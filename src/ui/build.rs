@@ -76,6 +76,7 @@ fn scan_protocol_references(workspace: &std::path::Path) -> String {
 
         for line in content.lines() {
             let trimmed = line.trim();
+            // REUSE-IgnoreStart -- these string literals are SPDX tags we parse, not our own.
             if let Some(id) = trimmed.strip_prefix("// SPDX-License-Identifier:") {
                 license = Some(id.trim().to_string());
             } else if let Some(ct) = trimmed.strip_prefix("// SPDX-FileCopyrightText:") {
@@ -87,6 +88,7 @@ fn scan_protocol_references(workspace: &std::path::Path) -> String {
             } else if !trimmed.is_empty() && !trimmed.starts_with("//") {
                 break; // past the header block
             }
+            // REUSE-IgnoreEnd
         }
 
         if let (Some(lic), false) = (license, copyrights.is_empty()) {

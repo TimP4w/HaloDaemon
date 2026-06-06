@@ -209,6 +209,7 @@ HaloDaemon would not exist without the reverse-engineering work and documentatio
 | [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) | MPL-2.0 | NCT677x SuperIO register map |
 | [linux-arctis-manager](https://github.com/elegos/Linux-Arctis-Manager) | GPL-3.0 | SteelSeries Arctis protocol |
 | [G560-led](https://github.com/claudiosanches/g560-led) | MIT | Logitech G560 protocol |
+| [PawnIO modules](https://github.com/namazso/PawnIO_modules) | LGPL-2.1-or-later | Bundled `LpcIO.bin`, `SmbusI801.bin`, `SmbusPIIX4.bin` for Windows SuperIO / chipset SMBus access (© 2023 namazso) |
 
 ## License
 

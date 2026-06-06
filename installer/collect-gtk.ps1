@@ -66,6 +66,9 @@ foreach ($blob in "SmbusI801.bin", "SmbusPIIX4.bin", "LpcIO.bin") {
     Copy-Item (Join-Path $repoRoot "pwnio\$blob") -Destination $StagingDir
     Write-Host "  blob  $blob"
 }
+# The PawnIO modules are LGPL-2.1-or-later (c) namazso; ship their license text.
+Copy-Item (Join-Path $repoRoot "pwnio\COPYING") -Destination (Join-Path $StagingDir "PawnIO-LICENSE.txt")
+Write-Host "  asset PawnIO-LICENSE.txt"
 Copy-Item (Join-Path $repoRoot "src\ui\style.css") -Destination $StagingDir
 Write-Host "  asset style.css"
 
