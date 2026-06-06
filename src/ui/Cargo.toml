@@ -1,0 +1,47 @@
+[package]
+name = "halod-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+wayland = ["gdk4-wayland"]
+
+[dependencies]
+halod-protocol = { path = "../protocol" }
+
+gtk4 = { version = "0.9", features = ["v4_12"] }
+libadwaita = { version = "0.7", features = ["v1_5"] }
+cairo-rs = { version = "0.20", features = ["use_glib"] }
+gdk-pixbuf = "0.20"
+glib = "0.20"
+gio = "0.20"
+gdk4 = "0.9"
+gdk4-wayland = { version = "0.9", optional = true }
+
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+base64 = "0.22"
+log = "0.4"
+env_logger = "0.11"
+async-channel = "2"
+resvg = "0.44"
+
+[target.'cfg(unix)'.dependencies]
+ksni = "0.2"
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.19"
+
+[build-dependencies]
+glib-build-tools = "0.20"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+resvg = "0.44"
+ico = "0.4"

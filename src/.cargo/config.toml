@@ -1,0 +1,10 @@
+# Use the system `git` CLI to fetch git dependencies (e.g. the `q565` crate)
+# instead of cargo's bundled libgit2.
+#
+# MSYS2's cargo ships a libgit2 that cannot validate GitHub's TLS certificate
+# in CI ("the SSL certificate is invalid; class=Ssl"), which makes the git
+# dependency fetch fail. The `git` CLI uses the system certificate store and
+# works everywhere. This requires `git` to be on PATH (it is, in every dev and
+# CI environment we build in).
+[net]
+git-fetch-with-cli = true

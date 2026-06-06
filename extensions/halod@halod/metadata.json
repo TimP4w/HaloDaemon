@@ -1,0 +1,14 @@
+{
+  "name": "haloD companion",
+  "description": "haloD companion for gnome",
+  "uuid": "halod@halod",
+  "version": 1,
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ]
+}

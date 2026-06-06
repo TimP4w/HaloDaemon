@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/dev/timp4w/Halod/icons">
+    <file preprocess="xml-stripblanks">scalable/actions/aio-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">scalable/actions/fan-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">scalable/actions/gpu-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">scalable/actions/moba-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">scalable/actions/ram-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">scalable/actions/rgb-strip-symbolic.svg</file>
+  </gresource>
+</gresources>

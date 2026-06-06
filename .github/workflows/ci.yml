@@ -1,0 +1,66 @@
+name: CI
+
+# Build + test the daemon and UI on every push and PR so regressions are
+# caught before a release tag is pushed. No installer is built here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  win-build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The daemon and tray do not need GTK; a minimal UCRT64 toolchain (the
+      # GNU Rust the project standardises on, plus gcc for hidapi/rusb) suffices.
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-rust
+
+      - name: Build daemon
+        shell: msys2 {0}
+        run: |
+          cd src
+          cargo build -p halod
+
+      - name: Test daemon
+        shell: msys2 {0}
+        run: |
+          cd src
+          cargo test -p halod
+
+  linux-build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev libhidapi-dev libusb-1.0-0-dev \
+            libpipewire-0.3-dev libpulse-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libdbus-1-dev \
+            clang libclang-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-about
+        run: cargo install --locked cargo-about
+
+      - name: Build daemon + UI
+        working-directory: src
+        run: cargo build -p halod -p halod-gui
+
+      - name: Test daemon
+        working-directory: src
+        run: cargo test -p halod

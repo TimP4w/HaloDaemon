@@ -1,0 +1,725 @@
+/* ════════════════════════════════════════════════════════════════════════════
+   HaloDaemon UI stylesheet
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── Dark palette overrides ─────────────────────────────────────────────────
+   Push libadwaita's dark theme closer to true black. These override the
+   named colors that adw uses for chrome, cards, popovers, etc. */
+
+@define-color window_bg_color        #0d0d10;
+@define-color window_fg_color        #f2f2f3;
+@define-color view_bg_color          #07070a;
+@define-color view_fg_color          #f2f2f3;
+@define-color headerbar_bg_color     #0a0a0d;
+@define-color headerbar_fg_color     #f2f2f3;
+@define-color headerbar_border_color #f2f2f3;
+@define-color sidebar_bg_color       #050507;
+@define-color sidebar_fg_color       #f2f2f3;
+@define-color secondary_sidebar_bg_color #07070a;
+@define-color card_bg_color          alpha(#ffffff, 0.045);
+@define-color card_fg_color          #f2f2f3;
+@define-color dialog_bg_color        #131318;
+@define-color dialog_fg_color        #f2f2f3;
+@define-color popover_bg_color       #131318;
+@define-color popover_fg_color       #f2f2f3;
+@define-color shade_color            alpha(black, 0.25);
+@define-color thumbnail_bg_color     #1a1a1f;
+
+/* ── Icon sidebar ───────────────────────────────────────────────────────── */
+
+.icon-sidebar {
+    background-color: @sidebar_bg_color;
+    border-right: 1px solid alpha(currentColor, 0.07);
+}
+
+.icon-nav-btn {
+    border-radius: 12px;
+    min-width: 44px;
+    min-height: 44px;
+    margin: 2px 10px;
+    padding: 0;
+    transition: background-color 120ms ease;
+}
+
+.icon-nav-btn image {
+    -gtk-icon-size: 20px;
+}
+
+.icon-nav-btn.active {
+    background-color: alpha(@accent_bg_color, 0.18);
+    color: @accent_color;
+}
+
+/* Active page indicator bar — 3px accent pill flush against sidebar edge */
+.sidebar-active-bar {
+    min-width: 3px;
+    min-height: 24px;
+    border-radius: 999px;
+    background-color: @accent_color;
+    margin-right: 0;
+}
+
+.sidebar-active-bar.hidden {
+    background-color: transparent;
+}
+
+/* Connection pill */
+.conn-pill {
+    border-radius: 999px;
+    padding: 5px 0;
+    font-size: 0.85em;
+}
+
+.conn-pill.connected {
+    color: @success_color;
+}
+.conn-pill.disconnected {
+    color: @error_color;
+}
+.conn-pill.connecting {
+    animation: pulse-opacity 1.4s ease-in-out infinite;
+}
+
+/* Daemon-down blocking overlay */
+.daemon-overlay {
+    background-color: @window_bg_color;
+}
+
+@keyframes pulse-opacity {
+    0%,
+    100% {
+        opacity: 0.35;
+    }
+    50% {
+        opacity: 0.7;
+    }
+}
+
+/* ── Device discovery — editorial hero ───────────────────────────────────── */
+
+/* Hero count: the visual anchor of the discovery screen. Tabular numerals so
+   the digit doesn't shift when the count ticks up during a scan. */
+.discovery-count {
+    font-size: 6.2em;
+    font-weight: 800;
+    letter-spacing: -0.045em;
+    line-height: 1;
+    font-feature-settings: "tnum";
+    color: @accent_color;
+    transition: color 250ms ease;
+}
+
+.discovery-count.error {
+    color: @error_color;
+}
+.discovery-count.ready {
+    color: @success_color;
+}
+
+.discovery-eyebrow {
+    font-size: 0.72em;
+    font-weight: 800;
+    letter-spacing: 0.22em;
+    opacity: 0.55;
+    margin-top: 12px;
+    transition:
+        color 250ms ease,
+        opacity 250ms ease;
+}
+
+.discovery-eyebrow.ready {
+    color: @success_color;
+    opacity: 0.9;
+}
+.discovery-eyebrow.error {
+    color: @error_color;
+    opacity: 0.9;
+}
+
+/* Pulsing status dot — uses the same pulse-opacity keyframes as the connection
+   pill. Sized via min/border-radius rather than width/height so GTK doesn't
+   clip it; the row Box already gave it an 8x8 request. */
+.discovery-dot {
+    min-width: 8px;
+    min-height: 8px;
+    border-radius: 999px;
+    background-color: @accent_color;
+}
+
+.discovery-dot.scanning {
+    animation: pulse-opacity 1.4s ease-in-out infinite;
+}
+.discovery-dot.ready {
+    background-color: @success_color;
+    opacity: 0.85;
+}
+.discovery-dot.error {
+    background-color: @error_color;
+    opacity: 0.85;
+}
+
+.discovery-phase {
+    font-size: 0.82em;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    opacity: 0.6;
+    font-feature-settings: "tnum";
+}
+
+.discovery-phase.error {
+    color: @error_color;
+    opacity: 0.85;
+}
+.discovery-phase.ready {
+    opacity: 0.5;
+}
+
+.radar-blip-icon {
+    color: @accent_color;
+    opacity: 0.9;
+}
+
+/* ── Status badges ──────────────────────────────────────────────────────── */
+
+.status-badge {
+    border-radius: 999px;
+    padding: 3px 11px;
+    font-size: 0.72em;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+}
+
+.status-badge.ready {
+    background-color: alpha(@success_color, 0.12);
+    color: @success_color;
+}
+
+.status-badge.failed {
+    background-color: alpha(@error_color, 0.12);
+    color: @error_color;
+}
+
+.status-badge.initializing {
+    background-color: alpha(@accent_bg_color, 0.15);
+    color: @accent_color;
+}
+
+/* ── Home view — section headings & device cards ────────────────────────── */
+
+.home-section-label {
+    font-size: 0.72em;
+    font-weight: 700;
+    opacity: 0.55;
+    letter-spacing: 0.06em;
+}
+
+flowboxchild {
+    padding: 0;
+    background: transparent;
+}
+
+/* ── Cooling page — fan card curve overlay stats ────────────────────────── */
+
+.cooling-stats-overlay {
+    background: alpha(black, 0.45);
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+
+/* Editorial typography: tracked-caps eyebrow, oversized headline, dot-separated
+   meta line. Chrome is intentionally near-zero — type weight and whitespace do
+   the work. */
+
+.home-device-card {
+    border-radius: 14px;
+    background: transparent;
+    border: 1px solid alpha(currentColor, 0.06);
+    padding: 22px 24px 18px;
+    min-width: 240px;
+    transition:
+        border-color 200ms ease,
+        background-color 200ms ease;
+}
+
+.home-device-card:hover {
+    border-color: alpha(@accent_color, 0.35);
+    background-color: alpha(@accent_bg_color, 0.04);
+}
+
+.home-card-eyebrow {
+    font-size: 0.62em;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    opacity: 0.42;
+    margin-bottom: 12px;
+}
+
+.home-card-headline {
+    font-size: 1.55em;
+    font-weight: 800;
+    letter-spacing: -0.022em;
+    line-height: 1.06;
+    margin-bottom: 18px;
+}
+
+.home-device-card:hover .home-card-headline {
+    color: @accent_color;
+}
+
+.home-card-meta-row {
+    margin-top: 0;
+}
+
+.home-card-meta {
+    font-size: 0.82em;
+    font-weight: 600;
+    font-feature-settings: "tnum";
+    opacity: 0.72;
+}
+
+.home-card-meta-sep {
+    font-size: 0.82em;
+    opacity: 0.28;
+    padding: 0 7px;
+}
+
+.home-card-mark {
+    -gtk-icon-size: 16px;
+    opacity: 0.32;
+    margin-left: 10px;
+}
+
+.home-card-curve-warning {
+    -gtk-icon-size: 14px;
+    color: #e5a50a;
+    margin-right: 4px;
+}
+
+/* ── Generic cards ──────────────────────────────────────────────────────── */
+
+.card {
+    border-radius: 16px;
+    border: 1px solid alpha(currentColor, 0.05);
+}
+
+/* ── Device detail cards ────────────────────────────────────────────────── */
+
+.device-card {
+    border-radius: 16px;
+    min-width: 130px;
+    min-height: 100px;
+    padding: 0;
+    border: 1px solid alpha(currentColor, 0.05);
+    transition: background-color 100ms ease;
+}
+
+.device-card:hover {
+    background-color: alpha(currentColor, 0.04);
+}
+
+/* ── Section headings ───────────────────────────────────────────────────── */
+
+.col-heading {
+    font-size: 0.72em;
+    font-weight: 700;
+    opacity: 0.55;
+    letter-spacing: 0.06em;
+}
+
+/* ── Sensor chips ───────────────────────────────────────────────────────── */
+
+.sensors-section-label {
+    font-size: 0.68em;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    opacity: 0.55;
+}
+
+.sensor-chip {
+    border-radius: 12px;
+    padding: 12px 14px 11px;
+    min-width: 96px;
+    background: transparent;
+    border: 1px solid alpha(currentColor, 0.06);
+    transition:
+        border-color 200ms ease,
+        background-color 200ms ease;
+}
+
+.sensor-chip:hover {
+    background-color: alpha(@accent_bg_color, 0.04);
+    border-color: alpha(@accent_color, 0.3);
+}
+
+.sensor-chip-source {
+    font-size: 0.58em;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    opacity: 0.42;
+    margin-bottom: 8px;
+}
+
+.sensor-chip-value {
+    font-size: 1.45em;
+    font-weight: 800;
+    letter-spacing: -0.025em;
+    line-height: 1;
+    font-feature-settings: "tnum";
+}
+
+.sensor-chip-unit {
+    font-size: 0.55em;
+    font-weight: 700;
+    opacity: 0.65;
+    margin-left: 2px;
+}
+
+.sensor-chip-label {
+    font-size: 0.72em;
+    font-weight: 600;
+    opacity: 0.55;
+    margin-top: 6px;
+}
+
+.temp-cool {
+    color: @accent_color;
+}
+.temp-warm {
+    color: @warning_color;
+}
+.temp-hot {
+    color: @error_color;
+}
+
+/* Heat signal is preserved as a subtle tint on the whole chip — the editorial
+   surface stays minimal but the chip still reads at a glance. */
+.sensor-chip.temp-warm {
+    border-color: alpha(@warning_color, 0.28);
+    background-color: alpha(@warning_color, 0.05);
+}
+.sensor-chip.temp-hot {
+    border-color: alpha(@error_color, 0.32);
+    background-color: alpha(@error_color, 0.06);
+}
+
+/* ── DPI chips ──────────────────────────────────────────────────────────── */
+
+.dpi-chip {
+    border-radius: 999px;
+    padding: 3px 12px;
+    min-height: 30px;
+    font-size: 0.85em;
+}
+
+/* ── Battery level bar ──────────────────────────────────────────────────── */
+
+levelbar > trough > block.low {
+    background-color: @error_color;
+}
+levelbar > trough > block.high {
+    background-color: @warning_color;
+}
+levelbar > trough > block.full {
+    background-color: @success_color;
+}
+
+/* ── Fan curve drawing area ─────────────────────────────────────────────── */
+
+drawingarea {
+    border-radius: 12px;
+}
+
+/* ── Fan curve preset chips ─────────────────────────────────────────────── */
+
+.preset-chip {
+    font-size: 0.75em;
+    padding: 2px 10px;
+    min-height: 0;
+}
+
+/* ── Fan curve warning bar ──────────────────────────────────────────────── */
+
+.fan-warning-bar {
+    background-color: alpha(@warning_color, 0.15);
+    color: @warning_color;
+    border-radius: 8px;
+    border: 1px solid alpha(@warning_color, 0.35);
+    padding: 8px 12px;
+    margin-bottom: 4px;
+}
+
+/* ── Equalizer sliders ──────────────────────────────────────────────────── */
+
+.eq-band scale {
+    min-height: 90px;
+}
+
+/* ── Screen circle preview ──────────────────────────────────────────────── */
+
+.screen-circle-preview {
+    border-radius: 9999px;
+    background-color: alpha(currentColor, 0.05);
+    border: 1px solid alpha(currentColor, 0.08);
+}
+
+/* ── LCD image library thumbnails ───────────────────────────────────────── */
+
+.lcd-thumb {
+    border-radius: 8px;
+    background-color: alpha(currentColor, 0.05);
+    border: 1px solid alpha(currentColor, 0.07);
+}
+
+/* ── Device detail page ──────────────────────────────────────────────────── */
+
+.device-page-title {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.device-info-row {
+    padding: 20px 0 8px;
+    margin-bottom: 8px;
+}
+
+.device-info-name {
+    font-size: 18px;
+    font-weight: 700;
+}
+.device-info-sub {
+    font-size: 13px;
+    opacity: 0.6;
+    margin-top: 2px;
+}
+
+/* ── Fan stats ───────────────────────────────────────────────────────────── */
+
+.fan-stats-row {
+    margin-top: 16px;
+}
+
+.fan-stat-chip {
+    min-width: 120px;
+    padding: 16px 20px;
+    border-radius: 14px;
+    background: @card_bg_color;
+    border-top: 2px solid alpha(@accent_color, 0.35);
+}
+
+.fan-stat-value {
+    font-size: 28px;
+    font-weight: 700;
+}
+.fan-stat-unit {
+    font-size: 14px;
+    opacity: 0.6;
+    margin-top: 2px;
+}
+.fan-stat-label {
+    font-size: 12px;
+    opacity: 0.55;
+    margin-top: 4px;
+}
+
+/* ── Device tab switcher ─────────────────────────────────────────────────── */
+
+.tab-pill-bar {
+    background-color: alpha(currentColor, 0.07);
+    border-radius: 999px;
+    padding: 3px;
+}
+
+.tab-pill {
+    border-radius: 999px;
+    padding: 5px 20px;
+    min-height: 0;
+    font-size: 0.875em;
+    font-weight: 600;
+    transition:
+        background-color 150ms ease,
+        color 150ms ease,
+        box-shadow 150ms ease;
+}
+
+.tab-pill:checked {
+    background-color: alpha(@accent_bg_color, 0.25);
+    color: @accent_color;
+    box-shadow: none;
+}
+
+.tab-pill:hover:not(:checked) {
+    background-color: alpha(currentColor, 0.06);
+}
+
+/* ── Fan curve placeholder ───────────────────────────────────────────────── */
+
+.fan-curve-placeholder {
+    border-radius: 14px;
+    background: @card_bg_color;
+    min-height: 180px;
+}
+
+/* ── Lighting page — zone selection chips & device header ────────────────── */
+
+.zone-device-toggle {
+    font-size: 0.72em;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    opacity: 0.55;
+    padding: 0 2px;
+    min-height: 0;
+    transition: opacity 150ms ease;
+}
+
+.zone-device-toggle:checked {
+    opacity: 1;
+    background-color: transparent;
+    box-shadow: none;
+    color: inherit;
+}
+
+.zone-device-toggle:hover {
+    opacity: 0.85;
+    background-color: transparent;
+}
+
+.zone-chip {
+    border-radius: 10px;
+    padding: 5px 14px;
+    min-height: 0;
+    font-size: 0.82em;
+    font-weight: 600;
+    border: 1px solid alpha(currentColor, 0.08);
+    background-color: transparent;
+    transition:
+        background-color 150ms ease,
+        color 150ms ease,
+        border-color 150ms ease;
+}
+
+.zone-chip:checked {
+    background-color: alpha(@accent_bg_color, 0.22);
+    color: @accent_color;
+    border-color: alpha(@accent_color, 0.38);
+}
+
+.zone-chip:hover:not(:checked) {
+    background-color: alpha(currentColor, 0.05);
+    border-color: alpha(currentColor, 0.15);
+}
+
+/* ── RGB lighting tab ────────────────────────────────────────────────────── */
+
+.rgb-section-card {
+    background-color: @card_bg_color;
+    border-radius: 14px;
+    border: 1px solid alpha(currentColor, 0.07);
+    padding: 12px;
+}
+
+.rgb-led-canvas {
+    border-radius: 14px;
+    background: alpha(black, 0.55);
+    border: 1px solid alpha(currentColor, 0.07);
+}
+
+.rgb-color-wheel {
+    border-radius: 9999px;
+}
+
+/* ── Canvas floating toolbar ─────────────────────────────────────────────── */
+
+.canvas-floating-bar {
+    background-color: @window_bg_color;
+    border-radius: 12px;
+    border: 1px solid alpha(currentColor, 0.1);
+    box-shadow: 0 2px 14px alpha(black, 0.4);
+    padding: 3px 8px;
+}
+
+.canvas-floating-bar button {
+    min-height: 0;
+    padding: 2px 10px;
+    font-size: 0.85em;
+}
+
+.canvas-floating-bar label {
+    font-size: 0.82em;
+}
+
+.canvas-floating-bar dropdown {
+    font-size: 0.85em;
+}
+
+.canvas-floating-bar spinbutton {
+    font-size: 0.85em;
+    min-width: 72px;
+}
+
+.rgb-param-label {
+    font-size: 0.7em;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    opacity: 0.5;
+}
+
+/* ── Add Zone dialog checkboxes ──────────────────────────────────────────── */
+
+/* Checked box uses the accent fill with a contrasting (white) checkmark,
+   instead of inheriting a stray foreground color from the row. */
+.zone-check:checked check {
+    background-color: @accent_bg_color;
+    border-color: @accent_bg_color;
+    color: @accent_fg_color;
+}
+
+/* ── App Rules — process tag chips ──────────────────────────────────────── */
+
+.process-tag {
+    border-radius: 999px;
+    padding: 2px 6px 2px 10px;
+    min-height: 0;
+    font-size: 0.88em;
+    background-color: alpha(@accent_bg_color, 0.15);
+    color: @accent_color;
+    border: 1px solid alpha(@accent_color, 0.28);
+    transition: background-color 120ms ease;
+}
+
+.process-tag:hover {
+    background-color: alpha(@accent_bg_color, 0.28);
+}
+
+.process-tag image {
+    -gtk-icon-size: 10px;
+    opacity: 0.65;
+}
+
+/* ── Device / sensor visibility states ──────────────────────────────────── */
+
+.device-hidden {
+    opacity: 0.45;
+}
+
+.device-disabled {
+    opacity: 0.3;
+    filter: grayscale(0.6);
+}
+
+.sensor-hidden {
+    opacity: 0.45;
+}
+
+/* Show-hidden toggle — small, unobtrusive eye icon next to the SENSORS label */
+.show-hidden-btn {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 2px;
+    opacity: 0.45;
+    transition: opacity 150ms ease;
+}
+
+.show-hidden-btn:hover,
+.show-hidden-btn:checked {
+    opacity: 1;
+}

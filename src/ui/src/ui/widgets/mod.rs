@@ -1,0 +1,23 @@
+pub mod battery;
+pub mod debug_dialog;
+pub mod dpi_profile;
+pub mod equalizer;
+pub mod fan_curve;
+pub mod key_remap;
+pub mod lcd;
+pub mod onboard_profiles;
+pub mod profile_switcher;
+pub mod rename_dialog;
+pub mod rgb;
+pub mod settings;
+
+pub use battery::BatteryWidget;
+pub use dpi_profile::DpiProfileWidget;
+pub use equalizer::EqualizerWidget;
+pub use fan_curve::FanCurveWidget;
+pub use key_remap::KeyRemapWidget;
+pub use lcd::LcdWidget;
+pub use onboard_profiles::OnboardProfilesWidget;
+pub use profile_switcher::ProfileSwitcher;
+pub use rgb::RgbWidget;
+pub use settings::SettingsWidget;

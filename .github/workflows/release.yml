@@ -1,0 +1,207 @@
+name: Release
+
+# Builds the Windows installer on every `vX.Y.Z` tag and attaches it to the
+# GitHub release. Can also be run manually (no release is published then).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # UCRT64 GTK 4 stack — the same toolchain SETUP.md documents.
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gettext
+            mingw-w64-ucrt-x86_64-libxml2
+            mingw-w64-ucrt-x86_64-librsvg
+            mingw-w64-ucrt-x86_64-ntldd
+            mingw-w64-ucrt-x86_64-rust
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref }}"
+          if ($ref -like "refs/tags/v*") { $v = $ref -replace "^refs/tags/v","" }
+          else { $v = "0.0.0-dev" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "version = $v"
+
+      - name: Sync workspace version in Cargo.toml
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $path = "src/Cargo.toml"
+          $text = Get-Content $path -Raw
+          $pattern = '(?ms)(\[workspace\.package\]\r?\nversion = ")[^"]*(")'
+          $replaced = [System.Text.RegularExpressions.Regex]::Replace($text, $pattern, "`${1}$v`${2}")
+          if ($replaced -eq $text) { throw "Failed to patch workspace version in $path" }
+          Set-Content -Path $path -Value $replaced -NoNewline
+          Select-String -Path $path -Pattern '^version = ' | Select-Object -First 1
+
+      - name: Install cargo-about
+        shell: msys2 {0}
+        run: cargo install --locked cargo-about
+
+      - name: Build release binaries
+        shell: msys2 {0}
+        run: |
+          cd src
+          cargo build --release -p halod -p halod-gui
+
+      - name: Resolve UCRT64 path
+        shell: msys2 {0}
+        run: echo "UCRT64=$(cygpath -w /ucrt64)" >> "$GITHUB_ENV"
+
+      - name: Stage GTK runtime
+        shell: pwsh
+        run: ./installer/collect-gtk.ps1 -Ucrt64 "$env:UCRT64"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            /DAppVersion=${{ steps.version.outputs.version }} `
+            installer\halod.iss
+
+      - name: Compute SHA-256 and release notes
+        shell: pwsh
+        run: |
+          $f = "installer\Output\halod-setup-x64.exe"
+          $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+          @"
+          ## HaloDaemon ${{ steps.version.outputs.version }}
+
+          Windows installer: ``halod-setup-x64.exe``
+
+          SHA-256:
+          ``````
+          $h
+          ``````
+          "@ | Set-Content release-notes.md -Encoding utf8
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: halod-setup-x64
+          path: installer/Output/halod-setup-x64.exe
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: HaloDaemon ${{ steps.version.outputs.version }}
+          body_path: release-notes.md
+          files: installer/Output/halod-setup-x64.exe
+
+  # Generic Linux build — a tarball of the two binaries for any distro that
+  # has the GTK runtime installed (see the bundled INSTALL.txt).
+  linux-tarball:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev libhidapi-dev libusb-1.0-0-dev \
+            libpipewire-0.3-dev libpulse-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libdbus-1-dev \
+            clang libclang-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-about
+        run: cargo install --locked cargo-about
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync workspace version in Cargo.toml
+        run: |
+          v='${{ steps.version.outputs.version }}'
+          python3 - "$v" <<'PY'
+          import pathlib, re, sys
+          version = sys.argv[1]
+          path = pathlib.Path("src/Cargo.toml")
+          text = path.read_text()
+          new = re.sub(
+              r'(\[workspace\.package\]\nversion = ")[^"]*(")',
+              lambda m: f'{m.group(1)}{version}{m.group(2)}',
+              text,
+              count=1,
+          )
+          if new == text:
+              sys.exit("Failed to patch workspace version in src/Cargo.toml")
+          path.write_text(new)
+          PY
+          grep -m1 '^version = ' src/Cargo.toml
+
+      - name: Build release binaries
+        working-directory: src
+        run: cargo build --release -p halod -p halod-gui
+
+      - name: Stage tarball
+        run: |
+          d=halod-linux-x64
+          mkdir -p "$d/udev"
+          cp src/target/release/halod "$d/"
+          cp src/target/release/halod-gui "$d/"
+          cp udev/60-halod.rules "$d/udev/"
+          cat > "$d/INSTALL.txt" <<'EOF'
+          HaloDaemon - Linux binaries
+
+          1. Install the runtime libraries (see the project README's
+             "Production Installation" section for your distro):
+               gtk4 libadwaita hidapi
+               libusb pipewire pulseaudio libudev wayland
+          2. Install the udev rules:
+               sudo cp udev/60-halod.rules /etc/udev/rules.d/
+               sudo udevadm control --reload-rules && sudo udevadm trigger
+          3. Add your user to the i2c group for SMBus/DRAM RGB:
+               sudo usermod -aG i2c $USER   (then re-login)
+          4. Run ./halod, then ./halod-gui.
+
+          On NixOS, use the flake instead — see the project README.
+          EOF
+          tar czf halod-linux-x64.tar.gz "$d"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: halod-linux-x64
+          path: halod-linux-x64.tar.gz
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: halod-linux-x64.tar.gz
