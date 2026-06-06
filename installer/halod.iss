@@ -34,6 +34,8 @@ DefaultDirName={autopf}\HaloD
 DefaultGroupName=HaloDaemon
 DisableProgramGroupPage=yes
 LicenseFile=LICENSE.txt
+; Disclaimer shown to the user before installation proceeds.
+InfoBeforeFile=DISCLAIMER.txt
 OutputDir=Output
 OutputBaseFilename=halod-setup-x64
 Compression=lzma2

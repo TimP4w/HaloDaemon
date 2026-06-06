@@ -9,10 +9,12 @@ Started as a project to learn about HID, in order to remove adware like Aura Syn
 
 It support my own devices, and some others may be added in the future, mostly following what my friends own.
 
+
+
 <img src="./docs/images/home.png" width="600">
 
-
-
+> [!WARNING]
+> **Disclaimer - use at your own risk.** This software communicates directly with low-level hardware interfaces (HID, SMBus/I2C, SuperIO port I/O, etc.). Sending incorrect data to peripherals or your motherboard can cause malfunction, data loss, or **irreparable damage to your peripherals or PC**. It is provided "as is", without warranty of any kind. You assume all responsibility for any damage that results from its use.
 
 
 ## LLM Notice
@@ -23,11 +25,8 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 
 - **Fan curves** - temperature-based PWM control with hysteresis and failsafe; preset curves (Balanced, Silent, Performance, Full Speed)
 <img src="./docs/images/fan.png" width="600">
-
-
 - **RGB canvas engine** - unified loop across all placed zones; effects: static color, breathing, rainbow, screen sampler (mirrors monitor content); see [engines](docs/engines.md)
 <img src="./docs/images/canvas.png" width="600">
-
 - **Chainable ARGB** - daisy-chain generic ARGB accessories on supported hubs; user-defined zones placed on the canvas
 - **LCD display** - template-based image rendering on LCD panels (frame counter, sensor readouts)
 <img src="./docs/images/lcd.png" width="600">
