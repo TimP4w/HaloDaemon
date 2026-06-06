@@ -9,6 +9,12 @@ Started as a project to learn about HID, in order to remove adware like Aura Syn
 
 It support my own devices, and some others may be added in the future, mostly following what my friends own.
 
+<img src="./docs/images/home.png" width="600">
+
+
+
+
+
 ## LLM Notice
 
 Claude code was heavily used. The GUI is exclusively done using claude code, the daemon's initial architecture and code was written manually, then iterated over with claude code.
@@ -16,10 +22,17 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 ## Features
 
 - **Fan curves** - temperature-based PWM control with hysteresis and failsafe; preset curves (Balanced, Silent, Performance, Full Speed)
+<img src="./docs/images/fan.png" width="600">
+
+
 - **RGB canvas engine** - unified loop across all placed zones; effects: static color, breathing, rainbow, screen sampler (mirrors monitor content); see [engines](docs/engines.md)
+<img src="./docs/images/canvas.png" width="600">
+
 - **Chainable ARGB** - daisy-chain generic ARGB accessories on supported hubs; user-defined zones placed on the canvas
 - **LCD display** - template-based image rendering on LCD panels (frame counter, sensor readouts)
+<img src="./docs/images/lcd.png" width="600">
 - **Per-led RGB** - full per-led lighting
+<img src="./docs/images/rgb.png" width="600">
 - **DPI profiles & onboard profiles** - read/write onboard profile storage; DPI step configuration
 - **ChatMix** - for SteelSeries arctis nova
 - **Battery** - live battery level
