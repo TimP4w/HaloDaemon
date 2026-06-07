@@ -133,10 +133,10 @@
           ...
         }:
         let
-          cfg = config.services.halod;
+          cfg = config.programs.halod;
         in
         {
-          options.services.halod = {
+          options.programs.halod = {
             enable = lib.mkEnableOption "the HaloDaemon peripheral control daemon";
             package = lib.mkOption {
               type = lib.types.package;
