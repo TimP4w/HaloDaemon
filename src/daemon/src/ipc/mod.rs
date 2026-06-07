@@ -25,8 +25,6 @@ impl ClientHandle {
         let frame = encode_json_frame(msg);
         let _ = self.tx.send(frame);
     }
-
-
 }
 
 /// Security descriptor for the Windows IPC named pipe.
@@ -118,10 +116,11 @@ impl PipeSecurity {
         //    Medium, so this is the lowest label that still lets it connect
         //    while blocking lower-integrity (sandboxed) processes.
         let user_sid = current_user_sid()?;
-        let sddl: Vec<u16> = format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{user_sid})S:(ML;;NW;;;ME)")
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let sddl: Vec<u16> =
+            format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{user_sid})S:(ML;;NW;;;ME)")
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
 
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `sddl` is NUL-terminated; `descriptor` receives a freshly
@@ -300,7 +299,7 @@ where
                                 let h = handle.clone();
                                 let a = app.clone();
                                 tokio::spawn(async move {
-                                    router::dispatch(msg, h, a).await;
+                                    router::handle_message(msg, h, a).await;
                                 });
                             } else if pending_commands.len() < MAX_PENDING {
                                 pending_commands.insert(req_id, msg);
@@ -308,7 +307,7 @@ where
                                 log::warn!("IPC: too many unpaired set_screen_image commands, dropping");
                             }
                         } else {
-                            router::dispatch(msg, handle.clone(), app.clone()).await;
+                            router::handle_message(msg, handle.clone(), app.clone()).await;
                         }
                     }
                 } else if frame_type == FRAME_BINARY {
@@ -319,7 +318,7 @@ where
                             let h = handle.clone();
                             let a = app.clone();
                             tokio::spawn(async move {
-                                router::dispatch(pending_msg, h, a).await;
+                                router::handle_message(pending_msg, h, a).await;
                             });
                         } else if pending_binary.len() < MAX_PENDING {
                             pending_binary.insert(req_id, data);

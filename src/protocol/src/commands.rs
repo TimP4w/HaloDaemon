@@ -7,11 +7,12 @@
 // Variants whose names don't naturally snake_case to the right string carry an
 // explicit `#[serde(rename = "…")]`.
 //
-// Commands that carry opaque `serde_json::Value` payloads (canvas ops, onboard
-// profiles, RGB apply, button mapping) are left on the raw string path in the
-// router and are NOT listed here — they are follow-up work.
+// Free-form / deeply-nested payloads (RGB state, button mapping, zone transform,
+// effect params, chain topology) are kept as opaque `serde_json::Value` fields;
+// the use-case re-parses them from the raw message.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Typed IPC commands shared between the daemon and the UI.
 ///
@@ -116,6 +117,160 @@ pub enum DaemonCommand {
         id:   String,
         name: String,
     },
+
+    // ── Fan speed / curves ─────────────────────────────────────────────────
+    #[serde(alias = "set_pump_duty")]
+    SetFanSpeed {
+        id:   String,
+        duty: u8,
+    },
+    SetFanCurvePoints {
+        fan_id: String,
+        points: Vec<[f64; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sensor_id: Option<String>,
+    },
+    SetFanCurvePreset {
+        fan_id: String,
+        preset: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sensor_id: Option<String>,
+    },
+    RemoveFanCurve {
+        fan_id: String,
+    },
+
+    // ── RGB ────────────────────────────────────────────────────────────────
+    RgbApply {
+        id:    String,
+        state: Value,
+    },
+    RgbSetZoneTransform {
+        id:        String,
+        zone_id:   String,
+        transform: Value,
+    },
+    RgbChainAddLink {
+        id:         String,
+        channel_id: String,
+        name:       String,
+        led_count:  u32,
+        topology:   Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+    },
+    RgbChainRemoveLink {
+        id:              String,
+        channel_id:      String,
+        child_device_id: String,
+    },
+    RgbChainReorderLink {
+        id:              String,
+        channel_id:      String,
+        child_device_id: String,
+        new_index:       usize,
+    },
+    RgbChainDetectChannel {
+        id:         String,
+        channel_id: String,
+    },
+
+    // ── Key remap ──────────────────────────────────────────────────────────
+    SetButtonMapping {
+        id:      String,
+        mapping: Value,
+    },
+    SetSoftwareDpiSteps {
+        id:    String,
+        steps: Vec<u32>,
+    },
+
+    // ── Onboard profiles ───────────────────────────────────────────────────
+    OnboardProfileSwitch {
+        id:   String,
+        slot: u8,
+    },
+    OnboardProfileRestore {
+        id:   String,
+        slot: u8,
+    },
+    OnboardProfileSetEnabled {
+        id:      String,
+        slot:    u8,
+        enabled: bool,
+    },
+
+    // ── LCD screen ─────────────────────────────────────────────────────────
+    SetScreenImage {
+        id:       String,
+        data_b64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    SetScreenImageFromLibrary {
+        id:       String,
+        filename: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    SetScreenRotation {
+        id:      String,
+        degrees: u32,
+    },
+    SetScreenBrightness {
+        id:         String,
+        brightness: u8,
+    },
+    SetScreenDefault {
+        id: String,
+    },
+    ListLcdImages,
+    DeleteLcdImage {
+        filename: String,
+    },
+
+    // ── Canvas ─────────────────────────────────────────────────────────────
+    CanvasSetEffect {
+        effect_id: String,
+        params:    Value,
+    },
+    CanvasPlaceZone {
+        device_id: String,
+        zone_id:   String,
+    },
+    CanvasRemoveZone {
+        device_id: String,
+        zone_id:   String,
+    },
+    CanvasMoveZone {
+        device_id: String,
+        zone_id:   String,
+        x:         f64,
+        y:         f64,
+    },
+    CanvasSetSampleRadius {
+        radius: f64,
+    },
+    CanvasSubscribe,
+
+    // ── LCD engine ─────────────────────────────────────────────────────────
+    LcdEngineSetTemplate {
+        device_id:   String,
+        template_id: String,
+        params:      Value,
+    },
+    LcdEngineDeactivate {
+        device_id: String,
+    },
+    LcdEngineSubscribe,
+
+    // ── Misc ───────────────────────────────────────────────────────────────
+    ListRunningApps,
+    GetDebugInfo,
+    SetEngineConfig {
+        engine: String,
+    },
+    Shutdown,
 }
 
 #[cfg(test)]
@@ -192,5 +347,56 @@ mod tests {
             new_name: "new".into(),
         });
         assert_eq!(v, json!({"type": "rename_profile", "old_name": "old", "new_name": "new"}));
+    }
+
+    #[test]
+    fn set_pump_duty_aliases_set_fan_speed() {
+        let cmd: DaemonCommand =
+            serde_json::from_value(json!({"type": "set_pump_duty", "id": "p", "duty": 60})).unwrap();
+        assert!(matches!(cmd, DaemonCommand::SetFanSpeed { duty: 60, .. }));
+    }
+
+    #[test]
+    fn set_fan_curve_points_omits_absent_sensor_id() {
+        let v = roundtrip(&DaemonCommand::SetFanCurvePoints {
+            fan_id: "f".into(),
+            points: vec![[30.0, 20.0], [80.0, 100.0]],
+            sensor_id: None,
+        });
+        assert_eq!(v, json!({"type": "set_fan_curve_points", "fan_id": "f", "points": [[30.0, 20.0], [80.0, 100.0]]}));
+    }
+
+    #[test]
+    fn rgb_apply_carries_opaque_state() {
+        let v = roundtrip(&DaemonCommand::RgbApply {
+            id: "d".into(),
+            state: json!({"mode": "static", "color": [1, 2, 3]}),
+        });
+        assert_eq!(v, json!({"type": "rgb_apply", "id": "d", "state": {"mode": "static", "color": [1, 2, 3]}}));
+    }
+
+    #[test]
+    fn shutdown_wire_format() {
+        let cmd: DaemonCommand =
+            serde_json::from_value(json!({"type": "shutdown"})).unwrap();
+        assert!(matches!(cmd, DaemonCommand::Shutdown));
+    }
+
+    #[test]
+    fn unit_variant_ignores_extra_fields() {
+        let cmd: DaemonCommand =
+            serde_json::from_value(json!({"type": "canvas_subscribe", "ignored": true})).unwrap();
+        assert!(matches!(cmd, DaemonCommand::CanvasSubscribe));
+    }
+
+    #[test]
+    fn struct_variant_ignores_unmodelled_fields() {
+        // place_zone's optional x/y/w/h are re-parsed from the raw message, so the
+        // variant must still deserialise when they are present.
+        let cmd: DaemonCommand = serde_json::from_value(
+            json!({"type": "canvas_place_zone", "device_id": "d", "zone_id": "z", "x": 0.1, "y": 0.2}),
+        )
+        .unwrap();
+        assert!(matches!(cmd, DaemonCommand::CanvasPlaceZone { .. }));
     }
 }
