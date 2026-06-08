@@ -12,12 +12,6 @@ use crate::{
     state::{AppState, HidTrackingEntry},
 };
 
-struct SendHidDevice(hidapi::HidDevice);
-// SAFETY: hidapi::HidDevice is not Send because it stores raw pointers, but we
-// only ever access it from within spawn_blocking closures that hold the Mutex.
-unsafe impl Send for SendHidDevice {}
-unsafe impl Sync for SendHidDevice {}
-
 fn build_frame(data: &[u8], report_size: Option<usize>) -> Vec<u8> {
     let Some(report_size) = report_size else {
         return data.to_vec();
@@ -63,8 +57,8 @@ fn route_to_long(report_id: u8, has_long: bool) -> bool {
 /// for high-frequency per-key RGB frames.
 #[derive(Clone)]
 struct HidIo {
-    read_dev: Arc<Mutex<SendHidDevice>>,
-    write_dev: Arc<Mutex<SendHidDevice>>,
+    read_dev: Arc<Mutex<hidapi::HidDevice>>,
+    write_dev: Arc<Mutex<hidapi::HidDevice>>,
 }
 
 impl HidIo {
@@ -84,8 +78,8 @@ impl HidIo {
             .set_blocking_mode(false)
             .context("failed to set non-blocking mode")?;
         Ok(Self {
-            read_dev: Arc::new(Mutex::new(SendHidDevice(read_dev))),
-            write_dev: Arc::new(Mutex::new(SendHidDevice(write_dev))),
+            read_dev: Arc::new(Mutex::new(read_dev)),
+            write_dev: Arc::new(Mutex::new(write_dev)),
         })
     }
 }
@@ -119,14 +113,14 @@ fn write_one(dev: &hidapi::HidDevice, pkt: &[u8], use_feature_report: bool) -> R
 
 /// Write a batch of already-framed packets back-to-back under a single lock.
 async fn write_batch(
-    dev: Arc<Mutex<SendHidDevice>>,
+    dev: Arc<Mutex<hidapi::HidDevice>>,
     packets: Vec<Vec<u8>>,
     use_feature_report: bool,
 ) -> Result<()> {
     tokio::task::spawn_blocking(move || {
         let guard = dev.blocking_lock();
         for pkt in &packets {
-            write_one(&guard.0, pkt, use_feature_report)?;
+            write_one(&guard, pkt, use_feature_report)?;
         }
         Ok(())
     })
@@ -135,12 +129,15 @@ async fn write_batch(
 }
 
 /// Read one packet from `dev` with `timeout_ms`. Empty vec on timeout.
-async fn read_io(dev: Arc<Mutex<SendHidDevice>>, size: usize, timeout_ms: i32) -> Result<Vec<u8>> {
+async fn read_io(
+    dev: Arc<Mutex<hidapi::HidDevice>>,
+    size: usize,
+    timeout_ms: i32,
+) -> Result<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
         let guard = dev.blocking_lock();
         let mut buf = vec![0u8; size];
         let n = guard
-            .0
             .read_timeout(&mut buf, timeout_ms)
             .map_err(|e| anyhow::anyhow!("HID read error: {}", e))?;
         buf.truncate(n);
@@ -344,7 +341,7 @@ impl Transport for HidTransport {
         let dev = Arc::clone(&self.pick_io(report_id).write_dev);
         let use_feature_report = self.use_feature_report;
         tokio::task::spawn_blocking(move || {
-            write_one(&dev.blocking_lock().0, &framed, use_feature_report)
+            write_one(&dev.blocking_lock(), &framed, use_feature_report)
         })
         .await
         .context("spawn_blocking panicked")?
@@ -364,12 +361,11 @@ impl Transport for HidTransport {
         let read_dev = Arc::clone(&io.read_dev);
         tokio::task::spawn_blocking(move || {
             let wguard = write_dev.blocking_lock();
-            write_one(&wguard.0, &framed, use_feature_report)?;
+            write_one(&wguard, &framed, use_feature_report)?;
             drop(wguard);
             let rguard = read_dev.blocking_lock();
             let mut buf = vec![0u8; size];
             let n = rguard
-                .0
                 .read_timeout(&mut buf, timeout_ms)
                 .map_err(|e| anyhow::anyhow!("HID read error: {}", e))?;
             buf.truncate(n);
@@ -429,14 +425,12 @@ impl Transport for HidTransport {
         tokio::task::spawn_blocking(move || {
             let guard = dev.blocking_lock();
             guard
-                .0
                 .send_feature_report(&framed)
                 .map_err(|e| anyhow::anyhow!("feature write error: {}", e))?;
             std::thread::sleep(std::time::Duration::from_millis(1));
             let mut buf = vec![0u8; response_size + 1];
             buf[0] = 0x00; // report ID
             let n = guard
-                .0
                 .get_feature_report(&mut buf)
                 .map_err(|e| anyhow::anyhow!("feature read error: {}", e))?;
             buf.truncate(n);
