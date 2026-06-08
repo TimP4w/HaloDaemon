@@ -6,7 +6,7 @@ use halod_protocol::debug_info::DebugInfo;
 use halod_protocol::types::RunningApp;
 use halod_protocol::frames::{
     decode_header, encode_binary_frame, encode_binary_payload,
-    encode_json_frame, FRAME_BINARY, FRAME_JSON,
+    encode_json_frame, payload_exceeds_max, FRAME_BINARY, FRAME_JSON,
 };
 use halod_protocol::types::{CanvasFrame, LcdEngineFrame, Notification};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -115,8 +115,7 @@ where
             result = stream.read_exact(&mut header) => {
                 result?;
                 let (frame_type, payload_len) = decode_header(&header);
-                const MAX_PAYLOAD: u32 = 16 * 1024 * 1024;
-                if payload_len > MAX_PAYLOAD {
+                if payload_exceeds_max(payload_len) {
                     return Err(anyhow::anyhow!("daemon sent oversized frame: {payload_len} bytes"));
                 }
                 let mut payload = vec![0u8; payload_len as usize];

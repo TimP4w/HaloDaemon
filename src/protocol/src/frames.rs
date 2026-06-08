@@ -1,6 +1,13 @@
 pub const FRAME_JSON: u8 = 1;
 pub const FRAME_BINARY: u8 = 2;
 
+/// Maximum accepted inbound frame payload size to prevent OOM/DoS
+pub const MAX_PAYLOAD: u32 = 16 * 1024 * 1024;
+
+pub fn payload_exceeds_max(payload_len: u32) -> bool {
+    payload_len > MAX_PAYLOAD
+}
+
 pub fn encode_json_frame(msg: &serde_json::Value) -> Vec<u8> {
     let payload = serde_json::to_vec(msg).unwrap_or_default();
     let mut buf = Vec::with_capacity(5 + payload.len());
@@ -108,5 +115,17 @@ mod tests {
         // req_len=100, ct_len=0 but payload is only 4 bytes
         let payload = [0, 100, 0, 0];
         assert!(decode_binary_payload(&payload).is_none());
+    }
+
+    #[test]
+    fn payload_within_cap_is_accepted() {
+        assert!(!payload_exceeds_max(MAX_PAYLOAD));
+        assert!(!payload_exceeds_max(0));
+    }
+
+    #[test]
+    fn payload_over_cap_is_rejected() {
+        assert!(payload_exceeds_max(MAX_PAYLOAD + 1));
+        assert!(payload_exceeds_max(u32::MAX));
     }
 }

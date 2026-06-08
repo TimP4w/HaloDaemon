@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 
 use halod_protocol::frames::{
-    decode_binary_payload, decode_header, encode_json_frame, FRAME_BINARY, FRAME_JSON,
+    decode_binary_payload, decode_header, encode_json_frame, payload_exceeds_max, FRAME_BINARY,
+    FRAME_JSON,
 };
 
 use crate::state::AppState;
@@ -282,6 +283,11 @@ where
             result = stream.read_exact(&mut header) => {
                 result?;
                 let (frame_type, payload_len) = decode_header(&header);
+                if payload_exceeds_max(payload_len) {
+                    return Err(anyhow::anyhow!(
+                        "client sent oversized frame: {payload_len} bytes"
+                    ));
+                }
                 let mut payload = vec![0u8; payload_len as usize];
                 if payload_len > 0 {
                     stream.read_exact(&mut payload).await?;
