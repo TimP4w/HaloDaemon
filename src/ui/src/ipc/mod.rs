@@ -27,7 +27,12 @@ impl IpcSender {
         let _ = self.tx.send(IpcCmd::Json(cmd));
     }
 
-    pub fn send_binary(&self, req_id: impl Into<String>, content_type: impl Into<String>, data: Vec<u8>) {
+    pub fn send_binary(
+        &self,
+        req_id: impl Into<String>,
+        content_type: impl Into<String>,
+        data: Vec<u8>,
+    ) {
         let _ = self.tx.send(IpcCmd::Binary {
             req_id: req_id.into(),
             content_type: content_type.into(),
@@ -36,19 +41,5 @@ impl IpcSender {
     }
 }
 
-#[cfg(unix)]
-pub fn socket_path() -> String {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
-    format!("{}/halod.sock", runtime_dir)
-}
-
-#[cfg(windows)]
-pub fn socket_path() -> String {
-    r"\\.\pipe\halod".to_string()
-}
-
-#[cfg(not(any(unix, windows)))]
-pub fn socket_path() -> String {
-    String::new()
-}
+/// Path to the daemon's IPC command channel
+pub use halod_protocol::socket::socket_path;

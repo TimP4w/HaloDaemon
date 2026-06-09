@@ -169,13 +169,45 @@ impl Drop for PipeSecurity {
 #[cfg(unix)]
 pub fn serve(app: Arc<AppState>) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
+        use halod_protocol::socket::{current_uid, runtime_dir};
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
         use tokio::net::UnixListener;
+
+        let (dir, is_fallback) = runtime_dir();
+        if is_fallback {
+            std::fs::create_dir_all(&dir)?;
+            std::fs::set_permissions(&dir, Permissions::from_mode(0o700))?;
+        }
+
         let path = socket_path();
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
+        // Belt-and-suspenders against umask/TOCTOU: even inside a private dir,
+        // make the socket node itself owner-only.
+        std::fs::set_permissions(&path, Permissions::from_mode(0o600))?;
         log::info!("Listening on {path}");
+
+        let our_uid = current_uid();
         loop {
             let (stream, _) = listener.accept().await?;
+            // Reject peers that are not the owning user. The 0700 dir already
+            // blocks them, but this enforces it at the socket regardless of how
+            // the path is reached, matching the Windows SID scoping.
+            match stream.peer_cred() {
+                Ok(cred) if cred.uid() == our_uid => {}
+                Ok(cred) => {
+                    log::warn!(
+                        "IPC: rejecting connection from uid {} (expected {our_uid})",
+                        cred.uid()
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!("IPC: could not read peer credentials, rejecting: {e}");
+                    continue;
+                }
+            }
             let app2 = app.clone();
             tokio::spawn(async move {
                 if let Err(e) = handle_client(stream, app2).await {
@@ -362,21 +394,70 @@ pub async fn build_state_msg(app: Arc<AppState>) -> Value {
     json!({ "type": "state", "data": data })
 }
 
-#[cfg(unix)]
-pub fn socket_path() -> String {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
-    format!("{}/halod.sock", runtime_dir)
-}
+/// Path to the IPC command channel. Shared with the UI via `halod-protocol`
+/// so the two can never drift on the path scheme.
+pub use halod_protocol::socket::socket_path;
 
-#[cfg(windows)]
-pub fn socket_path() -> String {
-    r"\\.\pipe\halod".to_string()
-}
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::state::AppState;
+    use std::os::unix::fs::PermissionsExt;
 
-#[cfg(not(any(unix, windows)))]
-pub fn socket_path() -> String {
-    String::new()
+    /// Binding in a fallback location (`XDG_RUNTIME_DIR` unset) must create a
+    /// private `0700` directory and a `0600` socket, so other local users
+    /// cannot reach the command channel.
+    #[tokio::test]
+    async fn serve_locks_down_fallback_dir_and_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Drive `runtime_dir()` down the fallback branch (XDG unset) while
+        // redirecting the temp base via TMPDIR. This is the only test in this
+        // crate that touches these env vars; it restores them before returning.
+        let prev_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+        let prev_tmp = std::env::var_os("TMPDIR");
+        // SAFETY: single-threaded test setup, restored below.
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+            std::env::set_var("TMPDIR", tmp.path());
+        }
+
+        let (dir, is_fallback) = halod_protocol::socket::runtime_dir();
+        assert!(is_fallback, "expected fallback dir under {:?}", tmp.path());
+        let path = socket_path();
+
+        let app = Arc::new(AppState::new(Config::default()));
+        let handle = serve(app);
+
+        // serve() binds inside its spawned task; wait for the socket to appear.
+        let mut waited = 0;
+        while !std::path::Path::new(&path).exists() && waited < 200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            waited += 1;
+        }
+        assert!(std::path::Path::new(&path).exists(), "socket not created");
+
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        let sock_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+
+        // SAFETY: restore env before asserting so a failure does not leak it.
+        unsafe {
+            match prev_xdg {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+            match prev_tmp {
+                Some(v) => std::env::set_var("TMPDIR", v),
+                None => std::env::remove_var("TMPDIR"),
+            }
+        }
+
+        handle.abort();
+
+        assert_eq!(dir_mode, 0o700, "fallback dir must be private");
+        assert_eq!(sock_mode, 0o600, "socket must be owner-only");
+    }
 }
 
 #[cfg(all(test, windows))]

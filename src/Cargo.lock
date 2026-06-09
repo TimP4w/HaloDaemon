@@ -1806,6 +1806,7 @@ dependencies = [
 name = "halod-protocol"
 version = "0.0.0-dev"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
 ]
