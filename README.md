@@ -78,6 +78,8 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 |--------|-------|---------|----------|-----------|----------|
 | Logitech | G PRO X TKL (wired | wireless) | 046d:c352 | [HID++](docs/protocols/hidpp.md) | [HID](docs/transports/hid.md) | 🐧🪟 |
 
+> Wireless G502 X Plus and G PRO X TKL connect through the Logitech Lightspeed Receiver (`046d:c547`), which proxies HID++ to the paired device.
+
 ### Headsets
 
 | Vendor | Model | VID:PID | Protocol | Transport | Platform |
@@ -164,10 +166,10 @@ Download `halod-linux-x64.tar.gz` from the [releases page](https://github.com/Ti
 sudo cp udev/60-halod.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
-sudo usermod -aG input,i2c $USER   # log out and back in after this
+sudo usermod -aG i2c $USER   # only for SMBus/DRAM RGB — log out and back in after this
 ```
 
-The `i2c` group is only needed for SMBus/DRAM RGB (ASUS/ENE, Corsair DRAM). For motherboard PWM fan control via hwmon the udev rules grant the necessary permissions automatically on device add.
+USB peripherals (HID, raw USB, uinput key remapper) are granted to the user of the active local session via the `uaccess` tag, so no group membership is needed for them. The `i2c` group is only required for SMBus/DRAM RGB (ASUS/ENE, Corsair DRAM); skip it if you don't have those. For motherboard PWM fan control via hwmon the udev rules grant the necessary permissions automatically on device add.
 
 **Motherboard fans (NCT677x):** if your board uses a Nuvoton NCT677x SuperIO chip, load the kernel module:
 ```bash

@@ -5,100 +5,91 @@
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger
 #
-# Add your user to the required groups:
-#   sudo usermod -aG input,i2c $USER
-#   (log out and back in for changes to take effect)
+# USB peripherals (HID, raw USB, uinput) are granted to the user of the active
+# local session via the "uaccess" tag — no group membership required.
 #
-# Group summary:
-#   input  — USB HID devices (all USB peripherals below)
-#   i2c    — SMBus I2C devices (ASUS/ENE DRAM and GPU RGB)
+# SMBus/I2C access (ASUS/ENE DRAM and GPU RGB) still needs the 'i2c' group:
+#   sudo usermod -aG i2c $USER
+#   (log out and back in for changes to take effect)
 
 # ─── NZXT ─────────────────────────────────────────────────────────────────────
 
 # NZXT Control Hub
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2022", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2022", TAG+="uaccess"
 
 # NZXT Kraken X53/X63/X73
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2007", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2014", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2007", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2014", TAG+="uaccess"
 # NZXT Kraken Z53/63/73
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3008", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3008", TAG+="uaccess"
 # NZXT Kraken Elite 2023
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", TAG+="uaccess"
 # NZXT Kraken 2023
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300e", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300e", TAG+="uaccess"
 # NZXT Kraken Elite RGB 2024
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3012", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3012", TAG+="uaccess"
 # NZXT Kraken Plus 2024
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3014", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3014", TAG+="uaccess"
 
 # USB device nodes for Kraken models with LCD panels (needed for libusb bulk transfers).
 # The hidraw rules above only grant access to the HID interface; the LCD engine
 # also opens the raw USB device via rusb for bulk OUT transfers.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3008", TAG+="uaccess", GROUP="input", MODE="0660"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", TAG+="uaccess", GROUP="input", MODE="0660"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300e", TAG+="uaccess", GROUP="input", MODE="0660"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3012", TAG+="uaccess", GROUP="input", MODE="0660"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3014", TAG+="uaccess", GROUP="input", MODE="0660"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3008", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300e", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3012", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3014", TAG+="uaccess"
 
 # ─── Logitech ─────────────────────────────────────────────────────────────────
 
 # Logitech Lightspeed Receiver (manages wireless G502 X Plus, G PRO X TKL)
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c547", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c547", TAG+="uaccess"
 # Logitech G502 X Plus (wired)
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c095", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c095", TAG+="uaccess"
 # Logitech G PRO X TKL (wired)
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c352", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c352", TAG+="uaccess"
 # Logitech G560 Gaming Speaker
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a78", TAG+="uaccess", GROUP="input", MODE="0660"
-
-# ─── Corsair ──────────────────────────────────────────────────────────────────
-
-# Corsair K70 RGB MK.2 Low Profile
-KERNEL=="hidraw*", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b55", TAG+="uaccess", GROUP="input", MODE="0660"
-
-# ─── Razer ────────────────────────────────────────────────────────────────────
-
-# Razer Basilisk V3
-KERNEL=="hidraw*", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0099", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a78", TAG+="uaccess"
 
 # ─── SteelSeries ──────────────────────────────────────────────────────────────
 
 # SteelSeries Arctis Nova Pro Wireless
-KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12e0", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12e0", TAG+="uaccess"
 # SteelSeries Arctis Nova Pro X Wireless
-KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12e5", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12e5", TAG+="uaccess"
 
 # ─── ASUS ─────────────────────────────────────────────────────────────────────
 
 # ASUS Aura USB controllers (motherboard RGB headers)
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1866", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1867", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1872", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18a3", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18a5", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18f3", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1939", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="19af", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1a30", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1a6c", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1866", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1867", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1872", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18a3", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18a5", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18f3", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1939", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="19af", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1a30", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1a6c", TAG+="uaccess"
 # ASUS X870E
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1aa6", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1b3b", TAG+="uaccess", GROUP="input", MODE="0660"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1bed", TAG+="uaccess", GROUP="input", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1aa6", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1b3b", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1bed", TAG+="uaccess"
 
 # ─── Philips ──────────────────────────────────────────────────────────────────
 
 # Philips Evnia 49 Ultrawide — USB DDC-CI interface (via USB hub chip)
-SUBSYSTEM=="usb", ATTRS{idVendor}=="2109", ATTRS{idProduct}=="8884", TAG+="uaccess", GROUP="input", MODE="0660"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2109", ATTRS{idProduct}=="8884", TAG+="uaccess"
 # Philips Evnia 49 Ultrawide — Ambiglow rear LEDs (ENE Technology RGB controller)
-SUBSYSTEM=="usb", ATTRS{idVendor}=="0cf2", ATTRS{idProduct}=="b201", TAG+="uaccess", GROUP="input", MODE="0660"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0cf2", ATTRS{idProduct}=="b201", TAG+="uaccess"
 
 # ─── uinput (key remapper / action executor) ──────────────────────────────────
 
 # Grant write access to /dev/uinput for the key remapper's virtual input devices.
 # Required for Wayland and headless operation (no X11 dependency).
-KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", TAG+="uaccess"
+# static_node=uinput creates the node (with the uaccess ACL) at boot even before
+# the uinput module is loaded; opening it then autoloads the module.
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
 
 # ─── SMBus / I2C (ASUS/ENE DRAM + GPU RGB) ────────────────────────────────────
 
