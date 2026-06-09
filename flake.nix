@@ -25,7 +25,10 @@
         pkgs.stdenv.mkDerivation {
           pname = "gnome-shell-extension-halod";
           inherit version;
-          src = ./. + "/extensions/halod@halod";
+          src = builtins.path {
+            path = ./. + "/extensions/halod@halod";
+            name = "gnome-shell-extension-halod-src";
+          };
           installPhase = ''
             install -Dm644 extension.js \
               $out/share/gnome-shell/extensions/halod@halod/extension.js
@@ -118,6 +121,7 @@
         in
         rec {
           halod = mkHalod pkgs;
+          gnome-extension = mkHalodExtension pkgs;
           default = halod;
         }
       );
@@ -144,30 +148,65 @@
               defaultText = lib.literalExpression "halod.packages.\${system}.default";
               description = "The HaloDaemon package to use.";
             };
+
+            enableGnomeExtension = lib.mkEnableOption ''
+              the HaloDaemon GNOME Shell focus-watcher extension (foreground-app
+              detection on GNOME Wayland). Installs it system-wide; each user
+              still enables it with `gnome-extensions enable halod@halod`'';
+
+            i2c = {
+              enable = lib.mkEnableOption ''
+                SMBus / I2C access for chipset RGB (ASUS/ENE DRAM and GPU). Turns
+                on `hardware.i2c.enable`, which loads i2c-dev and creates the
+                `i2c` group — add your user to it with
+                `users.users.<you>.extraGroups = [ "i2c" ]`'';
+
+              platform = lib.mkOption {
+                type = lib.types.nullOr (lib.types.enum [
+                  "intel"
+                  "amd"
+                ]);
+                default = null;
+                example = "amd";
+                description = ''
+                  Chipset SMBus controller driver to load:
+                  "intel" → i2c-i801, "amd" → i2c-piix4. `null` loads neither
+                  (use it if the driver autoloads on your board).
+                '';
+              };
+
+            };
+
+            enableNuvotonFanControl = lib.mkEnableOption ''
+              loading the nct6775 kernel module, which exposes Nuvoton NCT677x
+              SuperIO chips (most AMD/Intel consumer boards) as hwmon devices for
+              motherboard temperature sensors and PWM fan control. This is SuperIO
+              (LPC port I/O), unrelated to I2C. Harmless if the chip is absent'';
           };
 
           config = lib.mkIf cfg.enable {
-            # halod / halod-gui on PATH.
-            environment.systemPackages = [ cfg.package ];
+            # halod / halod-gui on PATH. The GNOME Shell focus-watcher extension
+            # (foreground-app detection on GNOME Wayland) is opt-in: installing it
+            # under share/gnome-shell/extensions only makes it discoverable; each
+            # user still enables it with `gnome-extensions enable halod@halod`.
+            environment.systemPackages = [
+              cfg.package
+            ] ++ lib.optional cfg.enableGnomeExtension (mkHalodExtension pkgs);
 
             # hidraw / uinput / i2c-dev access rules shipped by the package.
             services.udev.packages = [ cfg.package ];
 
-            # SMBus (DRAM + GPU RGB) needs /dev/i2c access. This loads the
-            # i2c-dev module and creates the `i2c` group — add your user to it:
+            # SMBus (DRAM + GPU RGB). hardware.i2c.enable loads i2c-dev and
+            # creates the `i2c` group — add your user with
             #   users.users.<you>.extraGroups = [ "i2c" ];
-            hardware.i2c.enable = true;
+            hardware.i2c.enable = lib.mkIf cfg.i2c.enable true;
 
-            # TODO: add to readme that this is needed
-            # nct6775 exposes Nuvoton NCT677x SuperIO chips (found on most
-            # AMD and Intel consumer motherboards) as hwmon devices, giving
-            # HaloDaemon access to motherboard temperature sensors and PWM
-            # fan headers. The module is harmless if the chip is absent.
-            #boot.kernelModules = [
-            #"nct6775"
-            #"i2c-dev"
-            #"i2c-piix4"
-            #];
+            # Chip-specific kernel modules, opt-in per board. i2c-dev itself is
+            # already handled by hardware.i2c.enable above.
+            boot.kernelModules =
+              lib.optional cfg.enableNuvotonFanControl "nct6775"
+              ++ lib.optionals (cfg.i2c.enable && cfg.i2c.platform == "amd") [ "i2c-piix4" ]
+              ++ lib.optionals (cfg.i2c.enable && cfg.i2c.platform == "intel") [ "i2c-i801" ];
 
             # Autostart the UI at login in background mode (no window shown).
             # NoDisplay=true keeps this out of the app grid — only the

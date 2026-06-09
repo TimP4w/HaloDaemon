@@ -130,17 +130,35 @@ inputs.halod.url = "github:TimP4w/HaloDaemon";
 
 # configuration.nix
 imports = [ inputs.halod.nixosModules.default ];
-programs.halod.enable = true;
-users.users.<you>.extraGroups = [ "i2c" ];  # for SMBus / DRAM RGB
 
-kernelModules = [
-  "i2c-dev"
-  "i2c-piix4"
-  "nct6775" # Motherboard nuvoton chip (for controlling fans)
-];
+programs.halod = {
+  enable = true;
+
+  # SMBus / DRAM + GPU RGB (ASUS/ENE, Corsair DRAM). Loads i2c-dev and
+  # creates the `i2c` group; pick the chipset driver for your board.
+  i2c.enable = true;
+  i2c.platform = "amd";          # "amd" → i2c-piix4 | "intel" → i2c-i801
+
+  # Motherboard temperature sensors + PWM fan control on Nuvoton NCT677x
+  # SuperIO chips (most AMD/Intel consumer boards). Loads nct6775.
+  enableNuvotonFanControl = true;
+
+  # GNOME Shell focus-watcher extension (foreground-app detection on Wayland).
+  enableGnomeExtension = true;
+};
+
+# Required for i2c.enable — grants your user SMBus access.
+users.users.<you>.extraGroups = [ "i2c" ];
 ```
 
-This installs the binaries, udev rules, and runs `halod` as a per-user service. It also loads `nct6775` at boot — the Linux kernel driver for Nuvoton NCT677x SuperIO chips (found on most AMD and Intel consumer motherboards). Without it, motherboard temperature sensors and PWM fan headers are not visible to HaloDaemon. The module is a no-op if your board uses a different SuperIO chip.
+This installs the binaries and udev rules and runs `halod` as a per-user service. Every option except `enable` defaults to `false`, so enable only what your hardware needs:
+
+| Option | Effect |
+|--------|--------|
+| `i2c.enable` | Turns on `hardware.i2c.enable` (loads `i2c-dev`, creates the `i2c` group) for SMBus DRAM/GPU RGB |
+| `i2c.platform` | Chipset SMBus driver: `"amd"` → `i2c-piix4`, `"intel"` → `i2c-i801` (`null` = load neither) |
+| `enableNuvotonFanControl` | Loads `nct6775` for NCT677x SuperIO temperature sensors and PWM fan headers (no-op if the chip is absent) |
+| `enableGnomeExtension` | Installs the GNOME Shell extension system-wide (each user still runs `gnome-extensions enable halod@halod`) |
 
 To try without installing: `nix run github:TimP4w/HaloDaemon`.
 
