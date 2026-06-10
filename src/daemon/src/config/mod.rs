@@ -12,10 +12,8 @@ pub fn load() -> Result<Config> {
         return Ok(Config::default());
     }
     let raw = std::fs::read_to_string(&path)?;
-    let cfg: Config = serde_yaml::from_str(&raw).unwrap_or_else(|e| {
-        log::warn!("config parse failed, using defaults: {e}");
-        Config::default()
-    });
+    let cfg: Config = serde_yaml::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("Failed to parse config at {}: {e}", path.display()))?;
     Ok(cfg)
 }
 
@@ -327,5 +325,28 @@ mod tests {
         let yaml = "log_level: info";
         let cfg: GlobalConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.close_to_tray);
+    }
+
+    #[test]
+    fn load_handles_missing_valid_and_malformed_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HALOD_CONFIG_DIR", dir.path());
+        let path = dir.path().join("config.yaml");
+
+        // Missing file -> defaults.
+        let cfg = load().unwrap();
+        assert_eq!(cfg.active_profile, DEFAULT_PROFILE_NAME);
+
+        // Valid file -> parsed values.
+        std::fs::write(&path, "active_profile: gaming\n").unwrap();
+        let cfg = load().unwrap();
+        assert_eq!(cfg.active_profile, "gaming");
+
+        // Malformed YAML -> error, not silent defaults.
+        std::fs::write(&path, "active_profile: [unterminated\n").unwrap();
+        let err = load().unwrap_err();
+        assert!(err.to_string().contains("Failed to parse config"));
+
+        std::env::remove_var("HALOD_CONFIG_DIR");
     }
 }
