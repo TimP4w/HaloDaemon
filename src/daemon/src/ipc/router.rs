@@ -95,13 +95,15 @@ async fn dispatch(
         DaemonCommand::SetEqPreset { .. } => usecases::equalizer::set_eq_preset(msg, app).await,
         DaemonCommand::SetEqBands { .. } => usecases::equalizer::set_eq_bands(msg, app).await,
         DaemonCommand::SetDpiSteps { .. } => usecases::dpi::set_dpi_steps(msg, app).await,
-        DaemonCommand::SetDeviceVisibility { .. } => {
-            usecases::visibility::set_device_visibility(msg, app).await
+        DaemonCommand::SetDeviceVisibility { device_id, state } => {
+            usecases::visibility::set_device_visibility(device_id, state, app).await
         }
-        DaemonCommand::SetSensorVisibility { .. } => {
-            usecases::visibility::set_sensor_visibility(msg, app).await
+        DaemonCommand::SetSensorVisibility { sensor_id, state } => {
+            usecases::visibility::set_sensor_visibility(sensor_id, state, app).await
         }
-        DaemonCommand::SetDeviceName { .. } => usecases::rename::set_device_name(msg, app).await,
+        DaemonCommand::SetDeviceName { device_id, name } => {
+            usecases::rename::set_device_name(device_id, name, app).await
+        }
 
         DaemonCommand::SetFanSpeed { .. } => usecases::fan::set_fan_speed(msg, app).await,
         DaemonCommand::SetFanCurvePoints { .. } => {

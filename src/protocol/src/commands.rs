@@ -11,6 +11,7 @@
 // effect params, chain topology) are kept as opaque `serde_json::Value` fields;
 // the use-case re-parses them from the raw message.
 
+use crate::types::VisibilityState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -106,16 +107,16 @@ pub enum DaemonCommand {
         steps: Vec<u32>,
     },
     SetDeviceVisibility {
-        id:      String,
-        visible: bool,
+        device_id: String,
+        state:     VisibilityState,
     },
     SetSensorVisibility {
-        id:      String,
-        visible: bool,
+        sensor_id: String,
+        state:     VisibilityState,
     },
     SetDeviceName {
-        id:   String,
-        name: String,
+        device_id: String,
+        name:      String,
     },
 
     // ── Fan speed / curves ─────────────────────────────────────────────────
@@ -387,6 +388,43 @@ mod tests {
         let cmd: DaemonCommand =
             serde_json::from_value(json!({"type": "canvas_subscribe", "ignored": true})).unwrap();
         assert!(matches!(cmd, DaemonCommand::CanvasSubscribe));
+    }
+
+    // ── UI-shaped payload deserialisation ────────────────────────────────────
+    // These feed the exact JSON the UI sends (grep the `json!({…})` blocks in
+    // src/ui) through the enum, guarding against enum/UI field-name drift.
+
+    #[test]
+    fn set_device_visibility_parses_ui_payload() {
+        let cmd: DaemonCommand = serde_json::from_value(
+            json!({"type": "set_device_visibility", "device_id": "d", "state": "hidden"}),
+        )
+        .expect("UI payload must deserialise");
+        assert!(matches!(
+            cmd,
+            DaemonCommand::SetDeviceVisibility { state: VisibilityState::Hidden, .. }
+        ));
+    }
+
+    #[test]
+    fn set_sensor_visibility_parses_ui_payload() {
+        let cmd: DaemonCommand = serde_json::from_value(
+            json!({"type": "set_sensor_visibility", "sensor_id": "s", "state": "disabled"}),
+        )
+        .expect("UI payload must deserialise");
+        assert!(matches!(
+            cmd,
+            DaemonCommand::SetSensorVisibility { state: VisibilityState::Disabled, .. }
+        ));
+    }
+
+    #[test]
+    fn set_device_name_parses_ui_payload() {
+        let cmd: DaemonCommand = serde_json::from_value(
+            json!({"type": "set_device_name", "device_id": "d", "name": "My Fan"}),
+        )
+        .expect("UI payload must deserialise");
+        assert!(matches!(cmd, DaemonCommand::SetDeviceName { .. }));
     }
 
     #[test]

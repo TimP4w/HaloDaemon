@@ -1095,13 +1095,11 @@ pub trait LcdCapability: Send + Sync {
             active_image: slot.active_image(),
         }
     }
-    fn lcd_status(&self) -> LcdStatus {
-        self.current_state()
-    }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
-        Some(DeviceCapability::Lcd(self.lcd_status()))
+        Some(DeviceCapability::Lcd(self.current_state()))
     }
+    
     /// Upload raw image bytes (PNG/JPEG/GIF). Caller saves to disk; device renders it.
     async fn set_image(&self, data: &[u8]) -> Result<()>;
     /// Stream one raw RGBA8 frame straight to the panel — no encoding, no

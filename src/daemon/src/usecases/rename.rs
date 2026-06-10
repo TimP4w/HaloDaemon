@@ -3,7 +3,6 @@
 //! every other device through its `DeviceRecord.name` in the persisted config.
 
 use anyhow::{anyhow, Result};
-use serde_json::Value;
 use std::sync::Arc;
 
 use crate::drivers::{ChainCapability, Device};
@@ -13,13 +12,8 @@ use crate::usecases::ensure_record;
 
 const MAX_NAME_LEN: usize = 64;
 
-pub async fn set_device_name(msg: Value, app: Arc<AppState>) -> Result<()> {
-    let device_id = msg["device_id"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing device_id"))?
-        .to_string();
-
-    let raw = msg["name"].as_str().unwrap_or("").trim();
+pub async fn set_device_name(device_id: String, name: String, app: Arc<AppState>) -> Result<()> {
+    let raw = name.trim();
     let trimmed: Option<String> = if raw.is_empty() {
         None
     } else {
@@ -124,20 +118,13 @@ mod tests {
     use crate::drivers::{CapabilityRef, ChainCapability, ChainLinkKind, ChainLinkSpec, Device};
     use async_trait::async_trait;
     use halod_protocol::types::{RgbColor, ZoneTopology};
-    use serde_json::json;
-
-    #[tokio::test]
-    async fn errors_when_device_id_missing() {
-        let app = Arc::new(AppState::new(Config::default()));
-        let msg = json!({"name": "X"});
-        assert!(set_device_name(msg, app).await.is_err());
-    }
 
     #[tokio::test]
     async fn writes_name_to_device_record() {
         let app = Arc::new(AppState::new(Config::default()));
-        let msg = json!({"device_id": "dev_a", "name": "My Fan"});
-        set_device_name(msg, app.clone()).await.unwrap();
+        set_device_name("dev_a".into(), "My Fan".into(), app.clone())
+            .await
+            .unwrap();
         let cfg = app.config.read().await;
         assert_eq!(
             cfg.known_devices.get("dev_a").map(|r| r.name.as_str()),
@@ -148,7 +135,7 @@ mod tests {
     #[tokio::test]
     async fn trims_whitespace() {
         let app = Arc::new(AppState::new(Config::default()));
-        set_device_name(json!({"device_id": "dev_a", "name": "  CPU Fan  "}), app.clone())
+        set_device_name("dev_a".into(), "  CPU Fan  ".into(), app.clone())
             .await
             .unwrap();
         let cfg = app.config.read().await;
@@ -161,8 +148,7 @@ mod tests {
     #[tokio::test]
     async fn caps_length_at_64_chars() {
         let app = Arc::new(AppState::new(Config::default()));
-        let long = "a".repeat(100);
-        set_device_name(json!({"device_id": "dev_a", "name": long}), app.clone())
+        set_device_name("dev_a".into(), "a".repeat(100), app.clone())
             .await
             .unwrap();
         let cfg = app.config.read().await;
@@ -175,10 +161,10 @@ mod tests {
     #[tokio::test]
     async fn blank_name_clears_to_empty_for_unknown_device() {
         let app = Arc::new(AppState::new(Config::default()));
-        set_device_name(json!({"device_id": "dev_a", "name": "First"}), app.clone())
+        set_device_name("dev_a".into(), "First".into(), app.clone())
             .await
             .unwrap();
-        set_device_name(json!({"device_id": "dev_a", "name": "   "}), app.clone())
+        set_device_name("dev_a".into(), "   ".into(), app.clone())
             .await
             .unwrap();
         let cfg = app.config.read().await;
@@ -216,10 +202,10 @@ mod tests {
         app.devices.lock().await.push(dev);
 
         // First override, then clear.
-        set_device_name(json!({"device_id": "dev_a", "name": "Custom"}), app.clone())
+        set_device_name("dev_a".into(), "Custom".into(), app.clone())
             .await
             .unwrap();
-        set_device_name(json!({"device_id": "dev_a", "name": ""}), app.clone())
+        set_device_name("dev_a".into(), "".into(), app.clone())
             .await
             .unwrap();
 
@@ -302,12 +288,9 @@ mod tests {
         let app = Arc::new(AppState::new(Config::default()));
         let child_id = setup_chain_parent_with_one_link(&app).await;
 
-        set_device_name(
-            json!({"device_id": child_id, "name": "Top Strip"}),
-            app.clone(),
-        )
-        .await
-        .unwrap();
+        set_device_name(child_id.clone(), "Top Strip".into(), app.clone())
+            .await
+            .unwrap();
 
         let devices = app.devices.lock().await;
         let parent = devices.iter().find(|d| d.id() == "parent_x").unwrap();
@@ -325,12 +308,9 @@ mod tests {
         let app = Arc::new(AppState::new(Config::default()));
         let child_id = setup_chain_parent_with_one_link(&app).await;
 
-        let err = set_device_name(
-            json!({"device_id": child_id, "name": "   "}),
-            app.clone(),
-        )
-        .await
-        .unwrap_err();
+        let err = set_device_name(child_id, "   ".into(), app.clone())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("cannot be empty"), "got: {err}");
     }
 }

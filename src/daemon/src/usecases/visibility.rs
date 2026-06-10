@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use serde_json::Value;
 use std::sync::Arc;
 
 use crate::ipc::broadcast_state;
@@ -7,14 +6,11 @@ use crate::state::AppState;
 use crate::usecases::{ensure_record, persist_device_state};
 use halod_protocol::types::VisibilityState;
 
-pub async fn set_device_visibility(msg: Value, app: Arc<AppState>) -> Result<()> {
-    let device_id = msg["device_id"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing device_id"))?
-        .to_string();
-    let new_state: VisibilityState = serde_json::from_value(msg["state"].clone())
-        .map_err(|_| anyhow!("invalid state"))?;
-
+pub async fn set_device_visibility(
+    device_id: String,
+    new_state: VisibilityState,
+    app: Arc<AppState>,
+) -> Result<()> {
     let device = {
         let devices = app.devices.lock().await;
         devices.iter().find(|d| d.id() == device_id).cloned()
@@ -85,14 +81,11 @@ pub async fn set_device_visibility(msg: Value, app: Arc<AppState>) -> Result<()>
     Ok(())
 }
 
-pub async fn set_sensor_visibility(msg: Value, app: Arc<AppState>) -> Result<()> {
-    let sensor_id = msg["sensor_id"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing sensor_id"))?
-        .to_string();
-    let state: VisibilityState = serde_json::from_value(msg["state"].clone())
-        .map_err(|_| anyhow!("invalid state"))?;
-
+pub async fn set_sensor_visibility(
+    sensor_id: String,
+    state: VisibilityState,
+    app: Arc<AppState>,
+) -> Result<()> {
     let owning_device = {
         let devices = app.devices.lock().await.clone();
         let mut found: Option<Arc<dyn crate::drivers::Device>> = None;

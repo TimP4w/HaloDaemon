@@ -416,7 +416,7 @@ impl Device for NZXTKraken {
             DeviceCapability::Rgb(rgb_status),
         ];
         if let Some(lcd) = self.as_lcd() {
-            capabilities.push(DeviceCapability::Lcd(lcd.lcd_status()));
+            capabilities.push(DeviceCapability::Lcd(lcd.current_state()));
         }
         if !child_wire.is_empty() {
             capabilities.push(DeviceCapability::Children(child_wire));
