@@ -65,6 +65,44 @@ pub struct FanCurveRecord {
 }
 
 impl FanCurveRecord {
+    /// Lowest temperature a control point may specify, in °C. Sub-ambient is
+    /// allowed (chilled loops) but absurd values are clamped.
+    pub const MIN_TEMP_C: f32 = -50.0;
+    /// Highest temperature a control point may specify, in °C.
+    pub const MAX_TEMP_C: f32 = 150.0;
+
+    /// Defensive normalization for the safety-critical fan/pump path.
+    ///
+    /// `engines::fan_curve::interpolate` assumes control points are sorted by
+    /// ascending temperature and within hardware-sane ranges. Points can reach
+    /// the engine from sources that bypass the API's `validate_points` check —
+    /// most notably a hand-edited or corrupted `config.yaml` restored via
+    /// `restore_state`. Out-of-order points there would silently produce wrong
+    /// duty values. Calling this at the ingestion boundary
+    /// (`FanStateSlot::set_fan_curve`) guarantees the engine only ever sees
+    /// well-formed curves:
+    ///   - clamp temperature to `MIN_TEMP_C..=MAX_TEMP_C` and duty to `0..=100`
+    ///     (NaN is treated as the lower bound),
+    ///   - sort points by ascending temperature,
+    ///   - drop duplicate temperatures, keeping the first occurrence.
+    pub fn sanitize(&mut self) {
+        fn clamp_or_low(v: f32, lo: f32, hi: f32) -> f32 {
+            if v.is_nan() {
+                lo
+            } else {
+                v.clamp(lo, hi)
+            }
+        }
+        for (temp, duty) in &mut self.points {
+            *temp = clamp_or_low(*temp, Self::MIN_TEMP_C, Self::MAX_TEMP_C);
+            *duty = clamp_or_low(*duty, 0.0, 100.0);
+        }
+        // total_cmp gives a total order over the now-finite temps; stable sort
+        // keeps the original order among equal temperatures so dedup is predictable.
+        self.points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        self.points.dedup_by(|a, b| a.0 == b.0);
+    }
+
     pub fn serialize(
         &self,
         fan_id: String,
@@ -318,6 +356,55 @@ mod tests {
         assert_eq!(decoded.points.len(), 3);
         assert!((decoded.points[0].0 - 30.0).abs() < 0.001);
         assert!((decoded.points[2].1 - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn sanitize_sorts_points_by_ascending_temperature() {
+        let mut record = FanCurveRecord {
+            sensor_id: None,
+            points: vec![(80.0, 100.0), (30.0, 20.0), (55.0, 50.0)],
+        };
+        record.sanitize();
+        assert_eq!(record.points, vec![(30.0, 20.0), (55.0, 50.0), (80.0, 100.0)]);
+    }
+
+    #[test]
+    fn sanitize_clamps_duty_and_temperature_to_sane_ranges() {
+        let mut record = FanCurveRecord {
+            sensor_id: None,
+            points: vec![(-999.0, -10.0), (999.0, 250.0)],
+        };
+        record.sanitize();
+        assert_eq!(
+            record.points,
+            vec![
+                (FanCurveRecord::MIN_TEMP_C, 0.0),
+                (FanCurveRecord::MAX_TEMP_C, 100.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn sanitize_drops_duplicate_temperatures_keeping_first() {
+        let mut record = FanCurveRecord {
+            sensor_id: None,
+            points: vec![(50.0, 30.0), (50.0, 90.0), (70.0, 80.0)],
+        };
+        record.sanitize();
+        assert_eq!(record.points, vec![(50.0, 30.0), (70.0, 80.0)]);
+    }
+
+    #[test]
+    fn sanitize_replaces_nan_with_lower_bound() {
+        let mut record = FanCurveRecord {
+            sensor_id: None,
+            points: vec![(f32::NAN, f32::NAN), (40.0, 50.0)],
+        };
+        record.sanitize();
+        assert_eq!(
+            record.points,
+            vec![(FanCurveRecord::MIN_TEMP_C, 0.0), (40.0, 50.0)]
+        );
     }
 
     #[test]

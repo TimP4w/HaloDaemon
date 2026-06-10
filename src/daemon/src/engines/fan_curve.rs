@@ -197,11 +197,8 @@ impl FanCurveEngine {
                     } else {
                         let default = default_curve();
                         fan.set_fan_curve(default.clone());
-                        crate::usecases::persist_device_state(
-                            &self.app_state,
-                            device.as_ref(),
-                        )
-                        .await;
+                        crate::usecases::persist_device_state(&self.app_state, device.as_ref())
+                            .await;
                         default
                     };
                     map.insert(device.id(), curve);
@@ -307,12 +304,10 @@ impl FanCurveEngine {
         if stalled {
             let should_notify = {
                 let mut map = self.stall_state.lock().unwrap();
-                let entry = map
-                    .entry(fan_id.to_string())
-                    .or_insert_with(|| StallState {
-                        since: std::time::Instant::now(),
-                        notified: false,
-                    });
+                let entry = map.entry(fan_id.to_string()).or_insert_with(|| StallState {
+                    since: std::time::Instant::now(),
+                    notified: false,
+                });
                 if entry.since.elapsed().as_secs() >= STALL_SECS && !entry.notified {
                     entry.notified = true;
                     true
@@ -351,10 +346,10 @@ impl FanCurveEngine {
 
     #[cfg(test)]
     fn seed_stall(&self, fan_id: &str, since: std::time::Instant, notified: bool) {
-        self.stall_state.lock().unwrap().insert(
-            fan_id.to_string(),
-            StallState { since, notified },
-        );
+        self.stall_state
+            .lock()
+            .unwrap()
+            .insert(fan_id.to_string(), StallState { since, notified });
     }
 
     async fn apply_failsafe(&self, fan_id: &str, duty: u8) {
@@ -389,6 +384,10 @@ async fn apply_duty(device: &Arc<dyn crate::drivers::Device>, duty: u8) -> anyho
 }
 
 fn interpolate(points: &[(f32, f32)], temp: f32) -> f32 {
+    debug_assert!(
+        points.windows(2).all(|w| w[0].0 <= w[1].0),
+        "interpolate requires ascending temperatures, got {points:?}"
+    );
     if points.is_empty() {
         return 0.0;
     }
@@ -465,6 +464,26 @@ mod tests {
         assert_eq!(interpolate(&[], 50.0), 0.0);
     }
 
+    // A curve restored from a hand-edited / corrupted config bypasses the API's
+    // validate_points. The slot setter must normalize it so the engine never
+    // interpolates over unsorted points.
+    #[test]
+    fn set_fan_curve_normalizes_unsorted_points() {
+        let slot = FanStateSlot::default();
+        slot.set_fan_curve(FanCurveRecord {
+            sensor_id: None,
+            points: vec![(80.0, 100.0), (30.0, 20.0), (55.0, 50.0)],
+        });
+        let points = slot.fan_curve().unwrap().points;
+        assert!(
+            points.windows(2).all(|w| w[0].0 <= w[1].0),
+            "stored points must be ascending, got {points:?}"
+        );
+        // interpolate now agrees with the intended sorted curve:
+        // 45 °C lies in (30,20)→(55,50): 20 + 30*(15/25) = 38%.
+        assert!((interpolate(&points, 45.0) - 38.0).abs() < 0.01);
+    }
+
     // --- mock helpers ---
 
     struct MockFan {
@@ -519,7 +538,9 @@ mod tests {
             Ok(true)
         }
         async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> { vec![CapabilityRef::Fan(self)] }
+        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
+            vec![CapabilityRef::Fan(self)]
+        }
     }
 
     #[async_trait]
@@ -568,7 +589,9 @@ mod tests {
             Ok(true)
         }
         async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> { vec![CapabilityRef::Sensor(self)] }
+        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
+            vec![CapabilityRef::Sensor(self)]
+        }
     }
 
     #[async_trait]
@@ -586,10 +609,7 @@ mod tests {
     }
 
     /// Build an AppState with a fan pre-loaded with `record` in its FanEngineSlot.
-    fn make_app(
-        fan: Arc<MockFan>,
-        sensor: Option<Arc<MockSensor>>,
-    ) -> Arc<AppState> {
+    fn make_app(fan: Arc<MockFan>, sensor: Option<Arc<MockSensor>>) -> Arc<AppState> {
         let app = Arc::new(AppState::new(Config::default()));
         let mut devices: Vec<Arc<dyn Device>> = vec![fan as Arc<dyn Device>];
         if let Some(s) = sensor {
@@ -603,7 +623,6 @@ mod tests {
 
     #[tokio::test]
     async fn tick_calls_set_duty_when_temp_triggers_change() {
-
         // At temp=70, interpolated between (60,60)→(90,100): 60 + 40*(10/30) ≈ 73%
         // current_duty=20, |20-73| > 1.0 → set_duty fires
         let record = FanCurveRecord {
@@ -620,7 +639,6 @@ mod tests {
 
     #[tokio::test]
     async fn tick_sets_failsafe_when_sensor_not_found() {
-
         let record = FanCurveRecord {
             sensor_id: Some("missing_sensor".to_string()),
             points: vec![(0.0, 50.0), (100.0, 100.0)],
@@ -634,7 +652,6 @@ mod tests {
 
     #[tokio::test]
     async fn tick_applies_failsafe_when_no_sensor_assigned() {
-
         let record = FanCurveRecord {
             sensor_id: None,
             points: vec![(0.0, 50.0), (100.0, 100.0)],
@@ -650,7 +667,6 @@ mod tests {
 
     #[tokio::test]
     async fn tick_seeds_default_curve_for_unconfigured_fan() {
-
         // Fan has no curve pre-loaded — tick should auto-seed one into its slot.
         let fan = MockFan::new("fan_0");
         assert!(fan.fan.fan_curve().is_none(), "starts with no curve");
@@ -667,7 +683,6 @@ mod tests {
 
     #[tokio::test]
     async fn tick_seeded_curve_has_no_sensor_and_applies_failsafe() {
-
         let fan = MockFan::new("fan_0");
         let app = make_app(fan.clone(), None);
         let engine = FanCurveEngine::new(app.clone());
@@ -681,7 +696,6 @@ mod tests {
 
     #[tokio::test]
     async fn tick_does_not_reseed_existing_curve() {
-
         let custom_record = FanCurveRecord {
             sensor_id: None,
             points: vec![(0.0, 42.0), (100.0, 42.0)],
@@ -721,7 +735,12 @@ mod tests {
     async fn tick_skips_disabled_fan_and_does_not_seed_curve() {
         let fan = MockFan::new("fan_0");
         let app = make_app(fan.clone(), None);
-        mark_active_state(&app, "fan_0", halod_protocol::types::VisibilityState::Disabled).await;
+        mark_active_state(
+            &app,
+            "fan_0",
+            halod_protocol::types::VisibilityState::Disabled,
+        )
+        .await;
         let initial_duty = fan.last_duty();
 
         let engine = FanCurveEngine::new(app.clone());
@@ -752,7 +771,12 @@ mod tests {
         let fan = MockFan::new_with_curve("fan_0", record);
         let sensor = MockSensor::new("sensor_0", 80.0);
         let app = make_app(fan.clone(), Some(sensor));
-        mark_active_state(&app, "fan_0", halod_protocol::types::VisibilityState::Hidden).await;
+        mark_active_state(
+            &app,
+            "fan_0",
+            halod_protocol::types::VisibilityState::Hidden,
+        )
+        .await;
         let initial_duty = fan.last_duty();
 
         let engine = FanCurveEngine::new(app);
@@ -905,23 +929,39 @@ mod tests {
 
     #[async_trait]
     impl Device for MockPump {
-        fn id(&self) -> String { self.id.to_string() }
-        fn name(&self) -> &str { self.id }
-        fn vendor(&self) -> &str { "test" }
-        fn model(&self) -> &str { "test" }
-        async fn initialize(&self) -> anyhow::Result<bool> { Ok(true) }
+        fn id(&self) -> String {
+            self.id.to_string()
+        }
+        fn name(&self) -> &str {
+            self.id
+        }
+        fn vendor(&self) -> &str {
+            "test"
+        }
+        fn model(&self) -> &str {
+            "test"
+        }
+        async fn initialize(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
         async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> { vec![CapabilityRef::Fan(self)] }
+        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
+            vec![CapabilityRef::Fan(self)]
+        }
     }
 
     #[async_trait]
     impl FanCapability for MockPump {
-        async fn get_duty(&self) -> anyhow::Result<u8> { Ok(*self.duty.lock().unwrap()) }
+        async fn get_duty(&self) -> anyhow::Result<u8> {
+            Ok(*self.duty.lock().unwrap())
+        }
         async fn set_duty(&self, duty: u8) -> anyhow::Result<()> {
             *self.duty.lock().unwrap() = duty;
             Ok(())
         }
-        async fn get_rpm(&self) -> Option<u32> { None }
+        async fn get_rpm(&self) -> Option<u32> {
+            None
+        }
         fn fan_state(&self) -> &FanStateSlot {
             &self.fan
         }
@@ -936,10 +976,8 @@ mod tests {
         let pump = MockPump::new_with_curve("pump_0", record);
         let app = Arc::new(AppState::new(Config::default()));
         let sensor = MockSensor::new("sensor_0", 50.0);
-        *app.devices.try_lock().unwrap() = vec![
-            pump.clone() as Arc<dyn Device>,
-            sensor as Arc<dyn Device>,
-        ];
+        *app.devices.try_lock().unwrap() =
+            vec![pump.clone() as Arc<dyn Device>, sensor as Arc<dyn Device>];
         let engine = FanCurveEngine::new(app);
         engine.tick(75).await;
         assert_ne!(pump.last_duty(), 50, "pump duty should have been updated");
@@ -957,7 +995,10 @@ mod tests {
         let engine = FanCurveEngine::new(app);
         let device: Arc<dyn crate::drivers::Device> = pump;
         let status = engine.check_stall("pump_0", &device, 60.0).await;
-        assert_eq!(status, FanCurveStatus::Ok, "pump with no RPM skips stall check");
+        assert_eq!(
+            status,
+            FanCurveStatus::Ok,
+            "pump with no RPM skips stall check"
+        );
     }
-
 }

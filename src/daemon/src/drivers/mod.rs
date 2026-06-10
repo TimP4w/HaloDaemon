@@ -2,9 +2,9 @@ pub mod chain;
 pub mod transports;
 pub mod vendors;
 
+use crate::drivers::vendors::generic::devices::common::WireDeviceBuilder;
 use anyhow::Result;
 use async_trait::async_trait;
-use crate::drivers::vendors::generic::devices::common::WireDeviceBuilder;
 use halod_protocol::types::{
     Battery, Boolean, ButtonMapping, ChainableChannelInfo, ConnectionType, DeviceCapability,
     DeviceType, DpiStatus, EffectParamValue, Equalizer, FanStatus, KeyRemapStatus, LcdDescriptor,
@@ -132,7 +132,8 @@ impl FanStateSlot {
     pub fn fan_curve(&self) -> Option<crate::config::FanCurveRecord> {
         self.0.lock().unwrap().clone()
     }
-    pub fn set_fan_curve(&self, c: crate::config::FanCurveRecord) {
+    pub fn set_fan_curve(&self, mut c: crate::config::FanCurveRecord) {
+        c.sanitize();
         *self.0.lock().unwrap() = Some(c);
     }
     pub fn clear_fan_curve(&self) {
@@ -165,9 +166,7 @@ impl LcdStateSlot {
     pub fn set_lcd_template_id(&self, id: Option<String>) {
         self.0.lock().unwrap().template_id = id;
     }
-    pub fn lcd_template_params(
-        &self,
-    ) -> HashMap<String, halod_protocol::types::EffectParamValue> {
+    pub fn lcd_template_params(&self) -> HashMap<String, halod_protocol::types::EffectParamValue> {
         self.0.lock().unwrap().params.clone()
     }
     pub fn set_lcd_template_params(
@@ -326,12 +325,18 @@ pub trait Device: Send + Sync {
                         }
                     }
                 } else {
-                    caps.insert(0, DeviceCapability::Rgb(RgbStatus {
-                        descriptor: RgbDescriptor { zones: vec![], native_effects: vec![] },
-                        state: None,
-                        zone_transforms: HashMap::new(),
-                        chainable_channels: channels,
-                    }));
+                    caps.insert(
+                        0,
+                        DeviceCapability::Rgb(RgbStatus {
+                            descriptor: RgbDescriptor {
+                                zones: vec![],
+                                native_effects: vec![],
+                            },
+                            state: None,
+                            zone_transforms: HashMap::new(),
+                            chainable_channels: channels,
+                        }),
+                    );
                 }
             }
         }
@@ -379,22 +384,30 @@ pub trait Device: Send + Sync {
     /// a new capability is introduced; this method never grows for existing ones.
     fn capabilities(&self) -> Vec<CapabilityRef<'_>>;
 
-    as_capability!(as_fan,                Fan,                FanCapability);
-    as_capability!(as_rgb,                Rgb,                RgbCapability);
-    as_capability!(as_sensor_capability,  Sensor,             SensorCapability);
-    as_capability!(as_range,              Range,              RangeCapability);
-    as_capability!(as_choice,             Choice,             ChoiceCapability);
-    as_capability!(as_boolean,            Boolean,            BooleanCapability);
-    as_capability!(as_action,             Action,             ActionCapability);
-    as_capability!(as_battery,            Battery,            BatteryCapability);
-    as_capability!(as_equalizer,          Equalizer,          EqualizerCapability);
-    as_capability!(as_dpi,                Dpi,                DpiCapability);
-    as_capability!(as_onboard_profiles,   OnboardProfiles,    OnboardProfilesCapability);
-    as_capability!(as_lcd,                Lcd,                LcdCapability);
-    as_capability!(as_key_remap,          KeyRemap,           KeyRemapCapability);
-    as_capability!(as_chain,              Chain,              ChainCapability);
-    as_capability!(as_controller,         Controller,         Controller);
-    as_capability!(as_transport_switchable, TransportSwitchable, TransportSwitchable);
+    as_capability!(as_fan, Fan, FanCapability);
+    as_capability!(as_rgb, Rgb, RgbCapability);
+    as_capability!(as_sensor_capability, Sensor, SensorCapability);
+    as_capability!(as_range, Range, RangeCapability);
+    as_capability!(as_choice, Choice, ChoiceCapability);
+    as_capability!(as_boolean, Boolean, BooleanCapability);
+    as_capability!(as_action, Action, ActionCapability);
+    as_capability!(as_battery, Battery, BatteryCapability);
+    as_capability!(as_equalizer, Equalizer, EqualizerCapability);
+    as_capability!(as_dpi, Dpi, DpiCapability);
+    as_capability!(
+        as_onboard_profiles,
+        OnboardProfiles,
+        OnboardProfilesCapability
+    );
+    as_capability!(as_lcd, Lcd, LcdCapability);
+    as_capability!(as_key_remap, KeyRemap, KeyRemapCapability);
+    as_capability!(as_chain, Chain, ChainCapability);
+    as_capability!(as_controller, Controller, Controller);
+    as_capability!(
+        as_transport_switchable,
+        TransportSwitchable,
+        TransportSwitchable
+    );
 
     fn visibility_slot(&self) -> Option<&VisibilitySlot> {
         None
@@ -903,7 +916,10 @@ pub trait EqualizerCapability: Send + Sync {
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
-        self.get_equalizer().await.ok().map(DeviceCapability::Equalizer)
+        self.get_equalizer()
+            .await
+            .ok()
+            .map(DeviceCapability::Equalizer)
     }
 
     fn state_key(&self) -> &'static str {
@@ -1147,9 +1163,7 @@ pub trait LcdCapability: Send + Sync {
             let _ = self.set_rotation(r as u32).await;
         }
         if let Some(m) = v.get("mode") {
-            if let Ok(mode) =
-                serde_json::from_value::<halod_protocol::types::LcdMode>(m.clone())
-            {
+            if let Ok(mode) = serde_json::from_value::<halod_protocol::types::LcdMode>(m.clone()) {
                 self.lcd_state().set_mode(mode);
             }
         }
