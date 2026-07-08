@@ -1,0 +1,162 @@
+[package]
+name = "halod"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Peripheral control daemon with an egui UI (fan curves, RGB, LCD, audio EQ, DPI)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "halod"
+path = "src/main.rs"
+
+[dependencies]
+halod-shared = { path = "../shared" }
+
+tokio      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+anyhow     = { workspace = true }
+log        = { workspace = true }
+async-trait = { workspace = true }
+env_logger = "0.11"
+fnv        = "1"
+hidapi     = "2"
+inventory  = "0.3"
+rusb       = { version = "0.9" }
+uuid       = { version = "1", features = ["v4"] }
+base64     = "0.22"
+image      = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+gif        = "0.14"
+# Q565 — QOI-derived RGB565 codec. The NZXT Kraken type-0x08 LCD streaming path
+# expects frames in this format (verified against NZXT CAM USB captures).
+q565       = { git = "https://github.com/seritools/q565", rev = "aeb432dc7d73757b20cd45b71755e8573a978541" }
+imageproc  = { version = "0.25", default-features = false }
+ab_glyph   = "0.2"
+tiny-skia = "0.11"
+resvg      = { version = "0.44", default-features = false }
+chrono     = { version = "0.4", default-features = false, features = ["clock"] }
+rustfft    = "6"
+
+[dev-dependencies]
+tempfile = "3"
+tokio    = { version = "1", features = ["test-util"] }
+proptest = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+netlink-sys = { version = "0.8", features = ["tokio_socket"] }
+libc = "0.2"
+ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+pipewire = "0.10"
+evdev = "0.12"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
+# http(s) album art for the now-playing widget (MPRIS players like Spotify
+# expose remote art URLs, not file:// paths).
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+[target.'cfg(target_os = "windows")'.dependencies.enigo]
+version = "0.2"
+default-features = false
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wmi        = "0.13"
+windows    = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Com",
+    "Win32_System_Power",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Environment",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_StationsAndDesktops",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_Media_KernelStreaming",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Media_Control",
+    "Foundation",
+    "Storage_Streams",
+] }
+# SCM dispatcher + service install/uninstall/stop for the supervisor service.
+windows-service = "0.7"
+libloading = "0.8"
+
+# ── Linux packaging ──────────────────────────────────────────────────────────
+# Both the .deb (cargo-deb) and .rpm (cargo-generate-rpm) ship BOTH binaries
+# from this one crate. Asset source paths are relative to this file (src/daemon),
+# so binaries are `target/release/*` (workspace target) and repo-root files are
+# `../../`. Dependency detection (dpkg-shlibdeps / rpm find-requires) inspects
+# only the binaries listed in `assets`, so `halod-gui` MUST be listed too — it
+# is what pulls the wayland/GL/xkbcommon deps.
+
+[package.metadata.deb]
+name = "halod"
+maintainer = "Timucin Besken <beskent@gmail.com>"
+copyright = "2024 Timucin Besken <beskent@gmail.com>"
+license-file = ["../../LICENSE", "0"]
+extended-description = "Peripheral control daemon with an egui UI: fan curves, RGB lighting, LCD panels, audio EQ and DPI control for a range of PC peripherals and motherboards."
+section = "utils"
+priority = "optional"
+# $auto (dpkg-shlibdeps) catches the daemon's linked libs; the GUI dlopens
+# libGL/EGL, wayland and libxkbcommon at runtime so they must be listed by hand.
+depends = "$auto, libgl1, libegl1, libwayland-client0, libwayland-egl1, libxkbcommon0"
+recommends = "ffmpeg"
+suggests = "nvidia-utils, i2c-tools"
+maintainer-scripts = "../../packaging/deb"
+assets = [
+    ["target/release/halod", "usr/bin/", "755"],
+    ["target/release/halod-gui", "usr/bin/", "755"],
+    ["../../udev/60-halod.rules", "usr/lib/udev/rules.d/60-halod.rules", "444"],
+    ["../../assets/dev.timp4w.Halod.desktop", "usr/share/applications/dev.timp4w.Halod.desktop", "444"],
+    ["../../assets/icon.svg", "usr/share/icons/hicolor/scalable/apps/halod.svg", "444"],
+    ["../../packaging/systemd/halod.service", "usr/lib/systemd/user/halod.service", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "halod"
+summary = "Peripheral control daemon with an egui UI (fan curves, RGB, LCD, audio EQ, DPI)"
+license = "GPL-3.0-or-later"
+# find-requires emits soname-based Requires that Fedora Provides, so binaries
+# built on Ubuntu resolve correctly on Fedora.
+auto-req = "auto"
+post_install_script = "systemd-sysusers /usr/lib/sysusers.d/halod.conf >/dev/null 2>&1 || groupadd -r halod 2>/dev/null || true\nudevadm control --reload-rules >/dev/null 2>&1 || true\nudevadm trigger >/dev/null 2>&1 || true"
+assets = [
+    { source = "target/release/halod", dest = "/usr/bin/halod", mode = "755" },
+    { source = "target/release/halod-gui", dest = "/usr/bin/halod-gui", mode = "755" },
+    { source = "../../udev/60-halod.rules", dest = "/usr/lib/udev/rules.d/60-halod.rules", mode = "444" },
+    { source = "../../assets/dev.timp4w.Halod.desktop", dest = "/usr/share/applications/dev.timp4w.Halod.desktop", mode = "444" },
+    { source = "../../assets/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/halod.svg", mode = "444" },
+    { source = "../../packaging/systemd/halod.service", dest = "/usr/lib/systemd/user/halod.service", mode = "644" },
+    { source = "../../packaging/rpm/halod-sysusers.conf", dest = "/usr/lib/sysusers.d/halod.conf", mode = "644" },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/halod/LICENSE", mode = "444", doc = true },
+]
+
+# auto-req catches the daemon's linked libs; the GUI dlopens these at runtime.
+[package.metadata.generate-rpm.requires]
+"mesa-libGL" = "*"
+"mesa-libEGL" = "*"
+"libwayland-client" = "*"
+"libwayland-egl" = "*"
+"libxkbcommon" = "*"
+
+[package.metadata.generate-rpm.recommends]
+ffmpeg = "*"
+
+[package.metadata.generate-rpm.suggests]
+i2c-tools = "*"

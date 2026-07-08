@@ -1,0 +1,52 @@
+lighting:
+  title: RGB Lighting
+  subtitle: Apply one color or effect to every device at once
+  tab_canvas: Effects Canvas
+  tab_direct: Direct Effects
+  static: Static
+  paint: Paint
+  edit: Edit
+  export: Export
+  delete: Delete
+  cancel: Cancel
+  master_color: Master color
+  global_effect: Global effect
+  new_effect: New effect
+  import: Import
+  effect_settings: Effect settings
+  master_brightness: Master brightness
+  saturation: Saturation
+  target_devices_zones: Target devices & zones
+  targets_subtitle: Choose which devices and zones this lighting applies to. Pick a device to expand its zones.
+  deselect_all: Deselect all
+  select_all: Select all
+  zones_count: "%{sel}/%{total} zones"
+  none: "(none)"
+  delete_effect_title: Delete effect?
+  delete_confirm: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
+  no_zones_title: No lighting zones reported
+  no_zones_subtitle: This device didn't expose any addressable RGB zones
+  remove_from_canvas_title: Remove from canvas?
+  remove_from_canvas_body: This device is currently on the canvas. Applying this effect removes it from the canvas.
+  remove_and_apply: Remove & apply
+  lighting_preview: Lighting preview
+  mode_static: STATIC
+  mode_paint: PAINT
+  mode_effect: EFFECT
+  mode_software: SOFTWARE
+  mode_canvas_engine: CANVAS ENGINE
+  zone_caps: ZONE
+  paint_hint: Click or drag LEDs to paint
+  clear: Clear
+  fill_zone: Fill zone
+  transform_caps: TRANSFORM
+  reverse: "↺ Reverse"
+  swap: "⇄ Swap"
+  flip_h: "⇄ Flip H"
+  flip_v: "⇅ Flip V"
+  reset: Reset
+  rotate: Rotate
+  effect: Effect
+  place_on_canvas: "Place on Canvas →"
+  brush_color: Brush color
+  color: Color

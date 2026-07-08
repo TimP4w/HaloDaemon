@@ -1,0 +1,177 @@
+tour:
+  skip: Skip
+  next: Next
+  done: Done
+  page_home:
+    find_device:
+      title: "Find a device"
+      body: "Search by name or vendor to filter the device list."
+    manage_device:
+      title: "Manage a device"
+      body: "Right-click a card to rename, hide, or disable a device."
+    hidden_devices:
+      title: "Hidden devices"
+      body: "Hidden devices are tucked away here. Toggle this to bring them back."
+    sidebar_home:
+      title: "Sidebar: Home"
+      body: "The Home page lists all your connected devices. Search, hide, or right-click a card to manage it."
+    sidebar_lighting:
+      title: "Sidebar: RGB Lighting"
+      body: "Apply a single colour or effect to every RGB device at once. Create, import, and manage custom effects here."
+    sidebar_cooling:
+      title: "Sidebar: Cooling"
+      body: "View fan and pump curves, sensor readings, and cooling presets across all devices."
+    sidebar_canvas:
+      title: "Sidebar: Effects Canvas"
+      body: "Compose layered effects across multiple devices on a shared pixmap canvas. Drag zones, stack effects, and tune sampling."
+    sidebar_settings:
+      title: "Sidebar: Settings"
+      body: "Application preferences, engine toggles, and close-to-tray behaviour live here."
+    switch_profiles:
+      title: "Switch profiles"
+      body: "Click the profile pill in the title bar to switch profiles or manage your saved configurations."
+  page_lighting:
+    pick_effect:
+      title: "Pick an effect"
+      body: "Choose a lighting effect to apply across your devices."
+    create_effect:
+      title: "Create an effect"
+      body: "Build your own custom effect with the designer: mix layers, colours, and animations."
+    import_effect:
+      title: "Import an effect"
+      body: "Load a saved effect file from another machine or a shared preset."
+    choose_targets:
+      title: "Choose targets"
+      body: "Pick which devices and zones the effect applies to."
+  page_cooling:
+    overview:
+      title: "Cooling overview"
+      body: "All cooling devices are listed here with their presets and sensor readings. To edit a fan or pump curve, navigate to the device's own Cooling tab."
+  page_canvas:
+    create_instance:
+      title: "Create an effect instance"
+      body: "Add an instance here, then expand it and click a zone chip to assign it."
+    arrange_remove:
+      title: "Arrange and remove"
+      body: "Drag a zone to reposition it; select one and press Delete to remove it."
+  page_settings:
+    application:
+      title: "Application preferences"
+      body: "Close-to-tray, startup checks, and other app-wide preferences live here."
+    engines:
+      title: "Engines"
+      body: "Turn the fan-curve, canvas, and LCD engines on or off and tune their rates."
+  page_profile:
+    settings:
+      title: "Profile settings"
+      body: "Rename the profile, set it as active, and configure auto-activation rules below."
+    auto_activate:
+      title: "Auto-activate with apps"
+      body: "Add processes so this profile automatically becomes active when a matching app is in focus."
+    overrides:
+      title: "Per-device overrides"
+      body: "Any device setting you change while this profile is active is saved as an override here. Revert individual overrides or check back later as you tweak devices."
+  page_device:
+    back:
+      title: "Back to all devices"
+      body: "Return to the device list from here."
+    rename:
+      title: "Rename this device"
+      body: "Click the pencil next to the name to rename this device."
+    tabs:
+      title: "Capability tabs"
+      body: "Each tab exposes a capability this device supports."
+  tab_devices:
+    connected:
+      title: "Connected devices"
+      body: "Child devices connected through this hub or receiver show up here."
+  tab_lighting:
+    choose_effect:
+      title: "Choose an effect"
+      body: "Pick from Static, Paint, or native and engine effects. Each applies a different lighting behaviour."
+    paint:
+      title: "Paint LEDs manually"
+      body: "Paint mode lets you click or drag individual LEDs to set a custom colour per diode."
+    place_canvas:
+      title: "Place on canvas"
+      body: "Send this device to the Effects Canvas, where you can compose layered effects across multiple devices."
+    transform:
+      title: "Transform zone layout"
+      body: "Flip, swap, reverse, or rotate the zone layout so effects flow the right way on your physical device."
+  tab_chains:
+    led_chains:
+      title: "LED chains"
+      body: "This device has addressable LED headers. Each header can drive a chain of strips, rings, or grids. Define them here so the daemon knows what is connected."
+    discover:
+      title: "Discover links"
+      body: "Click Discover to scan the header for already-connected ARGB devices. Discovered links are locked."
+    add_link:
+      title: "Add a link manually"
+      body: "Use Add link to define a new strip or ring: pick a name, topology, and LED count, then wire it up."
+  tab_cooling:
+    pick_sensor:
+      title: "Pick a sensor"
+      body: "Choose which temperature sensor drives this fan or pump curve. The live reading is shown below."
+    apply_preset:
+      title: "Apply a preset"
+      body: "Load a pre-defined curve shape from the preset picker to get started quickly."
+    edit_curve:
+      title: "Edit the curve"
+      body: "Drag points to shape the temperature-to-duty response. Click empty space to add a point; right-click a point to remove it."
+  tab_lcd:
+    choose_mode:
+      title: "Choose a mode"
+      body: "Image mode displays a static picture or GIF; Video mode streams a media file (requires ffmpeg); Editor mode lets you build a custom template with drag-and-drop widgets."
+    preview:
+      title: "Preview & settings"
+      body: "The live preview shows what the device displays. Use the controls below to adjust brightness, rotation, and other display settings."
+  tab_equalizer:
+    equalizer:
+      title: "Equalizer"
+      body: "Pick a preset or drag the bands to shape the audio output."
+  tab_keys:
+    select_action:
+      title: "Select an action"
+      body: "Choose a category (keystroke, media key, macro, or mouse button), then configure its parameters below."
+    record_macro:
+      title: "Record a macro"
+      body: "Macros play back a sequence of key presses and delays. Record, reorder, and edit steps right here."
+    layer_shift:
+      title: "Layer shift"
+      body: "Set a different action that fires while the layer-shift key is held. Layer-shift itself can only be assigned on the base layer."
+  tab_performance:
+    dpi_stages:
+      title: "DPI stages"
+      body: "Set the DPI steps this device cycles through."
+  tab_controls:
+    device_controls:
+      title: "Device controls"
+      body: "Vendor-specific switches and settings for this device live here."
+  tab_onboard:
+    onboard_profiles:
+      title: "Onboard profiles"
+      body: "Switch or overwrite the profile slots stored on the device itself."
+  tab_pairing:
+    pairing:
+      title: "Pairing"
+      body: "Pair a new wireless device to this receiver from here."
+  lcd_editor:
+    palette:
+      title: "Widget palette"
+      body: "Drag a widget from here onto the screen to add it to your template."
+    arrange:
+      title: "Arrange your template"
+      body: "Drag placed widgets to position them and select one to edit its settings."
+    variant:
+      title: "Variants & parameters"
+      body: "Each widget offers variants. For example a gauge can show a sensor value or audio level. Plus size, colour, and other parameters."
+  page_effect_designer:
+    save:
+      title: "Save your effect"
+      body: "Give it a name and click Save to add it to your library. Saved effects appear in the RGB Lighting and Canvas effect pickers."
+    preview:
+      title: "Live preview"
+      body: "See how your effect looks on different layouts: strip, ring, matrix, and fan hub. Changes update in real time."
+    tune:
+      title: "Tune the parameters"
+      body: "Pick a generator, adjust colours and speed, then shape the brightness curve. Each control feeds into the procedural formula shown above the graph."

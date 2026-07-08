@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "halod-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+halod-shared = { path = "../shared" }
+
+# glow (OpenGL) renderer, not the default wgpu — matches the Linux custom
+# event loop (egui_glow) and works without Vulkan.
+eframe = { version = "0.35", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wayland",
+] }
+egui = "0.35"
+
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "macros", "sync"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+base64 = "0.22"
+resvg = "0.44"
+rust-i18n = "4"
+
+[target.'cfg(unix)'.dependencies]
+ksni = "0.2"
+
+# Linux "close to tray" quirk (see wayland_hide.rs): a custom winit + glutin +
+# egui_glow event loop that destroys/recreates the window, because winit's
+# Wayland backend can't hide a surface. Remove this whole block (and the module)
+# once eframe/winit support hiding a Wayland window natively.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["wayland", "rwh_06"] }
+glutin = "0.32"
+glutin-winit = "0.5"
+glow = "0.17"
+egui_glow = { version = "0.35", default-features = false, features = ["winit", "wayland"] }
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.19"
+# HKCU Run-key autostart entry (ui/src/lifecycle/autostart/windows.rs).
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Embeds assets/icon.ico as the exe's Win32 icon resource so Windows shows the
+# app icon in Explorer, the taskbar, the Start Menu shortcut, and the installer.
+winresource = "0.1"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+serde_yaml = "0.9"

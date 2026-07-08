@@ -1,0 +1,446 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-FileCopyrightText: Adam Honse (CalcProgrammer1) — OpenRGB project
+// Reference: OpenRGB ENE SMBus implementation
+// https://gitlab.com/CalcProgrammer1/OpenRGB/-/blob/master/Controllers/ENESMBusController/ENESMBusInterface/ENESMBusInterface_i2c_smbus.cpp
+// SPD reference: https://gitlab.com/CalcProgrammer1/OpenRGB/-/blob/master/Controllers/ENESMBusController/ENESMBusController.cpp
+//
+// Platform backends live in sibling files, each selected by `cfg`:
+//   - `linux.rs`          — i2c-dev ioctl interface
+//   - `windows/chipset.rs` — PawnIO chipset SMBus
+//   - `windows/nvapi.rs`   — NvAPI GPU i2c
+//   - `fallback.rs`       — unsupported platforms
+// Every backend exposes the same four items consumed below: `SmBusInner`,
+// `enumerate_buses`, `enumerate_gpu_buses`, `open_device`.
+
+use anyhow::{anyhow, Result};
+use std::any::Any;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use crate::{
+    drivers::Metered,
+    registry::discovery::{DiscoveryHandle, SmBusScanEntry, TransportScanner},
+    state::AppState,
+};
+use halod_shared::types::{WriteRateLimit, WriteRateStatus};
+
+#[derive(Clone, Copy, Debug)]
+pub enum SmbusBusKind {
+    Chipset,
+    Gpu,
+}
+
+#[derive(Clone, Debug)]
+pub struct BusInfo {
+    pub bus_number: u8,
+    pub adapter_name: String,
+    pub pci_vendor: u16,
+    pub pci_device: u16,
+    pub pci_sub_vendor: u16,
+    pub pci_sub_device: u16,
+}
+
+impl BusInfo {
+    pub fn is_gpu_bus(&self) -> bool {
+        is_gpu_adapter_name(&self.adapter_name)
+    }
+}
+
+fn is_gpu_adapter_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("nvidia") || lower.contains("amd radeon") || lower.contains("radeon")
+}
+
+pub struct SmBusDevice {
+    pub bus_number: u8,
+    /// Rate-limits the whole bus; devices sharing a `SmBusScanEntry` already
+    /// share this gate and its bus mutex.
+    io: Metered<Mutex<SmBusInner>>,
+}
+
+impl SmBusDevice {
+    pub fn open(info: &BusInfo) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            bus_number: info.bus_number,
+            io: Metered::new(Mutex::new(platform::open_device(info)?), None),
+        }))
+    }
+
+    /// Run a batch of synchronous SMBus ops in one `spawn_blocking` call,
+    /// tallying written bytes and metering them through the bus's write-rate gate.
+    pub async fn run_batch<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut dyn SmBusSyncOps) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.io
+            .write_tallied(move |inner, bytes| {
+                let mut g = inner.lock().map_err(|_| anyhow!("smbus lock poisoned"))?;
+                let mut counting = CountingSmBusOps {
+                    inner: &mut *g,
+                    bytes,
+                };
+                f(&mut counting)
+            })
+            .await
+    }
+
+    /// Live write-rate limit and throughput for this bus.
+    pub fn rate_status(&self) -> Option<WriteRateStatus> {
+        Some(self.io.status())
+    }
+
+    /// Set (or clear) this bus's write-rate ceiling.
+    pub fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
+        self.io.set_limit(limit);
+    }
+}
+
+/// Delegates to `inner`, tallying bytes written by successful calls.
+struct CountingSmBusOps<'a> {
+    inner: &'a mut dyn SmBusSyncOps,
+    bytes: &'a AtomicUsize,
+}
+
+impl SmBusSyncOps for CountingSmBusOps<'_> {
+    fn read_byte(&mut self, addr: u8) -> Result<u8> {
+        self.inner.read_byte(addr)
+    }
+
+    fn read_byte_data(&mut self, addr: u8, cmd: u8) -> Result<u8> {
+        self.inner.read_byte_data(addr, cmd)
+    }
+
+    fn write_quick(&mut self, addr: u8) -> Result<bool> {
+        let result = self.inner.write_quick(addr);
+        if result.is_ok() {
+            self.bytes.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn write_byte_data(&mut self, addr: u8, cmd: u8, val: u8) -> Result<()> {
+        let result = self.inner.write_byte_data(addr, cmd, val);
+        if result.is_ok() {
+            self.bytes.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn write_word_data(&mut self, addr: u8, cmd: u8, val: u16) -> Result<()> {
+        let result = self.inner.write_word_data(addr, cmd, val);
+        if result.is_ok() {
+            self.bytes.fetch_add(2, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn write_block_data(&mut self, addr: u8, cmd: u8, data: &[u8]) -> Result<()> {
+        let len = data.len();
+        let result = self.inner.write_block_data(addr, cmd, data);
+        if result.is_ok() {
+            self.bytes.fetch_add(len, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn supports_block_write(&self) -> bool {
+        self.inner.supports_block_write()
+    }
+}
+
+/// Abstraction over an SMBus bus, so [`crate::registry::discovery::DiscoveryHandle`] stays free of the concrete type.
+pub trait SmBusOps: Send + Sync {
+    fn bus_number(&self) -> u8;
+    /// Convert this `Arc<Self>` into `Arc<dyn Any + Send + Sync>` so the
+    /// standard [`Arc::downcast`] can recover the concrete type.
+    fn into_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
+}
+
+impl SmBusOps for SmBusDevice {
+    fn bus_number(&self) -> u8 {
+        self.bus_number
+    }
+    fn into_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+/// Downcast `Arc<dyn SmBusOps>` to `Arc<SmBusDevice>`. Panics if the
+/// underlying type isn't `SmBusDevice` (never happens: every `Smbus`
+/// discovery handle is created by the SMBus transport scanner).
+pub fn downcast_smbus_device(bus: Arc<dyn SmBusOps>) -> Arc<SmBusDevice> {
+    bus.into_any_arc()
+        .downcast::<SmBusDevice>()
+        .expect("SmBusOps handle was not a SmBusDevice")
+}
+
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod platform;
+
+#[cfg(target_os = "windows")]
+#[path = "windows/mod.rs"]
+mod platform;
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[path = "fallback.rs"]
+mod platform;
+
+use platform::SmBusInner;
+
+/// Maximum payload length for a single SMBus block transfer (I2C_SMBUS_BLOCK_MAX).
+pub(super) const SMBUS_BLOCK_MAX: usize = 32;
+
+/// Synchronous SMBus operations, available inside a `SmBusDevice::run_batch` closure.
+pub trait SmBusSyncOps {
+    fn read_byte(&mut self, addr: u8) -> Result<u8>;
+    fn read_byte_data(&mut self, addr: u8, cmd: u8) -> Result<u8>;
+    fn write_quick(&mut self, addr: u8) -> Result<bool>;
+    fn write_byte_data(&mut self, addr: u8, cmd: u8, val: u8) -> Result<()>;
+    fn write_word_data(&mut self, addr: u8, cmd: u8, val: u16) -> Result<()>;
+    fn write_block_data(&mut self, addr: u8, cmd: u8, data: &[u8]) -> Result<()>;
+    /// Returns `false` if this backend does not support block writes.
+    /// Callers can check this statically to avoid attempting a block write
+    /// that will always return a runtime error (e.g. NvAPI GPU buses).
+    fn supports_block_write(&self) -> bool {
+        true
+    }
+}
+
+pub struct SmBusTransport;
+
+impl SmBusTransport {
+    /// Enumerate every chipset and GPU SMBus controller without opening any.
+    /// Returns `(chipset_buses, gpu_buses)`; used by the debug usecase.
+    pub async fn enumerate_for_debug() -> (Vec<BusInfo>, Vec<BusInfo>) {
+        tokio::task::spawn_blocking(|| {
+            (platform::enumerate_buses(), platform::enumerate_gpu_buses())
+        })
+        .await
+        .unwrap_or_else(|e| {
+            log::error!("[SmBus] enumerate_for_debug task panicked: {e}");
+            Default::default()
+        })
+    }
+}
+
+/// Label for the discovery status line while probing one bus, preferring the
+/// adapter name and falling back to the bus number. The UI prefixes this with
+/// its translated "Scanning …" wording.
+fn bus_scan_label(bus: &BusInfo) -> String {
+    if bus.adapter_name.trim().is_empty() {
+        format!("SMBus bus {}", bus.bus_number)
+    } else {
+        format!("SMBus · {}", bus.adapter_name.trim())
+    }
+}
+
+async fn discover(app: Arc<AppState>) -> Result<()> {
+    let (chipset_buses, gpu_buses) = tokio::task::spawn_blocking(|| {
+        (platform::enumerate_buses(), platform::enumerate_gpu_buses())
+    })
+    .await?;
+
+    // Failing to open a bus is non-fatal; warn once so the cause isn't silent.
+    let mut open_warned = false;
+
+    for entry in inventory::iter::<SmBusScanEntry>() {
+        let buses: Vec<&BusInfo> = match entry.bus_kind {
+            SmbusBusKind::Chipset => chipset_buses.iter().filter(|b| !b.is_gpu_bus()).collect(),
+            SmbusBusKind::Gpu => gpu_buses.iter().collect(),
+        };
+        log::debug!(
+            "[SmBusTransport] {:?}: {} bus(es) to scan",
+            entry.bus_kind,
+            buses.len()
+        );
+
+        for bus_info in buses {
+            crate::registry::discovery::set_discovery_detail(&app, bus_scan_label(bus_info)).await;
+            let bus = match SmBusDevice::open(bus_info) {
+                Ok(b) => b,
+                Err(e) => {
+                    if open_warned {
+                        log::debug!(
+                            "[SmBusTransport] Cannot open bus {}: {}",
+                            bus_info.bus_number,
+                            e
+                        );
+                    } else {
+                        log::warn!(
+                            "[SmBusTransport] cannot open SMBus bus {}: {}, \
+                             SMBus RGB devices (e.g. DRAM) on this bus \
+                             will be unavailable",
+                            bus_info.bus_number,
+                            e
+                        );
+                        open_warned = true;
+                    }
+                    continue;
+                }
+            };
+
+            // Apply the entry's declared ceiling before any traffic (pre_scan,
+            // probes, later effect streams) touches the freshly opened bus.
+            bus.set_write_rate_limit(entry.write_rate_limit);
+
+            if let Some(pre_scan) = entry.pre_scan {
+                if let Err(e) = pre_scan(Arc::clone(&bus)).await {
+                    log::debug!(
+                        "[SmBusTransport] pre_scan failed on bus {}: {}",
+                        bus_info.bus_number,
+                        e
+                    );
+                }
+            }
+
+            for &addr in entry.addresses {
+                crate::registry::discovery::discover_handle(
+                    &app,
+                    DiscoveryHandle::Smbus {
+                        bus: Arc::clone(&bus) as Arc<dyn SmBusOps>,
+                        addr,
+                        bus_kind: entry.bus_kind,
+                    },
+                )
+                .await;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+inventory::submit!(TransportScanner {
+    name: "SMBus",
+    platform: None,
+    scan: |app| Box::pin(async move {
+        if let Err(e) = discover(app).await {
+            log::error!("SMBus discovery failed: {e}");
+        }
+    }),
+});
+
+#[cfg(test)]
+mod tests {
+    use super::{bus_scan_label, is_gpu_adapter_name, BusInfo, CountingSmBusOps, SmBusSyncOps};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeOps {
+        fail_writes: bool,
+    }
+
+    impl SmBusSyncOps for FakeOps {
+        fn read_byte(&mut self, _addr: u8) -> anyhow::Result<u8> {
+            Ok(0)
+        }
+        fn read_byte_data(&mut self, _addr: u8, _cmd: u8) -> anyhow::Result<u8> {
+            Ok(0)
+        }
+        fn write_quick(&mut self, _addr: u8) -> anyhow::Result<bool> {
+            if self.fail_writes {
+                anyhow::bail!("nak");
+            }
+            Ok(true)
+        }
+        fn write_byte_data(&mut self, _addr: u8, _cmd: u8, _val: u8) -> anyhow::Result<()> {
+            if self.fail_writes {
+                anyhow::bail!("nak");
+            }
+            Ok(())
+        }
+        fn write_word_data(&mut self, _addr: u8, _cmd: u8, _val: u16) -> anyhow::Result<()> {
+            if self.fail_writes {
+                anyhow::bail!("nak");
+            }
+            Ok(())
+        }
+        fn write_block_data(&mut self, _addr: u8, _cmd: u8, _data: &[u8]) -> anyhow::Result<()> {
+            if self.fail_writes {
+                anyhow::bail!("nak");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn counting_smbus_ops_tallies_only_successful_writes() {
+        let bytes = AtomicUsize::new(0);
+        let mut fake = FakeOps { fail_writes: false };
+        let mut counting = CountingSmBusOps {
+            inner: &mut fake,
+            bytes: &bytes,
+        };
+
+        counting.write_quick(0x50).unwrap();
+        counting.write_byte_data(0x50, 0x01, 0xFF).unwrap();
+        counting.write_word_data(0x50, 0x02, 0xBEEF).unwrap();
+        counting
+            .write_block_data(0x50, 0x03, &[1, 2, 3, 4, 5])
+            .unwrap();
+
+        // 1 (quick) + 1 (byte) + 2 (word) + 5 (block)
+        assert_eq!(bytes.load(Ordering::Relaxed), 9);
+    }
+
+    #[test]
+    fn counting_smbus_ops_does_not_tally_failed_writes() {
+        let bytes = AtomicUsize::new(0);
+        let mut fake = FakeOps { fail_writes: true };
+        let mut counting = CountingSmBusOps {
+            inner: &mut fake,
+            bytes: &bytes,
+        };
+
+        let _ = counting.write_quick(0x50);
+        let _ = counting.write_byte_data(0x50, 0x01, 0xFF);
+        let _ = counting.write_word_data(0x50, 0x02, 0xBEEF);
+        let _ = counting.write_block_data(0x50, 0x03, &[1, 2, 3]);
+
+        assert_eq!(bytes.load(Ordering::Relaxed), 0);
+    }
+
+    fn bus(bus_number: u8, adapter_name: &str) -> BusInfo {
+        BusInfo {
+            bus_number,
+            adapter_name: adapter_name.to_string(),
+            pci_vendor: 0,
+            pci_device: 0,
+            pci_sub_vendor: 0,
+            pci_sub_device: 0,
+        }
+    }
+
+    #[test]
+    fn bus_scan_label_prefers_adapter_name() {
+        assert_eq!(bus_scan_label(&bus(3, "i801 SMBus")), "SMBus · i801 SMBus");
+    }
+
+    #[test]
+    fn bus_scan_label_falls_back_to_bus_number() {
+        assert_eq!(bus_scan_label(&bus(5, "   ")), "SMBus bus 5");
+        assert_eq!(bus_scan_label(&bus(0, "")), "SMBus bus 0");
+    }
+
+    #[test]
+    fn is_gpu_adapter_name_nvidia() {
+        assert!(is_gpu_adapter_name("NVIDIA GeForce RTX 4090"));
+        assert!(is_gpu_adapter_name("nvidia display"));
+    }
+
+    #[test]
+    fn is_gpu_adapter_name_amd_radeon() {
+        assert!(is_gpu_adapter_name("AMD Radeon RX 7900 XTX"));
+        assert!(is_gpu_adapter_name("Radeon Graphics"));
+        assert!(is_gpu_adapter_name("radeon rx 580"));
+    }
+
+    #[test]
+    fn is_gpu_adapter_name_non_gpu() {
+        assert!(!is_gpu_adapter_name("Intel SMBus"));
+        assert!(!is_gpu_adapter_name("i801 SMBus"));
+        assert!(!is_gpu_adapter_name(""));
+        assert!(!is_gpu_adapter_name("Piix4 SMBus"));
+    }
+}

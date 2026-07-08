@@ -1,0 +1,20 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -e
+
+# hwmon PWM files are chgrp'd to the `halod` group (mode 0664) by the udev
+# rules, so fan control works without root. Create the group if it's missing.
+if ! getent group halod >/dev/null; then
+    groupadd --system halod
+fi
+
+# Apply the freshly installed udev rules so devices are reachable without a
+# reboot.
+if command -v udevadm >/dev/null; then
+    udevadm control --reload-rules || true
+    udevadm trigger || true
+fi
+
+#DEBHELPER#
+
+exit 0

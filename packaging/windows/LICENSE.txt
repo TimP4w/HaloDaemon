@@ -1,0 +1,32 @@
+HaloDaemon
+Copyright (C) 2026 TimP4w and contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version (GPL-3.0-or-later).
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+The full license text is available at https://www.gnu.org/licenses/gpl-3.0.html
+and the project source at https://github.com/TimP4w/HaloDaemon
+
+----------------------------------------------------------------------------
+Bundled components:
+
+* PawnIO modules (SmbusI801.bin, SmbusPIIX4.bin, LpcIO.bin, AMDFamily17.bin),
+  (c) namazso. License: LGPL-2.1-or-later
+  (https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html).
+  Full text installed as PawnIO-LICENSE.txt.
+
+* FFmpeg (ffmpeg.exe and its libav* runtime DLLs), (c) the FFmpeg developers,
+  used by the LCD video mode as a separate subprocess. This is a GPL build of
+  FFmpeg with an LGPL core. Licenses:
+    - GPL-3.0-or-later:   https://www.gnu.org/licenses/gpl-3.0.html
+    - LGPL-2.1-or-later:  https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+  Upstream notice installed as FFmpeg-LICENSE.md / FFmpeg-README.txt; full texts
+  installed as COPYING.GPLv3 / COPYING.LGPLv2.1.
+
+Installing HaloDaemon means you accept the terms above.

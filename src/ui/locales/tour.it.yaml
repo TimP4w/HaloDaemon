@@ -1,0 +1,177 @@
+tour:
+  skip: Salta
+  next: Avanti
+  done: Fine
+  page_home:
+    find_device:
+      title: "Trova un dispositivo"
+      body: "Cerca per nome o fornitore per filtrare l'elenco dei dispositivi."
+    manage_device:
+      title: "Gestisci un dispositivo"
+      body: "Fai clic destro su una scheda per rinominare, nascondere o disabilitare un dispositivo."
+    hidden_devices:
+      title: "Dispositivi nascosti"
+      body: "I dispositivi nascosti sono nascosti qui. Attiva/disattiva questo per riportarli indietro."
+    sidebar_home:
+      title: "Barra laterale: Home"
+      body: "La pagina Home elenca tutti i tuoi dispositivi collegati. Cerca, nascondi o fai clic destro su una scheda per gestirla."
+    sidebar_lighting:
+      title: "Barra laterale: Illuminazione RGB"
+      body: "Applica un singolo colore o effetto a ogni dispositivo RGB in una volta. Crea, importa e gestisci effetti personalizzati qui."
+    sidebar_cooling:
+      title: "Barra laterale: Raffreddamento"
+      body: "Visualizza curve ventola e pompa, letture sensori e preset di raffreddamento su tutti i dispositivi."
+    sidebar_canvas:
+      title: "Barra laterale: Tela Effetti"
+      body: "Componi effetti stratificati su più dispositivi su una tela pixmap condivisa. Trascina zone, sovrapponi effetti e sintonizza il campionamento."
+    sidebar_settings:
+      title: "Barra laterale: Impostazioni"
+      body: "Le preferenze dell'applicazione, gli interruttori del motore e il comportamento di chiusura nella barra delle applicazioni si trovano qui."
+    switch_profiles:
+      title: "Cambia profili"
+      body: "Fai clic sulla pillola profilo nella barra del titolo per cambiare profili o gestire le tue configurazioni salvate."
+  page_lighting:
+    pick_effect:
+      title: "Scegli un effetto"
+      body: "Scegli un effetto di illuminazione da applicare sui tuoi dispositivi."
+    create_effect:
+      title: "Crea un effetto"
+      body: "Costruisci il tuo effetto personalizzato con il designer: mescola strati, colori e animazioni."
+    import_effect:
+      title: "Importa un effetto"
+      body: "Carica un file di effetto salvato da un'altra macchina o da un preset condiviso."
+    choose_targets:
+      title: "Scegli gli obiettivi"
+      body: "Seleziona a quali dispositivi e zone applicare l'effetto."
+  page_cooling:
+    overview:
+      title: "Panoramica raffreddamento"
+      body: "Tutti i dispositivi di raffreddamento sono elencati qui con i loro preset e letture sensori. Per modificare una curva ventola o pompa, vai alla scheda Raffreddamento del dispositivo."
+  page_canvas:
+    create_instance:
+      title: "Crea un'istanza di effetto"
+      body: "Aggiungi un'istanza qui, quindi espandila e fai clic su un chip zona per assegnarlo."
+    arrange_remove:
+      title: "Arrangia e rimuovi"
+      body: "Trascina una zona per riposizionarla; selezionane una e premi Elimina per rimuoverla."
+  page_settings:
+    application:
+      title: "Preferenze applicazione"
+      body: "Chiudi nella barra delle applicazioni, controlli all'avvio e altre preferenze a livello di app si trovano qui."
+    engines:
+      title: "Motori"
+      body: "Attiva o disattiva i motori curve ventola, tela e LCD e sintonizza le loro frequenze."
+  page_profile:
+    settings:
+      title: "Impostazioni profilo"
+      body: "Rinomina il profilo, impostalo come attivo e configura le regole di auto-attivazione di seguito."
+    auto_activate:
+      title: "Auto-attivazione con app"
+      body: "Aggiungi processi in modo che questo profilo diventi automaticamente attivo quando un'app corrispondente è in primo piano."
+    overrides:
+      title: "Override per dispositivo"
+      body: "Qualsiasi impostazione del dispositivo che modifichi mentre questo profilo è attivo viene salvata come override qui. Ripristina singoli override o torna più tardi mentre ottimizzi i dispositivi."
+  page_device:
+    back:
+      title: "Torna a tutti i dispositivi"
+      body: "Torna all'elenco dei dispositivi da qui."
+    rename:
+      title: "Rinomina questo dispositivo"
+      body: "Fai clic sulla matita accanto al nome per rinominare questo dispositivo."
+    tabs:
+      title: "Schede capacità"
+      body: "Ogni scheda espone una capacità che questo dispositivo supporta."
+  tab_devices:
+    connected:
+      title: "Dispositivi collegati"
+      body: "I dispositivi figlio collegati tramite questo hub o ricevitore appaiono qui."
+  tab_lighting:
+    choose_effect:
+      title: "Scegli un effetto"
+      body: "Scegli tra Statico, Dipingi o effetti nativi e del motore. Ognuno applica un comportamento di illuminazione diverso."
+    paint:
+      title: "Dipingi i LED manualmente"
+      body: "La modalità di pittura ti consente di fare clic o trascinare singoli LED per impostare un colore personalizzato per LED."
+    place_canvas:
+      title: "Posiziona sulla tela"
+      body: "Invia questo dispositivo alla Tela Effetti, dove puoi comporre effetti stratificati su più dispositivi."
+    transform:
+      title: "Trasforma il layout della zona"
+      body: "Capovolgi, scambia, inverti o ruota il layout della zona in modo che gli effetti fluiscano nel modo giusto sul tuo dispositivo fisico."
+  tab_chains:
+    led_chains:
+      title: "Catene LED"
+      body: "Questo dispositivo ha intestazioni LED indirizzabili. Ogni intestazione può guidare una catena di strisce, anelli o griglie. Definiscile qui in modo che il daemon sappia cosa è collegato."
+    discover:
+      title: "Scopri i collegamenti"
+      body: "Fai clic su Rileva per scansionare l'intestazione per i dispositivi ARGB già collegati. I collegamenti rilevati sono bloccati."
+    add_link:
+      title: "Aggiungi un collegamento manualmente"
+      body: "Usa Aggiungi collegamento per definire una nuova striscia o anello: scegli un nome, topologia e conteggio LED, quindi collegalo."
+  tab_cooling:
+    pick_sensor:
+      title: "Scegli un sensore"
+      body: "Scegli quale sensore di temperatura guida questa curva ventola o pompa. La lettura dal vivo è mostrata di seguito."
+    apply_preset:
+      title: "Applica un preset"
+      body: "Carica una forma di curva predefinita dal selettore preset per iniziare rapidamente."
+    edit_curve:
+      title: "Modifica la curva"
+      body: "Trascina i punti per modellare la risposta temperatura-servizio. Fai clic su uno spazio vuoto per aggiungere un punto; fai clic destro su un punto per rimuoverlo."
+  tab_lcd:
+    choose_mode:
+      title: "Scegli una modalità"
+      body: "La modalità immagine visualizza un'immagine statica o GIF; la modalità video trasmette un file multimediale (richiede ffmpeg); la modalità editor ti consente di costruire un modello personalizzato con widget trascinabili."
+    preview:
+      title: "Anteprima e impostazioni"
+      body: "L'anteprima in tempo reale mostra cosa il dispositivo visualizza. Usa i controlli sotto per regolare luminosità, rotazione e altre impostazioni di visualizzazione."
+  tab_equalizer:
+    equalizer:
+      title: "Equalizzatore"
+      body: "Scegli un preset o trascina le bande per modellare l'uscita audio."
+  tab_keys:
+    select_action:
+      title: "Seleziona un'azione"
+      body: "Scegli una categoria (pressione tasto, tasto media, macro o pulsante mouse), quindi configura i suoi parametri di seguito."
+    record_macro:
+      title: "Registra una macro"
+      body: "Le macro riproducono una sequenza di pressioni di tasti e ritardi. Registra, riordina e modifica i passaggi qui."
+    layer_shift:
+      title: "Cambio strato"
+      body: "Imposta un'azione diversa che si attiva mentre il tasto di cambio strato è tenuto premuto. Il cambio strato può essere assegnato solo sullo strato base."
+  tab_performance:
+    dpi_stages:
+      title: "Stadi DPI"
+      body: "Imposta gli stadi DPI attraverso cui questo dispositivo cicla."
+  tab_controls:
+    device_controls:
+      title: "Controlli dispositivo"
+      body: "Gli interruttori e le impostazioni specifiche del fornitore per questo dispositivo si trovano qui."
+  tab_onboard:
+    onboard_profiles:
+      title: "Profili onboard"
+      body: "Cambia o sovrascrivi gli slot di profilo archiviati nel dispositivo stesso."
+  tab_pairing:
+    pairing:
+      title: "Accoppiamento"
+      body: "Accoppia un nuovo dispositivo wireless a questo ricevitore da qui."
+  lcd_editor:
+    palette:
+      title: "Tavolozza widget"
+      body: "Trascina un widget da qui sullo schermo per aggiungerlo al tuo modello."
+    arrange:
+      title: "Arrangia il tuo modello"
+      body: "Trascina i widget posizionati per posizionarli e selezionane uno per modificare le sue impostazioni."
+    variant:
+      title: "Varianti e parametri"
+      body: "Ogni widget offre varianti. Ad esempio un misuratore può mostrare un valore sensore o livello audio. Inoltre: dimensione, colore e altri parametri."
+  page_effect_designer:
+    save:
+      title: "Salva il tuo effetto"
+      body: "Dagli un nome e fai clic su Salva per aggiungerlo alla tua libreria. Gli effetti salvati appaiono nei selettori di effetto RGB Lighting e Canvas."
+    preview:
+      title: "Anteprima in tempo reale"
+      body: "Vedi come appare il tuo effetto su diversi layout: striscia, anello, matrice e hub ventola. I cambiamenti vengono aggiornati in tempo reale."
+    tune:
+      title: "Sintonizza i parametri"
+      body: "Scegli un generatore, regola colori e velocità, quindi modella la curva di luminosità. Ogni controllo si alimenta nella formula procedurale mostrata sopra il grafico."

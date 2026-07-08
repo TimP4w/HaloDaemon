@@ -1,0 +1,81 @@
+settings:
+  title: Settings
+  subtitle: Engine, startup and integrations
+  section_application: APPLICATION
+  section_engines: ENGINES
+  section_devices: DEVICES
+  section_logging: LOGGING
+  section_advanced: ADVANCED
+  section_debug: DEBUG
+  section_about: ABOUT
+  section_healthcheck: HEALTHCHECK
+  start_on_boot_title: Start on boot
+  start_on_boot_sub: Launch HaloDaemon in the tray when you sign in
+  start_on_boot_managed_sub: Managed by your system configuration - change it there
+  start_on_boot_managed_value: Controlled by system
+  close_to_tray_title: Close to tray
+  close_to_tray_sub: Hide the window instead of quitting when the close button is pressed
+  window_controls_title: Window controls
+  window_controls_sub: Draw minimize / maximize / close in the title bar - turn off for tiling window managers
+  startup_healthcheck_title: Startup healthcheck
+  startup_healthcheck_sub: Warn on launch when a check fails
+  replay_tutorials_title: Replay tutorials
+  replay_tutorials_sub: Show the onboarding tour again next time you visit each page
+  replay_button: Replay
+  lcd_engine_sub: Frame rate for dynamic content driven to LCD screens by the LCD engine
+  daemon_title: Daemon
+  daemon_sub: Connection to the HaloDaemon daemon
+  daemon_connected: "● Connected"
+  daemon_disconnected: "○ Disconnected"
+  rediscover_title: Rediscover Devices
+  rediscover_sub: Scan USB, HID, hwmon, SMBus for new devices
+  scan_now_button: Scan now
+  scanning_button: Scanning…
+  recheck_button: Re-check
+  running_healthcheck_title: Running healthcheck…
+  running_healthcheck_sub: Waiting for the daemon to report its status
+  no_checks_title: No checks reported
+  no_checks_sub: The daemon returned an empty healthcheck list
+  dep_detected: "● Detected"
+  dep_missing: "● Missing"
+  dep_not_found: "○ Not found"
+  dep_required: Required
+  dep_optional: Optional
+  log_level_sub: Daemon log verbosity
+  live_log_title: Live Log
+  log_entries: "%{n} entries"
+  config_folder_title: Config Folder
+  unknown: Unknown
+  open_external_button: "Open ↗"
+  diagnostics_title: System & device diagnostics
+  diagnostics_sub: Show every attached HID device, what was matched, elevation state
+  open_button: Open…
+  app_tagline: Peripheral controller daemon
+  credits_button: Credits…
+  third_party_title: Third-Party Licenses
+  third_party_sub: Open source components used by HaloDaemon
+  view_button: View…
+  repository_title: Repository
+  licenses_modal_body: Open-source components bundled with or referenced by HaloDaemon, grouped by license.
+  credits_title: Credits
+  credits_developer: "Developer:"
+  credits_license: "License:"
+  acknowledgments: Acknowledgments
+  diagnostics_modal_title: System & Device Diagnostics
+  diagnostics_no_data: "No debug data available yet.\n\nSend GetDebugInfo from the daemon first, then open this dialog."
+  copy_json_button: Copy JSON
+  export_button: Export…
+  copied_feedback: Copied!
+  diag_system: System
+  diag_elevated: Elevated
+  yes: "yes"
+  no: "no"
+  present: present
+  absent: absent
+  diag_version: Version
+  diag_build: Build
+  diag_devices: "Devices (%{n})"
+  diag_connected: connected
+  diag_offline: offline
+  diag_hid: "HID Interfaces (%{n})"
+  diag_smbus: "SMBus Buses (%{n})"

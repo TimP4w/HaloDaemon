@@ -1,0 +1,97 @@
+name: CI
+
+# Build + test the daemon and UI on every push and PR so regressions are
+# caught before a release tag is pushed. No installer is built here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # rustfmt parses but does not compile, so it needs no system deps or build —
+  # keep it as a fast standalone job that gates the rest by failing early.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format check
+        working-directory: src
+        run: cargo fmt --check
+
+  # REUSE/SPDX compliance: every file has a declared license and every license
+  # text in LICENSES/ is actually used. Standalone and fast (no build), like fmt.
+  # See docs/licenses.md for how licensing is tracked across the repo.
+  reuse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: REUSE lint
+        uses: fsfe/reuse-action@v5
+
+  # Windows covers the daemon (-p halod) only, not the GUI. The egui GUI has no
+  # platform-specific logic and is already covered by the Linux job. Windows CI
+  # exists to guard the daemon's platform glue (HID/SMBus/LpcIO, named-pipe IPC),
+  # so a minimal toolchain suffices.
+  win-build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Minimal UCRT64 toolchain: GNU Rust plus gcc/pkgconf for hidapi/rusb.
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-rust
+
+      - name: Test daemon
+        shell: msys2 {0}
+        run: |
+          cd src
+          cargo test -p halod
+
+      - name: Clippy
+        shell: msys2 {0}
+        run: |
+          cd src
+          cargo clippy -p halod --all-targets -- -D warnings
+
+  linux-build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libhidapi-dev libusb-1.0-0-dev libpipewire-0.3-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libdbus-1-dev \
+            clang libclang-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install cargo-about
+        run: cargo install --locked --features cli cargo-about
+
+      - name: Build all
+        working-directory: src
+        run: cargo build --workspace
+
+      - name: Test all
+        working-directory: src
+        run: cargo test --workspace
+
+      - name: Clippy
+        working-directory: src
+        run: cargo clippy --workspace --all-targets -- -D warnings

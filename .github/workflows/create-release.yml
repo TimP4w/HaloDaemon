@@ -1,0 +1,491 @@
+name: Create Release
+
+# Triggered manually to cut a new release in the correct order:
+#   1. test        — test on both Linux and Windows, then build release
+#   2. commit      — bump the workspace version in Cargo.toml / Cargo.lock
+#   3. tag         — create a vX.Y.Z tag on that commit
+#   4. package     — produce the Windows installer + Linux tarball
+#   5. publish     — create the GitHub release with both artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: "Type of version bump"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Calculate version ────────────────────────────────────────────
+  # Lightweight — reads Cargo.toml, computes the new version string.
+  # Runs first so both test jobs can start immediately.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.calc.outputs.new }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Calculate new version
+        id: calc
+        run: |
+          CURRENT=$(grep -oP '^version = "\K[^"]+' src/Cargo.toml | head -1)
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "${{ inputs.version_type }}" in
+            major)
+              MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor)
+              MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch)
+              PATCH=$((PATCH + 1)) ;;
+          esac
+          NEW="${MAJOR}.${MINOR}.${PATCH}"
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+          echo "Current: $CURRENT → New: $NEW"
+
+  # ── Test (Linux) ─────────────────────────────────────────────────
+  # Run the full test suite + clippy first (fail fast), then build the
+  # release binaries and cache them for the tarball packaging step.
+  test-linux:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libhidapi-dev libusb-1.0-0-dev libpipewire-0.3-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libdbus-1-dev \
+            clang libclang-dev pkg-config
+
+      - name: Install cargo-about
+        run: cargo install --locked --features cli cargo-about
+
+      - name: Bump version locally before build
+        run: |
+          v="${{ needs.version.outputs.new_version }}"
+          python3 - "$v" <<'PY'
+          import pathlib, re, sys
+          version = sys.argv[1]
+          toml = pathlib.Path("src/Cargo.toml")
+          text, n = re.subn(
+              r'(\[workspace\.package\]\nversion = ")[^"]*(")',
+              lambda m: f'{m.group(1)}{version}{m.group(2)}',
+              toml.read_text(),
+              count=1,
+          )
+          if n == 0:
+              sys.exit("Failed to patch workspace version in src/Cargo.toml")
+          toml.write_text(text)
+          print(f"Bumped src/Cargo.toml to {version}")
+          PY
+
+      - name: Test + clippy
+        working-directory: src
+        run: |
+          cargo test --workspace
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build release binaries
+        working-directory: src
+        env:
+          HALOD_REQUIRE_LICENSES: "1"
+        run: cargo build --release -p halod -p halod-gui
+
+      - name: Upload release binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release-bin
+          path: |
+            src/target/release/halod
+            src/target/release/halod-gui
+
+  # ── Test (Windows) ───────────────────────────────────────────────
+  # Run tests + clippy first (fail fast), then build the release
+  # binaries (daemon + egui UI) and cache them for the installer step.
+  test-windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-rust
+            mingw-w64-ucrt-x86_64-cargo-about
+            mingw-w64-ucrt-x86_64-python
+
+      - name: Bump version locally before build
+        shell: msys2 {0}
+        run: |
+          v="${{ needs.version.outputs.new_version }}"
+          python3 - "$v" <<'PY'
+          import pathlib, re, sys
+          version = sys.argv[1]
+          toml = pathlib.Path("src/Cargo.toml")
+          text, n = re.subn(
+              r'(\[workspace\.package\]\nversion = ")[^"]*(")',
+              lambda m: f'{m.group(1)}{version}{m.group(2)}',
+              toml.read_text(),
+              count=1,
+          )
+          if n == 0:
+              sys.exit("Failed to patch workspace version in src/Cargo.toml")
+          toml.write_text(text)
+          print(f"Bumped src/Cargo.toml to {version}")
+          PY
+
+      - name: Test + clippy
+        shell: msys2 {0}
+        run: |
+          cd src
+          cargo test -p halod
+          cargo clippy -p halod --all-targets -- -D warnings
+
+      - name: Build release binaries
+        shell: msys2 {0}
+        env:
+          HALOD_REQUIRE_LICENSES: "1"
+        run: |
+          cd src
+          cargo build --release -p halod -p halod-gui
+
+      - name: Upload release binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-bin
+          path: |
+            src/target/release/halod.exe
+            src/target/release/halod-gui.exe
+
+  # ── Prepare ──────────────────────────────────────────────────────
+  # Version bump commit + tag. Only runs after both test jobs pass.
+  prepare:
+    needs: [version, test-linux, test-windows]
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ needs.version.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Bump version in Cargo.toml and Cargo.lock
+        run: |
+          v="${{ needs.version.outputs.new_version }}"
+          python3 - "$v" <<'PY'
+          import pathlib, re, sys
+          version = sys.argv[1]
+
+          toml = pathlib.Path("src/Cargo.toml")
+          text, n = re.subn(
+              r'(\[workspace\.package\]\nversion = ")[^"]*(")',
+              lambda m: f'{m.group(1)}{version}{m.group(2)}',
+              toml.read_text(),
+              count=1,
+          )
+          if n == 0:
+              sys.exit("Failed to patch workspace version in src/Cargo.toml")
+          toml.write_text(text)
+
+          lock = pathlib.Path("src/Cargo.lock")
+          locktext, n = re.subn(
+              r'(name = "halod[^"]*"\nversion = ")[^"]*(")',
+              lambda m: f'{m.group(1)}{version}{m.group(2)}',
+              lock.read_text(),
+          )
+          lock.write_text(locktext)
+
+          # The Arch PKGBUILD builds the git tag this workflow is about to
+          # create, so its pkgver must track the release version.
+          pkgbuild = pathlib.Path("packaging/arch/PKGBUILD")
+          pbtext, n = re.subn(
+              r'(?m)^(pkgver=).*$',
+              lambda m: f'{m.group(1)}{version}',
+              pkgbuild.read_text(),
+              count=1,
+          )
+          if n == 0:
+              sys.exit("Failed to patch pkgver in packaging/arch/PKGBUILD")
+          pkgbuild.write_text(pbtext)
+          PY
+
+      - name: Commit version bump
+        run: |
+          v="${{ needs.version.outputs.new_version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/Cargo.toml src/Cargo.lock packaging/arch/PKGBUILD
+          git commit -m "chore: bump version to v${v}"
+          git push origin HEAD:main
+
+      - name: Tag release
+        run: |
+          v="${{ needs.version.outputs.new_version }}"
+          git tag "v${v}"
+          git push origin "v${v}"
+
+  # ── Windows installer ────────────────────────────────────────────
+  # Takes the already-built Windows binaries from the test phase and
+  # packages them into an Inno Setup installer. No Rust rebuild.
+  windows-installer:
+    needs: [test-windows, prepare]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-release-bin
+          path: src/target/release
+
+      - name: Set up MSYS2 (UCRT64) for ffmpeg
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-ntldd
+
+      - name: Resolve UCRT64 path
+        shell: msys2 {0}
+        run: echo "UCRT64=$(cygpath -w /ucrt64)" >> "$GITHUB_ENV"
+
+      - name: Stage release files
+        shell: pwsh
+        run: ./packaging/windows/stage-release.ps1 -Ucrt64 "$env:UCRT64"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            /DAppVersion=${{ needs.prepare.outputs.new_version }} `
+            packaging\windows\halod.iss
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: halod-setup-x64
+          path: packaging/windows/Output/halod-setup-x64.exe
+
+  # ── Linux tarball ────────────────────────────────────────────────
+  # Takes the already-built Linux binaries from the test phase and
+  # packages them into a tarball. No Rust rebuild.
+  linux-tarball:
+    needs: [test-linux, prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-release-bin
+          path: src/target/release
+
+      - name: Stage tarball
+        run: |
+          d=halod-linux-x64
+          mkdir -p "$d/udev"
+          cp src/target/release/halod "$d/"
+          cp src/target/release/halod-gui "$d/"
+          cp udev/60-halod.rules "$d/udev/"
+          cat > "$d/INSTALL.txt" <<'EOF'
+          HaloDaemon - Linux binaries
+
+          ===========================================================
+          DISCLAIMER - USE AT YOUR OWN RISK
+          ===========================================================
+          This software communicates directly with low-level hardware
+          interfaces (HID, SMBus/I2C, SuperIO port I/O, etc.). Sending
+          incorrect data to peripherals or your motherboard can cause
+          malfunction, data loss, or IRREPARABLE DAMAGE TO YOUR
+          PERIPHERALS OR PC. It is provided "as is", without warranty
+          of any kind. You assume all responsibility for any damage
+          that results from its use.
+          ===========================================================
+
+          1. Install the runtime libraries (see the project README's
+             "Production Installation" section for your distro):
+               hidapi libusb pipewire libudev wayland
+               mesa (or your distro's OpenGL/EGL provider)
+          2. Install the udev rules:
+               sudo cp udev/60-halod.rules /etc/udev/rules.d/
+               sudo udevadm control --reload-rules && sudo udevadm trigger
+          3. Add your user to the i2c group for SMBus/DRAM RGB:
+               sudo usermod -aG i2c $USER   (then re-login)
+          4. Run ./halod, then ./halod-gui.
+
+          On NixOS, use the flake instead — see the project README.
+          EOF
+          tar czf halod-linux-x64.tar.gz "$d"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: halod-linux-x64
+          path: halod-linux-x64.tar.gz
+
+  # ── Ubuntu / Debian .deb ─────────────────────────────────────────
+  # Packages the already-built Linux binaries into a .deb via cargo-deb.
+  # No Rust rebuild. Runtime library deps are auto-detected (dpkg-shlibdeps);
+  # the GUI's dlopened libs are declared in [package.metadata.deb] in
+  # src/daemon/Cargo.toml.
+  linux-deb:
+    needs: [test-linux, prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Download Linux release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-release-bin
+          path: src/target/release
+
+      # upload/download-artifact does not preserve the executable bit.
+      - name: Restore executable bit
+        run: chmod +x src/target/release/halod src/target/release/halod-gui
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb
+        run: cargo deb --no-build --no-strip --manifest-path src/daemon/Cargo.toml
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: halod-deb
+          path: src/target/debian/*.deb
+
+  # ── Fedora .rpm ──────────────────────────────────────────────────
+  # Packages the already-built Linux binaries into a .rpm via
+  # cargo-generate-rpm. No Rust rebuild. `rpm` is installed so auto-req can
+  # run find-requires; the resulting soname Requires are distro-portable, so
+  # an Ubuntu-built binary resolves on Fedora. The GUI's dlopened libs are
+  # declared explicitly in [package.metadata.generate-rpm] in src/daemon/Cargo.toml.
+  linux-rpm:
+    needs: [test-linux, prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Download Linux release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-release-bin
+          path: src/target/release
+
+      - name: Restore executable bit
+        run: chmod +x src/target/release/halod src/target/release/halod-gui
+
+      - name: Install rpm tooling and cargo-generate-rpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rpm
+          cargo install cargo-generate-rpm --locked
+
+      - name: Build .rpm
+        working-directory: src
+        run: cargo generate-rpm -p daemon
+
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: halod-rpm
+          path: src/target/generate-rpm/*.rpm
+
+  # ── Publish ──────────────────────────────────────────────────────
+  # Creates the GitHub release with all platform artifacts attached.
+  publish:
+    needs: [prepare, windows-installer, linux-tarball, linux-deb, linux-rpm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Compute SHA-256 and build release notes
+        run: |
+          v="${{ needs.prepare.outputs.new_version }}"
+          DEB=$(ls artifacts/halod-deb/*.deb)
+          RPM=$(ls artifacts/halod-rpm/*.rpm)
+          W32_HASH=$(sha256sum artifacts/halod-setup-x64/halod-setup-x64.exe | cut -d' ' -f1)
+          LINUX_HASH=$(sha256sum artifacts/halod-linux-x64/halod-linux-x64.tar.gz | cut -d' ' -f1)
+          DEB_HASH=$(sha256sum "$DEB" | cut -d' ' -f1)
+          RPM_HASH=$(sha256sum "$RPM" | cut -d' ' -f1)
+          cat > release-notes.md <<EOF
+          ## HaloDaemon v${v}
+
+          > [!WARNING]
+          > **Disclaimer - use at your own risk.** This software communicates directly with
+          > low-level hardware interfaces (HID, SMBus/I2C, SuperIO port I/O, etc.). Sending
+          > incorrect data to peripherals or your motherboard can cause malfunction, data
+          > loss, or **irreparable damage to your peripherals or PC**. It is provided "as is",
+          > without warranty of any kind. You assume all responsibility for any damage that
+          > results from its use.
+
+          ### Checksums (SHA-256)
+
+          | Artifact | Hash |
+          |---|---|
+          | \`halod-setup-x64.exe\` | \`${W32_HASH}\` |
+          | \`halod-linux-x64.tar.gz\` | \`${LINUX_HASH}\` |
+          | \`$(basename "$DEB")\` | \`${DEB_HASH}\` |
+          | \`$(basename "$RPM")\` | \`${RPM_HASH}\` |
+          EOF
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.prepare.outputs.new_version }}
+          name: HaloDaemon ${{ needs.prepare.outputs.new_version }}
+          body_path: release-notes.md
+          files: |
+            artifacts/halod-setup-x64/halod-setup-x64.exe
+            artifacts/halod-linux-x64/halod-linux-x64.tar.gz
+            artifacts/halod-deb/*.deb
+            artifacts/halod-rpm/*.rpm

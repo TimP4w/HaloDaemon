@@ -1,0 +1,37 @@
+settings:
+  log_level: Livello di Log
+  language: Lingua
+
+notify:
+  error_title: Errore
+  unknown_error: Errore sconosciuto
+  engine_stopped:
+    title: Motore fermato
+    message: "%{detail}"
+  key_remap_unavailable:
+    title: Rimappatura tasti non disponibile
+    message: "Impossibile inizializzare l'esecutore azioni: %{detail}"
+  wireless_reinit_failed:
+    title: Il dispositivo non è tornato wireless
+    message: "%{device} non è tornato online dopo 6 tentativi di re-init wireless."
+  device_reconnect_failed:
+    title: Il dispositivo non si è riconnesso
+    message: "%{device} non è diventato pronto dopo 6 tentativi di riconnessione."
+  profile_switched:
+    title: Profilo cambiato
+    message: "Ora usi '%{profile}'"
+  chain_link_restore_failed:
+    title: "Impossibile ripristinare il collegamento catena \"%{name}\""
+    message: "%{detail}, rimosso dal layout salvato."
+  device_init_failed:
+    title: "Impossibile inizializzare %{device}"
+    message: "%{detail}"
+  fan_stalled:
+    title: "Ventola bloccata — %{fan}"
+    message: "La ventola non gira (0 RPM) mentre è applicato il ciclo di servizio. Controlla i cavi della ventola o sostituiscila."
+
+tray:
+  open: Apri HaloDaemon
+  quit: Esci
+  tooltip: HaloDaemon
+  profile: Profilo

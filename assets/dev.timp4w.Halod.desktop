@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=HaloDaemon
+Comment=Peripheral control — fan curves, RGB, LCD, audio and more
+Exec=halod-gui
+Icon=halod
+StartupNotify=true
+Terminal=false
+Type=Application
+Categories=Utility;Settings;HardwareSettings;
+Keywords=peripheral;mouse;keyboard;fan;rgb;lighting;
+X-GNOME-UsesNotifications=true

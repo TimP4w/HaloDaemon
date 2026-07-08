@@ -1,0 +1,41 @@
+device_type:
+  aio: Raffreddatore CPU
+  fan: Ventola
+  hub: Controller
+  dongle: Ricevitore
+  keyboard: Tastiera
+  mouse: Mouse
+  headset: Cuffie
+  monitor: Monitor
+  gpu: GPU
+  led_strip: Striscia LED
+  motherboard: Scheda madre
+  ram: RAM
+  sensor: Sensore
+  speaker: Altoparlante
+  other: Dispositivo
+
+device_code:
+  aio: AIO
+  fan: FAN
+  hub: HUB
+  dongle: DGL
+  keyboard: KB
+  mouse: MS
+  headset: HS
+  monitor: MON
+  gpu: GPU
+  led_strip: LED
+  motherboard: MB
+  ram: RAM
+  sensor: SEN
+  speaker: SPK
+  other: DEV
+
+model:
+  metric_speed: Velocità
+  metric_pump: Pompa
+  metric_temp: Temp
+  metric_link: Link
+  wired: Cablato
+  wireless: Wireless

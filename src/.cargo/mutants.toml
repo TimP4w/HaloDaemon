@@ -1,0 +1,28 @@
+# cargo-mutants configuration.
+#
+# Run from `src/`:  cargo mutants                 # whole workspace
+#                   cargo mutants -p halod-shared
+#                   cargo mutants --file daemon/src/cooling/fan_curve.rs
+#
+# Mutation testing mutates the source (flips `&&`/`||`, `==`/`!=`, replaces
+# return values with defaults, …) and reruns the tests. A *surviving* mutant is
+# a code change no test caught — i.e. a gap in coverage.
+
+# Exclude only the genuine I/O boundaries — code with no injectable seam, that
+# can only run against real hardware or a live OS. Device and protocol logic is
+# NOT here: it talks to a transport *trait* (SmBusOps, Transport, …) that tests
+# fake to assert the exact bytes (see MockSmBusOps / MockOps / MockTransport), so
+# it is testable and belongs in scope. Likewise GUI logic lives in free functions
+# that are unit-tested; only the thin egui paint shell is an untestable boundary.
+exclude_globs = [
+    "daemon/src/drivers/transports/**",
+    "daemon/src/main.rs",
+    "daemon/src/ipc/**",
+    "daemon/src/lighting/rgb_engine/canvas/screen_capture/**",
+]
+
+# The daemon test suite includes async/tokio tests; give each mutant run a
+# generous multiple of the baseline test time before declaring a timeout (a
+# timeout counts as caught, but a too-tight limit causes flaky results).
+timeout_multiplier = 5.0
+minimum_test_timeout = 60

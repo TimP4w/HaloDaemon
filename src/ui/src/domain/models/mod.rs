@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Pure derivations from the daemon's `AppState`/`WireDevice` — no egui, no
+//! channels, no mutation. Screens call these to turn wire types into display
+//! values.
+
+pub mod device;
+pub mod device_tabs;
+pub mod notifications;
+pub mod sensors;

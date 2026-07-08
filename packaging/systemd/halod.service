@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Optional systemd *user* service for the HaloDaemon device daemon.
+#
+# The daemon is per-user: its IPC socket lives in $XDG_RUNTIME_DIR, and the GUI
+# already spawns `halod` on demand. This unit is shipped DISABLED — enable it
+# only if you want the daemon running for your graphical session without the GUI:
+#
+#   systemctl --user enable --now halod.service
+[Unit]
+Description=HaloDaemon device daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/halod
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

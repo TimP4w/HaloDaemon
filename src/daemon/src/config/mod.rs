@@ -1,0 +1,494 @@
+use anyhow::Result;
+use halod_shared::types::{AppRule, VisibilityState, DEFAULT_PROFILE_NAME};
+// Types shared with wire protocol; re-exported for backward-compat.
+pub use halod_shared::types::{CanvasState, GlobalConfig, PlacedZone};
+use halod_shared::zone_transform::ZoneContentTransform;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use crate::profiles::config::Profile;
+use crate::registry::config::{DeviceLayout, DeviceRecord};
+
+// ── On-disk layout ───────────────────────────────────────────────────────────
+//
+// The single in-memory `Config` is split across several files by concern, each
+// independently atomic (tmp+rename) and independently defaultable:
+//   config.yaml          - active_profile + GlobalConfig
+//   devices.yaml          - known_devices, device_layouts, device_transforms, sensor_visibility
+//   app_rules.yaml        - app_rules
+//   profiles/<slug>.yaml  - one Profile per file, named for a human to read
+
+pub fn load() -> Result<Config> {
+    let main: MainFile = load_file(&main_config_path(), "config.yaml")?;
+    let devices: DevicesFile = load_file(&devices_config_path(), "devices.yaml")?;
+    let app_rules: AppRulesFile = load_file(&app_rules_config_path(), "app_rules.yaml")?;
+    let mut profiles = load_profiles()?;
+    if profiles.is_empty() {
+        profiles.insert(DEFAULT_PROFILE_NAME.to_string(), Profile::default());
+    }
+
+    let mut global = main.global;
+    global.fan_failsafe_duty = global.fan_failsafe_duty.min(100);
+
+    Ok(Config {
+        active_profile: main.active_profile,
+        profiles,
+        known_devices: devices.known_devices,
+        global,
+        device_layouts: devices.device_layouts,
+        sensor_visibility: devices.sensor_visibility,
+        device_transforms: devices.device_transforms,
+        app_rules: app_rules.app_rules,
+    })
+}
+
+pub fn save(cfg: &Config) -> Result<()> {
+    atomic_write(
+        &main_config_path(),
+        &serde_yaml::to_string(&MainFile {
+            active_profile: cfg.active_profile.clone(),
+            global: cfg.global.clone(),
+        })?,
+    )?;
+    atomic_write(
+        &devices_config_path(),
+        &serde_yaml::to_string(&DevicesFile {
+            known_devices: cfg.known_devices.clone(),
+            device_layouts: cfg.device_layouts.clone(),
+            sensor_visibility: cfg.sensor_visibility.clone(),
+            device_transforms: cfg.device_transforms.clone(),
+        })?,
+    )?;
+    atomic_write(
+        &app_rules_config_path(),
+        &serde_yaml::to_string(&AppRulesFile {
+            app_rules: cfg.app_rules.clone(),
+        })?,
+    )?;
+    save_profiles(&cfg.profiles)?;
+    Ok(())
+}
+
+fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("yaml.tmp");
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
+}
+
+fn load_file<T: Default + DeserializeOwned>(path: &Path, label: &str) -> Result<T> {
+    if !path.exists() {
+        return Ok(T::default());
+    }
+    let raw = std::fs::read_to_string(path)?;
+    // Guard against crafted files: config is trusted (daemon-written) but a
+    // 1 MiB ceiling catches accidental corruption and local tampering.
+    if raw.len() > 1024 * 1024 {
+        anyhow::bail!(
+            "{label} at {} is too large ({} bytes)",
+            path.display(),
+            raw.len()
+        );
+    }
+    serde_yaml::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {label} at {}: {e}", path.display()))
+}
+
+fn load_profiles() -> Result<HashMap<String, Profile>> {
+    let dir = profiles_dir();
+    let mut out = HashMap::new();
+    if !dir.exists() {
+        return Ok(out);
+    }
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("yaml"))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let raw = std::fs::read_to_string(&path)?;
+        let file: ProfileFile = serde_yaml::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("Failed to parse profile at {}: {e}", path.display()))?;
+        out.insert(file.name, file.profile);
+    }
+    Ok(out)
+}
+
+/// Write every profile to its expected filename, then delete any other
+/// `*.yaml` left in `profiles/` so a rename/remove doesn't orphan a stale file.
+fn save_profiles(profiles: &HashMap<String, Profile>) -> Result<()> {
+    let dir = profiles_dir();
+    std::fs::create_dir_all(&dir)?;
+
+    let mut expected: HashSet<String> = HashSet::new();
+    for (name, profile) in profiles {
+        let filename = profile_filename(name);
+        let yaml = serde_yaml::to_string(&ProfileFile {
+            name: name.clone(),
+            profile: profile.clone(),
+        })?;
+        atomic_write(&dir.join(&filename), &yaml)?;
+        expected.insert(filename);
+    }
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let filename = entry.file_name().to_string_lossy().into_owned();
+            if !expected.contains(&filename) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Derive a filesystem-safe filename (with `.yaml` extension) for a profile
+/// name. Names that are already a safe slug map to themselves; any lossy
+/// transformation (disallowed chars, leading dot, overlong) gets an FNV-1a
+/// hash of the full name appended so distinct names can't collide.
+fn profile_filename(name: &str) -> String {
+    let mut slug: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    while slug.starts_with('.') {
+        slug.remove(0);
+    }
+    slug.truncate(64);
+    if slug.is_empty() {
+        slug = "profile".to_string();
+    }
+    if slug == name {
+        format!("{slug}.yaml")
+    } else {
+        format!("{slug}-{:016x}.yaml", fnv1a64(name))
+    }
+}
+
+fn fnv1a64(s: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = fnv::FnvHasher::default();
+    h.write(s.as_bytes());
+    h.finish()
+}
+
+pub fn config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("HALOD_CONFIG_DIR") {
+        return PathBuf::from(dir);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(appdata).join(halod_shared::app::APP_NAME)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home)
+            .join(".config")
+            .join(halod_shared::app::APP_NAME)
+    }
+}
+
+fn main_config_path() -> PathBuf {
+    config_dir().join("config.yaml")
+}
+
+fn devices_config_path() -> PathBuf {
+    config_dir().join("devices.yaml")
+}
+
+fn app_rules_config_path() -> PathBuf {
+    config_dir().join("app_rules.yaml")
+}
+
+fn profiles_dir() -> PathBuf {
+    config_dir().join("profiles")
+}
+
+/// Directory where uploaded LCD images are stored persistently.
+/// All uploaded images accumulate here; profiles reference them by filename only.
+pub fn lcd_images_dir() -> PathBuf {
+    config_dir().join(halod_shared::types::LCD_IMAGES_SUBDIR)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MainFile {
+    #[serde(default = "default_profile_name")]
+    active_profile: String,
+    #[serde(default)]
+    global: GlobalConfig,
+}
+
+impl Default for MainFile {
+    fn default() -> Self {
+        Self {
+            active_profile: default_profile_name(),
+            global: GlobalConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct DevicesFile {
+    #[serde(default)]
+    known_devices: HashMap<String, DeviceRecord>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    device_layouts: HashMap<String, DeviceLayout>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    sensor_visibility: HashMap<String, VisibilityState>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct AppRulesFile {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    app_rules: Vec<AppRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProfileFile {
+    name: String,
+    #[serde(flatten)]
+    profile: Profile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default = "default_profile_name")]
+    pub active_profile: String,
+    #[serde(default)]
+    pub profiles: HashMap<String, Profile>,
+    #[serde(default)]
+    pub known_devices: HashMap<String, DeviceRecord>,
+    #[serde(default)]
+    pub global: GlobalConfig,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub device_layouts: HashMap<String, DeviceLayout>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sensor_visibility: HashMap<String, VisibilityState>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub app_rules: Vec<AppRule>,
+}
+
+fn default_profile_name() -> String {
+    DEFAULT_PROFILE_NAME.to_string()
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        let mut profiles = HashMap::new();
+        profiles.insert(DEFAULT_PROFILE_NAME.to_string(), Profile::default());
+        Self {
+            active_profile: DEFAULT_PROFILE_NAME.to_string(),
+            profiles,
+            known_devices: HashMap::new(),
+            global: GlobalConfig::default(),
+            device_layouts: HashMap::new(),
+            sensor_visibility: HashMap::new(),
+            device_transforms: HashMap::new(),
+            app_rules: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_config_close_to_tray_defaults_to_true_when_field_absent() {
+        let yaml = "log_level: info";
+        let cfg: GlobalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.close_to_tray);
+    }
+
+    #[test]
+    fn load_handles_missing_valid_and_malformed_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+
+        // Missing files -> defaults.
+        let cfg = load().unwrap();
+        assert_eq!(cfg.active_profile, DEFAULT_PROFILE_NAME);
+        assert!(cfg.profiles.contains_key(DEFAULT_PROFILE_NAME));
+
+        // Valid main file -> parsed values.
+        std::fs::write(dir.path().join("config.yaml"), "active_profile: gaming\n").unwrap();
+        let cfg = load().unwrap();
+        assert_eq!(cfg.active_profile, "gaming");
+
+        // Malformed YAML in a section file -> error naming that file, not silent defaults.
+        std::fs::write(
+            dir.path().join("devices.yaml"),
+            "known_devices: [unterminated\n",
+        )
+        .unwrap();
+        let err = load().unwrap_err();
+        assert!(err.to_string().contains("devices.yaml"));
+
+        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
+    }
+
+    #[test]
+    fn save_then_load_round_trips_every_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+
+        let mut cfg = Config {
+            active_profile: "Gäming Setup".to_string(),
+            ..Config::default()
+        };
+        let mut gaming = Profile::default();
+        gaming
+            .device_states
+            .insert("dev1".into(), serde_json::json!({ "fan_curve": {"a": 1} }));
+        gaming.lighting.canvas = Some(CanvasState {
+            sample_radius: 9.0,
+            ..Default::default()
+        });
+        cfg.profiles.insert("Gäming Setup".to_string(), gaming);
+        cfg.known_devices.insert(
+            "dev1".into(),
+            DeviceRecord {
+                name: "Dev One".into(),
+                vendor: "Acme".into(),
+                model: "X1".into(),
+                active_state: Default::default(),
+            },
+        );
+        cfg.device_layouts.insert(
+            "hub1".into(),
+            DeviceLayout {
+                channels: HashMap::new(),
+            },
+        );
+        cfg.sensor_visibility
+            .insert("sensor1".into(), Default::default());
+        cfg.app_rules.push(AppRule {
+            process_names: vec!["game.exe".into()],
+            profile: "Gäming Setup".into(),
+            enabled: true,
+        });
+        cfg.global.seen_tours.insert("page:home".into());
+
+        save(&cfg).unwrap();
+        let reloaded = load().unwrap();
+
+        assert_eq!(reloaded.active_profile, cfg.active_profile);
+        assert_eq!(reloaded.profiles.len(), cfg.profiles.len());
+        assert_eq!(
+            reloaded.profiles["Gäming Setup"].device_states["dev1"]["fan_curve"]["a"],
+            1
+        );
+        assert_eq!(
+            reloaded.profiles["Gäming Setup"]
+                .lighting
+                .canvas
+                .as_ref()
+                .unwrap()
+                .sample_radius,
+            9.0
+        );
+        assert_eq!(reloaded.known_devices["dev1"].name, "Dev One");
+        assert!(reloaded.device_layouts.contains_key("hub1"));
+        assert!(reloaded.sensor_visibility.contains_key("sensor1"));
+        assert_eq!(reloaded.app_rules.len(), 1);
+        assert!(reloaded.global.seen_tours.contains("page:home"));
+
+        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
+    }
+
+    #[test]
+    fn save_prunes_a_removed_profiles_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+
+        let mut cfg = Config::default();
+        cfg.profiles.insert("Gaming".into(), Profile::default());
+        save(&cfg).unwrap();
+        assert!(dir.path().join("profiles/Gaming.yaml").exists());
+
+        cfg.profiles.remove("Gaming");
+        save(&cfg).unwrap();
+        assert!(!dir.path().join("profiles/Gaming.yaml").exists());
+        assert!(dir
+            .path()
+            .join("profiles")
+            .join(profile_filename(DEFAULT_PROFILE_NAME))
+            .exists());
+
+        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
+    }
+
+    #[test]
+    fn profile_filename_is_readable_for_a_clean_name() {
+        assert_eq!(profile_filename("Gaming"), "Gaming.yaml");
+    }
+
+    #[test]
+    fn profile_filename_sanitizes_unsafe_chars() {
+        let f = profile_filename("../etc/passwd");
+        assert!(!f.contains('/'));
+        assert!(f.ends_with(".yaml"));
+        assert!(!f.starts_with('.'));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn profile_filename_property_all_invariants_hold(name in ".*") {
+            let f = profile_filename(&name);
+            assert!(!f.is_empty());
+            assert!(f.ends_with(".yaml"));
+            assert!(!f.starts_with('.'));
+            assert!(
+                f.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
+                "filename {f} has unsafe characters"
+            );
+            assert!(f.len() <= 64 + 1 + 16 + 5, "filename {f} unexpectedly long");
+        }
+
+        #[test]
+        fn profile_filename_property_distinct_names_produce_distinct_files(
+            a in ".{1,80}", b in ".{1,80}"
+        ) {
+            if a != b {
+                assert_ne!(profile_filename(&a), profile_filename(&b));
+            }
+        }
+    }
+
+    #[test]
+    fn placed_zone_effect_defaults_to_none() {
+        let yaml = "device_id: d\nzone_id: z\nx: 0.0\ny: 0.0\n";
+        let z: PlacedZone = serde_yaml::from_str(yaml).unwrap();
+        assert!(z.effect.is_none());
+    }
+}

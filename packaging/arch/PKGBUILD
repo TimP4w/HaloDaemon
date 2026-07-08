@@ -1,0 +1,52 @@
+# Maintainer: Timucin Besken <beskent@gmail.com>
+pkgname=halod
+pkgver=0.0.1
+pkgrel=1
+pkgdesc="Peripheral control daemon (fan curves, RGB, LCD, audio EQ, DPI)"
+arch=('x86_64')
+url="https://github.com/TimP4w/HaloDaemon"
+license=('GPL-3.0-or-later')
+depends=('hidapi' 'libusb' 'pipewire' 'systemd-libs' 'wayland' 'libxkbcommon'
+         'libglvnd' 'dbus')
+makedepends=('rust' 'cargo' 'clang' 'pkgconf' 'git')
+optdepends=('ffmpeg: LCD video playback'
+            'nvidia-utils: GPU temperature readout via nvidia-smi'
+            'i2c-tools: SMBus/DRAM + GPU RGB (provides the i2c group)')
+install="$pkgname.install"
+source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$srcdir/$pkgname-$pkgver/src"
+    export CARGO_HOME="$srcdir/cargo-home"
+    # Fetch crates (incl. the `q565` git dependency, via git-fetch-with-cli)
+    # while the network is available so build() can run --frozen.
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+    # cargo-about isn't in the Arch repos; build it hermetically so the release
+    # build can generate THIRD_PARTY_LICENSES.txt (HALOD_REQUIRE_LICENSES=1).
+    cargo install --locked --features cli --root "$srcdir/tools" cargo-about
+}
+
+build() {
+    cd "$srcdir/$pkgname-$pkgver/src"
+    export CARGO_HOME="$srcdir/cargo-home"
+    export PATH="$srcdir/tools/bin:$PATH"
+    export HALOD_REQUIRE_LICENSES=1
+    export RUSTUP_TOOLCHAIN=stable
+    cargo build --release --frozen -p halod -p halod-gui
+}
+
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+    install -Dm755 src/target/release/halod     "$pkgdir/usr/bin/halod"
+    install -Dm755 src/target/release/halod-gui "$pkgdir/usr/bin/halod-gui"
+    install -Dm444 udev/60-halod.rules \
+        "$pkgdir/usr/lib/udev/rules.d/60-halod.rules"
+    install -Dm444 assets/dev.timp4w.Halod.desktop \
+        "$pkgdir/usr/share/applications/dev.timp4w.Halod.desktop"
+    install -Dm444 assets/icon.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/halod.svg"
+    install -Dm644 packaging/systemd/halod.service \
+        "$pkgdir/usr/lib/systemd/user/halod.service"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

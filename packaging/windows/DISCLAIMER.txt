@@ -1,0 +1,8 @@
+DISCLAIMER - USE AT YOUR OWN RISK
+
+This software communicates directly with low-level hardware interfaces
+(HID, SMBus/I2C, SuperIO port I/O, etc.). Sending incorrect data to
+peripherals or your motherboard can cause malfunction, data loss, or
+IRREPARABLE DAMAGE TO YOUR PERIPHERALS OR PC. It is provided "as is",
+without warranty of any kind. You assume all responsibility for any
+damage that results from its use.

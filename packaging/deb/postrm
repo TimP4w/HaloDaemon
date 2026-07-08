@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -e
+
+# Reload udev after the rules file is removed. The `halod` group is left in
+# place on purpose — users may still be members of it.
+if command -v udevadm >/dev/null; then
+    udevadm control --reload-rules || true
+fi
+
+#DEBHELPER#
+
+exit 0

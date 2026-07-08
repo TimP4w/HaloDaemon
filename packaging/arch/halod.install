@@ -1,0 +1,27 @@
+post_install() {
+    # hwmon PWM files are chgrp'd to the `halod` group (mode 0664) by the udev
+    # rules, so fan control works without root.
+    getent group halod >/dev/null || groupadd -r halod
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger 2>/dev/null || true
+    cat <<'EOF'
+==> HaloDaemon installed. Notes:
+    * Add yourself to the `halod` group for hwmon PWM fan control:
+        sudo usermod -aG halod $USER
+    * For SMBus/DRAM + GPU RGB, install i2c-tools and join the `i2c` group:
+        sudo usermod -aG i2c $USER
+      (log out and back in for group changes to take effect)
+    * The GUI starts the daemon on demand. To run it as a session service:
+        systemctl --user enable --now halod.service
+EOF
+}
+
+post_upgrade() {
+    getent group halod >/dev/null || groupadd -r halod
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger 2>/dev/null || true
+}
+
+post_remove() {
+    udevadm control --reload-rules 2>/dev/null || true
+}

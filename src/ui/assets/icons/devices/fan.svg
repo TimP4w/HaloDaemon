@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="604.00 137.00 305.00 305.00"><path fill="#fff" fill-rule="evenodd" d="
+M634 137 H879 Q909 137 909 167 V412 Q909 442 879 442 H634 Q604 442 604 412 V167 Q604 137 634 137 Z
+M611.5 289.5 a145 145 0 1 0 290 0 a145 145 0 1 0 -290 0 Z
+M615 167 a12 12 0 1 0 24 0 a12 12 0 1 0 -24 0 Z
+M874 167 a12 12 0 1 0 24 0 a12 12 0 1 0 -24 0 Z
+M615 412 a12 12 0 1 0 24 0 a12 12 0 1 0 -24 0 Z
+M874 412 a12 12 0 1 0 24 0 a12 12 0 1 0 -24 0 Z
+"/><g fill="#fff"><circle cx="756.5" cy="289.5" r="44"/><path id="b" d="M772.8 253 C780 222 745 182 712 167.3 A130 130 0 0 1 788 163.4 C812 195 806 240 786.2 262.7 A40 40 0 0 0 772.8 253 Z"/><use href="#b" transform="rotate(60 756.5 289.5)"/><use href="#b" transform="rotate(120 756.5 289.5)"/><use href="#b" transform="rotate(180 756.5 289.5)"/><use href="#b" transform="rotate(240 756.5 289.5)"/><use href="#b" transform="rotate(300 756.5 289.5)"/></g></svg>

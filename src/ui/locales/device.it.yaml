@@ -1,0 +1,111 @@
+device:
+  # keys.rs — Scheda Tasti/Pulsanti
+  keys_host_mode_required: "È richiesta la modalità host — la rimappatura viene applicata mentre il daemon controlla questo dispositivo."
+  keys_tab_buttons: Pulsanti
+  keys_tab_keys: Tasti
+  keys_select_button_hint: Seleziona un pulsante per rimapparlo
+  keys_reset_all: Ripristina tutto
+  keys_layer_normal: Normale
+  keys_layer_shift: Shift layer
+  keys_assign_action: Assegna azione
+  keys_editing: MODIFICA
+  keys_assign_hint: "Scegli cosa fa il pulsante %{button} quando premuto e mentre il tasto shift layer è tenuto premuto."
+  keys_select_button_prompt: Seleziona un pulsante a sinistra per configurarne l'azione.
+  keys_no_params_native: Invia il suo input predefinito. Nessun parametro da configurare.
+  keys_no_params_disable: Questo pulsante è disabilitato e non fa nulla quando premuto.
+  keys_no_params_layer_shift: Attiva lo shift layer mentre è tenuto premuto. Nessun parametro da configurare.
+  keys_no_params: Nessun parametro da configurare.
+  keys_direction: DIREZIONE
+  keys_dir_up: Su
+  keys_dir_down: Giù
+  keys_mouse_button: PULSANTE MOUSE
+  keys_mouse_left: Sinistro
+  keys_mouse_right: Destro
+  keys_mouse_middle: Centrale
+  keys_mouse_back: Indietro
+  keys_mouse_forward: Avanti
+  keys_dpi_value: VALORE DPI
+  keys_sniper_dpi: DPI Cecchino
+  keys_presets: PRESET
+  keys_media_key: TASTO MEDIA
+  keys_media_play: Riproduci / Pausa
+  keys_media_next: Brano successivo
+  keys_media_prev: Brano precedente
+  keys_media_mute: Muto
+  keys_media_volume_up: Alza volume
+  keys_media_volume_down: Abbassa volume
+  keys_axis: ASSE
+  keys_axis_vertical: Verticale
+  keys_axis_horizontal: Orizzontale
+  keys_clicks_per_event: CLIC PER EVENTO
+  keys_application: APPLICAZIONE
+  keys_app_hint: Nome o percorso app
+  keys_browse: "Sfoglia…"
+  keys_command: COMANDO
+  keys_command_hint: comando
+  keys_tag_default: PREDEFINITO
+  keys_tag_disabled: DISABILITATO
+  keys_tag_mouse_btn: PULSANTE MOUSE
+  keys_tag_scroll: SCORRIMENTO
+  keys_tag_key_chord: COMBINAZIONE TASTI
+  keys_tag_media: MEDIA
+  keys_tag_dpi_cycle: CICLO DPI
+  keys_tag_profile: PROFILO
+  keys_tag_dpi_snap: DPI SNAP
+  keys_tag_layer: LAYER
+  keys_tag_macro: MACRO
+  keys_tag_launch: AVVIO
+  keys_tag_command: COMANDO
+  keys_type_default: Predefinito
+  keys_type_disabled: Disabilitato
+  keys_type_mouse_button: Pulsante mouse
+  keys_type_scroll: Scorrimento
+  keys_type_key_chord: Combinazione tasti
+  keys_type_media_key: Tasto media
+  keys_type_dpi_cycle: Ciclo DPI
+  keys_type_profile_cycle: Ciclo profilo
+  keys_type_momentary_dpi: DPI momentaneo
+  keys_type_layer_shift: Shift layer
+  keys_type_macro: Macro
+  keys_type_open_app: Apri app
+  keys_type_command: Comando
+  keys_label_mouse_click: "clic %{btn}"
+  keys_label_dpi_dir: "DPI %{direction}"
+  keys_label_profile_dir: "Profilo %{direction}"
+  keys_label_dpi: "DPI %{dpi}"
+
+  # chains.rs — Scheda catene LED
+  chains_topo_linear: Lineare
+  chains_topo_ring: Anello
+  chains_topo_rings: "Anelli ×%{count}"
+  chains_topo_grid: Griglia
+  chains_topo_keyboard: Tastiera
+  chains_title: Catene LED
+  chains_summary: "%{leds} LED · %{headers} header"
+  chains_subtitle: "Collega strisce indirizzabili a ogni header. I collegamenti rilevati sono bloccati; puoi aggiungere, rinominare e rimuovere i tuoi."
+  chains_flashing: "Lampeggio…"
+  chains_discover: Rileva
+  chains_usage: "%{used} / %{max} LED"
+  chains_no_links: Nessuna striscia collegata a questo header
+  chains_discovered: RILEVATO
+  chains_led_count: "%{count} LED"
+  chains_add_link: Aggiungi striscia
+  chains_new_link: Nuova striscia
+  chains_name: Nome
+  chains_type: Tipo
+  chains_leds: LED
+  chains_cancel: Annulla
+  chains_add: Aggiungi
+
+  # children.rs — Schede Dispositivi e Accoppiamento
+  children_connected_devices: Dispositivi connessi
+  children_no_child_devices: Nessun dispositivo figlio
+  children_receiver: RICEVITORE
+  children_hold_pair_button: "Tieni premuto il pulsante di accoppiamento del dispositivo…"
+  children_cancel: Annulla
+  children_slots_in_use: "%{used} di %{max} slot in uso"
+  children_pair_new_device: Accoppia nuovo dispositivo
+  children_paired_slots: Slot accoppiati
+  children_unpair: Scollega
+  children_empty_slot: Slot vuoto
+  children_available: Disponibile

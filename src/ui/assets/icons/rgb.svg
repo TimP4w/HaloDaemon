@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+<circle cx="32" cy="32" r="23" stroke="#ff2d2d" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="0.00" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+<circle cx="32" cy="32" r="23" stroke="#ff8a00" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="-12.04" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+<circle cx="32" cy="32" r="23" stroke="#ffd400" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="-24.09" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+<circle cx="32" cy="32" r="23" stroke="#a6e000" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="-36.13" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+<circle cx="32" cy="32" r="23" stroke="#3fd23f" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="-48.17" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+<circle cx="32" cy="32" r="23" stroke="#00c98d" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="-60.21" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+<circle cx="32" cy="32" r="23" stroke="#00cfe0" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="-72.26" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+<circle cx="32" cy="32" r="23" stroke="#1e9bff" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="-84.30" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+<circle cx="32" cy="32" r="23" stroke="#2d5bff" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="-96.34" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+<circle cx="32" cy="32" r="23" stroke="#7b3fff" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="-108.38" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+<circle cx="32" cy="32" r="23" stroke="#e03fd2" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="-120.43" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+<circle cx="32" cy="32" r="23" stroke="#ff2d8a" stroke-width="8" stroke-dasharray="10.04 134.47" stroke-dashoffset="-132.47" stroke-linecap="butt" transform="rotate(-90 32 32)" />
+</svg>

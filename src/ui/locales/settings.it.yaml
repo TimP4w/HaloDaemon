@@ -1,0 +1,81 @@
+settings:
+  title: Impostazioni
+  subtitle: Motori, avvio e integrazioni
+  section_application: APPLICAZIONE
+  section_engines: MOTORI
+  section_devices: DISPOSITIVI
+  section_logging: LOG
+  section_advanced: AVANZATE
+  section_debug: DEBUG
+  section_about: INFORMAZIONI
+  section_healthcheck: CONTROLLO SALUTE
+  start_on_boot_title: Avvia all'accesso
+  start_on_boot_sub: Avvia HaloDaemon nella barra delle applicazioni quando accedi
+  start_on_boot_managed_sub: Gestito dalla configurazione di sistema — modificalo da lì
+  start_on_boot_managed_value: Controllato dal sistema
+  close_to_tray_title: Riduci a icona nella barra
+  close_to_tray_sub: Nascondi la finestra invece di chiudere quando premi il pulsante di chiusura
+  window_controls_title: Controlli finestra
+  window_controls_sub: Mostra minimizza / massimizza / chiudi nella barra del titolo — disattiva per i window manager a piastrelle
+  startup_healthcheck_title: Controllo salute all'avvio
+  startup_healthcheck_sub: Avvisa al lancio quando un controllo fallisce
+  replay_tutorials_title: Ripeti i tutorial
+  replay_tutorials_sub: Mostra di nuovo il tour introduttivo la prossima volta che visiti ogni pagina
+  replay_button: Ripeti
+  lcd_engine_sub: Frame rate per i contenuti dinamici inviati agli schermi LCD dal motore LCD
+  daemon_title: Daemon
+  daemon_sub: Connessione al daemon HaloDaemon
+  daemon_connected: "● Connesso"
+  daemon_disconnected: "○ Disconnesso"
+  rediscover_title: Rileva dispositivi
+  rediscover_sub: Scansiona USB, HID, hwmon, SMBus per nuovi dispositivi
+  scan_now_button: Scansiona ora
+  scanning_button: Scansione…
+  recheck_button: Ricontrolla
+  running_healthcheck_title: Controllo salute in corso…
+  running_healthcheck_sub: In attesa che il daemon riporti il suo stato
+  no_checks_title: Nessun controllo riportato
+  no_checks_sub: Il daemon ha restituito una lista di controllo vuota
+  dep_detected: "● Rilevato"
+  dep_missing: "● Mancante"
+  dep_not_found: "○ Non trovato"
+  dep_required: Obbligatorio
+  dep_optional: Facoltativo
+  log_level_sub: Livello di dettaglio dei log del daemon
+  live_log_title: Log in tempo reale
+  log_entries: "%{n} voci"
+  config_folder_title: Cartella di configurazione
+  unknown: Sconosciuto
+  open_external_button: "Apri ↗"
+  diagnostics_title: Diagnostica di sistema e dispositivi
+  diagnostics_sub: Mostra tutti i dispositivi HID collegati, quali sono stati riconosciuti, stato dei privilegi
+  open_button: Apri…
+  app_tagline: Daemon controller per periferiche
+  credits_button: Crediti…
+  third_party_title: Licenze di terze parti
+  third_party_sub: Componenti open source usati da HaloDaemon
+  view_button: Visualizza…
+  repository_title: Repository
+  licenses_modal_body: Componenti open source integrati o referenziati da HaloDaemon, raggruppati per licenza.
+  credits_title: Crediti
+  credits_developer: "Sviluppatore:"
+  credits_license: "Licenza:"
+  acknowledgments: Riconoscimenti
+  diagnostics_modal_title: Diagnostica di sistema e dispositivi
+  diagnostics_no_data: "Nessun dato di debug ancora disponibile.\n\nInvia GetDebugInfo dal daemon, poi apri questa finestra."
+  copy_json_button: Copia JSON
+  export_button: Esporta…
+  copied_feedback: Copiato!
+  diag_system: Sistema
+  diag_elevated: Elevato
+  yes: "sì"
+  no: "no"
+  present: presente
+  absent: assente
+  diag_version: Versione
+  diag_build: Build
+  diag_devices: "Dispositivi (%{n})"
+  diag_connected: connesso
+  diag_offline: offline
+  diag_hid: "Interfacce HID (%{n})"
+  diag_smbus: "Bus SMBus (%{n})"

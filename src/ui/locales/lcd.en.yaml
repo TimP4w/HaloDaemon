@@ -1,0 +1,148 @@
+lcd:
+  tab_image: Image
+  tab_editor: Editor
+  tab_video: Video
+  ffmpeg_not_installed: ffmpeg not installed
+  display: Display
+  brightness: Brightness
+  rotation: ROTATION
+  reset_to_default: Reset to default
+  raw_streaming: Raw streaming
+  raw_streaming_hint: Stream uncompressed frames to the panel (bypasses Q565 encoding)
+  media: Media
+  no_video_selected: No video selected
+  choose_video: "Choose Video…"
+  filter_videos: Videos
+  ffmpeg_unavailable_host: ffmpeg is not available on the daemon host
+  upload_image_gif: "Upload Image / GIF…"
+  filter_images: Images
+  upload_processing_pct: "Processing… %{pct}%"
+  upload_processing: "Processing…"
+  upload_writing: "Writing to device…"
+  uploading: "Uploading…"
+  none: "(none)"
+  widget_count: "%{n} widgets"
+  clear_all: Clear all
+  empty_screen_hint: Empty screen - drag widgets from the library below
+  editor_shortcuts_hint: "Del delete  ·  Alt+H / Alt+V center  ·  drag ⟳ handle to rotate  ·  double-click text to edit"
+  no_image_selected: No image selected
+  widget_clock: Clock
+  widget_date: Date
+  widget_sensor: Sensor
+  widget_text: Text
+  widget_image: Image
+  widget_debug: Debug
+  widget_spectrum: Spectrum
+  widget_vu_meter: VU Meter
+  widget_now_playing: Now Playing
+  widget_logo: Logo
+  widget_shape: Shape
+  preset_stats: Stats
+  preset_clock: Clock
+  preset_cooler: Cooler
+  preset_gauge: Gauge
+  start_from_preset: START FROM A PRESET
+  widget_library: Widget library
+  drag_onto_screen: drag onto screen
+  my_templates: MY TEMPLATES
+  template_name_hint: Template name
+  save: Save
+  delete_template_title: Delete template?
+  delete_confirm_body: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
+  cancel: Cancel
+  delete: Delete
+  empty_selection_hint: "Tap a widget on the screen\nto change its size, color or text."
+  selected_caption: "SELECTED · %{kind}"
+  type_clock: Clock
+  type_date: Date
+  type_ring_gauge: Ring gauge
+  type_progress_bar: Progress bar
+  type_sensor_stat: Sensor stat
+  type_text: Text
+  type_image: Image
+  type_logo: Logo
+  type_shape: Shape
+  type_debug: Debug
+  type_spectrum: Spectrum
+  type_vu_bar: VU bar
+  type_vu_ring: VU ring
+  type_now_playing: Now Playing
+  type_widget: Widget
+  size: Size
+  color: Color
+  accent: Accent
+  font: Font
+  center: Center
+  screen_style: Screen style
+  background: Background
+  dim: Dim
+  bg_flow: Flow
+  bg_solid: Solid
+  bg_grid: Grid
+  bg_glow: Glow
+  bg_image: Image
+  # Widget param row labels (device/lcd.rs render_param), keyed by the
+  # shared::lcd_custom::widget_schema param `id`.
+  param_opacity: Opacity
+  param_variant: Style
+  param_sensor: Sensor
+  param_label: Label text
+  param_show_value: Show value
+  param_value_color: Number color
+  param_label_color: Label color
+  param_rounded: Rounded ends
+  param_inverted: Inverted
+  param_curve: Meter curve
+  param_fill: Fill color
+  # AudioSpectrum's "fill"/"gradient" and Shape's "fill" reuse those param
+  # ids for a differently-worded row; see device/lcd.rs's param_label.
+  param_fill_bar: Bar color
+  param_fill_plain: Color
+  param_track: Track color
+  param_gradient: Value gradient
+  param_gradient_height: Height gradient
+  param_gradient_high: Gradient high color
+  param_min: Min value
+  param_max: Max value
+  param_text: Text
+  param_filename: Image
+  param_fit: Scaling
+  param_shape: Shape
+  param_bands: Bands
+  param_flip_h: Flip horizontally
+  param_flip_v: Flip vertically
+  param_mirror: Mirror from center
+  param_show_art: Show album art
+  param_show_title: Show title
+  param_show_artist: Show artist
+  param_title_color: Title color
+  param_artist_color: Artist color
+  param_show_img: Show logo
+  param_show_text: Show text
+  param_filled: Filled
+  # Enum option display text, keyed by `lcd.enum.<param id>.<raw value>`.
+  enum_variant:
+    24h: 24h
+    24h_seconds: 24h (with seconds)
+    12h: 12h
+    short: Short
+    numeric: Numeric
+    stat: Stat
+    ring: Ring
+    bar: Bar
+  enum_fit:
+    fit: Fit
+    cover: Cover
+    contain: Contain
+  enum_shape:
+    rect: Rectangle
+    rounded: Rounded
+    circle: Circle
+    square: Square
+    rectangle: Rectangle
+    triangle: Triangle
+    line: Line
+  # Param group headings (device/lcd_editor.rs).
+  group_shape: Shape
+  group_colors: Colors
+  group_range: Range

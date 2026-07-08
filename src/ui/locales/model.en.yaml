@@ -1,0 +1,41 @@
+device_type:
+  aio: CPU Cooler
+  fan: Fan
+  hub: Controller
+  dongle: Dongle
+  keyboard: Keyboard
+  mouse: Mouse
+  headset: Headset
+  monitor: Monitor
+  gpu: GPU
+  led_strip: LED Strip
+  motherboard: Motherboard
+  ram: RAM
+  sensor: Sensor
+  speaker: Speaker
+  other: Device
+
+device_code:
+  aio: AIO
+  fan: FAN
+  hub: HUB
+  dongle: DGL
+  keyboard: KB
+  mouse: MS
+  headset: HS
+  monitor: MON
+  gpu: GPU
+  led_strip: LED
+  motherboard: MB
+  ram: RAM
+  sensor: SEN
+  speaker: SPK
+  other: DEV
+
+model:
+  metric_speed: Speed
+  metric_pump: Pump
+  metric_temp: Temp
+  metric_link: Link
+  wired: Wired
+  wireless: Wireless

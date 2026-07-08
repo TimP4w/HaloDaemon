@@ -1,0 +1,27 @@
+home:
+  device_name: Device name
+  save: Save
+  cancel: Cancel
+  rename_device: Rename device
+  hide_device: Hide device
+  show_device: Show device
+  disable_device: Disable device
+  enable_device: Enable device
+  remove_device: Remove device
+  remove: Remove
+  remove_device_title: Remove device
+  remove_device_confirm: "Remove %{name} from its chain? This unlinks the device and it will no longer appear here."
+  devices_connected: "%{online} of %{total} devices connected"
+  devices_connected_attention: "%{online} of %{total} devices connected · %{attention} need attention"
+  hide_hidden: Hide hidden
+  show_hidden: Show hidden
+  search_devices: Search devices
+  grid: Grid
+  list: List
+  show_sensor: Show sensor
+  hide_sensor: Hide sensor
+  offline: Offline
+  no_matching: No matching devices
+  no_matching_sub: No connected device matches your search
+  no_devices: No devices connected
+  no_devices_sub: Plug in a peripheral or check that halod is running

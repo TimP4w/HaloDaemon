@@ -1,0 +1,221 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Modal dialogs and the shared delete-confirmation reducer.
+
+use egui::Stroke;
+
+use crate::ui::theme;
+
+/// A centered modal dialog over a dimmed backdrop, with a title bar, close ×
+/// button, and a scrollable body. Returns `true` when the user closed it
+/// (backdrop click or ×). `id` must be unique per concurrently-open modal.
+pub fn modal_frame<R>(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    default_w: f32,
+    default_h: f32,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> bool {
+    modal_frame_raw(ctx, id, title, default_w, default_h, |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, body);
+    })
+}
+
+/// The single modal implementation: dimmed backdrop, title bar, × button, then
+/// `contents`. Every modal in the app routes through this.
+fn modal_shell(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    width: f32,
+    contents: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let w = width.min(ctx.content_rect().width() - 80.0);
+    let mut x_clicked = false;
+    let resp = egui::Modal::new(egui::Id::new((id, "modal")))
+        .frame(
+            egui::Frame::NONE
+                .fill(theme::hex(0x0d1119))
+                .stroke(Stroke::new(1.0, theme::hex(0x232a39)))
+                .corner_radius(12.0)
+                .inner_margin(egui::Margin::same(18)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(w);
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(title)
+                            .font(theme::semibold(15.0))
+                            .color(theme::TEXT),
+                    );
+                },
+                |ui| {
+                    if ui.button("×").clicked() {
+                        x_clicked = true;
+                    }
+                },
+            );
+            ui.add_space(8.0);
+            contents(ui);
+        });
+    x_clicked || resp.should_close()
+}
+
+/// Like [`modal_frame`] but without the outer vertical scroll area, so the
+/// caller controls scrolling (e.g. scrolling only a list while keeping action
+/// buttons pinned).
+pub fn modal_frame_raw<R>(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    default_w: f32,
+    default_h: f32,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> bool {
+    // Fix the height (min == max) so a body that sizes a scroll area from
+    // `available_height` stays bounded instead of growing every frame. Pin it
+    // on a fresh child ui: `set_max_height` on a ui that already holds the
+    // title row rewinds its cursor to the top, painting the body over the
+    // title bar.
+    let h = default_h.min(ctx.content_rect().height() - 80.0);
+    modal_shell(ctx, id, title, default_w, |ui| {
+        ui.allocate_ui(egui::Vec2::new(ui.available_width(), h), |ui| {
+            ui.set_min_height(h);
+            ui.set_max_height(h);
+            body(ui);
+        });
+    })
+}
+
+/// Content-sized modal: title, `body`, and right-aligned `actions` (add the
+/// confirm button first). Returns `true` when dismissed.
+pub fn dialog(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    width: f32,
+    body: impl FnOnce(&mut egui::Ui),
+    actions: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let max_body = (ctx.content_rect().height() - 220.0).max(120.0);
+    modal_shell(ctx, id, title, width, |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .max_height(max_body)
+            .show(ui, body);
+        ui.add_space(16.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
+    })
+}
+
+/// Reduce a delete/remove-confirmation modal's outcome: `Some(target)` means
+/// the action was confirmed; the pending state is cleared on any outcome.
+pub fn resolve_delete_confirm<T>(
+    pending: &mut Option<T>,
+    confirm: bool,
+    dismiss: bool,
+) -> Option<T> {
+    if confirm {
+        pending.take()
+    } else {
+        if dismiss {
+            *pending = None;
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::button::{button, ButtonKind};
+    use super::*;
+    use egui::{Pos2, Rect, Sense, Vec2};
+
+    #[test]
+    fn modal_frame_raw_height_stays_bounded_across_frames() {
+        // Reproduces the picker layout: a scroll area sized from
+        // `available_height` with `auto_shrink=false`. Before the height was
+        // capped, this fed the auto-sizing modal and grew every frame.
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1000.0))),
+            ..Default::default()
+        };
+        let avail = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        for _ in 0..6 {
+            let avail = avail.clone();
+            let _ = ctx.run_ui(input(), |ui| {
+                modal_frame_raw(ui.ctx(), "t", "T", 440.0, 520.0, |ui| {
+                    ui.label("Choose which running apps trigger this profile.");
+                    ui.add_space(12.0);
+                    let mut s = String::new();
+                    ui.add(
+                        egui::TextEdit::singleline(&mut s)
+                            .desired_width(f32::INFINITY)
+                            .margin(egui::vec2(10.0, 9.0)),
+                    );
+                    ui.add_space(8.0);
+                    avail.borrow_mut().push(ui.available_height());
+                    let list = (ui.available_height() - 60.0).max(60.0);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(list)
+                        .show(ui, |ui| {
+                            for _ in 0..3 {
+                                ui.allocate_exact_size(
+                                    Vec2::new(ui.available_width(), 40.0),
+                                    Sense::hover(),
+                                );
+                            }
+                        });
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    let _ = button(ui, "OK", ButtonKind::Primary, Vec2::new(160.0, 34.0));
+                });
+            });
+        }
+        let avail = avail.borrow();
+        // Settle after the first frame, then the available height must not creep
+        // upward frame over frame (it did before the modal height was capped).
+        assert!(
+            (avail.last().unwrap() - avail[1]).abs() < 1.0,
+            "modal height grew across frames: {avail:?}"
+        );
+    }
+
+    #[test]
+    fn modal_body_starts_below_the_title_row() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1000.0))),
+            ..Default::default()
+        };
+        let body_top = std::rc::Rc::new(std::cell::RefCell::new(0.0f32));
+        for _ in 0..2 {
+            let body_top = body_top.clone();
+            let _ = ctx.run_ui(input(), |ui| {
+                modal_frame(ui.ctx(), "t", "Title", 400.0, 300.0, |ui| {
+                    *body_top.borrow_mut() = ui.max_rect().top();
+                    ui.label("body");
+                });
+            });
+        }
+        let modal_top = ctx
+            .memory(|m| m.area_rect(egui::Id::new(("t", "modal"))))
+            .expect("modal area rect")
+            .top();
+        // 18px frame margin, then a real title row before the body starts.
+        let body_top = *body_top.borrow();
+        assert!(
+            body_top >= modal_top + 18.0 + 15.0,
+            "modal body overlaps the title row: body_top={body_top} modal_top={modal_top}"
+        );
+    }
+}
