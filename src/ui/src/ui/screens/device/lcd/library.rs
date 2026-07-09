@@ -11,6 +11,7 @@ use halod_shared::types::{LcdStatus, LcdUploadProgress, LcdUploadStage};
 use super::gif::decode_next_thumb;
 use super::{DeviceUi, LcdMediaTab, PickerTarget, TabCtx};
 use crate::ui::components as widgets;
+use crate::ui::components::resolve_delete_confirm;
 use crate::ui::theme;
 
 /// Maximum library tiles shown (not counting the "None" slot).
@@ -120,12 +121,7 @@ pub(super) fn image_section(
             let selected = highlighted == Some(filename.as_str());
             let action = draw_thumb_tile(ui, tex, selected, filename);
             if action.delete {
-                crate::domain::actions::lcd::delete_lcd_image(ctx.cmd, filename);
-                st.lcd.image_cache.remove(filename);
-                st.lcd.requested.remove(filename);
-                // The daemon doesn't push the library after a delete; re-list so
-                // the removed tile disappears.
-                crate::domain::actions::lcd::list_lcd_images(ctx.cmd);
+                st.lcd.confirm_delete_image = Some(filename.clone());
             } else if action.clicked {
                 select_image(ctx, st, id, filename, active_template_id.as_deref());
             }
@@ -191,12 +187,7 @@ pub(super) fn image_picker(
                 filename,
             );
             if action.delete {
-                crate::domain::actions::lcd::delete_lcd_image(ctx.cmd, filename);
-                st.lcd.image_cache.remove(filename);
-                st.lcd.requested.remove(filename);
-                // The daemon doesn't push the library after a delete; re-list so
-                // the removed tile disappears.
-                crate::domain::actions::lcd::list_lcd_images(ctx.cmd);
+                st.lcd.confirm_delete_image = Some(filename.clone());
                 if current == filename {
                     picked = Some(String::new());
                 }
@@ -231,6 +222,62 @@ pub(super) fn image_picker(
         );
     }
     picked
+}
+
+/// Confirmation modal for deleting an image from the library.
+pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
+    let Some(filename) = st.lcd.confirm_delete_image.clone() else {
+        return;
+    };
+    let (mut confirm, mut cancel) = (false, false);
+    let dismissed = widgets::dialog(
+        ui.ctx(),
+        "lcd_delete_image",
+        &t!("lcd.delete_image_title"),
+        420.0,
+        |ui| {
+            ui.label(
+                egui::RichText::new(t!("lcd.delete_confirm_body", name = filename))
+                    .font(theme::body(12.5))
+                    .color(theme::TEXT_MUT),
+            );
+        },
+        |ui| {
+            if widgets::button(
+                ui,
+                &t!("lcd.delete"),
+                widgets::ButtonKind::Danger,
+                egui::vec2(96.0, 32.0),
+            )
+            .clicked()
+            {
+                confirm = true;
+            }
+            ui.add_space(8.0);
+            if widgets::button(
+                ui,
+                &t!("lcd.cancel"),
+                widgets::ButtonKind::Ghost,
+                egui::vec2(96.0, 32.0),
+            )
+            .clicked()
+            {
+                cancel = true;
+            }
+        },
+    );
+    if let Some(filename) = resolve_delete_confirm(
+        &mut st.lcd.confirm_delete_image,
+        confirm,
+        cancel || dismissed,
+    ) {
+        crate::domain::actions::lcd::delete_lcd_image(ctx.cmd, &filename);
+        st.lcd.image_cache.remove(&filename);
+        st.lcd.requested.remove(&filename);
+        // The daemon doesn't push the library after a delete; re-list so
+        // the removed tile disappears.
+        crate::domain::actions::lcd::list_lcd_images(ctx.cmd);
+    }
 }
 
 /// Handle a click on the "None" tile: reset the screen to default, first

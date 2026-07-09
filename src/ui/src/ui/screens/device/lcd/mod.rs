@@ -29,7 +29,7 @@ mod preview;
 use halod_shared::types::{DeviceCapability, LcdMode, LcdStatus, ScreenRotation};
 
 use gif::{advance_gif, clear_gif, rgba_texture};
-use library::{media_content, poll_picker, select_image, select_none};
+use library::{delete_image_modal, media_content, poll_picker, select_image, select_none};
 use preview::display_card;
 
 use super::{DeviceUi, LcdMediaTab, PickerTarget, TabCtx};
@@ -143,6 +143,9 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         }
     }
     st.lcd.prev_mode_tab = Some(st.lcd.media_tab);
+
+    // Modals overlay the content — must be drawn last.
+    delete_image_modal(ui, ctx, st);
 }
 
 fn activate_image_mode(ctx: &TabCtx, st: &mut DeviceUi, id: &str, lcd: &LcdStatus) {

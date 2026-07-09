@@ -48,6 +48,7 @@ lcd:
   template_name_hint: Template name
   save: Save
   delete_template_title: Delete template?
+  delete_image_title: Delete image?
   delete_confirm_body: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
   cancel: Cancel
   delete: Delete

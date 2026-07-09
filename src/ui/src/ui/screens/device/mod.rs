@@ -188,6 +188,8 @@ pub struct LcdTab {
     /// Library size when an upload was sent; the upload spinner clears once the
     /// refreshed library grows past it.
     pub upload_base: Option<usize>,
+    /// Image filename pending delete confirmation, if any.
+    pub confirm_delete_image: Option<String>,
     /// Native file picker running on a background thread; `Some` while the
     /// dialog is open. Blocking the UI thread on the dialog would stop the
     /// event loop and trip GNOME's "application is not responding" prompt.

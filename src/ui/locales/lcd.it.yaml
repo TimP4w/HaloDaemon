@@ -48,6 +48,7 @@ lcd:
   template_name_hint: Nome modello
   save: Salva
   delete_template_title: Eliminare il modello?
+  delete_image_title: Eliminare l'immagine?
   delete_confirm_body: 'Sei sicuro di voler eliminare "%{name}"? Non può essere annullato.'
   cancel: Annulla
   delete: Elimina
