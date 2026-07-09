@@ -383,8 +383,17 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                 },
                 |ui| {
                     let on = b.value;
-                    if !b.read_only && widgets::toggle(ui, on) != on {
-                        crate::domain::actions::devices::set_boolean(ctx.cmd, id, &b.key, !on);
+                    if b.read_only {
+                        // Paint a non-interactive toggle showing the current value.
+                        let (rect, _resp) = ui
+                            .allocate_exact_size(egui::Vec2::new(34.0, 18.0), egui::Sense::hover());
+                        let t = ui.ctx().animate_bool_with_time(ui.next_auto_id(), on, 0.1);
+                        widgets::paint_toggle(ui.painter(), rect, t);
+                    } else {
+                        let new_val = widgets::toggle(ui, on);
+                        if new_val != on {
+                            crate::domain::actions::devices::set_boolean(ctx.cmd, id, &b.key, !on);
+                        }
                     }
                 },
             );
