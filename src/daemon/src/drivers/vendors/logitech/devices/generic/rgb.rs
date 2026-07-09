@@ -14,6 +14,7 @@ use crate::drivers::vendors::generic::devices::common::override_keyboard_layout;
 use crate::drivers::vendors::logitech::devices::generic::device::LogitechDevice;
 use crate::drivers::vendors::logitech::devices::generic::led_positions::leds_for_zone_info;
 use crate::drivers::vendors::logitech::devices::generic::state::LogitechDeviceState;
+use crate::drivers::vendors::logitech::devices::generic::state::RgbWire;
 use crate::drivers::vendors::logitech::protocols::hidpp::feature;
 use crate::drivers::vendors::logitech::protocols::hidpp::v2::rgb::find_native_effect;
 use crate::drivers::vendors::logitech::protocols::hidpp::v2::Hidpp20;
@@ -51,72 +52,73 @@ impl LogitechDevice {
     // ── RGB write helpers ─────────────────────────────────────────────────────
 
     pub(super) async fn rgb_set_static(&self, color: RgbColor) -> Result<()> {
-        let (zone_count, static_slots, use_pk, use_color_led) = {
+        let (zone_count, static_slots, wire) = {
             let state = self.state.lock().await;
             (
                 state.rgb.rgb_zones.len(),
                 state.rgb.rgb_static_slots.clone(),
-                state.rgb.rgb_use_pk_lighting,
-                state.rgb.rgb_use_color_led,
+                state.rgb.rgb_wire,
             )
         };
         let hidpp = self.hidpp2().await;
 
         log::debug!(
-            "[{}] rgb_set_static use_pk={use_pk} use_color_led={use_color_led} zones={zone_count} color={:02x}{:02x}{:02x}",
+            "[{}] rgb_set_static wire={wire:?} zones={zone_count} color={:02x}{:02x}{:02x}",
             self.id,
             color.r,
             color.g,
             color.b
         );
 
-        if use_pk {
-            hidpp.per_key_set_all(color).await.map_err(|e| {
-                log::warn!("[{}] PER_KEY set-all failed: {e}", self.id);
-                e
-            })?;
-        } else if use_color_led {
-            let mut last_err = None;
-            let mut ok_count = 0u8;
-            for z in 0..zone_count as u8 {
-                let slot = static_slots.get(z as usize).copied().unwrap_or(0);
-                match hidpp.color_led_set_static_effect(z, slot, color).await {
-                    Ok(()) => ok_count += 1,
-                    Err(e) => {
-                        log::warn!(
-                            "[{}] COLOR_LED SetEffect zone={z} slot={slot} failed: {e}",
-                            self.id
-                        );
-                        last_err = Some(e);
+        match wire {
+            RgbWire::PerKey => {
+                hidpp.per_key_set_all(color).await.map_err(|e| {
+                    log::warn!("[{}] PER_KEY set-all failed: {e}", self.id);
+                    e
+                })?;
+            }
+            RgbWire::ColorLedEffects => {
+                let mut last_err = None;
+                let mut ok_count = 0u8;
+                for z in 0..zone_count as u8 {
+                    let slot = static_slots.get(z as usize).copied().unwrap_or(0);
+                    match hidpp.color_led_set_static_effect(z, slot, color).await {
+                        Ok(()) => ok_count += 1,
+                        Err(e) => {
+                            log::warn!(
+                                "[{}] COLOR_LED SetEffect zone={z} slot={slot} failed: {e}",
+                                self.id
+                            );
+                            last_err = Some(e);
+                        }
+                    }
+                }
+                if ok_count == 0 {
+                    if let Some(e) = last_err {
+                        return Err(e.context("COLOR_LED SetEffect failed for all zones"));
                     }
                 }
             }
-            if ok_count == 0 {
-                if let Some(e) = last_err {
-                    return Err(e.context("COLOR_LED SetEffect failed for all zones"));
-                }
-            }
-        } else {
-            let mut last_err = None;
-            let mut ok_count = 0u8;
-            for z in 0..zone_count as u8 {
-                let slot = static_slots.get(z as usize).copied().unwrap_or(0);
-                match hidpp.rgb_set_static_effect(z, slot, color).await {
-                    Ok(()) => ok_count += 1,
-                    Err(e) => {
-                        log::warn!(
-                            "[{}] RGB SetEffect zone={z} slot={slot} failed: {e}",
-                            self.id
-                        );
-                        last_err = Some(e);
+            RgbWire::RgbEffects => {
+                let mut last_err = None;
+                let mut ok_count = 0u8;
+                for z in 0..zone_count as u8 {
+                    let slot = static_slots.get(z as usize).copied().unwrap_or(0);
+                    match hidpp.rgb_set_static_effect(z, slot, color).await {
+                        Ok(()) => ok_count += 1,
+                        Err(e) => {
+                            log::warn!(
+                                "[{}] RGB SetEffect zone={z} slot={slot} failed: {e}",
+                                self.id
+                            );
+                            last_err = Some(e);
+                        }
                     }
                 }
-            }
-            // If every zone failed, surface the error; a partial success is
-            // still reported as success (best effort).
-            if ok_count == 0 {
-                if let Some(e) = last_err {
-                    return Err(e.context("RGB SetEffect failed for all zones"));
+                if ok_count == 0 {
+                    if let Some(e) = last_err {
+                        return Err(e.context("RGB SetEffect failed for all zones"));
+                    }
                 }
             }
         }
@@ -167,13 +169,13 @@ impl LogitechDevice {
 
     /// Whole-zone fallback for a per-LED write: paint each zone with
     /// its first LED's colour via `SetEffect`. Dispatches to the correct
-    /// protocol (COLOR_LED_EFFECTS or RGB_EFFECTS) based on device state.
+    /// protocol based on `wire`.
     async fn rgb_set_per_led_via_effects(
         &self,
         hidpp: &Hidpp20,
         zones: &HashMap<String, HashMap<String, RgbColor>>,
         zone_map: &HashMap<String, usize>,
-        use_color_led: bool,
+        wire: RgbWire,
     ) {
         let static_slots = {
             let st = self.state.lock().await;
@@ -185,20 +187,22 @@ impl LogitechDevice {
             };
             if let Some(&color) = led_colors.values().next() {
                 let slot = static_slots.get(zone_idx).copied().unwrap_or(0);
-                let result = if use_color_led {
-                    hidpp
-                        .color_led_set_static_effect(zone_idx as u8, slot, color)
-                        .await
-                } else {
-                    hidpp
-                        .rgb_set_static_effect(zone_idx as u8, slot, color)
-                        .await
+                let result = match wire {
+                    RgbWire::ColorLedEffects => {
+                        hidpp
+                            .color_led_set_static_effect(zone_idx as u8, slot, color)
+                            .await
+                    }
+                    _ => {
+                        hidpp
+                            .rgb_set_static_effect(zone_idx as u8, slot, color)
+                            .await
+                    }
                 };
                 if let Err(e) = result {
-                    let label = if use_color_led {
-                        "COLOR_LED"
-                    } else {
-                        "RGB_EFFECTS"
+                    let label = match wire {
+                        RgbWire::ColorLedEffects => "COLOR_LED",
+                        _ => "RGB_EFFECTS",
                     };
                     log::warn!("[{}] {label} zone={zone_idx} failed: {e}", self.id);
                 }
@@ -213,28 +217,25 @@ impl LogitechDevice {
         let transformed = self.transform_perled_map(zones_map);
         let zones = &*transformed;
         let hidpp = self.hidpp2().await;
-        let state = self.state.lock().await;
-        let has_pk = state.features.contains_key(&feature::PER_KEY_LIGHTING_V2);
-        let has_rgb = state.features.contains_key(&feature::RGB_EFFECTS);
-        let has_color_led = state.features.contains_key(&feature::COLOR_LED_EFFECTS);
-        let zone_map: HashMap<String, usize> = state
-            .rgb
-            .rgb_zones
-            .iter()
-            .enumerate()
-            .map(|(i, z)| (z.id.clone(), i))
-            .collect();
-        drop(state);
+        let (wire, zone_map) = {
+            let state = self.state.lock().await;
+            let zone_map: HashMap<String, usize> = state
+                .rgb
+                .rgb_zones
+                .iter()
+                .enumerate()
+                .map(|(i, z)| (z.id.clone(), i))
+                .collect();
+            (state.rgb.rgb_wire, zone_map)
+        };
 
-        if has_pk {
+        if let RgbWire::PerKey = wire {
             if self.is_keyboard() {
-                // Keyboard: stream every key via PER_KEY setIndividual + commit.
                 let pairs = collect_pairs(zones, &zone_map, None);
                 if let Err(e) = hidpp.write_per_key_pairs(&pairs).await {
                     log::warn!("[{}] PER_KEY_LIGHTING burst failed: {e}", self.id);
                 }
             } else {
-                // Mouse: only the firmware-reported per-key LED ids.
                 let pk_led_ids = {
                     let st = self.state.lock().await;
                     st.rgb.pk_led_ids.clone()
@@ -244,29 +245,14 @@ impl LogitechDevice {
                     if let Err(e) = hidpp.write_per_key_pairs(&pairs).await {
                         log::warn!("[{}] PER_KEY_LIGHTING burst failed: {e}", self.id);
                     }
-                } else if has_rgb {
-                    log::info!(
-                        "[{}] rgb_set_per_led: mouse has no pk_led_ids, whole-zone RGB_EFFECTS fallback",
-                        self.id
-                    );
-                    self.rgb_set_per_led_via_effects(&hidpp, zones, &zone_map, false)
-                        .await;
-                } else if has_color_led {
-                    self.rgb_set_per_led_via_effects(&hidpp, zones, &zone_map, true)
+                } else {
+                    self.rgb_set_per_led_via_effects(&hidpp, zones, &zone_map, wire)
                         .await;
                 }
             }
-        } else if has_rgb {
-            self.rgb_set_per_led_via_effects(&hidpp, zones, &zone_map, false)
-                .await;
-        } else if has_color_led {
-            self.rgb_set_per_led_via_effects(&hidpp, zones, &zone_map, true)
-                .await;
         } else {
-            log::warn!(
-                "[{}] rgb_set_per_led: no per-key or RGB/COLOR_LED feature available",
-                self.id
-            );
+            self.rgb_set_per_led_via_effects(&hidpp, zones, &zone_map, wire)
+                .await;
         }
         Ok(())
     }
@@ -276,12 +262,11 @@ impl LogitechDevice {
     /// reconnect) cause the firmware to reclaim LED control. After any of them,
     /// re-enable software LED control and re-apply the last cached RGB state.
     pub(super) async fn restore_rgb_control(&self) {
-        let use_color_led = self.state.lock().await.rgb.rgb_use_color_led;
+        let wire = self.state.lock().await.rgb.rgb_wire;
         let hidpp = self.hidpp2().await;
-        if use_color_led {
-            hidpp.color_led_enable_sw_control().await;
-        } else {
-            hidpp.rgb_enable_sw_control().await;
+        match wire {
+            RgbWire::ColorLedEffects => hidpp.color_led_enable_sw_control().await,
+            RgbWire::RgbEffects | RgbWire::PerKey => hidpp.rgb_enable_sw_control().await,
         }
         let current_rgb = self.state.lock().await.rgb.rgb_state.clone();
         if let Some(rgb_state) = current_rgb {
@@ -357,7 +342,7 @@ impl LogitechDevice {
             self.id
         );
         state.rgb.rgb_static_slots = vec![0];
-        state.rgb.rgb_use_pk_lighting = true;
+        state.rgb.rgb_wire = RgbWire::PerKey;
         let zones = vec![RgbZone {
             id: "zone_0".to_string(),
             name,
@@ -522,8 +507,7 @@ impl LogitechDevice {
                     .await;
 
                 state.rgb.rgb_static_slots = static_slots;
-                state.rgb.rgb_use_pk_lighting = false;
-                state.rgb.rgb_use_color_led = true;
+                state.rgb.rgb_wire = RgbWire::ColorLedEffects;
                 self.commit_rgb_descriptor(zones, state);
             } else if let Some(pk) = pk_idx {
                 self.init_rgb_pk_fallback(pk, keyboard_layout, state);
@@ -555,8 +539,8 @@ impl LogitechDevice {
         }
 
         state.rgb.rgb_static_slots = static_slots;
-        state.rgb.rgb_use_pk_lighting = false;
         self.commit_rgb_descriptor(zones, state);
+        // RgbWire defaults to RgbEffects — no explicit assignment needed.
     }
 }
 
@@ -644,7 +628,11 @@ impl RgbCapability for LogitechDevice {
         // RGB_SET_SW_CONTROL tells it to hand control back so our SetEffect /
         // PER_KEY writes take effect.
         if !matches!(new_state, RgbState::Engine | RgbState::DirectEffect { .. }) {
-            self.hidpp2().await.rgb_enable_sw_control().await;
+            let hidpp = self.hidpp2().await;
+            match self.state.lock().await.rgb.rgb_wire {
+                RgbWire::ColorLedEffects => hidpp.color_led_enable_sw_control().await,
+                _ => hidpp.rgb_enable_sw_control().await,
+            }
         }
         let write_result = match &new_state {
             RgbState::Static { color } => self.rgb_set_static(*color).await,
@@ -665,7 +653,7 @@ impl RgbCapability for LogitechDevice {
     }
 
     async fn write_frame(&self, zone_id: &str, colors: &[RgbColor]) -> Result<()> {
-        let (zone_idx, has_pk, has_rgb, has_color_led, leds) = {
+        let (zone_idx, wire, pk_idx, leds) = {
             let state = self.state.lock().await;
             let (zone_idx, leds) = state
                 .rgb
@@ -677,95 +665,93 @@ impl RgbCapability for LogitechDevice {
                 .unwrap_or((0, vec![]));
             (
                 Some(zone_idx),
-                state.features.contains_key(&feature::PER_KEY_LIGHTING_V2),
-                state.features.contains_key(&feature::RGB_EFFECTS),
-                state.features.contains_key(&feature::COLOR_LED_EFFECTS),
+                state.rgb.rgb_wire,
+                state.features.get(&feature::PER_KEY_LIGHTING_V2).copied(),
                 leds,
             )
         };
 
         let hidpp = self.hidpp2().await;
 
-        // Read is_wired and coordinator together from one lock acquisition.
         let (is_wired, coordinator) = {
             let t = self.transport.lock().await;
             (t.is_wired, t.coordinator.clone())
         };
 
-        if has_pk {
-            let keys: Vec<(u8, RgbColor)> = leds
-                .iter()
-                .zip(colors.iter())
-                .map(|(lp, &c)| ((lp.id & 0xFF) as u8, c))
-                .collect();
+        match wire {
+            RgbWire::PerKey if pk_idx.is_some() => {
+                let keys: Vec<(u8, RgbColor)> = leds
+                    .iter()
+                    .zip(colors.iter())
+                    .map(|(lp, &c)| ((lp.id & 0xFF) as u8, c))
+                    .collect();
 
-            // Diff against the last streamed frame and run-length-encode it.
-            let packets = {
-                let mut state = self.state.lock().await;
-                let cache = state
-                    .rgb
-                    .pk_frame_cache
-                    .entry(zone_id.to_string())
-                    .or_default();
-                hidpp.encode_per_key_frame(&keys, cache)
-            };
-            if packets.is_empty() {
-                return Ok(());
-            }
-
-            // Wired devices bypass the per-receiver coordinator (their own HID
-            // path) and write directly. Wireless devices post through the
-            // coordinator so all devices on the same receiver flush together.
-            if !is_wired {
-                if let Some(coord) = &coordinator {
-                    coord.post(hidpp.devnum(), packets).await;
+                let packets = {
+                    let mut state = self.state.lock().await;
+                    let cache = state
+                        .rgb
+                        .pk_frame_cache
+                        .entry(zone_id.to_string())
+                        .or_default();
+                    hidpp.encode_per_key_frame(&keys, cache)
+                };
+                if packets.is_empty() {
                     return Ok(());
                 }
-            }
-            if let Err(e) = hidpp.send_packets(packets).await {
-                log::warn!("[{}] write_frame: send_packets failed: {e}", self.id);
-            }
-        } else if has_rgb {
-            let Some(zone_idx) = zone_idx else {
-                return Ok(());
-            };
-            if let Some(&c) = colors.first() {
-                let static_slot = {
-                    let st = self.state.lock().await;
-                    st.rgb
-                        .rgb_static_slots
-                        .get(zone_idx as usize)
-                        .copied()
-                        .unwrap_or(0)
-                };
-                if let Err(e) = hidpp.rgb_set_static_effect(zone_idx, static_slot, c).await {
-                    log::warn!(
-                        "[{}] write_frame: rgb_set_static_effect failed: {e}",
-                        self.id
-                    );
+
+                if !is_wired {
+                    if let Some(coord) = &coordinator {
+                        coord.post(hidpp.devnum(), packets).await;
+                        return Ok(());
+                    }
+                }
+                if let Err(e) = hidpp.send_packets(packets).await {
+                    log::warn!("[{}] write_frame: send_packets failed: {e}", self.id);
                 }
             }
-        } else if has_color_led {
-            let Some(zone_idx) = zone_idx else {
-                return Ok(());
-            };
-            if let Some(&c) = colors.first() {
-                let static_slot = {
-                    let st = self.state.lock().await;
-                    st.rgb
-                        .rgb_static_slots
-                        .get(zone_idx as usize)
-                        .copied()
-                        .unwrap_or(0)
+            RgbWire::ColorLedEffects => {
+                let Some(zone_idx) = zone_idx else {
+                    return Ok(());
                 };
-                if let Err(e) = hidpp
-                    .color_led_set_static_effect(zone_idx, static_slot, c)
-                    .await
-                {
-                    log::warn!(
-                        "[{}] write_frame: color_led_set_static_effect failed: {e}",
-                        self.id
-                    );
+                if let Some(&c) = colors.first() {
+                    let static_slot = {
+                        let st = self.state.lock().await;
+                        st.rgb
+                            .rgb_static_slots
+                            .get(zone_idx as usize)
+                            .copied()
+                            .unwrap_or(0)
+                    };
+                    if let Err(e) = hidpp
+                        .color_led_set_static_effect(zone_idx, static_slot, c)
+                        .await
+                    {
+                        log::warn!(
+                            "[{}] write_frame: color_led_set_static_effect failed: {e}",
+                            self.id
+                        );
+                    }
+                }
+            }
+            RgbWire::RgbEffects | RgbWire::PerKey => {
+                let Some(zone_idx) = zone_idx else {
+                    return Ok(());
+                };
+                if let Some(&c) = colors.first() {
+                    let static_slot = {
+                        let st = self.state.lock().await;
+                        st.rgb
+                            .rgb_static_slots
+                            .get(zone_idx as usize)
+                            .copied()
+                            .unwrap_or(0)
+                    };
+                    if let Err(e) = hidpp.rgb_set_static_effect(zone_idx, static_slot, c).await {
+                        log::warn!(
+                            "[{}] write_frame: rgb_set_static_effect failed: {e}",
+                            self.id
+                        );
+                    }
                 }
             }
         }
