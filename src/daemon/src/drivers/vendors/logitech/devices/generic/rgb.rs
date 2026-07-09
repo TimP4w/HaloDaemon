@@ -92,7 +92,7 @@ impl LogitechDevice {
                         Err(e) => {
                             log::warn!(
                                 "[{}] COLOR_LED SetEffect zone={} zone_idx={zone_idx} slot={slot} failed: {e}",
-                                zone.id, self.id
+                                self.id, zone.id
                             );
                             last_err = Some(e);
                         }
@@ -115,8 +115,8 @@ impl LogitechDevice {
                         Err(e) => {
                             log::warn!(
                                 "[{}] RGB SetEffect zone={} zone_idx={zone_idx} failed: {e}",
-                                zone.id,
-                                self.id
+                                self.id,
+                                zone.id
                             );
                             last_err = Some(e);
                         }
