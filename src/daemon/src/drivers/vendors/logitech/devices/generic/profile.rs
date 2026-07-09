@@ -43,6 +43,8 @@ pub(super) struct LogitechDeviceProfile {
     /// LIGHTSPEED variant; those are resolved through `pid` instead.
     pub(super) wpid: Option<u16>,
     pub(super) pid: u16,
+    pub(super) interface: i32,
+    pub(super) report_mode: DirectReport,
     pub(super) name: &'static str,
     pub(super) device_type: DeviceType,
     pub(super) zones: &'static [LogitechZoneInfo],
@@ -135,21 +137,18 @@ static G502_HERO_BITMAP_BUTTONS: &[(u16, &str)] = &[
 /// G502 Hero out-of-the-box button actions. G8/G7 cycle DPI; the thumb trigger
 /// acts as a sniper button.
 static G502_HERO_DEFAULT_BUTTONS: &[(u16, ButtonAction)] = &[
-    // G8 (cid 16) → DPI up.
     (
         16,
         ButtonAction::DpiCycle {
             direction: CycleDir::Up,
         },
     ),
-    // G7 (cid 15) → DPI down.
     (
         15,
         ButtonAction::DpiCycle {
             direction: CycleDir::Down,
         },
     ),
-    // Thumb trigger (cid 14) → sniper (momentary 400 DPI while held).
     (14, ButtonAction::MomentaryDpi { dpi: 400 }),
 ];
 
@@ -157,6 +156,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
     LogitechDeviceProfile {
         wpid: Some(WPID_G502X_PLUS),
         pid: WIRED_PID_G502X_PLUS,
+        interface: WIRED_HIDPP_INTERFACE,
+        report_mode: DirectReport::ShortLong,
         name: "Logitech G502 X Plus",
         device_type: DeviceType::Mouse,
         zones: &[LogitechZoneInfo {
@@ -173,12 +174,11 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
     LogitechDeviceProfile {
         wpid: None,
         pid: WIRED_PID_G502_HERO,
+        interface: G502_HERO_HIDPP_INTERFACE,
+        report_mode: DirectReport::ShortLong,
         name: "Logitech G502 Hero",
         device_type: DeviceType::Mouse,
-        // Zones are discovered at runtime via COLOR_LED_EFFECTS (0x8070); a
-        // single-LED fallback template is applied per-zone by the init path.
         zones: &[],
-        // No native effects — 0x8070 doesn't use the 0x8071 NativeEffect system.
         native_effects: &[],
         bitmap_button_labels: Some(G502_HERO_BITMAP_BUTTONS),
         bitmap_button_prefix: "Button",
@@ -188,6 +188,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
     LogitechDeviceProfile {
         wpid: Some(WPID_GPROX_TKL),
         pid: WIRED_PID_GPROX_TKL,
+        interface: WIRED_HIDPP_INTERFACE,
+        report_mode: DirectReport::ShortLong,
         name: "Logitech G PRO X TKL",
         device_type: DeviceType::Keyboard,
         zones: &[LogitechZoneInfo {
@@ -199,11 +201,109 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
             led_count: 0,
         }],
         native_effects: &["ripple"],
-        // GKEY backend: no per-CID table, G-keys labelled "G1".."G12".
         bitmap_button_labels: None,
         bitmap_button_prefix: "G",
         default_buttons: None,
         key_layout: Some(&GPROX_TKL_LAYOUT),
+    },
+    // ── LIGHTSPEED headsets ──────────────────────────────────────────────────
+    LogitechDeviceProfile {
+        wpid: None,
+        pid: 0x0ABA,
+        interface: COMPOSITE_HIDPP_INTERFACE,
+        report_mode: DirectReport::LongOnly,
+        name: "Logitech PRO X Wireless Gaming Headset",
+        device_type: DeviceType::Headset,
+        zones: &[],
+        native_effects: &[],
+        bitmap_button_labels: None,
+        bitmap_button_prefix: "",
+        default_buttons: None,
+        key_layout: None,
+    },
+    LogitechDeviceProfile {
+        wpid: None,
+        pid: 0x0AF7,
+        interface: COMPOSITE_HIDPP_INTERFACE,
+        report_mode: DirectReport::LongOnly,
+        name: "Logitech PRO X 2 LIGHTSPEED",
+        device_type: DeviceType::Headset,
+        zones: &[],
+        native_effects: &[],
+        bitmap_button_labels: None,
+        bitmap_button_prefix: "",
+        default_buttons: None,
+        key_layout: None,
+    },
+    LogitechDeviceProfile {
+        wpid: None,
+        pid: 0x0AB5,
+        interface: COMPOSITE_HIDPP_INTERFACE,
+        report_mode: DirectReport::LongOnly,
+        name: "Logitech G733 LIGHTSPEED",
+        device_type: DeviceType::Headset,
+        zones: &[],
+        native_effects: &[],
+        bitmap_button_labels: None,
+        bitmap_button_prefix: "",
+        default_buttons: None,
+        key_layout: None,
+    },
+    LogitechDeviceProfile {
+        wpid: None,
+        pid: 0x0AFE,
+        interface: COMPOSITE_HIDPP_INTERFACE,
+        report_mode: DirectReport::LongOnly,
+        name: "Logitech G733 LIGHTSPEED",
+        device_type: DeviceType::Headset,
+        zones: &[],
+        native_effects: &[],
+        bitmap_button_labels: None,
+        bitmap_button_prefix: "",
+        default_buttons: None,
+        key_layout: None,
+    },
+    LogitechDeviceProfile {
+        wpid: None,
+        pid: 0x0AC4,
+        interface: COMPOSITE_HIDPP_INTERFACE,
+        report_mode: DirectReport::LongOnly,
+        name: "Logitech G535 LIGHTSPEED",
+        device_type: DeviceType::Headset,
+        zones: &[],
+        native_effects: &[],
+        bitmap_button_labels: None,
+        bitmap_button_prefix: "",
+        default_buttons: None,
+        key_layout: None,
+    },
+    LogitechDeviceProfile {
+        wpid: None,
+        pid: 0x0A87,
+        interface: COMPOSITE_HIDPP_INTERFACE,
+        report_mode: DirectReport::LongOnly,
+        name: "Logitech G935",
+        device_type: DeviceType::Headset,
+        zones: &[],
+        native_effects: &[],
+        bitmap_button_labels: None,
+        bitmap_button_prefix: "",
+        default_buttons: None,
+        key_layout: None,
+    },
+    LogitechDeviceProfile {
+        wpid: None,
+        pid: 0x0A66,
+        interface: COMPOSITE_HIDPP_INTERFACE,
+        report_mode: DirectReport::LongOnly,
+        name: "Logitech G533",
+        device_type: DeviceType::Headset,
+        zones: &[],
+        native_effects: &[],
+        bitmap_button_labels: None,
+        bitmap_button_prefix: "",
+        default_buttons: None,
+        key_layout: None,
     },
 ];
 
@@ -255,97 +355,9 @@ pub(super) fn build_device_id(
 // device-category axis — only the transport (direct vs wireless). Capabilities
 // come from the feature table at init; a profile row above is optional enrichment.
 
-/// HID++ vendor interface for composite (audio + HID) devices, e.g. headsets.
-/// These expose only the long report, so they use [`DirectReport::LongOnly`].
+/// The declared device type for a wireless `wpid`, or `Other` when unlisted.
 const COMPOSITE_HIDPP_INTERFACE: i32 = 3;
 const G502_HERO_HIDPP_INTERFACE: i32 = 1;
-
-/// Directly-connected (USB) devices: `(pid, hid interface, report mode, name,
-/// device type)`. `ShortLong` resolves the split short/long collections
-/// (standard wired); `LongOnly` opens a single long-only handle (composite
-/// headsets/dongles). `name` is a plain display label used when the device
-/// doesn't advertise the DEVICE_NAME feature.
-///
-/// `device_type` is the fallback used only when no `DEVICE_PROFILES` row exists
-/// for this pid; profiled devices (mice, keyboards) take their type from the
-/// profile, which is the single authoritative source.
-static DIRECT_PIDS: &[(u16, i32, DirectReport, &str, DeviceType)] = &[
-    (
-        WIRED_PID_G502X_PLUS,
-        WIRED_HIDPP_INTERFACE,
-        DirectReport::ShortLong,
-        "Logitech G502 X Plus",
-        DeviceType::Other, // authoritative type is in DEVICE_PROFILES
-    ),
-    (
-        WIRED_PID_G502_HERO,
-        G502_HERO_HIDPP_INTERFACE,
-        DirectReport::ShortLong,
-        "Logitech G502 Hero",
-        DeviceType::Other, // authoritative type is in DEVICE_PROFILES
-    ),
-    (
-        WIRED_PID_GPROX_TKL,
-        WIRED_HIDPP_INTERFACE,
-        DirectReport::ShortLong,
-        "Logitech G PRO X TKL",
-        DeviceType::Other, // authoritative type is in DEVICE_PROFILES
-    ),
-    // LIGHTSPEED headsets — direct USB, long-only, on the audio interface. These
-    // don't advertise DEVICE_NAME, so the label below is the displayed name.
-    // No profile row exists for these; the type here is the sole declaration.
-    (
-        0x0ABA,
-        COMPOSITE_HIDPP_INTERFACE,
-        DirectReport::LongOnly,
-        "Logitech PRO X Wireless Gaming Headset",
-        DeviceType::Headset,
-    ),
-    (
-        0x0AF7,
-        COMPOSITE_HIDPP_INTERFACE,
-        DirectReport::LongOnly,
-        "Logitech PRO X 2 LIGHTSPEED",
-        DeviceType::Headset,
-    ),
-    (
-        0x0AB5,
-        COMPOSITE_HIDPP_INTERFACE,
-        DirectReport::LongOnly,
-        "Logitech G733 LIGHTSPEED",
-        DeviceType::Headset,
-    ),
-    (
-        0x0AFE,
-        COMPOSITE_HIDPP_INTERFACE,
-        DirectReport::LongOnly,
-        "Logitech G733 LIGHTSPEED",
-        DeviceType::Headset,
-    ),
-    (
-        0x0AC4,
-        COMPOSITE_HIDPP_INTERFACE,
-        DirectReport::LongOnly,
-        "Logitech G535 LIGHTSPEED",
-        DeviceType::Headset,
-    ),
-    (
-        0x0A87,
-        COMPOSITE_HIDPP_INTERFACE,
-        DirectReport::LongOnly,
-        "Logitech G935",
-        DeviceType::Headset,
-    ),
-    (
-        0x0A66,
-        COMPOSITE_HIDPP_INTERFACE,
-        DirectReport::LongOnly,
-        "Logitech G533",
-        DeviceType::Headset,
-    ),
-];
-
-/// The declared device type for a wireless `wpid`, or `Other` when unlisted.
 /// Delegates to `DEVICE_PROFILES` so adding a new wireless device only requires
 /// editing the profile table.
 pub(crate) fn wpid_device_type(wpid: u16) -> DeviceType {
@@ -361,23 +373,15 @@ inventory::submit! {
             pid,
             interface_number: Some(iface),
             ..
-        } if DIRECT_PIDS.iter().any(|(p, i, _, _, _)| p == pid && i == iface)),
+        } if DEVICE_PROFILES.iter().any(|p| p.pid == *pid && p.interface == *iface)),
         make: |h| {
             let DiscoveryHandle::Hid { path, serial, pid, idx, interface_number, .. } = h else {
                 anyhow::bail!("descriptor matched non-HID handle");
             };
-            let entry = DIRECT_PIDS
-                .iter()
-                .find(|(p, i, _, _, _)| *p == pid && Some(*i) == interface_number)
-                .ok_or_else(|| anyhow::anyhow!("no DIRECT_PIDS entry for pid {pid:#06x}"))?;
-            let (_, iface, report, name, fallback_type) = entry;
-            // Profile is authoritative for device type; fallback_type covers
-            // devices (e.g. headsets) that have no DEVICE_PROFILES row.
-            let device_type = find_profile(pid)
-                .map(|p| p.device_type)
-                .unwrap_or(*fallback_type);
+            let p = DEVICE_PROFILES.iter().find(|p| p.pid == pid && Some(p.interface) == interface_number)
+                .ok_or_else(|| anyhow::anyhow!("no profile for pid {pid:#06x}"))?;
             Ok(Arc::new(LogitechDevice::new_direct(
-                path, serial, pid, idx, *iface, *report, name, device_type,
+                path, serial, pid, idx, p.interface, p.report_mode, p.name, p.device_type,
             )?))
         },
     }
@@ -563,13 +567,19 @@ mod tests {
     // ── Discovery tables ─────────────────────────────────────────────────────
 
     #[test]
-    fn direct_pids_have_no_duplicate_pid_interface() {
-        let mut seen: Vec<(u16, i32)> =
-            DIRECT_PIDS.iter().map(|(p, i, _, _, _)| (*p, *i)).collect();
+    fn profile_pids_interfaces_are_unique() {
+        let mut seen: Vec<(u16, i32)> = DEVICE_PROFILES
+            .iter()
+            .map(|p| (p.pid, p.interface))
+            .collect();
         let n = seen.len();
         seen.sort_unstable();
         seen.dedup();
-        assert_eq!(seen.len(), n, "duplicate (pid, interface) in DIRECT_PIDS");
+        assert_eq!(
+            seen.len(),
+            n,
+            "duplicate (pid, interface) in DEVICE_PROFILES"
+        );
     }
 
     #[test]
