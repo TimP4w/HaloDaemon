@@ -102,6 +102,42 @@ static G502X_PLUS_DEFAULT_BUTTONS: &[(u16, ButtonAction)] = &[
     (13, ButtonAction::MomentaryDpi { dpi: 400 }),
 ];
 
+/// G502 Hero MOUSE_BUTTON_SPY button labels. The bitmap layout differs from the
+/// G502 X Plus — the G502 Hero scatters its buttons across different bit
+/// positions. Mapping established via trace-level logs.
+static G502_HERO_BITMAP_BUTTONS: &[(u16, &str)] = &[
+    (1, "G9"),
+    (9, "Left Click"),
+    (10, "Right Click"),
+    (11, "Wheel Center"),
+    (12, "G4"),
+    (13, "G5"),
+    (14, "Thumb Trigger"),
+    (15, "G7"),
+    (16, "G8"),
+];
+
+/// G502 Hero out-of-the-box button actions. G8/G7 cycle DPI; the thumb trigger
+/// acts as a sniper button.
+static G502_HERO_DEFAULT_BUTTONS: &[(u16, ButtonAction)] = &[
+    // G8 (cid 16) → DPI up.
+    (
+        16,
+        ButtonAction::DpiCycle {
+            direction: CycleDir::Up,
+        },
+    ),
+    // G7 (cid 15) → DPI down.
+    (
+        15,
+        ButtonAction::DpiCycle {
+            direction: CycleDir::Down,
+        },
+    ),
+    // Thumb trigger (cid 14) → sniper (momentary 400 DPI while held).
+    (14, ButtonAction::MomentaryDpi { dpi: 400 }),
+];
+
 pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
     LogitechDeviceProfile {
         wpid: Some(WPID_G502X_PLUS),
@@ -129,9 +165,9 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         zones: &[],
         // No native effects — 0x8070 doesn't use the 0x8071 NativeEffect system.
         native_effects: &[],
-        bitmap_button_labels: Some(G502X_PLUS_BITMAP_BUTTONS),
+        bitmap_button_labels: Some(G502_HERO_BITMAP_BUTTONS),
         bitmap_button_prefix: "Button",
-        default_buttons: Some(G502X_PLUS_DEFAULT_BUTTONS),
+        default_buttons: Some(G502_HERO_DEFAULT_BUTTONS),
         key_layout: None,
     },
     LogitechDeviceProfile {

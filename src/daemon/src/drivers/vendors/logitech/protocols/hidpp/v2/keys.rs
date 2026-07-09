@@ -84,11 +84,12 @@ pub fn parse_diverted_buttons_event(data: &[u8]) -> Vec<u16> {
 
 /// Decode a GKEY/SPY bitmap event payload (16-bit little-endian) into CIDs.
 pub fn parse_button_bitmap_event(data: &[u8]) -> Vec<u16> {
-    let bitmap = u16::from_le_bytes([
-        data.first().copied().unwrap_or(0),
-        data.get(1).copied().unwrap_or(0),
-    ]);
-    button_bitmap_to_cids(bitmap)
+    let b0 = data.first().copied().unwrap_or(0);
+    let b1 = data.get(1).copied().unwrap_or(0);
+    let bitmap = u16::from_le_bytes([b0, b1]);
+    let cids = button_bitmap_to_cids(bitmap);
+    log::trace!("button bitmap raw=[{b0:#04x}, {b1:#04x}] bitmap={bitmap:#018b} cids={cids:?}",);
+    cids
 }
 
 /// Parse a REPROG_CONTROLS_V4 getCidInfo (func 0x10) reply.

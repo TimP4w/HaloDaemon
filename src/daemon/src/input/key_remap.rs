@@ -51,6 +51,12 @@ impl KeyRemapEngine {
 
     async fn process_event(&self, event: ButtonEvent, held: &mut HashMap<(String, u16), u16>) {
         let Some(mappings) = self.get_mappings(&event.device_id).await else {
+            log::trace!(
+                "KeyRemapEngine: no mappings for device={} event pressed={:?} released={:?}",
+                event.device_id,
+                event.pressed,
+                event.released
+            );
             return;
         };
 
@@ -61,6 +67,10 @@ impl KeyRemapEngine {
                 .layer_shift_active
                 .load(std::sync::atomic::Ordering::Relaxed);
             let action = Self::resolve(mappings.iter().find(|m| m.cid == cid), layer_shift);
+            log::trace!(
+                "KeyRemapEngine: release cid={cid} device={} layer_shift={layer_shift} action={action:?}",
+                event.device_id
+            );
             self.handle_button(action, false, cid, &event.device_id, held)
                 .await;
         }
@@ -71,6 +81,10 @@ impl KeyRemapEngine {
                 .layer_shift_active
                 .load(std::sync::atomic::Ordering::Relaxed);
             let action = Self::resolve(mappings.iter().find(|m| m.cid == cid), layer_shift);
+            log::trace!(
+                "KeyRemapEngine: press cid={cid} device={} layer_shift={layer_shift} action={action:?}",
+                event.device_id
+            );
             self.handle_button(action, true, cid, &event.device_id, held)
                 .await;
         }
