@@ -36,6 +36,7 @@ lighting:
   mode_software: SOFTWARE
   mode_canvas_engine: MOTORE CANVAS
   zone_caps: ZONA
+  all_zones: Tutte
   paint_hint: Clicca o trascina sui LED per dipingerli
   clear: Cancella
   fill_zone: Riempi zona
