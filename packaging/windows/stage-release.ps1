@@ -28,12 +28,12 @@
 [CmdletBinding()]
 param(
     [string]$Ucrt64     = "C:\msys64\ucrt64",
-    [string]$TargetDir  = (Join-Path $PSScriptRoot "..\src\target\release"),
+    [string]$TargetDir  = (Join-Path $PSScriptRoot "..\..\src\target\release"),
     [string]$StagingDir = (Join-Path $PSScriptRoot "staging")
 )
 
 $ErrorActionPreference = "Stop"
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 
 function Fail($msg) { Write-Error $msg; exit 1 }
 
