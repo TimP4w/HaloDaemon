@@ -9,6 +9,27 @@
 
 use halod_shared::types::RgbColor;
 
+// ── Zone location → name ────────────────────────────────────────────────────
+
+/// Map a COLOR_LED_EFFECTS zone location (u16) to a human-readable name.
+/// Reference: Solaar LEDZoneLocations.
+pub fn color_led_location_name(location: u16) -> &'static str {
+    match location {
+        0x0001 => "Primary",
+        0x0002 => "Logo",
+        0x0003 => "Left Side",
+        0x0004 => "Right Side",
+        0x0005 => "Combined",
+        0x0006 => "Primary 1",
+        0x0007 => "Primary 2",
+        0x0008 => "Primary 3",
+        0x0009 => "Primary 4",
+        0x000A => "Primary 5",
+        0x000B => "Primary 6",
+        _ => "Unknown",
+    }
+}
+
 // ── Effect parameter slots ────────────────────────────────────────────────────
 
 /// Which parameters an effect ID uses, and at what byte offset in the 10-byte
@@ -124,15 +145,16 @@ pub fn parse_color_led_zone_count(reply: &[u8]) -> Option<u8> {
     Some(reply[0])
 }
 
-/// Parse zone location and effect count from GetZoneInfo (fn 0x10).
+/// Parse zone index, location, and effect count from GetZoneInfo (fn 0x10).
 /// Reply layout: `[index, location_hi, location_lo, count, caps_hi, caps_lo]`
-pub fn parse_color_led_zone_info(reply: &[u8]) -> Option<(u16, u8)> {
+pub fn parse_color_led_zone_info(reply: &[u8]) -> Option<(u8, u16, u8)> {
     if reply.len() < 4 {
         return None;
     }
+    let zone_index = reply[0];
     let location = u16::from_be_bytes([reply[1], reply[2]]);
     let count = reply[3];
-    Some((location, count))
+    Some((zone_index, location, count))
 }
 
 /// Parse a single effect-table entry from GetZoneEffectInfo (fn 0x20).
@@ -188,8 +210,8 @@ mod tests {
 
     #[test]
     fn parse_zone_info_valid() {
-        let reply = [0u8, 0x00, 0x01, 5u8]; // location=1 (Primary), count=5
-        assert_eq!(parse_color_led_zone_info(&reply), Some((1, 5)));
+        let reply = [0u8, 0x00, 0x02, 5u8]; // zone_index=0, location=2 (Logo), count=5
+        assert_eq!(parse_color_led_zone_info(&reply), Some((0, 2, 5)));
     }
 
     #[test]

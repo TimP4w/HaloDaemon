@@ -161,9 +161,9 @@ impl Hidpp20 {
         }
     }
 
-    /// Zone location and effect count for zone `z` (GetZoneInfo fn 0x10).
-    /// Returns `(location, effect_count)`.
-    pub async fn color_led_zone_info(&self, z: u8) -> Option<(u16, u8)> {
+    /// Zone index, location, and effect count for zone `z` (GetZoneInfo fn 0x10).
+    /// Returns `(zone_index, location, effect_count)`.
+    pub async fn color_led_zone_info(&self, z: u8) -> Option<(u8, u16, u8)> {
         let idx = self.idx(feature::COLOR_LED_EFFECTS)?;
         match self.call(idx, CLED_GET_ZONE_INFO, &[z, 0xFF, 0x00]).await {
             Ok(r) => color_led::parse_color_led_zone_info(&r),
@@ -202,6 +202,11 @@ impl Hidpp20 {
             .idx(feature::COLOR_LED_EFFECTS)
             .ok_or_else(|| anyhow::anyhow!("No COLOR_LED_EFFECTS feature"))?;
         let payload = color_led::encode_color_led_set_effect_static(zone_idx, slot, color);
+        log::debug!(
+            "COLOR_LED SetEffect idx={idx} fn=0x30 zone_idx={zone_idx:#04x} slot={slot} color=({:02x},{:02x},{:02x}) payload={:02x?}",
+            color.r, color.g, color.b,
+            &payload[..]
+        );
         self.call(idx, CLED_SET_EFFECT, &payload).await?;
         Ok(())
     }

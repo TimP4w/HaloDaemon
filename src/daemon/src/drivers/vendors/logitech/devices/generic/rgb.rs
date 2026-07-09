@@ -52,10 +52,10 @@ impl LogitechDevice {
     // ── RGB write helpers ─────────────────────────────────────────────────────
 
     pub(super) async fn rgb_set_static(&self, color: RgbColor) -> Result<()> {
-        let (zone_count, static_slots, wire) = {
+        let (zones, static_slots, wire) = {
             let state = self.state.lock().await;
             (
-                state.rgb.rgb_zones.len(),
+                state.rgb.rgb_zones.clone(),
                 state.rgb.rgb_static_slots.clone(),
                 state.rgb.rgb_wire,
             )
@@ -63,8 +63,9 @@ impl LogitechDevice {
         let hidpp = self.hidpp2().await;
 
         log::debug!(
-            "[{}] rgb_set_static wire={wire:?} zones={zone_count} color={:02x}{:02x}{:02x}",
+            "[{}] rgb_set_static wire={wire:?} zones={} color={:02x}{:02x}{:02x}",
             self.id,
+            zones.len(),
             color.r,
             color.g,
             color.b
@@ -80,14 +81,18 @@ impl LogitechDevice {
             RgbWire::ColorLedEffects => {
                 let mut last_err = None;
                 let mut ok_count = 0u8;
-                for z in 0..zone_count as u8 {
-                    let slot = static_slots.get(z as usize).copied().unwrap_or(0);
-                    match hidpp.color_led_set_static_effect(z, slot, color).await {
+                for (i, zone) in zones.iter().enumerate() {
+                    let zone_idx = i as u8;
+                    let slot = static_slots.get(i).copied().unwrap_or(0);
+                    match hidpp
+                        .color_led_set_static_effect(zone_idx, slot, color)
+                        .await
+                    {
                         Ok(()) => ok_count += 1,
                         Err(e) => {
                             log::warn!(
-                                "[{}] COLOR_LED SetEffect zone={z} slot={slot} failed: {e}",
-                                self.id
+                                "[{}] COLOR_LED SetEffect zone={} zone_idx={zone_idx} slot={slot} failed: {e}",
+                                zone.id, self.id
                             );
                             last_err = Some(e);
                         }
@@ -102,13 +107,15 @@ impl LogitechDevice {
             RgbWire::RgbEffects => {
                 let mut last_err = None;
                 let mut ok_count = 0u8;
-                for z in 0..zone_count as u8 {
-                    let slot = static_slots.get(z as usize).copied().unwrap_or(0);
-                    match hidpp.rgb_set_static_effect(z, slot, color).await {
+                for (i, zone) in zones.iter().enumerate() {
+                    let slot = static_slots.get(i).copied().unwrap_or(0);
+                    let zone_idx = i as u8;
+                    match hidpp.rgb_set_static_effect(zone_idx, slot, color).await {
                         Ok(()) => ok_count += 1,
                         Err(e) => {
                             log::warn!(
-                                "[{}] RGB SetEffect zone={z} slot={slot} failed: {e}",
+                                "[{}] RGB SetEffect zone={} zone_idx={zone_idx} failed: {e}",
+                                zone.id,
                                 self.id
                             );
                             last_err = Some(e);
@@ -182,20 +189,20 @@ impl LogitechDevice {
             st.rgb.rgb_static_slots.clone()
         };
         for (zone_id, led_colors) in zones {
-            let Some(&zone_idx) = zone_map.get(zone_id) else {
+            let Some(&seq_idx) = zone_map.get(zone_id) else {
                 continue;
             };
             if let Some(&color) = led_colors.values().next() {
-                let slot = static_slots.get(zone_idx).copied().unwrap_or(0);
+                let slot = static_slots.get(seq_idx).copied().unwrap_or(0);
                 let result = match wire {
                     RgbWire::ColorLedEffects => {
                         hidpp
-                            .color_led_set_static_effect(zone_idx as u8, slot, color)
+                            .color_led_set_static_effect(seq_idx as u8, slot, color)
                             .await
                     }
                     _ => {
                         hidpp
-                            .rgb_set_static_effect(zone_idx as u8, slot, color)
+                            .rgb_set_static_effect(seq_idx as u8, slot, color)
                             .await
                     }
                 };
@@ -204,7 +211,7 @@ impl LogitechDevice {
                         RgbWire::ColorLedEffects => "COLOR_LED",
                         _ => "RGB_EFFECTS",
                     };
-                    log::warn!("[{}] {label} zone={zone_idx} failed: {e}", self.id);
+                    log::warn!("[{}] {label} zone={zone_id} failed: {e}", self.id);
                 }
             }
         }
@@ -217,7 +224,7 @@ impl LogitechDevice {
         let transformed = self.transform_perled_map(zones_map);
         let zones = &*transformed;
         let hidpp = self.hidpp2().await;
-        let (wire, zone_map) = {
+        let (wire, zone_map, has_pk) = {
             let state = self.state.lock().await;
             let zone_map: HashMap<String, usize> = state
                 .rgb
@@ -226,10 +233,11 @@ impl LogitechDevice {
                 .enumerate()
                 .map(|(i, z)| (z.id.clone(), i))
                 .collect();
-            (state.rgb.rgb_wire, zone_map)
+            let has_pk = state.features.contains_key(&feature::PER_KEY_LIGHTING_V2);
+            (state.rgb.rgb_wire, zone_map, has_pk)
         };
 
-        if let RgbWire::PerKey = wire {
+        if has_pk {
             if self.is_keyboard() {
                 let pairs = collect_pairs(zones, &zone_map, None);
                 if let Err(e) = hidpp.write_per_key_pairs(&pairs).await {
@@ -426,18 +434,22 @@ impl LogitechDevice {
     }
 
     /// Build zones via COLOR_LED_EFFECTS (0x8070) — same shape as
-    /// `rgb_build_zones` but uses the 0x8070 function codes.
+    /// `rgb_build_zones` but uses the 0x8070 function codes and derives
+    /// zone names / LED positions from the firmware-reported location.
     async fn color_led_build_zones(
         &self,
         hidpp: &Hidpp20,
         zone_count: u8,
         keyboard_layout: &KeyboardLayout,
     ) -> (Vec<RgbZone>, Vec<u8>) {
+        use crate::drivers::vendors::logitech::protocols::hidpp::v2::rgb::color_led::color_led_location_name;
+
         let mut zones = Vec::new();
         let mut static_slots = Vec::new();
 
         for z in 0..zone_count {
-            let (location, effect_count) = hidpp.color_led_zone_info(z).await.unwrap_or((0, 0));
+            let (_, location, effect_count) =
+                hidpp.color_led_zone_info(z).await.unwrap_or((z, 0, 0));
             log::debug!(
                 "[{}] COLOR_LED zone={z} location={location} effect_count={effect_count}",
                 self.id
@@ -462,7 +474,7 @@ impl LogitechDevice {
                 id: format!("zone_{z}"),
                 name: zone_info
                     .map(|zi| zi.name.to_string())
-                    .unwrap_or_else(|| format!("Zone {z}")),
+                    .unwrap_or_else(|| color_led_location_name(location).to_string()),
                 topology: override_keyboard_layout(
                     zone_info
                         .map(|zi| zi.topology.clone())
