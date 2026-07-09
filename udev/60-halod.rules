@@ -46,6 +46,8 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3014", TAG+="uacce
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c547", TAG+="uaccess"
 # Logitech G502 X Plus (wired)
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c095", TAG+="uaccess"
+# Logitech G502 Hero (wired-only)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c08b", TAG+="uaccess"
 # Logitech G PRO X TKL (wired)
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c352", TAG+="uaccess"
 # Logitech G560 Gaming Speaker
