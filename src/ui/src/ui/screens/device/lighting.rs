@@ -234,9 +234,13 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, 
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                 widgets::caps_label_inline(ui, &t!("lighting.zone_caps"));
-                for z in &rgb.descriptor.zones {
-                    if widgets::pill(ui, &z.name, z.id == st.lighting.zone) {
-                        st.lighting.zone = z.id.clone();
+                if matches!(mode, Mode::Solid | Mode::Direct(_)) {
+                    let _ = widgets::pill(ui, &t!("lighting.all_zones"), true);
+                } else {
+                    for z in &rgb.descriptor.zones {
+                        if widgets::pill(ui, &z.name, z.id == st.lighting.zone) {
+                            st.lighting.zone = z.id.clone();
+                        }
                     }
                 }
             });

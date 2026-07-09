@@ -439,12 +439,20 @@ pub(super) async fn dispatch_button_notification(
             st.features.get(&feature::MOUSE_BUTTON_SPY).copied(),
         )
     };
-    let current = if Some(sub_id) == rc_idx {
-        parse_diverted_buttons_event(data)
-    } else if Some(sub_id) == gkey_idx || Some(sub_id) == spy_idx {
-        parse_button_bitmap_event(data)
+    let backend = if Some(sub_id) == spy_idx {
+        "SPY"
+    } else if Some(sub_id) == gkey_idx {
+        "GKEY"
+    } else if Some(sub_id) == rc_idx {
+        "REPROG"
     } else {
         return false;
+    };
+    log::trace!("[{id}] button notify backend={backend} sub_id={sub_id:#04x} data={data:02x?}",);
+    let current = if backend == "REPROG" {
+        parse_diverted_buttons_event(data)
+    } else {
+        parse_button_bitmap_event(data)
     };
 
     let (pressed, released) = {
@@ -463,6 +471,7 @@ pub(super) async fn dispatch_button_notification(
         st.remap.prev_diverted_cids = current;
         (pressed, released)
     };
+    log::trace!("[{id}] button event: pressed={pressed:?} released={released:?}",);
     if (!pressed.is_empty() || !released.is_empty())
         && app
             .input

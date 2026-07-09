@@ -115,7 +115,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
             "Checking HID {:04x}:{:04x} path={} iface={}",
             info.vid,
             info.pid,
-            &info.path,
+            info.path,
             info.iface
         );
         let serial = (!info.serial.is_empty()).then_some(info.serial.as_str());

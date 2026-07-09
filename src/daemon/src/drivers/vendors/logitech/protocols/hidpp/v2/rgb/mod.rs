@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2012-2013 Daniel Pavel
 // SPDX-FileCopyrightText: 2014-2024 Solaar Contributors <https://pwr-solaar.github.io/Solaar/>
-//! RGB lighting features: RGB_EFFECTS (`0x8071`), PER_KEY_LIGHTING_V2
-//! (`0x8081`) and the KEYBOARD_LAYOUT_2 (`0x4540`) country-code read.
+//! RGB lighting features: RGB_EFFECTS (`0x8071`), COLOR_LED_EFFECTS (`0x8070`),
+//! PER_KEY_LIGHTING_V2 (`0x8081`) and the KEYBOARD_LAYOUT_2 (`0x4540`)
+//! country-code read.
 //!
-//! Codecs live in [`effects`] (firmware effects, static block, reply parsers)
-//! and [`per_key`] (the streaming frame encoder); the typed [`Hidpp20`]
-//! operations that drive them live here. Device-agnostic.
+//! Codecs live in [`effects`] (firmware effects, static block, reply parsers),
+//! [`color_led`] (0x8070 zone/effect codecs), and [`per_key`] (the streaming
+//! frame encoder); the typed [`Hidpp20`] operations that drive them live here.
+//! Device-agnostic.
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -15,6 +17,7 @@ use halod_shared::types::{EffectParamValue, KeyboardLayout, RgbColor};
 
 use super::{feature, Hidpp20};
 
+pub mod color_led;
 pub mod effects;
 pub mod per_key;
 
@@ -25,6 +28,14 @@ pub use per_key::PkFrameCache;
 const RGB_GET_INFO: u8 = 0x00;
 const RGB_SET_EFFECT: u8 = 0x10;
 const RGB_SET_SW_CONTROL: u8 = 0x50;
+
+// ── COLOR_LED_EFFECTS function codes ─────────────────────────────────────────
+const CLED_GET_INFO: u8 = 0x00;
+const CLED_GET_ZONE_INFO: u8 = 0x10;
+const CLED_GET_ZONE_EFFECT_INFO: u8 = 0x20;
+const CLED_SET_EFFECT: u8 = 0x30;
+const CLED_GET_SW_CONTROL: u8 = 0x70;
+const CLED_SET_SW_CONTROL: u8 = 0x80;
 
 impl Hidpp20 {
     /// Read the keyboard country code via KEYBOARD_LAYOUT_2 (`0x4540`).
@@ -133,6 +144,78 @@ impl Hidpp20 {
     pub async fn rgb_enable_sw_control(&self) {
         if let Some(idx) = self.idx(feature::RGB_EFFECTS) {
             let _ = self.call(idx, RGB_SET_SW_CONTROL, &[0x01, 0x01]).await;
+        }
+    }
+
+    // ── COLOR_LED_EFFECTS (0x8070) operations ───────────────────────────────
+
+    /// Total number of COLOR_LED_EFFECTS lighting zones (GetInfo fn 0x00).
+    pub async fn color_led_zone_count(&self) -> Option<u8> {
+        let idx = self.idx(feature::COLOR_LED_EFFECTS)?;
+        match self.call(idx, CLED_GET_INFO, &[]).await {
+            Ok(r) => color_led::parse_color_led_zone_count(&r),
+            Err(e) => {
+                log::warn!("[HID++2.0] COLOR_LED GetInfo failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Zone index, location, and effect count for zone `z` (GetZoneInfo fn 0x10).
+    /// Returns `(zone_index, location, effect_count)`.
+    pub async fn color_led_zone_info(&self, z: u8) -> Option<(u8, u16, u8)> {
+        let idx = self.idx(feature::COLOR_LED_EFFECTS)?;
+        match self.call(idx, CLED_GET_ZONE_INFO, &[z, 0xFF, 0x00]).await {
+            Ok(r) => color_led::parse_color_led_zone_info(&r),
+            Err(e) => {
+                log::warn!("[HID++2.0] COLOR_LED GetZoneInfo(z={z}) failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Effect id stored in zone `z` slot `slot` (GetZoneEffectInfo fn 0x20).
+    pub async fn color_led_effect_id(&self, z: u8, slot: u8) -> Option<u16> {
+        let idx = self.idx(feature::COLOR_LED_EFFECTS)?;
+        match self
+            .call(idx, CLED_GET_ZONE_EFFECT_INFO, &[z, slot, 0x00])
+            .await
+        {
+            Ok(r) => color_led::parse_color_led_effect_entry(&r),
+            Err(e) => {
+                log::warn!(
+                    "[HID++2.0] COLOR_LED GetZoneEffectInfo(z={z}, slot={slot}) failed: {e}"
+                );
+                None
+            }
+        }
+    }
+
+    /// Apply a static colour to one zone via COLOR_LED_EFFECTS SetEffect (fn 0x30).
+    pub async fn color_led_set_static_effect(
+        &self,
+        zone_idx: u8,
+        slot: u8,
+        color: RgbColor,
+    ) -> Result<()> {
+        let idx = self
+            .idx(feature::COLOR_LED_EFFECTS)
+            .ok_or_else(|| anyhow::anyhow!("No COLOR_LED_EFFECTS feature"))?;
+        let payload = color_led::encode_color_led_set_effect_static(zone_idx, slot, color);
+        log::debug!(
+            "COLOR_LED SetEffect idx={idx} fn=0x30 zone_idx={zone_idx:#04x} slot={slot} color=({:02x},{:02x},{:02x}) payload={:02x?}",
+            color.r, color.g, color.b,
+            &payload[..]
+        );
+        self.call(idx, CLED_SET_EFFECT, &payload).await?;
+        Ok(())
+    }
+
+    /// Claim software LED control via COLOR_LED_EFFECTS SetSWControl (fn 0x80).
+    /// Best-effort; no-op when the device lacks COLOR_LED_EFFECTS.
+    pub async fn color_led_enable_sw_control(&self) {
+        if let Some(idx) = self.idx(feature::COLOR_LED_EFFECTS) {
+            let _ = self.call(idx, CLED_SET_SW_CONTROL, &[0x01]).await;
         }
     }
 
