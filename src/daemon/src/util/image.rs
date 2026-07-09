@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Image resize/compression for the LCD path — reducing an uploaded image to a
 //! panel's native resolution. Depends on the `image`/`gif` crates, so it stays
 //! daemon-side; the pure filename/format helpers live in

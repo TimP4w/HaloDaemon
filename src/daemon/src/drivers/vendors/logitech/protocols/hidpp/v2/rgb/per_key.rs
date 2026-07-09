@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Pure HID++ frame encoder for PER_KEY_LIGHTING (feature 0x8081).
 //!
 //! Naive streaming sends one `setIndividualRGBZones` packet per 4 keys, which

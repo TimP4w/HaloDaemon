@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "windows")]
 
 //! Temperature-sensor device for a detected SuperIO chip. Polls the chip's

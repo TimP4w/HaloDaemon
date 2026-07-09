@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 pub mod control_hub;
 pub mod f_fan;
 pub mod kraken;

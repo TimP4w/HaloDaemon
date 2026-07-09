@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Save/load/delete named LCD templates under `{config_dir}/lcd/<name>.yaml`.
 //! Mirrors the LCD image library's validation and IPC push patterns (see `usecases::lcd`).
 

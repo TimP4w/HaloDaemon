@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;

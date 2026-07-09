@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::Result;
 use halod_shared::types::{AppRule, VisibilityState, DEFAULT_PROFILE_NAME};
 // Types shared with wire protocol; re-exported for backward-compat.

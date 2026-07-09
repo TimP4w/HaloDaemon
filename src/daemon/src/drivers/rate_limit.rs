@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Per-device write-rate enforcement, generic over any transport.
 
 use std::collections::VecDeque;

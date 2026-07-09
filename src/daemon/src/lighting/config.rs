@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use crate::config::Config;
 use halod_shared::types::{CanvasState, LightingTargets, DEFAULT_PROFILE_NAME};
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use tokio::sync::mpsc;
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use futures_util::StreamExt as _;
 use tokio::sync::mpsc;
 use zbus::zvariant::Value;

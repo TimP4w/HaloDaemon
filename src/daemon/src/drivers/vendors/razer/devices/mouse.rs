@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Generic Razer mouse driver — one `Device` impl over the shared [`Razer`]
 //! handle, parameterised by a per-model [`MouseSpec`]. Adding another Razer
 //! mouse is a new table row, not a new file.

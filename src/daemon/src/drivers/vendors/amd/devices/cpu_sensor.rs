@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "windows")]
 
 //! AMD Ryzen (Zen, family 17h+) CPU temperature sensor.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /// A virtual PulseAudio/PipeWire sink created on behalf of a device and looped
 /// into that device's physical sink. Drivers obtain one via [`register_sink`]
 /// and drive its volume with [`Sink::set_volume`]; they must call

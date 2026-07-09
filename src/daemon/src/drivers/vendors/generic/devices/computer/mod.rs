@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! A synthetic device representing the host PC / OS itself. It is not tied to a
 //! physical transport: a [`crate::registry::discovery::TransportScanner`] constructs and
 //! registers it during discovery.

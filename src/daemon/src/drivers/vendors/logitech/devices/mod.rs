@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Logitech HID++ devices: the generic feature-driven device (mice, keyboards,
 //! headsets — anything speaking HID++ 2.0), the Unifying/Lightspeed receiver that
 //! hosts wireless children, and the G560 speaker.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Report-rate (`REPORT_RATE` 0x8060 / `EXT_REPORT_RATE` 0x8061) for
 //! `LogitechDevice` — the `ChoiceCapability` impl and its `init_report_rate`.
 //! Rate tables and wire encoding live in the protocol; this file only mirrors

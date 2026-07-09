@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 pub mod nzxt;
 pub mod nzxt_control_hub;
 pub mod nzxt_kraken;

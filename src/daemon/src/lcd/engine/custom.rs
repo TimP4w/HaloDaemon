@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The data-driven "custom" LCD template: composites a widget list over a
 //! procedural or image backdrop, both configured by [`CustomTemplateDef`]
 //! (edited by the GUI's LCD editor and passed in as the `widgets_json` param).

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 mod config;
 mod constants;
 mod cooling;

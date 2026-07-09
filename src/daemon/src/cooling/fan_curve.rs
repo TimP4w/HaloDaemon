@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Fan curve engine: a control loop that, per assigned fan, interpolates a
 //! target duty from the curve against its sensor and writes it via
 //! `FanCapability::set_duty`. Each fan's `FanCurveStatus` is published to

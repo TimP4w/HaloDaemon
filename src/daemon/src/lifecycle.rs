@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Idle-shutdown: a killed (not cleanly quit) tray never sends
 //! `DaemonCommand::Shutdown`, so the daemon watches its own client count
 //! instead and shuts itself down once empty for

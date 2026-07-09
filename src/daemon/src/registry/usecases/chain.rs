@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! IPC use cases for chainable ARGB channels. Each handler forwards to
 //! [`crate::drivers::ChainCapability`] then persists + broadcasts.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /// Key remap engine — subscribes to ButtonEvents from diverted HID++ buttons,
 /// resolves the configured action for each CID, and executes it.
 ///

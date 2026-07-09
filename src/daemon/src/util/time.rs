@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Milliseconds since the Unix epoch. Saturates to 0 if the clock is before the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `get_debug_info` — snapshot of system + device + HID-bus state for the debug
 //! UI. Extra fields are best-effort and absent where they don't apply (e.g.
 //! PawnIO is Windows-only). Response goes back to the requesting client on the

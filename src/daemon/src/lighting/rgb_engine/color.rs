@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Shared by the pixmap (canvas) and direct effect paths so a direct and a
 // pixmap rendering of equal params match on the wire.
 #[derive(Debug, Clone, Copy)]

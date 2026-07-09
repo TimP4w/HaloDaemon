@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "linux")]
 //! Linux host-metrics backend, reading the numbers from `/proc`.
 

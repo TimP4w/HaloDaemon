@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /// Encode a string as a NUL-terminated UTF-16 buffer for the Win32 `*W` APIs.
 pub(crate) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()

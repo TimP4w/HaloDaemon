@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! User-visible notifications.
 //!
 //! Two responsibilities, intentionally bundled in one helper:

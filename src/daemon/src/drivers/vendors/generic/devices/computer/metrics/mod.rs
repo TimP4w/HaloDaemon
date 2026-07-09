@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Host metrics for the [`super::ComputerDevice`]: CPU load, memory usage, CPU
 //! frequency, and uptime, surfaced as read-only [`Sensor`]s. The pure parsers
 //! and the [`HostMetrics`] -> [`Sensor`] mapping live here (unit-tested); the

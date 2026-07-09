@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The shared HID++ 2.0 init spine — feature enumeration and the device-name
 //! read. Capability-specific initialisation lives next to each capability impl
 //! (`battery::init_battery`, `rgb::init_rgb`, `onboard::init_dpi`, …).

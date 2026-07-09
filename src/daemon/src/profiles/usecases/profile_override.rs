@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::{bail, Result};
 use std::sync::Arc;
 

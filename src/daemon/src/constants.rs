@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Daemon-only string constants that aren't part of the wire-facing
 //! `halod_shared::app` identity (see that module for cross-process constants).
 

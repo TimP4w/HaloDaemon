@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /// Synchronous rusb bulk-OUT transport for devices that require a separate USB
 /// bulk endpoint for large data transfers (e.g. NZXT Kraken LCD image upload).
 ///

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Shared helpers for device drivers: stable-ID construction, serial normalisation, the `WireDevice` builder, per-LED frame assembly, and keyboard layout utilities.
 
 use std::collections::HashMap;

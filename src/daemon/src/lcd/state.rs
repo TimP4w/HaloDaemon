@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{watch, RwLock};

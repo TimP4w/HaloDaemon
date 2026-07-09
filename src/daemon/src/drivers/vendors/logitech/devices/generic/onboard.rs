@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Onboard-profile flash management and DPI capabilities for `LogitechDevice` —
 //! the `OnboardProfilesCapability` and `DpiCapability` impls, the active-profile
 //! reconciler, and the background DPI watcher. Sector I/O, mode reads and DPI

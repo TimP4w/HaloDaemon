@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Capability traits a `Device` can expose, plus the `Controller`,
 //! `TransportSwitchable`, and chain-related traits. Re-exported from
 //! `drivers/mod.rs` so call sites keep using `crate::drivers::*`.

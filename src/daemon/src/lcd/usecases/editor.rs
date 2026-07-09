@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `render_lcd_editor` — on-demand editor preview. Renders each widget of a
 //! `CustomTemplateDef` to its own sprite bitmap against the device's canvas and
 //! replies to the requesting client with an `lcd_editor_render` frame. The GUI

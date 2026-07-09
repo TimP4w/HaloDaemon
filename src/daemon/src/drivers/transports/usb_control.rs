@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /// Synchronous rusb vendor-control transport (e.g. DDC/CI over a USB Billboard
 /// hub controller). Transfers are blocking; callers on async tasks must ensure
 /// the timeout is short enough not to stall the executor thread.

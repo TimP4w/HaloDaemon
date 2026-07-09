@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "linux")]
 //! Linux keep-awake via a systemd-logind inhibitor lock. Holding the file
 //! descriptor returned by `Inhibit` keeps the lock; dropping it releases.

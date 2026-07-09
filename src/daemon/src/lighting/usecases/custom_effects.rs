@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Save/load/delete named custom Designer effects.
 
 use std::collections::HashMap;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "linux")]
 //! Linux power-profile backend. Talks to power-profiles-daemon over the system
 //! bus (the `ActiveProfile` property), falling back to the `powerprofilesctl`

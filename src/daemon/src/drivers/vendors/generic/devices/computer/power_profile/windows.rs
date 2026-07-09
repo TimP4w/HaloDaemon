@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "windows")]
 //! Windows power-profile backend. Uses the built-in `powercfg` tool (available
 //! on Windows 10 and later) to read and switch the active power plan.

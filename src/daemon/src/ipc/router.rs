@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use halod_shared::commands::DaemonCommand;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

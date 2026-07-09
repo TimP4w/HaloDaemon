@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Linux SMBus backend — chipset and GPU i2c buses through the i2c-dev ioctl interface (`/dev/i2c-N`).
 
 use super::*;

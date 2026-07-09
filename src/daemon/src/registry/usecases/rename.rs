@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Unified device-rename IPC. Routes chain-link children (whose name lives in
 //! the parent's `ChainHost`) through `ChainCapability::rename_chain_link`, and
 //! every other device through its `DeviceRecord.name` in the persisted config.

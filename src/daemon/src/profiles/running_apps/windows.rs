@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "windows")]
 
 //! Motherboard identity lookup (Windows DMI/SMBIOS via WMI) and per-board

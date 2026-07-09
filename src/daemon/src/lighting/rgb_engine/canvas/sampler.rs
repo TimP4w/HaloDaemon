@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use halod_shared::types::{RgbColor, RgbZone, SamplingMode, ZoneTopology};
 use tiny_skia::Pixmap;
 

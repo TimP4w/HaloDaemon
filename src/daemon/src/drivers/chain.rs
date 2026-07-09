@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Vendor-agnostic chain machinery.
 //!
 //! Parent drivers that expose chainable ARGB channels embed a [`ChainHost`]

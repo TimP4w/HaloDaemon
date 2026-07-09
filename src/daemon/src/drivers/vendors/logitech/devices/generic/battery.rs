@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Battery for `LogitechDevice` — the `BatteryCapability` impl and the voltage
 //! re-poll loop. Source detection and decoding live in the protocol
 //! ([`Hidpp20::battery_source`] / [`Hidpp20::read_battery`]); this file only

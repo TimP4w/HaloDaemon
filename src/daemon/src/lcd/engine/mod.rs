@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 pub(crate) mod custom;
 mod templates;
 pub mod video;

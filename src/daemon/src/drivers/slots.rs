@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `Slot`/`KvStateCache` state cells and the per-capability state-slot types.
 //! Re-exported from `drivers/mod.rs` so call sites keep using `crate::drivers::*`.
 

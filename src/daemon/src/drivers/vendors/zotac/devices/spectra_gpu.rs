@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::{Arc, OnceLock};

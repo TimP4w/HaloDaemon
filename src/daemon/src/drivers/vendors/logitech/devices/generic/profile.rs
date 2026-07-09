@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Logitech device profiles — the static per-model descriptor table, WPID/PID
 //! constants, keyboard-layout statics, and device registration.
 

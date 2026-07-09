@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! LED position layout for Logitech RGB zones — mouse linear strips and
 //! keyboard per-key grids.
 

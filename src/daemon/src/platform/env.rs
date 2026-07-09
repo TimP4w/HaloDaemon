@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Linux `PATH` self-repair: a dev shell, systemd, or a GUI can launch the
 //! daemon with a `PATH` missing the Nix/FHS dirs `pactl`/`nvidia-smi`/
 //! `powerprofilesctl` live in. Augmenting our own `PATH` at startup fixes both

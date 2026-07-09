@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "windows")]
 
 //! NVIDIA GPU temperature sensors on Windows, sourced via NvAPI

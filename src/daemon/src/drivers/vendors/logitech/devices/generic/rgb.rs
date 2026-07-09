@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! RGB lighting for `LogitechDevice` — the `RgbCapability` implementation and
 //! its static / native-effect / per-LED write helpers. All wire work is done
 //! through the protocol's typed RGB operations ([`Hidpp20`]); this file owns the

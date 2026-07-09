@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use crate::config::Config;
 use crate::lighting::config::ProfileLighting;
 use halod_shared::types::DEFAULT_PROFILE_NAME;

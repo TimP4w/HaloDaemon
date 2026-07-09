@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The generic Logitech HID++ 2.0 device: feature-driven capability composition.
 //!
 //! Discovery is vid/pid-only (see [`profile`]); on init the device enumerates its

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! NvAPI GPU i2c transport.
 //!
 //! NVIDIA GPU i2c buses are driven through `nvapi64.dll`. NvAPI is a process

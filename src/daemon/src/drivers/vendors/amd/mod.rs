@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "windows")]
 
 //! AMD CPU support — Ryzen (Zen, family 17h/19h/1Ah) on-die thermal sensors.

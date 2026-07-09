@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
 use serde_json::{json, Value};

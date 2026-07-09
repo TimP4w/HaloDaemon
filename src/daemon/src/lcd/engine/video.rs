@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Per-device looped video playback: an `ffmpeg` subprocess decodes a local
 //! file into RGBA frames handed to the device's `stream_frame`. Cross-platform
 //! — on Windows a bundled `ffmpeg.exe` beside the daemon is preferred, else

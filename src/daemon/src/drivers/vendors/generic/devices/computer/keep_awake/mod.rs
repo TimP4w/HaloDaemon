@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Keep-awake toggle for the [`super::ComputerDevice`]: while on, the host is
 //! prevented from idling/sleeping. Exposed as a `Boolean`. Linux holds a
 //! systemd-logind inhibitor lock; Windows uses `SetThreadExecutionState`.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Vendor-agnostic ARGB chain link.
 
 use std::sync::Arc;

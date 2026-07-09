@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Startup self-elevation (Windows).
 //!
 //! Chipset SMBus access (DRAM and GPU RGB via PawnIO) requires Administrator

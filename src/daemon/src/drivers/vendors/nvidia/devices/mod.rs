@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! NVIDIA GPU support — temperature sensors via NvAPI on Windows and the
 //! `nvidia-smi` CLI on Linux.
 

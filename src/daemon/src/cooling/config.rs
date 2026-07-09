@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use serde::{Deserialize, Serialize};
 
 /// A single fan curve assignment: links a fan device to a temperature sensor and curve points.

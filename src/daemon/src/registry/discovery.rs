@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Discovery is driven by two inventory-registered types:
 //
 // - `TransportScanner` — submitted by each transport; `discover_devices()` loops over all of them.

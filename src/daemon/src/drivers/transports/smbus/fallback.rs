@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Stub SMBus backend for platforms without an i2c-dev or PawnIO/NvAPI path.
 //! Every operation reports "not supported"; enumeration yields no buses.
 

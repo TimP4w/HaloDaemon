@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Cached device state for `LogitechDevice` — the in-memory mirror of
 //! everything queried from the hardware during `initialize`.
 //!

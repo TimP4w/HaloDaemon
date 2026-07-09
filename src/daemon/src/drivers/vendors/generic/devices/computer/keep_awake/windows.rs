@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "windows")]
 //! Windows keep-awake via `SetThreadExecutionState`. The execution state is
 //! bound to the thread that sets it, so a dedicated thread holds it for the

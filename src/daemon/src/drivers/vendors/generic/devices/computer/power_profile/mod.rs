@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! System power-profile support for the [`super::ComputerDevice`]: the canonical
 //! profile list, the platform [`PowerProfileBackend`] trait, and backend
 //! selection. The actual work lives in the platform submodules —

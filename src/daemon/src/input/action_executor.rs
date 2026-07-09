@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /// Cross-platform input injection for key remapper actions.
 ///
 /// Linux: evdev uinput — works on X11, Wayland, and headless. Requires /dev/uinput

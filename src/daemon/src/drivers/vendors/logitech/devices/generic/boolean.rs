@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Host-mode toggle for `LogitechDevice` — the `BooleanCapability` impl backed by
 //! ONBOARD_PROFILES getMode/setMode (0x01 = onboard, 0x02 = host).
 

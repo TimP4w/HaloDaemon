@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "windows")]
 
 //! One PWM fan header on a detected SuperIO chip, exposing a `FanCapability` and `FanEngineSlot`.

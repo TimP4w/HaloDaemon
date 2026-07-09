@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 pub mod common;
 pub mod computer;
 pub mod generic_argb;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Key remapping for `LogitechDevice` — the `KeyRemapCapability` impl, the
 //! notification-path button-event handlers, and the reconnect/online state
 //! machinery shared with the receiver.
