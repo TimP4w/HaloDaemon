@@ -102,6 +102,21 @@ static G502X_PLUS_DEFAULT_BUTTONS: &[(u16, ButtonAction)] = &[
     (13, ButtonAction::MomentaryDpi { dpi: 400 }),
 ];
 
+static G502X_PLUS_LED_LAYOUT: KeyLayoutSpec<'static> = KeyLayoutSpec {
+    base: StandardLayout::Tkl,
+    edits: &[],
+    cid_map: &[
+        (3, KeyId::Custom(5)),
+        (4, KeyId::Custom(7)),
+        (8, KeyId::Custom(0)),
+        (7, KeyId::Custom(1)),
+        (6, KeyId::Custom(4)),
+        (5, KeyId::Custom(6)),
+        (2, KeyId::Custom(3)),
+        (1, KeyId::Custom(2)),
+    ],
+};
+
 /// G502 Hero MOUSE_BUTTON_SPY button labels. The bitmap layout differs from the
 /// G502 X Plus — the G502 Hero scatters its buttons across different bit
 /// positions. Mapping established via trace-level logs.
@@ -153,7 +168,7 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         bitmap_button_labels: Some(G502X_PLUS_BITMAP_BUTTONS),
         bitmap_button_prefix: "Button",
         default_buttons: Some(G502X_PLUS_DEFAULT_BUTTONS),
-        key_layout: None,
+        key_layout: Some(&G502X_PLUS_LED_LAYOUT),
     },
     LogitechDeviceProfile {
         wpid: None,

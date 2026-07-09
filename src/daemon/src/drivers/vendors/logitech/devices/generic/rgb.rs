@@ -421,8 +421,27 @@ impl LogitechDevice {
         zones: &mut [RgbZone],
         state: &mut LogitechDeviceState,
     ) {
-        let low_ids = hidpp.read_pk_led_ids().await;
+        let mut low_ids = hidpp.read_pk_led_ids().await;
         log::debug!("[{}] PK bitmap low_ids: {:?}", self.id, low_ids);
+
+        if let Some(layout) = self.profile.and_then(|p| p.key_layout) {
+            let ordered: Vec<u8> = layout
+                .cid_map
+                .iter()
+                .filter_map(|(fid, _)| {
+                    let id = *fid as u8;
+                    low_ids.contains(&id).then_some(id)
+                })
+                .collect();
+            if ordered.len() == low_ids.len() {
+                low_ids = ordered;
+                log::debug!(
+                    "[{}] PK bitmap reordered via key_layout: {:?}",
+                    self.id,
+                    low_ids
+                );
+            }
+        }
 
         if low_ids.len() > 1 && zones.len() <= 1 {
             let leds = super::led_positions::led_strip_from_ids(&low_ids);
