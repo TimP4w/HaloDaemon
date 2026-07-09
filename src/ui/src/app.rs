@@ -114,4 +114,9 @@ impl App {
             depcheck_grace: ui::screens::depcheck::GraceState::default(),
         }
     }
+
+    pub(crate) fn sync_tray_background(&mut self, ctx: &egui::Context) {
+        let state = self.ui.state.borrow();
+        self.tray.sync(ctx, &state);
+    }
 }

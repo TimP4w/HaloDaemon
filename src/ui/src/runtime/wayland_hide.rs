@@ -404,6 +404,9 @@ impl ApplicationHandler<UserEvent> for WaylandApp {
             }
             return;
         }
+        if self.hidden {
+            self.app.sync_tray_background(&self.ctx);
+        }
         if !self.hidden && delay.is_zero() {
             if let Some(w) = self.window() {
                 w.request_redraw();
