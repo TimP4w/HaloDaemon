@@ -88,33 +88,73 @@ impl RangeCapability for LogitechDevice {
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
         let state = self.state.lock().await;
-        if !state.features.contains_key(&feature::SIDETONE) {
-            return None;
+        let mut ranges = Vec::new();
+
+        if state.features.contains_key(&feature::SIDETONE) {
+            ranges.push(Range {
+                key: "sidetone".into(),
+                label: "Sidetone".into(),
+                min: 0,
+                max: 100,
+                step: 1,
+                value: state.audio.sidetone.unwrap_or(0) as i32,
+                read_only: false,
+                category: "Microphone".into(),
+                start_label: None,
+                end_label: None,
+                display: Default::default(),
+                visible_when: None,
+            });
         }
-        Some(DeviceCapability::Range(vec![Range {
-            key: "sidetone".into(),
-            label: "Sidetone".into(),
-            min: 0,
-            max: 100,
-            step: 1,
-            value: state.audio.sidetone.unwrap_or(0) as i32,
-            read_only: false,
-            category: "Microphone".into(),
-            start_label: None,
-            end_label: None,
-            display: Default::default(),
-            visible_when: None,
-        }]))
+
+        if let Some(info) = state.brightness.info {
+            ranges.push(Range {
+                key: "brightness".into(),
+                label: "Brightness".into(),
+                min: info.min as i32,
+                max: info.max as i32,
+                step: 1,
+                value: state.brightness.level.unwrap_or(info.max) as i32,
+                read_only: false,
+                category: "Keyboard".into(),
+                start_label: None,
+                end_label: None,
+                display: Default::default(),
+                visible_when: None,
+            });
+        }
+
+        if ranges.is_empty() {
+            None
+        } else {
+            Some(DeviceCapability::Range(ranges))
+        }
     }
 
     async fn set_range(&self, key: &str, value: i32) -> Result<()> {
-        if key != "sidetone" {
-            anyhow::bail!("unknown range key: {key}");
+        match key {
+            "sidetone" => {
+                self.range_cache.record(key, value);
+                let level = value.clamp(0, 100) as u8;
+                self.hidpp2().await.set_sidetone(level).await?;
+                self.state.lock().await.audio.sidetone = Some(level);
+            }
+            "brightness" => {
+                let (min, max) = {
+                    let state = self.state.lock().await;
+                    let info = state
+                        .brightness
+                        .info
+                        .ok_or_else(|| anyhow::anyhow!("BRIGHTNESS_CONTROL not available"))?;
+                    (info.min, info.max)
+                };
+                let clamped = (value as u16).clamp(min, max);
+                self.hidpp2().await.set_brightness(clamped).await?;
+                self.range_cache.record(key, value);
+                self.state.lock().await.brightness.level = Some(clamped);
+            }
+            other => anyhow::bail!("unknown range key: {other}"),
         }
-        self.range_cache.record(key, value);
-        let level = value.clamp(0, 100) as u8;
-        self.hidpp2().await.set_sidetone(level).await?;
-        self.state.lock().await.audio.sidetone = Some(level);
         Ok(())
     }
 }

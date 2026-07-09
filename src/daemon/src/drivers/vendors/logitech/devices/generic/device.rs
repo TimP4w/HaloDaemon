@@ -297,6 +297,9 @@ impl Device for LogitechDevice {
         let keyboard_layout = self.init_keyboard_layout(&features).await;
         self.init_rgb(&features, &keyboard_layout, &mut state).await;
         self.init_audio(&features, &mut state).await;
+        self.init_hires_wheel(&features, &mut state).await;
+        self.init_fn_inversion(&features, &mut state).await;
+        self.init_brightness(&features, &mut state).await;
 
         log::info!(
             "[{}] {}: battery={:?}%, rate={:?}, dpi={:?}, steps={:?}",

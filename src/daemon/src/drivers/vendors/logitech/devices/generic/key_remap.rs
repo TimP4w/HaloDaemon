@@ -344,6 +344,7 @@ impl LogitechDevice {
         // GKEY exposes a getCount call; MOUSE_BUTTON_SPY has no count so all 16
         // bitmap slots are considered.
         let usable: u16 = if features.contains_key(&feature::GKEY) {
+            state.remap.uses_software_control = true;
             let count = self.hidpp2_with(features).await.gkey_count().await;
             log::debug!("[{}] GKEY: {count} G-key(s)", self.id);
             // The gkeysEvent bitmap is 16-bit, so `button_bitmap_to_cids` only
@@ -358,6 +359,7 @@ impl LogitechDevice {
             }
             usable
         } else if features.contains_key(&feature::MOUSE_BUTTON_SPY) {
+            state.remap.uses_software_control = true;
             log::debug!(
                 "[{}] MOUSE_BUTTON_SPY: registering buttons (table={})",
                 self.id,

@@ -15,7 +15,9 @@
 pub mod audio;
 pub mod battery;
 pub mod boolean;
+pub mod brightness;
 pub mod device;
+pub mod hires_wheel;
 pub mod init;
 pub mod key_remap;
 pub mod led_positions;

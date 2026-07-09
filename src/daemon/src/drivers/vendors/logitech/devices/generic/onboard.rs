@@ -361,11 +361,24 @@ pub(super) async fn reconcile_feature_notification(
     id: &str,
     reconcile_mode_on_other_address: bool,
 ) -> Option<bool> {
+    log::trace!("[{id}] notif sub_id={sub_id:#04x} address={address:#04x} data={data:02x?}");
+
     if let Some(app) = app {
         if super::key_remap::dispatch_button_notification(sub_id, address, data, state, app, id)
             .await
         {
             return None;
+        }
+    }
+
+    if let Some(hidpp) = hidpp {
+        if let Some(inverted) = hidpp.handle_fn_inversion_notif(sub_id, data) {
+            let mut st = state.lock().await;
+            if !st.fn_inversion.writeable {
+                st.fn_inversion.inverted = !inverted;
+                return Some(true);
+            }
+            return Some(false);
         }
     }
 

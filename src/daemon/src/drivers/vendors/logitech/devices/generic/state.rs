@@ -19,7 +19,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::drivers::vendors::logitech::protocols::hidpp::feature;
 use crate::drivers::vendors::logitech::protocols::hidpp::v2::audio::EqReading;
 use crate::drivers::vendors::logitech::protocols::hidpp::v2::battery::BatterySource;
 use crate::drivers::vendors::logitech::protocols::hidpp::v2::rgb::PkFrameCache;
@@ -148,13 +147,48 @@ pub(super) struct RgbCacheState {
     pub(super) pk_frame_cache: HashMap<String, PkFrameCache>,
 }
 
-/// Key-remapper cached state (REPROG_CONTROLS_V4 / 0x1b04).
+/// Key-remapper cached state.
 #[derive(Default)]
 pub(super) struct RemapState {
     pub(super) reprog_cids: Vec<ButtonDescriptor>,
     pub(super) button_mappings: Vec<ButtonMapping>,
     /// Last CID list from a divertedButtonsEvent, used to compute press/release deltas.
     pub(super) prev_diverted_cids: Vec<u16>,
+    /// When true the GKEY or MOUSE_BUTTON_SPY backend is in use; these don't
+    /// require host mode (they use a global software-control toggle).
+    pub(super) uses_software_control: bool,
+}
+
+/// Scroll wheel cached state, populated at init when the device supports it.
+#[derive(Default)]
+pub(super) struct HiresWheelState {
+    pub(super) present: bool,
+    pub(super) multi: u8,
+    pub(super) has_invert: bool,
+    pub(super) has_ratchet: bool,
+    pub(super) invert: bool,
+    pub(super) hi_res: bool,
+    pub(super) hidpp_target: bool,
+    pub(super) ratchet: bool,
+}
+
+/// Fn-inversion cached state, populated at init when the device supports it.
+#[derive(Default)]
+pub(super) struct FnInversionState {
+    pub(super) present: bool,
+    pub(super) writeable: bool,
+    pub(super) inverted: bool,
+    pub(super) default_inverted: bool,
+}
+
+/// Keyboard backlight cached state, populated at init when the device supports
+/// it. `info` is `None` when the capability is absent.
+#[derive(Default)]
+pub(super) struct BrightnessState {
+    pub(super) info:
+        Option<crate::drivers::vendors::logitech::protocols::hidpp::v2::BrightnessInfo>,
+    pub(super) level: Option<u16>,
+    pub(super) on: bool,
 }
 
 #[derive(Default)]
@@ -172,17 +206,15 @@ pub(super) struct LogitechDeviceState {
     pub(super) rgb: RgbCacheState,
     pub(super) remap: RemapState,
     pub(super) audio: AudioState,
+    pub(super) hires_wheel: HiresWheelState,
+    pub(super) fn_inversion: FnInversionState,
+    pub(super) brightness: BrightnessState,
 }
 
 impl LogitechDeviceState {
     /// Whether key remapping needs the device to be in host mode.
-    ///
-    /// Only the `REPROG_CONTROLS_V4` backend uses per-control divert, which is
-    /// gated on host mode. `GKEY` and `MOUSE_BUTTON_SPY` use a global
-    /// software-control toggle that works regardless of onboard/host mode.
     pub(super) fn key_remap_requires_host_mode(&self) -> bool {
-        !(self.features.contains_key(&feature::GKEY)
-            || self.features.contains_key(&feature::MOUSE_BUTTON_SPY))
+        !self.remap.uses_software_control
     }
 }
 
@@ -497,43 +529,27 @@ mod tests {
 
     // ── key_remap_requires_host_mode ──────────────────────────────────────
 
-    fn make_state(features: Vec<(u16, u8)>) -> LogitechDeviceState {
-        LogitechDeviceState {
-            features: Arc::new(features.into_iter().collect()),
-            ..LogitechDeviceState::default()
-        }
+    fn make_state(software_control: bool) -> LogitechDeviceState {
+        let mut s = LogitechDeviceState::default();
+        s.remap.uses_software_control = software_control;
+        s
     }
 
     #[test]
     fn remap_requires_host_mode_with_reprog_controls_only() {
-        let s = make_state(vec![(feature::REPROG_CONTROLS_V4, 1)]);
+        let s = make_state(false);
         assert!(s.key_remap_requires_host_mode());
     }
 
     #[test]
-    fn remap_does_not_require_host_mode_with_gkey() {
-        let s = make_state(vec![(feature::GKEY, 1)]);
+    fn remap_does_not_require_host_mode_with_software_control() {
+        let s = make_state(true);
         assert!(!s.key_remap_requires_host_mode());
     }
 
     #[test]
-    fn remap_does_not_require_host_mode_with_mouse_button_spy() {
-        let s = make_state(vec![(feature::MOUSE_BUTTON_SPY, 1)]);
-        assert!(!s.key_remap_requires_host_mode());
-    }
-
-    #[test]
-    fn remap_requires_host_mode_with_empty_feature_map() {
-        let s = make_state(vec![]);
-        assert!(s.key_remap_requires_host_mode());
-    }
-
-    #[test]
-    fn remap_requires_host_mode_even_with_unrelated_features() {
-        let s = make_state(vec![
-            (feature::ONBOARD_PROFILES, 1),
-            (feature::ADJUSTABLE_DPI, 1),
-        ]);
+    fn remap_requires_host_mode_by_default() {
+        let s = LogitechDeviceState::default();
         assert!(s.key_remap_requires_host_mode());
     }
 }

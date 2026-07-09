@@ -57,11 +57,11 @@ Resolving ADJUSTABLE_DPI (`0x2201`) on device `0x01`: send `10 01 00 01 22 01 00
 
 ### Feature codes (`v2/mod.rs`)
 
-ROOT `0x0000`, FEATURE_SET `0x0001`, FIRMWARE_VERSION `0x0003`, DEVICE_NAME `0x0005`, BATTERY_VOLTAGE `0x1001`, UNIFIED_BATTERY `0x1004`, ADC_MEASUREMENT `0x1F20`, ADJUSTABLE_DPI `0x2201`, KEYBOARD_LAYOUT_2 `0x4540`, REPROG_CONTROLS_V4 `0x1b04`, REPORT_RATE `0x8060`, EXT_REPORT_RATE `0x8061`, RGB_EFFECTS `0x8071`, PER_KEY_LIGHTING_V2 `0x8081`, GKEY `0x8010`, ONBOARD_PROFILES `0x8100`, MOUSE_BUTTON_SPY `0x8110`, SIDETONE `0x8300`, EQUALIZER `0x8310`. Declared but unused: `0x2202`, `0x1b10`, `0x1bc0`, `0x1b05`.
+ROOT `0x0000`, FEATURE_SET `0x0001`, FIRMWARE_VERSION `0x0003`, DEVICE_NAME `0x0005`, DEVICE_FRIENDLY_NAME `0x0007`, BATTERY_VOLTAGE `0x1001`, UNIFIED_BATTERY `0x1004`, WIRELESS_DEVICE_STATUS `0x1D4B`, ADC_MEASUREMENT `0x1F20`, HIRES_WHEEL `0x2121`, ADJUSTABLE_DPI `0x2201`, K375S_FN_INVERSION `0x40A3`, KEYBOARD_LAYOUT_2 `0x4540`, REPROG_CONTROLS_V4 `0x1b04`, BRIGHTNESS_CONTROL `0x8040`, REPORT_RATE `0x8060`, EXT_REPORT_RATE `0x8061`, RGB_EFFECTS `0x8071`, PER_KEY_LIGHTING_V2 `0x8081`, GKEY `0x8010`, ONBOARD_PROFILES `0x8100`, MOUSE_BUTTON_SPY `0x8110`, SIDETONE `0x8300`, EQUALIZER `0x8310`. Declared but unused: `0x2202`, `0x1b10`, `0x1bc0`, `0x1b05`, `0x1D4B` (WIRELESS_DEVICE_STATUS is declared for enumeration logging only).
 
-### DEVICE_NAME (`0x0005`)
+### DEVICE_NAME (`0x0005`) / DEVICE_FRIENDLY_NAME (`0x0007`)
 
-`Hidpp20::device_name` reads func `0x00` (name length) then func `0x10` + offset for up to 16 chars per chunk until the length is reached.
+`Hidpp20::device_name` reads func `0x00` (name length) then func `0x10` + offset for up to 16 chars per chunk until the length is reached. `device_friendly_name` (`0x0007`) uses the same length-then-chunk shape for newer devices (MX Keys, Craft, …) but the chunk reply **echoes the offset in byte 0**, so it copies from `reply[1..]`. `init_name` prefers `0x0007` when present and falls back to `0x0005`.
 
 ---
 
@@ -149,6 +149,45 @@ LIGHTSPEED headsets report a **cell voltage**, not a percentage (the PRO X `0x0A
 | 3..13 | DPI steps | 5 × u16 **little-endian** (`0x0000`/`0xFFFF` = unused) |
 | 13..(size−2) | button / G-button bindings | preserved verbatim on a DPI patch |
 | (size−2)..size | CRC16 | big-endian, over `bytes[0 .. size−2]` |
+
+### HIRES_WHEEL (`0x2121`) — `v2/mod.rs`
+
+Scroll-wheel resolution/direction/diversion + ratchet switch. `read_hires_wheel` reads three functions and decodes them via `parse_hires_wheel` into a `HiresWheel` struct; writes go through `set_hires_wheel_mode`, a read-modify-write of the mode byte.
+
+| Function | Bytes sent | Params | Notes |
+|----------|-----------|--------|-------|
+| getCapability (`0x00`) | `11 dd fi 01 ··` | none | reply byte 0 = ratchet multiplier; byte 1 flags: `0x08` = has-invert, `0x04` = has-ratchet |
+| getMode (`0x10`) | `11 dd fi 11 ··` | none | reply byte 0 mode bits: `0x04` = invert, `0x02` = hi-res, `0x01` = HID++ target (diversion) |
+| setMode (`0x20`) | `11 dd fi 21 <mode> 00 ··` | `[mode, 0]` | RMW: read byte 0, clear `mask`, OR in `value & mask`, write back |
+| getRatchet (`0x30`) | `11 dd fi 31 ··` | none | reply byte 0 bit `0x01` = ratchet engaged |
+
+Feature presence over-declares: a keyboard may advertise `0x2121` with no physical wheel. `read_hires_wheel` requires all three reads to succeed with ≥2 bytes, so a device that errors on getRatchet decodes to `None` and exposes no wheel controls.
+
+### K375S_FN_INVERSION (`0x40A3`) — `v2/mod.rs`
+
+F-row inversion (media keys vs F1–F12) on MX Keys / Craft-class keyboards. `parse_fn_inversion` decodes the low bit of bytes 0 (current) and 1 (default) of the getState reply.
+
+| Function | Bytes sent | Params | Notes |
+|----------|-----------|--------|-------|
+| getState (`0x00`) | `11 dd fi 01 ··` | none | reply byte 0 bit `0x01` = inverted, byte 1 bit `0x01` = default-inverted |
+| setState (`0x10`) | `11 dd fi 11 <0/1> ··` | `[0/1]` | `0x01` = F-keys send media by default |
+| stateChanged notif | `10 dd fi <data>` | — | `handle_fn_inversion_notif` reads **data byte 1** low bit |
+
+Version gate (`fn_inversion_version`, via FEATURE_SET getFeatureId byte 3): version ≥ 2 supports setState; version 1 is read-only, so the reported bit is echoed back into state on notification without a write.
+
+> Solaar's `K375sFnSwap` additionally sends a current-host prefix byte (from HOSTS_INFO) as a workaround for an MX Keys S firmware bug that reports the wrong host's state. HaloDaemon sends no prefix — reply byte 0 is the state directly — which is correct for tested devices; MX Keys S multi-host may need the prefix.
+
+### BRIGHTNESS_CONTROL (`0x8040`) — `v2/mod.rs`
+
+Keyboard backlight level + optional on/off. `parse_brightness_info` decodes getInfo into a `BrightnessInfo { min, max, has_on_off, steps }`.
+
+| Function | Bytes sent | Params | Notes |
+|----------|-----------|--------|-------|
+| getInfo (`0x00`) | `11 dd fi 01 ··` | none | reply: `[max_be, steps_and_flags, caps, min_be]`; `steps = steps_and_flags & 0x0F`, `has_on_off = caps & 0x04` |
+| getBrightness (`0x10`) | `11 dd fi 11 ··` | none | reply bytes 0–1 = level (BE u16) |
+| setBrightness (`0x20`) | `11 dd fi 21 <level_be> ··` | level BE u16 | clamped to `[min, max]` before the write |
+| getOnOff (`0x30`) | `11 dd fi 31 ··` | none | reply byte 0 bit `0x01` = on (only meaningful when `has_on_off`) |
+| setOnOff (`0x40`) | `11 dd fi 41 <0/1> ··` | `[0/1]` | on/off toggle |
 
 ---
 

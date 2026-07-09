@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::drivers::vendors::logitech::devices::generic::device::LogitechDevice;
+use crate::drivers::vendors::logitech::protocols::hidpp::feature;
 use crate::drivers::vendors::logitech::protocols::hidpp::v2::Hidpp20;
 
 impl LogitechDevice {
@@ -26,6 +27,18 @@ impl LogitechDevice {
     /// doesn't advertise it (e.g. headsets) or the read yields nothing — the
     /// caller then falls back to the static `model_name`.
     pub(super) async fn init_name(&self, features: &HashMap<u16, u8>) -> Option<String> {
+        // Prefer DEVICE_FRIENDLY_NAME (0x0007) when both are present (newer
+        // devices like MX Keys, Craft, etc.).
+        if features.contains_key(&feature::DEVICE_FRIENDLY_NAME) {
+            if let Some(name) = self
+                .hidpp2_with(features)
+                .await
+                .device_friendly_name()
+                .await
+            {
+                return Some(name);
+            }
+        }
         self.hidpp2_with(features).await.device_name().await
     }
 }
