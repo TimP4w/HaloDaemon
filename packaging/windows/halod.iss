@@ -39,7 +39,7 @@ OutputDir=Output
 OutputBaseFilename=halod-setup-x64
 ; The app icon: shown on the setup wizard and (via the installed exe) in
 ; Add/Remove Programs. Path is relative to this .iss (packaging\windows\).
-SetupIconFile=..\assets\icon.ico
+SetupIconFile=..\..\assets\icon.ico
 UninstallDisplayIcon={app}\halod-gui.exe
 Compression=lzma2
 SolidCompression=yes
