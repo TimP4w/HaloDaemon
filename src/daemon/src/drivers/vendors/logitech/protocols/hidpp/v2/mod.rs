@@ -43,6 +43,7 @@ pub mod feature {
     pub const REPORT_RATE: u16 = 0x8060;
     pub const EXT_REPORT_RATE: u16 = 0x8061;
     pub const RGB_EFFECTS: u16 = 0x8071;
+    pub const COLOR_LED_EFFECTS: u16 = 0x8070;
     pub const PER_KEY_LIGHTING_V2: u16 = 0x8081;
     pub const ONBOARD_PROFILES: u16 = 0x8100;
     pub const KEYBOARD_LAYOUT_2: u16 = 0x4540;

@@ -133,7 +133,8 @@ pub(super) struct RgbCacheState {
     pub(super) rgb_state: Option<RgbState>,
     pub(super) rgb_static_slots: Vec<u8>, // static effect slot index per zone
     pub(super) rgb_use_pk_lighting: bool, // true → use PER_KEY_LIGHTING instead of RGB_EFFECTS
-    pub(super) pk_led_ids: Vec<u8>,       // mouse per-key LED IDs from bitmap (0 < id < 32)
+    pub(super) rgb_use_color_led: bool, // true → use COLOR_LED_EFFECTS (0x8070) instead of RGB_EFFECTS
+    pub(super) pk_led_ids: Vec<u8>,     // mouse per-key LED IDs from bitmap (0 < id < 32)
     /// Last per-key colours streamed to each zone, keyed by zone id, used to
     /// diff successive `write_frame` calls.
     pub(super) pk_frame_cache: HashMap<String, PkFrameCache>,

@@ -335,7 +335,9 @@ impl Device for LogitechDevice {
     fn debug_info_extra(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         if let Some(p) = self.profile {
-            out.push(("wpid".to_string(), format!("{:04x}", p.wpid)));
+            if let Some(wpid) = p.wpid {
+                out.push(("wpid".to_string(), format!("{wpid:04x}")));
+            }
             out.push(("wired_pid".to_string(), format!("{:04x}", p.pid)));
             out.push(("profile".to_string(), p.name.to_string()));
         }

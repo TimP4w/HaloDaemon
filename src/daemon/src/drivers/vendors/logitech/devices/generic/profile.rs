@@ -27,6 +27,7 @@ pub const WPID_GPROX_TKL: u16 = 0x40B0;
 
 /// Wired USB PIDs — same HID++ 2.0 protocol, devnum = 0xFF (direct).
 pub const WIRED_PID_G502X_PLUS: u16 = 0xC095;
+pub const WIRED_PID_G502_HERO: u16 = 0xC08B;
 pub const WIRED_PID_GPROX_TKL: u16 = 0xC352;
 
 // ── Device profiles ───────────────────────────────────────────────────────────
@@ -38,7 +39,9 @@ pub(super) struct LogitechZoneInfo {
 }
 
 pub(super) struct LogitechDeviceProfile {
-    pub(super) wpid: u16,
+    /// Wireless (receiver-side) PID. `None` for wired-only devices that have no
+    /// LIGHTSPEED variant; those are resolved through `pid` instead.
+    pub(super) wpid: Option<u16>,
     pub(super) pid: u16,
     pub(super) name: &'static str,
     pub(super) device_type: DeviceType,
@@ -101,7 +104,7 @@ static G502X_PLUS_DEFAULT_BUTTONS: &[(u16, ButtonAction)] = &[
 
 pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
     LogitechDeviceProfile {
-        wpid: WPID_G502X_PLUS,
+        wpid: Some(WPID_G502X_PLUS),
         pid: WIRED_PID_G502X_PLUS,
         name: "Logitech G502 X Plus",
         device_type: DeviceType::Mouse,
@@ -117,7 +120,22 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         key_layout: None,
     },
     LogitechDeviceProfile {
-        wpid: WPID_GPROX_TKL,
+        wpid: None,
+        pid: WIRED_PID_G502_HERO,
+        name: "Logitech G502 Hero",
+        device_type: DeviceType::Mouse,
+        // Zones are discovered at runtime via COLOR_LED_EFFECTS (0x8070); a
+        // single-LED fallback template is applied per-zone by the init path.
+        zones: &[],
+        // No native effects — 0x8070 doesn't use the 0x8071 NativeEffect system.
+        native_effects: &[],
+        bitmap_button_labels: Some(G502X_PLUS_BITMAP_BUTTONS),
+        bitmap_button_prefix: "Button",
+        default_buttons: Some(G502X_PLUS_DEFAULT_BUTTONS),
+        key_layout: None,
+    },
+    LogitechDeviceProfile {
+        wpid: Some(WPID_GPROX_TKL),
         pid: WIRED_PID_GPROX_TKL,
         name: "Logitech G PRO X TKL",
         device_type: DeviceType::Keyboard,
@@ -129,8 +147,6 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
             },
             led_count: 0,
         }],
-        // color_wave is mouse-only until its keyboard effect-table slot is
-        // resolved by scan — slot 0 (the mouse slot) is wrong for the keyboard.
         native_effects: &["ripple"],
         // GKEY backend: no per-CID table, G-keys labelled "G1".."G12".
         bitmap_button_labels: None,
@@ -141,7 +157,9 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
 ];
 
 pub(super) fn find_profile(id: u16) -> Option<&'static LogitechDeviceProfile> {
-    DEVICE_PROFILES.iter().find(|p| p.wpid == id || p.pid == id)
+    DEVICE_PROFILES
+        .iter()
+        .find(|p| p.wpid == Some(id) || p.pid == id)
 }
 
 /// The device's default button mappings, restricted to the CIDs it actually
@@ -189,6 +207,7 @@ pub(super) fn build_device_id(
 /// HID++ vendor interface for composite (audio + HID) devices, e.g. headsets.
 /// These expose only the long report, so they use [`DirectReport::LongOnly`].
 const COMPOSITE_HIDPP_INTERFACE: i32 = 3;
+const G502_HERO_HIDPP_INTERFACE: i32 = 1;
 
 /// Directly-connected (USB) devices: `(pid, hid interface, report mode, name,
 /// device type)`. `ShortLong` resolves the split short/long collections
@@ -205,6 +224,13 @@ static DIRECT_PIDS: &[(u16, i32, DirectReport, &str, DeviceType)] = &[
         WIRED_HIDPP_INTERFACE,
         DirectReport::ShortLong,
         "Logitech G502 X Plus",
+        DeviceType::Other, // authoritative type is in DEVICE_PROFILES
+    ),
+    (
+        WIRED_PID_G502_HERO,
+        G502_HERO_HIDPP_INTERFACE,
+        DirectReport::ShortLong,
+        "Logitech G502 Hero",
         DeviceType::Other, // authoritative type is in DEVICE_PROFILES
     ),
     (
@@ -293,15 +319,14 @@ inventory::submit! {
                 .iter()
                 .find(|(p, i, _, _, _)| *p == pid && Some(*i) == interface_number)
                 .ok_or_else(|| anyhow::anyhow!("no DIRECT_PIDS entry for pid {pid:#06x}"))?;
-            let (_, _, report, name, fallback_type) = entry;
+            let (_, iface, report, name, fallback_type) = entry;
             // Profile is authoritative for device type; fallback_type covers
             // devices (e.g. headsets) that have no DEVICE_PROFILES row.
             let device_type = find_profile(pid)
                 .map(|p| p.device_type)
                 .unwrap_or(*fallback_type);
-            let iface = interface_number.unwrap_or(WIRED_HIDPP_INTERFACE);
             Ok(Arc::new(LogitechDevice::new_direct(
-                path, serial, pid, idx, iface, *report, name, device_type,
+                path, serial, pid, idx, *iface, *report, name, device_type,
             )?))
         },
     }
@@ -499,8 +524,9 @@ mod tests {
     #[test]
     fn wpids_are_unique() {
         // All wireless devices in DEVICE_PROFILES must have unique wpids so
-        // find_profile can distinguish them.
-        let wpids: Vec<u16> = DEVICE_PROFILES.iter().map(|p| p.wpid).collect();
+        // find_profile can distinguish them. Wired-only profiles (wpid: None)
+        // are resolved through pid and don't participate.
+        let wpids: Vec<u16> = DEVICE_PROFILES.iter().filter_map(|p| p.wpid).collect();
         let mut seen = wpids.clone();
         seen.sort_unstable();
         seen.dedup();
