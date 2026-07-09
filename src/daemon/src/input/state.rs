@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;
 
@@ -23,9 +23,10 @@ pub struct InputState {
     /// for `KeyRemapEngine` (which is spawned standalone, not held as a
     /// domain engine).
     pub button_event_tx: broadcast::Sender<ButtonEvent>,
-    /// True while the global Layer Shift modifier is held down; read/written
-    /// only by `KeyRemapEngine`.
-    pub layer_shift_active: AtomicBool,
+    /// Reference count of held Layer Shift buttons across all devices.
+    /// Layer Shift is active when this is > 0. Read/written only by
+    /// `KeyRemapEngine`.
+    pub layer_shift_active: AtomicU32,
     /// Injection backend, wired at startup when it initializes successfully
     /// (may fail on headless Linux); used by the `PlayMacro` usecase.
     executor: OnceLock<Arc<ActionExecutor>>,
@@ -36,7 +37,7 @@ impl InputState {
         let (button_event_tx, _) = broadcast::channel(256);
         Self {
             button_event_tx,
-            layer_shift_active: AtomicBool::new(false),
+            layer_shift_active: AtomicU32::new(0),
             executor: OnceLock::new(),
         }
     }

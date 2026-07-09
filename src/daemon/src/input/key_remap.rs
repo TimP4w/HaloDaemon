@@ -59,7 +59,8 @@ impl KeyRemapEngine {
                 .app
                 .input
                 .layer_shift_active
-                .load(std::sync::atomic::Ordering::Relaxed);
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0;
             let action = Self::resolve(mappings.iter().find(|m| m.cid == cid), layer_shift);
             self.handle_button(action, false, cid, &event.device_id, held)
                 .await;
@@ -69,7 +70,8 @@ impl KeyRemapEngine {
                 .app
                 .input
                 .layer_shift_active
-                .load(std::sync::atomic::Ordering::Relaxed);
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0;
             let action = Self::resolve(mappings.iter().find(|m| m.cid == cid), layer_shift);
             self.handle_button(action, true, cid, &event.device_id, held)
                 .await;
@@ -103,10 +105,22 @@ impl KeyRemapEngine {
     ) {
         match (action, pressed) {
             (ButtonAction::LayerShift, pressed) => {
-                self.app
-                    .input
-                    .layer_shift_active
-                    .store(pressed, std::sync::atomic::Ordering::Relaxed);
+                if pressed {
+                    self.app
+                        .input
+                        .layer_shift_active
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    self.app
+                        .input
+                        .layer_shift_active
+                        .fetch_update(
+                            std::sync::atomic::Ordering::Relaxed,
+                            std::sync::atomic::Ordering::Relaxed,
+                            |v| if v > 0 { Some(v - 1) } else { Some(0) },
+                        )
+                        .ok();
+                }
                 log::debug!(
                     "KeyRemapEngine: Layer Shift {}",
                     if pressed { "engaged" } else { "released" }
@@ -227,16 +241,17 @@ mod tests {
             .handle_button(&ButtonAction::LayerShift, true, 0, "dev", &mut held)
             .await;
 
-        assert!(
+        assert_eq!(
             app.input.layer_shift_active.load(Ordering::Relaxed),
-            "layer_shift_active must be true after press"
+            1,
+            "layer_shift_active must be 1 after press"
         );
     }
 
     #[tokio::test]
     async fn layer_shift_release_clears_active_flag() {
         let app = Arc::new(AppState::new(Config::default()));
-        app.input.layer_shift_active.store(true, Ordering::Relaxed);
+        app.input.layer_shift_active.store(1, Ordering::Relaxed);
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
 
@@ -244,9 +259,10 @@ mod tests {
             .handle_button(&ButtonAction::LayerShift, false, 0, "dev", &mut held)
             .await;
 
-        assert!(
-            !app.input.layer_shift_active.load(Ordering::Relaxed),
-            "layer_shift_active must be false after release"
+        assert_eq!(
+            app.input.layer_shift_active.load(Ordering::Relaxed),
+            0,
+            "layer_shift_active must be 0 after release"
         );
     }
 
@@ -399,7 +415,7 @@ mod tests {
             ),
         ];
         let app = Arc::new(AppState::new(Config::default()));
-        app.input.layer_shift_active.store(true, Ordering::Relaxed);
+        app.input.layer_shift_active.store(1, Ordering::Relaxed);
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
         app.devices
             .write()
@@ -415,9 +431,145 @@ mod tests {
         };
         engine.process_event(event, &mut held).await;
 
-        assert!(
-            !app.input.layer_shift_active.load(Ordering::Relaxed),
+        assert_eq!(
+            app.input.layer_shift_active.load(Ordering::Relaxed),
+            0,
             "layer shift release in the same notification must be processed"
+        );
+    }
+
+    #[tokio::test]
+    async fn layer_shift_counter_stays_positive_when_another_device_still_held() {
+        // Two LayerShift buttons on different devices: releasing one must not
+        // clear the global flag while the other is still held.
+        let app = Arc::new(AppState::new(Config::default()));
+        let engine = test_engine(Arc::clone(&app));
+        let mut held = HashMap::new();
+
+        // Press LayerShift on device A
+        engine
+            .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev_a", &mut held)
+            .await;
+        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 1);
+
+        // Press LayerShift on device B
+        engine
+            .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev_b", &mut held)
+            .await;
+        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 2);
+
+        // Release device A's LayerShift — the global shift must still be active
+        engine
+            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev_a", &mut held)
+            .await;
+        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 1);
+
+        // Release device B's LayerShift — now it should clear
+        engine
+            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev_b", &mut held)
+            .await;
+        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn layer_shift_release_never_drops_below_zero() {
+        // A spurious release (e.g. from a double-disconnect synthetic event)
+        // must not underflow the counter.
+        let app = Arc::new(AppState::new(Config::default()));
+        let engine = test_engine(Arc::clone(&app));
+        let mut held = HashMap::new();
+
+        engine
+            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev", &mut held)
+            .await;
+        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 0);
+
+        // Press then release twice — second release must still be 0.
+        engine
+            .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev", &mut held)
+            .await;
+        engine
+            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev", &mut held)
+            .await;
+        engine
+            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev", &mut held)
+            .await;
+        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn cross_device_layer_shift_affects_other_device() {
+        // Device A holds LayerShift → Device B's button must resolve to its
+        // shifted action. This is the "Layer shift not global" scenario.
+        use halod_shared::types::MediaAction;
+        let dev_a_mappings = vec![mapping(
+            0x50,
+            ButtonAction::LayerShift,
+            ButtonAction::Native,
+        )];
+        let dev_b_mappings = vec![mapping(
+            0x51,
+            ButtonAction::MediaKey {
+                key: MediaAction::Play,
+            },
+            ButtonAction::MediaKey {
+                key: MediaAction::Next,
+            },
+        )];
+
+        let app = Arc::new(AppState::new(Config::default()));
+        let dev_a = Arc::new(MockDevice::new("dev_a").with_key_remap_mappings(dev_a_mappings));
+        let dev_b = Arc::new(MockDevice::new("dev_b").with_key_remap_mappings(dev_b_mappings));
+        app.devices
+            .write()
+            .await
+            .push(Arc::clone(&dev_a) as Arc<dyn Device>);
+        app.devices
+            .write()
+            .await
+            .push(Arc::clone(&dev_b) as Arc<dyn Device>);
+
+        let engine = test_engine(Arc::clone(&app));
+        let mut held = HashMap::new();
+
+        // Step 1: press LayerShift on device A
+        let event_a = ButtonEvent {
+            device_id: "dev_a".to_string(),
+            pressed: vec![0x50],
+            released: vec![],
+        };
+        engine.process_event(event_a, &mut held).await;
+        assert_eq!(
+            app.input.layer_shift_active.load(Ordering::Relaxed),
+            1,
+            "layer shift must be active after device A press"
+        );
+
+        // Step 2: press button on device B — must see layer_shift=true
+        let event_b = ButtonEvent {
+            device_id: "dev_b".to_string(),
+            pressed: vec![0x51],
+            released: vec![],
+        };
+        engine.process_event(event_b, &mut held).await;
+        // The counter must still be 1 — device B's press didn't change it
+        assert_eq!(
+            app.input.layer_shift_active.load(Ordering::Relaxed),
+            1,
+            "layer shift must remain active after device B press"
+        );
+
+        // Step 3: release LayerShift on device A
+        let event_a_rel = ButtonEvent {
+            device_id: "dev_a".to_string(),
+            pressed: vec![],
+            released: vec![0x50],
+        };
+        engine.process_event(event_a_rel, &mut held).await;
+        assert_eq!(
+            app.input.layer_shift_active.load(Ordering::Relaxed),
+            0,
+            "layer shift must clear after device A release"
         );
     }
 }
