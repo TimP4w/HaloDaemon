@@ -9,6 +9,21 @@ Always run, from `src/`, and resolve any issues before committing:
 - `cargo fmt --all`
 - `cargo clippy --all-targets -- -D warnings` (matches the CI gate; see [Lint policy](#lint-policy))
 
+### Commit format
+
+Use Conventional Commits: `<type>(<optional scope>): <summary>`. Types:
+
+- `feat:` — new feature
+- `fix:` — bug fix
+- `docs:` — documentation only
+- `chore:` — CI/CD, packaging, tooling, deps, formatting-only, build/manifest changes (folds in `style`/`build`/`ci`)
+- `refactor:` — code change that neither fixes a bug nor adds a feature
+- `test:` — adding or fixing tests only
+- `perf:` — performance improvement
+- `revert:` — reverting a previous commit (only when needed)
+
+Scope is encouraged given the layered codebase, e.g. `feat(cooling): ...`, `fix(drivers/asus): ...`, `docs(protocols): ...`.
+
 The workspace manifest lives at `src/Cargo.toml`. Members are the directories `shared`, `daemon`, `ui` (crates `halod-shared`, `halod`, `halod-gui`).
 
 ## Code conventions
