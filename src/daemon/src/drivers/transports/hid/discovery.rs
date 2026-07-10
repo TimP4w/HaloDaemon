@@ -669,7 +669,7 @@ mod tests {
 
         let entry = HidDeviceInfo {
             vid: 0x1E71,
-            pid: 0x3012, // Kraken Elite RGB 2024 — plugin-only, no native descriptor
+            pid: 0x3012, // Kraken Elite V2 — plugin-only, no native descriptor
             path: "kraken".into(),
             iface: 0,
             serial: "S1".into(),

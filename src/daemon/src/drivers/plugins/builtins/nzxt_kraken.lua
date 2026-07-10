@@ -357,7 +357,7 @@ return {
     { transport = "hid", vid = 0x1E71, pid = 0x3008, name = "Kraken Z53/63/73", device_type = "a_i_o" },
     { transport = "hid", vid = 0x1E71, pid = 0x300C, name = "Kraken Elite 2023", device_type = "a_i_o" },
     { transport = "hid", vid = 0x1E71, pid = 0x300E, name = "Kraken 2023", device_type = "a_i_o" },
-    { transport = "hid", vid = 0x1E71, pid = 0x3012, name = "Kraken Elite RGB 2024", device_type = "a_i_o" },
+    { transport = "hid", vid = 0x1E71, pid = 0x3012, name = "Kraken Elite V2", device_type = "a_i_o" },
     { transport = "hid", vid = 0x1E71, pid = 0x3014, name = "Kraken Plus 2024", device_type = "a_i_o" },
   },
   identity = { vendor = "NZXT", model = "Kraken" },

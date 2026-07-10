@@ -648,12 +648,12 @@ mod tests {
             assert_eq!(spec.device_type, Some(DeviceType::AIO));
             assert!(spec.name.is_some(), "every PID needs its own display name");
         }
-        let elite_2024 = m
+        let elite_v2 = m
             .match_specs
             .iter()
             .find(|s| s.pid == Some(0x3012))
-            .expect("0x3012 (Elite RGB 2024) must be matched");
-        assert_eq!(elite_2024.name.as_deref(), Some("Kraken Elite RGB 2024"));
+            .expect("0x3012 (Elite V2) must be matched");
+        assert_eq!(elite_v2.name.as_deref(), Some("Kraken Elite V2"));
         assert!(m.fan.is_some());
         assert!(m.lcd.is_some());
     }
