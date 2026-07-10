@@ -8,9 +8,7 @@ use std::f32::consts::PI;
 use std::sync::{Arc, OnceLock, Weak};
 
 use crate::drivers::vendors::nzxt::impl_nzxt_chain_host_methods;
-use crate::drivers::vendors::nzxt::protocols::{
-    decode_static_image_rgba, KrakenWire, NzxtKrakenProtocol,
-};
+use crate::drivers::vendors::nzxt::protocols::{KrakenWire, NzxtKrakenProtocol};
 use crate::{
     drivers::{
         chain::{ChainAdapter, ChainHost, ChannelDescriptor},
@@ -639,9 +637,10 @@ impl LcdCapability for NZXTKraken {
             // Static image: decode + resize, then stream a single Q565 frame over
             // the type-0x08 path — no bucket handshake, no flash to the default screen.
             let raw = data.to_vec();
-            let rgba =
-                tokio::task::spawn_blocking(move || decode_static_image_rgba(&raw, width, height))
-                    .await??;
+            let rgba = tokio::task::spawn_blocking(move || {
+                crate::util::image::decode_static_image_rgba(&raw, width, height)
+            })
+            .await??;
             self.stream_frame(&rgba, width, height).await?;
         }
         // mode and active_image filename are set by the usecase after saving the file.
@@ -675,10 +674,8 @@ impl LcdCapability for NZXTKraken {
                 _ => 0,
             };
             let bgr = tokio::task::spawn_blocking(move || {
-                let rgba = NzxtKrakenProtocol::<HidTransport>::rotate_rgba_square_owned(
-                    rgba, width, degrees,
-                );
-                NzxtKrakenProtocol::<HidTransport>::rgba_to_bgr888(&rgba)
+                let rgba = crate::util::image::rotate_rgba_square(&rgba, width, degrees);
+                crate::util::image::rgba_to_bgr888(&rgba)
             })
             .await?;
             self.protocol
@@ -695,10 +692,8 @@ impl LcdCapability for NZXTKraken {
             let rgba = rgba.to_vec();
             let t_enc = std::time::Instant::now();
             let payload = tokio::task::spawn_blocking(move || {
-                let rgba = NzxtKrakenProtocol::<HidTransport>::rotate_rgba_square_owned(
-                    rgba, width, degrees,
-                );
-                NzxtKrakenProtocol::<HidTransport>::rgba_to_q565_payload(&rgba, width, height)
+                let rgba = crate::util::image::rotate_rgba_square(&rgba, width, degrees);
+                crate::util::image::rgba_to_q565(&rgba, width, height)
             })
             .await??;
             log::trace!(

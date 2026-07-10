@@ -5,10 +5,6 @@
 //! HID control channel plus a separate USB bulk endpoint for frame payloads.
 
 use anyhow::{Context, Result};
-use q565::{
-    encode::Q565EncodeContext,
-    utils::{encode_rgb565_unchecked, rgb888_to_rgb565},
-};
 use std::collections::HashMap;
 use std::sync::{atomic::Ordering, Arc};
 
@@ -74,31 +70,6 @@ impl<T: Transport> NzxtKrakenProtocol<T> {
             .await
     }
 
-    /// Encodes a raw RGBA8 frame as a Q565 stream (the codec the panel's
-    /// type-0x08 LCD path expects), including magic, dimensions, and `OP_END`.
-    pub fn rgba_to_q565_payload(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
-        let pixels = (width as usize) * (height as usize);
-        let expected = pixels * 4;
-        if rgba.len() != expected {
-            anyhow::bail!(
-                "RGBA frame size mismatch: got {} bytes, expected {expected} for {width}x{height}",
-                rgba.len()
-            );
-        }
-        if width > u16::MAX as u32 || height > u16::MAX as u32 {
-            anyhow::bail!("frame {width}x{height} exceeds Q565 u16 dimension limit");
-        }
-        let rgb565: Vec<u16> = rgba
-            .chunks_exact(4)
-            .map(|p| encode_rgb565_unchecked(rgb888_to_rgb565([p[0], p[1], p[2]])))
-            .collect();
-        let mut out = Vec::with_capacity(8 + pixels);
-        if !Q565EncodeContext::encode_to_vec(width as u16, height as u16, &rgb565, &mut out) {
-            anyhow::bail!("Q565 encode failed for {width}x{height}");
-        }
-        Ok(out)
-    }
-
     /// 20-byte bulk header. `asset_mode`: `0x08` = Q565, `0x09` = raw BGR888.
     pub fn stream_bulk_header(payload_len: u32, asset_mode: u8) -> [u8; 20] {
         let mut h = [0u8; 20];
@@ -106,53 +77,6 @@ impl<T: Transport> NzxtKrakenProtocol<T> {
         h[12] = asset_mode;
         h[16..20].copy_from_slice(&payload_len.to_le_bytes());
         h
-    }
-
-    /// Non-multiples of 90 and non-square buffers are returned unrotated.
-    pub fn rotate_rgba_square(rgba: &[u8], size: u32, degrees: u32) -> Vec<u8> {
-        let n = size as usize;
-        let step = degrees % 360;
-        if step == 0 || rgba.len() != n * n * 4 {
-            return rgba.to_vec();
-        }
-        Self::rotate_rgba_square_impl(rgba, n, step)
-    }
-
-    /// Owned variant for the streaming path: at 0° the buffer is returned as-is.
-    pub fn rotate_rgba_square_owned(rgba: Vec<u8>, size: u32, degrees: u32) -> Vec<u8> {
-        let n = size as usize;
-        let step = degrees % 360;
-        if step == 0 || rgba.len() != n * n * 4 {
-            return rgba;
-        }
-        Self::rotate_rgba_square_impl(&rgba, n, step)
-    }
-
-    fn rotate_rgba_square_impl(rgba: &[u8], n: usize, step: u32) -> Vec<u8> {
-        let mut out = vec![0u8; rgba.len()];
-        for y in 0..n {
-            for x in 0..n {
-                let (cx, cy) = match step {
-                    90 => (n - 1 - y, x),
-                    180 => (n - 1 - x, n - 1 - y),
-                    270 => (y, n - 1 - x),
-                    _ => (x, y),
-                };
-                let s = (y * n + x) * 4;
-                let d = (cy * n + cx) * 4;
-                out[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
-            }
-        }
-        out
-    }
-
-    /// RGBA8 → BGR888 (drops alpha), as the raw `0x09` path expects.
-    pub fn rgba_to_bgr888(rgba: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
-        for px in rgba.chunks_exact(4) {
-            out.extend_from_slice(&[px[2], px[1], px[0]]); // B, G, R
-        }
-        out
     }
 
     /// Lowest bucket whose info (bytes 15+) is all-zero; `None` if all occupied.
@@ -666,19 +590,6 @@ impl NzxtKrakenProtocol<HidTransport> {
     }
 }
 
-/// Decodes a static image (PNG/JPEG/…) and resizes it to the panel's native
-/// resolution, returning a raw `width*height*4` RGBA8 buffer. CPU-heavy
-/// (Lanczos3 resize) — call inside `spawn_blocking`.
-pub fn decode_static_image_rgba(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
-    let img = image::load_from_memory(data)?;
-    let img = if img.width() == width && img.height() == height {
-        img
-    } else {
-        img.resize_exact(width, height, image::imageops::FilterType::Lanczos3)
-    };
-    Ok(img.into_rgba8().into_raw())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,22 +673,6 @@ mod tests {
         let p = protocol(vec![]);
         p.write_screen_config(50, 270).await.unwrap();
         assert_eq!(p.base.transport.written.lock().await[0][7], 3);
-    }
-
-    // ── decode_static_image_rgba ──────────────────────────────────────────
-
-    #[test]
-    fn decode_static_image_rgba_resizes_to_native() {
-        let dynimg = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-            2,
-            2,
-            image::Rgba([255u8, 0, 0, 255]),
-        ));
-        let mut png = std::io::Cursor::new(Vec::new());
-        dynimg.write_to(&mut png, image::ImageFormat::Png).unwrap();
-        let rgba = decode_static_image_rgba(png.get_ref(), 4, 4).unwrap();
-        assert_eq!(rgba.len(), 4 * 4 * 4);
-        assert!(rgba.chunks_exact(4).all(|px| px == [255, 0, 0, 255]));
     }
 
     // ── LCD bucket layout ─────────────────────────────────────────────────
@@ -907,58 +802,6 @@ mod tests {
     }
 
     #[test]
-    fn rotate_rgba_square_90_moves_top_left_to_top_right() {
-        let mut src = vec![0u8; 2 * 2 * 4];
-        src[0..4].copy_from_slice(&[1, 1, 1, 255]);
-        let out = NzxtKrakenProtocol::<MockTransport>::rotate_rgba_square(&src, 2, 90);
-        assert_eq!(&out[4..8], &[1, 1, 1, 255]);
-        assert_eq!(&out[0..4], &[0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn rotate_rgba_square_zero_and_bad_size_passthrough() {
-        let src = vec![9u8; 2 * 2 * 4];
-        assert_eq!(
-            NzxtKrakenProtocol::<MockTransport>::rotate_rgba_square(&src, 2, 0),
-            src
-        );
-        assert_eq!(
-            NzxtKrakenProtocol::<MockTransport>::rotate_rgba_square(&src, 4, 90),
-            src
-        );
-    }
-
-    proptest::proptest! {
-        #[test]
-        fn rotate_rgba_square_four_quarters_is_identity(
-            pixels in proptest::collection::vec(proptest::num::u8::ANY, 5 * 5 * 4..=5 * 5 * 4)
-        ) {
-            let mut img = pixels.clone();
-            for _ in 0..4 {
-                img = NzxtKrakenProtocol::<MockTransport>::rotate_rgba_square(&img, 5, 90);
-            }
-            proptest::prop_assert_eq!(img, pixels);
-        }
-
-        #[test]
-        fn rotate_rgba_square_180_equals_two_90s(
-            pixels in proptest::collection::vec(proptest::num::u8::ANY, 5 * 5 * 4..=5 * 5 * 4)
-        ) {
-            let once = NzxtKrakenProtocol::<MockTransport>::rotate_rgba_square(&pixels, 5, 180);
-            let step1 = NzxtKrakenProtocol::<MockTransport>::rotate_rgba_square(&pixels, 5, 90);
-            let twice = NzxtKrakenProtocol::<MockTransport>::rotate_rgba_square(&step1, 5, 90);
-            proptest::prop_assert_eq!(once, twice);
-        }
-    }
-
-    #[test]
-    fn rgba_to_bgr888_reorders_and_drops_alpha() {
-        let rgba = [10u8, 20, 30, 255, 40, 50, 60, 128];
-        let bgr = NzxtKrakenProtocol::<MockTransport>::rgba_to_bgr888(&rgba);
-        assert_eq!(bgr, vec![30, 20, 10, 60, 50, 40]); // B,G,R per pixel
-    }
-
-    #[test]
     fn stream_luts_have_correct_prefixes_and_fill() {
         let l1 = stream_lut1();
         assert_eq!(&l1[..4], &[0x72, 0x01, 0x01, 0x00]);
@@ -967,40 +810,5 @@ mod tests {
         let l2 = stream_lut2();
         assert_eq!(&l2[..4], &[0x72, 0x02, 0x01, 0x01]);
         assert!(l2[4..].iter().all(|&b| b == 0x1F));
-    }
-
-    // ── Q565 payload ──────────────────────────────────────────────────────
-
-    #[test]
-    fn q565_payload_has_magic_dimensions_and_end() {
-        let rgba = [255u8; 4 * 4 * 4];
-        let out = NzxtKrakenProtocol::<MockTransport>::rgba_to_q565_payload(&rgba, 4, 4).unwrap();
-        assert_eq!(&out[0..4], b"q565");
-        assert_eq!(&out[4..8], &[4, 0, 4, 0]);
-        assert_eq!(*out.last().unwrap(), 0xFF);
-        assert!(out.len() < 4 * 4 * 2);
-    }
-
-    #[test]
-    fn q565_payload_roundtrips_via_decoder() {
-        let rgba: Vec<u8> = std::iter::repeat_n([255u8, 0, 0, 255], 8 * 8)
-            .flatten()
-            .collect();
-        let out = NzxtKrakenProtocol::<MockTransport>::rgba_to_q565_payload(&rgba, 8, 8).unwrap();
-        let mut decoded = Vec::new();
-        let (hdr, _) = q565::decode::Q565DecodeContext::decode::<q565::byteorder::LittleEndian>(
-            &out,
-            q565::decode::VecDecodeOutput::<q565::Rgb565>::new(&mut decoded),
-        )
-        .expect("decode failed");
-        assert_eq!((hdr.width, hdr.height), (8, 8));
-        assert!(decoded.iter().all(|&px| px == 0xF800));
-    }
-
-    #[test]
-    fn q565_payload_rejects_size_mismatch() {
-        assert!(
-            NzxtKrakenProtocol::<MockTransport>::rgba_to_q565_payload(&[0u8; 4], 2, 2).is_err()
-        );
     }
 }

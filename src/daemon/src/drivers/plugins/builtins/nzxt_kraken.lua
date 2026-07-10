@@ -111,6 +111,14 @@ local function await_xfer_ack(dev, sub)
   return false
 end
 
+-- Consume the ACK or abort the transfer (as native does): proceeding past a
+-- missing 0x37 <sub> risks desyncing the panel firmware.
+local function require_ack(dev, sub)
+  if not await_xfer_ack(dev, sub) then
+    error(string.format("Kraken LCD: transfer ACK 0x%02X not received", sub))
+  end
+end
+
 local function drain_hid(dev)
   for _ = 1, 64 do
     if #dev.transport:read_nonblocking(REPORT) == 0 then break end
@@ -148,11 +156,11 @@ end
 local function stream_q565(dev, payload)
   drain_hid(dev)
   dev.transport:write(string.char(0x36, 0x01, 0x00, 0x01, 0x08))
-  await_xfer_ack(dev, 0x01)
+  require_ack(dev, 0x01)
   dev.transport:write_bulk(bulk_header(#payload, 0x08))
   dev.transport:write_bulk(payload)
   dev.transport:write(string.char(0x36, 0x02))
-  await_xfer_ack(dev, 0x02)
+  require_ack(dev, 0x02)
 end
 
 -- Asset mode 0x09: raw BGR888. Per-frame LUTs keep the firmware colour map synced.
@@ -186,14 +194,14 @@ local function stream_raw(dev, bgr888, brightness)
     raw_stream_entered = true
   end
   drain_hid(dev)
-  dev.transport:write(stream_lut1())
-  dev.transport:write(stream_lut2())
+  write_then_read(dev, stream_lut1()) -- native reads a reply after each LUT
+  write_then_read(dev, stream_lut2())
   dev.transport:write(string.char(0x36, 0x01, 0x00, 0x01, 0x09))
-  await_xfer_ack(dev, 0x01)
+  require_ack(dev, 0x01)
   dev.transport:write_bulk(bulk_header(#bgr888, 0x09))
   dev.transport:write_bulk(bgr888)
   dev.transport:write(string.char(0x36, 0x02))
-  await_xfer_ack(dev, 0x02)
+  require_ack(dev, 0x02)
 end
 
 -- ── 16-bucket allocator (GIF / persistent image uploads) ─────────────────────
@@ -319,7 +327,7 @@ local function run_bucket_pipeline(dev, data, bulk_info)
   end
 
   dev.transport:write(string.char(0x36, 0x01, bucket_index))
-  await_xfer_ack(dev, 0x01)
+  require_ack(dev, 0x01)
 
   -- header = magic(12) + bulk_info(8); then the data.
   local header = halod.buffer(12 + #bulk_info)
@@ -329,7 +337,7 @@ local function run_bucket_pipeline(dev, data, bulk_info)
   dev.transport:write_bulk(data)
 
   dev.transport:write(string.char(0x36, 0x02))
-  await_xfer_ack(dev, 0x02)
+  require_ack(dev, 0x02)
   lcd_command(dev, string.char(0x38, 0x01, 0x04, bucket_index)) -- switch to it
 end
 

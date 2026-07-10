@@ -12,7 +12,6 @@
 //! [`lcd`] submodule.
 
 mod lcd;
-pub use lcd::decode_static_image_rgba;
 
 use anyhow::Result;
 use std::sync::{
