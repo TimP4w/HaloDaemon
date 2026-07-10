@@ -13,7 +13,10 @@ use serde::Deserialize;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
-use halod_shared::types::{RgbColor, RgbState, Sensor};
+use halod_shared::types::{
+    Battery, Boolean, ButtonMapping, ConnectionStatus, Equalizer, OnboardProfiles, PairingStatus,
+    RgbColor, RgbState, Sensor,
+};
 
 use super::bytebuf::ByteBuf;
 use super::sandbox;
@@ -196,6 +199,71 @@ pub enum Call {
         selected: usize,
         reply: oneshot::Sender<Result<()>>,
     },
+    // ── Range / Boolean / Action ───────────────────────────────────────────
+    RangeSet {
+        key: String,
+        value: i32,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    BooleanGet(oneshot::Sender<Result<Vec<Boolean>>>),
+    BooleanSet {
+        key: String,
+        value: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    ActionTrigger {
+        key: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    // ── Battery / Connection / Equalizer ────────────────────────────────────
+    BatteryGet(oneshot::Sender<Result<Vec<Battery>>>),
+    ConnectionGet(oneshot::Sender<Result<Option<ConnectionStatus>>>),
+    EqualizerGet(oneshot::Sender<Result<Equalizer>>),
+    EqualizerSetPreset {
+        preset: usize,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    EqualizerSetBands {
+        values: Vec<f32>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    // ── Pairing ──────────────────────────────────────────────────────────
+    PairingStart {
+        timeout_secs: u8,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    PairingStop(oneshot::Sender<Result<()>>),
+    PairingUnpair {
+        slot: u8,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    PairingStatusGet(oneshot::Sender<Result<PairingStatus>>),
+    // ── Onboard profiles ─────────────────────────────────────────────────
+    OnboardSwitchProfile {
+        slot: u8,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    OnboardRestoreProfile {
+        slot: u8,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    OnboardSetProfileEnabled {
+        slot: u8,
+        enabled: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    OnboardProfilesGet(oneshot::Sender<Result<OnboardProfiles>>),
+    // ── Key remap ────────────────────────────────────────────────────────
+    KeyRemapSetMapping {
+        mapping: ButtonMapping,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    KeyRemapReset {
+        cid: u16,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    KeyRemapResetAll(oneshot::Sender<Result<()>>),
+    KeyRemapHostModeActive(oneshot::Sender<bool>),
 }
 
 /// Handle the `LuaDevice` holds. `UnboundedSender` is `Send + Sync`, so the
@@ -378,6 +446,115 @@ impl PluginHandle {
         })
         .await?
     }
+
+    pub async fn range_set(&self, key: &str, value: i32) -> Result<()> {
+        let key = key.to_owned();
+        self.request(|reply| Call::RangeSet { key, value, reply })
+            .await?
+    }
+
+    pub async fn boolean_get(&self) -> Result<Vec<Boolean>> {
+        self.request(Call::BooleanGet).await?
+    }
+
+    pub async fn boolean_set(&self, key: &str, value: bool) -> Result<()> {
+        let key = key.to_owned();
+        self.request(|reply| Call::BooleanSet { key, value, reply })
+            .await?
+    }
+
+    pub async fn action_trigger(&self, key: &str) -> Result<()> {
+        let key = key.to_owned();
+        self.request(|reply| Call::ActionTrigger { key, reply })
+            .await?
+    }
+
+    pub async fn battery_get(&self) -> Result<Vec<Battery>> {
+        self.request(Call::BatteryGet).await?
+    }
+
+    pub async fn connection_get(&self) -> Result<Option<ConnectionStatus>> {
+        self.request(Call::ConnectionGet).await?
+    }
+
+    pub async fn equalizer_get(&self) -> Result<Equalizer> {
+        self.request(Call::EqualizerGet).await?
+    }
+
+    pub async fn equalizer_set_preset(&self, preset: usize) -> Result<()> {
+        self.request(|reply| Call::EqualizerSetPreset { preset, reply })
+            .await?
+    }
+
+    pub async fn equalizer_set_bands(&self, values: &[f32]) -> Result<()> {
+        let values = values.to_vec();
+        self.request(|reply| Call::EqualizerSetBands { values, reply })
+            .await?
+    }
+
+    pub async fn pairing_start(&self, timeout_secs: u8) -> Result<()> {
+        self.request(|reply| Call::PairingStart {
+            timeout_secs,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn pairing_stop(&self) -> Result<()> {
+        self.request(Call::PairingStop).await?
+    }
+
+    pub async fn pairing_unpair(&self, slot: u8) -> Result<()> {
+        self.request(|reply| Call::PairingUnpair { slot, reply })
+            .await?
+    }
+
+    pub async fn pairing_status(&self) -> Result<PairingStatus> {
+        self.request(Call::PairingStatusGet).await?
+    }
+
+    pub async fn onboard_switch_profile(&self, slot: u8) -> Result<()> {
+        self.request(|reply| Call::OnboardSwitchProfile { slot, reply })
+            .await?
+    }
+
+    pub async fn onboard_restore_profile(&self, slot: u8) -> Result<()> {
+        self.request(|reply| Call::OnboardRestoreProfile { slot, reply })
+            .await?
+    }
+
+    pub async fn onboard_set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()> {
+        self.request(|reply| Call::OnboardSetProfileEnabled {
+            slot,
+            enabled,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn onboard_profiles_get(&self) -> Result<OnboardProfiles> {
+        self.request(Call::OnboardProfilesGet).await?
+    }
+
+    pub async fn key_remap_set_mapping(&self, mapping: ButtonMapping) -> Result<()> {
+        self.request(|reply| Call::KeyRemapSetMapping { mapping, reply })
+            .await?
+    }
+
+    pub async fn key_remap_reset(&self, cid: u16) -> Result<()> {
+        self.request(|reply| Call::KeyRemapReset { cid, reply })
+            .await?
+    }
+
+    pub async fn key_remap_reset_all(&self) -> Result<()> {
+        self.request(Call::KeyRemapResetAll).await?
+    }
+
+    pub async fn key_remap_host_mode_active(&self) -> bool {
+        self.request(Call::KeyRemapHostModeActive)
+            .await
+            .unwrap_or(false)
+    }
 }
 
 /// The plugin's callback functions, looked up once by name.
@@ -404,6 +581,27 @@ struct Callbacks {
     lcd_reset: Option<Function>,
     set_dpi: Option<Function>,
     set_choice: Option<Function>,
+    set_range: Option<Function>,
+    get_booleans: Option<Function>,
+    set_boolean: Option<Function>,
+    trigger_action: Option<Function>,
+    get_batteries: Option<Function>,
+    connection_status: Option<Function>,
+    get_equalizer: Option<Function>,
+    set_eq_preset: Option<Function>,
+    set_eq_bands: Option<Function>,
+    start_pairing: Option<Function>,
+    stop_pairing: Option<Function>,
+    unpair: Option<Function>,
+    pairing_status: Option<Function>,
+    switch_profile: Option<Function>,
+    restore_profile: Option<Function>,
+    set_profile_enabled: Option<Function>,
+    onboard_profiles_status: Option<Function>,
+    set_button_mapping: Option<Function>,
+    reset_button_mapping: Option<Function>,
+    reset_all_button_mappings: Option<Function>,
+    key_remap_host_mode: Option<Function>,
 }
 
 impl Callbacks {
@@ -435,6 +633,27 @@ impl Callbacks {
             lcd_reset: f("lcd_reset"),
             set_dpi: f("set_dpi"),
             set_choice: f("set_choice"),
+            set_range: f("set_range"),
+            get_booleans: f("get_booleans"),
+            set_boolean: f("set_boolean"),
+            trigger_action: f("trigger_action"),
+            get_batteries: f("get_batteries"),
+            connection_status: f("connection_status"),
+            get_equalizer: f("get_equalizer"),
+            set_eq_preset: f("set_eq_preset"),
+            set_eq_bands: f("set_eq_bands"),
+            start_pairing: f("start_pairing"),
+            stop_pairing: f("stop_pairing"),
+            unpair: f("unpair"),
+            pairing_status: f("pairing_status"),
+            switch_profile: f("switch_profile"),
+            restore_profile: f("restore_profile"),
+            set_profile_enabled: f("set_profile_enabled"),
+            onboard_profiles_status: f("onboard_profiles_status"),
+            set_button_mapping: f("set_button_mapping"),
+            reset_button_mapping: f("reset_button_mapping"),
+            reset_all_button_mappings: f("reset_all_button_mappings"),
+            key_remap_host_mode: f("key_remap_host_mode"),
         }
     }
 }
@@ -601,6 +820,76 @@ fn worker_main(
             } => {
                 let _ = reply.send(run_choice_set(&cb, &dev, &key, selected));
             }
+            Call::RangeSet { key, value, reply } => {
+                let _ = reply.send(run_range_set(&cb, &dev, &key, value));
+            }
+            Call::BooleanGet(reply) => {
+                let _ = reply.send(run_get_booleans(&lua, &cb, &dev));
+            }
+            Call::BooleanSet { key, value, reply } => {
+                let _ = reply.send(run_boolean_set(&cb, &dev, &key, value));
+            }
+            Call::ActionTrigger { key, reply } => {
+                let _ = reply.send(run_trigger_action(&cb, &dev, &key));
+            }
+            Call::BatteryGet(reply) => {
+                let _ = reply.send(run_get_batteries(&lua, &cb, &dev));
+            }
+            Call::ConnectionGet(reply) => {
+                let _ = reply.send(run_connection_status(&lua, &cb, &dev));
+            }
+            Call::EqualizerGet(reply) => {
+                let _ = reply.send(run_get_equalizer(&lua, &cb, &dev));
+            }
+            Call::EqualizerSetPreset { preset, reply } => {
+                let _ = reply.send(run_eq_set_preset(&cb, &dev, preset));
+            }
+            Call::EqualizerSetBands { values, reply } => {
+                let _ = reply.send(run_eq_set_bands(&cb, &dev, &values));
+            }
+            Call::PairingStart {
+                timeout_secs,
+                reply,
+            } => {
+                let _ = reply.send(run_pairing_start(&cb, &dev, timeout_secs));
+            }
+            Call::PairingStop(reply) => {
+                let _ = reply.send(run_pairing_stop(&cb, &dev));
+            }
+            Call::PairingUnpair { slot, reply } => {
+                let _ = reply.send(run_pairing_unpair(&cb, &dev, slot));
+            }
+            Call::PairingStatusGet(reply) => {
+                let _ = reply.send(run_pairing_status(&lua, &cb, &dev));
+            }
+            Call::OnboardSwitchProfile { slot, reply } => {
+                let _ = reply.send(run_switch_profile(&cb, &dev, slot));
+            }
+            Call::OnboardRestoreProfile { slot, reply } => {
+                let _ = reply.send(run_restore_profile(&cb, &dev, slot));
+            }
+            Call::OnboardSetProfileEnabled {
+                slot,
+                enabled,
+                reply,
+            } => {
+                let _ = reply.send(run_set_profile_enabled(&cb, &dev, slot, enabled));
+            }
+            Call::OnboardProfilesGet(reply) => {
+                let _ = reply.send(run_onboard_profiles_status(&lua, &cb, &dev));
+            }
+            Call::KeyRemapSetMapping { mapping, reply } => {
+                let _ = reply.send(run_set_button_mapping(&lua, &cb, &dev, &mapping));
+            }
+            Call::KeyRemapReset { cid, reply } => {
+                let _ = reply.send(run_reset_button_mapping(&cb, &dev, cid));
+            }
+            Call::KeyRemapResetAll(reply) => {
+                let _ = reply.send(run_reset_all_button_mappings(&cb, &dev));
+            }
+            Call::KeyRemapHostModeActive(reply) => {
+                let _ = reply.send(run_key_remap_host_mode(&cb, &dev));
+            }
         }
     }
     Ok(())
@@ -622,6 +911,259 @@ fn run_choice_set(cb: &Callbacks, dev: &Table, key: &str, selected: usize) -> Re
         .ok_or_else(|| anyhow!("plugin has no set_choice()"))?;
     f.call::<()>((dev.clone(), key.to_owned(), selected))
         .map_err(|e| lua_err("set_choice", e))
+}
+
+fn run_pairing_start(cb: &Callbacks, dev: &Table, timeout_secs: u8) -> Result<()> {
+    let f = cb
+        .start_pairing
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no start_pairing()"))?;
+    f.call::<()>((dev.clone(), timeout_secs))
+        .map_err(|e| lua_err("start_pairing", e))
+}
+
+fn run_pairing_stop(cb: &Callbacks, dev: &Table) -> Result<()> {
+    let f = cb
+        .stop_pairing
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no stop_pairing()"))?;
+    f.call::<()>(dev.clone())
+        .map_err(|e| lua_err("stop_pairing", e))
+}
+
+fn run_pairing_unpair(cb: &Callbacks, dev: &Table, slot: u8) -> Result<()> {
+    let f = cb
+        .unpair
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no unpair()"))?;
+    f.call::<()>((dev.clone(), slot))
+        .map_err(|e| lua_err("unpair", e))
+}
+
+fn run_pairing_status(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<PairingStatus> {
+    let f = cb
+        .pairing_status
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no pairing_status()"))?;
+    let value: Value = f
+        .call(dev.clone())
+        .map_err(|e| lua_err("pairing_status", e))?;
+    lua.from_value(value)
+        .map_err(|e| lua_err("pairing_status result", e))
+}
+
+fn run_switch_profile(cb: &Callbacks, dev: &Table, slot: u8) -> Result<()> {
+    let f = cb
+        .switch_profile
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no switch_profile()"))?;
+    f.call::<()>((dev.clone(), slot))
+        .map_err(|e| lua_err("switch_profile", e))
+}
+
+fn run_restore_profile(cb: &Callbacks, dev: &Table, slot: u8) -> Result<()> {
+    let f = cb
+        .restore_profile
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no restore_profile()"))?;
+    f.call::<()>((dev.clone(), slot))
+        .map_err(|e| lua_err("restore_profile", e))
+}
+
+fn run_set_profile_enabled(cb: &Callbacks, dev: &Table, slot: u8, enabled: bool) -> Result<()> {
+    let f = cb
+        .set_profile_enabled
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no set_profile_enabled()"))?;
+    f.call::<()>((dev.clone(), slot, enabled))
+        .map_err(|e| lua_err("set_profile_enabled", e))
+}
+
+fn run_onboard_profiles_status(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<OnboardProfiles> {
+    let f = cb
+        .onboard_profiles_status
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no onboard_profiles_status()"))?;
+    let value: Value = f
+        .call(dev.clone())
+        .map_err(|e| lua_err("onboard_profiles_status", e))?;
+    lua.from_value(value)
+        .map_err(|e| lua_err("onboard_profiles_status result", e))
+}
+
+fn run_set_button_mapping(
+    lua: &Lua,
+    cb: &Callbacks,
+    dev: &Table,
+    mapping: &ButtonMapping,
+) -> Result<()> {
+    let f = cb
+        .set_button_mapping
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no set_button_mapping()"))?;
+    let mapping_v = lua
+        .to_value(mapping)
+        .map_err(|e| lua_err("set_button_mapping arg", e))?;
+    f.call::<()>((dev.clone(), mapping_v))
+        .map_err(|e| lua_err("set_button_mapping", e))
+}
+
+fn run_reset_button_mapping(cb: &Callbacks, dev: &Table, cid: u16) -> Result<()> {
+    let f = cb
+        .reset_button_mapping
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no reset_button_mapping()"))?;
+    f.call::<()>((dev.clone(), cid))
+        .map_err(|e| lua_err("reset_button_mapping", e))
+}
+
+fn run_reset_all_button_mappings(cb: &Callbacks, dev: &Table) -> Result<()> {
+    let f = cb
+        .reset_all_button_mappings
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no reset_all_button_mappings()"))?;
+    f.call::<()>(dev.clone())
+        .map_err(|e| lua_err("reset_all_button_mappings", e))
+}
+
+/// Whether the device is currently in the host mode remapping requires.
+/// Devices that don't declare `key_remap_host_mode` are assumed always active
+/// (the common case: remapping doesn't depend on a device-side mode toggle).
+fn run_key_remap_host_mode(cb: &Callbacks, dev: &Table) -> bool {
+    let Some(f) = &cb.key_remap_host_mode else {
+        return true;
+    };
+    match f.call::<bool>(dev.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            log::debug!("plugin key_remap_host_mode: {e}");
+            true
+        }
+    }
+}
+
+fn run_range_set(cb: &Callbacks, dev: &Table, key: &str, value: i32) -> Result<()> {
+    let f = cb
+        .set_range
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no set_range()"))?;
+    f.call::<()>((dev.clone(), key.to_owned(), value))
+        .map_err(|e| lua_err("set_range", e))
+}
+
+/// What `get_booleans` returns per entry: only `key`/`value` are required, since
+/// label/category/read_only are typically manifest-declared and backfilled by
+/// the device layer.
+#[derive(Debug, Deserialize)]
+struct PluginBoolean {
+    key: String,
+    value: bool,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default)]
+    category: String,
+}
+
+fn run_get_booleans(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<Vec<Boolean>> {
+    let Some(f) = &cb.get_booleans else {
+        return Ok(Vec::new());
+    };
+    let value: Value = f
+        .call(dev.clone())
+        .map_err(|e| lua_err("get_booleans", e))?;
+    let raw: Vec<PluginBoolean> = lua
+        .from_value(value)
+        .map_err(|e| lua_err("get_booleans result", e))?;
+    Ok(raw
+        .into_iter()
+        .map(|b| Boolean {
+            key: b.key,
+            label: b.label,
+            value: b.value,
+            read_only: b.read_only,
+            category: b.category,
+            visible_when: None,
+        })
+        .collect())
+}
+
+fn run_boolean_set(cb: &Callbacks, dev: &Table, key: &str, value: bool) -> Result<()> {
+    let f = cb
+        .set_boolean
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no set_boolean()"))?;
+    f.call::<()>((dev.clone(), key.to_owned(), value))
+        .map_err(|e| lua_err("set_boolean", e))
+}
+
+fn run_trigger_action(cb: &Callbacks, dev: &Table, key: &str) -> Result<()> {
+    let f = cb
+        .trigger_action
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no trigger_action()"))?;
+    f.call::<()>((dev.clone(), key.to_owned()))
+        .map_err(|e| lua_err("trigger_action", e))
+}
+
+fn run_get_batteries(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<Vec<Battery>> {
+    let Some(f) = &cb.get_batteries else {
+        return Ok(Vec::new());
+    };
+    let value: Value = f
+        .call(dev.clone())
+        .map_err(|e| lua_err("get_batteries", e))?;
+    lua.from_value(value)
+        .map_err(|e| lua_err("get_batteries result", e))
+}
+
+fn run_connection_status(
+    lua: &Lua,
+    cb: &Callbacks,
+    dev: &Table,
+) -> Result<Option<ConnectionStatus>> {
+    let Some(f) = &cb.connection_status else {
+        return Ok(None);
+    };
+    let value: Value = f
+        .call(dev.clone())
+        .map_err(|e| lua_err("connection_status", e))?;
+    if matches!(value, Value::Nil) {
+        return Ok(None);
+    }
+    lua.from_value(value)
+        .map_err(|e| lua_err("connection_status result", e))
+}
+
+fn run_get_equalizer(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<Equalizer> {
+    let f = cb
+        .get_equalizer
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no get_equalizer()"))?;
+    let value: Value = f
+        .call(dev.clone())
+        .map_err(|e| lua_err("get_equalizer", e))?;
+    lua.from_value(value)
+        .map_err(|e| lua_err("get_equalizer result", e))
+}
+
+fn run_eq_set_preset(cb: &Callbacks, dev: &Table, preset: usize) -> Result<()> {
+    let f = cb
+        .set_eq_preset
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no set_eq_preset()"))?;
+    f.call::<()>((dev.clone(), preset))
+        .map_err(|e| lua_err("set_eq_preset", e))
+}
+
+fn run_eq_set_bands(cb: &Callbacks, dev: &Table, values: &[f32]) -> Result<()> {
+    let f = cb
+        .set_eq_bands
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no set_eq_bands()"))?;
+    f.call::<()>((dev.clone(), values.to_vec()))
+        .map_err(|e| lua_err("set_eq_bands", e))
 }
 
 fn run_lcd_stream_frame(

@@ -11,24 +11,29 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{
-    Choice, DeviceCapability, DeviceType, DpiMode, DpiStatus, LcdDescriptor, NativeEffect,
-    RgbColor, RgbDescriptor, RgbState, RgbZone, ScreenRotation, ScreenShape, Sensor,
-    WriteRateStatus,
+    Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, Choice,
+    ConnectionStatus, DeviceCapability, DeviceType, DpiMode, DpiStatus, Equalizer, KeyRemapStatus,
+    LcdDescriptor, NativeEffect, Range, RgbColor, RgbDescriptor, RgbState, RgbZone, ScreenRotation,
+    ScreenShape, Sensor, WriteRateStatus,
 };
 
 use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor};
 use crate::drivers::{
-    CapabilityRef, ChainCapability, ChoiceCapability, ChoiceStateCache, Controller, Device,
-    DpiCapability, FanCapability, FanHub, FanStateSlot, LcdCapability, LcdStateSlot, RgbCapability,
-    RgbStateSlot, SensorCapability,
+    ActionCapability, BatteryCapability, BoolStateCache, BooleanCapability, CapabilityRef,
+    ChainCapability, ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, Device,
+    DpiCapability, EqualizerCapability, FanCapability, FanHub, FanStateSlot, KeyRemapCapability,
+    LcdCapability, LcdStateSlot, OnboardProfilesCapability, PairingCapability, RangeCapability,
+    RangeStateCache, RgbCapability, RgbStateSlot, SensorCapability,
 };
 
 use super::chain_leaf::ChainLeaf;
 use super::manifest::{
-    topology_from, AccessoryManifest, ChoiceDef, DpiManifest, MatchSpec, PluginManifest,
+    topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DpiManifest, MatchSpec,
+    PluginManifest, RangeDef,
 };
 use super::transport::PluginIo;
 use super::worker::{DevMatch, InitLcd, InitZone, PluginHandle};
+use std::collections::HashMap;
 
 /// Host-side DPI step-cycle state (the plugin only writes the chosen value).
 struct DpiState {
@@ -36,8 +41,11 @@ struct DpiState {
     index: usize,
     current: u16,
 }
-use crate::drivers::vendors::generic::devices::common::{linear_rgb_zone, ring_led_positions};
+use crate::drivers::vendors::generic::devices::common::{
+    linear_rgb_zone, per_led_frame, ring_led_positions,
+};
 use halod_shared::types::ZoneTopology;
+use halod_shared::zone_transform::transform_colors;
 
 /// A device whose behaviour is defined by a plugin script rather than native
 /// Rust.
@@ -68,6 +76,15 @@ pub struct LuaDevice {
     has_lcd: bool,
     has_dpi: bool,
     has_choice: bool,
+    has_range: bool,
+    has_boolean: bool,
+    has_action: bool,
+    has_battery: bool,
+    has_connection: bool,
+    has_equalizer: bool,
+    has_pairing: bool,
+    has_onboard_profiles: bool,
+    has_key_remap: bool,
 
     /// Host-owned DPI step-cycle state + bounds/mode (present iff `has_dpi`).
     dpi_state: Mutex<DpiState>,
@@ -78,6 +95,27 @@ pub struct LuaDevice {
     /// Declared choice controls + the current selection cache.
     choices: Vec<ChoiceDef>,
     choice_cache: ChoiceStateCache,
+
+    /// Declared range controls + the current value cache.
+    ranges: Vec<RangeDef>,
+    range_cache: RangeStateCache,
+    /// Declared boolean controls (values are read live from `get_booleans`;
+    /// the cache only backs save/restore of the last-known write).
+    booleans: Vec<BooleanDef>,
+    bool_cache: BoolStateCache,
+    /// Declared actions (fire-and-forget, no cached state).
+    actions: Vec<ActionDef>,
+
+    /// Last equalizer snapshot read, backing `EqualizerCapability::current_state`
+    /// (and therefore save/restore) between explicit `get_equalizer` calls.
+    eq_cache: Mutex<Option<Equalizer>>,
+
+    /// Declared remappable buttons + policy (present iff `has_key_remap`).
+    key_remap_buttons: Vec<ButtonDescriptor>,
+    key_remap_requires_host_mode: bool,
+    key_remap_default_mappings: Vec<ButtonMapping>,
+    /// Host-cached mappings that differ from `ButtonAction::Native`.
+    key_remap_mappings: Mutex<HashMap<u16, ButtonMapping>>,
 
     /// LCD panel descriptor, reported by `initialize` (resolution can vary by
     /// device variant). Absent until initialized.
@@ -203,6 +241,15 @@ impl LuaDevice {
                 .unwrap_or(false),
             has_dpi: manifest.dpi.is_some(),
             has_choice: manifest.choice.is_some(),
+            has_range: manifest.range.is_some(),
+            has_boolean: manifest.boolean.is_some(),
+            has_action: manifest.action.is_some(),
+            has_battery: manifest.battery.is_some(),
+            has_connection: manifest.connection.is_some(),
+            has_equalizer: manifest.equalizer.is_some(),
+            has_pairing: manifest.pairing.is_some(),
+            has_onboard_profiles: manifest.onboard_profiles.is_some(),
+            has_key_remap: manifest.key_remap.is_some(),
             dpi_state: Mutex::new(build_dpi_state(manifest.dpi.as_ref())),
             dpi_min: manifest.dpi.as_ref().map(|d| d.min).unwrap_or(0),
             dpi_max: manifest.dpi.as_ref().map(|d| d.max).unwrap_or(0),
@@ -216,6 +263,40 @@ impl LuaDevice {
                 .map(|c| c.choices.clone())
                 .unwrap_or_default(),
             choice_cache: ChoiceStateCache::default(),
+            ranges: manifest
+                .range
+                .as_ref()
+                .map(|r| r.ranges.clone())
+                .unwrap_or_default(),
+            range_cache: RangeStateCache::default(),
+            booleans: manifest
+                .boolean
+                .as_ref()
+                .map(|b| b.booleans.clone())
+                .unwrap_or_default(),
+            bool_cache: BoolStateCache::default(),
+            actions: manifest
+                .action
+                .as_ref()
+                .map(|a| a.actions.clone())
+                .unwrap_or_default(),
+            eq_cache: Mutex::new(None),
+            key_remap_buttons: manifest
+                .key_remap
+                .as_ref()
+                .map(|k| k.buttons.clone())
+                .unwrap_or_default(),
+            key_remap_requires_host_mode: manifest
+                .key_remap
+                .as_ref()
+                .map(|k| k.requires_host_mode)
+                .unwrap_or(false),
+            key_remap_default_mappings: manifest
+                .key_remap
+                .as_ref()
+                .map(|k| k.default_mappings.clone())
+                .unwrap_or_default(),
+            key_remap_mappings: Mutex::new(HashMap::new()),
             rgb_descriptor: manifest.rgb_descriptor().unwrap_or(RgbDescriptor {
                 zones: Vec::new(),
                 native_effects: Vec::new(),
@@ -398,6 +479,33 @@ impl Device for LuaDevice {
         if self.has_choice {
             caps.push(CapabilityRef::Choice(self));
         }
+        if self.has_range {
+            caps.push(CapabilityRef::Range(self));
+        }
+        if self.has_boolean {
+            caps.push(CapabilityRef::Boolean(self));
+        }
+        if self.has_action {
+            caps.push(CapabilityRef::Action(self));
+        }
+        if self.has_battery {
+            caps.push(CapabilityRef::Battery(self));
+        }
+        if self.has_connection {
+            caps.push(CapabilityRef::Connection(self));
+        }
+        if self.has_equalizer {
+            caps.push(CapabilityRef::Equalizer(self));
+        }
+        if self.has_pairing {
+            caps.push(CapabilityRef::Pairing(self));
+        }
+        if self.has_onboard_profiles {
+            caps.push(CapabilityRef::OnboardProfiles(self));
+        }
+        if self.has_key_remap {
+            caps.push(CapabilityRef::KeyRemap(self));
+        }
         if self.has_chain {
             caps.push(CapabilityRef::Controller(self));
             caps.push(CapabilityRef::Chain(self));
@@ -415,6 +523,7 @@ impl RgbCapability for LuaDevice {
     }
 
     async fn apply(&self, state: RgbState) -> Result<()> {
+        let state = apply_per_led_transforms(self.descriptor(), &self.rgb_slot, state);
         self.rgb_slot.set_state(Some(state.clone()));
         self.worker()?.rgb_apply(state).await
     }
@@ -425,6 +534,37 @@ impl RgbCapability for LuaDevice {
 
     fn rgb_state(&self) -> &RgbStateSlot {
         &self.rgb_slot
+    }
+}
+
+/// Apply each zone's content transform to PerLed colour maps before handing the
+/// state to the plugin, so the plugin never needs to understand transforms.
+fn apply_per_led_transforms(
+    descriptor: &RgbDescriptor,
+    slot: &RgbStateSlot,
+    state: RgbState,
+) -> RgbState {
+    let RgbState::PerLed { zones } = state else {
+        return state;
+    };
+    let mut transformed = HashMap::new();
+    for (zone_id, led_map) in &zones {
+        let Some(zone) = descriptor.zones.iter().find(|z| &z.id == zone_id) else {
+            transformed.insert(zone_id.clone(), led_map.clone());
+            continue;
+        };
+        let colors = per_led_frame(led_map, zone.leds.len());
+        let tx = slot.transform_for(zone_id);
+        let colors = transform_colors(&colors, zone, &tx);
+        let new_map: HashMap<String, RgbColor> = colors
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i.to_string(), *c))
+            .collect();
+        transformed.insert(zone_id.clone(), new_map);
+    }
+    RgbState::PerLed {
+        zones: transformed,
     }
 }
 
@@ -750,6 +890,240 @@ impl ChoiceCapability for LuaDevice {
 }
 
 #[async_trait]
+impl RangeCapability for LuaDevice {
+    fn range_cache(&self) -> &RangeStateCache {
+        &self.range_cache
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        if self.ranges.is_empty() {
+            return None;
+        }
+        let ranges = self
+            .ranges
+            .iter()
+            .map(|r| Range {
+                key: r.key.clone(),
+                label: r.label.clone(),
+                min: r.min,
+                max: r.max,
+                step: r.step,
+                value: self.range_cache.get(&r.key).unwrap_or(r.default),
+                read_only: r.read_only,
+                category: r.category.clone(),
+                start_label: r.start_label.clone(),
+                end_label: r.end_label.clone(),
+                display: r.display.clone(),
+                visible_when: None,
+            })
+            .collect();
+        Some(DeviceCapability::Range(ranges))
+    }
+
+    async fn set_range(&self, key: &str, value: i32) -> Result<()> {
+        let range = self
+            .ranges
+            .iter()
+            .find(|r| r.key == key)
+            .ok_or_else(|| anyhow::anyhow!("unknown range key: {key}"))?;
+        let value = value.clamp(range.min, range.max);
+        self.range_cache.record(key, value);
+        self.worker()?.range_set(key, value).await
+    }
+}
+
+#[async_trait]
+impl BooleanCapability for LuaDevice {
+    async fn get_booleans(&self) -> Result<Vec<Boolean>> {
+        let mut live = self.worker()?.boolean_get().await?;
+        // Backfill labels/category/read_only from the manifest when the
+        // script's `get_booleans` only reports `{key, value}` pairs.
+        for b in &mut live {
+            if let Some(decl) = self.booleans.iter().find(|d| d.key == b.key) {
+                if b.label.is_empty() {
+                    b.label = decl.label.clone();
+                }
+                if b.category.is_empty() {
+                    b.category = decl.category.clone();
+                }
+            }
+        }
+        Ok(live)
+    }
+
+    async fn set_boolean(&self, key: &str, value: bool) -> Result<()> {
+        self.bool_cache.record(key, value);
+        self.worker()?.boolean_set(key, value).await
+    }
+
+    fn bool_cache(&self) -> Option<&BoolStateCache> {
+        Some(&self.bool_cache)
+    }
+}
+
+#[async_trait]
+impl ActionCapability for LuaDevice {
+    async fn trigger_action(&self, key: &str) -> Result<()> {
+        if !self.actions.iter().any(|a| a.key == key) {
+            anyhow::bail!("unknown action key: {key}");
+        }
+        self.worker()?.action_trigger(key).await
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        if self.actions.is_empty() {
+            return None;
+        }
+        let actions = self
+            .actions
+            .iter()
+            .map(|a| Action {
+                key: a.key.clone(),
+                label: a.label.clone(),
+                category: a.category.clone(),
+                visible_when: None,
+            })
+            .collect();
+        Some(DeviceCapability::Action(actions))
+    }
+}
+
+#[async_trait]
+impl BatteryCapability for LuaDevice {
+    async fn get_batteries(&self) -> Result<Vec<Battery>> {
+        self.worker()?.battery_get().await
+    }
+}
+
+#[async_trait]
+impl ConnectionCapability for LuaDevice {
+    async fn connection_status(&self) -> Option<ConnectionStatus> {
+        self.worker().ok()?.connection_get().await.ok().flatten()
+    }
+}
+
+#[async_trait]
+impl EqualizerCapability for LuaDevice {
+    async fn get_equalizer(&self) -> Result<Equalizer> {
+        let eq = self.worker()?.equalizer_get().await?;
+        *self.eq_cache.lock().unwrap() = Some(eq.clone());
+        Ok(eq)
+    }
+
+    async fn set_eq_preset(&self, preset_index: usize) -> Result<()> {
+        self.worker()?.equalizer_set_preset(preset_index).await
+    }
+
+    async fn set_eq_bands(&self, values: &[f32]) -> Result<()> {
+        self.worker()?.equalizer_set_bands(values).await
+    }
+
+    fn current_state(&self) -> Option<Equalizer> {
+        self.eq_cache.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl PairingCapability for LuaDevice {
+    async fn start_pairing(&self, timeout_secs: u8) -> Result<()> {
+        self.worker()?.pairing_start(timeout_secs).await
+    }
+
+    async fn stop_pairing(&self) -> Result<()> {
+        self.worker()?.pairing_stop().await
+    }
+
+    /// Runs the plugin's hardware-side unpair, but does not remove a live
+    /// child `Device` from the registry — `LuaDevice` has no owned-child model
+    /// for paired wireless slots (unlike the ARGB chain/accessory path). A
+    /// plugin driving a receiver with real paired child devices needs that
+    /// wired up as a follow-up; today `unpair` only clears the hardware slot.
+    async fn unpair(&self, slot: u8) -> Result<Option<Arc<dyn Device>>> {
+        self.worker()?.pairing_unpair(slot).await?;
+        Ok(None)
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        let status = self.worker().ok()?.pairing_status().await.ok()?;
+        Some(DeviceCapability::Pairing(status))
+    }
+}
+
+#[async_trait]
+impl OnboardProfilesCapability for LuaDevice {
+    async fn switch_profile(&self, slot: u8) -> Result<()> {
+        self.worker()?.onboard_switch_profile(slot).await
+    }
+
+    async fn restore_profile(&self, slot: u8) -> Result<()> {
+        self.worker()?.onboard_restore_profile(slot).await
+    }
+
+    async fn set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()> {
+        self.worker()?
+            .onboard_set_profile_enabled(slot, enabled)
+            .await
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        let profiles = self.worker().ok()?.onboard_profiles_get().await.ok()?;
+        Some(DeviceCapability::OnboardProfiles(profiles))
+    }
+}
+
+#[async_trait]
+impl KeyRemapCapability for LuaDevice {
+    async fn get_key_remap_status(&self) -> KeyRemapStatus {
+        let mappings: Vec<ButtonMapping> = self
+            .key_remap_mappings
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        let host_mode_active = match &self.worker {
+            Some(_) => self.worker().unwrap().key_remap_host_mode_active().await,
+            None => false,
+        };
+        KeyRemapStatus {
+            buttons: self.key_remap_buttons.clone(),
+            mappings,
+            requires_host_mode: self.key_remap_requires_host_mode,
+            host_mode_active,
+        }
+    }
+
+    async fn set_button_mapping(&self, mapping: ButtonMapping) -> Result<()> {
+        self.worker()?
+            .key_remap_set_mapping(mapping.clone())
+            .await?;
+        let mut cache = self.key_remap_mappings.lock().unwrap();
+        if mapping.base == ButtonAction::Native && mapping.shifted == ButtonAction::Native {
+            cache.remove(&mapping.cid);
+        } else {
+            cache.insert(mapping.cid, mapping);
+        }
+        Ok(())
+    }
+
+    async fn reset_button_mapping(&self, cid: u16) -> Result<()> {
+        self.worker()?.key_remap_reset(cid).await?;
+        self.key_remap_mappings.lock().unwrap().remove(&cid);
+        Ok(())
+    }
+
+    async fn reset_all_button_mappings(&self) -> Result<()> {
+        self.worker()?.key_remap_reset_all().await?;
+        self.key_remap_mappings.lock().unwrap().clear();
+        Ok(())
+    }
+
+    async fn default_mappings(&self) -> Vec<ButtonMapping> {
+        self.key_remap_default_mappings.clone()
+    }
+}
+
+#[async_trait]
 impl ChainAdapter for LuaDevice {
     fn parent_id(&self) -> String {
         self.id.clone()
@@ -983,6 +1357,269 @@ mod tests {
         let dev = hid_device("poll-0", &manifest, mock.clone());
         dev.poll_once().await.unwrap();
         assert_eq!(dev.get_sensors().await.unwrap()[0].value, 55.0);
+    }
+
+    // ── Range / Boolean / Action / Battery / Connection / Equalizer ────────
+
+    const CONTROLS_SCRIPT: &str = r#"
+        return {
+          match = { transport = "hid", vid = 0x1, pid = 0x2 },
+          identity = { vendor = "Test", model = "M" },
+          range = { ranges = { { key = "poll_hz", label = "Poll Rate", min = 125, max = 1000, default = 500 } } },
+          boolean = { booleans = { { key = "sniper", label = "Sniper" } } },
+          action = { actions = { { key = "calibrate", label = "Calibrate" } } },
+          battery = {},
+          connection = {},
+          equalizer = {},
+
+          set_range = function(dev, key, value)
+            dev.transport:write(string.char(0xA0, value & 0xFF))
+          end,
+          get_booleans = function(dev)
+            return { { key = "sniper", value = true } }
+          end,
+          set_boolean = function(dev, key, value)
+            dev.transport:write(string.char(0xB0, value and 1 or 0))
+          end,
+          trigger_action = function(dev, key)
+            dev.transport:write(string.char(0xC0))
+          end,
+          get_batteries = function(dev)
+            return { { key = "main", label = "Battery", level = 77, status = "discharging" } }
+          end,
+          connection_status = function(dev)
+            return { connection_type = "wireless" }
+          end,
+          get_equalizer = function(dev)
+            return { presets = {}, selected_preset = 0, bands = {}, bands_editable = false }
+          end,
+          set_eq_preset = function(dev, preset)
+            dev.transport:write(string.char(0xD0, preset))
+          end,
+          set_eq_bands = function(dev, values)
+            dev.transport:write(string.char(0xD1, #values))
+          end,
+        }
+    "#;
+
+    fn controls_device(transport: Arc<dyn Transport>) -> LuaDevice {
+        let manifest =
+            super::super::parse_manifest(CONTROLS_SCRIPT, Path::new("controls.lua")).unwrap();
+        hid_device("controls-0", &manifest, transport)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn advertises_all_declared_controls() {
+        use crate::drivers::Device;
+        let dev = controls_device(Arc::new(MockTransport::empty()));
+        assert!(dev.as_range().is_some());
+        assert!(dev.as_boolean().is_some());
+        assert!(dev.as_action().is_some());
+        assert!(dev.as_battery().is_some());
+        assert!(dev.as_equalizer().is_some());
+        assert!(dev
+            .capabilities()
+            .iter()
+            .any(|c| matches!(c, CapabilityRef::Connection(_))));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn range_set_clamps_and_caches_and_reaches_script() {
+        use crate::drivers::RangeCapability;
+        let mock = Arc::new(MockTransport::empty());
+        let dev = controls_device(mock.clone());
+        dev.set_range("poll_hz", 5000).await.unwrap(); // above max, clamped
+        assert_eq!(*mock.written.lock().await, vec![vec![0xA0, 232]]); // 1000 & 0xFF
+        assert_eq!(dev.range_cache().get("poll_hz"), Some(1000));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boolean_round_trips_value_and_backfills_label() {
+        use crate::drivers::BooleanCapability;
+        let mock = Arc::new(MockTransport::empty());
+        let dev = controls_device(mock.clone());
+        let booleans = dev.get_booleans().await.unwrap();
+        assert_eq!(booleans.len(), 1);
+        assert!(booleans[0].value);
+        assert_eq!(booleans[0].label, "Sniper");
+        dev.set_boolean("sniper", false).await.unwrap();
+        assert_eq!(*mock.written.lock().await, vec![vec![0xB0, 0]]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn action_trigger_reaches_script_and_rejects_unknown_key() {
+        use crate::drivers::ActionCapability;
+        let mock = Arc::new(MockTransport::empty());
+        let dev = controls_device(mock.clone());
+        dev.trigger_action("calibrate").await.unwrap();
+        assert_eq!(*mock.written.lock().await, vec![vec![0xC0]]);
+        assert!(dev.trigger_action("unknown").await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn battery_and_connection_deserialize_from_lua() {
+        use crate::drivers::{BatteryCapability, ConnectionCapability};
+        let dev = controls_device(Arc::new(MockTransport::empty()));
+        let batteries = dev.get_batteries().await.unwrap();
+        assert_eq!(batteries[0].level, 77);
+        let status = dev.connection_status().await.unwrap();
+        assert_eq!(
+            status.connection_type,
+            halod_shared::types::ConnectionType::Wireless
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn equalizer_caches_last_read_for_current_state() {
+        use crate::drivers::EqualizerCapability;
+        let mock = Arc::new(MockTransport::empty());
+        let dev = controls_device(mock.clone());
+        assert!(
+            EqualizerCapability::current_state(&dev).is_none(),
+            "nothing read yet"
+        );
+        let eq = dev.get_equalizer().await.unwrap();
+        assert_eq!(eq.selected_preset, 0);
+        assert!(
+            EqualizerCapability::current_state(&dev).is_some(),
+            "cached after get_equalizer"
+        );
+        dev.set_eq_preset(2).await.unwrap();
+        dev.set_eq_bands(&[1.0, 2.0, 3.0]).await.unwrap();
+        assert_eq!(
+            *mock.written.lock().await,
+            vec![vec![0xD0, 2], vec![0xD1, 3]]
+        );
+    }
+
+    // ── Pairing / OnboardProfiles / KeyRemap ────────────────────────────
+
+    const RECEIVER_SCRIPT: &str = r#"
+        return {
+          match = { transport = "hid", vid = 0x1, pid = 0x2 },
+          identity = { vendor = "Test", model = "Receiver" },
+          pairing = {},
+          onboard_profiles = {},
+          key_remap = {
+            buttons = { { cid = 1, label = "Left", divertable = true, group = 0 } },
+            requires_host_mode = true,
+          },
+
+          start_pairing = function(dev, timeout_secs)
+            dev.transport:write(string.char(0xE0, timeout_secs))
+          end,
+          stop_pairing = function(dev)
+            dev.transport:write(string.char(0xE1))
+          end,
+          unpair = function(dev, slot)
+            dev.transport:write(string.char(0xE2, slot))
+          end,
+          pairing_status = function(dev)
+            return { state = "idle", max_slots = 1, slots = {} }
+          end,
+          switch_profile = function(dev, slot)
+            dev.transport:write(string.char(0xF0, slot))
+          end,
+          restore_profile = function(dev, slot)
+            dev.transport:write(string.char(0xF1, slot))
+          end,
+          set_profile_enabled = function(dev, slot, enabled)
+            dev.transport:write(string.char(0xF2, slot, enabled and 1 or 0))
+          end,
+          onboard_profiles_status = function(dev)
+            return { active_slot = 1, slots = { { index = 1, enabled = true, active = true, has_rom_default = true } } }
+          end,
+          set_button_mapping = function(dev, mapping)
+            dev.transport:write(string.char(0x90, mapping.cid))
+          end,
+          reset_button_mapping = function(dev, cid)
+            dev.transport:write(string.char(0x91, cid))
+          end,
+          reset_all_button_mappings = function(dev)
+            dev.transport:write(string.char(0x92))
+          end,
+          key_remap_host_mode = function(dev)
+            return true
+          end,
+        }
+    "#;
+
+    fn receiver_device(transport: Arc<dyn Transport>) -> LuaDevice {
+        let manifest =
+            super::super::parse_manifest(RECEIVER_SCRIPT, Path::new("receiver.lua")).unwrap();
+        hid_device("receiver-0", &manifest, transport)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn advertises_pairing_onboard_and_key_remap() {
+        let dev = receiver_device(Arc::new(MockTransport::empty()));
+        assert!(dev.as_pairing().is_some());
+        assert!(dev.as_onboard_profiles().is_some());
+        assert!(dev.as_key_remap().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pairing_start_stop_unpair_reach_script() {
+        use crate::drivers::PairingCapability;
+        let mock = Arc::new(MockTransport::empty());
+        let dev = receiver_device(mock.clone());
+        dev.start_pairing(30).await.unwrap();
+        dev.stop_pairing().await.unwrap();
+        let removed = dev.unpair(1).await.unwrap();
+        assert!(removed.is_none(), "no owned child to remove");
+        assert_eq!(
+            *mock.written.lock().await,
+            vec![vec![0xE0, 30], vec![0xE1], vec![0xE2, 1]]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn onboard_profiles_switch_restore_enable_reach_script() {
+        use crate::drivers::OnboardProfilesCapability;
+        let mock = Arc::new(MockTransport::empty());
+        let dev = receiver_device(mock.clone());
+        dev.switch_profile(2).await.unwrap();
+        dev.restore_profile(3).await.unwrap();
+        dev.set_profile_enabled(4, true).await.unwrap();
+        assert_eq!(
+            *mock.written.lock().await,
+            vec![vec![0xF0, 2], vec![0xF1, 3], vec![0xF2, 4, 1]]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn key_remap_round_trips_mapping_and_reports_status() {
+        use crate::drivers::KeyRemapCapability;
+        use halod_shared::types::{ButtonAction, ButtonMapping, MouseBtn};
+        let mock = Arc::new(MockTransport::empty());
+        let dev = receiver_device(mock.clone());
+
+        let status = dev.get_key_remap_status().await;
+        assert_eq!(status.buttons.len(), 1);
+        assert!(status.requires_host_mode);
+        assert!(status.host_mode_active);
+        assert!(status.mappings.is_empty());
+
+        dev.set_button_mapping(ButtonMapping {
+            cid: 1,
+            base: ButtonAction::MouseButton {
+                btn: MouseBtn::Right,
+            },
+            shifted: ButtonAction::Native,
+        })
+        .await
+        .unwrap();
+        let status = dev.get_key_remap_status().await;
+        assert_eq!(status.mappings.len(), 1);
+        assert_eq!(status.mappings[0].cid, 1);
+
+        dev.reset_button_mapping(1).await.unwrap();
+        assert!(dev.get_key_remap_status().await.mappings.is_empty());
+
+        assert_eq!(
+            *mock.written.lock().await,
+            vec![vec![0x90, 1], vec![0x91, 1]]
+        );
     }
 
     // ── Chain / children ────────────────────────────────────────────────

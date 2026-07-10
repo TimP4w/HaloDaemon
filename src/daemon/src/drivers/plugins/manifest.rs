@@ -8,7 +8,8 @@
 
 use anyhow::{anyhow, bail, Result};
 use halod_shared::types::{
-    ChoiceDisplay, ChoiceOption, DeviceType, NativeEffect, RgbDescriptor, RgbZone, ZoneTopology,
+    ButtonDescriptor, ButtonMapping, ChoiceDisplay, ChoiceOption, DeviceType, NativeEffect,
+    RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
 };
 use mlua::{DeserializeOptions, Lua, LuaSerdeExt};
 use serde::Deserialize;
@@ -118,6 +119,121 @@ pub struct ChoiceDef {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChoiceManifest {
     pub choices: Vec<ChoiceDef>,
+}
+
+/// One integer range control (e.g. polling rate in Hz).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RangeDef {
+    pub key: String,
+    pub label: String,
+    pub min: i32,
+    pub max: i32,
+    #[serde(default = "default_range_step")]
+    pub step: i32,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub start_label: Option<String>,
+    #[serde(default)]
+    pub end_label: Option<String>,
+    #[serde(default)]
+    pub display: RangeDisplay,
+    /// Value shown before the host learns the device's actual value.
+    pub default: i32,
+}
+
+fn default_range_step() -> i32 {
+    1
+}
+
+/// Range capability: a set of integer controls. The host caches the current
+/// value and calls `set_range(dev, key, value)` to apply it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RangeManifest {
+    pub ranges: Vec<RangeDef>,
+}
+
+/// One boolean toggle control.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BooleanDef {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub category: String,
+}
+
+/// Boolean capability: a set of toggles. The plugin's `get_booleans(dev)`
+/// reports current values (readable state may be live, unlike range/choice);
+/// `set_boolean(dev, key, value)` applies a write.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BooleanManifest {
+    #[serde(default)]
+    pub booleans: Vec<BooleanDef>,
+}
+
+/// One fire-and-forget action (button).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionDef {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub category: String,
+}
+
+/// Action capability: a set of triggerable buttons, applied via
+/// `trigger_action(dev, key)`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionManifest {
+    #[serde(default)]
+    pub actions: Vec<ActionDef>,
+}
+
+/// Battery capability marker (data-less; readings come from `get_batteries`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BatteryManifest {}
+
+/// Connection-status capability marker (data-less; state comes from
+/// `connection_status`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ConnectionManifest {}
+
+/// Equalizer capability marker (data-less; presets/bands/values all come from
+/// `get_equalizer`; applied via `set_eq_preset`/`set_eq_bands`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EqualizerManifest {}
+
+/// Pairing capability marker (data-less; state comes from `pairing_status`,
+/// applied via `start_pairing`/`stop_pairing`/`unpair`). Unpairing a slot does
+/// not (yet) remove a live child `Device` from the registry — the plugin
+/// handles the hardware side; wiring paired slots to owned children is a
+/// follow-up once a plugin needs it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PairingManifest {}
+
+/// Onboard-profile capability marker (data-less; state comes from
+/// `onboard_profiles_status`, applied via `switch_profile`/`restore_profile`/
+/// `set_profile_enabled`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OnboardProfilesManifest {}
+
+/// Key-remap capability: the device's remappable buttons + policy, declared
+/// statically since they're fixed hardware. Cached mappings are host-owned;
+/// writes go through `set_button_mapping`/`reset_button_mapping`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct KeyRemapManifest {
+    pub buttons: Vec<ButtonDescriptor>,
+    /// True when remapping only takes effect in the device's host mode (as for
+    /// Logitech HID++); the GUI shows a "requires host mode" notice.
+    #[serde(default)]
+    pub requires_host_mode: bool,
+    /// Out-of-the-box mappings, seeded on first run and restored by the reset
+    /// callbacks.
+    #[serde(default)]
+    pub default_mappings: Vec<ButtonMapping>,
 }
 
 fn default_topology() -> String {
@@ -354,6 +470,24 @@ struct RawManifest {
     #[serde(default)]
     choice: Option<ChoiceManifest>,
     #[serde(default)]
+    range: Option<RangeManifest>,
+    #[serde(default)]
+    boolean: Option<BooleanManifest>,
+    #[serde(default)]
+    action: Option<ActionManifest>,
+    #[serde(default)]
+    battery: Option<BatteryManifest>,
+    #[serde(default)]
+    connection: Option<ConnectionManifest>,
+    #[serde(default)]
+    equalizer: Option<EqualizerManifest>,
+    #[serde(default)]
+    pairing: Option<PairingManifest>,
+    #[serde(default)]
+    onboard_profiles: Option<OnboardProfilesManifest>,
+    #[serde(default)]
+    key_remap: Option<KeyRemapManifest>,
+    #[serde(default)]
     poll: Option<PollManifest>,
     #[serde(default)]
     chain: Option<ChainManifest>,
@@ -376,6 +510,15 @@ pub struct PluginManifest {
     pub lcd: Option<LcdManifest>,
     pub dpi: Option<DpiManifest>,
     pub choice: Option<ChoiceManifest>,
+    pub range: Option<RangeManifest>,
+    pub boolean: Option<BooleanManifest>,
+    pub action: Option<ActionManifest>,
+    pub battery: Option<BatteryManifest>,
+    pub connection: Option<ConnectionManifest>,
+    pub equalizer: Option<EqualizerManifest>,
+    pub pairing: Option<PairingManifest>,
+    pub onboard_profiles: Option<OnboardProfilesManifest>,
+    pub key_remap: Option<KeyRemapManifest>,
     pub poll: Option<PollManifest>,
     pub chain: Option<ChainManifest>,
 }
@@ -470,6 +613,15 @@ impl PluginManifest {
             || self.lcd.is_some()
             || self.dpi.is_some()
             || self.choice.is_some()
+            || self.range.is_some()
+            || self.boolean.is_some()
+            || self.action.is_some()
+            || self.battery.is_some()
+            || self.connection.is_some()
+            || self.equalizer.is_some()
+            || self.pairing.is_some()
+            || self.onboard_profiles.is_some()
+            || self.key_remap.is_some()
             || self.chain.is_some()
     }
 
@@ -493,6 +645,27 @@ impl PluginManifest {
         }
         if self.choice.is_some() {
             labels.push("Settings".to_owned());
+        }
+        if self.range.is_some() || self.boolean.is_some() || self.action.is_some() {
+            labels.push("Controls".to_owned());
+        }
+        if self.battery.is_some() {
+            labels.push("Battery".to_owned());
+        }
+        if self.connection.is_some() {
+            labels.push("Connection".to_owned());
+        }
+        if self.equalizer.is_some() {
+            labels.push("Equalizer".to_owned());
+        }
+        if self.pairing.is_some() {
+            labels.push("Pairing".to_owned());
+        }
+        if self.onboard_profiles.is_some() {
+            labels.push("Onboard".to_owned());
+        }
+        if self.key_remap.is_some() {
+            labels.push("Keys".to_owned());
         }
         if self.chain.is_some() {
             labels.push("Accessories".to_owned());
@@ -557,6 +730,15 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         lcd: raw.lcd,
         dpi: raw.dpi,
         choice: raw.choice,
+        range: raw.range,
+        boolean: raw.boolean,
+        action: raw.action,
+        battery: raw.battery,
+        connection: raw.connection,
+        equalizer: raw.equalizer,
+        pairing: raw.pairing,
+        onboard_profiles: raw.onboard_profiles,
+        key_remap: raw.key_remap,
         poll: raw.poll,
         chain: raw.chain,
     })
@@ -747,5 +929,68 @@ mod tests {
             identity = { vendor = "x", model = "y" },
         }"#;
         assert!(parse_manifest(src, Path::new("ok.lua")).is_ok());
+    }
+
+    #[test]
+    fn range_boolean_action_battery_connection_equalizer_sections_parse() {
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            range = { ranges = { { key = "hz", label = "Hz", min = 125, max = 1000, default = 500 } } },
+            boolean = { booleans = { { key = "sniper", label = "Sniper" } } },
+            action = { actions = { { key = "cal", label = "Calibrate" } } },
+            battery = {},
+            connection = {},
+            equalizer = {},
+        }"#;
+        let m = parse_manifest(src, Path::new("controls.lua")).unwrap();
+        assert!(m.needs_worker());
+        let labels = m.capability_labels();
+        assert!(labels.contains(&"Controls".to_owned()));
+        assert!(labels.contains(&"Battery".to_owned()));
+        assert!(labels.contains(&"Connection".to_owned()));
+        assert!(labels.contains(&"Equalizer".to_owned()));
+        assert_eq!(m.range.unwrap().ranges[0].key, "hz");
+        assert_eq!(m.boolean.unwrap().booleans[0].key, "sniper");
+        assert_eq!(m.action.unwrap().actions[0].key, "cal");
+        assert!(m.battery.is_some());
+        assert!(m.connection.is_some());
+        assert!(m.equalizer.is_some());
+    }
+
+    #[test]
+    fn range_default_step_is_one() {
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            range = { ranges = { { key = "hz", label = "Hz", min = 0, max = 10, default = 5 } } },
+        }"#;
+        let m = parse_manifest(src, Path::new("r.lua")).unwrap();
+        assert_eq!(m.range.unwrap().ranges[0].step, 1);
+    }
+
+    #[test]
+    fn pairing_onboard_profiles_key_remap_sections_parse() {
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            pairing = {},
+            onboard_profiles = {},
+            key_remap = {
+              buttons = { { cid = 1, label = "Left", divertable = true, group = 0 } },
+              requires_host_mode = true,
+            },
+        }"#;
+        let m = parse_manifest(src, Path::new("receiver.lua")).unwrap();
+        assert!(m.needs_worker());
+        let labels = m.capability_labels();
+        assert!(labels.contains(&"Pairing".to_owned()));
+        assert!(labels.contains(&"Onboard".to_owned()));
+        assert!(labels.contains(&"Keys".to_owned()));
+        assert!(m.pairing.is_some());
+        assert!(m.onboard_profiles.is_some());
+        let key_remap = m.key_remap.unwrap();
+        assert_eq!(key_remap.buttons[0].cid, 1);
+        assert!(key_remap.requires_host_mode);
     }
 }
