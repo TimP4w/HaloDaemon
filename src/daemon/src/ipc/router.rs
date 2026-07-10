@@ -294,6 +294,9 @@ async fn dispatch(
         DaemonCommand::SetPluginPermissions { id, granted } => {
             registry::usecases::plugins::set_permissions(id, granted, app).await
         }
+        DaemonCommand::SetPluginConfig { id, values } => {
+            registry::usecases::plugins::set_config(id, values, app).await
+        }
         DaemonCommand::ApplyPendingPluginChanges => {
             registry::usecases::plugins::apply_pending_changes(app).await
         }

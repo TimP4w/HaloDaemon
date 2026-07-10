@@ -30,8 +30,11 @@ plugins:
   revoke: Revoca
   permission_network: Rete
   permission_os: Sistema Operativo
-  permission_storage: Archiviazione
   permission_secure_storage: Archiviazione sicura
+  # Campi di configurazione
+  settings: IMPOSTAZIONI
+  save_settings: Salva
+  secret_set_hint: (un segreto è memorizzato)
   # Finestra di consenso permessi (mostrata subito dopo l'importazione di un plugin che richiede permessi)
   consent_title: Richiesta di permessi
   consent_body: "%{name} richiede i seguenti permessi per funzionare:"

@@ -154,11 +154,13 @@ fn build_effect_handle(
         .strip_prefix(&format!("{}:", entry.plugin_id))?
         .to_string();
     let granted = granted_for(&entry.plugin_id);
+    let config = resolved_config_for(&entry.plugin_id, &granted);
     Some(PluginEffectHandle::spawn(
         entry.script_source,
         effect_id,
         params.clone(),
         granted,
+        config,
     ))
 }
 
@@ -190,6 +192,103 @@ pub(crate) fn granted_for(plugin_id: &str) -> Vec<Permission> {
         .read()
         .ok()
         .and_then(|g| g.as_ref().and_then(|m| m.get(plugin_id).cloned()))
+        .unwrap_or_default()
+}
+
+/// Non-secure config values the user has set per plugin (from
+/// `config.plugin_config`). Secure values never live here — see the secret
+/// store.
+static CONFIG_VALUES: RwLock<Option<HashMap<String, HashMap<String, String>>>> = RwLock::new(None);
+
+/// Replace the plugin config-values map (from `config.plugin_config`).
+pub fn set_config_values(values: &HashMap<String, HashMap<String, String>>) {
+    *CONFIG_VALUES
+        .write()
+        .expect("plugin config values poisoned") = Some(values.clone());
+}
+
+/// A plugin's resolved non-secure config: every declared field defaults to its
+/// manifest `default`, overridden by any value the user has set. Unknown keys
+/// the user may have stored (e.g. after a manifest edit removed a field) are
+/// not included — only keys the manifest still declares.
+pub fn config_for(plugin_id: &str) -> HashMap<String, String> {
+    let registry = match PLUGIN_REGISTRY.read() {
+        Ok(g) => g,
+        Err(_) => return HashMap::new(),
+    };
+    let Some(manifest) = registry.iter().find(|m| m.plugin_id == plugin_id) else {
+        return HashMap::new();
+    };
+    let stored = CONFIG_VALUES
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(plugin_id).cloned()))
+        .unwrap_or_default();
+    manifest
+        .config_fields()
+        .iter()
+        .filter(|f| !f.secure)
+        .map(|f| {
+            let value = stored
+                .get(&f.key)
+                .cloned()
+                .unwrap_or_else(|| f.default.clone());
+            (f.key.clone(), value)
+        })
+        .collect()
+}
+
+/// The secret store backing plugin-declared `secure` config fields, shared
+/// process-wide (set once at startup/reload, mirroring `GRANTED`/`CONFIG_VALUES`).
+/// `Arc` so `AppState::secret_store` and this static can point at the same
+/// instance without cloning the store itself.
+static SECRET_STORE: RwLock<Option<Arc<dyn crate::secrets::SecretStore>>> = RwLock::new(None);
+
+/// Point the process-wide secret-store reference at `store` (from
+/// `AppState::secret_store`).
+pub fn set_secret_store(store: Arc<dyn crate::secrets::SecretStore>) {
+    *SECRET_STORE.write().expect("secret store poisoned") = Some(store);
+}
+
+/// A plugin's full resolved config for its Lua VM: `config_for` plus, only
+/// when `Permission::SecureStorage` is granted, its decrypted secure values.
+/// Without that grant the secure keys are simply absent — a plugin can never
+/// read its own secret without the user having consented to the permission.
+pub fn resolved_config_for(plugin_id: &str, granted: &[Permission]) -> HashMap<String, String> {
+    let mut config = config_for(plugin_id);
+    if !granted.contains(&Permission::SecureStorage) {
+        return config;
+    }
+    let Some(store) = SECRET_STORE.read().ok().and_then(|g| g.clone()) else {
+        return config;
+    };
+    for key in secure_config_keys_for(plugin_id) {
+        match store.get(plugin_id, &key) {
+            Ok(Some(value)) => {
+                config.insert(key, value);
+            }
+            Ok(None) => {}
+            Err(e) => log::warn!("reading secret '{key}' for plugin '{plugin_id}': {e:#}"),
+        }
+    }
+    config
+}
+
+/// Keys of `plugin_id`'s declared `secure = true` config fields, for splitting
+/// an incoming `SetPluginConfig` (or a plugin delete) between the plaintext
+/// config store and the secret store. Empty for an unknown plugin id.
+pub fn secure_config_keys_for(plugin_id: &str) -> Vec<String> {
+    PLUGIN_REGISTRY
+        .read()
+        .ok()
+        .and_then(|reg| {
+            reg.iter().find(|m| m.plugin_id == plugin_id).map(|m| {
+                m.secure_config_keys()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+            })
+        })
         .unwrap_or_default()
 }
 
@@ -244,28 +343,54 @@ pub fn take_newly_ungranted_plugins() -> Vec<String> {
 }
 
 /// Every loaded plugin with its enable state, for the management UI.
-pub fn list() -> Vec<PluginInfo> {
+/// `secrets` resolves whether each declared secure field currently has a
+/// value stored, without ever reading the plaintext (see `PluginInfo::secret_set`).
+pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
     let registry = match PLUGIN_REGISTRY.read() {
         Ok(g) => g,
         Err(_) => return Vec::new(),
     };
     registry
         .iter()
-        .map(|m| PluginInfo {
-            id: m.plugin_id.clone(),
-            name: m.display_name().to_owned(),
-            path: m.source_path.display().to_string(),
-            plugin_type: m.plugin_type.into(),
-            capabilities: m.capability_labels(),
-            effect_names: m.effects.iter().map(|e| e.name.clone()).collect(),
-            enabled: !is_disabled(&m.plugin_id),
-            author: m.author().to_owned(),
-            version: m.version().to_owned(),
-            description: m.description().to_owned(),
-            targets: m.target_labels(),
-            builtin: is_builtin(&m.plugin_id),
-            declared_permissions: m.permissions.clone(),
-            granted_permissions: granted_for(&m.plugin_id),
+        .map(|m| {
+            let secret_set = m
+                .config_fields()
+                .iter()
+                .filter(|f| f.secure)
+                .map(|f| {
+                    let is_set = secrets
+                        .get(&m.plugin_id, &f.key)
+                        .unwrap_or_else(|e| {
+                            log::warn!(
+                                "checking secret '{}' for plugin '{}': {e:#}",
+                                f.key,
+                                m.plugin_id
+                            );
+                            None
+                        })
+                        .is_some();
+                    (f.key.clone(), is_set)
+                })
+                .collect();
+            PluginInfo {
+                id: m.plugin_id.clone(),
+                name: m.display_name().to_owned(),
+                path: m.source_path.display().to_string(),
+                plugin_type: m.plugin_type.into(),
+                capabilities: m.capability_labels(),
+                effect_names: m.effects.iter().map(|e| e.name.clone()).collect(),
+                enabled: !is_disabled(&m.plugin_id),
+                author: m.author().to_owned(),
+                version: m.version().to_owned(),
+                description: m.description().to_owned(),
+                targets: m.target_labels(),
+                builtin: is_builtin(&m.plugin_id),
+                declared_permissions: m.permissions.clone(),
+                granted_permissions: granted_for(&m.plugin_id),
+                config_fields: m.config_fields().iter().map(Into::into).collect(),
+                config_values: config_for(&m.plugin_id),
+                secret_set,
+            }
         })
         .collect()
 }
@@ -470,6 +595,7 @@ pub fn has_match(handle: &DiscoveryHandle<'_>) -> bool {
 mod tests {
     use super::manifest::PluginType;
     use super::*;
+    use crate::secrets::SecretStore as _;
     use halod_shared::types::DeviceType;
     use std::path::Path;
 
@@ -780,5 +906,131 @@ mod tests {
         "#;
         let m = parse_manifest(src, Path::new("caps.lua")).unwrap();
         assert_eq!(m.capability_labels(), vec!["RGB", "Sensor"]);
+    }
+
+    /// An in-memory `SecretStore` for tests, so `list()` tests don't need a
+    /// real keyring or the encrypted-file backend.
+    #[derive(Default)]
+    struct FakeSecretStore {
+        values: std::sync::Mutex<HashMap<(String, String), String>>,
+    }
+
+    impl crate::secrets::SecretStore for FakeSecretStore {
+        fn set(&self, plugin_id: &str, key: &str, plaintext: &str) -> anyhow::Result<()> {
+            self.values
+                .lock()
+                .unwrap()
+                .insert((plugin_id.to_owned(), key.to_owned()), plaintext.to_owned());
+            Ok(())
+        }
+        fn get(&self, plugin_id: &str, key: &str) -> anyhow::Result<Option<String>> {
+            Ok(self
+                .values
+                .lock()
+                .unwrap()
+                .get(&(plugin_id.to_owned(), key.to_owned()))
+                .cloned())
+        }
+        fn delete(&self, plugin_id: &str, key: &str) -> anyhow::Result<()> {
+            self.values
+                .lock()
+                .unwrap()
+                .remove(&(plugin_id.to_owned(), key.to_owned()));
+            Ok(())
+        }
+        fn backend_name(&self) -> &'static str {
+            "fake"
+        }
+    }
+
+    #[test]
+    fn config_for_defaults_unset_fields_and_overrides_set_ones() {
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            config = { fields = {
+              { key = "host", label = "Host", default = "127.0.0.1" },
+              { key = "port", label = "Port", default = "6742" },
+              { key = "token", label = "Token", secure = true, default = "unused" },
+            } },
+        }"#;
+        *PLUGIN_REGISTRY.write().unwrap() =
+            vec![parse_manifest(src, Path::new("cfgfor.lua")).unwrap()];
+        let mut stored = HashMap::new();
+        stored.insert(
+            "cfgfor".to_string(),
+            HashMap::from([("port".to_string(), "9999".to_string())]),
+        );
+        set_config_values(&stored);
+
+        let resolved = config_for("cfgfor");
+        assert_eq!(resolved.get("host"), Some(&"127.0.0.1".to_string()));
+        assert_eq!(resolved.get("port"), Some(&"9999".to_string()));
+        assert!(
+            !resolved.contains_key("token"),
+            "secure fields must never appear in the non-secure config map"
+        );
+
+        set_config_values(&HashMap::new());
+        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
+    }
+
+    #[test]
+    fn config_for_unknown_plugin_is_empty() {
+        assert!(config_for("does-not-exist").is_empty());
+    }
+
+    #[test]
+    fn secure_config_keys_for_returns_declared_secure_keys() {
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            config = { fields = {
+              { key = "host", label = "Host" },
+              { key = "token", label = "Token", secure = true },
+            } },
+        }"#;
+        *PLUGIN_REGISTRY.write().unwrap() =
+            vec![parse_manifest(src, Path::new("securekeys.lua")).unwrap()];
+
+        assert_eq!(secure_config_keys_for("securekeys"), vec!["token"]);
+        assert!(secure_config_keys_for("does-not-exist").is_empty());
+
+        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
+    }
+
+    #[test]
+    fn list_reports_config_fields_values_and_secret_set() {
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            config = { fields = {
+              { key = "host", label = "Host", default = "127.0.0.1" },
+              { key = "token", label = "Token", secure = true },
+            } },
+        }"#;
+        *PLUGIN_REGISTRY.write().unwrap() =
+            vec![parse_manifest(src, Path::new("listcfg.lua")).unwrap()];
+
+        let secrets = FakeSecretStore::default();
+        secrets.set("listcfg", "token", "s3cr3t").unwrap();
+
+        let infos = list(&secrets);
+        let info = infos.iter().find(|p| p.id == "listcfg").expect("present");
+        assert_eq!(info.config_fields.len(), 2);
+        assert_eq!(
+            info.config_values.get("host"),
+            Some(&"127.0.0.1".to_string())
+        );
+        assert!(
+            !info.config_values.contains_key("token"),
+            "secret value must never appear in config_values"
+        );
+        assert_eq!(info.secret_set.get("token"), Some(&true));
+
+        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
     }
 }

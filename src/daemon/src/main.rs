@@ -13,6 +13,7 @@ mod platform;
 mod profiles;
 mod registry;
 mod run_loop;
+mod secrets;
 mod services;
 mod state;
 #[cfg(test)]
@@ -156,7 +157,11 @@ async fn run_daemon(is_worker: bool, headless: bool, cfg: crate::config::Config)
         .parse_default_env()
         .build();
 
-    let app = Arc::new(state::AppState::new(cfg).with_service_worker(is_worker));
+    let app = Arc::new(
+        state::AppState::new(cfg)
+            .with_service_worker(is_worker)
+            .with_secret_store(secrets::open_secret_store()),
+    );
     let _save_worker = crate::state::start_config_save_worker(app.clone());
     let _persist_worker = crate::state::start_persist_worker(app.clone());
 

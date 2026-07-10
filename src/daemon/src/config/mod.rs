@@ -45,6 +45,7 @@ pub fn load() -> Result<Config> {
         app_rules: app_rules.app_rules,
         plugins_disabled: plugins.disabled,
         plugin_permissions: plugins.granted,
+        plugin_config: plugins.config,
     })
 }
 
@@ -76,13 +77,14 @@ pub fn save(cfg: &Config) -> Result<()> {
         &serde_yaml::to_string(&PluginsFile {
             disabled: cfg.plugins_disabled.clone(),
             granted: cfg.plugin_permissions.clone(),
+            config: cfg.plugin_config.clone(),
         })?,
     )?;
     save_profiles(&cfg.profiles)?;
     Ok(())
 }
 
-fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -292,6 +294,11 @@ struct PluginsFile {
     /// permissions must be a subset of its entry here before it activates.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     granted: HashMap<String, Vec<Permission>>,
+    /// Non-secure user-editable config values per plugin id (key -> value).
+    /// Fields declared `secure = true` never appear here — see the encrypted
+    /// secret store instead.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    config: HashMap<String, HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,6 +332,9 @@ pub struct Config {
     /// subset before the plugin activates).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub plugin_permissions: HashMap<String, Vec<Permission>>,
+    /// Non-secure user-editable config values per plugin id (key -> value).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub plugin_config: HashMap<String, HashMap<String, String>>,
 }
 
 fn default_profile_name() -> String {
@@ -346,6 +356,7 @@ impl Default for Config {
             app_rules: Vec::new(),
             plugins_disabled: Vec::new(),
             plugin_permissions: HashMap::new(),
+            plugin_config: HashMap::new(),
         }
     }
 }
@@ -438,6 +449,10 @@ mod tests {
         cfg.plugins_disabled.push("nzxt_kraken".into());
         cfg.plugin_permissions
             .insert("wled_udp".into(), vec![Permission::Network]);
+        cfg.plugin_config.insert(
+            "openrgb".into(),
+            HashMap::from([("host".to_string(), "127.0.0.1".to_string())]),
+        );
 
         save(&cfg).unwrap();
         let reloaded = load().unwrap();
@@ -446,6 +461,13 @@ mod tests {
         assert_eq!(
             reloaded.plugin_permissions.get("wled_udp"),
             Some(&vec![Permission::Network])
+        );
+        assert_eq!(
+            reloaded
+                .plugin_config
+                .get("openrgb")
+                .and_then(|m| m.get("host")),
+            Some(&"127.0.0.1".to_string())
         );
 
         assert_eq!(reloaded.active_profile, cfg.active_profile);

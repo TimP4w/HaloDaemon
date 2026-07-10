@@ -122,6 +122,42 @@ pub struct ChoiceManifest {
     pub choices: Vec<ChoiceDef>,
 }
 
+/// Interpretation hint for a [`ConfigFieldDef`] value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigFieldKind {
+    #[default]
+    Text,
+    Number,
+}
+
+/// One user-editable setting a plugin declares (e.g. a server IP/port). Shown by
+/// the GUI, persisted per-plugin-id, and readable from Lua via `halod.config`
+/// (`sandbox.rs`). Not a capability: it never appears in `capability_labels` and
+/// never flips `needs_worker`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigFieldDef {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub kind: ConfigFieldKind,
+    #[serde(default)]
+    pub default: String,
+    #[serde(default)]
+    pub category: String,
+    /// When true, the value is a secret: encrypted at rest, masked in the GUI,
+    /// never sent to the GUI in plaintext, and readable from Lua only when the
+    /// plugin was granted `Permission::SecureStorage`.
+    #[serde(default)]
+    pub secure: bool,
+}
+
+/// A plugin's declared user-editable settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigManifest {
+    pub fields: Vec<ConfigFieldDef>,
+}
+
 /// One integer range control (e.g. polling rate in Hz).
 #[derive(Debug, Clone, Deserialize)]
 pub struct RangeDef {
@@ -292,6 +328,27 @@ impl From<PluginType> for halod_shared::types::PluginKind {
         match t {
             PluginType::Device => halod_shared::types::PluginKind::Device,
             PluginType::Effect => halod_shared::types::PluginKind::Effect,
+        }
+    }
+}
+
+impl From<ConfigFieldKind> for halod_shared::types::PluginConfigFieldKind {
+    fn from(k: ConfigFieldKind) -> Self {
+        match k {
+            ConfigFieldKind::Text => halod_shared::types::PluginConfigFieldKind::Text,
+            ConfigFieldKind::Number => halod_shared::types::PluginConfigFieldKind::Number,
+        }
+    }
+}
+
+impl From<&ConfigFieldDef> for halod_shared::types::PluginConfigField {
+    fn from(f: &ConfigFieldDef) -> Self {
+        halod_shared::types::PluginConfigField {
+            key: f.key.clone(),
+            label: f.label.clone(),
+            kind: f.kind.into(),
+            category: f.category.clone(),
+            secure: f.secure,
         }
     }
 }
@@ -558,6 +615,8 @@ struct RawManifest {
     poll: Option<PollManifest>,
     #[serde(default)]
     chain: Option<ChainManifest>,
+    #[serde(default)]
+    config: Option<ConfigManifest>,
 }
 
 /// A parsed, validated plugin ready to be matched against discovery handles.
@@ -591,6 +650,7 @@ pub struct PluginManifest {
     pub permissions: Vec<Permission>,
     pub poll: Option<PollManifest>,
     pub chain: Option<ChainManifest>,
+    pub config: Option<ConfigManifest>,
 }
 
 impl MatchSpec {
@@ -747,6 +807,23 @@ impl PluginManifest {
     pub fn accessory(&self, id: u8) -> Option<&AccessoryManifest> {
         self.chain.as_ref()?.accessories.iter().find(|a| a.id == id)
     }
+
+    /// Every user-editable config field this plugin declares (empty if none).
+    pub fn config_fields(&self) -> &[ConfigFieldDef] {
+        self.config
+            .as_ref()
+            .map(|c| c.fields.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Keys of declared config fields marked `secure = true`.
+    pub fn secure_config_keys(&self) -> Vec<&str> {
+        self.config_fields()
+            .iter()
+            .filter(|f| f.secure)
+            .map(|f| f.key.as_str())
+            .collect()
+    }
 }
 
 /// Parse (and validate) a plugin script's manifest. Does not register it.
@@ -817,6 +894,7 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         permissions: raw.permissions,
         poll: raw.poll,
         chain: raw.chain,
+        config: raw.config,
     })
 }
 
@@ -1166,5 +1244,61 @@ mod tests {
         let m = parse_manifest(src, Path::new("bundled.lua")).unwrap();
         assert_eq!(m.match_specs.len(), 1);
         assert_eq!(m.effects.len(), 1);
+    }
+
+    #[test]
+    fn config_section_parses_fields_with_defaults() {
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            config = { fields = {
+              { key = "host", label = "Host", default = "127.0.0.1" },
+              { key = "port", label = "Port", kind = "number", default = "6742" },
+              { key = "token", label = "API Token", secure = true },
+            } },
+        }"#;
+        let m = parse_manifest(src, Path::new("cfg.lua")).unwrap();
+        let fields = m.config_fields();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].key, "host");
+        assert_eq!(fields[0].kind, ConfigFieldKind::Text);
+        assert_eq!(fields[0].default, "127.0.0.1");
+        assert!(!fields[0].secure);
+        assert_eq!(fields[1].kind, ConfigFieldKind::Number);
+        assert!(fields[2].secure);
+    }
+
+    #[test]
+    fn secure_config_keys_returns_only_secure_fields() {
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            config = { fields = {
+              { key = "host", label = "Host" },
+              { key = "token", label = "Token", secure = true },
+              { key = "secret2", label = "Secret 2", secure = true },
+            } },
+        }"#;
+        let m = parse_manifest(src, Path::new("cfg2.lua")).unwrap();
+        assert_eq!(m.secure_config_keys(), vec!["token", "secret2"]);
+    }
+
+    #[test]
+    fn config_fields_empty_when_no_config_section() {
+        let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
+        assert!(m.config_fields().is_empty());
+        assert!(m.secure_config_keys().is_empty());
+    }
+
+    #[test]
+    fn config_section_does_not_affect_capability_labels_or_needs_worker() {
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            config = { fields = { { key = "host", label = "Host" } } },
+        }"#;
+        let m = parse_manifest(src, Path::new("cfg3.lua")).unwrap();
+        assert!(m.capability_labels().is_empty());
+        assert!(!m.needs_worker());
     }
 }

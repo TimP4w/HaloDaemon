@@ -30,8 +30,11 @@ plugins:
   revoke: Revoke
   permission_network: Network
   permission_os: OS
-  permission_storage: Storage
   permission_secure_storage: Secure storage
+  # Config fields
+  settings: SETTINGS
+  save_settings: Save
+  secret_set_hint: (a secret is stored)
   # Permission consent dialog (shown right after importing a plugin that declares permissions)
   consent_title: Permission request
   consent_body: "%{name} requires the following permissions to work:"

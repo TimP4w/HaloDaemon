@@ -5,6 +5,7 @@
 //! triggers is synchronous from Lua's view; the worker drives the async
 //! transport via a captured runtime handle.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -276,19 +277,24 @@ pub struct PluginHandle {
 impl PluginHandle {
     /// Spawn the worker thread. `source` is the full script; the worker builds
     /// its own VM from it (no live VM crosses threads). `granted` is the
-    /// plugin's currently-granted permission set, snapshotted at spawn time.
+    /// plugin's currently-granted permission set, and `config` its resolved
+    /// config values (including decrypted secrets if `SecureStorage` is
+    /// granted) — both snapshotted at spawn time.
     pub fn spawn(
         source: String,
         transport: PluginIo,
         dev_match: DevMatch,
         granted: Vec<Permission>,
+        config: HashMap<String, String>,
         handle: Handle,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         std::thread::Builder::new()
             .name("halod-plugin".into())
             .spawn(move || {
-                if let Err(e) = worker_main(&source, transport, dev_match, &granted, handle, rx) {
+                if let Err(e) =
+                    worker_main(&source, transport, dev_match, &granted, &config, handle, rx)
+                {
                     log::error!("plugin worker stopped: {e:#}");
                 }
             })
@@ -674,11 +680,12 @@ fn worker_main(
     transport: PluginIo,
     dev_match: DevMatch,
     granted: &[Permission],
+    config: &HashMap<String, String>,
     handle: Handle,
     mut rx: mpsc::UnboundedReceiver<Call>,
 ) -> Result<()> {
     let lua = Lua::new();
-    sandbox::apply(&lua, granted).map_err(|e| lua_err("sandbox setup", e))?;
+    sandbox::apply(&lua, granted, config).map_err(|e| lua_err("sandbox setup", e))?;
 
     let manifest: Table = lua
         .load(source)
@@ -1330,7 +1337,9 @@ pub fn run_pre_scan(
     handle: Handle,
 ) -> Result<()> {
     let lua = Lua::new();
-    sandbox::apply(&lua, granted).map_err(|e| lua_err("sandbox setup", e))?;
+    // `pre_scan` is one-time bus preparation before a device is even matched,
+    // not general plugin logic — it gets no `halod.config` (an empty map).
+    sandbox::apply(&lua, granted, &HashMap::new()).map_err(|e| lua_err("sandbox setup", e))?;
     let manifest: Table = lua
         .load(source)
         .eval()

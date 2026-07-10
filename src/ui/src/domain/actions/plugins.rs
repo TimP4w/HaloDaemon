@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Plugin management actions.
 
+use std::collections::HashMap;
+
 use halod_shared::commands::DaemonCommand;
 use halod_shared::types::Permission;
 
@@ -45,4 +47,10 @@ pub fn revoke_plugin_permissions(cmd: &CommandTx, id: String) {
 
 pub fn apply_pending_plugin_changes(cmd: &CommandTx) {
     ipc::send(cmd, DaemonCommand::ApplyPendingPluginChanges);
+}
+
+/// Replace a plugin's user-editable config values. Omit a `secure` field's key
+/// entirely to leave its stored secret unchanged (see `SetPluginConfig`).
+pub fn set_plugin_config(cmd: &CommandTx, id: String, values: HashMap<String, String>) {
+    ipc::send(cmd, DaemonCommand::SetPluginConfig { id, values });
 }

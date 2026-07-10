@@ -48,6 +48,41 @@ pub async fn set_permissions(
     Ok(())
 }
 
+/// Replace a plugin's user-editable config values and persist the choice.
+/// Values keyed to a manifest-declared `secure` field go through
+/// [`AppState::secret_store`] instead of the plaintext config file; an absent
+/// (or empty) secure key leaves the previously stored secret untouched, so
+/// the GUI never has to round-trip a secret to keep it. Staged.
+pub async fn set_config(
+    id: String,
+    values: std::collections::HashMap<String, String>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let secure_keys = crate::drivers::plugins::secure_config_keys_for(&id);
+    {
+        let mut cfg = app.config.write().await;
+        let plaintext = cfg.plugin_config.entry(id.clone()).or_default();
+        for (key, value) in &values {
+            if secure_keys.iter().any(|k| k == key) {
+                if !value.is_empty() {
+                    app.secret_store
+                        .set(&id, key, value)
+                        .with_context(|| format!("storing secret '{key}' for plugin '{id}'"))?;
+                }
+            } else {
+                plaintext.insert(key.clone(), value.clone());
+            }
+        }
+        if plaintext.is_empty() {
+            cfg.plugin_config.remove(&id);
+        }
+        crate::drivers::plugins::set_config_values(&cfg.plugin_config);
+    }
+    app.request_config_save();
+    mark_pending_and_broadcast(&app).await;
+    Ok(())
+}
+
 /// Install a Lua plugin script into the plugins directory. The source is
 /// validated as a manifest first, so a malformed script is rejected before
 /// any file is written. Staged — see the module docs.
@@ -88,16 +123,29 @@ pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("deleting {}", path.display())),
     }
 
-    // Drop it from the disabled set too, so a later re-import starts enabled.
+    // Purge any stored secrets before the registry reload drops the manifest
+    // that names which keys were secure.
+    for key in crate::drivers::plugins::secure_config_keys_for(&id) {
+        if let Err(e) = app.secret_store.delete(&id, &key) {
+            log::warn!("deleting secret '{key}' for plugin '{id}': {e:#}");
+        }
+    }
+
+    // Drop it from the disabled set and plaintext config too, so a later
+    // re-import starts clean.
     let changed = {
         let mut cfg = app.config.write().await;
         let before = cfg.plugins_disabled.len();
         cfg.plugins_disabled.retain(|x| x != &id);
-        let changed = cfg.plugins_disabled.len() != before;
-        if changed {
+        let disabled_changed = cfg.plugins_disabled.len() != before;
+        let config_changed = cfg.plugin_config.remove(&id).is_some();
+        if disabled_changed {
             crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
         }
-        changed
+        if config_changed {
+            crate::drivers::plugins::set_config_values(&cfg.plugin_config);
+        }
+        disabled_changed || config_changed
     };
     if changed {
         app.request_config_save();
@@ -122,6 +170,8 @@ async fn reload_registry(app: &Arc<AppState>) {
     let cfg = app.config.read().await;
     crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
     crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
+    crate::drivers::plugins::set_config_values(&cfg.plugin_config);
+    crate::drivers::plugins::set_secret_store(app.secret_store.clone());
 }
 
 /// Flag a rediscovery as needed and push the updated plugin listing (and the
@@ -234,6 +284,129 @@ mod tests {
             apply_pending_changes(app.clone()).await.unwrap();
 
             assert!(!app.plugins_rediscover_pending.load(Ordering::Relaxed));
+        })
+        .await;
+    }
+
+    const CONFIG_TEST_PLUGIN: &str = r#"
+        return {
+          identity = { vendor = "x", model = "y" },
+          match = { transport = "hid", vid = 1, pid = 2 },
+          config = { fields = {
+            { key = "host", label = "Host" },
+            { key = "token", label = "Token", secure = true },
+          } },
+        }
+    "#;
+
+    /// Loads `CONFIG_TEST_PLUGIN` into the (process-wide) plugin registry for
+    /// the duration of `f`, then restores the registry to just the built-ins.
+    /// Callers must already hold `TEST_GLOBALS_LOCK`.
+    async fn with_config_test_plugin<F, Fut>(f: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cfgtest.lua"), CONFIG_TEST_PLUGIN).unwrap();
+        crate::drivers::plugins::load_all(dir.path());
+        f().await;
+        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_config_splits_secure_values_into_the_secret_store() {
+        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(|| async {
+                let mut values = std::collections::HashMap::new();
+                values.insert("host".to_string(), "127.0.0.1".to_string());
+                values.insert("token".to_string(), "s3cr3t".to_string());
+                set_config("cfgtest".into(), values, app.clone())
+                    .await
+                    .unwrap();
+
+                let cfg = app.config.read().await;
+                assert_eq!(
+                    cfg.plugin_config.get("cfgtest").and_then(|m| m.get("host")),
+                    Some(&"127.0.0.1".to_string())
+                );
+                assert!(
+                    !cfg.plugin_config
+                        .get("cfgtest")
+                        .is_some_and(|m| m.contains_key("token")),
+                    "a secure value must never land in the plaintext config map"
+                );
+                drop(cfg);
+                assert_eq!(
+                    app.secret_store.get("cfgtest", "token").unwrap(),
+                    Some("s3cr3t".to_string())
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_config_with_blank_secure_value_keeps_the_existing_secret() {
+        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(|| async {
+                let mut first = std::collections::HashMap::new();
+                first.insert("token".to_string(), "s3cr3t".to_string());
+                set_config("cfgtest".into(), first, app.clone())
+                    .await
+                    .unwrap();
+
+                // Re-saving with an empty secure value must not clear it.
+                let mut second = std::collections::HashMap::new();
+                second.insert("token".to_string(), "".to_string());
+                set_config("cfgtest".into(), second, app.clone())
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    app.secret_store.get("cfgtest", "token").unwrap(),
+                    Some("s3cr3t".to_string())
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn delete_purges_the_plugins_stored_secret() {
+        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::test_support::with_tmp_config(|app| async move {
+            let dir = crate::config::plugins_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("cfgtest.lua"), CONFIG_TEST_PLUGIN).unwrap();
+            crate::drivers::plugins::load_all(&dir);
+
+            let mut values = std::collections::HashMap::new();
+            values.insert("token".to_string(), "s3cr3t".to_string());
+            set_config("cfgtest".into(), values, app.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                app.secret_store.get("cfgtest", "token").unwrap(),
+                Some("s3cr3t".to_string())
+            );
+
+            delete("cfgtest".into(), app.clone()).await.unwrap();
+
+            assert_eq!(app.secret_store.get("cfgtest", "token").unwrap(), None);
         })
         .await;
     }

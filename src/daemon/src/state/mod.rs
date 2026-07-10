@@ -59,6 +59,13 @@ pub struct AppState {
     /// close-everything-and-rediscover cycle so several plugin edits in a
     /// row only pay for it once, when the user explicitly applies them.
     pub plugins_rediscover_pending: std::sync::atomic::AtomicBool,
+    /// Backing store for plugin-declared secret config values (`secure =
+    /// true` fields). Defaults to the encrypted-file backend (deterministic,
+    /// no external dependency) so tests get an isolated store scoped to their
+    /// own `HALOD_CONFIG_DIR`; real startup upgrades it via
+    /// `with_secret_store(crate::secrets::open_secret_store())` to prefer the
+    /// OS keyring.
+    pub secret_store: Arc<dyn crate::secrets::SecretStore>,
 }
 
 impl AppState {
@@ -83,6 +90,7 @@ impl AppState {
             shutdown: tokio::sync::Notify::new(),
             is_service_worker: false,
             plugins_rediscover_pending: std::sync::atomic::AtomicBool::new(false),
+            secret_store: Arc::new(crate::secrets::FileKeyStore::new()),
         }
     }
 
@@ -109,6 +117,13 @@ impl AppState {
     /// `AppState::new(cfg)` call sites (including tests) are unaffected.
     pub fn with_service_worker(mut self, is_worker: bool) -> Self {
         self.is_service_worker = is_worker;
+        self
+    }
+
+    /// Override the secret store (e.g. with `crate::secrets::open_secret_store()`
+    /// to prefer the OS keyring). Builder-style, like `with_service_worker`.
+    pub fn with_secret_store(mut self, store: Arc<dyn crate::secrets::SecretStore>) -> Self {
+        self.secret_store = store;
         self
     }
 

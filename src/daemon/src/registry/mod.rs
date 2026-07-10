@@ -43,7 +43,9 @@ pub async fn initialize_app_state(app: Arc<AppState>) {
         let cfg = app.config.read().await;
         crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
         crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
+        crate::drivers::plugins::set_config_values(&cfg.plugin_config);
     }
+    crate::drivers::plugins::set_secret_store(app.secret_store.clone());
     notify_ungranted_plugins(&app).await;
     discovery::discover_devices(app.clone()).await;
     seed_known_devices(app.clone()).await;

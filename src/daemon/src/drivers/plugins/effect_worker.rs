@@ -90,12 +90,15 @@ impl PluginEffectHandle {
         effect_id: String,
         params: HashMap<String, EffectParamValue>,
         granted: Vec<Permission>,
+        config: HashMap<String, String>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         std::thread::Builder::new()
             .name("halod-effect".into())
             .spawn(move || {
-                if let Err(e) = worker_main(&script_source, &effect_id, &params, &granted, rx) {
+                if let Err(e) =
+                    worker_main(&script_source, &effect_id, &params, &granted, &config, rx)
+                {
                     log::error!("effect worker stopped: {e:#}");
                 }
             })
@@ -225,10 +228,11 @@ fn worker_main(
     effect_id: &str,
     params: &HashMap<String, EffectParamValue>,
     granted: &[Permission],
+    config: &HashMap<String, String>,
     mut rx: mpsc::UnboundedReceiver<EffectCall>,
 ) -> Result<()> {
     let lua = Lua::new();
-    sandbox::apply(&lua, granted).map_err(|e| lua_err("sandbox setup", e))?;
+    sandbox::apply(&lua, granted, config).map_err(|e| lua_err("sandbox setup", e))?;
     register_effect_helpers(&lua).map_err(|e| lua_err("effect helpers", e))?;
     let budget = install_budget_hook(&lua);
 
@@ -343,8 +347,13 @@ mod tests {
                 end
             end,
         }"#;
-        let handle =
-            PluginEffectHandle::spawn(src.to_string(), "plasma".to_string(), params(), vec![]);
+        let handle = PluginEffectHandle::spawn(
+            src.to_string(),
+            "plasma".to_string(),
+            params(),
+            vec![],
+            HashMap::new(),
+        );
         let bytes = handle.render_pixmap(0.0, 0.016).await.unwrap();
         assert_eq!(bytes.len(), (CANVAS_W * CANVAS_H * 4) as usize);
         assert_eq!(&bytes[0..4], &[10, 20, 30, 255]);
@@ -362,8 +371,13 @@ mod tests {
                 return out
             end,
         }"#;
-        let handle =
-            PluginEffectHandle::spawn(src.to_string(), "comet".to_string(), params(), vec![]);
+        let handle = PluginEffectHandle::spawn(
+            src.to_string(),
+            "comet".to_string(),
+            params(),
+            vec![],
+            HashMap::new(),
+        );
         let leds = vec![
             LedCoord {
                 p: 0.0,
@@ -398,8 +412,13 @@ mod tests {
                 return { { r = 5.0, g = -3.0, b = 0.5 } }
             end,
         }"#;
-        let handle =
-            PluginEffectHandle::spawn(src.to_string(), "over".to_string(), params(), vec![]);
+        let handle = PluginEffectHandle::spawn(
+            src.to_string(),
+            "over".to_string(),
+            params(),
+            vec![],
+            HashMap::new(),
+        );
         let colors = handle
             .led_colors(
                 vec![LedCoord {
@@ -422,8 +441,13 @@ mod tests {
     #[tokio::test]
     async fn missing_callback_errors_instead_of_panicking() {
         let src = r#"return {}"#;
-        let handle =
-            PluginEffectHandle::spawn(src.to_string(), "nope".to_string(), params(), vec![]);
+        let handle = PluginEffectHandle::spawn(
+            src.to_string(),
+            "nope".to_string(),
+            params(),
+            vec![],
+            HashMap::new(),
+        );
         assert!(handle.render_pixmap(0.0, 0.0).await.is_err());
         assert!(handle.led_colors(vec![], 0.0, 0.0, None).await.is_err());
     }
@@ -433,8 +457,13 @@ mod tests {
         let src = r#"return {
             render_boom = function(buf, t, dt, params) error("kaboom") end,
         }"#;
-        let handle =
-            PluginEffectHandle::spawn(src.to_string(), "boom".to_string(), params(), vec![]);
+        let handle = PluginEffectHandle::spawn(
+            src.to_string(),
+            "boom".to_string(),
+            params(),
+            vec![],
+            HashMap::new(),
+        );
         assert!(handle.render_pixmap(0.0, 0.0).await.is_err());
     }
 
@@ -445,8 +474,13 @@ mod tests {
                 while true do end
             end,
         }"#;
-        let handle =
-            PluginEffectHandle::spawn(src.to_string(), "spin".to_string(), params(), vec![]);
+        let handle = PluginEffectHandle::spawn(
+            src.to_string(),
+            "spin".to_string(),
+            params(),
+            vec![],
+            HashMap::new(),
+        );
         let result = handle.render_pixmap(0.0, 0.0).await;
         assert!(result.is_err(), "runaway script must error, not hang");
     }
@@ -464,6 +498,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             vec![],
+            HashMap::new(),
         );
         let bytes = pixmap.render_pixmap(1.5, 0.016).await.unwrap();
         assert_eq!(bytes.len(), (CANVAS_W * CANVAS_H * 4) as usize);
@@ -472,8 +507,13 @@ mod tests {
             "plasma must not render solid black"
         );
 
-        let direct =
-            PluginEffectHandle::spawn(src.to_string(), "comet".to_string(), params(), vec![]);
+        let direct = PluginEffectHandle::spawn(
+            src.to_string(),
+            "comet".to_string(),
+            params(),
+            vec![],
+            HashMap::new(),
+        );
         let leds: Vec<LedCoord> = (0..8)
             .map(|i| LedCoord {
                 p: i as f32 / 7.0,
@@ -508,6 +548,7 @@ mod tests {
             "audio_spectrum".to_string(),
             params,
             vec![],
+            HashMap::new(),
         );
         let bytes = handle.render_pixmap(0.0, 0.016).await.unwrap();
         assert_eq!(bytes.len(), (CANVAS_W * CANVAS_H * 4) as usize);
@@ -526,6 +567,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             vec![],
+            HashMap::new(),
         );
         // First call pays for VM/palette warm-up; time a subsequent one.
         handle.render_pixmap(0.0, 0.016).await.unwrap();
@@ -556,8 +598,13 @@ mod tests {
             EffectParamValue::Str("forward".to_string()),
         );
         fwd_params.insert("speed".to_string(), EffectParamValue::Float(1.0));
-        let forward =
-            PluginEffectHandle::spawn(src.to_string(), "comet".to_string(), fwd_params, vec![]);
+        let forward = PluginEffectHandle::spawn(
+            src.to_string(),
+            "comet".to_string(),
+            fwd_params,
+            vec![],
+            HashMap::new(),
+        );
         let forward_colors = forward
             .led_colors(leds.clone(), 0.3, 0.0, None)
             .await
@@ -569,8 +616,13 @@ mod tests {
             EffectParamValue::Str("backward".to_string()),
         );
         back_params.insert("speed".to_string(), EffectParamValue::Float(1.0));
-        let backward =
-            PluginEffectHandle::spawn(src.to_string(), "comet".to_string(), back_params, vec![]);
+        let backward = PluginEffectHandle::spawn(
+            src.to_string(),
+            "comet".to_string(),
+            back_params,
+            vec![],
+            HashMap::new(),
+        );
         let backward_colors = backward.led_colors(leds, 0.3, 0.0, None).await.unwrap();
 
         // Default comet color is {r:0, g:160, b:255} — compare `.g` (or `.b`),

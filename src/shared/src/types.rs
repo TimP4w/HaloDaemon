@@ -490,8 +490,7 @@ pub struct AppState {
 
 /// A privileged capability a plugin must declare before the daemon grants it —
 /// the enforcement boundary between "trusted to talk to its matched device"
-/// (every plugin) and "trusted to reach outside it". `Storage`/`SecureStorage`
-/// are accepted for forward-compat but not yet enforced by any backend.
+/// (every plugin) and "trusted to reach outside it".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
@@ -500,9 +499,8 @@ pub enum Permission {
     /// Reach OS-level primitives beyond pure computation (currently: clock
     /// reads via `os.time`/`os.clock`).
     Os,
-    /// Persist plain key/value data across daemon restarts.
-    Storage,
-    /// Persist secrets (tokens, credentials) in an OS-backed secure store.
+    /// Read this plugin's own decrypted secret config values (`secure = true`
+    /// fields) via `halod.config`. Non-secure config values need no permission.
     SecureStorage,
 }
 
@@ -557,6 +555,42 @@ pub struct PluginInfo {
     /// activated) until the user accepts them.
     #[serde(default)]
     pub granted_permissions: Vec<Permission>,
+    /// User-editable config fields the plugin declares (e.g. a server IP).
+    #[serde(default)]
+    pub config_fields: Vec<PluginConfigField>,
+    /// Current values of the plugin's non-secure config fields, keyed by
+    /// field key. Secure fields never appear here — see `secret_set`.
+    #[serde(default)]
+    pub config_values: HashMap<String, String>,
+    /// Whether a secret is currently stored for each secure config field
+    /// (keyed by field key). The GUI shows "set"/"not set"; the secret's
+    /// plaintext never crosses the IPC boundary.
+    #[serde(default)]
+    pub secret_set: HashMap<String, bool>,
+}
+
+/// Interpretation hint for a [`PluginConfigField`] value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginConfigFieldKind {
+    #[default]
+    Text,
+    Number,
+}
+
+/// One user-editable setting a plugin declares (mirrors the manifest's
+/// `ConfigFieldDef`, without the `default` — the GUI is only ever shown the
+/// resolved current value via `PluginInfo::config_values`/`secret_set`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfigField {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub kind: PluginConfigFieldKind,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub secure: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -189,9 +189,18 @@ pub enum DaemonCommand {
         id: String,
         granted: Vec<Permission>,
     },
+    /// Replace a plugin's user-editable config values (see `ConfigFieldDef`).
+    /// A `secure` field's key is included only when the user typed a new
+    /// value; an absent secure key leaves the previously stored secret
+    /// unchanged, so secrets are never round-tripped through the GUI or
+    /// cleared by accident. Staged.
+    SetPluginConfig {
+        id: String,
+        values: HashMap<String, String>,
+    },
     /// Apply every staged plugin change (`SetPluginEnabled`, `ImportPlugin`,
-    /// `DeletePlugin`, `SetPluginPermissions`) by running the actual
-    /// close-everything-and-rediscover cycle once.
+    /// `DeletePlugin`, `SetPluginPermissions`, `SetPluginConfig`) by running
+    /// the actual close-everything-and-rediscover cycle once.
     ApplyPendingPluginChanges,
     SetLogLevel {
         level: String,
@@ -705,6 +714,20 @@ mod tests {
             id: "my_driver".into(),
         });
         assert_eq!(v, json!({"type": "delete_plugin", "id": "my_driver"}));
+    }
+
+    #[test]
+    fn set_plugin_config_wire_format() {
+        let mut values = HashMap::new();
+        values.insert("host".to_string(), "127.0.0.1".to_string());
+        let v = roundtrip(&DaemonCommand::SetPluginConfig {
+            id: "openrgb".into(),
+            values,
+        });
+        assert_eq!(
+            v,
+            json!({"type": "set_plugin_config", "id": "openrgb", "values": {"host": "127.0.0.1"}})
+        );
     }
 
     #[test]
