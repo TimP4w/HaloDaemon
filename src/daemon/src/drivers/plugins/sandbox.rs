@@ -6,6 +6,8 @@
 
 use mlua::Lua;
 
+use super::bytebuf;
+
 /// Globals removed before a plugin script runs.
 const REMOVED: &[&str] = &[
     "os",
@@ -29,6 +31,7 @@ pub fn apply(lua: &Lua) -> mlua::Result<()> {
         Ok(())
     })?;
     globals.set("log", logger)?;
+    bytebuf::register(lua)?;
     Ok(())
 }
 

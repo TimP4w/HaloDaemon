@@ -267,6 +267,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_frame_accepts_a_halod_buffer() {
+        // Same behaviour as the string path, but built with the bounds-checked
+        // buffer (0-based, mutable) and passed straight to transport:write.
+        const BUF_SCRIPT: &str = r#"
+            return {
+              match = { transport = "hid", vid = 0x1, pid = 0x2 },
+              identity = { vendor = "Test", model = "M" },
+              rgb = { zones = { { id="z", name="Z", topology={type="linear"}, leds={ {id=0,x=0,y=0} } } } },
+              write_frame = function(dev, zone, colors)
+                local b = halod.buffer(1 + 3 * #colors)
+                b:set_u8(0, 0xAB)
+                for i, c in ipairs(colors) do
+                  local base = 1 + (i - 1) * 3
+                  b:set_u8(base, c.r)
+                  b:set_u8(base + 1, c.g)
+                  b:set_u8(base + 2, c.b)
+                end
+                dev.transport:write(b)
+              end,
+            }
+        "#;
+        let manifest = super::super::parse_manifest(BUF_SCRIPT, Path::new("buf.lua")).unwrap();
+        let mock = Arc::new(MockTransport::empty());
+        let dev = LuaDevice::with_transport(
+            "b-0".into(),
+            &manifest,
+            mock.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        dev.write_frame(
+            "z",
+            &[RgbColor {
+                r: 10,
+                g: 20,
+                b: 30,
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(*mock.written.lock().await, vec![vec![0xAB, 10, 20, 30]]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn apply_persists_state_and_calls_script() {
         let mock = Arc::new(MockTransport::empty());
         let dev = device(mock.clone());

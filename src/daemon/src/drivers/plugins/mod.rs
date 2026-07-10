@@ -11,6 +11,7 @@
 //! and `make_device` consults `match_handle` before the native descriptors, so
 //! a plugin shadows a native driver for the same hardware.
 
+mod bytebuf;
 mod device;
 mod manifest;
 mod sandbox;

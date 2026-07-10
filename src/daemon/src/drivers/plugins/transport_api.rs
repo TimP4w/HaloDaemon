@@ -6,10 +6,12 @@
 
 use std::sync::Arc;
 
-use mlua::{UserData, UserDataMethods};
+use mlua::{UserData, UserDataMethods, Value};
 use tokio::runtime::Handle;
 
 use crate::drivers::transports::Transport;
+
+use super::bytebuf::ByteBuf;
 
 /// Lua userdata wrapping one transport. Rate limiting is inherited: this holds
 /// the real (metered) transport, so a script cannot outrun the hardware.
@@ -28,10 +30,22 @@ fn to_lua_err(e: anyhow::Error) -> mlua::Error {
     mlua::Error::RuntimeError(format!("{e:#}"))
 }
 
+/// Accept either a Lua string or a `halod.buffer` as outbound bytes.
+fn bytes_from(value: &Value) -> mlua::Result<Vec<u8>> {
+    match value {
+        Value::String(s) => Ok(s.as_bytes().to_vec()),
+        Value::UserData(ud) => Ok(ud.borrow::<ByteBuf>()?.as_slice().to_vec()),
+        other => Err(mlua::Error::RuntimeError(format!(
+            "transport data must be a string or halod.buffer, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 impl UserData for TransportApi {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("write", |_, this, data: mlua::String| {
-            let bytes = data.as_bytes().to_vec();
+        methods.add_method("write", |_, this, data: Value| {
+            let bytes = bytes_from(&data)?;
             this.handle
                 .block_on(this.transport.write(&bytes))
                 .map_err(to_lua_err)
@@ -47,8 +61,8 @@ impl UserData for TransportApi {
 
         methods.add_method(
             "write_then_read",
-            |lua, this, (data, size): (mlua::String, usize)| {
-                let bytes = data.as_bytes().to_vec();
+            |lua, this, (data, size): (Value, usize)| {
+                let bytes = bytes_from(&data)?;
                 let reply = this
                     .handle
                     .block_on(this.transport.write_then_read(&bytes, size))
@@ -59,8 +73,8 @@ impl UserData for TransportApi {
 
         methods.add_method(
             "feature_exchange",
-            |lua, this, (data, size): (mlua::String, usize)| {
-                let bytes = data.as_bytes().to_vec();
+            |lua, this, (data, size): (Value, usize)| {
+                let bytes = bytes_from(&data)?;
                 let reply = this
                     .handle
                     .block_on(this.transport.feature_exchange(&bytes, size))
@@ -69,8 +83,11 @@ impl UserData for TransportApi {
             },
         );
 
-        methods.add_method("write_many", |_, this, packets: Vec<mlua::String>| {
-            let owned: Vec<Vec<u8>> = packets.iter().map(|p| p.as_bytes().to_vec()).collect();
+        methods.add_method("write_many", |_, this, packets: Vec<Value>| {
+            let owned: Vec<Vec<u8>> = packets
+                .iter()
+                .map(bytes_from)
+                .collect::<mlua::Result<_>>()?;
             this.handle
                 .block_on(this.transport.write_many(&owned))
                 .map_err(to_lua_err)
