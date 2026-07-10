@@ -2,7 +2,6 @@
 #[cfg(target_os = "windows")]
 pub mod amd;
 pub mod asus;
-pub mod corsair;
 pub mod generic;
 pub mod logitech;
 pub mod nvidia;
