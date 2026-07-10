@@ -23,7 +23,7 @@ mod transport_api;
 mod worker;
 
 pub use device::LuaDevice;
-pub use manifest::{parse_manifest, PluginManifest, ProbeMode};
+pub use manifest::{parse_manifest, EffectKind, PluginManifest, ProbeMode};
 pub use scan::plugin_smbus_scan_entries;
 pub use worker::run_pre_scan;
 
@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use halod_shared::types::{Permission, PluginInfo};
+use halod_shared::types::{Animation, Permission, PluginInfo};
 
 use crate::drivers::Device;
 use crate::registry::discovery::DiscoveryHandle;
@@ -49,6 +49,69 @@ static PLUGIN_REGISTRY: RwLock<Vec<PluginManifest>> = RwLock::new(Vec::new());
 /// Plugin ids the user disabled. `match_handle` skips these, so a disabled
 /// plugin no longer shadows its native driver.
 static DISABLED: RwLock<Option<HashSet<String>>> = RwLock::new(None);
+
+/// One RGB effect a plugin declares, registered under its namespaced catalog
+/// id (`<plugin_id>:<effect.id>`) so it can never collide with a native
+/// effect or another plugin's.
+#[derive(Clone)]
+pub struct PluginEffectEntry {
+    pub plugin_id: String,
+    pub script_source: String,
+    pub kind: EffectKind,
+    pub catalog_id: String,
+    pub descriptor: Animation,
+}
+
+static EFFECT_REGISTRY: RwLock<Vec<PluginEffectEntry>> = RwLock::new(Vec::new());
+
+fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
+    manifest
+        .effects
+        .iter()
+        .map(|e| PluginEffectEntry {
+            plugin_id: manifest.plugin_id.clone(),
+            script_source: manifest.script_source.clone(),
+            kind: e.kind,
+            catalog_id: e.catalog_id(&manifest.plugin_id),
+            descriptor: e.descriptor(&manifest.plugin_id),
+        })
+        .collect()
+}
+
+/// Every enabled plugin's declared descriptors of one effect kind, for the
+/// RGB engine's dynamic catalog.
+fn effect_descriptors(kind: EffectKind) -> Vec<Animation> {
+    EFFECT_REGISTRY
+        .read()
+        .map(|reg| {
+            reg.iter()
+                .filter(|e| e.kind == kind && !is_disabled(&e.plugin_id))
+                .map(|e| e.descriptor.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Descriptors for every enabled plugin-declared pixmap effect.
+pub fn pixmap_effect_descriptors() -> Vec<Animation> {
+    effect_descriptors(EffectKind::Pixmap)
+}
+
+/// Descriptors for every enabled plugin-declared direct effect.
+pub fn direct_effect_descriptors() -> Vec<Animation> {
+    effect_descriptors(EffectKind::Direct)
+}
+
+/// Look up a registered effect entry by its namespaced catalog id. `None` if
+/// unknown or its plugin is disabled.
+pub fn effect_entry(catalog_id: &str) -> Option<PluginEffectEntry> {
+    EFFECT_REGISTRY
+        .read()
+        .ok()?
+        .iter()
+        .find(|e| e.catalog_id == catalog_id && !is_disabled(&e.plugin_id))
+        .cloned()
+}
 
 /// Replace the disabled-plugin set (from `config.plugins_disabled`).
 pub fn set_disabled(ids: &[String]) {
@@ -220,6 +283,8 @@ pub fn load_all(dir: &Path) {
         }
         Err(e) => log::warn!("Cannot read plugins directory {}: {e}", dir.display()),
     }
+    let effects: Vec<PluginEffectEntry> = manifests.iter().flat_map(effect_entries_for).collect();
+    *EFFECT_REGISTRY.write().expect("effect registry poisoned") = effects;
     *PLUGIN_REGISTRY.write().expect("plugin registry poisoned") = manifests;
 }
 
@@ -328,6 +393,12 @@ pub fn match_handle(handle: &DiscoveryHandle<'_>) -> Option<Arc<dyn Device>> {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::sync::Mutex;
+
+    /// `GRANTED`/`DISABLED` are process-wide statics; any test that mutates
+    /// them must hold this lock for its duration so it can't race a sibling
+    /// test running in another thread.
+    static GLOBALS_LOCK: Mutex<()> = Mutex::new(());
 
     fn manifest() -> PluginManifest {
         let src = r#"
@@ -376,7 +447,7 @@ mod tests {
 
     #[test]
     fn disabled_plugin_does_not_match() {
-        // Unique id so toggling DISABLED can't perturb other parallel tests.
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let src = r#"
             return {
               match = { transport = "hid", vid = 0xAAAA, pid = 0xBBBB },
@@ -396,6 +467,7 @@ mod tests {
 
     #[test]
     fn plugin_with_ungranted_permission_does_not_match() {
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let src = r#"
             return {
               match = { transport = "hid", vid = 0xCCCC, pid = 0xDDDD },
@@ -490,12 +562,37 @@ mod tests {
     }
 
     #[test]
+    fn effect_entries_for_namespaces_ids_and_carries_kind() {
+        let src = r#"return {
+            identity = { vendor = "x", model = "Effects" },
+            effects = {
+              { kind = "pixmap", id = "plasma", name = "Plasma" },
+              { kind = "direct", id = "comet", name = "Comet" },
+            },
+        }"#;
+        let m = parse_manifest(src, Path::new("fx.lua")).unwrap();
+        let entries = effect_entries_for(&m);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].catalog_id, "fx:plasma");
+        assert_eq!(entries[0].kind, EffectKind::Pixmap);
+        assert_eq!(entries[0].descriptor.id, "fx:plasma");
+        assert_eq!(entries[1].catalog_id, "fx:comet");
+        assert_eq!(entries[1].kind, EffectKind::Direct);
+    }
+
+    #[test]
+    fn effect_entries_for_empty_for_a_device_only_plugin() {
+        assert!(effect_entries_for(&manifest()).is_empty());
+    }
+
+    #[test]
     fn shipped_permission_demo_plugin_parses_and_is_inert_until_granted() {
         // Guards the permission-demo example against drift, and demonstrates
         // the gate: declared-but-ungranted is unsatisfied; fully granted is
         // satisfied. (Not routed through `match_in` — this plugin declares a
         // `sensor` capability, so `needs_worker()` is true and full device
         // construction would need a real HID transport, not just a runtime.)
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let src = include_str!("../../../../../plugins/examples/permission_demo.lua");
         let m = parse_manifest(src, Path::new("permission_demo.lua")).unwrap();
         assert_eq!(m.permissions, vec![Permission::Os]);

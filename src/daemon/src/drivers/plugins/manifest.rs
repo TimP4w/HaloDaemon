@@ -8,8 +8,9 @@
 
 use anyhow::{anyhow, bail, Result};
 use halod_shared::types::{
-    ButtonDescriptor, ButtonMapping, ChoiceDisplay, ChoiceOption, DeviceType, NativeEffect,
-    Permission, RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
+    Animation, ButtonDescriptor, ButtonMapping, ChoiceDisplay, ChoiceOption, DeviceType,
+    EffectParamDescriptor, NativeEffect, Permission, RangeDisplay, RgbDescriptor, RgbZone,
+    ZoneTopology,
 };
 use mlua::{DeserializeOptions, Lua, LuaSerdeExt};
 use serde::Deserialize;
@@ -236,6 +237,56 @@ pub struct KeyRemapManifest {
     pub default_mappings: Vec<ButtonMapping>,
 }
 
+/// Which RGB engine pass a declared effect plugs into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectKind {
+    /// Fills a shared pixmap once per frame; zones sample it (`canvas`).
+    Pixmap,
+    /// Computes one color per LED directly (`direct`).
+    Direct,
+}
+
+/// One RGB effect a plugin contributes to the engine's catalog. Registered
+/// under a namespaced id (`<plugin_id>:<id>`) so it can never collide with a
+/// native effect or another plugin's. The render callback is a sibling
+/// function named `render_<id>` (pixmap) or `led_colors_<id>` (direct), or
+/// bare `render`/`led_colors` when the plugin declares exactly one effect.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EffectManifest {
+    pub kind: EffectKind,
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub params: Vec<EffectParamDescriptor>,
+}
+
+impl EffectManifest {
+    /// The catalog id an effect is registered/built under.
+    pub fn catalog_id(&self, plugin_id: &str) -> String {
+        format!("{plugin_id}:{}", self.id)
+    }
+
+    pub fn descriptor(&self, plugin_id: &str) -> Animation {
+        Animation {
+            id: self.catalog_id(plugin_id),
+            name: self.name.clone(),
+            params: self.params.clone(),
+        }
+    }
+}
+
+/// Which discovery path a plugin registers into. `Device` (the default)
+/// declares hardware via `match`; `Effect` declares RGB effects and needs no
+/// `match` spec at all — it never opens a transport or a worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginType {
+    #[default]
+    Device,
+    Effect,
+}
+
 fn default_topology() -> String {
     "ring".to_owned()
 }
@@ -452,9 +503,13 @@ pub struct Identity {
 
 #[derive(Debug, Deserialize)]
 struct RawManifest {
-    #[serde(rename = "match")]
-    match_spec: MatchSpecs,
+    #[serde(rename = "match", default)]
+    match_spec: Option<MatchSpecs>,
     identity: Identity,
+    #[serde(rename = "type", default)]
+    plugin_type: PluginType,
+    #[serde(default)]
+    effects: Vec<EffectManifest>,
     #[serde(default)]
     transports: TransportsConfig,
     #[serde(default)]
@@ -506,6 +561,8 @@ pub struct PluginManifest {
     pub script_source: String,
     pub match_specs: Vec<MatchSpec>,
     pub identity: Identity,
+    pub plugin_type: PluginType,
+    pub effects: Vec<EffectManifest>,
     pub transports: TransportsConfig,
     pub rgb: Option<RgbManifest>,
     pub fan: Option<FanManifest>,
@@ -674,6 +731,9 @@ impl PluginManifest {
         if self.chain.is_some() {
             labels.push("Accessories".to_owned());
         }
+        if !self.effects.is_empty() {
+            labels.push("Effect".to_owned());
+        }
         labels
     }
 
@@ -704,9 +764,9 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         .from_value_with(value, options)
         .map_err(|e| anyhow!("manifest table is malformed: {e}"))?;
 
-    let match_specs = raw.match_spec.into_vec();
-    if match_specs.is_empty() {
-        bail!("plugin declares no match spec");
+    let match_specs = raw.match_spec.map(MatchSpecs::into_vec).unwrap_or_default();
+    if match_specs.is_empty() && raw.effects.is_empty() {
+        bail!("plugin declares neither a match spec nor any effects");
     }
     // Validate every spec against its registered transport backend: unknown
     // kinds and missing required fields are rejected here, not at match time.
@@ -720,6 +780,9 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
             ),
         }
     }
+    if raw.effects.iter().any(|e| e.id.is_empty()) {
+        bail!("effect declares an empty id");
+    }
 
     Ok(PluginManifest {
         plugin_id,
@@ -727,6 +790,8 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         script_source: source.to_owned(),
         match_specs,
         identity: raw.identity,
+        plugin_type: raw.plugin_type,
+        effects: raw.effects,
         transports: raw.transports,
         rgb: raw.rgb,
         fan: raw.fan,
@@ -1015,5 +1080,70 @@ mod tests {
         }"#;
         let m = parse_manifest(no_perms, Path::new("no_perms.lua")).unwrap();
         assert!(m.permissions.is_empty());
+    }
+
+    #[test]
+    fn effect_only_plugin_needs_no_match_spec() {
+        let src = r#"return {
+            identity = { vendor = "x", model = "Effects" },
+            type = "effect",
+            effects = {
+              { kind = "pixmap", id = "plasma", name = "Plasma",
+                params = { { id = "speed", label = "Speed",
+                             kind = { kind = "range", min = 0.1, max = 3.0, step = 0.1 },
+                             default = 0.5 } } },
+              { kind = "direct", id = "comet", name = "Comet" },
+            },
+        }"#;
+        let m = parse_manifest(src, Path::new("fx.lua")).unwrap();
+        assert!(m.match_specs.is_empty());
+        assert_eq!(m.plugin_type, PluginType::Effect);
+        assert!(!m.needs_worker(), "effects never need the device worker");
+        assert_eq!(m.capability_labels(), vec!["Effect"]);
+        assert_eq!(m.effects.len(), 2);
+        assert_eq!(m.effects[0].catalog_id("fx"), "fx:plasma");
+        assert_eq!(m.effects[0].kind, EffectKind::Pixmap);
+        assert_eq!(m.effects[1].kind, EffectKind::Direct);
+
+        let descriptor = m.effects[0].descriptor("fx");
+        assert_eq!(descriptor.id, "fx:plasma");
+        assert_eq!(descriptor.params.len(), 1);
+    }
+
+    #[test]
+    fn plugin_with_neither_match_nor_effects_is_rejected() {
+        let src = r#"return {
+            identity = { vendor = "x", model = "y" },
+        }"#;
+        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
+    }
+
+    #[test]
+    fn effect_with_empty_id_is_rejected() {
+        let src = r#"return {
+            identity = { vendor = "x", model = "y" },
+            effects = { { kind = "pixmap", id = "", name = "Nope" } },
+        }"#;
+        assert!(parse_manifest(src, Path::new("bad2.lua")).is_err());
+    }
+
+    #[test]
+    fn plugin_type_defaults_to_device() {
+        let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
+        assert_eq!(m.plugin_type, PluginType::Device);
+    }
+
+    #[test]
+    fn device_plugin_can_also_bundle_effects() {
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            effects = { { kind = "direct", id = "pulse", name = "Pulse" } },
+        }"#;
+        let m = parse_manifest(src, Path::new("bundled.lua")).unwrap();
+        assert_eq!(m.match_specs.len(), 1);
+        assert_eq!(m.effects.len(), 1);
+        let labels = m.capability_labels();
+        assert!(labels.contains(&"Effect".to_owned()));
     }
 }
