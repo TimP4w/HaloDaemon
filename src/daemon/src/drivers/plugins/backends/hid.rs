@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 
 use crate::drivers::plugins::manifest::{MatchSpec, PluginManifest};
-use crate::drivers::plugins::transport::{PluginIo, PluginTransportDescriptor};
+use crate::drivers::plugins::transport::{BulkEndpoint, PluginIo, PluginTransportDescriptor};
 use crate::drivers::transports::hid::HidTransport;
 use crate::registry::discovery::DiscoveryHandle;
 
@@ -36,7 +36,7 @@ fn matches(spec: &MatchSpec, handle: &DiscoveryHandle<'_>) -> bool {
 }
 
 fn open(manifest: &PluginManifest, handle: &DiscoveryHandle<'_>) -> Result<PluginIo> {
-    let DiscoveryHandle::Hid { path, .. } = handle else {
+    let DiscoveryHandle::Hid { path, vid, pid, .. } = handle else {
         bail!("plugin '{}' matched a non-HID handle", manifest.plugin_id);
     };
     let hid = manifest.transports.hid.clone().unwrap_or_default();
@@ -47,7 +47,11 @@ fn open(manifest: &PluginManifest, handle: &DiscoveryHandle<'_>) -> Result<Plugi
         hid.feature_report,
         None,
     )?;
-    Ok(PluginIo::Stream(Arc::new(transport)))
+    Ok(PluginIo::Stream {
+        transport: Arc::new(transport),
+        // Lazy companion bulk endpoint (opened only if the plugin streams LCD).
+        bulk: Some(BulkEndpoint::new(*vid, *pid)),
+    })
 }
 
 fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {

@@ -11,19 +11,20 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{
-    DeviceType, NativeEffect, RgbColor, RgbDescriptor, RgbState, RgbZone, Sensor, WriteRateStatus,
+    DeviceType, LcdDescriptor, NativeEffect, RgbColor, RgbDescriptor, RgbState, RgbZone,
+    ScreenRotation, ScreenShape, Sensor, WriteRateStatus,
 };
 
 use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor};
 use crate::drivers::{
     CapabilityRef, ChainCapability, Controller, Device, FanCapability, FanHub, FanStateSlot,
-    RgbCapability, RgbStateSlot, SensorCapability,
+    LcdCapability, LcdStateSlot, RgbCapability, RgbStateSlot, SensorCapability,
 };
 
 use super::chain_leaf::ChainLeaf;
 use super::manifest::{topology_from, AccessoryManifest, MatchSpec, PluginManifest};
 use super::transport::PluginIo;
-use super::worker::{DevMatch, InitZone, PluginHandle};
+use super::worker::{DevMatch, InitLcd, InitZone, PluginHandle};
 use crate::drivers::vendors::generic::devices::common::{linear_rgb_zone, ring_led_positions};
 use halod_shared::types::ZoneTopology;
 
@@ -53,6 +54,14 @@ pub struct LuaDevice {
     has_rgb: bool,
     has_fan: bool,
     has_sensor: bool,
+    has_lcd: bool,
+
+    /// LCD panel descriptor, reported by `initialize` (resolution can vary by
+    /// device variant). Absent until initialized.
+    lcd_descriptor: OnceLock<LcdDescriptor>,
+    lcd_slot: LcdStateSlot,
+    /// Re-apply RGB after an LCD image upload (some panels reset their LEDs).
+    lcd_needs_rgb_restore: bool,
 
     rgb_descriptor: RgbDescriptor,
     /// RGB zones discovered at `initialize()` (dynamic LED counts). Overrides
@@ -161,6 +170,14 @@ impl LuaDevice {
             has_rgb: manifest.rgb.is_some(),
             has_fan: manifest.fan.is_some(),
             has_sensor: manifest.sensor.is_some(),
+            has_lcd: manifest.lcd.is_some(),
+            lcd_descriptor: OnceLock::new(),
+            lcd_slot: LcdStateSlot::default(),
+            lcd_needs_rgb_restore: manifest
+                .lcd
+                .as_ref()
+                .map(|l| l.needs_rgb_restore)
+                .unwrap_or(false),
             rgb_descriptor: manifest.rgb_descriptor().unwrap_or(RgbDescriptor {
                 zones: Vec::new(),
                 native_effects: Vec::new(),
@@ -298,6 +315,14 @@ impl Device for LuaDevice {
                 &self.rgb_descriptor.native_effects,
             ));
         }
+        if let Some(lcd) = outcome.lcd {
+            self.lcd_slot.set_brightness(lcd.brightness);
+            self.lcd_slot
+                .set_rotation(degrees_to_rotation(lcd.rotation));
+            self.lcd_slot.set_raw_streaming(lcd.raw_streaming);
+            self.lcd_slot.set_latches_last_frame(lcd.latches);
+            let _ = self.lcd_descriptor.set(build_lcd_descriptor(&lcd));
+        }
         Ok(outcome.ok)
     }
 
@@ -325,6 +350,9 @@ impl Device for LuaDevice {
         }
         if self.has_sensor {
             caps.push(CapabilityRef::Sensor(self));
+        }
+        if self.has_lcd {
+            caps.push(CapabilityRef::Lcd(self));
         }
         if self.has_chain {
             caps.push(CapabilityRef::Controller(self));
@@ -457,6 +485,115 @@ impl ChainCapability for LuaDevice {
     }
 }
 
+fn degrees_to_rotation(degrees: u32) -> ScreenRotation {
+    match degrees % 360 {
+        90 => ScreenRotation::R90,
+        180 => ScreenRotation::R180,
+        270 => ScreenRotation::R270,
+        _ => ScreenRotation::R0,
+    }
+}
+
+fn rotation_to_degrees(rotation: ScreenRotation) -> u32 {
+    match rotation {
+        ScreenRotation::R0 => 0,
+        ScreenRotation::R90 => 90,
+        ScreenRotation::R180 => 180,
+        ScreenRotation::R270 => 270,
+    }
+}
+
+/// Build an `LcdDescriptor` from the panel info `initialize` reported.
+fn build_lcd_descriptor(lcd: &InitLcd) -> LcdDescriptor {
+    let shape = if lcd.shape.eq_ignore_ascii_case("square") {
+        ScreenShape::Square
+    } else {
+        ScreenShape::Circle
+    };
+    let supported_rotations = if lcd.rotations.is_empty() {
+        vec![ScreenRotation::R0]
+    } else {
+        lcd.rotations
+            .iter()
+            .map(|d| degrees_to_rotation(*d))
+            .collect()
+    };
+    LcdDescriptor {
+        shape,
+        width: lcd.width,
+        height: lcd.height,
+        supported_rotations,
+        supported_image_types: lcd.image_types.clone(),
+        latches_last_frame: lcd.latches,
+    }
+}
+
+#[async_trait]
+impl LcdCapability for LuaDevice {
+    fn lcd_descriptor(&self) -> LcdDescriptor {
+        self.lcd_descriptor.get().cloned().unwrap_or(LcdDescriptor {
+            shape: ScreenShape::Circle,
+            width: 0,
+            height: 0,
+            supported_rotations: vec![ScreenRotation::R0],
+            supported_image_types: Vec::new(),
+            latches_last_frame: false,
+        })
+    }
+
+    fn lcd_state(&self) -> &LcdStateSlot {
+        &self.lcd_slot
+    }
+
+    fn needs_rgb_restore_after_upload(&self) -> bool {
+        self.lcd_needs_rgb_restore
+    }
+
+    /// One rendered engine frame. Rotation/brightness/mode live in the slot and
+    /// are passed to the plugin so it can pre-rotate and pick the stream path.
+    async fn stream_frame(&self, rgba: &[u8], width: u32, height: u32) -> Result<()> {
+        let rotation = rotation_to_degrees(self.lcd_slot.rotation());
+        let raw = self.lcd_slot.raw_streaming();
+        let brightness = self.lcd_slot.brightness();
+        // The bulk transfer owns the transport; silence the status poll meanwhile.
+        self.set_polling_paused(true);
+        let result = self
+            .worker()?
+            .lcd_stream_frame(rgba.to_vec(), width, height, rotation, raw, brightness)
+            .await;
+        self.set_polling_paused(false);
+        result
+    }
+
+    async fn set_image(&self, data: &[u8]) -> Result<()> {
+        let rotation = rotation_to_degrees(self.lcd_slot.rotation());
+        self.set_polling_paused(true);
+        let result = self.worker()?.lcd_set_image(data.to_vec(), rotation).await;
+        self.set_polling_paused(false);
+        result
+    }
+
+    async fn set_brightness(&self, brightness: u8) -> Result<()> {
+        let rotation = rotation_to_degrees(self.lcd_slot.rotation());
+        self.worker()?
+            .lcd_set_brightness(brightness, rotation)
+            .await?;
+        self.lcd_slot.set_brightness(brightness);
+        Ok(())
+    }
+
+    async fn set_rotation(&self, degrees: u32) -> Result<()> {
+        let brightness = self.lcd_slot.brightness();
+        self.worker()?.lcd_set_rotation(brightness, degrees).await?;
+        self.lcd_slot.set_rotation(degrees_to_rotation(degrees));
+        Ok(())
+    }
+
+    async fn reset_to_default(&self) -> Result<()> {
+        self.worker()?.lcd_reset().await
+    }
+}
+
 #[async_trait]
 impl ChainAdapter for LuaDevice {
     fn parent_id(&self) -> String {
@@ -502,6 +639,7 @@ mod tests {
             transport: "hid".into(),
             bus: None,
             addr: None,
+            pid: Some(0x300E), // Kraken Z (320x320 LCD) for LCD-capable tests
         }
     }
 
@@ -513,7 +651,10 @@ mod tests {
             manifest,
             spec,
             hid_match(),
-            PluginIo::Stream(transport),
+            PluginIo::Stream {
+                transport,
+                bulk: None,
+            },
             tokio::runtime::Handle::current(),
         )
     }
@@ -629,7 +770,10 @@ mod tests {
         };
         dev.apply(state).await.unwrap();
         assert_eq!(*mock.written.lock().await, vec![vec![0xCC]]);
-        assert!(matches!(dev.current_state(), Some(RgbState::Static { .. })));
+        assert!(matches!(
+            RgbCapability::current_state(&dev),
+            Some(RgbState::Static { .. })
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -727,7 +871,10 @@ mod tests {
                 &manifest,
                 spec,
                 hid_match(),
-                PluginIo::Stream(transport),
+                PluginIo::Stream {
+                    transport,
+                    bulk: None,
+                },
                 tokio::runtime::Handle::current(),
             );
             d.set_self_ref(weak.clone());
@@ -744,7 +891,7 @@ mod tests {
         // native NzxtKrakenProtocol (Z/Elite 0x26 0x14 GRB, 0x72 duty profiles).
         use crate::drivers::chain::{ChainAdapter, ChainHost};
         use crate::drivers::CHAIN_LINK_KIND_NZXT_ARGB;
-        let src = include_str!("../../../../../plugins/examples/nzxt_kraken.lua");
+        let src = include_str!("builtins/nzxt_kraken.lua");
         let manifest = super::super::parse_manifest(src, Path::new("nzxt_kraken.lua")).unwrap();
         let mock = Arc::new(MockTransport::empty());
         let spec = &manifest.match_specs[0];
@@ -754,7 +901,10 @@ mod tests {
                 &manifest,
                 spec,
                 hid_match(),
-                PluginIo::Stream(mock.clone()),
+                PluginIo::Stream {
+                    transport: mock.clone(),
+                    bulk: None,
+                },
                 tokio::runtime::Handle::current(),
             );
             d.set_self_ref(weak.clone());

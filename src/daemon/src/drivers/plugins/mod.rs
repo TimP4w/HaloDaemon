@@ -15,6 +15,7 @@ mod backends;
 mod bytebuf;
 mod chain_leaf;
 mod device;
+mod image_api;
 mod manifest;
 mod sandbox;
 mod transport;
@@ -41,6 +42,8 @@ mod scan;
 mod corsair_test;
 #[cfg(test)]
 mod ene_test;
+#[cfg(test)]
+mod lcd_test;
 #[cfg(test)]
 mod zotac_test;
 
@@ -107,6 +110,7 @@ const BUILTIN_PLUGINS: &[(&str, &str)] = &[
         "zotac_spectra_gpu.lua",
         include_str!("builtins/zotac_spectra_gpu.lua"),
     ),
+    ("nzxt_kraken.lua", include_str!("builtins/nzxt_kraken.lua")),
 ];
 
 fn builtin_manifests() -> Vec<PluginManifest> {
@@ -210,6 +214,10 @@ fn build_device(
         bus: spec.bus.clone(),
         addr: match handle {
             DiscoveryHandle::Smbus { addr, .. } => Some(*addr),
+            _ => None,
+        },
+        pid: match handle {
+            DiscoveryHandle::Hid { pid, .. } => Some(*pid),
             _ => None,
         },
     };

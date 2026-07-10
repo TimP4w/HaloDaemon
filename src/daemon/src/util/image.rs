@@ -139,6 +139,85 @@ pub fn compress_for_storage(
     Ok((out, "jpg"))
 }
 
+/// Decode a static image (PNG/JPEG/…) and resize it to `width`×`height`,
+/// returning a raw `width*height*4` RGBA8 buffer. CPU-heavy (Lanczos3) — call
+/// off the async runtime.
+pub fn decode_static_image_rgba(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    let img = image::load_from_memory(data)?;
+    let img = if img.width() == width && img.height() == height {
+        img
+    } else {
+        img.resize_exact(width, height, image::imageops::FilterType::Lanczos3)
+    };
+    Ok(img.into_rgba8().into_raw())
+}
+
+/// Rotate a square RGBA8 buffer by a multiple of 90°. Non-multiples of 90 and
+/// non-square buffers are returned unchanged (LCD panels rotate their built-in
+/// display in firmware but not streamed frames, so we pre-rotate in software).
+pub fn rotate_rgba_square(rgba: &[u8], size: u32, degrees: u32) -> Vec<u8> {
+    let n = size as usize;
+    let step = degrees % 360;
+    if step == 0 || rgba.len() != n * n * 4 {
+        return rgba.to_vec();
+    }
+    let mut out = vec![0u8; rgba.len()];
+    for y in 0..n {
+        for x in 0..n {
+            let (cx, cy) = match step {
+                90 => (n - 1 - y, x),
+                180 => (n - 1 - x, n - 1 - y),
+                270 => (y, n - 1 - x),
+                _ => (x, y),
+            };
+            let s = (y * n + x) * 4;
+            let d = (cy * n + cx) * 4;
+            out[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+        }
+    }
+    out
+}
+
+/// RGBA8 → BGR888 (drops alpha, reorders to B,G,R) — the raw uncompressed LCD
+/// stream format.
+pub fn rgba_to_bgr888(rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        out.extend_from_slice(&[px[2], px[1], px[0]]);
+    }
+    out
+}
+
+/// Encode a raw RGBA8 frame as a complete Q565 file (QOI-style RGB565 codec):
+/// `b"q565"` magic, LE u16 width/height, encoded stream, `OP_END`. This is the
+/// compressed LCD stream format some panels (e.g. NZXT Kraken type-0x08) expect.
+pub fn rgba_to_q565(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    use q565::{
+        encode::Q565EncodeContext,
+        utils::{encode_rgb565_unchecked, rgb888_to_rgb565},
+    };
+    let pixels = (width as usize) * (height as usize);
+    let expected = pixels * 4;
+    if rgba.len() != expected {
+        anyhow::bail!(
+            "RGBA frame size mismatch: got {} bytes, expected {expected} for {width}x{height}",
+            rgba.len()
+        );
+    }
+    if width > u16::MAX as u32 || height > u16::MAX as u32 {
+        anyhow::bail!("frame {width}x{height} exceeds Q565 u16 dimension limit");
+    }
+    let rgb565: Vec<u16> = rgba
+        .chunks_exact(4)
+        .map(|p| encode_rgb565_unchecked(rgb888_to_rgb565([p[0], p[1], p[2]])))
+        .collect();
+    let mut out = Vec::with_capacity(8 + pixels);
+    if !Q565EncodeContext::encode_to_vec(width as u16, height as u16, &rgb565, &mut out) {
+        anyhow::bail!("Q565 encode failed for {width}x{height}");
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +364,69 @@ mod tests {
         let decoder = opts.read_info(std::io::Cursor::new(&data)).unwrap();
         assert_eq!(decoder.width(), 4);
         assert_eq!(decoder.height(), 4);
+    }
+
+    // ── codecs ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rgba_to_bgr888_reorders_and_drops_alpha() {
+        let rgba = [10u8, 20, 30, 255, 40, 50, 60, 128];
+        assert_eq!(rgba_to_bgr888(&rgba), vec![30, 20, 10, 60, 50, 40]);
+    }
+
+    #[test]
+    fn rotate_rgba_square_90_moves_top_left_to_top_right() {
+        let mut src = vec![0u8; 2 * 2 * 4];
+        src[0..4].copy_from_slice(&[1, 1, 1, 255]);
+        let out = rotate_rgba_square(&src, 2, 90);
+        assert_eq!(&out[4..8], &[1, 1, 1, 255]);
+        assert_eq!(&out[0..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rotate_rgba_square_zero_and_bad_size_passthrough() {
+        let src = vec![9u8; 2 * 2 * 4];
+        assert_eq!(rotate_rgba_square(&src, 2, 0), src);
+        assert_eq!(rotate_rgba_square(&src, 4, 90), src);
+    }
+
+    #[test]
+    fn q565_payload_has_magic_dimensions_and_end() {
+        let rgba = [255u8; 4 * 4 * 4];
+        let out = rgba_to_q565(&rgba, 4, 4).unwrap();
+        assert_eq!(&out[0..4], b"q565");
+        assert_eq!(&out[4..8], &[4, 0, 4, 0]);
+        assert_eq!(*out.last().unwrap(), 0xFF);
+    }
+
+    #[test]
+    fn q565_rejects_size_mismatch() {
+        assert!(rgba_to_q565(&[0u8; 4], 2, 2).is_err());
+    }
+
+    #[test]
+    fn decode_static_image_rgba_resizes_to_native() {
+        use image::ImageEncoder as _;
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([255u8, 0, 0, 255]));
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(img.as_raw(), 2, 2, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let rgba = decode_static_image_rgba(&png, 4, 4).unwrap();
+        assert_eq!(rgba.len(), 4 * 4 * 4);
+        assert!(rgba.chunks_exact(4).all(|px| px == [255, 0, 0, 255]));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn rotate_rgba_square_four_quarters_is_identity(
+            pixels in proptest::collection::vec(proptest::num::u8::ANY, 5 * 5 * 4..=5 * 5 * 4)
+        ) {
+            let mut img = pixels.clone();
+            for _ in 0..4 {
+                img = rotate_rgba_square(&img, 5, 90);
+            }
+            proptest::prop_assert_eq!(img, pixels);
+        }
     }
 }

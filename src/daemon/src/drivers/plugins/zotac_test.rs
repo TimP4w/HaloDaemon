@@ -80,6 +80,7 @@ fn device(ops: RecordingOps) -> LuaDevice {
         transport: "smbus".into(),
         bus: Some("gpu".into()),
         addr: Some(ZOTAC_ADDR),
+        pid: None,
     };
     LuaDevice::with_transport(
         "zotac-gpu".into(),

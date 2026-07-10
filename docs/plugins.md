@@ -138,6 +138,7 @@ Include a section to advertise that capability:
 - `rgb = { zones = { … }, native_effects = { … } }` — see [RGB](#rgb).
 - `fan = { channel = <u8> }` — a controllable fan/pump channel.
 - `sensor = {}` — the device reports sensor readings (via `get_sensors`).
+- `lcd = { needs_rgb_restore = <bool> }` — the device has an image panel; see [LCD](#lcd).
 - `poll = { interval_ms = <n> }` — run `read_status` on a background loop.
 - `chain = { channels = { … }, accessories = { … } }` — host detachable child
   accessories (fan hubs / ARGB chains); see [Chained accessories](#chained-accessories).
@@ -163,6 +164,11 @@ device's transport; `dev.status` holds the most recent table returned by
 | `write_ext_frame(dev, ch, colors)`| chain    | —                             |
 | `set_fan_duty(dev, ch, duty)`    | chain (fan)| —                             |
 | `fan_rpm`/`fan_duty`/`fan_controllable`| chain (fan) | value for that channel   |
+| `lcd_stream_frame(dev, rgba, w, h, rotation, raw, brightness)` | lcd | — |
+| `set_image(dev, bytes, rotation)`| lcd        | —                             |
+| `lcd_set_brightness(dev, brightness, rotation)` | lcd | —                    |
+| `lcd_set_rotation(dev, brightness, degrees)` | lcd | —                       |
+| `lcd_reset(dev)`                 | lcd        | —                             |
 
 ### RGB
 
@@ -252,6 +258,49 @@ get_sensors = function(dev)
   }
 end,
 ```
+
+### LCD
+
+Declare `lcd = { needs_rgb_restore = <bool> }` (set the flag when an image upload
+resets the LEDs, so the host re-applies RGB after). The panel descriptor is
+reported **dynamically** by `initialize` — resolution can vary by device variant
+(`dev.match.pid`) — as an `lcd` field:
+
+```lua
+initialize = function(dev)
+  local size = LCD_SIZES[dev.match.pid] or { 320, 320 }
+  return { ok = true, lcd = {
+    shape = "circle", width = size[1], height = size[2],
+    rotations = { 0, 90, 180, 270 },
+    image_types = { "image/png", "image/jpeg", "image/gif" },
+    latches = true,            -- unchanged frames aren't re-streamed
+    brightness = 80, rotation = 0,
+  } }
+end,
+```
+
+The host owns rotation/brightness/mode state and passes them into each callback,
+so the script stays stateless about them:
+
+- `lcd_stream_frame(dev, rgba, w, h, rotation, raw, brightness)` — one rendered
+  engine frame. `rgba` is a `halod.buffer` of `w*h*4` bytes at native resolution.
+- `set_image(dev, bytes, rotation)` — upload a still image or GIF.
+- `lcd_set_brightness` / `lcd_set_rotation` / `lcd_reset` — panel config.
+
+Pixel data is far too large to shuffle byte-by-byte in Lua, so the `halod` table
+provides host-side codecs (each takes/returns a `halod.buffer`):
+
+| helper | purpose |
+|--------|---------|
+| `halod.rgba_to_q565(rgba, w, h)` | RGBA8 → Q565 (QOI-style RGB565) file |
+| `halod.rgba_to_bgr888(rgba)`     | RGBA8 → raw BGR888 (drops alpha)    |
+| `halod.rgba_rotate_square(rgba, size, deg)` | rotate a square RGBA buffer 90°× |
+| `halod.image_decode(bytes, w, h)`| decode PNG/JPEG and resize to `w×h` RGBA |
+| `halod.gif_resize(bytes, w, h)`  | resize an animated GIF to `w×h`     |
+
+Image bytes that exceed a HID report go over the device's **USB bulk-OUT
+endpoint** via `dev.transport:write_bulk(buf)` (the 64-byte HID reports carry only
+the control handshake). The bulk endpoint opens lazily on first use.
 
 ## The transport API (`dev.transport`)
 

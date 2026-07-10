@@ -181,6 +181,7 @@ fn dram_device(ops: RecordingOps) -> LuaDevice {
         transport: "smbus".into(),
         bus: Some("chipset".into()),
         addr: Some(0x70),
+        pid: None,
     };
     LuaDevice::with_transport(
         "ene-dram".into(),
@@ -489,6 +490,7 @@ async fn register_ops_outside_scope_are_rejected() {
             transport: "smbus".into(),
             bus: Some("chipset".into()),
             addr: Some(0x70),
+            pid: None,
         },
         io,
         tokio::runtime::Handle::current(),

@@ -9,11 +9,11 @@ To add a device, see the [development guide](development.md).
 | Vendor | Model | VID:PID | Protocol | Transport | Platform |
 |--------|-------|---------|----------|-----------|----------|
 | NZXT | Kraken X53, X63, X73 | 1e71:2007, 1e71:2014 | [NZXT](protocols/nzxt.md) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | Kraken Z53, Z63, Z73 | 1e71:3008 | [NZXT](protocols/nzxt.md) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | Kraken Elite 2023 | 1e71:300c | [NZXT](protocols/nzxt.md) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | Kraken 2023 | 1e71:300e | [NZXT](protocols/nzxt.md) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | Kraken Elite RGB 2024 | 1e71:3012 | [NZXT](protocols/nzxt.md) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | Kraken Plus 2024 | 1e71:3014 | [NZXT](protocols/nzxt.md) | [HID](transports/hid.md) | 🐧🪟 |
+| NZXT | Kraken Z53, Z63, Z73 | 1e71:3008 | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
+| NZXT | Kraken Elite 2023 | 1e71:300c | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
+| NZXT | Kraken 2023 | 1e71:300e | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
+| NZXT | Kraken Elite RGB 2024 | 1e71:3012 | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
+| NZXT | Kraken Plus 2024 | 1e71:3014 | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
 
 ## Fans & Controllers
 

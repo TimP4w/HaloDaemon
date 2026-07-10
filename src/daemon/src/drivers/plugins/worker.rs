@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use halod_shared::types::{RgbColor, RgbState, Sensor};
 
+use super::bytebuf::ByteBuf;
 use super::sandbox;
 use super::transport::{AddrScope, PluginIo, RegisterBus};
 use super::transport_api::TransportApi;
@@ -35,6 +36,9 @@ pub struct DevMatch {
     pub transport: String,
     pub bus: Option<String>,
     pub addr: Option<u8>,
+    /// HID product id, so a callback can branch on device variant (e.g. an LCD
+    /// panel picking its native resolution). `None` for non-HID transports.
+    pub pid: Option<u16>,
 }
 
 /// One RGB zone a plugin's `initialize` reports for dynamic LED counts.
@@ -53,13 +57,47 @@ fn default_zone_topology() -> String {
     "linear".to_owned()
 }
 
+/// The LCD panel an `initialize` reports (resolution is per-device, e.g. varies
+/// by HID pid), converted into an `LcdDescriptor` by the device layer.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InitLcd {
+    /// `"circle"` or `"square"`.
+    #[serde(default)]
+    pub shape: String,
+    pub width: u32,
+    pub height: u32,
+    /// Supported rotation angles in degrees (e.g. `{0, 90, 180, 270}`).
+    #[serde(default)]
+    pub rotations: Vec<u32>,
+    /// Accepted upload MIME types (e.g. `"image/png"`).
+    #[serde(default)]
+    pub image_types: Vec<String>,
+    /// The panel latches the last frame, so unchanged content isn't re-streamed.
+    #[serde(default)]
+    pub latches: bool,
+    /// Start in the raw (uncompressed 24-bit) streaming path instead of Q565.
+    #[serde(default)]
+    pub raw_streaming: bool,
+    /// Current panel brightness (0–100), typically read back from the device.
+    #[serde(default = "default_lcd_brightness")]
+    pub brightness: u8,
+    /// Current rotation in degrees, typically read back from the device.
+    #[serde(default)]
+    pub rotation: u32,
+}
+
+fn default_lcd_brightness() -> u8 {
+    80
+}
+
 /// What `initialize` returns: a bare bool, or a table with dynamic device info
-/// discovered from the hardware (firmware/model, RGB zones).
+/// discovered from the hardware (firmware/model, RGB zones, LCD panel).
 #[derive(Debug, Default)]
 pub struct InitOutcome {
     pub ok: bool,
     pub model: Option<String>,
     pub zones: Option<Vec<InitZone>>,
+    pub lcd: Option<InitLcd>,
 }
 
 /// The shape `initialize` may return as a table (bool short-circuits before this).
@@ -71,6 +109,8 @@ struct InitTable {
     model: Option<String>,
     #[serde(default)]
     zones: Option<Vec<InitZone>>,
+    #[serde(default)]
+    lcd: Option<InitLcd>,
 }
 
 fn default_true() -> bool {
@@ -120,6 +160,32 @@ pub enum Call {
         duty: u8,
         reply: oneshot::Sender<Result<()>>,
     },
+    // ── LCD ──────────────────────────────────────────────────────────────
+    LcdStreamFrame {
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        rotation: u32,
+        raw: bool,
+        brightness: u8,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    LcdSetImage {
+        data: Vec<u8>,
+        rotation: u32,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    LcdSetBrightness {
+        brightness: u8,
+        rotation: u32,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    LcdSetRotation {
+        brightness: u8,
+        degrees: u32,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    LcdReset(oneshot::Sender<Result<()>>),
 }
 
 /// Handle the `LuaDevice` holds. `UnboundedSender` is `Send + Sync`, so the
@@ -236,6 +302,58 @@ impl PluginHandle {
         })
         .await?
     }
+
+    pub async fn lcd_stream_frame(
+        &self,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        rotation: u32,
+        raw: bool,
+        brightness: u8,
+    ) -> Result<()> {
+        self.request(|reply| Call::LcdStreamFrame {
+            rgba,
+            width,
+            height,
+            rotation,
+            raw,
+            brightness,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn lcd_set_image(&self, data: Vec<u8>, rotation: u32) -> Result<()> {
+        self.request(|reply| Call::LcdSetImage {
+            data,
+            rotation,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn lcd_set_brightness(&self, brightness: u8, rotation: u32) -> Result<()> {
+        self.request(|reply| Call::LcdSetBrightness {
+            brightness,
+            rotation,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn lcd_set_rotation(&self, brightness: u8, degrees: u32) -> Result<()> {
+        self.request(|reply| Call::LcdSetRotation {
+            brightness,
+            degrees,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn lcd_reset(&self) -> Result<()> {
+        self.request(Call::LcdReset).await?
+    }
 }
 
 /// The plugin's callback functions, looked up once by name.
@@ -255,6 +373,11 @@ struct Callbacks {
     fan_duty: Option<Function>,
     fan_controllable: Option<Function>,
     set_fan_duty: Option<Function>,
+    lcd_stream_frame: Option<Function>,
+    lcd_set_image: Option<Function>,
+    lcd_set_brightness: Option<Function>,
+    lcd_set_rotation: Option<Function>,
+    lcd_reset: Option<Function>,
 }
 
 impl Callbacks {
@@ -279,6 +402,11 @@ impl Callbacks {
             fan_duty: f("fan_duty"),
             fan_controllable: f("fan_controllable"),
             set_fan_duty: f("set_fan_duty"),
+            lcd_stream_frame: f("lcd_stream_frame"),
+            lcd_set_image: f("set_image"),
+            lcd_set_brightness: f("lcd_set_brightness"),
+            lcd_set_rotation: f("lcd_set_rotation"),
+            lcd_reset: f("lcd_reset"),
         }
     }
 }
@@ -386,9 +514,123 @@ fn worker_main(
             } => {
                 let _ = reply.send(run_set_fan_duty(&cb, &dev, channel, duty));
             }
+            Call::LcdStreamFrame {
+                rgba,
+                width,
+                height,
+                rotation,
+                raw,
+                brightness,
+                reply,
+            } => {
+                let _ = reply.send(run_lcd_stream_frame(
+                    &lua, &cb, &dev, rgba, width, height, rotation, raw, brightness,
+                ));
+            }
+            Call::LcdSetImage {
+                data,
+                rotation,
+                reply,
+            } => {
+                let _ = reply.send(run_lcd_set_image(&lua, &cb, &dev, data, rotation));
+            }
+            Call::LcdSetBrightness {
+                brightness,
+                rotation,
+                reply,
+            } => {
+                let _ = reply.send(call_lcd_config(
+                    &cb.lcd_set_brightness,
+                    "lcd_set_brightness",
+                    &dev,
+                    brightness,
+                    rotation,
+                ));
+            }
+            Call::LcdSetRotation {
+                brightness,
+                degrees,
+                reply,
+            } => {
+                let _ = reply.send(call_lcd_config(
+                    &cb.lcd_set_rotation,
+                    "lcd_set_rotation",
+                    &dev,
+                    brightness,
+                    degrees,
+                ));
+            }
+            Call::LcdReset(reply) => {
+                let _ = reply.send(run_lcd_reset(&cb, &dev));
+            }
         }
     }
     Ok(())
+}
+
+fn run_lcd_stream_frame(
+    lua: &Lua,
+    cb: &Callbacks,
+    dev: &Table,
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    rotation: u32,
+    raw: bool,
+    brightness: u8,
+) -> Result<()> {
+    let f = cb
+        .lcd_stream_frame
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no lcd_stream_frame()"))?;
+    let buf = lua
+        .create_userdata(ByteBuf::from_bytes(rgba))
+        .map_err(|e| lua_err("lcd_stream_frame arg", e))?;
+    f.call::<()>((dev.clone(), buf, width, height, rotation, raw, brightness))
+        .map_err(|e| lua_err("lcd_stream_frame", e))
+}
+
+fn run_lcd_set_image(
+    lua: &Lua,
+    cb: &Callbacks,
+    dev: &Table,
+    data: Vec<u8>,
+    rotation: u32,
+) -> Result<()> {
+    let f = cb
+        .lcd_set_image
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no set_image()"))?;
+    let buf = lua
+        .create_userdata(ByteBuf::from_bytes(data))
+        .map_err(|e| lua_err("set_image arg", e))?;
+    f.call::<()>((dev.clone(), buf, rotation))
+        .map_err(|e| lua_err("set_image", e))
+}
+
+/// Drives `lcd_set_brightness`/`lcd_set_rotation`, which both take
+/// `(dev, brightness, rotation_degrees)` since the panel config carries both.
+fn call_lcd_config(
+    f: &Option<Function>,
+    name: &str,
+    dev: &Table,
+    brightness: u8,
+    rotation: u32,
+) -> Result<()> {
+    let f = f
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no {name}()"))?;
+    f.call::<()>((dev.clone(), brightness, rotation))
+        .map_err(|e| lua_err(name, e))
+}
+
+fn run_lcd_reset(cb: &Callbacks, dev: &Table) -> Result<()> {
+    let f = cb
+        .lcd_reset
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no lcd_reset()"))?;
+    f.call::<()>(dev.clone())
+        .map_err(|e| lua_err("lcd_reset", e))
 }
 
 fn run_detect(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<Vec<DetectedAccessory>> {
@@ -511,6 +753,9 @@ fn build_match_table(lua: &Lua, m: &DevMatch) -> Result<Table> {
     if let Some(addr) = m.addr {
         t.set("addr", addr).map_err(|e| lua_err("match.addr", e))?;
     }
+    if let Some(pid) = m.pid {
+        t.set("pid", pid).map_err(|e| lua_err("match.pid", e))?;
+    }
     Ok(t)
 }
 
@@ -541,6 +786,7 @@ fn run_initialize(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<InitOutcome>
                 ok: t.ok,
                 model: t.model,
                 zones: t.zones,
+                lcd: t.lcd,
             })
         }
     }

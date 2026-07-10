@@ -165,6 +165,7 @@ fn device(ops: RecordingOps) -> LuaDevice {
         transport: "smbus".into(),
         bus: Some("chipset".into()),
         addr: Some(0x58),
+        pid: None,
     };
     LuaDevice::with_transport(
         "corsair-dram".into(),

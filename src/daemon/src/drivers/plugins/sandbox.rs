@@ -32,6 +32,7 @@ pub fn apply(lua: &Lua) -> mlua::Result<()> {
     })?;
     globals.set("log", logger)?;
     bytebuf::register(lua)?;
+    super::image_api::register(lua)?;
     Ok(())
 }
 

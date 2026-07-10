@@ -21,7 +21,7 @@ use crate::drivers::transports::smbus::SmBusSyncOps;
 use crate::drivers::transports::Transport;
 
 use super::bytebuf::ByteBuf;
-use super::transport::{AddrScope, PluginIo, RegisterBus};
+use super::transport::{AddrScope, BulkEndpoint, PluginIo, RegisterBus};
 
 /// Lua userdata wrapping one transport. Rate limiting is inherited: this holds
 /// the real (metered) transport, so a script cannot outrun the hardware.
@@ -37,9 +37,20 @@ impl TransportApi {
 
     fn stream(&self) -> mlua::Result<&std::sync::Arc<dyn Transport>> {
         match &self.io {
-            PluginIo::Stream(t) => Ok(t),
+            PluginIo::Stream { transport, .. } => Ok(transport),
             PluginIo::Register(_) => Err(mlua::Error::RuntimeError(
                 "this transport is a register bus (SMBus); use transport:batch(fn)".into(),
+            )),
+        }
+    }
+
+    fn bulk(&self) -> mlua::Result<&BulkEndpoint> {
+        match &self.io {
+            PluginIo::Stream {
+                bulk: Some(bulk), ..
+            } => Ok(bulk),
+            _ => Err(mlua::Error::RuntimeError(
+                "this transport has no bulk endpoint".into(),
             )),
         }
     }
@@ -47,7 +58,7 @@ impl TransportApi {
     fn register(&self) -> mlua::Result<&RegisterBus> {
         match &self.io {
             PluginIo::Register(r) => Ok(r),
-            PluginIo::Stream(_) => Err(mlua::Error::RuntimeError(
+            PluginIo::Stream { .. } => Err(mlua::Error::RuntimeError(
                 "this transport is a byte stream (HID); use transport:write/read".into(),
             )),
         }
@@ -128,6 +139,13 @@ impl UserData for TransportApi {
             this.handle
                 .block_on(this.stream()?.write_many(&owned))
                 .map_err(to_lua_err)
+        });
+
+        // Push a payload over the device's USB bulk-OUT endpoint (LCD images).
+        // Blocking, on the worker thread; the endpoint opens on first use.
+        methods.add_method("write_bulk", |_, this, data: Value| {
+            let bytes = bytes_from(&data)?;
+            this.bulk()?.write(&bytes).map_err(to_lua_err)
         });
 
         // ── Register (SMBus) ─────────────────────────────────────────────

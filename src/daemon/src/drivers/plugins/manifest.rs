@@ -73,6 +73,16 @@ pub struct FanManifest {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SensorManifest {}
 
+/// LCD capability marker. The panel descriptor (resolution, rotations, …) is
+/// reported dynamically by `initialize` (it can vary by device variant), so this
+/// carries only device-wide LCD policy.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LcdManifest {
+    /// Re-apply the RGB state after an image upload (some panels reset the LEDs).
+    #[serde(default)]
+    pub needs_rgb_restore: bool,
+}
+
 fn default_topology() -> String {
     "ring".to_owned()
 }
@@ -301,6 +311,8 @@ struct RawManifest {
     #[serde(default)]
     sensor: Option<SensorManifest>,
     #[serde(default)]
+    lcd: Option<LcdManifest>,
+    #[serde(default)]
     poll: Option<PollManifest>,
     #[serde(default)]
     chain: Option<ChainManifest>,
@@ -320,6 +332,7 @@ pub struct PluginManifest {
     pub rgb: Option<RgbManifest>,
     pub fan: Option<FanManifest>,
     pub sensor: Option<SensorManifest>,
+    pub lcd: Option<LcdManifest>,
     pub poll: Option<PollManifest>,
     pub chain: Option<ChainManifest>,
 }
@@ -408,7 +421,11 @@ impl PluginManifest {
     /// True when the plugin declares any capability that needs a live transport
     /// + worker. Device-only plugins skip the worker.
     pub fn needs_worker(&self) -> bool {
-        self.rgb.is_some() || self.fan.is_some() || self.sensor.is_some() || self.chain.is_some()
+        self.rgb.is_some()
+            || self.fan.is_some()
+            || self.sensor.is_some()
+            || self.lcd.is_some()
+            || self.chain.is_some()
     }
 
     /// Human-readable capability labels for the management UI.
@@ -422,6 +439,9 @@ impl PluginManifest {
         }
         if self.sensor.is_some() {
             labels.push("Sensor".to_owned());
+        }
+        if self.lcd.is_some() {
+            labels.push("LCD".to_owned());
         }
         if self.chain.is_some() {
             labels.push("Accessories".to_owned());
@@ -483,6 +503,7 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         rgb: raw.rgb,
         fan: raw.fan,
         sensor: raw.sensor,
+        lcd: raw.lcd,
         poll: raw.poll,
         chain: raw.chain,
     })

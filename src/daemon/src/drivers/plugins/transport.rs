@@ -18,15 +18,80 @@ use anyhow::Result;
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 
 use crate::drivers::transports::smbus::{SmBusDevice, SmBusSyncOps};
+use crate::drivers::transports::usb_bulk::UsbBulkTransport;
 use crate::drivers::transports::Transport;
 use crate::registry::discovery::DiscoveryHandle;
 
 use super::manifest::{MatchSpec, PluginManifest};
 
+/// A lazily-opened USB bulk-OUT endpoint paired with a HID stream transport, for
+/// plugins that must push payloads larger than a HID report (LCD image frames).
+/// The device is opened on first write, so plugins that never stream pay nothing.
+pub enum BulkEndpoint {
+    Usb {
+        vid: u16,
+        pid: u16,
+        inner: std::sync::Mutex<Option<UsbBulkTransport>>,
+    },
+    /// Records every write instead of touching hardware (tests only).
+    #[cfg(test)]
+    Recording(std::sync::Mutex<Vec<Vec<u8>>>),
+}
+
+impl BulkEndpoint {
+    pub fn new(vid: u16, pid: u16) -> Arc<Self> {
+        Arc::new(Self::Usb {
+            vid,
+            pid,
+            inner: std::sync::Mutex::new(None),
+        })
+    }
+
+    #[cfg(test)]
+    pub fn recording() -> Arc<Self> {
+        Arc::new(Self::Recording(std::sync::Mutex::new(Vec::new())))
+    }
+
+    #[cfg(test)]
+    pub fn recorded(&self) -> Vec<Vec<u8>> {
+        match self {
+            BulkEndpoint::Recording(m) => m.lock().unwrap().clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Write the whole payload to the bulk endpoint, opening the device on first
+    /// use. `UsbBulkTransport::write` loops internally until every byte is sent.
+    pub fn write(&self, data: &[u8]) -> Result<()> {
+        match self {
+            BulkEndpoint::Usb { vid, pid, inner } => {
+                let mut guard = inner
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("plugin bulk endpoint mutex poisoned"))?;
+                if guard.is_none() {
+                    *guard = Some(UsbBulkTransport::open(*vid, *pid, None)?);
+                }
+                guard.as_ref().unwrap().write(data)?;
+                Ok(())
+            }
+            #[cfg(test)]
+            BulkEndpoint::Recording(m) => {
+                m.lock().unwrap().push(data.to_vec());
+                Ok(())
+            }
+        }
+    }
+}
+
 /// The live transport handed to a plugin's worker (and to a `pre_scan`).
 #[derive(Clone)]
 pub enum PluginIo {
-    Stream(Arc<dyn Transport>),
+    Stream {
+        transport: Arc<dyn Transport>,
+        /// Companion bulk endpoint for HID devices that also expose one (e.g. an
+        /// LCD panel). `None` when the device has no bulk endpoint.
+        bulk: Option<Arc<BulkEndpoint>>,
+    },
     Register(RegisterBus),
 }
 
@@ -34,14 +99,14 @@ impl PluginIo {
     /// Live write-rate/throughput for the Info UI, regardless of backend.
     pub fn rate_status(&self) -> WriteRateStatus {
         match self {
-            PluginIo::Stream(t) => t.rate_status(),
+            PluginIo::Stream { transport, .. } => transport.rate_status(),
             PluginIo::Register(r) => r.rate_status(),
         }
     }
 
     pub fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
         match self {
-            PluginIo::Stream(t) => t.set_write_rate_limit(limit),
+            PluginIo::Stream { transport, .. } => transport.set_write_rate_limit(limit),
             PluginIo::Register(r) => r.set_write_rate_limit(limit),
         }
     }
