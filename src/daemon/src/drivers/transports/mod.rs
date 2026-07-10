@@ -22,6 +22,9 @@ use rusb::UsbContext;
 pub struct UsbClaim {
     pub handle: rusb::DeviceHandle<rusb::Context>,
     pub interface: u8,
+    /// `true` when we detached a kernel driver in [`Self::claim`], so
+    /// [`Drop`] knows to re-attach it.
+    had_kernel_driver: bool,
 }
 
 impl UsbClaim {
@@ -36,9 +39,13 @@ impl UsbClaim {
 
     /// Claim an interface on an already-opened device handle.
     pub fn claim(handle: rusb::DeviceHandle<rusb::Context>, interface: u8) -> Result<Self> {
+        let mut had_kernel_driver = false;
         #[cfg(target_os = "linux")]
         match handle.kernel_driver_active(interface) {
-            Ok(true) => handle.detach_kernel_driver(interface)?,
+            Ok(true) => {
+                handle.detach_kernel_driver(interface)?;
+                had_kernel_driver = true;
+            }
             Ok(false) => {}
             Err(e) => log::warn!(
                 "UsbClaim: kernel_driver_active({}) query failed: {e}",
@@ -47,11 +54,17 @@ impl UsbClaim {
         }
 
         handle.claim_interface(interface)?;
-        Ok(Self { handle, interface })
+        Ok(Self {
+            handle,
+            interface,
+            had_kernel_driver,
+        })
     }
 
     pub fn release(self) {
-        std::mem::forget(self);
+        // Drop runs, releasing the interface and re-attaching the kernel driver
+        // on Linux. The caller has taken ownership and wants explicit cleanup;
+        // letting the value drop is the correct behaviour.
     }
 }
 
@@ -64,11 +77,13 @@ impl Drop for UsbClaim {
             );
         }
         #[cfg(target_os = "linux")]
-        if let Err(e) = self.handle.attach_kernel_driver(self.interface) {
-            log::warn!(
-                "UsbClaim: attach_kernel_driver({}) failed: {e}",
-                self.interface
-            );
+        if self.had_kernel_driver {
+            if let Err(e) = self.handle.attach_kernel_driver(self.interface) {
+                log::warn!(
+                    "UsbClaim: attach_kernel_driver({}) failed: {e}",
+                    self.interface
+                );
+            }
         }
     }
 }

@@ -100,6 +100,8 @@ async fn rediscover_devices(app: Arc<AppState>) {
     }
     drop(previous);
 
+    app.hid.clear().await;
+
     crate::registry::initialize_app_state(app.clone()).await;
     crate::ipc::broadcast_state(&app).await;
 }

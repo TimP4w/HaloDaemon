@@ -82,6 +82,12 @@ impl HidTracking {
         removed
     }
 
+    /// Clear all tracked HID entries and the cached id set.
+    pub async fn clear(&self) {
+        self.tracking.lock().await.clear();
+        *self.ids.write().await = HashSet::new();
+    }
+
     /// A clone of one tracked entry, if present.
     pub async fn get(&self, key: &str) -> Option<HidTrackingEntry> {
         self.tracking.lock().await.get(key).cloned()
