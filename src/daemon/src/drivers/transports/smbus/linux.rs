@@ -307,8 +307,8 @@ fn read_pci_ids(num: u8) -> Option<(u16, u16, u16, u16)> {
         let device = read_sysfs_hex(d.join("device"));
         let sub_vendor = read_sysfs_hex(d.join("subsystem_vendor"));
         let sub_device = read_sysfs_hex(d.join("subsystem_device"));
-        if let (Some(v), Some(d), Some(sv), Some(sd)) = (vendor, device, sub_vendor, sub_device) {
-            return Some((v, d, sv, sd));
+        if let (Some(v), Some(dev), Some(sv), Some(sd)) = (vendor, device, sub_vendor, sub_device) {
+            return Some((v, dev, sv, sd));
         }
         dir = d.parent().map(std::path::Path::to_path_buf);
     }
