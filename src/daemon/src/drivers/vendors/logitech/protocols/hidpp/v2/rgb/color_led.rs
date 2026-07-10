@@ -250,4 +250,20 @@ mod tests {
     fn find_unknown_effect() {
         assert!(find_led_effect(0xFF).is_none());
     }
+
+    #[test]
+    fn location_name_maps_known_and_unknown() {
+        assert_eq!(color_led_location_name(0x0001), "Primary");
+        assert_eq!(color_led_location_name(0x0002), "Logo");
+        assert_eq!(color_led_location_name(0x000B), "Primary 6");
+        assert_eq!(color_led_location_name(0x00FF), "Unknown");
+    }
+
+    #[test]
+    fn effect_command_prepends_slot() {
+        assert_eq!(
+            color_led_effect_command(0, 2, &[0xAA, 0xBB]),
+            vec![2, 0xAA, 0xBB]
+        );
+    }
 }
