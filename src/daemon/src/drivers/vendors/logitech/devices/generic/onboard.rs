@@ -372,6 +372,14 @@ pub(super) async fn reconcile_feature_notification(
     }
 
     if let Some(hidpp) = hidpp {
+        if let Some(status) = hidpp.handle_wireless_status_notif(sub_id, data) {
+            log::debug!("[{id}] wireless status: {status:?}");
+            state.lock().await.wireless_status = Some(status);
+            return Some(true);
+        }
+    }
+
+    if let Some(hidpp) = hidpp {
         if let Some(inverted) = hidpp.handle_fn_inversion_notif(sub_id, data) {
             let mut st = state.lock().await;
             if !st.fn_inversion.writeable {

@@ -209,6 +209,9 @@ pub(super) struct LogitechDeviceState {
     pub(super) hires_wheel: HiresWheelState,
     pub(super) fn_inversion: FnInversionState,
     pub(super) brightness: BrightnessState,
+    pub(super) firmware: Option<String>,
+    pub(super) wireless_status:
+        Option<crate::drivers::vendors::logitech::protocols::hidpp::v2::WirelessStatus>,
 }
 
 impl LogitechDeviceState {

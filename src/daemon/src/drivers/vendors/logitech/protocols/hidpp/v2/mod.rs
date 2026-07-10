@@ -19,6 +19,7 @@ use super::HidppChannel;
 
 pub mod audio;
 pub mod battery;
+pub mod firmware;
 pub mod keys;
 pub mod rgb;
 pub mod settings;
@@ -167,6 +168,28 @@ fn parse_fn_inversion(reply: &[u8]) -> Option<(bool, bool)> {
         return None;
     }
     Some(((reply[0] & 0x01) != 0, (reply[1] & 0x01) != 0))
+}
+
+/// Decoded WIRELESS_DEVICE_STATUS (`0x1D4B`) broadcast event. Read-only feature
+/// with no getter — this is the payload of the device-initiated status event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WirelessStatus {
+    pub reconnected: bool,
+    pub reconfigure_needed: bool,
+    pub reason: u8,
+}
+
+/// Decode a WIRELESS_DEVICE_STATUS event payload (`address == 0x00`). `None` if
+/// shorter than 2 bytes.
+fn parse_wireless_status(data: &[u8]) -> Option<WirelessStatus> {
+    if data.len() < 2 {
+        return None;
+    }
+    Some(WirelessStatus {
+        reconnected: data[0] == 1,
+        reconfigure_needed: data[1] == 1,
+        reason: data.get(2).copied().unwrap_or(0),
+    })
 }
 
 impl Hidpp20 {
@@ -347,6 +370,15 @@ impl Hidpp20 {
         Some(inverted)
     }
 
+    /// If `sub_id` matches WIRELESS_DEVICE_STATUS, decode the broadcast event
+    /// payload. `None` when this notification is not ours or data is too short.
+    pub fn handle_wireless_status_notif(&self, sub_id: u8, data: &[u8]) -> Option<WirelessStatus> {
+        if self.idx(feature::WIRELESS_DEVICE_STATUS)? != sub_id {
+            return None;
+        }
+        parse_wireless_status(data)
+    }
+
     /// K375S_FN_INVERSION version. `None` if the feature is absent. Version ≥ 2
     /// supports SET; version 1 is read-only.
     pub async fn fn_inversion_version(&self) -> Option<u8> {
@@ -424,6 +456,37 @@ mod tests {
         assert_eq!(
             h.handle_fn_inversion_notif(0x0b, &[0x00, 0x00]),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn wireless_status_notif_decodes_reconnect_event() {
+        let h = hidpp_with_features(HashMap::from([(feature::WIRELESS_DEVICE_STATUS, 0x07)]));
+        // data = [status=1 reconnected, request=1 reconfigure, reason=0x05]
+        assert_eq!(
+            h.handle_wireless_status_notif(0x07, &[0x01, 0x01, 0x05]),
+            Some(super::WirelessStatus {
+                reconnected: true,
+                reconfigure_needed: true,
+                reason: 0x05,
+            })
+        );
+        // request=0 → no reconfigure; reason defaults to 0 when absent.
+        assert_eq!(
+            h.handle_wireless_status_notif(0x07, &[0x00, 0x00]),
+            Some(super::WirelessStatus::default())
+        );
+    }
+
+    #[test]
+    fn wireless_status_notif_filters_by_sub_id_and_length() {
+        let h = hidpp_with_features(HashMap::from([(feature::WIRELESS_DEVICE_STATUS, 0x07)]));
+        assert_eq!(h.handle_wireless_status_notif(0x08, &[0x01, 0x01]), None);
+        assert_eq!(h.handle_wireless_status_notif(0x07, &[0x01]), None);
+        let absent = hidpp_with_features(HashMap::new());
+        assert_eq!(
+            absent.handle_wireless_status_notif(0x07, &[0x01, 0x01]),
+            None
         );
     }
 

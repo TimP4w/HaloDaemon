@@ -286,6 +286,7 @@ impl Device for LogitechDevice {
             .init_name(&features)
             .await
             .unwrap_or_else(|| self.model_name.to_string());
+        state.firmware = self.init_firmware(&features).await;
 
         self.init_battery(&features, &mut state).await;
         self.init_report_rate(&features, &mut state).await;
@@ -367,6 +368,25 @@ impl Device for LogitechDevice {
                 out.push((
                     "connection".to_string(),
                     "unknown (transport busy)".to_string(),
+                ));
+            }
+        }
+        if let Ok(state) = self.state.try_lock() {
+            if let Some(fw) = &state.firmware {
+                out.push(("firmware".to_string(), fw.clone()));
+            }
+            if let Some(ws) = &state.wireless_status {
+                out.push((
+                    "wireless_status".to_string(),
+                    format!(
+                        "{} (reason {})",
+                        if ws.reconnected {
+                            "reconnected"
+                        } else {
+                            "disconnected"
+                        },
+                        ws.reason
+                    ),
                 ));
             }
         }

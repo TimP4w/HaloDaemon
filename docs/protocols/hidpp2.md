@@ -57,7 +57,25 @@ Resolving ADJUSTABLE_DPI (`0x2201`) on device `0x01`: send `10 01 00 01 22 01 00
 
 ### Feature codes (`v2/mod.rs`)
 
-ROOT `0x0000`, FEATURE_SET `0x0001`, FIRMWARE_VERSION `0x0003`, DEVICE_NAME `0x0005`, DEVICE_FRIENDLY_NAME `0x0007`, BATTERY_VOLTAGE `0x1001`, UNIFIED_BATTERY `0x1004`, WIRELESS_DEVICE_STATUS `0x1D4B`, ADC_MEASUREMENT `0x1F20`, HIRES_WHEEL `0x2121`, ADJUSTABLE_DPI `0x2201`, K375S_FN_INVERSION `0x40A3`, KEYBOARD_LAYOUT_2 `0x4540`, REPROG_CONTROLS_V4 `0x1b04`, BRIGHTNESS_CONTROL `0x8040`, REPORT_RATE `0x8060`, EXT_REPORT_RATE `0x8061`, RGB_EFFECTS `0x8071`, PER_KEY_LIGHTING_V2 `0x8081`, GKEY `0x8010`, ONBOARD_PROFILES `0x8100`, MOUSE_BUTTON_SPY `0x8110`, SIDETONE `0x8300`, EQUALIZER `0x8310`. Declared but unused: `0x2202`, `0x1b10`, `0x1bc0`, `0x1b05`, `0x1D4B` (WIRELESS_DEVICE_STATUS is declared for enumeration logging only).
+ROOT `0x0000`, FEATURE_SET `0x0001`, FIRMWARE_VERSION `0x0003`, DEVICE_NAME `0x0005`, DEVICE_FRIENDLY_NAME `0x0007`, BATTERY_VOLTAGE `0x1001`, UNIFIED_BATTERY `0x1004`, WIRELESS_DEVICE_STATUS `0x1D4B`, ADC_MEASUREMENT `0x1F20`, HIRES_WHEEL `0x2121`, ADJUSTABLE_DPI `0x2201`, K375S_FN_INVERSION `0x40A3`, KEYBOARD_LAYOUT_2 `0x4540`, REPROG_CONTROLS_V4 `0x1b04`, BRIGHTNESS_CONTROL `0x8040`, REPORT_RATE `0x8060`, EXT_REPORT_RATE `0x8061`, RGB_EFFECTS `0x8071`, PER_KEY_LIGHTING_V2 `0x8081`, GKEY `0x8010`, ONBOARD_PROFILES `0x8100`, MOUSE_BUTTON_SPY `0x8110`, SIDETONE `0x8300`, EQUALIZER `0x8310`. Declared but unused: `0x2202`, `0x1b10`, `0x1bc0`, `0x1b05`.
+
+### FIRMWARE_VERSION (`0x0003`) — `v2/firmware.rs`
+
+Informational only. func `0x00` getCount returns the firmware-entity count in `reply[0]`; func `0x10` getFwInfo(`[entity]`) returns one entity. `parse_fw_entity` decodes the getFwInfo reply (Solaar `struct.unpack('!3sBBH', fw_info[1:8])`):
+
+| byte | field |
+|------|-------|
+| 0 | low nibble = fw type (`0` = main/application) |
+| 1–3 | ASCII prefix (3 chars) |
+| 4 | major |
+| 5 | minor |
+| 6–7 | build (BE u16) |
+
+`read_firmware_version` loops entities and returns the **main** (`kind == 0`) entity's version string, formatted `"{prefix}{major:02X}.{minor:02X}.B{build:04X}"` (e.g. `MPM19.02.B0016`). Surfaced in the GUI Info tab via `debug_info_extra`.
+
+### WIRELESS_DEVICE_STATUS (`0x1D4B`) — `v2/mod.rs`
+
+Read-only V0 feature with **no getter** — the only payload is the device-initiated broadcast event (address `0x00`). `parse_wireless_status` decodes `data[0]` = status (`1` = reconnected), `data[1]` = request (`1` = host should reload config), `data[2]` = opaque reason. `handle_wireless_status_notif` gates on the feature index like `handle_fn_inversion_notif`; `reconcile_feature_notification` records the last event into device state (informational, surfaced in the Info tab) — it does **not** trigger reinit.
 
 ### DEVICE_NAME (`0x0005`) / DEVICE_FRIENDLY_NAME (`0x0007`)
 

@@ -41,4 +41,16 @@ impl LogitechDevice {
         }
         self.hidpp2_with(features).await.device_name().await
     }
+
+    /// Read the MAIN firmware version via FIRMWARE_VERSION (0x0003). `None` when
+    /// the device doesn't advertise it or the read fails; purely informational.
+    pub(super) async fn init_firmware(&self, features: &HashMap<u16, u8>) -> Option<String> {
+        if !features.contains_key(&feature::FIRMWARE_VERSION) {
+            return None;
+        }
+        self.hidpp2_with(features)
+            .await
+            .read_firmware_version()
+            .await
+    }
 }
