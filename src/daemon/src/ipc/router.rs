@@ -284,6 +284,9 @@ async fn dispatch(
             profiles::usecases::app_rules::remove(index, app).await
         }
         DaemonCommand::Rediscover => registry::usecases::settings::rediscover(app).await,
+        DaemonCommand::SetPluginEnabled { id, enabled } => {
+            registry::usecases::plugins::set_enabled(id, enabled, app).await
+        }
         DaemonCommand::SetLogLevel { level } => {
             registry::usecases::settings::set_log_level(level, app).await
         }

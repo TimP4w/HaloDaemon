@@ -2,6 +2,7 @@ shell:
   nav_home: Home
   nav_lighting: Illuminazione RGB
   nav_cooling: Raffreddamento
+  nav_plugins: Plugin
   nav_settings: Impostazioni
   workspace: AREA DI LAVORO
   my_devices: I MIEI DISPOSITIVI

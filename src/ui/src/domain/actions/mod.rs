@@ -12,6 +12,7 @@ pub mod devices;
 pub mod keys;
 pub mod lcd;
 pub mod lighting;
+pub mod plugins;
 pub mod profiles;
 pub mod system;
 

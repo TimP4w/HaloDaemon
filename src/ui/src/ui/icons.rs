@@ -14,6 +14,7 @@ pub enum Icon {
     Lighting,
     Cooling,
     Settings,
+    Plugins,
 }
 
 impl Icon {
@@ -23,6 +24,7 @@ impl Icon {
             Icon::Lighting => include_bytes!("../../assets/icons/rgb.svg"),
             Icon::Cooling => include_bytes!("../../assets/icons/cooling.svg"),
             Icon::Settings => include_bytes!("../../assets/icons/settings.svg"),
+            Icon::Plugins => include_bytes!("../../assets/icons/plugins.svg"),
         }
     }
 
@@ -32,6 +34,7 @@ impl Icon {
             Icon::Lighting => "nav_lighting",
             Icon::Cooling => "nav_cooling",
             Icon::Settings => "nav_settings",
+            Icon::Plugins => "nav_plugins",
         }
     }
 }

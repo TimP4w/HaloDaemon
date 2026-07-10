@@ -8,6 +8,7 @@ pub mod device;
 pub mod effect_designer;
 pub mod home;
 pub mod lighting;
+pub mod plugins;
 pub mod profile;
 pub mod radar;
 pub mod settings;

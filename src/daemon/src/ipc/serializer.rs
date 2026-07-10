@@ -36,6 +36,7 @@ pub async fn serialize_state(
         ffmpeg_available: crate::lcd::engine::video::ffmpeg_available(),
         profile_overrides: cfg.profile_overrides(),
         process_icons,
+        plugins: crate::drivers::plugins::list(),
     };
     match serde_json::to_value(wire) {
         Ok(v) => v,

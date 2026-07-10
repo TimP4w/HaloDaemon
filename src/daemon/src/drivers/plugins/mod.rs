@@ -21,8 +21,11 @@ mod worker;
 pub use device::LuaDevice;
 pub use manifest::{parse_manifest, PluginManifest};
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
+
+use halod_shared::types::PluginInfo;
 
 use crate::drivers::transports::hid::HidTransport;
 use crate::drivers::transports::Transport;
@@ -30,6 +33,40 @@ use crate::drivers::Device;
 use crate::registry::discovery::DiscoveryHandle;
 
 static PLUGIN_REGISTRY: RwLock<Vec<PluginManifest>> = RwLock::new(Vec::new());
+/// Plugin ids the user disabled. `match_handle` skips these, so a disabled
+/// plugin no longer shadows its native driver.
+static DISABLED: RwLock<Option<HashSet<String>>> = RwLock::new(None);
+
+/// Replace the disabled-plugin set (from `config.plugins_disabled`).
+pub fn set_disabled(ids: &[String]) {
+    *DISABLED.write().expect("plugin disabled set poisoned") = Some(ids.iter().cloned().collect());
+}
+
+fn is_disabled(plugin_id: &str) -> bool {
+    DISABLED
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|s| s.contains(plugin_id)))
+        .unwrap_or(false)
+}
+
+/// Every loaded plugin with its enable state, for the management UI.
+pub fn list() -> Vec<PluginInfo> {
+    let registry = match PLUGIN_REGISTRY.read() {
+        Ok(g) => g,
+        Err(_) => return Vec::new(),
+    };
+    registry
+        .iter()
+        .map(|m| PluginInfo {
+            id: m.plugin_id.clone(),
+            name: m.display_name().to_owned(),
+            path: m.source_path.display().to_string(),
+            capabilities: m.capability_labels(),
+            enabled: !is_disabled(&m.plugin_id),
+        })
+        .collect()
+}
 
 /// (Re)load every `*.lua` in `dir` into the registry, replacing prior contents.
 /// A malformed plugin is logged and skipped — it never aborts loading or the
@@ -141,6 +178,7 @@ pub fn match_in(
 ) -> Option<Arc<dyn Device>> {
     manifests
         .iter()
+        .filter(|m| !is_disabled(&m.plugin_id))
         .find(|m| m.match_spec.matches(handle))
         .and_then(|m| build_device(m, handle))
 }
@@ -200,5 +238,39 @@ mod tests {
     fn non_matching_handle_returns_none() {
         let manifests = vec![manifest()];
         assert!(match_in(&manifests, &hid(0x9999, 0x0000, None, 0)).is_none());
+    }
+
+    #[test]
+    fn disabled_plugin_does_not_match() {
+        // Unique id so toggling DISABLED can't perturb other parallel tests.
+        let src = r#"
+            return {
+              match = { transport = "hid", vid = 0xAAAA, pid = 0xBBBB },
+              identity = { vendor = "Acme", model = "K1" },
+            }
+        "#;
+        let manifests = vec![parse_manifest(src, Path::new("disabled_only_plugin.lua")).unwrap()];
+        let handle = hid(0xAAAA, 0xBBBB, Some("S"), 0);
+        set_disabled(&["disabled_only_plugin".to_string()]);
+        assert!(
+            match_in(&manifests, &handle).is_none(),
+            "disabled plugin must not shadow native"
+        );
+        set_disabled(&[]);
+        assert!(match_in(&manifests, &handle).is_some());
+    }
+
+    #[test]
+    fn capability_labels_reflect_manifest_sections() {
+        let src = r#"
+            return {
+              match = { transport = "hid", vid = 1, pid = 2 },
+              identity = { vendor = "V", model = "M" },
+              rgb = { zones = {} },
+              sensor = {},
+            }
+        "#;
+        let m = parse_manifest(src, Path::new("caps.lua")).unwrap();
+        assert_eq!(m.capability_labels(), vec!["RGB", "Sensor"]);
     }
 }

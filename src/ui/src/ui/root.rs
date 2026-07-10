@@ -300,6 +300,9 @@ impl App {
                             &mut self.settings_ui,
                         );
                     }
+                    Page::Plugins => {
+                        crate::ui::screens::plugins::show(ui, &state, &self.cmd);
+                    }
                     Page::Profile(name) => {
                         let name = name.clone();
                         crate::ui::screens::profile::show(
@@ -394,6 +397,7 @@ fn tour_key_for(
             }
         }
         Page::EffectDesigner => Some(domain::tour::TourKey::EffectDesigner),
+        Page::Plugins => None,
     }
 }
 

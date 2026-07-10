@@ -25,6 +25,7 @@ pub fn load() -> Result<Config> {
     let main: MainFile = load_file(&main_config_path(), "config.yaml")?;
     let devices: DevicesFile = load_file(&devices_config_path(), "devices.yaml")?;
     let app_rules: AppRulesFile = load_file(&app_rules_config_path(), "app_rules.yaml")?;
+    let plugins: PluginsFile = load_file(&plugins_config_path(), "plugins.yaml")?;
     let mut profiles = load_profiles()?;
     if profiles.is_empty() {
         profiles.insert(DEFAULT_PROFILE_NAME.to_string(), Profile::default());
@@ -42,6 +43,7 @@ pub fn load() -> Result<Config> {
         sensor_visibility: devices.sensor_visibility,
         device_transforms: devices.device_transforms,
         app_rules: app_rules.app_rules,
+        plugins_disabled: plugins.disabled,
     })
 }
 
@@ -66,6 +68,12 @@ pub fn save(cfg: &Config) -> Result<()> {
         &app_rules_config_path(),
         &serde_yaml::to_string(&AppRulesFile {
             app_rules: cfg.app_rules.clone(),
+        })?,
+    )?;
+    atomic_write(
+        &plugins_config_path(),
+        &serde_yaml::to_string(&PluginsFile {
+            disabled: cfg.plugins_disabled.clone(),
         })?,
     )?;
     save_profiles(&cfg.profiles)?;
@@ -218,6 +226,10 @@ fn app_rules_config_path() -> PathBuf {
     config_dir().join("app_rules.yaml")
 }
 
+fn plugins_config_path() -> PathBuf {
+    config_dir().join("plugins.yaml")
+}
+
 fn profiles_dir() -> PathBuf {
     config_dir().join("profiles")
 }
@@ -268,6 +280,14 @@ struct AppRulesFile {
     app_rules: Vec<AppRule>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PluginsFile {
+    /// Plugin ids the user has disabled. Everything present-and-not-listed is
+    /// enabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    disabled: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileFile {
     name: String,
@@ -293,6 +313,8 @@ pub struct Config {
     pub device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_rules: Vec<AppRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugins_disabled: Vec<String>,
 }
 
 fn default_profile_name() -> String {
@@ -312,6 +334,7 @@ impl Default for Config {
             sensor_visibility: HashMap::new(),
             device_transforms: HashMap::new(),
             app_rules: Vec::new(),
+            plugins_disabled: Vec::new(),
         }
     }
 }
@@ -401,9 +424,12 @@ mod tests {
             enabled: true,
         });
         cfg.global.seen_tours.insert("page:home".into());
+        cfg.plugins_disabled.push("nzxt_kraken".into());
 
         save(&cfg).unwrap();
         let reloaded = load().unwrap();
+
+        assert_eq!(reloaded.plugins_disabled, vec!["nzxt_kraken".to_string()]);
 
         assert_eq!(reloaded.active_profile, cfg.active_profile);
         assert_eq!(reloaded.profiles.len(), cfg.profiles.len());

@@ -470,6 +470,23 @@ pub struct AppState {
     /// `.desktop` file; on Windows an absolute path to a cached PNG.
     #[serde(default)]
     pub process_icons: HashMap<String, String>,
+    /// Device plugins discovered in the plugins directory, with their
+    /// enable/disable state, for the Plugins management screen.
+    #[serde(default)]
+    pub plugins: Vec<PluginInfo>,
+}
+
+/// One device plugin as shown in the GUI's Plugins screen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginInfo {
+    pub id: String,
+    pub name: String,
+    /// Filesystem path of the script.
+    pub path: String,
+    /// Human-readable capability labels the plugin declares (e.g. "RGB", "Fan").
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

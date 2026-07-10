@@ -163,6 +163,11 @@ pub enum DaemonCommand {
 
     // Misc / global
     Rediscover,
+    /// Enable or disable a device plugin by id, then re-run discovery.
+    SetPluginEnabled {
+        id: String,
+        enabled: bool,
+    },
     SetLogLevel {
         level: String,
     },
@@ -643,6 +648,18 @@ mod tests {
     fn rediscover_wire_format() {
         let v = roundtrip(&DaemonCommand::Rediscover);
         assert_eq!(v, json!({"type": "rediscover"}));
+    }
+
+    #[test]
+    fn set_plugin_enabled_wire_format() {
+        let v = roundtrip(&DaemonCommand::SetPluginEnabled {
+            id: "nzxt_kraken".into(),
+            enabled: false,
+        });
+        assert_eq!(
+            v,
+            json!({"type": "set_plugin_enabled", "id": "nzxt_kraken", "enabled": false})
+        );
     }
 
     #[test]

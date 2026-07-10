@@ -1,0 +1,8 @@
+plugins:
+  title: Plugin
+  subtitle: I plugin aggiungono il supporto a nuovi dispositivi senza ricompilare il daemon.
+  empty_title: Nessun plugin installato
+  empty_hint: Copia uno script Lua nella cartella dei plugin, poi riavvia la scansione dei dispositivi.
+  import_title: Importa un repository di plugin
+  import_sub: Installa e aggiorna i plugin da un repository Git.
+  import_soon: In arrivo

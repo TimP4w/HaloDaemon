@@ -144,6 +144,10 @@ pub async fn reset_tours_seen(app: Arc<AppState>) -> Result<()> {
 
 pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     log::info!("Rediscovery triggered via UI");
+    // Re-read the plugins directory so a freshly-dropped script is picked up by
+    // a "Scan now" without restarting the daemon.
+    crate::drivers::plugins::load_all(&crate::config::plugins_dir());
+    crate::drivers::plugins::set_disabled(&app.config.read().await.plugins_disabled);
     crate::registry::discovery::discover_devices(Arc::clone(&app)).await;
 
     let controllers: Vec<std::sync::Arc<dyn crate::drivers::Device>> =

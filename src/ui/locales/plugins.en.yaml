@@ -1,0 +1,8 @@
+plugins:
+  title: Plugins
+  subtitle: Device plugins add hardware support without rebuilding the daemon.
+  empty_title: No plugins installed
+  empty_hint: Drop a Lua plugin script into the plugins directory, then rescan devices.
+  import_title: Import a plugin repository
+  import_sub: Install and update plugins from a Git repository.
+  import_soon: Coming soon

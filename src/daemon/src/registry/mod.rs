@@ -39,6 +39,7 @@ pub async fn seed_known_devices(app: Arc<AppState>) {
 
 pub async fn initialize_app_state(app: Arc<AppState>) {
     crate::drivers::plugins::load_all(&crate::config::plugins_dir());
+    crate::drivers::plugins::set_disabled(&app.config.read().await.plugins_disabled);
     discovery::discover_devices(app.clone()).await;
     seed_known_devices(app.clone()).await;
     usecases::chain::restore_saved_chains(app.clone()).await;

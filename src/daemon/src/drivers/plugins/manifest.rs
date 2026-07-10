@@ -198,6 +198,21 @@ impl PluginManifest {
     pub fn needs_worker(&self) -> bool {
         self.rgb.is_some() || self.fan.is_some() || self.sensor.is_some()
     }
+
+    /// Human-readable capability labels for the management UI.
+    pub fn capability_labels(&self) -> Vec<String> {
+        let mut labels = Vec::new();
+        if self.rgb.is_some() {
+            labels.push("RGB".to_owned());
+        }
+        if self.fan.is_some() {
+            labels.push("Fan".to_owned());
+        }
+        if self.sensor.is_some() {
+            labels.push("Sensor".to_owned());
+        }
+        labels
+    }
 }
 
 /// Parse (and validate) a plugin script's manifest. Does not register it.
