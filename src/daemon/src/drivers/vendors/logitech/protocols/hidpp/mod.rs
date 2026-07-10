@@ -113,6 +113,11 @@ pub const HIDPP_LONG: u8 = 0x11;
 pub const SHORT_LEN: usize = 7;
 pub const LONG_LEN: usize = 20;
 
+/// Software-id nibble stamped into the address of every HID++ 2.0 feature
+/// request (see `feature_request`). Device-originated event notifications
+/// always carry swid 0, so a nonzero swid marks a solicited response.
+pub const HIDPP_SW_ID: u8 = 0x01;
+
 /// Consecutive read errors before the listener gives up on the device (~1.2s, just ahead of the 2s hotplug monitor).
 const MAX_CONSECUTIVE_READ_ERRORS: u32 = 20;
 
@@ -651,6 +656,20 @@ async fn dispatch_packet(
         }
     } else {
         drop(guard);
+        // Orphaned response: a HID++ 2.0 feature reply (sub_id is a feature
+        // index < 0x40) whose caller already timed out, so its in-flight slot
+        // is gone. It echoes our nonzero software-id nibble; genuine device
+        // events use swid 0. Broadcasting it as a notification is wrong — an
+        // ONBOARD_PROFILES reply would retrigger a reconcile read whose own
+        // reply orphans in turn, a self-sustaining notification storm. Drop it.
+        // (HID++ 1.0 sub_ids ≥ 0x40 carry a device/register byte here, not a
+        // swid, so they must still broadcast.)
+        if sub_id < 0x40 && (address & 0x0F) == HIDPP_SW_ID {
+            log::trace!(
+                "[HID++] dropping orphaned response devnum={devnum:#04x} sub_id={sub_id:#04x} address={address:#04x}"
+            );
+            return;
+        }
         let _ = notify_tx.send(HidppNotification {
             devnum,
             sub_id,
@@ -926,6 +945,50 @@ mod tests {
         assert_eq!(pkt[2], 0x10);
         assert_eq!(pkt[3], 0x21);
         assert_eq!(&pkt[4..9], &[1, 2, 3, 4, 5]);
+    }
+
+    // An orphaned HID++ 2.0 feature response (nonzero swid, no matching
+    // in-flight request) must be dropped, not broadcast — broadcasting it
+    // re-triggers a reconcile read whose own reply orphans in turn, a storm.
+    #[tokio::test]
+    async fn dispatch_drops_orphaned_feature_response() {
+        let inflight: Mutex<Option<InflightRequest>> = Mutex::new(None);
+        let (notify_tx, mut rx) = broadcast::channel(8);
+        // ONBOARD_PROFILES (idx 0x10) func 2, swid 1 → address 0x21.
+        let pkt = build_packet(0x01, 0x10, 0x21, &[0x01, 0x00], true);
+        dispatch_packet(&pkt, &inflight, &notify_tx).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "orphaned response must not broadcast"
+        );
+    }
+
+    // A genuine device event (swid 0) with no in-flight request is a real
+    // notification and must still be broadcast.
+    #[tokio::test]
+    async fn dispatch_broadcasts_genuine_event() {
+        let inflight: Mutex<Option<InflightRequest>> = Mutex::new(None);
+        let (notify_tx, mut rx) = broadcast::channel(8);
+        // DPI step change: feature idx 0x10, func 1, swid 0 → address 0x10.
+        let pkt = build_packet(0x01, 0x10, 0x10, &[0x02, 0x00], true);
+        dispatch_packet(&pkt, &inflight, &notify_tx).await;
+        let notif = rx.try_recv().expect("genuine event must broadcast");
+        assert_eq!(notif.address, 0x10);
+    }
+
+    // HID++ 1.0 notifications (sub_id ≥ 0x40) carry a device/register byte, not
+    // a swid, so a nonzero low nibble must not suppress them.
+    #[tokio::test]
+    async fn dispatch_broadcasts_hidpp10_notification_with_nonzero_low_nibble() {
+        let inflight: Mutex<Option<InflightRequest>> = Mutex::new(None);
+        let (notify_tx, mut rx) = broadcast::channel(8);
+        // 0x41 device-connection, address 0x01 (device index 1), low nibble 1.
+        let pkt = build_packet(0x02, 0x41, 0x01, &[0x00, 0x00], false);
+        dispatch_packet(&pkt, &inflight, &notify_tx).await;
+        assert!(
+            rx.try_recv().is_ok(),
+            "HID++ 1.0 notification must broadcast"
+        );
     }
 
     #[test]

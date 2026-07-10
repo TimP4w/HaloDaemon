@@ -25,6 +25,19 @@ use halod_shared::types::{
 };
 use halod_shared::zone_transform::build_permutation;
 
+/// Pick the wire for a device that reports RGB_EFFECTS. Per-LED streaming
+/// (`PerKey`) needs the per-key feature AND zone LEDs that carry real firmware
+/// IDs — keyboards get those from their static layout, mice only once PK
+/// discovery has populated `pk_led_ids`. Anything else stays on whole-zone
+/// `RgbEffects`, which `write_frame` collapses to `colors.first()`.
+fn rgb_effects_wire(is_keyboard: bool, has_per_key: bool, pk_leds_discovered: bool) -> RgbWire {
+    if has_per_key && (is_keyboard || pk_leds_discovered) {
+        RgbWire::PerKey
+    } else {
+        RgbWire::RgbEffects
+    }
+}
+
 fn collect_pairs(
     zones: &HashMap<String, HashMap<String, RgbColor>>,
     zone_map: &HashMap<String, usize>,
@@ -570,8 +583,10 @@ impl LogitechDevice {
         }
 
         state.rgb.rgb_static_slots = static_slots;
+        let pk_leds_discovered = !state.rgb.pk_led_ids.is_empty();
+        state.rgb.rgb_wire =
+            rgb_effects_wire(self.is_keyboard(), pk_idx.is_some(), pk_leds_discovered);
         self.commit_rgb_descriptor(zones, state);
-        // RgbWire defaults to RgbEffects — no explicit assignment needed.
     }
 }
 
@@ -787,5 +802,36 @@ impl RgbCapability for LogitechDevice {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_with_per_key_streams_per_led() {
+        // Keyboard LEDs always carry real firmware IDs, so discovery is moot.
+        assert_eq!(rgb_effects_wire(true, true, false), RgbWire::PerKey);
+        assert_eq!(rgb_effects_wire(true, true, true), RgbWire::PerKey);
+    }
+
+    #[test]
+    fn keyboard_without_per_key_stays_rgb_effects() {
+        assert_eq!(rgb_effects_wire(true, false, false), RgbWire::RgbEffects);
+    }
+
+    #[test]
+    fn mouse_streams_per_led_only_once_leds_are_discovered() {
+        // Discovered PK LED IDs are real firmware IDs — safe to stream per-LED.
+        assert_eq!(rgb_effects_wire(false, true, true), RgbWire::PerKey);
+        // Not discovered: LEDs carry synthetic IDs, so stay whole-zone.
+        assert_eq!(rgb_effects_wire(false, true, false), RgbWire::RgbEffects);
+    }
+
+    #[test]
+    fn no_per_key_feature_always_stays_rgb_effects() {
+        assert_eq!(rgb_effects_wire(false, false, true), RgbWire::RgbEffects);
+        assert_eq!(rgb_effects_wire(true, false, true), RgbWire::RgbEffects);
     }
 }
