@@ -12,6 +12,7 @@
 //! a plugin shadows a native driver for the same hardware.
 
 mod bytebuf;
+mod chain_leaf;
 mod device;
 mod manifest;
 mod sandbox;
@@ -156,18 +157,33 @@ fn build_device(
         );
         return None;
     };
-    match open_hid_transport(manifest, handle) {
-        Ok(transport) => Some(Arc::new(LuaDevice::with_transport(
-            id, manifest, transport, runtime,
-        ))),
+    let transport = match open_hid_transport(manifest, handle) {
+        Ok(t) => t,
         Err(e) => {
             log::warn!(
                 "plugin '{}' transport open failed: {e:#}",
                 manifest.plugin_id
             );
-            None
+            return None;
         }
+    };
+
+    // `new_cyclic` so the device can hand its children a `FanHub` back-reference
+    // (the chain machinery, mirrored on the native NZXT Kraken).
+    let device = Arc::new_cyclic(|weak| {
+        let mut dev = LuaDevice::with_transport(id, manifest, transport, runtime);
+        dev.set_self_ref(weak.clone());
+        dev
+    });
+    if manifest.chain.is_some() {
+        let adapter: Arc<dyn crate::drivers::chain::ChainAdapter> = device.clone();
+        let host = crate::drivers::chain::ChainHost::new(
+            adapter,
+            crate::drivers::CHAIN_LINK_KIND_NZXT_ARGB,
+        );
+        device.install_chain_host(host);
     }
+    Some(device as Arc<dyn Device>)
 }
 
 /// Match a handle against a given manifest slice (pure — used by tests and by

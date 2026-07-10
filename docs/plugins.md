@@ -65,6 +65,7 @@ return {
 | `transport`   | string          | `"hid"` (only transport in v1)                 |
 | `vid`         | integer         | USB vendor id                                  |
 | `pid`         | integer         | USB product id (optional — omit to match any)  |
+| `pids`        | integer array   | match any of several products (device family); takes precedence over `pid` |
 | `usage_page`  | integer         | HID usage page (optional; Windows routing)     |
 | `usage`       | integer         | HID usage (optional)                           |
 | `interface`   | integer         | USB interface number (optional)                |
@@ -89,6 +90,8 @@ Include a section to advertise that capability:
 - `fan = { channel = <u8> }` — a controllable fan/pump channel.
 - `sensor = {}` — the device reports sensor readings (via `get_sensors`).
 - `poll = { interval_ms = <n> }` — run `read_status` on a background loop.
+- `chain = { channels = { … }, accessories = { … } }` — host detachable child
+  accessories (fan hubs / ARGB chains); see [Chained accessories](#chained-accessories).
 
 ## Callbacks
 
@@ -107,6 +110,10 @@ device's transport; `dev.status` holds the most recent table returned by
 | `get_rpm(dev)`                   | fan        | rpm integer or `nil`          |
 | `get_sensors(dev)`               | sensor     | array of sensor tables        |
 | `read_status(dev)`              | poll       | a status table → `dev.status` |
+| `detect_accessories(dev)`        | chain      | array of `{channel, accessory}` |
+| `write_ext_frame(dev, ch, colors)`| chain    | —                             |
+| `set_fan_duty(dev, ch, duty)`    | chain (fan)| —                             |
+| `fan_rpm`/`fan_duty`/`fan_controllable`| chain (fan) | value for that channel   |
 
 ### RGB
 
@@ -141,6 +148,39 @@ both for canvas sampling and for the GUI's zone widget. `topology` is one of
 `fan = { channel = 0 }` enables a fan/pump channel. `get_duty`/`set_duty` use
 duty `0..=255`; `get_rpm` returns an integer or `nil` (e.g. a pump reporting duty
 but not rpm).
+
+### Chained accessories
+
+Some devices host detachable children — e.g. an AIO pump whose accessory port
+drives an RGB fan. Declare the channel(s) and the accessories you recognize:
+
+```lua
+chain = {
+  channels = { { id = "0", name = "Accessory", max_leds = 40 } },
+  accessories = {
+    { id = 0x13, name = "F120 RGB", led_count = 8, topology = "ring", fan = true },
+    { id = 0x1B, name = "F240 RGB Core", led_count = 16, topology = "rings", rings = 2, fan = true },
+  },
+}
+```
+
+You provide the probe and the routing; the host owns the child device and the
+per-channel frame composition (you never write a child device):
+
+- `detect_accessories(dev)` → array of `{ channel = <int>, accessory = <id> }`.
+  The host looks each id up in `accessories` and builds a child.
+- `write_ext_frame(dev, channel_id, colors)` — write one channel's composed
+  frame (the host has already merged all children on that channel).
+- For accessories with `fan = true`: `fan_rpm(dev, ch)`, `fan_duty(dev, ch)`,
+  `fan_controllable(dev, ch)`, `set_fan_duty(dev, ch, duty)` — the child's fan
+  routes through these. (`ch` is the numeric channel from `detect_accessories`.)
+
+The status poll is paused automatically while `detect_accessories` runs, so its
+reads don't race the background poll.
+
+[`plugins/examples/nzxt_kraken.lua`](../plugins/examples/nzxt_kraken.lua) is a
+full port of the NZXT Kraken Z: pump RGB, pump fan, liquid-temp sensor, status
+poll, and an attached RGB fan as a child — everything but LCD.
 
 ### Polling
 
@@ -217,6 +257,5 @@ background status poll — every implemented feature in one file.
 
 ## Roadmap
 
-Not yet available to plugins (native drivers still required): chained child
-devices (fan hubs / ARGB chains), LCD panels, and non-HID transports (SMBus,
-USB bulk/control). These are planned follow-ups.
+Not yet available to plugins (native drivers still required): LCD panels and
+non-HID transports (SMBus, USB bulk/control). These are planned follow-ups.

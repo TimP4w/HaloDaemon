@@ -7,11 +7,12 @@
 //! actually matches.
 
 use anyhow::{anyhow, bail, Result};
-use halod_shared::types::{NativeEffect, RgbDescriptor, RgbZone};
+use halod_shared::types::{NativeEffect, RgbDescriptor, RgbZone, ZoneTopology};
 use mlua::{DeserializeOptions, Lua, LuaSerdeExt};
 use serde::Deserialize;
 use std::path::Path;
 
+use crate::drivers::vendors::generic::devices::common::ring_led_positions;
 use crate::registry::discovery::DiscoveryHandle;
 
 fn default_report_size() -> usize {
@@ -70,6 +71,72 @@ pub struct FanManifest {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SensorManifest {}
 
+fn default_topology() -> String {
+    "ring".to_owned()
+}
+
+/// One chainable output channel the parent exposes (e.g. an ARGB/accessory port).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelManifest {
+    pub id: String,
+    pub name: String,
+    pub max_leds: u32,
+}
+
+/// A recognizable accessory that can attach to a channel. `detect_accessories`
+/// returns ids; the host looks them up here to build the child device.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccessoryManifest {
+    pub id: u8,
+    pub name: String,
+    pub led_count: u32,
+    #[serde(default = "default_topology")]
+    pub topology: String,
+    /// Ring count for `topology = "rings"`.
+    #[serde(default)]
+    pub rings: u8,
+    /// True when this accessory also exposes a controllable fan.
+    #[serde(default)]
+    pub fan: bool,
+}
+
+impl AccessoryManifest {
+    pub fn zone_topology(&self) -> ZoneTopology {
+        match self.topology.as_str() {
+            "linear" => ZoneTopology::Linear,
+            "grid" => ZoneTopology::Grid,
+            "rings" => ZoneTopology::Rings {
+                count: self.rings.max(1),
+            },
+            _ => ZoneTopology::Ring,
+        }
+    }
+
+    pub fn rgb_descriptor(&self) -> RgbDescriptor {
+        let topology = self.zone_topology();
+        let leds = ring_led_positions(&topology, self.led_count);
+        RgbDescriptor {
+            zones: vec![RgbZone {
+                id: "ring".to_owned(),
+                name: "Ring".to_owned(),
+                topology,
+                leds,
+            }],
+            native_effects: vec![],
+        }
+    }
+}
+
+/// Chainable-children capability: the parent hosts child accessories on one or
+/// more channels. Requires `detect_accessories` + `write_ext_frame` (and, for
+/// accessories with fans, the fan-hub callbacks).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChainManifest {
+    pub channels: Vec<ChannelManifest>,
+    #[serde(default)]
+    pub accessories: Vec<AccessoryManifest>,
+}
+
 fn default_poll_interval_ms() -> u64 {
     1000
 }
@@ -92,6 +159,10 @@ pub struct MatchSpec {
     pub vid: u16,
     #[serde(default)]
     pub pid: Option<u16>,
+    /// Match any of several product ids (for device families). Takes precedence
+    /// over `pid` when non-empty.
+    #[serde(default)]
+    pub pids: Vec<u16>,
     #[serde(default)]
     pub usage_page: Option<u16>,
     #[serde(default)]
@@ -126,6 +197,8 @@ struct RawManifest {
     sensor: Option<SensorManifest>,
     #[serde(default)]
     poll: Option<PollManifest>,
+    #[serde(default)]
+    chain: Option<ChainManifest>,
 }
 
 /// A parsed, validated plugin ready to be matched against discovery handles.
@@ -143,6 +216,7 @@ pub struct PluginManifest {
     pub fan: Option<FanManifest>,
     pub sensor: Option<SensorManifest>,
     pub poll: Option<PollManifest>,
+    pub chain: Option<ChainManifest>,
 }
 
 impl MatchSpec {
@@ -160,8 +234,13 @@ impl MatchSpec {
                     ..
                 },
             ) => {
+                let pid_ok = if self.pids.is_empty() {
+                    self.pid.is_none_or(|p| p == *pid)
+                } else {
+                    self.pids.contains(pid)
+                };
                 *vid == self.vid
-                    && self.pid.is_none_or(|p| p == *pid)
+                    && pid_ok
                     && self.usage_page.is_none_or(|u| u == *usage_page)
                     && self.usage.is_none_or(|u| u == *usage)
                     && self.interface.is_none_or(|i| Some(i) == *interface_number)
@@ -194,9 +273,9 @@ impl PluginManifest {
     }
 
     /// True when the plugin declares any capability that needs a live transport
-    /// + worker (RGB / fan / sensor). Device-only plugins skip the worker.
+    /// + worker. Device-only plugins skip the worker.
     pub fn needs_worker(&self) -> bool {
-        self.rgb.is_some() || self.fan.is_some() || self.sensor.is_some()
+        self.rgb.is_some() || self.fan.is_some() || self.sensor.is_some() || self.chain.is_some()
     }
 
     /// Human-readable capability labels for the management UI.
@@ -211,7 +290,15 @@ impl PluginManifest {
         if self.sensor.is_some() {
             labels.push("Sensor".to_owned());
         }
+        if self.chain.is_some() {
+            labels.push("Accessories".to_owned());
+        }
         labels
+    }
+
+    /// Look up a declared accessory by id (for `discover_children`).
+    pub fn accessory(&self, id: u8) -> Option<&AccessoryManifest> {
+        self.chain.as_ref()?.accessories.iter().find(|a| a.id == id)
     }
 }
 
@@ -255,6 +342,7 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         fan: raw.fan,
         sensor: raw.sensor,
         poll: raw.poll,
+        chain: raw.chain,
     })
 }
 
@@ -304,6 +392,21 @@ mod tests {
         assert!(
             !m.match_spec.matches(&hid(0x9999, 0x5678, None)),
             "vid differs"
+        );
+    }
+
+    #[test]
+    fn pids_list_matches_any_listed_product() {
+        let src = r#"return {
+            match = { transport = "hid", vid = 0x1E71, pids = { 0x3008, 0x300C } },
+            identity = { vendor = "NZXT", model = "Kraken" },
+        }"#;
+        let m = parse_manifest(src, Path::new("k.lua")).unwrap();
+        assert!(m.match_spec.matches(&hid(0x1E71, 0x3008, None)));
+        assert!(m.match_spec.matches(&hid(0x1E71, 0x300C, None)));
+        assert!(
+            !m.match_spec.matches(&hid(0x1E71, 0x2007, None)),
+            "unlisted pid"
         );
     }
 

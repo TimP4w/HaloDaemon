@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
+use serde::Deserialize;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
@@ -18,6 +19,13 @@ use crate::drivers::transports::Transport;
 
 use super::sandbox;
 use super::transport_api::TransportApi;
+
+/// One accessory the plugin's `detect_accessories` reports.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetectedAccessory {
+    pub channel: u8,
+    pub accessory: u8,
+}
 
 /// A request to the worker. Each carries its own reply channel.
 pub enum Call {
@@ -38,6 +46,30 @@ pub enum Call {
     GetSensors(oneshot::Sender<Result<Vec<Sensor>>>),
     /// Run the `read_status` callback and cache the result as `dev.status`.
     Poll(oneshot::Sender<()>),
+    // ── chain / children ────────────────────────────────────────────────
+    DetectAccessories(oneshot::Sender<Result<Vec<DetectedAccessory>>>),
+    WriteExtFrame {
+        channel: String,
+        colors: Vec<RgbColor>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    HubFanRpm {
+        channel: u8,
+        reply: oneshot::Sender<Result<u32>>,
+    },
+    HubFanDuty {
+        channel: u8,
+        reply: oneshot::Sender<Result<u8>>,
+    },
+    HubFanControllable {
+        channel: u8,
+        reply: oneshot::Sender<Result<bool>>,
+    },
+    HubSetFanDuty {
+        channel: u8,
+        duty: u8,
+        reply: oneshot::Sender<Result<()>>,
+    },
 }
 
 /// Handle the `LuaDevice` holds. `UnboundedSender` is `Send + Sync`, so the
@@ -115,6 +147,45 @@ impl PluginHandle {
     pub async fn poll(&self) -> Result<()> {
         self.request(Call::Poll).await
     }
+
+    pub async fn detect_accessories(&self) -> Result<Vec<DetectedAccessory>> {
+        self.request(Call::DetectAccessories).await?
+    }
+
+    pub async fn write_ext_frame(&self, channel: &str, colors: &[RgbColor]) -> Result<()> {
+        let channel = channel.to_owned();
+        let colors = colors.to_vec();
+        self.request(|reply| Call::WriteExtFrame {
+            channel,
+            colors,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn hub_fan_rpm(&self, channel: u8) -> Result<u32> {
+        self.request(|reply| Call::HubFanRpm { channel, reply })
+            .await?
+    }
+
+    pub async fn hub_fan_duty(&self, channel: u8) -> Result<u8> {
+        self.request(|reply| Call::HubFanDuty { channel, reply })
+            .await?
+    }
+
+    pub async fn hub_fan_controllable(&self, channel: u8) -> Result<bool> {
+        self.request(|reply| Call::HubFanControllable { channel, reply })
+            .await?
+    }
+
+    pub async fn hub_set_fan_duty(&self, channel: u8, duty: u8) -> Result<()> {
+        self.request(|reply| Call::HubSetFanDuty {
+            channel,
+            duty,
+            reply,
+        })
+        .await?
+    }
 }
 
 /// The plugin's callback functions, looked up once by name.
@@ -128,6 +199,12 @@ struct Callbacks {
     get_rpm: Option<Function>,
     get_sensors: Option<Function>,
     read_status: Option<Function>,
+    detect_accessories: Option<Function>,
+    write_ext_frame: Option<Function>,
+    fan_rpm: Option<Function>,
+    fan_duty: Option<Function>,
+    fan_controllable: Option<Function>,
+    set_fan_duty: Option<Function>,
 }
 
 impl Callbacks {
@@ -146,6 +223,12 @@ impl Callbacks {
             get_rpm: f("get_rpm"),
             get_sensors: f("get_sensors"),
             read_status: f("read_status"),
+            detect_accessories: f("detect_accessories"),
+            write_ext_frame: f("write_ext_frame"),
+            fan_rpm: f("fan_rpm"),
+            fan_duty: f("fan_duty"),
+            fan_controllable: f("fan_controllable"),
+            set_fan_duty: f("set_fan_duty"),
         }
     }
 }
@@ -218,9 +301,102 @@ fn worker_main(
                 run_poll(&cb, &dev);
                 let _ = reply.send(());
             }
+            Call::DetectAccessories(reply) => {
+                let _ = reply.send(run_detect(&lua, &cb, &dev));
+            }
+            Call::WriteExtFrame {
+                channel,
+                colors,
+                reply,
+            } => {
+                let _ = reply.send(run_write_ext_frame(&lua, &cb, &dev, &channel, &colors));
+            }
+            Call::HubFanRpm { channel, reply } => {
+                let _ = reply.send(call_u32(&cb.fan_rpm, "fan_rpm", &dev, channel));
+            }
+            Call::HubFanDuty { channel, reply } => {
+                let _ = reply.send(call_u8(&cb.fan_duty, "fan_duty", &dev, channel));
+            }
+            Call::HubFanControllable { channel, reply } => {
+                let _ = reply.send(call_bool(
+                    &cb.fan_controllable,
+                    "fan_controllable",
+                    &dev,
+                    channel,
+                ));
+            }
+            Call::HubSetFanDuty {
+                channel,
+                duty,
+                reply,
+            } => {
+                let _ = reply.send(run_set_fan_duty(&cb, &dev, channel, duty));
+            }
         }
     }
     Ok(())
+}
+
+fn run_detect(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<Vec<DetectedAccessory>> {
+    let Some(f) = &cb.detect_accessories else {
+        return Ok(Vec::new());
+    };
+    let value: Value = f
+        .call(dev.clone())
+        .map_err(|e| lua_err("detect_accessories", e))?;
+    lua.from_value(value)
+        .map_err(|e| lua_err("detect_accessories result", e))
+}
+
+fn run_write_ext_frame(
+    lua: &Lua,
+    cb: &Callbacks,
+    dev: &Table,
+    channel: &str,
+    colors: &[RgbColor],
+) -> Result<()> {
+    let f = cb
+        .write_ext_frame
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no write_ext_frame()"))?;
+    let colors_v = lua
+        .to_value(colors)
+        .map_err(|e| lua_err("write_ext_frame arg", e))?;
+    f.call::<()>((dev.clone(), channel.to_owned(), colors_v))
+        .map_err(|e| lua_err("write_ext_frame", e))
+}
+
+fn call_u32(f: &Option<Function>, name: &str, dev: &Table, channel: u8) -> Result<u32> {
+    let f = f
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no {name}()"))?;
+    f.call::<u32>((dev.clone(), channel))
+        .map_err(|e| lua_err(name, e))
+}
+
+fn call_u8(f: &Option<Function>, name: &str, dev: &Table, channel: u8) -> Result<u8> {
+    let f = f
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no {name}()"))?;
+    f.call::<u8>((dev.clone(), channel))
+        .map_err(|e| lua_err(name, e))
+}
+
+fn call_bool(f: &Option<Function>, name: &str, dev: &Table, channel: u8) -> Result<bool> {
+    let f = f
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no {name}()"))?;
+    f.call::<bool>((dev.clone(), channel))
+        .map_err(|e| lua_err(name, e))
+}
+
+fn run_set_fan_duty(cb: &Callbacks, dev: &Table, channel: u8, duty: u8) -> Result<()> {
+    let f = cb
+        .set_fan_duty
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no set_fan_duty()"))?;
+    f.call::<()>((dev.clone(), channel, duty))
+        .map_err(|e| lua_err("set_fan_duty", e))
 }
 
 /// Run `read_status(dev)` and cache the returned table as `dev.status`. Errors
