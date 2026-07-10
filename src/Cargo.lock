@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "halod"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2341,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "halod-gui"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2372,7 +2372,7 @@ dependencies = [
 
 [[package]]
 name = "halod-shared"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "libc",
  "proptest",
