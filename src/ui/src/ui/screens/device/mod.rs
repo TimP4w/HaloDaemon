@@ -9,6 +9,7 @@ mod cooling;
 mod equalizer;
 mod header;
 pub(crate) mod info;
+mod keyboard_visual;
 mod keys;
 mod lcd;
 mod lighting;

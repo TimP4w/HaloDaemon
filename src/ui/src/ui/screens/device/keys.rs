@@ -61,6 +61,14 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         }
     }
 
+    // The list below stays the primary control; the picture is a shortcut.
+    if let Some(status) = ctx.dev.keyboard_layout() {
+        if !status.keys.is_empty() {
+            keyboard_overview(ui, st, status);
+            ui.add_space(14.0);
+        }
+    }
+
     let tab_label = if matches!(ctx.dev.device_type, DeviceType::Mouse) {
         t!("device.keys_tab_buttons")
     } else {
@@ -74,6 +82,78 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         action_card(right, ctx, st, &remap, &id);
         params_card(right, ctx, st, &id);
     });
+}
+
+// ── Keyboard overview (clickable key picture) ────────────────────────────────
+
+/// Reduce a click on key `idx` to a new selected cid. A mapped key (one with a
+/// KeyRemap cid) selects it; an unmapped key is a no-op (keeps `current`).
+fn key_click_selection(
+    keys: &[halod_shared::keyboard::VisualKey],
+    idx: usize,
+    current: Option<u16>,
+) -> Option<u16> {
+    match keys.get(idx).and_then(|k| k.remap_cid) {
+        Some(cid) => Some(cid),
+        None => current,
+    }
+}
+
+/// The index of the key currently highlighted for `cid`, if any.
+fn selected_key_index(
+    keys: &[halod_shared::keyboard::VisualKey],
+    cid: Option<u16>,
+) -> Option<usize> {
+    let cid = cid?;
+    keys.iter().position(|k| k.remap_cid == Some(cid))
+}
+
+fn keyboard_overview(
+    ui: &mut egui::Ui,
+    st: &mut DeviceUi,
+    status: &halod_shared::keyboard::KeyboardLayoutStatus,
+) {
+    use super::keyboard_visual as kbv;
+    use std::collections::HashSet;
+
+    let (resp, inner) = kbv::panel(ui, 240.0, Sense::click());
+    let keys = &status.keys;
+    let rects = kbv::key_rects(keys, inner, 3.0);
+    let unit = kbv::unit_for(keys, inner);
+
+    if resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            if let Some(i) = kbv::hit_key(keys, &rects, pos, unit) {
+                st.keys.keys_sel_cid = key_click_selection(keys, i, st.keys.keys_sel_cid);
+            }
+        }
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let selected = selected_key_index(keys, st.keys.keys_sel_cid);
+    let remappable: HashSet<u32> = keys
+        .iter()
+        .filter(|k| k.remap_cid.is_some())
+        .map(|k| k.led_id)
+        .collect();
+    let (mapped, unmapped) = (theme::hex(0x28324a), theme::hex(0x141a24));
+    kbv::draw_keyboard(
+        ui,
+        keys,
+        &rects,
+        &|id| {
+            if remappable.contains(&id) {
+                mapped
+            } else {
+                unmapped
+            }
+        },
+        selected,
+        status.language,
+        unit,
+    );
 }
 
 // ── Left card: button selector ───────────────────────────────────────────────
@@ -1072,6 +1152,38 @@ fn action_display(a: &ButtonAction) -> ActionDisplay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halod_shared::keyboard::{KeyCell, KeyId, VisualKey};
+
+    fn vkey(led_id: u32, remap_cid: Option<u16>) -> VisualKey {
+        VisualKey {
+            led_id,
+            remap_cid,
+            cell: KeyCell::new(KeyId::A, 0.0, 0.0),
+        }
+    }
+
+    #[test]
+    fn key_click_selects_mapped_key_and_ignores_unmapped() {
+        let keys = vec![vkey(0, Some(0x50)), vkey(1, None), vkey(2, Some(0x51))];
+        // Clicking a mapped key selects its cid.
+        assert_eq!(key_click_selection(&keys, 0, None), Some(0x50));
+        assert_eq!(key_click_selection(&keys, 2, Some(0x50)), Some(0x51));
+        // Clicking an unmapped key keeps the current selection (no-op).
+        assert_eq!(key_click_selection(&keys, 1, Some(0x50)), Some(0x50));
+        assert_eq!(key_click_selection(&keys, 1, None), None);
+        // Out-of-range index is a no-op.
+        assert_eq!(key_click_selection(&keys, 9, Some(0x50)), Some(0x50));
+    }
+
+    #[test]
+    fn selected_key_index_looks_up_by_cid() {
+        let keys = vec![vkey(0, Some(0x50)), vkey(1, None), vkey(2, Some(0x51))];
+        assert_eq!(selected_key_index(&keys, Some(0x51)), Some(2));
+        assert_eq!(selected_key_index(&keys, Some(0x50)), Some(0));
+        // No selection, or a cid not on the grid, highlights nothing.
+        assert_eq!(selected_key_index(&keys, None), None);
+        assert_eq!(selected_key_index(&keys, Some(0x99)), None);
+    }
 
     #[test]
     fn chip_width_clamps_and_grows() {

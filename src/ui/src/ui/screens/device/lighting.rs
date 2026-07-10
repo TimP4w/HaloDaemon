@@ -240,6 +240,12 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, 
             });
             ui.add_space(12.0);
 
+            let kbd_status = ctx.dev.keyboard_layout();
+            if let Some(status) = kbd_status {
+                layout_selector(ui, ctx, status);
+                ui.add_space(12.0);
+            }
+
             let zone = rgb
                 .descriptor
                 .zones
@@ -254,7 +260,16 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, 
                 st.lighting.paint_color,
                 live,
             );
-            if led_canvas(ui, st, zone, painting, &fill) {
+            // A keyboard zone with a resolved key grid renders as real key caps;
+            // everything else (rings, strips, keyless boards) keeps the LED dots.
+            let as_keyboard = matches!(zone.topology, ZoneTopology::Keyboard { .. })
+                && kbd_status.is_some_and(|s| !s.keys.is_empty());
+            let dirty = if as_keyboard {
+                keyboard_canvas(ui, st, zone, painting, &fill, kbd_status.unwrap())
+            } else {
+                led_canvas(ui, st, zone, painting, &fill)
+            };
+            if dirty {
                 let cmd = paint_cmd(ctx, st);
                 st.queue("rgb", cmd, ctx.time);
             }
@@ -732,16 +747,7 @@ fn led_canvas(
     let buf = st.lighting.paint_buf.get(&zone.id);
     let painter = ui.painter();
     for (i, (led, c, r)) in pts.iter().enumerate() {
-        let col = match fill {
-            LedFill::Buffer => buf
-                .and_then(|m| m.get(led))
-                .map(|rc| rgb_to_color32(*rc))
-                .unwrap_or(theme::hex(0x1b2230)),
-            LedFill::Solid(rc) => rgb_to_color32(*rc),
-            LedFill::Off => theme::hex(0x14181f),
-            LedFill::Rainbow => rainbow(i as f32 / n as f32),
-            LedFill::Live(m) => live_led_color32(m, *led),
-        };
+        let col = key_fill(fill, buf, *led, i as f32 / n as f32);
         let dark = col == theme::hex(0x1b2230) || col == theme::hex(0x14181f);
         if !dark {
             theme::glow(painter, *c, r * 2.4, col, 0.09);
@@ -761,6 +767,142 @@ fn live_led_color32(m: &HashMap<u32, RgbColor>, led: u32) -> Color32 {
         Some(c) if *c != (RgbColor { r: 0, g: 0, b: 0 }) => rgb_to_color32(*c),
         _ => theme::hex(0x14181f),
     }
+}
+
+/// Resolve a single key's/LED's fill colour, shared by the LED-dot canvas and
+/// the keyboard-cap canvas. `frac` positions the LED in the rainbow gradient.
+fn key_fill(
+    fill: &LedFill,
+    buf: Option<&HashMap<u32, RgbColor>>,
+    led_id: u32,
+    frac: f32,
+) -> Color32 {
+    match fill {
+        LedFill::Buffer => buf
+            .and_then(|m| m.get(&led_id))
+            .map(|rc| rgb_to_color32(*rc))
+            .unwrap_or(theme::hex(0x1b2230)),
+        LedFill::Solid(rc) => rgb_to_color32(*rc),
+        LedFill::Off => theme::hex(0x14181f),
+        LedFill::Rainbow => rainbow(frac),
+        LedFill::Live(m) => live_led_color32(m, led_id),
+    }
+}
+
+/// Draw a keyboard zone as real key caps (from the device's `KeyboardLayout`
+/// capability). Paint-mode hit-tests key rects. Returns whether the paint
+/// buffer changed. Mirrors [`led_canvas`] but keyed on `VisualKey`.
+fn keyboard_canvas(
+    ui: &mut egui::Ui,
+    st: &mut DeviceUi,
+    zone: &RgbZone,
+    painting: bool,
+    fill: &LedFill,
+    status: &halod_shared::keyboard::KeyboardLayoutStatus,
+) -> bool {
+    use super::keyboard_visual as kbv;
+
+    let (resp, inner) = kbv::panel(ui, 260.0, Sense::click_and_drag());
+    let keys = &status.keys;
+    let rects = kbv::key_rects(keys, inner, 3.0);
+    let unit = kbv::unit_for(keys, inner);
+
+    let mut changed = false;
+    if painting && (resp.is_pointer_button_down_on() || resp.dragged() || resp.clicked()) {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            if let Some(i) = kbv::hit_key(keys, &rects, pos, unit) {
+                let color = st.lighting.paint_color.unwrap_or_default();
+                st.lighting
+                    .paint_buf
+                    .entry(zone.id.clone())
+                    .or_default()
+                    .insert(keys[i].led_id, color);
+                changed = true;
+            }
+        }
+    }
+    if painting && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+
+    let buf = st.lighting.paint_buf.get(&zone.id);
+    let n = keys.len().max(1) as f32;
+    let fills: HashMap<u32, Color32> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (k.led_id, key_fill(fill, buf, k.led_id, i as f32 / n)))
+        .collect();
+    let off = theme::hex(0x14181f);
+    kbv::draw_keyboard(
+        ui,
+        keys,
+        &rects,
+        &|id| fills.get(&id).copied().unwrap_or(off),
+        None,
+        status.language,
+        unit,
+    );
+    changed
+}
+
+/// The layout-selector combo boxes for a keyboard, emitting `SetKeyboardLayout`.
+fn layout_selector(
+    ui: &mut egui::Ui,
+    ctx: &TabCtx,
+    status: &halod_shared::keyboard::KeyboardLayoutStatus,
+) {
+    use super::keyboard_visual as kbv;
+    use halod_shared::keyboard::KeyboardLayoutSelection;
+
+    let opts = kbv::layout_options(status);
+    let emit = |sel: KeyboardLayoutSelection| {
+        let _ = ctx.cmd.send(DaemonCommand::SetKeyboardLayout {
+            id: ctx.dev.id.clone(),
+            selection: sel,
+        });
+    };
+    // Render one combo box; return the newly picked index only when it changed.
+    let combo = |ui: &mut egui::Ui, salt: &str, labels: &[String], sel: usize| -> Option<usize> {
+        let mut idx = sel;
+        egui::ComboBox::from_id_salt((salt, &ctx.dev.id))
+            .selected_text(labels[idx].clone())
+            .show_ui(ui, |ui| {
+                for (i, label) in labels.iter().enumerate() {
+                    ui.selectable_value(&mut idx, i, label);
+                }
+            });
+        (idx != sel).then_some(idx)
+    };
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+        widgets::caps_label_inline(ui, &t!("lighting.layout_caps"));
+
+        if opts.show_variant {
+            if let Some(idx) = combo(
+                ui,
+                "kbd_variant",
+                &opts.variant_labels,
+                opts.variant_selected,
+            ) {
+                emit(KeyboardLayoutSelection {
+                    variant: kbv::variant_from_index(idx),
+                    language: status.selection.language,
+                });
+            }
+        }
+        if let Some(idx) = combo(
+            ui,
+            "kbd_lang",
+            &opts.language_labels,
+            opts.language_selected,
+        ) {
+            emit(KeyboardLayoutSelection {
+                variant: status.selection.variant,
+                language: kbv::language_from_index(status, idx),
+            });
+        }
+    });
 }
 
 /// Screen positions + radius for each LED, per zone topology.
@@ -1218,6 +1360,40 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn key_fill_resolves_buffer_solid_off_and_live() {
+        let red = RgbColor { r: 200, g: 0, b: 0 };
+        let mut buf = HashMap::new();
+        buf.insert(5u32, red);
+        // Buffer: painted LED shows its colour; unpainted shows the empty cap.
+        assert_eq!(
+            key_fill(&LedFill::Buffer, Some(&buf), 5, 0.0),
+            rgb_to_color32(red)
+        );
+        assert_eq!(
+            key_fill(&LedFill::Buffer, Some(&buf), 6, 0.0),
+            theme::hex(0x1b2230)
+        );
+        // Solid paints every key the same colour.
+        assert_eq!(
+            key_fill(&LedFill::Solid(red), None, 9, 0.0),
+            rgb_to_color32(red)
+        );
+        // Off is the unlit cap.
+        assert_eq!(key_fill(&LedFill::Off, None, 9, 0.5), theme::hex(0x14181f));
+        // Live mirrors live_led_color32 (a black/missing LED is unlit).
+        let mut live = HashMap::new();
+        live.insert(9u32, red);
+        assert_eq!(
+            key_fill(&LedFill::Live(&live), None, 9, 0.0),
+            rgb_to_color32(red)
+        );
+        assert_eq!(
+            key_fill(&LedFill::Live(&live), None, 1, 0.0),
+            theme::hex(0x14181f)
+        );
     }
 
     #[test]
