@@ -517,18 +517,21 @@ fn build_device(
         );
         return None;
     };
-    let transport =
-        match transport::descriptor_for(&spec.transport).map(|d| (d.open)(manifest, handle)) {
-            Some(Ok(t)) => t,
-            Some(Err(e)) => {
-                log::warn!(
-                    "plugin '{}' transport open failed: {e:#}",
-                    manifest.plugin_id
-                );
-                return None;
-            }
-            None => return None,
-        };
+    let granted = granted_for(&manifest.plugin_id);
+    let config = resolved_config_for(&manifest.plugin_id, &granted);
+    let transport = match transport::descriptor_for(&spec.transport)
+        .map(|d| (d.open)(manifest, handle, &config))
+    {
+        Some(Ok(t)) => t,
+        Some(Err(e)) => {
+            log::warn!(
+                "plugin '{}' transport open failed: {e:#}",
+                manifest.plugin_id
+            );
+            return None;
+        }
+        None => return None,
+    };
 
     let dev_match = worker::DevMatch {
         transport: spec.transport.clone(),

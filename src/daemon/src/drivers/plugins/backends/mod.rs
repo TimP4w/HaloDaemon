@@ -5,3 +5,4 @@
 
 mod hid;
 mod smbus;
+mod tcp;

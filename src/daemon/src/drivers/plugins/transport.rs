@@ -12,6 +12,7 @@
 //! descriptor plus, if its I/O shape is new, a new `PluginIo` variant; the
 //! plugin core (`manifest`/`worker`/`mod`) never grows a per-bus branch.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -190,8 +191,12 @@ pub struct PluginTransportDescriptor {
     pub kind: &'static str,
     /// Does this spec (of this kind) accept the discovered handle?
     pub matches: fn(&MatchSpec, &DiscoveryHandle<'_>) -> bool,
-    /// Open the live transport for a matched handle.
-    pub open: fn(&PluginManifest, &DiscoveryHandle<'_>) -> Result<PluginIo>,
+    /// Open the live transport for a matched handle. `config` is the plugin's
+    /// resolved non-secure config values (see `plugins::config_for`) — HID/
+    /// SMBus ignore it; the `tcp` backend reads its host/port keys from it,
+    /// since a config-instantiated integration has no real discovery handle.
+    pub open:
+        fn(&PluginManifest, &DiscoveryHandle<'_>, &HashMap<String, String>) -> Result<PluginIo>,
     /// Stable per-device id suffix from the matched handle.
     pub id_suffix: fn(&DiscoveryHandle<'_>) -> String,
     /// Reject a manifest whose match spec omits a field this kind requires.

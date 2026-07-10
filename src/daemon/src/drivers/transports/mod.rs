@@ -10,6 +10,7 @@ pub mod mock;
 #[cfg(target_os = "windows")]
 pub mod pawnio;
 pub mod smbus;
+pub mod tcp;
 pub mod usb_bulk;
 pub mod usb_control;
 

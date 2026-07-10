@@ -2,6 +2,8 @@
 //! SMBus plugin transport backend: an addressed [`RegisterBus`] scoped to the
 //! device's own address, opened from an `SmBusScanEntry`-produced handle.
 
+use std::collections::HashMap;
+
 use anyhow::{bail, Result};
 
 use crate::drivers::plugins::manifest::{MatchSpec, PluginManifest};
@@ -18,7 +20,11 @@ fn matches(spec: &MatchSpec, handle: &DiscoveryHandle<'_>) -> bool {
     spec.bus_kind() == Some(*bus_kind) && spec.addresses.as_ref().is_some_and(|a| a.contains(addr))
 }
 
-fn open(_manifest: &PluginManifest, handle: &DiscoveryHandle<'_>) -> Result<PluginIo> {
+fn open(
+    _manifest: &PluginManifest,
+    handle: &DiscoveryHandle<'_>,
+    _config: &HashMap<String, String>,
+) -> Result<PluginIo> {
     let DiscoveryHandle::Smbus { bus, addr, .. } = handle else {
         bail!("smbus backend matched a non-SMBus handle");
     };

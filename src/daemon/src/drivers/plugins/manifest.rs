@@ -51,10 +51,48 @@ impl Default for HidConfig {
     }
 }
 
+fn default_host_key() -> String {
+    "host".to_owned()
+}
+
+fn default_port_key() -> String {
+    "port".to_owned()
+}
+
+fn default_tcp_timeout_ms() -> u64 {
+    5000
+}
+
+/// TCP transport parameters a plugin declares: which of its own `config`
+/// fields (see `ConfigFieldDef`) hold the host/port to connect to. Declaring
+/// the *keys* rather than a literal host/port lets the same manifest section
+/// double as the GUI-editable settings and the connection source.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TcpConfig {
+    #[serde(default = "default_host_key")]
+    pub host_key: String,
+    #[serde(default = "default_port_key")]
+    pub port_key: String,
+    #[serde(default = "default_tcp_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for TcpConfig {
+    fn default() -> Self {
+        Self {
+            host_key: default_host_key(),
+            port_key: default_port_key(),
+            timeout_ms: default_tcp_timeout_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TransportsConfig {
     #[serde(default)]
     pub hid: Option<HidConfig>,
+    #[serde(default)]
+    pub tcp: Option<TcpConfig>,
 }
 
 /// RGB capability data (zones + native effects). Callbacks (`apply`,
@@ -1300,5 +1338,33 @@ mod tests {
         let m = parse_manifest(src, Path::new("cfg3.lua")).unwrap();
         assert!(m.capability_labels().is_empty());
         assert!(!m.needs_worker());
+    }
+
+    #[test]
+    fn tcp_transport_config_parses_with_defaults() {
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            transports = { tcp = { host_key = "ip", port_key = "svc_port" } },
+        }"#;
+        let m = parse_manifest(src, Path::new("tcpcfg.lua")).unwrap();
+        let tcp = m.transports.tcp.expect("tcp transport config");
+        assert_eq!(tcp.host_key, "ip");
+        assert_eq!(tcp.port_key, "svc_port");
+        assert_eq!(tcp.timeout_ms, 5000);
+    }
+
+    #[test]
+    fn tcp_transport_config_defaults_keys_when_omitted() {
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            transports = { tcp = { timeout_ms = 2000 } },
+        }"#;
+        let m = parse_manifest(src, Path::new("tcpcfg2.lua")).unwrap();
+        let tcp = m.transports.tcp.expect("tcp transport config");
+        assert_eq!(tcp.host_key, "host");
+        assert_eq!(tcp.port_key, "port");
+        assert_eq!(tcp.timeout_ms, 2000);
     }
 }

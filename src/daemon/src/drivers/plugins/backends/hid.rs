@@ -2,6 +2,7 @@
 //! HID plugin transport backend: a byte-stream `Transport` opened from the
 //! matched device's HID path.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -35,7 +36,11 @@ fn matches(spec: &MatchSpec, handle: &DiscoveryHandle<'_>) -> bool {
         && spec.interface.is_none_or(|i| Some(i) == *interface_number)
 }
 
-fn open(manifest: &PluginManifest, handle: &DiscoveryHandle<'_>) -> Result<PluginIo> {
+fn open(
+    manifest: &PluginManifest,
+    handle: &DiscoveryHandle<'_>,
+    _config: &HashMap<String, String>,
+) -> Result<PluginIo> {
     let DiscoveryHandle::Hid { path, vid, pid, .. } = handle else {
         bail!("plugin '{}' matched a non-HID handle", manifest.plugin_id);
     };
