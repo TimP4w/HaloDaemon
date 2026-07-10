@@ -30,7 +30,7 @@ To add a device, see the [development guide](development.md).
 |--------|-------|---------|----------|-----------|----------|
 | Logitech | G502 X Plus (wired | wireless) | 046d:c095 | [HID++](protocols/hidpp2.md) | [HID](transports/hid.md) | 🐧🪟 |
 | Logitech | G502 Hero (wired) | 046d:c08b | [HID++](protocols/hidpp2.md) | [HID](transports/hid.md) | 🐧🪟 |
-| Razer | Basilisk V3 | 1532:0099 | [Razer](protocols/razer.md) | [HID](transports/hid.md) | 🐧🪟 |
+| Razer | Basilisk V3 | 1532:0099 | [Razer](protocols/razer.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
 
 ## Keyboards
 

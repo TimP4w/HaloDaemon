@@ -186,6 +186,16 @@ pub enum Call {
         reply: oneshot::Sender<Result<()>>,
     },
     LcdReset(oneshot::Sender<Result<()>>),
+    // ── DPI / choice ─────────────────────────────────────────────────────
+    DpiSet {
+        dpi: u16,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    ChoiceSet {
+        key: String,
+        selected: usize,
+        reply: oneshot::Sender<Result<()>>,
+    },
 }
 
 /// Handle the `LuaDevice` holds. `UnboundedSender` is `Send + Sync`, so the
@@ -354,6 +364,20 @@ impl PluginHandle {
     pub async fn lcd_reset(&self) -> Result<()> {
         self.request(Call::LcdReset).await?
     }
+
+    pub async fn dpi_set(&self, dpi: u16) -> Result<()> {
+        self.request(|reply| Call::DpiSet { dpi, reply }).await?
+    }
+
+    pub async fn choice_set(&self, key: &str, selected: usize) -> Result<()> {
+        let key = key.to_owned();
+        self.request(|reply| Call::ChoiceSet {
+            key,
+            selected,
+            reply,
+        })
+        .await?
+    }
 }
 
 /// The plugin's callback functions, looked up once by name.
@@ -378,6 +402,8 @@ struct Callbacks {
     lcd_set_brightness: Option<Function>,
     lcd_set_rotation: Option<Function>,
     lcd_reset: Option<Function>,
+    set_dpi: Option<Function>,
+    set_choice: Option<Function>,
 }
 
 impl Callbacks {
@@ -407,6 +433,8 @@ impl Callbacks {
             lcd_set_brightness: f("lcd_set_brightness"),
             lcd_set_rotation: f("lcd_set_rotation"),
             lcd_reset: f("lcd_reset"),
+            set_dpi: f("set_dpi"),
+            set_choice: f("set_choice"),
         }
     }
 }
@@ -563,9 +591,37 @@ fn worker_main(
             Call::LcdReset(reply) => {
                 let _ = reply.send(run_lcd_reset(&cb, &dev));
             }
+            Call::DpiSet { dpi, reply } => {
+                let _ = reply.send(run_dpi_set(&cb, &dev, dpi));
+            }
+            Call::ChoiceSet {
+                key,
+                selected,
+                reply,
+            } => {
+                let _ = reply.send(run_choice_set(&cb, &dev, &key, selected));
+            }
         }
     }
     Ok(())
+}
+
+fn run_dpi_set(cb: &Callbacks, dev: &Table, dpi: u16) -> Result<()> {
+    let f = cb
+        .set_dpi
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no set_dpi()"))?;
+    f.call::<()>((dev.clone(), dpi))
+        .map_err(|e| lua_err("set_dpi", e))
+}
+
+fn run_choice_set(cb: &Callbacks, dev: &Table, key: &str, selected: usize) -> Result<()> {
+    let f = cb
+        .set_choice
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no set_choice()"))?;
+    f.call::<()>((dev.clone(), key.to_owned(), selected))
+        .map_err(|e| lua_err("set_choice", e))
 }
 
 fn run_lcd_stream_frame(

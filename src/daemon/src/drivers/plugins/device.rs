@@ -5,26 +5,37 @@
 //! manifest — Halo owns the capability taxonomy; the script only fills it in.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{
-    DeviceType, LcdDescriptor, NativeEffect, RgbColor, RgbDescriptor, RgbState, RgbZone,
-    ScreenRotation, ScreenShape, Sensor, WriteRateStatus,
+    Choice, DeviceCapability, DeviceType, DpiMode, DpiStatus, LcdDescriptor, NativeEffect,
+    RgbColor, RgbDescriptor, RgbState, RgbZone, ScreenRotation, ScreenShape, Sensor,
+    WriteRateStatus,
 };
 
 use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor};
 use crate::drivers::{
-    CapabilityRef, ChainCapability, Controller, Device, FanCapability, FanHub, FanStateSlot,
-    LcdCapability, LcdStateSlot, RgbCapability, RgbStateSlot, SensorCapability,
+    CapabilityRef, ChainCapability, ChoiceCapability, ChoiceStateCache, Controller, Device,
+    DpiCapability, FanCapability, FanHub, FanStateSlot, LcdCapability, LcdStateSlot, RgbCapability,
+    RgbStateSlot, SensorCapability,
 };
 
 use super::chain_leaf::ChainLeaf;
-use super::manifest::{topology_from, AccessoryManifest, MatchSpec, PluginManifest};
+use super::manifest::{
+    topology_from, AccessoryManifest, ChoiceDef, DpiManifest, MatchSpec, PluginManifest,
+};
 use super::transport::PluginIo;
 use super::worker::{DevMatch, InitLcd, InitZone, PluginHandle};
+
+/// Host-side DPI step-cycle state (the plugin only writes the chosen value).
+struct DpiState {
+    steps: Vec<u16>,
+    index: usize,
+    current: u16,
+}
 use crate::drivers::vendors::generic::devices::common::{linear_rgb_zone, ring_led_positions};
 use halod_shared::types::ZoneTopology;
 
@@ -55,6 +66,18 @@ pub struct LuaDevice {
     has_fan: bool,
     has_sensor: bool,
     has_lcd: bool,
+    has_dpi: bool,
+    has_choice: bool,
+
+    /// Host-owned DPI step-cycle state + bounds/mode (present iff `has_dpi`).
+    dpi_state: Mutex<DpiState>,
+    dpi_min: u16,
+    dpi_max: u16,
+    dpi_mode: DpiMode,
+
+    /// Declared choice controls + the current selection cache.
+    choices: Vec<ChoiceDef>,
+    choice_cache: ChoiceStateCache,
 
     /// LCD panel descriptor, reported by `initialize` (resolution can vary by
     /// device variant). Absent until initialized.
@@ -178,6 +201,21 @@ impl LuaDevice {
                 .as_ref()
                 .map(|l| l.needs_rgb_restore)
                 .unwrap_or(false),
+            has_dpi: manifest.dpi.is_some(),
+            has_choice: manifest.choice.is_some(),
+            dpi_state: Mutex::new(build_dpi_state(manifest.dpi.as_ref())),
+            dpi_min: manifest.dpi.as_ref().map(|d| d.min).unwrap_or(0),
+            dpi_max: manifest.dpi.as_ref().map(|d| d.max).unwrap_or(0),
+            dpi_mode: match manifest.dpi.as_ref().map(|d| d.onboard) {
+                Some(true) => DpiMode::Onboard,
+                _ => DpiMode::Host,
+            },
+            choices: manifest
+                .choice
+                .as_ref()
+                .map(|c| c.choices.clone())
+                .unwrap_or_default(),
+            choice_cache: ChoiceStateCache::default(),
             rgb_descriptor: manifest.rgb_descriptor().unwrap_or(RgbDescriptor {
                 zones: Vec::new(),
                 native_effects: Vec::new(),
@@ -353,6 +391,12 @@ impl Device for LuaDevice {
         }
         if self.has_lcd {
             caps.push(CapabilityRef::Lcd(self));
+        }
+        if self.has_dpi {
+            caps.push(CapabilityRef::Dpi(self));
+        }
+        if self.has_choice {
+            caps.push(CapabilityRef::Choice(self));
         }
         if self.has_chain {
             caps.push(CapabilityRef::Controller(self));
@@ -591,6 +635,117 @@ impl LcdCapability for LuaDevice {
 
     async fn reset_to_default(&self) -> Result<()> {
         self.worker()?.lcd_reset().await
+    }
+}
+
+/// Initial DPI state from the manifest: mid-step selected, like the native driver.
+fn build_dpi_state(dpi: Option<&DpiManifest>) -> DpiState {
+    let steps: Vec<u16> = dpi.map(|d| d.steps.clone()).unwrap_or_default();
+    let index = steps.len() / 2;
+    let current = steps
+        .get(index)
+        .copied()
+        .unwrap_or_else(|| dpi.map(|d| d.min).unwrap_or(0));
+    DpiState {
+        steps,
+        index,
+        current,
+    }
+}
+
+impl LuaDevice {
+    fn clamp_dpi(&self, dpi: u16) -> u16 {
+        dpi.clamp(self.dpi_min, self.dpi_max)
+    }
+}
+
+#[async_trait]
+impl DpiCapability for LuaDevice {
+    async fn dpi_status(&self) -> DpiStatus {
+        let dpi = self.dpi_state.lock().unwrap();
+        DpiStatus {
+            steps: dpi.steps.clone(),
+            current_index: dpi.index,
+            current_dpi: dpi.current,
+            available_dpis: (self.dpi_min..=self.dpi_max).step_by(100).collect(),
+            mode: self.dpi_mode,
+        }
+    }
+
+    async fn set_dpi_steps(&self, steps: Vec<u16>) -> Result<()> {
+        let apply = {
+            let mut dpi = self.dpi_state.lock().unwrap();
+            dpi.steps = steps.iter().map(|&s| self.clamp_dpi(s)).collect();
+            if dpi.index >= dpi.steps.len() {
+                dpi.index = dpi.steps.len().saturating_sub(1);
+            }
+            dpi.steps.get(dpi.index).copied()
+        };
+        if let Some(v) = apply {
+            self.dpi_state.lock().unwrap().current = v;
+            self.worker()?.dpi_set(v).await?;
+        }
+        Ok(())
+    }
+
+    async fn set_dpi_index(&self, index: usize) -> Result<()> {
+        let value = {
+            let mut dpi = self.dpi_state.lock().unwrap();
+            let &v = dpi
+                .steps
+                .get(index)
+                .ok_or_else(|| anyhow::anyhow!("dpi index {index} out of range"))?;
+            dpi.index = index;
+            dpi.current = v;
+            v
+        };
+        self.worker()?.dpi_set(value).await
+    }
+
+    async fn set_dpi_direct(&self, dpi: u16) -> Result<()> {
+        let value = self.clamp_dpi(dpi);
+        self.dpi_state.lock().unwrap().current = value;
+        self.worker()?.dpi_set(value).await
+    }
+}
+
+#[async_trait]
+impl ChoiceCapability for LuaDevice {
+    fn choice_cache(&self) -> &ChoiceStateCache {
+        &self.choice_cache
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        if self.choices.is_empty() {
+            return None;
+        }
+        let choices = self
+            .choices
+            .iter()
+            .map(|c| Choice {
+                key: c.key.clone(),
+                label: c.label.clone(),
+                options: c.options.clone(),
+                selected: self.choice_cache.get(&c.key).unwrap_or(c.default),
+                category: c.category.clone(),
+                display: c.display.clone(),
+                visible_when: None,
+            })
+            .collect();
+        Some(DeviceCapability::Choice(choices))
+    }
+
+    async fn set_choice(&self, key: &str, selected: usize) -> Result<()> {
+        let choice = self
+            .choices
+            .iter()
+            .find(|c| c.key == key)
+            .ok_or_else(|| anyhow::anyhow!("unknown choice key: {key}"))?;
+        if selected >= choice.options.len() {
+            anyhow::bail!("choice '{key}' selection {selected} out of range");
+        }
+        self.choice_cache.record(key, selected);
+        self.worker()?.choice_set(key, selected).await
     }
 }
 

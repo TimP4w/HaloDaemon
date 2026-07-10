@@ -45,6 +45,8 @@ mod ene_test;
 #[cfg(test)]
 mod lcd_test;
 #[cfg(test)]
+mod razer_test;
+#[cfg(test)]
 mod zotac_test;
 
 static PLUGIN_REGISTRY: RwLock<Vec<PluginManifest>> = RwLock::new(Vec::new());
@@ -111,6 +113,10 @@ const BUILTIN_PLUGINS: &[(&str, &str)] = &[
         include_str!("builtins/zotac_spectra_gpu.lua"),
     ),
     ("nzxt_kraken.lua", include_str!("builtins/nzxt_kraken.lua")),
+    (
+        "razer_basilisk.lua",
+        include_str!("builtins/razer_basilisk.lua"),
+    ),
 ];
 
 fn builtin_manifests() -> Vec<PluginManifest> {

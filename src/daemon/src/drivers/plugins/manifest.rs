@@ -7,7 +7,9 @@
 //! actually matches.
 
 use anyhow::{anyhow, bail, Result};
-use halod_shared::types::{DeviceType, NativeEffect, RgbDescriptor, RgbZone, ZoneTopology};
+use halod_shared::types::{
+    ChoiceDisplay, ChoiceOption, DeviceType, NativeEffect, RgbDescriptor, RgbZone, ZoneTopology,
+};
 use mlua::{DeserializeOptions, Lua, LuaSerdeExt};
 use serde::Deserialize;
 use std::path::Path;
@@ -81,6 +83,41 @@ pub struct LcdManifest {
     /// Re-apply the RGB state after an image upload (some panels reset the LEDs).
     #[serde(default)]
     pub needs_rgb_restore: bool,
+}
+
+/// DPI capability. The host owns the step-list state machine (clamp/index); the
+/// plugin only writes the chosen value through its `set_dpi(dev, dpi)` callback.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DpiManifest {
+    pub min: u16,
+    pub max: u16,
+    /// Ordered DPI steps the step-cycle walks.
+    pub steps: Vec<u16>,
+    /// `true` = steps live in the device's onboard profile; default host-managed.
+    #[serde(default)]
+    pub onboard: bool,
+}
+
+/// One choice control the device exposes (e.g. a polling-rate selector).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChoiceDef {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub display: ChoiceDisplay,
+    pub options: Vec<ChoiceOption>,
+    /// Index selected before the user picks one.
+    #[serde(default)]
+    pub default: usize,
+}
+
+/// Choice capability: a set of discrete selectors. The host caches the selection
+/// and calls `set_choice(dev, key, selected)` to apply it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChoiceManifest {
+    pub choices: Vec<ChoiceDef>,
 }
 
 fn default_topology() -> String {
@@ -313,6 +350,10 @@ struct RawManifest {
     #[serde(default)]
     lcd: Option<LcdManifest>,
     #[serde(default)]
+    dpi: Option<DpiManifest>,
+    #[serde(default)]
+    choice: Option<ChoiceManifest>,
+    #[serde(default)]
     poll: Option<PollManifest>,
     #[serde(default)]
     chain: Option<ChainManifest>,
@@ -333,6 +374,8 @@ pub struct PluginManifest {
     pub fan: Option<FanManifest>,
     pub sensor: Option<SensorManifest>,
     pub lcd: Option<LcdManifest>,
+    pub dpi: Option<DpiManifest>,
+    pub choice: Option<ChoiceManifest>,
     pub poll: Option<PollManifest>,
     pub chain: Option<ChainManifest>,
 }
@@ -425,6 +468,8 @@ impl PluginManifest {
             || self.fan.is_some()
             || self.sensor.is_some()
             || self.lcd.is_some()
+            || self.dpi.is_some()
+            || self.choice.is_some()
             || self.chain.is_some()
     }
 
@@ -442,6 +487,12 @@ impl PluginManifest {
         }
         if self.lcd.is_some() {
             labels.push("LCD".to_owned());
+        }
+        if self.dpi.is_some() {
+            labels.push("DPI".to_owned());
+        }
+        if self.choice.is_some() {
+            labels.push("Settings".to_owned());
         }
         if self.chain.is_some() {
             labels.push("Accessories".to_owned());
@@ -504,6 +555,8 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         fan: raw.fan,
         sensor: raw.sensor,
         lcd: raw.lcd,
+        dpi: raw.dpi,
+        choice: raw.choice,
         poll: raw.poll,
         chain: raw.chain,
     })

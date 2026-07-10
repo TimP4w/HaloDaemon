@@ -139,6 +139,8 @@ Include a section to advertise that capability:
 - `fan = { channel = <u8> }` — a controllable fan/pump channel.
 - `sensor = {}` — the device reports sensor readings (via `get_sensors`).
 - `lcd = { needs_rgb_restore = <bool> }` — the device has an image panel; see [LCD](#lcd).
+- `dpi = { min, max, steps = { … } }` — a pointing device's DPI; see [DPI & choices](#dpi--choices).
+- `choice = { choices = { … } }` — discrete selectors (e.g. polling rate); see [DPI & choices](#dpi--choices).
 - `poll = { interval_ms = <n> }` — run `read_status` on a background loop.
 - `chain = { channels = { … }, accessories = { … } }` — host detachable child
   accessories (fan hubs / ARGB chains); see [Chained accessories](#chained-accessories).
@@ -169,6 +171,8 @@ device's transport; `dev.status` holds the most recent table returned by
 | `lcd_set_brightness(dev, brightness, rotation)` | lcd | —                    |
 | `lcd_set_rotation(dev, brightness, degrees)` | lcd | —                       |
 | `lcd_reset(dev)`                 | lcd        | —                             |
+| `set_dpi(dev, dpi)`              | dpi        | —                             |
+| `set_choice(dev, key, selected)` | choice    | —                             |
 
 ### RGB
 
@@ -302,6 +306,29 @@ Image bytes that exceed a HID report go over the device's **USB bulk-OUT
 endpoint** via `dev.transport:write_bulk(buf)` (the 64-byte HID reports carry only
 the control handshake). The bulk endpoint opens lazily on first use.
 
+### DPI & choices
+
+`dpi = { min, max, steps = { 800, 1600, 3200 } }` enables a pointing device's DPI
+control. The **host owns the step-cycle state** (clamp, index, the current value)
+— the plugin only writes the chosen value through one callback:
+
+```lua
+dpi = { min = 100, max = 26000, steps = { 800, 1600, 3200 } },
+set_dpi = function(dev, dpi) dev.transport:write(dpi_report(dpi)) end,
+```
+
+`choice = { choices = { … } }` declares discrete selectors (dropdowns / toggles).
+The host caches the selection and calls `set_choice` to apply it:
+
+```lua
+choice = { choices = {
+  { key = "poll_rate", label = "Polling Rate", category = "Mouse", display = "list",
+    options = { { id = "1000 Hz", label = "1000 Hz" }, { id = "500 Hz", label = "500 Hz" } },
+    default = 0 },
+} },
+set_choice = function(dev, key, selected) --[[ apply ]] end,
+```
+
 ## The transport API (`dev.transport`)
 
 The shape of `dev.transport` depends on the matched `transport`. Write rate
@@ -320,6 +347,13 @@ values; reads return Lua strings.
 | `:write_then_read(data, n)`         | write then read → string                |
 | `:feature_exchange(data, n)`        | HID feature report exchange → string    |
 | `:write_many({p1, p2, …})`          | write several packets                   |
+
+`transports = { hid = { report_size, feature_report, timeout_ms } }` configures
+the stream. `report_size` sets the padding target (a leading `0x00` report id is
+prepended and the payload padded to `report_size`); set **`report_size = 0` for
+raw passthrough** — no report id, no padding — when the script builds the exact
+wire buffer itself (e.g. the Razer 90-byte feature report). `feature_report = true`
+routes `:write` through `send_feature_report`.
 
 ### Register transport (SMBus)
 

@@ -40,13 +40,11 @@ fn open(manifest: &PluginManifest, handle: &DiscoveryHandle<'_>) -> Result<Plugi
         bail!("plugin '{}' matched a non-HID handle", manifest.plugin_id);
     };
     let hid = manifest.transports.hid.clone().unwrap_or_default();
-    let transport = HidTransport::open(
-        path,
-        Some(hid.report_size),
-        hid.timeout_ms,
-        hid.feature_report,
-        None,
-    )?;
+    // `report_size = 0` means raw passthrough (no report-id prepend, no padding):
+    // the plugin builds the exact wire buffer itself (e.g. the Razer 90-byte report).
+    let report_size = (hid.report_size != 0).then_some(hid.report_size);
+    let transport =
+        HidTransport::open(path, report_size, hid.timeout_ms, hid.feature_report, None)?;
     Ok(PluginIo::Stream {
         transport: Arc::new(transport),
         // Lazy companion bulk endpoint (opened only if the plugin streams LCD).
