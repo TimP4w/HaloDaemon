@@ -444,7 +444,67 @@ Returning `false` (or `{ ok = false }`) rejects the device, so a native driver
 can still claim it. This is how an SMBus controller reports its firmware string
 and per-stick LED count once probed.
 
+## Permissions
+
+A plugin that needs a privileged capability declares it up front:
+
+```lua
+permissions = { "network", "os" },
+```
+
+Known permissions: `network` (no backend consumes this yet — reserved for a
+future TCP transport), `os` (re-enables the read-only wall clock —
+`os.time()`/`os.clock()` — inside the sandbox; every other `os.*` function
+stays stripped), `storage`/`secure_storage` (accepted for forward-compat, not
+yet enforced). A plugin with any declared permission loads but stays
+**inert** — discovered, listed in the Plugins screen, but never matched
+against hardware — until the user grants it. Manually importing such a
+plugin (Add plugin) prompts for consent immediately; one found by a
+directory scan instead gets a toast notification. Revoking a grant reverts
+the plugin to inert on the next rediscovery.
+
+## RGB effects
+
+A plugin can also declare RGB effects instead of (or alongside) a device.
+An effect-only plugin sets `type = "effect"` and needs no `match` spec — it
+never opens a transport and is pure compute, so it needs no permissions
+either:
+
+```lua
+type = "effect",
+effects = {
+  { kind = "pixmap", id = "plasma", name = "Plasma", params = { ... } },
+  { kind = "direct", id = "comet", name = "Comet", params = { ... } },
+},
+```
+
+Each entry registers under a namespaced catalog id (`<plugin_id>:<id>`) in
+the RGB engine's effect picker, so it can never collide with a built-in
+effect or another plugin's. Two kinds:
+
+- **`pixmap`** — fills a shared 400×300 linear-RGBA canvas once per frame;
+  every zone using it then samples the canvas at its LED positions. Callback
+  `render_<id>(buf, t, dt, params)` mutates `buf` (a `halod.buffer` of
+  `halod.canvas_w * halod.canvas_h * 4` bytes) in place; no return value.
+- **`direct`** — computes one color per LED directly, once per zone per
+  frame. Callback `led_colors_<id>(leds, t, dt, params) -> colors` receives
+  an array of `{p, p_ring, nx, ny}` (chain/spatial coordinates) and returns
+  one `{r, g, b}` per LED, linear-light `0..1` (clamped on the host side).
+
+`t`/`dt` are the engine clock/delta, same as native effects. `params` is the
+declared param table with the user's current values. `halod.hsv(h, s, v)`
+converts to sRGB bytes for convenience. A script that errors, or one whose
+per-frame instruction budget runs out (a runaway loop is killed rather than
+stalling the engine), falls back to a native default (solid/off) and is
+disabled for the rest of the session rather than being retried every frame.
+
+A complete example lives at
+[`plugins/examples/example_effects.lua`](../plugins/examples/example_effects.lua).
+
 ## Roadmap
 
-Not yet available to plugins (native drivers still required): LCD panels and the
-USB bulk/control transports. HID (stream) and SMBus (register) are supported.
+Not yet available to plugins (native drivers still required): the USB
+bulk/control transports beyond what LCD streaming already uses, and a
+network transport (the `network` permission is declared but unenforced —
+see [Permissions](#permissions)). HID (stream) and SMBus (register) are
+supported.

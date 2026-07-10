@@ -440,6 +440,7 @@ pub fn match_handle(handle: &DiscoveryHandle<'_>) -> Option<Arc<dyn Device>> {
 
 #[cfg(test)]
 mod tests {
+    use super::manifest::PluginType;
     use super::*;
     use std::path::Path;
 
@@ -604,6 +605,26 @@ mod tests {
         assert_eq!(m.capability_labels(), vec!["RGB", "Fan", "Sensor"]);
         assert!(m.needs_worker());
         assert_eq!(m.poll.as_ref().map(|p| p.interval_ms), Some(500));
+    }
+
+    #[test]
+    fn shipped_example_effects_plugin_parses() {
+        // Guards the documented effects example against drift with the schema.
+        let src = include_str!("../../../../../plugins/examples/example_effects.lua");
+        let m = parse_manifest(src, Path::new("example_effects.lua")).unwrap();
+        assert!(
+            m.match_specs.is_empty(),
+            "effect-only plugin needs no match"
+        );
+        assert_eq!(m.plugin_type, PluginType::Effect);
+        assert!(!m.needs_worker());
+        assert_eq!(m.capability_labels(), vec!["Effect"]);
+        assert_eq!(m.effects.len(), 2);
+        let entries = effect_entries_for(&m);
+        assert_eq!(entries[0].catalog_id, "example_effects:plasma");
+        assert_eq!(entries[0].kind, EffectKind::Pixmap);
+        assert_eq!(entries[1].catalog_id, "example_effects:comet");
+        assert_eq!(entries[1].kind, EffectKind::Direct);
     }
 
     #[test]

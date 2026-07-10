@@ -414,4 +414,43 @@ mod tests {
         let result = handle.render_pixmap(0.0, 0.0).await;
         assert!(result.is_err(), "runaway script must error, not hang");
     }
+
+    #[tokio::test]
+    async fn shipped_example_effects_plugin_renders_without_error() {
+        // Guards the documented example against drift: both callbacks must
+        // run clean and produce plausible output.
+        let src = include_str!("../../../../../plugins/examples/example_effects.lua");
+
+        let pixmap = PluginEffectHandle::spawn(
+            src.to_string(),
+            "plasma".to_string(),
+            [("speed".to_string(), EffectParamValue::Float(0.8))]
+                .into_iter()
+                .collect(),
+            vec![],
+        );
+        let bytes = pixmap.render_pixmap(1.5, 0.016).await.unwrap();
+        assert_eq!(bytes.len(), (CANVAS_W * CANVAS_H * 4) as usize);
+        assert!(
+            bytes.iter().any(|&b| b != 0),
+            "plasma must not render solid black"
+        );
+
+        let direct =
+            PluginEffectHandle::spawn(src.to_string(), "comet".to_string(), params(), vec![]);
+        let leds: Vec<LedCoord> = (0..8)
+            .map(|i| LedCoord {
+                p: i as f32 / 7.0,
+                p_ring: i as f32 / 7.0,
+                nx: 0.0,
+                ny: 0.0,
+            })
+            .collect();
+        let colors = direct.led_colors(leds, 0.0, 0.016).await.unwrap();
+        assert_eq!(colors.len(), 8);
+        assert!(
+            colors.iter().any(|c| c.r > 0.0 || c.g > 0.0 || c.b > 0.0),
+            "comet must light at least one LED at its head"
+        );
+    }
 }
