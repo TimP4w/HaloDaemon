@@ -33,7 +33,7 @@ pub(super) fn led_strip_from_ids(ids: &[u8]) -> Vec<LedPosition> {
 
 pub(super) fn leds_for_zone_info(
     zi: &LogitechZoneInfo,
-    key_layout: Option<&'static KeyLayoutSpec>,
+    key_layout: Option<&KeyLayoutSpec>,
 ) -> Vec<LedPosition> {
     match &zi.topology {
         ZoneTopology::Keyboard { .. } => key_layout.map(tkl_key_positions).unwrap_or_default(),

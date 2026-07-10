@@ -19,6 +19,7 @@ use crate::drivers::vendors::logitech::protocols::hidpp::feature;
 use crate::drivers::vendors::logitech::protocols::hidpp::v2::rgb::find_native_effect;
 use crate::drivers::vendors::logitech::protocols::hidpp::v2::Hidpp20;
 use crate::drivers::{RgbCapability, RgbStateSlot};
+use halod_shared::keyboard::KeyLayoutSpec;
 use halod_shared::types::{
     DeviceCapability, EffectParamValue, KeyboardLayout, NativeEffect, RgbColor, RgbDescriptor,
     RgbState, RgbZone, ZoneTopology,
@@ -386,7 +387,8 @@ impl LogitechDevice {
     fn init_rgb_pk_fallback(
         &self,
         pk_idx: u8,
-        keyboard_layout: &KeyboardLayout,
+        key_layout: Option<&KeyLayoutSpec>,
+        language: &KeyboardLayout,
         state: &mut LogitechDeviceState,
     ) {
         let zone_info = self.profile.map(|p| p.zones).unwrap_or(&[]).first();
@@ -395,9 +397,8 @@ impl LogitechDevice {
             zone_info
                 .map(|z| z.topology.clone())
                 .unwrap_or(ZoneTopology::Linear),
-            keyboard_layout,
+            language,
         );
-        let key_layout = self.profile.and_then(|p| p.key_layout);
         let leds = zone_info
             .map(|zi| leds_for_zone_info(zi, key_layout))
             .unwrap_or_default();
@@ -423,7 +424,8 @@ impl LogitechDevice {
         &self,
         hidpp: &Hidpp20,
         zone_count: u8,
-        keyboard_layout: &KeyboardLayout,
+        key_layout: Option<&KeyLayoutSpec<'_>>,
+        language: &KeyboardLayout,
     ) -> (Vec<RgbZone>, Vec<u8>) {
         let mut zones = Vec::new();
         let mut static_slots = Vec::new();
@@ -457,10 +459,10 @@ impl LogitechDevice {
                     zone_info
                         .map(|zi| zi.topology.clone())
                         .unwrap_or(ZoneTopology::Linear),
-                    keyboard_layout,
+                    language,
                 ),
                 leds: zone_info
-                    .map(|zi| leds_for_zone_info(zi, self.profile.and_then(|p| p.key_layout)))
+                    .map(|zi| leds_for_zone_info(zi, key_layout))
                     .unwrap_or_default(),
             });
         }
@@ -474,13 +476,14 @@ impl LogitechDevice {
     async fn rgb_discover_mouse_pk_leds(
         &self,
         hidpp: &Hidpp20,
+        key_layout: Option<&KeyLayoutSpec<'_>>,
         zones: &mut [RgbZone],
         state: &mut LogitechDeviceState,
     ) {
         let mut low_ids = hidpp.read_pk_led_ids().await;
         log::debug!("[{}] PK bitmap low_ids: {:?}", self.id, low_ids);
 
-        if let Some(layout) = self.profile.and_then(|p| p.key_layout) {
+        if let Some(layout) = key_layout {
             let ordered: Vec<u8> = layout
                 .cid_map
                 .iter()
@@ -515,7 +518,8 @@ impl LogitechDevice {
         &self,
         hidpp: &Hidpp20,
         zone_count: u8,
-        keyboard_layout: &KeyboardLayout,
+        key_layout: Option<&KeyLayoutSpec<'_>>,
+        language: &KeyboardLayout,
     ) -> (Vec<RgbZone>, Vec<u8>) {
         use crate::drivers::vendors::logitech::protocols::hidpp::v2::rgb::color_led::color_led_location_name;
 
@@ -554,10 +558,10 @@ impl LogitechDevice {
                     zone_info
                         .map(|zi| zi.topology.clone())
                         .unwrap_or(ZoneTopology::Linear),
-                    keyboard_layout,
+                    language,
                 ),
                 leds: zone_info
-                    .map(|zi| leds_for_zone_info(zi, self.profile.and_then(|p| p.key_layout)))
+                    .map(|zi| leds_for_zone_info(zi, key_layout))
                     .unwrap_or_else(|| super::led_positions::mouse_led_positions(1)),
             });
         }
@@ -568,7 +572,8 @@ impl LogitechDevice {
     pub(super) async fn init_rgb(
         &self,
         features: &HashMap<u16, u8>,
-        keyboard_layout: &KeyboardLayout,
+        key_layout: Option<&KeyLayoutSpec<'_>>,
+        language: &KeyboardLayout,
         state: &mut LogitechDeviceState,
     ) {
         let has_rgb = features.contains_key(&feature::RGB_EFFECTS);
@@ -590,14 +595,14 @@ impl LogitechDevice {
                 }
 
                 let (zones, static_slots) = self
-                    .color_led_build_zones(&hidpp, zone_count, keyboard_layout)
+                    .color_led_build_zones(&hidpp, zone_count, key_layout, language)
                     .await;
 
                 state.rgb.rgb_static_slots = static_slots;
                 state.rgb.rgb_wire = RgbWire::ColorLedEffects;
                 self.commit_rgb_descriptor(zones, state);
             } else if let Some(pk) = pk_idx {
-                self.init_rgb_pk_fallback(pk, keyboard_layout, state);
+                self.init_rgb_pk_fallback(pk, key_layout, language, state);
             } else {
                 log::debug!("[{}] No RGB feature found", self.id);
             }
@@ -616,12 +621,12 @@ impl LogitechDevice {
         }
 
         let (mut zones, static_slots) = self
-            .rgb_build_zones(&hidpp, zone_count, keyboard_layout)
+            .rgb_build_zones(&hidpp, zone_count, key_layout, language)
             .await;
 
         // For mice: overlay the PK bitmap to get exact per-LED firmware IDs.
         if !self.is_keyboard() && pk_idx.is_some() {
-            self.rgb_discover_mouse_pk_leds(&hidpp, &mut zones, state)
+            self.rgb_discover_mouse_pk_leds(&hidpp, key_layout, &mut zones, state)
                 .await;
         }
 
