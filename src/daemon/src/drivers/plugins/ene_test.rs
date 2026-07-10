@@ -248,6 +248,22 @@ async fn static_apply_emits_direct_preamble_in_one_batch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_leaves_direct_mode_to_hand_lighting_back() {
+    let ops = RecordingOps::new(seed_dram("LED-0116", 4));
+    let dev = dram_device(ops.clone());
+    dev.initialize().await.unwrap();
+    ops.drain(); // discard initialize's writes
+
+    dev.close().await;
+
+    // set_direct_mode(false): DIRECT=0 then APPLY, nothing else.
+    assert_eq!(
+        steps(&ops.drain()),
+        vec![Step::Reg(REG_DIRECT, 0), Step::Reg(REG_APPLY, 1)]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_frame_emits_only_the_color_block_in_rbg_order() {
     let ops = RecordingOps::new(seed_dram("LED-0116", 2));
     let dev = dram_device(ops.clone());

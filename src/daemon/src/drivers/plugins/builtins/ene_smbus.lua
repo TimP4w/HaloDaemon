@@ -337,6 +337,16 @@ return {
     end)
   end,
 
+  -- Hand lighting back to the controller's onboard effect on daemon exit,
+  -- rather than stranding it in direct mode on the last streamed frame.
+  close = function(dev)
+    local addr = dev.match.addr
+    dev.transport:batch(function(ops)
+      set_direct_mode(ops, addr, false)
+      return true
+    end)
+  end,
+
   -- Canvas-engine frame: color data only (device is already in direct mode).
   write_frame = function(dev, _zone, colors)
     local info = dev.info
