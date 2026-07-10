@@ -228,6 +228,11 @@ pub fn lcd_images_dir() -> PathBuf {
     config_dir().join(halod_shared::types::LCD_IMAGES_SUBDIR)
 }
 
+/// Directory holding device plugin scripts (`*.lua`), read at startup.
+pub fn plugins_dir() -> PathBuf {
+    config_dir().join("plugins")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MainFile {
     #[serde(default = "default_profile_name")]

@@ -119,6 +119,11 @@ inventory::submit!(TransportScanner {
 
 /// Does NOT register — the caller decides what to do with the result.
 pub fn make_device(handle: DiscoveryHandle<'_>) -> Option<Arc<dyn crate::drivers::Device>> {
+    // Plugins are consulted before native descriptors so a plugin shadows a
+    // native driver for the same hardware (the Corsair/Razer migration path).
+    if let Some(device) = crate::drivers::plugins::match_handle(&handle) {
+        return Some(device);
+    }
     for desc in inventory::iter::<DeviceDescriptor> {
         if (desc.matches)(&handle) {
             return match (desc.make)(handle) {
