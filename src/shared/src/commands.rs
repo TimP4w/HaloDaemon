@@ -163,31 +163,36 @@ pub enum DaemonCommand {
 
     // Misc / global
     Rediscover,
-    /// Enable or disable a device plugin by id, then re-run discovery.
+    /// Enable or disable a device plugin by id. Staged — see
+    /// `ApplyPendingPluginChanges`.
     SetPluginEnabled {
         id: String,
         enabled: bool,
     },
-    /// Install a Lua plugin script into the plugins directory, then re-run
-    /// discovery. The daemon sanitizes `filename` and validates the source.
+    /// Install a Lua plugin script into the plugins directory. The daemon
+    /// sanitizes `filename` and validates the source. Staged.
     ImportPlugin {
         /// Suggested file name, e.g. `"my-driver.lua"`.
         filename: String,
         /// Full Lua source of the plugin script.
         source: String,
     },
-    /// Delete a user plugin script by id, then re-run discovery. Built-in
-    /// plugins cannot be deleted and the daemon rejects the request.
+    /// Delete a user plugin script by id. Built-in plugins cannot be deleted
+    /// and the daemon rejects the request. Staged.
     DeletePlugin {
         id: String,
     },
-    /// Replace the set of permissions granted to a plugin, then re-run
-    /// discovery. An empty `granted` revokes everything, leaving the plugin
-    /// inert if it declares any permission.
+    /// Replace the set of permissions granted to a plugin. An empty `granted`
+    /// revokes everything, leaving the plugin inert if it declares any
+    /// permission. Staged.
     SetPluginPermissions {
         id: String,
         granted: Vec<Permission>,
     },
+    /// Apply every staged plugin change (`SetPluginEnabled`, `ImportPlugin`,
+    /// `DeletePlugin`, `SetPluginPermissions`) by running the actual
+    /// close-everything-and-rediscover cycle once.
+    ApplyPendingPluginChanges,
     SetLogLevel {
         level: String,
     },

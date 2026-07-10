@@ -42,3 +42,7 @@ pub fn revoke_plugin_permissions(cmd: &CommandTx, id: String) {
         },
     );
 }
+
+pub fn apply_pending_plugin_changes(cmd: &CommandTx) {
+    ipc::send(cmd, DaemonCommand::ApplyPendingPluginChanges);
+}

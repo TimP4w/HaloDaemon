@@ -54,6 +54,11 @@ pub struct AppState {
     /// True when this process is the service `--worker` (relaunched by the
     /// supervisor). Determines how an IPC `shutdown` is handled.
     pub is_service_worker: bool,
+    /// Set when a plugin enable/disable/grant/import/delete has been staged
+    /// but not yet applied to live devices. Batches the expensive
+    /// close-everything-and-rediscover cycle so several plugin edits in a
+    /// row only pay for it once, when the user explicitly applies them.
+    pub plugins_rediscover_pending: std::sync::atomic::AtomicBool,
 }
 
 impl AppState {
@@ -77,6 +82,7 @@ impl AppState {
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
             is_service_worker: false,
+            plugins_rediscover_pending: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

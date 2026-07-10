@@ -37,6 +37,9 @@ pub async fn serialize_state(
         profile_overrides: cfg.profile_overrides(),
         process_icons,
         plugins: crate::drivers::plugins::list(),
+        plugins_rediscover_pending: app
+            .plugins_rediscover_pending
+            .load(std::sync::atomic::Ordering::Relaxed),
     };
     match serde_json::to_value(wire) {
         Ok(v) => v,

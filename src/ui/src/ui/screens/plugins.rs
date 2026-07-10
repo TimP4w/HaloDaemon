@@ -95,6 +95,11 @@ impl PluginsUi {
         );
         ui.add_space(18.0);
 
+        if state.plugins_rediscover_pending {
+            pending_changes_banner(ui, cmd);
+            ui.add_space(18.0);
+        }
+
         widgets::split_columns(ui, 320.0, 18.0, |left, right| {
             self.list_column(left, state, cmd);
             self.detail_column(right, state, cmd);
@@ -728,6 +733,41 @@ fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
             }
         });
     }
+}
+
+/// Full-width call to action shown when one or more staged plugin edits
+/// (enable/disable, grant/revoke, import, delete) haven't been applied to
+/// live devices yet.
+fn pending_changes_banner(ui: &mut egui::Ui, cmd: &CommandTx) {
+    egui::Frame::NONE
+        .fill(theme::a(theme::STAT_AMBER, 0.12))
+        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.4)))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(t!("plugins.pending_changes"))
+                            .font(theme::body(12.5))
+                            .color(theme::TEXT),
+                    );
+                },
+                |ui| {
+                    if widgets::button(
+                        ui,
+                        &t!("plugins.apply_changes"),
+                        ButtonKind::Primary,
+                        Vec2::new(160.0, 32.0),
+                    )
+                    .clicked()
+                    {
+                        crate::domain::actions::plugins::apply_pending_plugin_changes(cmd);
+                    }
+                },
+            );
+        });
 }
 
 fn status_banner(ui: &mut egui::Ui, p: &PluginInfo) {

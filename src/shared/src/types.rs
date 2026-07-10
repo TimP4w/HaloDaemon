@@ -481,6 +481,11 @@ pub struct AppState {
     /// enable/disable state, for the Plugins management screen.
     #[serde(default)]
     pub plugins: Vec<PluginInfo>,
+    /// True when a plugin enable/disable/grant/import/delete has been staged
+    /// but not yet applied to live devices — the Plugins screen invites the
+    /// user to apply it explicitly rather than rediscovering on every edit.
+    #[serde(default)]
+    pub plugins_rediscover_pending: bool,
 }
 
 /// A privileged capability a plugin must declare before the daemon grants it —

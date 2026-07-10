@@ -5,6 +5,9 @@ plugins:
   empty_title: Nessun plugin installato
   empty_hint: Aggiungi uno script Lua per estendere HALO con nuovi dispositivi.
   add: Aggiungi plugin
+  # Banner modifiche in sospeso
+  pending_changes: Hai modifiche ai plugin non ancora applicate. Applicale per attivare o disattivare i dispositivi.
+  apply_changes: Applica modifiche
   # Pannello dettagli
   author: AUTORE
   capabilities: FUNZIONALITÀ

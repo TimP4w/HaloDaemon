@@ -2,6 +2,7 @@
 //! Managing device plugins: enable/disable, import, and delete.
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -9,9 +10,9 @@ use halod_shared::types::Permission;
 
 use crate::state::AppState;
 
-/// Enable or disable a plugin, persist the choice, and re-run discovery so the
-/// change applies to currently-connected hardware: a disabled plugin releases
-/// its device to the native driver; an enabled plugin shadows native again.
+/// Enable or disable a plugin and persist the choice. Staged — see the module
+/// docs; call [`apply_pending_changes`] to hand the device to/from its
+/// native driver.
 pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
     {
         let mut cfg = app.config.write().await;
@@ -22,13 +23,12 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
         crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
     }
     app.request_config_save();
-    rediscover_devices(app).await;
+    mark_pending_and_broadcast(&app).await;
     Ok(())
 }
 
-/// Replace the set of permissions granted to a plugin, persist the choice,
-/// and re-run discovery — an emptied grant leaves the plugin inert if it
-/// declares any permission; a satisfied grant activates it.
+/// Replace the set of permissions granted to a plugin and persist the
+/// choice. Staged — see the module docs.
 pub async fn set_permissions(
     id: String,
     granted: Vec<Permission>,
@@ -44,13 +44,13 @@ pub async fn set_permissions(
         crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
     }
     app.request_config_save();
-    rediscover_devices(app).await;
+    mark_pending_and_broadcast(&app).await;
     Ok(())
 }
 
-/// Install a Lua plugin script into the plugins directory, then re-run
-/// discovery. The source is validated as a manifest first, so a malformed
-/// script is rejected before any file is written.
+/// Install a Lua plugin script into the plugins directory. The source is
+/// validated as a manifest first, so a malformed script is rejected before
+/// any file is written. Staged — see the module docs.
 pub async fn import(filename: String, source: String, app: Arc<AppState>) -> Result<()> {
     let name = sanitize_lua_filename(&filename);
     let manifest = crate::drivers::plugins::parse_manifest(&source, Path::new(&name))
@@ -68,12 +68,13 @@ pub async fn import(filename: String, source: String, app: Arc<AppState>) -> Res
     // otherwise fire one for this exact plugin.
     crate::drivers::plugins::suppress_permission_notice(&manifest.plugin_id);
 
-    reload_and_rediscover(app).await;
+    reload_registry(&app).await;
+    mark_pending_and_broadcast(&app).await;
     Ok(())
 }
 
-/// Delete a user plugin script by id, then re-run discovery. Built-in plugins
-/// have no on-disk script and are refused.
+/// Delete a user plugin script by id. Built-in plugins have no on-disk
+/// script and are refused. Staged — see the module docs.
 pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
     if crate::drivers::plugins::is_builtin(&id) {
         bail!("cannot delete built-in plugin '{id}'");
@@ -102,26 +103,37 @@ pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
         app.request_config_save();
     }
 
-    reload_and_rediscover(app).await;
+    reload_registry(&app).await;
+    mark_pending_and_broadcast(&app).await;
     Ok(())
 }
 
-/// Re-read the plugins directory (picking up added/removed scripts), re-apply
-/// the disabled set, then run a clean-slate re-discovery.
-async fn reload_and_rediscover(app: Arc<AppState>) {
-    crate::drivers::plugins::load_all(&crate::config::plugins_dir());
-    {
-        let cfg = app.config.read().await;
-        crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
-        crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
-    }
+pub async fn apply_pending_changes(app: Arc<AppState>) -> Result<()> {
+    app.plugins_rediscover_pending
+        .store(false, Ordering::Relaxed);
     rediscover_devices(app).await;
+    Ok(())
+}
+
+/// Re-read the plugins directory (picking up added/removed scripts) and
+/// re-apply the disabled/granted sets, without touching live devices.
+async fn reload_registry(app: &Arc<AppState>) {
+    crate::drivers::plugins::load_all(&crate::config::plugins_dir());
+    let cfg = app.config.read().await;
+    crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
+    crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
+}
+
+/// Flag a rediscovery as needed and push the updated plugin listing (and the
+/// pending flag itself) so the GUI can show it immediately.
+async fn mark_pending_and_broadcast(app: &Arc<AppState>) {
+    app.plugins_rediscover_pending
+        .store(true, Ordering::Relaxed);
+    crate::ipc::broadcast_state(app).await;
 }
 
 /// Clean-slate re-discovery: close every device and re-run the startup path,
-/// then broadcast. Closing everything is the only way to correctly hand
-/// hardware between a plugin and its native driver without tracking per-device
-/// discovery handles.
+/// then broadcast.
 async fn rediscover_devices(app: Arc<AppState>) {
     let previous = {
         let mut devices = app.devices.write().await;
@@ -177,5 +189,52 @@ mod tests {
         assert!(!sanitize_lua_filename("../../etc/passwd").contains('/'));
         assert_eq!(sanitize_lua_filename("///"), "plugin.lua");
         assert_eq!(sanitize_lua_filename(""), "plugin.lua");
+    }
+
+    #[tokio::test]
+    async fn set_enabled_stages_without_touching_live_devices() {
+        crate::test_support::with_tmp_config(|app| async move {
+            app.devices.write().await.push(std::sync::Arc::new(
+                crate::test_support::MockDevice::new("stays-open"),
+            ));
+
+            set_enabled("some_plugin".into(), false, app.clone())
+                .await
+                .unwrap();
+
+            assert!(
+                app.plugins_rediscover_pending.load(Ordering::Relaxed),
+                "staged edit must flag a pending rediscover"
+            );
+            assert_eq!(
+                app.devices.read().await.len(),
+                1,
+                "staging must not close/reopen live devices"
+            );
+            assert!(app
+                .config
+                .read()
+                .await
+                .plugins_disabled
+                .contains(&"some_plugin".to_string()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn apply_pending_changes_clears_the_flag() {
+        // Real discovery runs here (initialize_app_state hits actual hardware
+        // on the test machine), so this only asserts the flag transition —
+        // asserting on the resulting device set would depend on what hardware
+        // happens to be attached to the runner.
+        crate::test_support::with_tmp_config(|app| async move {
+            app.plugins_rediscover_pending
+                .store(true, Ordering::Relaxed);
+
+            apply_pending_changes(app.clone()).await.unwrap();
+
+            assert!(!app.plugins_rediscover_pending.load(Ordering::Relaxed));
+        })
+        .await;
     }
 }

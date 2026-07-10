@@ -5,6 +5,9 @@ plugins:
   empty_title: No plugins installed
   empty_hint: Add a Lua plugin script to extend HALO with new devices.
   add: Add plugin
+  # Pending changes banner
+  pending_changes: You have unapplied plugin changes. Apply them to hand devices to or from their plugin.
+  apply_changes: Apply changes
   # Detail panel
   author: AUTHOR
   capabilities: CAPABILITIES
