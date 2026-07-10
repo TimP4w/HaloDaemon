@@ -284,25 +284,38 @@ fn read_adapter_name(num: u8) -> String {
     String::new()
 }
 
+fn read_sysfs_hex(path: std::path::PathBuf) -> Option<u16> {
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
+}
+
 fn read_pci_ids(num: u8) -> Option<(u16, u16, u16, u16)> {
     let link = format!("/sys/bus/i2c/devices/i2c-{}", num);
-    let real = std::fs::canonicalize(&link).ok()?;
-    let mut dir = real.as_path();
-    let read_pci_id = |name: &str| -> Option<u16> {
-        std::fs::read_to_string(dir.join(name))
-            .ok()
-            .and_then(|s| u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
-    };
-    for _ in 0..4 {
-        dir = dir.parent()?;
-        let vendor = read_pci_id("vendor");
-        let device = read_pci_id("device");
-        let sub_vendor = read_pci_id("subsystem_vendor");
-        let sub_device = read_pci_id("subsystem_device");
+    let real = std::fs::canonicalize(&link)
+        .inspect_err(|e| {
+            log::debug!("[SmBusTransport] canonicalize({link}) failed: {e}");
+        })
+        .ok()?;
+
+    // Walk up the device tree from the i2c adapter until we find a PCI device
+    // with all four ID files. No depth limit — NVIDIA's DRM connector nesting
+    // can place the PCI node several levels above the i2c adapter.
+    let mut dir = real.parent().map(std::path::Path::to_path_buf);
+    while let Some(d) = dir {
+        let vendor = read_sysfs_hex(d.join("vendor"));
+        let device = read_sysfs_hex(d.join("device"));
+        let sub_vendor = read_sysfs_hex(d.join("subsystem_vendor"));
+        let sub_device = read_sysfs_hex(d.join("subsystem_device"));
         if let (Some(v), Some(d), Some(sv), Some(sd)) = (vendor, device, sub_vendor, sub_device) {
             return Some((v, d, sv, sd));
         }
+        dir = d.parent().map(std::path::Path::to_path_buf);
     }
+    log::debug!(
+        "[SmBusTransport] i2c-{num}: no PCI device found in ancestry; \
+         canonical path was {real:?}"
+    );
     None
 }
 
