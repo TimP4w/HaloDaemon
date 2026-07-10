@@ -287,6 +287,10 @@ async fn dispatch(
         DaemonCommand::SetPluginEnabled { id, enabled } => {
             registry::usecases::plugins::set_enabled(id, enabled, app).await
         }
+        DaemonCommand::ImportPlugin { filename, source } => {
+            registry::usecases::plugins::import(filename, source, app).await
+        }
+        DaemonCommand::DeletePlugin { id } => registry::usecases::plugins::delete(id, app).await,
         DaemonCommand::SetLogLevel { level } => {
             registry::usecases::settings::set_log_level(level, app).await
         }

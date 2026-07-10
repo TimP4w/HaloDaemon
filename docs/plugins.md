@@ -37,8 +37,13 @@ return {
   -- Which hardware this plugin drives (one table, or an array of them).
   match = { transport = "hid", vid = 0x1234, pid = 0x5678 },
 
-  -- Required identity.
-  identity = { vendor = "Acme", model = "K1", name = "Acme K1" },
+  -- Required identity. `author`, `version` and `description` are optional and
+  -- surfaced in the Plugins screen.
+  identity = {
+    vendor = "Acme", model = "K1", name = "Acme K1",
+    author = "you@example.com", version = "1.0.0",
+    description = "Driver for the Acme K1 keyboard.",
+  },
 
   -- Transport parameters (optional; sensible HID defaults).
   transports = { hid = { report_size = 64, timeout_ms = 1000 } },
@@ -95,12 +100,15 @@ for the same hardware, so this is also how you override a built-in driver.
 
 ### `identity`
 
-| field    | type   | meaning                                              |
-|----------|--------|------------------------------------------------------|
-| `vendor` | string | required                                             |
-| `model`  | string | required                                             |
-| `name`   | string | display name (defaults to `model`)                   |
-| `id`     | string | stable id prefix (defaults to the script file stem)  |
+| field         | type   | meaning                                             |
+|---------------|--------|-----------------------------------------------------|
+| `vendor`      | string | required                                            |
+| `model`       | string | required                                            |
+| `name`        | string | display name (defaults to `model`)                  |
+| `id`          | string | stable id prefix (defaults to the script file stem) |
+| `author`      | string | plugin author, shown in the Plugins screen          |
+| `version`     | string | plugin version, e.g. `"1.2.0"`                      |
+| `description` | string | free-text summary, shown in the Plugins screen      |
 
 ### Capability sections
 

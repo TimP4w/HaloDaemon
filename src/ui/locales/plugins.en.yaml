@@ -1,8 +1,32 @@
 plugins:
   title: Plugins
   subtitle: Device plugins add hardware support without rebuilding the daemon.
+  counts: "%{count} scripts · %{active} active"
   empty_title: No plugins installed
-  empty_hint: Drop a Lua plugin script into the plugins directory, then rescan devices.
-  import_title: Import a plugin repository
-  import_sub: Install and update plugins from a Git repository.
-  import_soon: Coming soon
+  empty_hint: Add a Lua plugin script to extend HALO with new devices.
+  add: Add plugin
+  # Detail panel
+  author: AUTHOR
+  capabilities: CAPABILITIES
+  targets: TARGET DEVICES
+  status_active: Active
+  status_disabled: Disabled
+  enable: Enable
+  disable: Disable
+  delete: Delete script
+  builtin_note: Built-in — cannot be deleted
+  # Add dialog
+  add_title: Add a plugin
+  add_sub: Install a Lua device driver from a file or paste its source.
+  tab_upload: Upload .lua
+  tab_paste: Paste code
+  choose_file: Choose .lua file…
+  upload_hint: Choose a .lua file
+  upload_sub: It is copied into your plugins folder.
+  paste_hint: "-- paste your Lua driver here"
+  name: Name
+  name_hint: e.g. Nanoleaf Shapes
+  cancel: Cancel
+  # Delete confirmation
+  delete_title: Delete script?
+  delete_body: This permanently removes %{name} from your plugins folder.

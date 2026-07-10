@@ -28,7 +28,11 @@ end
 
 return {
   match = { transport = "hid", vid = 0x1234, pid = 0x5678 },
-  identity = { vendor = "Example", model = "Cooler X", name = "Example Cooler X" },
+  identity = {
+    vendor = "Example", model = "Cooler X", name = "Example Cooler X",
+    author = "Your Name", version = "1.0.0",
+    description = "Reference plugin showing RGB, fan and sensor capabilities.",
+  },
   transports = { hid = { report_size = REPORT, timeout_ms = 1000 } },
 
   rgb = {

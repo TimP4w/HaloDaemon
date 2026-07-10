@@ -301,7 +301,7 @@ impl App {
                         );
                     }
                     Page::Plugins => {
-                        crate::ui::screens::plugins::show(ui, &state, &self.cmd);
+                        self.plugins_ui.show(ui, &state, &self.cmd);
                     }
                     Page::Profile(name) => {
                         let name = name.clone();

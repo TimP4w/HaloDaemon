@@ -270,6 +270,15 @@ pub struct Identity {
     /// Optional stable id prefix; defaults to the plugin id (script file stem).
     #[serde(default)]
     pub id: Option<String>,
+    /// Who wrote the plugin (surfaced in the Plugins screen).
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Plugin version string, e.g. "1.2.0".
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Free-text description of what the plugin does.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -352,6 +361,34 @@ impl PluginManifest {
             .name
             .as_deref()
             .unwrap_or(&self.identity.model)
+    }
+
+    /// Declared plugin author (empty when unset).
+    pub fn author(&self) -> &str {
+        self.identity.author.as_deref().unwrap_or("")
+    }
+
+    /// Declared plugin version (empty when unset).
+    pub fn version(&self) -> &str {
+        self.identity.version.as_deref().unwrap_or("")
+    }
+
+    /// Declared plugin description (empty when unset).
+    pub fn description(&self) -> &str {
+        self.identity.description.as_deref().unwrap_or("")
+    }
+
+    /// Device labels the plugin targets — the per-spec display name of every
+    /// match spec, de-duplicated in declaration order.
+    pub fn target_labels(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for spec in &self.match_specs {
+            let label = self.display_name_for(spec);
+            if !out.contains(&label) {
+                out.push(label);
+            }
+        }
+        out
     }
 
     /// The RGB descriptor a matched device advertises, if it has RGB.
@@ -478,6 +515,44 @@ mod tests {
         assert_eq!(m.match_specs[0].vid, Some(0x1234));
         assert_eq!(m.match_specs[0].pid, Some(0x5678));
         assert_eq!(m.id_prefix(), "acme_k1");
+    }
+
+    #[test]
+    fn author_version_description_default_empty_and_parse() {
+        let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
+        assert_eq!(m.author(), "");
+        assert_eq!(m.version(), "");
+        assert_eq!(m.description(), "");
+
+        let src = r#"
+            return {
+              match = { transport = "hid", vid = 1, pid = 2 },
+              identity = {
+                vendor = "Acme", model = "K1",
+                author = "Jane", version = "2.1.0", description = "A keyboard.",
+              },
+            }
+        "#;
+        let m = parse_manifest(src, Path::new("k.lua")).unwrap();
+        assert_eq!(m.author(), "Jane");
+        assert_eq!(m.version(), "2.1.0");
+        assert_eq!(m.description(), "A keyboard.");
+    }
+
+    #[test]
+    fn target_labels_dedupe_per_spec_names() {
+        let src = r#"
+            return {
+              match = {
+                { transport = "hid", vid = 1, pid = 2, name = "Acme K1" },
+                { transport = "hid", vid = 1, pid = 3, name = "Acme K2" },
+                { transport = "hid", vid = 1, pid = 4, name = "Acme K1" },
+              },
+              identity = { vendor = "Acme", model = "K" },
+            }
+        "#;
+        let m = parse_manifest(src, Path::new("k.lua")).unwrap();
+        assert_eq!(m.target_labels(), vec!["Acme K1", "Acme K2"]);
     }
 
     #[test]

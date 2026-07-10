@@ -72,8 +72,22 @@ pub fn list() -> Vec<PluginInfo> {
             path: m.source_path.display().to_string(),
             capabilities: m.capability_labels(),
             enabled: !is_disabled(&m.plugin_id),
+            author: m.author().to_owned(),
+            version: m.version().to_owned(),
+            description: m.description().to_owned(),
+            targets: m.target_labels(),
+            builtin: is_builtin(&m.plugin_id),
         })
         .collect()
+}
+
+/// A plugin compiled into the daemon binary (built-in), keyed by its stem.
+/// Built-ins have no on-disk script in the plugins directory, so they can be
+/// disabled but never deleted through the GUI.
+pub fn is_builtin(plugin_id: &str) -> bool {
+    BUILTIN_PLUGINS
+        .iter()
+        .any(|(name, _)| Path::new(name).file_stem().and_then(|s| s.to_str()) == Some(plugin_id))
 }
 
 /// Plugins shipped inside the daemon binary, loaded before directory plugins.
@@ -293,6 +307,13 @@ mod tests {
         );
         set_disabled(&[]);
         assert!(match_in(&manifests, &handle).is_some());
+    }
+
+    #[test]
+    fn ene_smbus_is_builtin_others_are_not() {
+        assert!(is_builtin("ene_smbus"));
+        assert!(!is_builtin("wled_udp"));
+        assert!(!is_builtin("ene_smbus.lua")); // stem only, not the file name
     }
 
     #[test]

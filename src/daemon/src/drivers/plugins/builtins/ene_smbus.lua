@@ -268,7 +268,11 @@ return {
       name = "ASUS GPU RGB", device_type = "gpu",
     },
   },
-  identity = { vendor = "ASUS/ENE", model = "ENE SMBus", id = "ene" },
+  identity = {
+    vendor = "ASUS/ENE", model = "ENE SMBus", id = "ene",
+    author = "HaloDaemon", version = "1.0.0",
+    description = "ASUS Aura / ENE SMBus RGB for DRAM sticks and GPUs.",
+  },
   rgb = { zones = {}, native_effects = NATIVE_EFFECTS },
 
   -- Broadcast-remap DRAM sticks onto individual addresses before probing.

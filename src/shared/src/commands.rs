@@ -168,6 +168,19 @@ pub enum DaemonCommand {
         id: String,
         enabled: bool,
     },
+    /// Install a Lua plugin script into the plugins directory, then re-run
+    /// discovery. The daemon sanitizes `filename` and validates the source.
+    ImportPlugin {
+        /// Suggested file name, e.g. `"my-driver.lua"`.
+        filename: String,
+        /// Full Lua source of the plugin script.
+        source: String,
+    },
+    /// Delete a user plugin script by id, then re-run discovery. Built-in
+    /// plugins cannot be deleted and the daemon rejects the request.
+    DeletePlugin {
+        id: String,
+    },
     SetLogLevel {
         level: String,
     },
@@ -660,6 +673,26 @@ mod tests {
             v,
             json!({"type": "set_plugin_enabled", "id": "nzxt_kraken", "enabled": false})
         );
+    }
+
+    #[test]
+    fn import_plugin_wire_format() {
+        let v = roundtrip(&DaemonCommand::ImportPlugin {
+            filename: "my-driver.lua".into(),
+            source: "return {}".into(),
+        });
+        assert_eq!(
+            v,
+            json!({"type": "import_plugin", "filename": "my-driver.lua", "source": "return {}"})
+        );
+    }
+
+    #[test]
+    fn delete_plugin_wire_format() {
+        let v = roundtrip(&DaemonCommand::DeletePlugin {
+            id: "my_driver".into(),
+        });
+        assert_eq!(v, json!({"type": "delete_plugin", "id": "my_driver"}));
     }
 
     #[test]

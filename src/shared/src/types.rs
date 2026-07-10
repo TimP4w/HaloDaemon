@@ -487,6 +487,21 @@ pub struct PluginInfo {
     #[serde(default)]
     pub capabilities: Vec<String>,
     pub enabled: bool,
+    /// Plugin author, as declared in the manifest (empty when unset).
+    #[serde(default)]
+    pub author: String,
+    /// Plugin version string, as declared in the manifest (empty when unset).
+    #[serde(default)]
+    pub version: String,
+    /// Free-text description from the manifest (empty when unset).
+    #[serde(default)]
+    pub description: String,
+    /// Device labels the plugin targets, derived from its match specs.
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// True for plugins compiled into the daemon; these cannot be deleted.
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
