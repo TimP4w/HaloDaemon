@@ -491,6 +491,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shipped_audio_spectrum_bars_mode_renders_without_nil_gap() {
+        // Regression: in "bars" mode, the 1px gap between a band's x_end and
+        // the next band's x0 (at the real 400px canvas width, 64 bands) was
+        // never written into the row buffer, leaving a nil hole that crashed
+        // `table.concat` at render time.
+        let src = include_str!("builtins/halo_effects.lua");
+        let params: HashMap<String, EffectParamValue> = [(
+            "fill".to_string(),
+            EffectParamValue::Str("bars".to_string()),
+        )]
+        .into_iter()
+        .collect();
+        let handle = PluginEffectHandle::spawn(
+            src.to_string(),
+            "audio_spectrum".to_string(),
+            params,
+            vec![],
+        );
+        let bytes = handle.render_pixmap(0.0, 0.016).await.unwrap();
+        assert_eq!(bytes.len(), (CANVAS_W * CANVAS_H * 4) as usize);
+    }
+
+    #[tokio::test]
     async fn shipped_example_plasma_renders_a_frame_well_under_the_tick_budget() {
         // Guards against the per-pixel-trig/per-pixel-hsv-call regression:
         // 400x300 pixels in interpreted Lua must stay fast enough for the

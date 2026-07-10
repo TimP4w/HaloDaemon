@@ -181,11 +181,14 @@ impl From<&hidapi::DeviceInfo> for HidDeviceInfo {
 /// Resolve enumerated HID entries to one entry per physical device,
 /// keyed by `(vid, pid, serial)`.
 ///
-/// Uses `DeviceDescriptor::matches` to filter entries. When multiple entries
-/// exist for one physical device (Windows HID collections), the one whose
-/// usage_page/usage satisfies a descriptor's `matches()` is preferred; otherwise
-/// the first entry in the group wins. Result order follows enumeration
-/// first-occurrence so device `idx` assignment stays stable.
+/// Filters entries against both the native `DeviceDescriptor` inventory and
+/// the loaded plugin registry (`plugins::has_match`) — a device driven only
+/// by a plugin, with no native fallback, must still pass this pre-filter or
+/// it never reaches `make_device`. When multiple entries exist for one
+/// physical device (Windows HID collections), the one whose usage_page/usage
+/// satisfies a match is preferred; otherwise the first entry in the group
+/// wins. Result order follows enumeration first-occurrence so device `idx`
+/// assignment stays stable.
 fn pick_hid_devices(entries: &[HidDeviceInfo]) -> Vec<&HidDeviceInfo> {
     let make_probe = |e: &HidDeviceInfo| DiscoveryHandle::Hid {
         vid: e.vid,
@@ -201,9 +204,15 @@ fn pick_hid_devices(entries: &[HidDeviceInfo]) -> Vec<&HidDeviceInfo> {
     let mut order: Vec<(u16, u16, String)> = Vec::new();
     let mut groups: HashMap<(u16, u16, String), Vec<&HidDeviceInfo>> = HashMap::new();
 
+    // Check both `DeviceDescriptor` and plugin registries
+    let is_recognized = |probe: &DiscoveryHandle<'_>| {
+        inventory::iter::<DeviceDescriptor>().any(|d| (d.matches)(probe))
+            || crate::drivers::plugins::has_match(probe)
+    };
+
     for e in entries {
         let probe = make_probe(e);
-        if inventory::iter::<DeviceDescriptor>().all(|d| !(d.matches)(&probe)) {
+        if !is_recognized(&probe) {
             continue;
         }
         let key = (e.vid, e.pid, e.serial.clone());
@@ -220,10 +229,7 @@ fn pick_hid_devices(entries: &[HidDeviceInfo]) -> Vec<&HidDeviceInfo> {
             candidates
                 .iter()
                 .copied()
-                .find(|e| {
-                    let probe = make_probe(e);
-                    inventory::iter::<DeviceDescriptor>().any(|d| (d.matches)(&probe))
-                })
+                .find(|e| is_recognized(&make_probe(e)))
                 .unwrap_or(candidates[0])
         })
         .collect()
@@ -652,6 +658,31 @@ mod tests {
         let picked = pick_hid_devices(&entries);
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].path, "iface2");
+    }
+
+    #[test]
+    fn picker_recognizes_a_plugin_only_device_with_no_native_descriptor() {
+        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent-halod-test-dir"));
+
+        let entry = HidDeviceInfo {
+            vid: 0x1E71,
+            pid: 0x3012, // Kraken Elite RGB 2024 — plugin-only, no native descriptor
+            path: "kraken".into(),
+            iface: 0,
+            serial: "S1".into(),
+            usage_page: 0,
+            usage: 0,
+        };
+        let entries = [entry];
+        let picked = pick_hid_devices(&entries);
+        assert_eq!(
+            picked.len(),
+            1,
+            "a plugin-only HID device must survive the discovery pre-filter"
+        );
     }
 
     #[test]

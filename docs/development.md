@@ -83,7 +83,7 @@ Configuration lives in `~/.config/halod/config.yaml` (Linux) or `%APPDATA%\halod
 
 Implement the `Device` trait. Declare capabilities in `fn capabilities()` — the list of `Capability` variants the device supports (e.g. `Capability::Rgb`, `Capability::Fan`, `Capability::Battery`). Each capability variant has a matching accessor (`as_rgb()`, `as_fan()`, etc.) that returns a trait object.
 
-See any existing device (e.g. `nzxt/devices/kraken.rs`) for a complete example.
+See any existing device (e.g. `steelseries/devices/arctis_nova_pro_wireless.rs`) for a complete example.
 
 ### 2. Add a protocol module (if new)
 
@@ -176,6 +176,6 @@ Write tests for:
 - **Descriptor registration** — inventory smoke tests when adding a new device descriptor
 - **Bug fixes** — add a test that reproduces the bug before fixing it
 
-For tests that need a device or hub trait object, create a minimal `MockDevice`/`MockHub` struct inside the test module. See `f_fan.rs` (`src/daemon/src/drivers/vendors/nzxt/devices/f_fan.rs`) or `ipc/serializer.rs` for examples.
+For tests that need a device or hub trait object, create a minimal `MockDevice`/`MockHub` struct inside the test module, or reuse the shared `MockDevice` in `test_support.rs`. See `ipc/serializer.rs` for an example.
 
 Do not write tests that require real hardware, open sockets, or touch the filesystem.

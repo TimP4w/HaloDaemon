@@ -10,7 +10,7 @@ NZXT's proprietary USB HID wire protocol for Kraken AIO liquid coolers and the R
 
 Two device families share one base HID wire format: firmware query, accessory detection, and raw report I/O are identical. Device-specific framing diverges as follows.
 
-- **Kraken AIO**. Two wire sub-families, selected by `KrakenWire`:
+- **Kraken AIO**. Two wire sub-families, selected by PID:
   - **X3** — **64-byte** HID reports. 8-LED ring; per-channel RGB via `0x22 0x10`/`0x11` + commit `0x22 0xA0`; single pump-head logo LED via `0x2A 0x04`. Pump is on the CPU_OPT header, not USB-controllable.
   - **Z/Elite** — 24-LED ring; combined ring+ext RGB via `0x26 0x14`; USB pump control; LCD panel. Command packets are 64 bytes, except the `0x26 0x14` ring+ext frame, which is a single 124-byte report (it has no sequence nibble and cannot be chunked) sent oversized — the HID framer pads short writes to the report size but never truncates long ones. The LCD bulk path uses a separate USB bulk endpoint (see [Packet layout](#1-packet-layout)).
 - **RGB & Fan Control Hub** — 5 fan channels (RPM/duty/type); per-channel ARGB chains via `0x26 0x04` + commit `0x26 0x06`. Fan/init/status writes are 64 bytes, and the `0x26 0x04` lighting frame is a single `4 + 3·LED`-byte packet sent oversized — the HID framer pads short writes up to the report size but never truncates long ones, so long chains aren't cut off.

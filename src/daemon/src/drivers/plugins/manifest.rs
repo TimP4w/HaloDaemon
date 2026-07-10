@@ -971,6 +971,20 @@ mod tests {
     }
 
     #[test]
+    fn device_type_aio_serializes_as_a_i_o_not_aio() {
+        // Regression guard: serde's snake_case rename inserts an underscore
+        // before every uppercase letter (not just word boundaries), so the
+        // all-caps `AIO` variant becomes "a_i_o", not the more intuitive
+        // "aio" — a real footgun for plugin authors declaring `device_type`.
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2, device_type = "a_i_o" },
+            identity = { vendor = "x", model = "y" },
+        }"#;
+        let m = parse_manifest(src, Path::new("k.lua")).unwrap();
+        assert_eq!(m.match_specs[0].device_type, Some(DeviceType::AIO));
+    }
+
+    #[test]
     fn gpu_spec_without_pci_match_is_rejected() {
         // The GPU I²C bus is shared with the display; a gate is mandatory.
         let src = r#"return {

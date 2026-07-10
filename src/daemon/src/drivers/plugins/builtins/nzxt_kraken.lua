@@ -1,10 +1,11 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- SPDX-FileCopyrightText: liquidctl contributors <https://github.com/liquidctl/liquidctl>
 --
--- NZXT Kraken Z / Elite built-in plugin for HaloDaemon — a full port of the
--- native driver's RGB, pump-fan, sensor, accessory-fan-child, and LCD paths. As
--- a built-in it shadows the native NZXT Kraken driver; disabling it falls back to
--- native.
+-- NZXT Kraken Z / Elite built-in plugin for HaloDaemon — RGB, pump-fan,
+-- sensor, accessory-fan-child, and LCD support. This is the only driver for
+-- these PIDs (there is no native Rust fallback); disabling it makes the
+-- device undetected. See `nzxt_kraken_x3.lua` for the older X53/X63/X73
+-- wire family (no LCD, no software pump/fan control).
 --
 -- Protocol references: docs/protocols/ and liquidctl's nzxt_kraken driver.
 -- Verified offsets: status report 0x75; Z/Elite lighting 0x26 0x14 (GRB, ring
@@ -349,13 +350,17 @@ local function upload_gif(dev, resized)
 end
 
 return {
+  -- One spec per PID so each model gets its own display name and is
+  -- correctly categorized as an AIO (a flat `pids` list can't carry
+  -- per-model overrides — every matched device would show the same name).
   match = {
-    transport = "hid",
-    vid = 0x1E71,
-    -- Kraken Z53/63/73, Elite 2023/2024, Kraken 2023/Plus 2024.
-    pids = { 0x3008, 0x300C, 0x300E, 0x3012, 0x3014 },
+    { transport = "hid", vid = 0x1E71, pid = 0x3008, name = "Kraken Z53/63/73", device_type = "a_i_o" },
+    { transport = "hid", vid = 0x1E71, pid = 0x300C, name = "Kraken Elite 2023", device_type = "a_i_o" },
+    { transport = "hid", vid = 0x1E71, pid = 0x300E, name = "Kraken 2023", device_type = "a_i_o" },
+    { transport = "hid", vid = 0x1E71, pid = 0x3012, name = "Kraken Elite RGB 2024", device_type = "a_i_o" },
+    { transport = "hid", vid = 0x1E71, pid = 0x3014, name = "Kraken Plus 2024", device_type = "a_i_o" },
   },
-  identity = { vendor = "NZXT", model = "Kraken Z", name = "NZXT Kraken Z" },
+  identity = { vendor = "NZXT", model = "Kraken" },
   transports = { hid = { report_size = REPORT, timeout_ms = 1000 } },
 
   rgb = {
@@ -401,7 +406,7 @@ return {
     local size = LCD_SIZES[dev.match.pid] or { 320, 320 }
     lcd_w, lcd_h = size[1], size[2]
     local brightness, rotation = read_lcd_state(dev)
-    log("NZXT Kraken Z initialized")
+    log("NZXT Kraken initialized")
     return {
       ok = true,
       lcd = {

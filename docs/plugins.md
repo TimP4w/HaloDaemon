@@ -237,9 +237,14 @@ per-channel frame composition (you never write a child device):
 The status poll is paused automatically while `detect_accessories` runs, so its
 reads don't race the background poll.
 
-[`plugins/examples/nzxt_kraken.lua`](../plugins/examples/nzxt_kraken.lua) is a
-full port of the NZXT Kraken Z: pump RGB, pump fan, liquid-temp sensor, status
-poll, and an attached RGB fan as a child — everything but LCD.
+The built-in
+[`nzxt_kraken.lua`](../src/daemon/src/drivers/plugins/builtins/nzxt_kraken.lua)
+plugin is a full port of the NZXT Kraken Z/Elite family: pump RGB, pump fan,
+liquid-temp sensor, status poll, an attached RGB fan as a child, and LCD.
+[`nzxt_kraken_x3.lua`](../src/daemon/src/drivers/plugins/builtins/nzxt_kraken_x3.lua)
+covers the older X53/X63/X73 wire family (ring + logo RGB and the same
+accessory-fan-child chaining, but no LCD and no software pump/fan speed
+control).
 
 ### Polling
 

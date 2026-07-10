@@ -38,6 +38,17 @@ fn rgb_effects_wire(is_keyboard: bool, has_per_key: bool, pk_leds_discovered: bo
     }
 }
 
+/// Build `setIndividual` pairs painting every id in `led_ids` a single colour.
+/// Used for a mouse static apply on the PerKey wire, where the keyboard-style
+/// `SET_RANGE 0x00..0xFF` of `per_key_set_all` is rejected (INVALID_ARGUMENT)
+/// because only the discovered firmware ids are valid.
+fn pk_uniform_pairs(led_ids: &[u8], color: RgbColor) -> Vec<(u8, u8, u8, u8)> {
+    led_ids
+        .iter()
+        .map(|&id| (id, color.r, color.g, color.b))
+        .collect()
+}
+
 fn collect_pairs(
     zones: &HashMap<String, HashMap<String, RgbColor>>,
     zone_map: &HashMap<String, usize>,
@@ -86,10 +97,22 @@ impl LogitechDevice {
 
         match wire {
             RgbWire::PerKey => {
-                hidpp.per_key_set_all(color).await.map_err(|e| {
-                    log::warn!("[{}] PER_KEY set-all failed: {e}", self.id);
-                    e
-                })?;
+                // Keyboards accept the whole-range `SET_RANGE 0x00..0xFF`; mice
+                // only accept their discovered firmware ids, so paint those
+                // explicitly to avoid an INVALID_ARGUMENT rejection.
+                if self.is_keyboard() {
+                    hidpp.per_key_set_all(color).await.map_err(|e| {
+                        log::warn!("[{}] PER_KEY set-all failed: {e}", self.id);
+                        e
+                    })?;
+                } else {
+                    let pk_led_ids = { self.state.lock().await.rgb.pk_led_ids.clone() };
+                    let pairs = pk_uniform_pairs(&pk_led_ids, color);
+                    hidpp.write_per_key_pairs(&pairs).await.map_err(|e| {
+                        log::warn!("[{}] PER_KEY set-all (mouse) failed: {e}", self.id);
+                        e
+                    })?;
+                }
             }
             RgbWire::ColorLedEffects => {
                 let mut last_err = None;
@@ -833,5 +856,17 @@ mod tests {
     fn no_per_key_feature_always_stays_rgb_effects() {
         assert_eq!(rgb_effects_wire(false, false, true), RgbWire::RgbEffects);
         assert_eq!(rgb_effects_wire(true, false, true), RgbWire::RgbEffects);
+    }
+
+    #[test]
+    fn pk_uniform_pairs_paints_only_discovered_ids() {
+        // A mouse static apply must target its real firmware ids, not the
+        // keyboard 0x00..0xFF range that firmware rejects.
+        let color = RgbColor { r: 1, g: 2, b: 3 };
+        assert_eq!(
+            pk_uniform_pairs(&[4, 7, 11], color),
+            vec![(4, 1, 2, 3), (7, 1, 2, 3), (11, 1, 2, 3)]
+        );
+        assert!(pk_uniform_pairs(&[], color).is_empty());
     }
 }

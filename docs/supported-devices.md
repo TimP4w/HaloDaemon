@@ -8,7 +8,7 @@ To add a device, see the [development guide](development.md).
 
 | Vendor | Model | VID:PID | Protocol | Transport | Platform |
 |--------|-------|---------|----------|-----------|----------|
-| NZXT | Kraken X53, X63, X73 | 1e71:2007, 1e71:2014 | [NZXT](protocols/nzxt.md) | [HID](transports/hid.md) | 🐧🪟 |
+| NZXT | Kraken X53, X63, X73 | 1e71:2007, 1e71:2014 | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
 | NZXT | Kraken Z53, Z63, Z73 | 1e71:3008 | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
 | NZXT | Kraken Elite 2023 | 1e71:300c | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
 | NZXT | Kraken 2023 | 1e71:300e | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
@@ -30,14 +30,12 @@ To add a device, see the [development guide](development.md).
 |--------|-------|---------|----------|-----------|----------|
 | Logitech | G502 X Plus (wired | wireless) | 046d:c095 | [HID++](protocols/hidpp2.md) | [HID](transports/hid.md) | 🐧🪟 |
 | Logitech | G502 Hero (wired) | 046d:c08b | [HID++](protocols/hidpp2.md) | [HID](transports/hid.md) | 🐧🪟 |
-| Razer | Basilisk V3 | 1532:0099 | [Razer](protocols/razer.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
 
 ## Keyboards
 
 | Vendor | Model | VID:PID | Protocol | Transport | Platform |
 |--------|-------|---------|----------|-----------|----------|
 | Logitech | G PRO X TKL (wired | wireless) | 046d:c352 | [HID++](protocols/hidpp2.md) | [HID](transports/hid.md) | 🐧🪟 |
-| Corsair | K70 RGB MK.2 Low Profile | 1b1c:1b55 | [Corsair NXP](protocols/corsair-nxp.md) | [HID](transports/hid.md) | 🐧🪟 |
 
 > Wireless G502 X Plus and G PRO X TKL connect through the Logitech Lightspeed Receiver (`046d:c547`), which proxies HID++ to the paired device.
 
@@ -75,7 +73,6 @@ To add a device, see the [development guide](development.md).
 | ASUS | Aura USB controllers | 0b05:1866, 1867, 1872, 18a3, 18a5, 18f3, 1939, 19af, 1a30, 1a6c, 1aa6, 1b3b, 1bed | [ASUS Aura USB](protocols/asus-aura-usb.md) | [HID](transports/hid.md) | 🐧🪟 |
 | ASUS/ENE | SMBus RGB (DRAM, GPU) | — | [ENE SMBus](protocols/ene-smbus.md) (built-in [Lua plugin](plugins.md)) | [SMBus](transports/smbus.md) | 🐧🪟 |
 | Corsair | Vengeance / Dominator DDR4/DDR5 DRAM RGB | — | [Corsair DRAM](protocols/corsair-dram.md) (built-in [Lua plugin](plugins.md)) | [SMBus](transports/smbus.md) | 🐧🪟 |
-| Zotac | RTX 5080 AMP Extreme INFINITY (SPECTRA 2.0) | 10DE:2C02 (sub 19DA:1762) | [Zotac Blackwell GPU](protocols/zotac-gpu-blackwell.md) (built-in [Lua plugin](plugins.md)) | [SMBus](transports/smbus.md) | 🐧🪟 |
 
 ## Sensors
 

@@ -1679,8 +1679,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn kraken_example_emits_native_wire_bytes() {
-        // Conformance: the shipped Kraken plugin must encode exactly like the
-        // native NzxtKrakenProtocol (Z/Elite 0x26 0x14 GRB, 0x72 duty profiles).
+        // Conformance: pins the shipped Kraken plugin's wire encoding (Z/Elite
+        // 0x26 0x14 GRB, 0x72 duty profiles) against the documented protocol
+        // (there is no native Rust Kraken driver to cross-check against).
         use crate::drivers::chain::{ChainAdapter, ChainHost};
         use crate::drivers::CHAIN_LINK_KIND_NZXT_ARGB;
         let src = include_str!("builtins/nzxt_kraken.lua");
@@ -1729,6 +1730,150 @@ mod tests {
             assert_eq!(&pkt[0..4], &[0x26, 0x14, 0x01, 0x01]);
             assert_eq!(pkt.len(), 4 + 120);
             assert_eq!(&pkt[4..7], &[20, 10, 30]); // GRB order
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kraken_x3_example_emits_native_wire_bytes() {
+        // Conformance: pins the shipped Kraken X plugin's X3-family wire
+        // encoding (0x22 0x10 per-channel data + 0x22 0xA0 commit; 0x2A 0x04
+        // logo) against the documented protocol.
+        let src = include_str!("builtins/nzxt_kraken_x3.lua");
+        let manifest = super::super::parse_manifest(src, Path::new("nzxt_kraken_x3.lua")).unwrap();
+        let mock = Arc::new(MockTransport::empty());
+        let spec = &manifest.match_specs[0];
+        let dev_match = DevMatch {
+            transport: "hid".into(),
+            bus: None,
+            addr: None,
+            pid: Some(0x2007),
+        };
+        let dev = LuaDevice::with_transport(
+            "k".into(),
+            &manifest,
+            spec,
+            dev_match,
+            PluginIo::Stream {
+                transport: mock.clone(),
+                bulk: None,
+            },
+            tokio::runtime::Handle::current(),
+        );
+
+        // Ring RGB (8 LEDs): two 64-byte 0x22 0x10|n data packets + a 16-byte
+        // 0x22 0xA0 commit.
+        let colors = vec![
+            RgbColor {
+                r: 10,
+                g: 20,
+                b: 30
+            };
+            8
+        ];
+        dev.write_frame("ring", &colors).await.unwrap();
+        {
+            let w = mock.written.lock().await;
+            assert_eq!(w.len(), 3);
+            assert_eq!(&w[0][0..4], &[0x22, 0x10, 0x02, 0x00]);
+            assert_eq!(w[0].len(), 64);
+            assert_eq!(&w[0][4..7], &[20, 10, 30]); // GRB order
+            assert_eq!(&w[1][0..4], &[0x22, 0x11, 0x02, 0x00]);
+            assert_eq!(
+                &w[2][..],
+                &[
+                    0x22, 0xA0, 0x02, 0x00, 0x01, 0x00, 0x00, 0x28, 0x00, 0x00, 0x80, 0x00, 0x32,
+                    0x00, 0x00, 0x01
+                ]
+            );
+        }
+
+        // Logo: 0x2A 0x04 header, GRB at bytes 7-9, footer at bytes 56-59.
+        dev.write_frame(
+            "logo",
+            &[RgbColor {
+                r: 255,
+                g: 0,
+                b: 128,
+            }],
+        )
+        .await
+        .unwrap();
+        {
+            let w = mock.written.lock().await;
+            let pkt = w.last().unwrap();
+            assert_eq!(pkt.len(), 64);
+            assert_eq!(&pkt[0..7], &[0x2A, 0x04, 0x04, 0x04, 0x00, 0x32, 0x00]);
+            assert_eq!((pkt[7], pkt[8], pkt[9]), (0, 255, 128)); // G, R, B
+            assert_eq!(&pkt[56..60], &[0x01, 0x00, 0x01, 0x03]);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nzxt_control_hub_example_emits_native_wire_bytes() {
+        // Conformance: pins the shipped Control Hub plugin's wire encoding
+        // (0x26 0x04 data / 0x26 0x06 commit lighting, 0x62 0x01 fan duty)
+        // against the documented protocol (Linux kernel nzxt-smart2).
+        use crate::drivers::chain::ChainAdapter;
+        use crate::drivers::FanHub;
+        let src = include_str!("builtins/nzxt_control_hub.lua");
+        let manifest =
+            super::super::parse_manifest(src, Path::new("nzxt_control_hub.lua")).unwrap();
+        let mock = Arc::new(MockTransport::empty());
+        let spec = &manifest.match_specs[0];
+        let dev_match = DevMatch {
+            transport: "hid".into(),
+            bus: None,
+            addr: None,
+            pid: Some(0x2022),
+        };
+        let dev = LuaDevice::with_transport(
+            "hub".into(),
+            &manifest,
+            spec,
+            dev_match,
+            PluginIo::Stream {
+                transport: mock.clone(),
+                bulk: None,
+            },
+            tokio::runtime::Handle::current(),
+        );
+
+        // Channel 1 RGB: 0x26 0x04 data (unpadded) + 64-byte 0x26 0x06 commit,
+        // channel bitmask 1<<1 = 0x02.
+        let colors = vec![
+            RgbColor {
+                r: 10,
+                g: 20,
+                b: 30,
+            };
+            2
+        ];
+        ChainAdapter::write_composed_frame(&dev, "1", &colors)
+            .await
+            .unwrap();
+        {
+            let w = mock.written.lock().await;
+            assert_eq!(w.len(), 2);
+            assert_eq!(&w[0][0..4], &[0x26, 0x04, 0x02, 0x00]);
+            assert_eq!(w[0].len(), 4 + 6);
+            assert_eq!(&w[0][4..7], &[20, 10, 30]); // GRB order
+            assert_eq!(w[1].len(), 64);
+            assert_eq!(
+                &w[1][0..16],
+                &[
+                    0x26, 0x06, 0x02, 0x00, 0x01, 0x00, 0x00, 0x18, 0x00, 0x00, 0x80, 0x00, 0x32,
+                    0x00, 0x00, 0x01
+                ]
+            );
+            assert!(w[1][16..].iter().all(|&b| b == 0));
+        }
+
+        // Fan duty: [0x62,0x01,bitmask,duty@3+ch] — channel 2 → bitmask 0x04.
+        FanHub::set_fan_duty(&dev, 2, 75).await.unwrap();
+        {
+            let w = mock.written.lock().await;
+            let pkt = w.last().unwrap();
+            assert_eq!(&pkt[..], &[0x62, 0x01, 0x04, 0, 0, 75, 0, 0, 0, 0, 0]);
         }
     }
 

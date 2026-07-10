@@ -474,16 +474,17 @@ return {
 
     local parts = PARTS
     for y = 0, h - 1 do
+      -- Pre-fill the whole row black first: bar mode leaves a 1px gap
+      -- between x_end and the next band's x0 that no band segment covers.
+      for x = 1, w do
+        parts[x] = black
+      end
       for i = 1, n do
         local s = starts[i]
-        local cb
         if y >= s.y_start then
-          cb = s.bytes
-        else
-          cb = black
-        end
-        for x = s.x0, s.x_end - 1 do
-          parts[x + 1] = cb
+          for x = s.x0, s.x_end - 1 do
+            parts[x + 1] = s.bytes
+          end
         end
       end
       buf:set_bytes(y * w * 4, concat(parts, "", 1, w))

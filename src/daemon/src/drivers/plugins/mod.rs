@@ -294,6 +294,14 @@ const BUILTIN_PLUGINS: &[(&str, &str)] = &[
     ),
     ("nzxt_kraken.lua", include_str!("builtins/nzxt_kraken.lua")),
     (
+        "nzxt_kraken_x3.lua",
+        include_str!("builtins/nzxt_kraken_x3.lua"),
+    ),
+    (
+        "nzxt_control_hub.lua",
+        include_str!("builtins/nzxt_control_hub.lua"),
+    ),
+    (
         "halo_effects.lua",
         include_str!("builtins/halo_effects.lua"),
     ),
@@ -411,7 +419,7 @@ fn build_device(
     };
 
     // `new_cyclic` so the device can hand its children a `FanHub` back-reference
-    // (the chain machinery, mirrored on the native NZXT Kraken).
+    // for the chain machinery (e.g. an NZXT Kraken/Control Hub accessory fan).
     let device = Arc::new_cyclic(|weak| {
         let mut dev = LuaDevice::with_transport(id, manifest, spec, dev_match, transport, runtime);
         dev.set_self_ref(weak.clone());
@@ -448,10 +456,21 @@ pub fn match_handle(handle: &DiscoveryHandle<'_>) -> Option<Arc<dyn Device>> {
     match_in(&registry, handle)
 }
 
+pub fn has_match(handle: &DiscoveryHandle<'_>) -> bool {
+    let Ok(registry) = PLUGIN_REGISTRY.read() else {
+        return false;
+    };
+    registry
+        .iter()
+        .filter(|m| !is_disabled(&m.plugin_id) && permissions_satisfied(m))
+        .any(|m| m.match_spec_for(handle).is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::manifest::PluginType;
     use super::*;
+    use halod_shared::types::DeviceType;
     use std::path::Path;
 
     use super::TEST_GLOBALS_LOCK as GLOBALS_LOCK;
@@ -615,6 +634,64 @@ mod tests {
         assert_eq!(m.capability_labels(), vec!["RGB", "Fan", "Sensor"]);
         assert!(m.needs_worker());
         assert_eq!(m.poll.as_ref().map(|p| p.interval_ms), Some(500));
+    }
+
+    #[test]
+    fn shipped_nzxt_kraken_plugin_parses_per_pid_identity() {
+        // Guards the Z/Elite family plugin's per-PID name/device_type fix
+        // (regression: every matched PID used to show as "Kraken Z" and
+        // categorize as "unknown" instead of AIO).
+        let src = include_str!("builtins/nzxt_kraken.lua");
+        let m = parse_manifest(src, Path::new("nzxt_kraken.lua")).unwrap();
+        assert_eq!(m.match_specs.len(), 5);
+        for spec in &m.match_specs {
+            assert_eq!(spec.device_type, Some(DeviceType::AIO));
+            assert!(spec.name.is_some(), "every PID needs its own display name");
+        }
+        let elite_2024 = m
+            .match_specs
+            .iter()
+            .find(|s| s.pid == Some(0x3012))
+            .expect("0x3012 (Elite RGB 2024) must be matched");
+        assert_eq!(elite_2024.name.as_deref(), Some("Kraken Elite RGB 2024"));
+        assert!(m.fan.is_some());
+        assert!(m.lcd.is_some());
+    }
+
+    #[test]
+    fn shipped_nzxt_kraken_x3_plugin_parses() {
+        // X53/X63/X73: distinct wire family — ring+logo RGB only, no
+        // software pump/fan control, no LCD.
+        let src = include_str!("builtins/nzxt_kraken_x3.lua");
+        let m = parse_manifest(src, Path::new("nzxt_kraken_x3.lua")).unwrap();
+        assert_eq!(m.match_specs.len(), 2);
+        for spec in &m.match_specs {
+            assert_eq!(spec.device_type, Some(DeviceType::AIO));
+            assert_eq!(spec.name.as_deref(), Some("Kraken X53/X63/X73"));
+        }
+        assert!(m.match_specs.iter().any(|s| s.pid == Some(0x2007)));
+        assert!(m.match_specs.iter().any(|s| s.pid == Some(0x2014)));
+        assert!(m.fan.is_none(), "X3 has no software pump/fan control");
+        assert!(m.lcd.is_none(), "X3 has no LCD");
+        let zones = &m.rgb.as_ref().unwrap().zones;
+        assert_eq!(zones.len(), 2);
+        assert_eq!(zones[0].leds.len(), 8);
+        assert_eq!(zones[1].leds.len(), 1);
+    }
+
+    #[test]
+    fn shipped_nzxt_control_hub_plugin_parses() {
+        let src = include_str!("builtins/nzxt_control_hub.lua");
+        let m = parse_manifest(src, Path::new("nzxt_control_hub.lua")).unwrap();
+        assert_eq!(m.match_specs.len(), 1);
+        assert_eq!(m.match_specs[0].pid, Some(0x2022));
+        assert_eq!(m.match_specs[0].device_type, Some(DeviceType::Hub));
+        assert!(m.rgb.is_none(), "hub has no LEDs of its own");
+        assert!(m.fan.is_none(), "hub has no fan of its own");
+        assert!(m.sensor.is_none());
+        let chain = m.chain.as_ref().unwrap();
+        assert_eq!(chain.channels.len(), 5);
+        assert!(chain.accessories.iter().all(|a| a.fan));
     }
 
     #[test]

@@ -5,6 +5,5 @@ pub mod asus;
 pub mod generic;
 pub mod logitech;
 pub mod nvidia;
-pub mod nzxt;
 pub mod philips;
 pub mod steelseries;
