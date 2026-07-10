@@ -261,6 +261,17 @@ mod tests {
     }
 
     #[test]
+    fn shipped_example_plugin_parses() {
+        // Guards the documented example against drift with the manifest schema.
+        let src = include_str!("../../../../../plugins/examples/example_device.lua");
+        let m = parse_manifest(src, Path::new("example_device.lua")).unwrap();
+        assert_eq!(m.identity.vendor, "Example");
+        assert_eq!(m.capability_labels(), vec!["RGB", "Fan", "Sensor"]);
+        assert!(m.needs_worker());
+        assert_eq!(m.poll.as_ref().map(|p| p.interval_ms), Some(500));
+    }
+
+    #[test]
     fn capability_labels_reflect_manifest_sections() {
         let src = r#"
             return {

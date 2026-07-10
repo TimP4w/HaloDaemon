@@ -140,6 +140,18 @@ inventory::submit!(DeviceDescriptor {
 it in `AppState`, restores its saved config, runs `discover_children()`, and calls
 `after_register()`.
 
+### Plugins — devices without recompiling
+
+Native drivers register at **compile time** via `inventory`. **Device plugins**
+([drivers/plugins/](../src/daemon/src/drivers/plugins/)) add a parallel **runtime**
+registry: `load_all()` reads Lua scripts from the plugins directory at startup, and
+`make_device()` consults `plugins::match_handle()` *before* the native descriptors —
+so a plugin **shadows** a native driver for the same hardware. A single generic
+`LuaDevice` implements the `Device` + capability traits and forwards each call into a
+per-device Lua worker thread (which owns the VM + transport). Plugins expose only
+existing capability *kinds*; the capability taxonomy and engines stay native and
+type-safe. See [docs/plugins.md](plugins.md) for the authoring guide.
+
 ## IPC and usecases — the daemon's public API
 
 The daemon and GUI are separate processes talking over a Unix domain socket
