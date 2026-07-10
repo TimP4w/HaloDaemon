@@ -13,6 +13,9 @@
 
 mod device;
 mod manifest;
+mod sandbox;
+mod transport_api;
+mod worker;
 
 pub use device::LuaDevice;
 pub use manifest::{parse_manifest, PluginManifest};
@@ -20,6 +23,8 @@ pub use manifest::{parse_manifest, PluginManifest};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use crate::drivers::transports::hid::HidTransport;
+use crate::drivers::transports::Transport;
 use crate::drivers::Device;
 use crate::registry::discovery::DiscoveryHandle;
 
@@ -63,8 +68,8 @@ fn load_one(path: &Path) -> anyhow::Result<PluginManifest> {
     parse_manifest(&source, path)
 }
 
-/// Build a device from a matched manifest and the handle that matched it.
-fn build_device(manifest: &PluginManifest, handle: &DiscoveryHandle<'_>) -> Arc<dyn Device> {
+/// Stable device id from a matched manifest + handle.
+fn device_id(manifest: &PluginManifest, handle: &DiscoveryHandle<'_>) -> String {
     let suffix = match handle {
         DiscoveryHandle::Hid {
             serial: Some(s), ..
@@ -72,8 +77,59 @@ fn build_device(manifest: &PluginManifest, handle: &DiscoveryHandle<'_>) -> Arc<
         DiscoveryHandle::Hid { idx, .. } => idx.to_string(),
         _ => "0".to_owned(),
     };
-    let id = format!("{}-{}", manifest.id_prefix(), suffix);
-    Arc::new(LuaDevice::new(id, manifest))
+    format!("{}-{}", manifest.id_prefix(), suffix)
+}
+
+/// Open the HID transport a plugin declares against the matched handle's path.
+fn open_hid_transport(
+    manifest: &PluginManifest,
+    handle: &DiscoveryHandle<'_>,
+) -> anyhow::Result<Arc<dyn Transport>> {
+    let DiscoveryHandle::Hid { path, .. } = handle else {
+        anyhow::bail!("plugin '{}' matched a non-HID handle", manifest.plugin_id);
+    };
+    let hid = manifest.transports.hid.clone().unwrap_or_default();
+    let transport = HidTransport::open(
+        path,
+        Some(hid.report_size),
+        hid.timeout_ms,
+        hid.feature_report,
+        None,
+    )?;
+    Ok(Arc::new(transport))
+}
+
+/// Build a device from a matched manifest and the handle that matched it.
+/// Device-only plugins need no runtime/transport; capability plugins open their
+/// transport and spawn a worker. Returns `None` if the transport can't be opened
+/// (so a native driver can still claim the hardware).
+fn build_device(
+    manifest: &PluginManifest,
+    handle: &DiscoveryHandle<'_>,
+) -> Option<Arc<dyn Device>> {
+    let id = device_id(manifest, handle);
+    if !manifest.needs_worker() {
+        return Some(Arc::new(LuaDevice::device_only(id, manifest)));
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        log::warn!(
+            "plugin '{}' needs a worker but no runtime is available",
+            manifest.plugin_id
+        );
+        return None;
+    };
+    match open_hid_transport(manifest, handle) {
+        Ok(transport) => Some(Arc::new(LuaDevice::with_transport(
+            id, manifest, transport, runtime,
+        ))),
+        Err(e) => {
+            log::warn!(
+                "plugin '{}' transport open failed: {e:#}",
+                manifest.plugin_id
+            );
+            None
+        }
+    }
 }
 
 /// Match a handle against a given manifest slice (pure — used by tests and by
@@ -85,7 +141,7 @@ pub fn match_in(
     manifests
         .iter()
         .find(|m| m.match_spec.matches(handle))
-        .map(|m| build_device(m, handle))
+        .and_then(|m| build_device(m, handle))
 }
 
 /// Match a discovery handle against every loaded plugin. Consulted by

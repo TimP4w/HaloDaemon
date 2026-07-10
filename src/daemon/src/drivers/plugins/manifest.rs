@@ -7,11 +7,68 @@
 //! actually matches.
 
 use anyhow::{anyhow, bail, Result};
-use mlua::{Lua, LuaSerdeExt};
+use halod_shared::types::{NativeEffect, RgbDescriptor, RgbZone};
+use mlua::{DeserializeOptions, Lua, LuaSerdeExt};
 use serde::Deserialize;
 use std::path::Path;
 
 use crate::registry::discovery::DiscoveryHandle;
+
+fn default_report_size() -> usize {
+    64
+}
+
+fn default_timeout_ms() -> i32 {
+    1000
+}
+
+/// HID transport parameters a plugin declares. The device path comes from the
+/// matched discovery handle, not the manifest.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HidConfig {
+    #[serde(default = "default_report_size")]
+    pub report_size: usize,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: i32,
+    #[serde(default)]
+    pub feature_report: bool,
+}
+
+impl Default for HidConfig {
+    fn default() -> Self {
+        Self {
+            report_size: default_report_size(),
+            timeout_ms: default_timeout_ms(),
+            feature_report: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TransportsConfig {
+    #[serde(default)]
+    pub hid: Option<HidConfig>,
+}
+
+/// RGB capability data (zones + native effects). Callbacks (`apply`,
+/// `write_frame`) live as sibling functions the worker reads separately.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RgbManifest {
+    pub zones: Vec<RgbZone>,
+    #[serde(default)]
+    pub native_effects: Vec<NativeEffect>,
+}
+
+/// Fan capability marker (pump/fan channel). Presence enables the capability.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FanManifest {
+    #[serde(default)]
+    pub channel: u8,
+}
+
+/// Sensor capability marker (data-less; readings come from `get_sensors`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SensorManifest {}
 
 /// Declarative device match — compiled to the `DeviceDescriptor::matches`
 /// predicate shape. `None` fields mean "don't care".
@@ -45,6 +102,14 @@ struct RawManifest {
     #[serde(rename = "match")]
     match_spec: MatchSpec,
     identity: Identity,
+    #[serde(default)]
+    transports: TransportsConfig,
+    #[serde(default)]
+    rgb: Option<RgbManifest>,
+    #[serde(default)]
+    fan: Option<FanManifest>,
+    #[serde(default)]
+    sensor: Option<SensorManifest>,
 }
 
 /// A parsed, validated plugin ready to be matched against discovery handles.
@@ -57,6 +122,10 @@ pub struct PluginManifest {
     pub script_source: String,
     pub match_spec: MatchSpec,
     pub identity: Identity,
+    pub transports: TransportsConfig,
+    pub rgb: Option<RgbManifest>,
+    pub fan: Option<FanManifest>,
+    pub sensor: Option<SensorManifest>,
 }
 
 impl MatchSpec {
@@ -98,6 +167,20 @@ impl PluginManifest {
             .as_deref()
             .unwrap_or(&self.identity.model)
     }
+
+    /// The RGB descriptor a matched device advertises, if it has RGB.
+    pub fn rgb_descriptor(&self) -> Option<RgbDescriptor> {
+        self.rgb.as_ref().map(|r| RgbDescriptor {
+            zones: r.zones.clone(),
+            native_effects: r.native_effects.clone(),
+        })
+    }
+
+    /// True when the plugin declares any capability that needs a live transport
+    /// + worker (RGB / fan / sensor). Device-only plugins skip the worker.
+    pub fn needs_worker(&self) -> bool {
+        self.rgb.is_some() || self.fan.is_some() || self.sensor.is_some()
+    }
 }
 
 /// Parse (and validate) a plugin script's manifest. Does not register it.
@@ -113,8 +196,12 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         .load(source)
         .eval()
         .map_err(|e| anyhow!("lua evaluation failed: {e}"))?;
+    // The manifest table also holds callback *functions* as sibling keys; skip
+    // unsupported types (functions → nil) so serde ignores them, rather than
+    // erroring on the first function it meets.
+    let options = DeserializeOptions::new().deny_unsupported_types(false);
     let raw: RawManifest = lua
-        .from_value(value)
+        .from_value_with(value, options)
         .map_err(|e| anyhow!("manifest table is malformed: {e}"))?;
 
     // v1 supports HID only; other transports land in later steps.
@@ -131,6 +218,10 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         script_source: source.to_owned(),
         match_spec: raw.match_spec,
         identity: raw.identity,
+        transports: raw.transports,
+        rgb: raw.rgb,
+        fan: raw.fan,
+        sensor: raw.sensor,
     })
 }
 

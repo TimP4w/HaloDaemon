@@ -164,9 +164,13 @@ pub trait Transport: Send + Sync {
         self.read(size).await
     }
 
+    // `Self: Sized` keeps this generic method out of the vtable so `dyn
+    // Transport` stays object-safe (the plugin layer holds `Arc<dyn Transport>`).
+    // Concrete callers are unaffected.
     async fn read_matching<F>(&self, size: usize, predicate: F, max_tries: usize) -> Option<Vec<u8>>
     where
         F: Fn(&[u8]) -> bool + Send,
+        Self: Sized,
     {
         for i in 0..max_tries {
             match self.read(size).await {
