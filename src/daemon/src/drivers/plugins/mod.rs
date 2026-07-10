@@ -15,6 +15,7 @@ mod backends;
 mod bytebuf;
 mod chain_leaf;
 mod device;
+mod effect_worker;
 mod image_api;
 mod manifest;
 mod sandbox;
@@ -23,6 +24,7 @@ mod transport_api;
 mod worker;
 
 pub use device::LuaDevice;
+pub use effect_worker::{LedCoord, PluginEffectHandle};
 pub use manifest::{parse_manifest, EffectKind, PluginManifest, ProbeMode};
 pub use scan::plugin_smbus_scan_entries;
 pub use worker::run_pre_scan;
@@ -31,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use halod_shared::types::{Animation, Permission, PluginInfo};
+use halod_shared::types::{Animation, EffectParamValue, Permission, PluginInfo};
 
 use crate::drivers::Device;
 use crate::registry::discovery::DiscoveryHandle;
@@ -44,6 +46,14 @@ mod corsair_test;
 mod ene_test;
 #[cfg(test)]
 mod lcd_test;
+
+/// `PLUGIN_REGISTRY`/`EFFECT_REGISTRY`/`DISABLED`/`GRANTED` are process-wide
+/// statics; any test (in this module or elsewhere, e.g. the RGB engine's
+/// plugin-effect integration tests) that mutates them via `load_all`/
+/// `set_disabled`/`set_granted` must hold this lock for its duration so it
+/// can't race a sibling test running on another thread.
+#[cfg(test)]
+pub(crate) static TEST_GLOBALS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 static PLUGIN_REGISTRY: RwLock<Vec<PluginManifest>> = RwLock::new(Vec::new());
 /// Plugin ids the user disabled. `match_handle` skips these, so a disabled
@@ -111,6 +121,45 @@ pub fn effect_entry(catalog_id: &str) -> Option<PluginEffectEntry> {
         .iter()
         .find(|e| e.catalog_id == catalog_id && !is_disabled(&e.plugin_id))
         .cloned()
+}
+
+/// Spawn a worker for a registered pixmap effect. `None` for an unknown,
+/// disabled, or wrong-kind id — the caller falls back to a native default.
+pub fn build_pixmap_effect(
+    catalog_id: &str,
+    params: &HashMap<String, EffectParamValue>,
+) -> Option<PluginEffectHandle> {
+    build_effect_handle(EffectKind::Pixmap, catalog_id, params)
+}
+
+/// Spawn a worker for a registered direct effect. `None` for an unknown,
+/// disabled, or wrong-kind id — the caller falls back to a native default.
+pub fn build_direct_effect(
+    catalog_id: &str,
+    params: &HashMap<String, EffectParamValue>,
+) -> Option<PluginEffectHandle> {
+    build_effect_handle(EffectKind::Direct, catalog_id, params)
+}
+
+fn build_effect_handle(
+    kind: EffectKind,
+    catalog_id: &str,
+    params: &HashMap<String, EffectParamValue>,
+) -> Option<PluginEffectHandle> {
+    let entry = effect_entry(catalog_id)?;
+    if entry.kind != kind {
+        return None;
+    }
+    let effect_id = catalog_id
+        .strip_prefix(&format!("{}:", entry.plugin_id))?
+        .to_string();
+    let granted = granted_for(&entry.plugin_id);
+    Some(PluginEffectHandle::spawn(
+        entry.script_source,
+        effect_id,
+        params.clone(),
+        granted,
+    ))
 }
 
 /// Replace the disabled-plugin set (from `config.plugins_disabled`).
@@ -393,12 +442,8 @@ pub fn match_handle(handle: &DiscoveryHandle<'_>) -> Option<Arc<dyn Device>> {
 mod tests {
     use super::*;
     use std::path::Path;
-    use std::sync::Mutex;
 
-    /// `GRANTED`/`DISABLED` are process-wide statics; any test that mutates
-    /// them must hold this lock for its duration so it can't race a sibling
-    /// test running in another thread.
-    static GLOBALS_LOCK: Mutex<()> = Mutex::new(());
+    use super::TEST_GLOBALS_LOCK as GLOBALS_LOCK;
 
     fn manifest() -> PluginManifest {
         let src = r#"

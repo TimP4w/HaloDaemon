@@ -53,11 +53,19 @@ struct LivePixmap {
     key: String,
     effect: Box<dyn FrameSource>,
     pixmap: Pixmap,
+    /// Present when `key`'s effect id is a plugin-registered one. `effect`
+    /// stays a native fallback (`canvas::default_source()`) so a worker
+    /// error can drop this to `None` and the tick still renders something.
+    plugin: Option<crate::drivers::plugins::PluginEffectHandle>,
 }
 
 struct LiveDirect {
     key: String,
     effect: Box<dyn DirectLedEffect>,
+    /// Present when `key`'s effect id is a plugin-registered one. `effect`
+    /// stays `direct::off_effect()` so a worker error can drop this to
+    /// `None` and the tick still renders something (off).
+    plugin: Option<crate::drivers::plugins::PluginEffectHandle>,
 }
 
 pub struct RgbEngine {
@@ -94,11 +102,23 @@ fn resolve_instance(zone: &PlacedZone, cs: &CanvasState) -> (String, Option<Effe
     }
 }
 
-fn build_pixmap_effect(def: Option<&EffectDef>) -> Box<dyn FrameSource> {
-    match def {
-        Some(d) => canvas::build(&d.effect_id, &d.params).unwrap_or_else(canvas::default_source),
-        None => canvas::default_source(),
+/// Build a pixmap instance: a native `FrameSource` when the id is a built-in
+/// effect, or a native fallback plus a live plugin worker when it's a
+/// registered plugin effect id, or just the fallback for an unknown id.
+fn build_pixmap_effect(
+    def: Option<&EffectDef>,
+) -> (
+    Box<dyn FrameSource>,
+    Option<crate::drivers::plugins::PluginEffectHandle>,
+) {
+    let Some(d) = def else {
+        return (canvas::default_source(), None);
+    };
+    if let Some(fx) = canvas::build(&d.effect_id, &d.params) {
+        return (fx, None);
     }
+    let plugin = crate::drivers::plugins::build_pixmap_effect(&d.effect_id, &d.params);
+    (canvas::default_source(), plugin)
 }
 
 /// Number of rings for per-ring motion, or 1 for non-ring / indivisible zones.
@@ -116,7 +136,11 @@ fn ring_count_for(zone: &RgbZone) -> usize {
     }
 }
 
-fn direct_zone_colors(effect: &dyn DirectLedEffect, zone: &RgbZone, t: f32) -> Vec<RgbColor> {
+/// Per-LED chain/spatial coordinates for a zone — the `(p, p_ring, nx, ny)`
+/// tuple every direct effect (native or plugin) computes its color from.
+/// Shared by `direct_zone_colors` (native, calls `led_color` inline) and the
+/// plugin path (batches these into one `led_colors` round-trip).
+fn zone_led_coords(zone: &RgbZone) -> Vec<(f32, f32, f32, f32)> {
     let n = zone.leds.len();
     let last = n.saturating_sub(1).max(1) as f32;
     let ring_count = ring_count_for(zone);
@@ -133,7 +157,16 @@ fn direct_zone_colors(effect: &dyn DirectLedEffect, zone: &RgbZone, t: f32) -> V
             } else {
                 p
             };
-            let c = effect.led_color(p, p_ring, led.x, led.y, t);
+            (p, p_ring, led.x, led.y)
+        })
+        .collect()
+}
+
+fn direct_zone_colors(effect: &dyn DirectLedEffect, zone: &RgbZone, t: f32) -> Vec<RgbColor> {
+    zone_led_coords(zone)
+        .into_iter()
+        .map(|(p, p_ring, nx, ny)| {
+            let c = effect.led_color(p, p_ring, nx, ny, t);
             RgbColor {
                 r: linear_to_led(c.r, LED_GAMMA),
                 g: linear_to_led(c.g, LED_GAMMA),
@@ -198,16 +231,21 @@ impl RgbEngine {
         self.frame_tx.subscribe()
     }
 
+    /// Native + plugin-declared pixmap effects. Not memoized (unlike the
+    /// pre-plugin `LazyLock`) since plugins can load/unload at runtime; the
+    /// merge itself is a cheap `RwLock` read + small-struct clone.
     pub fn available_effect_descriptors() -> Vec<Animation> {
-        static DESCRIPTORS: std::sync::LazyLock<Vec<Animation>> =
-            std::sync::LazyLock::new(canvas::all_descriptors);
-        DESCRIPTORS.clone()
+        let mut v = canvas::all_descriptors();
+        v.extend(crate::drivers::plugins::pixmap_effect_descriptors());
+        v
     }
 
+    /// Native + plugin-declared direct effects. See
+    /// [`Self::available_effect_descriptors`] for why this isn't memoized.
     pub fn direct_effect_descriptors() -> Vec<Animation> {
-        static DESCRIPTORS: std::sync::LazyLock<Vec<Animation>> =
-            std::sync::LazyLock::new(direct::direct_descriptors);
-        DESCRIPTORS.clone()
+        let mut v = direct::direct_descriptors();
+        v.extend(crate::drivers::plugins::direct_effect_descriptors());
+        v
     }
 
     pub async fn start(
@@ -347,12 +385,14 @@ impl RgbEngine {
                     log::error!("canvas: failed to allocate pixmap for '{key}', skipping");
                     continue;
                 };
+                let (effect, plugin) = build_pixmap_effect(def.as_ref());
                 live.insert(
                     key.clone(),
                     LivePixmap {
                         key: want,
-                        effect: build_pixmap_effect(def.as_ref()),
+                        effect,
                         pixmap,
+                        plugin,
                     },
                 );
             }
@@ -360,7 +400,29 @@ impl RgbEngine {
         }
         for key in &built {
             let lp = live.get_mut(key).expect("instance built above");
-            lp.effect.render(&mut lp.pixmap, t, dt);
+            if let Some(handle) = &lp.plugin {
+                match handle.render_pixmap(t, dt).await {
+                    Ok(bytes) if bytes.len() == lp.pixmap.data().len() => {
+                        lp.pixmap.data_mut().copy_from_slice(&bytes);
+                    }
+                    Ok(bytes) => {
+                        log::warn!(
+                            "plugin pixmap effect '{key}' returned {} bytes, expected {}; disabling for this session",
+                            bytes.len(),
+                            lp.pixmap.data().len()
+                        );
+                        lp.plugin = None;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "plugin pixmap effect '{key}' render failed: {e:#}; disabling for this session"
+                        );
+                        lp.plugin = None;
+                    }
+                }
+            } else {
+                lp.effect.render(&mut lp.pixmap, t, dt);
+            }
         }
 
         for (key, zones) in &groups {
@@ -421,13 +483,80 @@ impl RgbEngine {
             let want = format!("{id}|{}", params_key(params));
             let stale = live.get(dev.id()).map(|ld| ld.key != want).unwrap_or(true);
             if stale {
-                let effect = direct::build_direct(id, params).unwrap_or_else(|| {
-                    log::warn!("Unknown direct effect id '{id}' on {}; leds off", dev.id());
-                    direct::off_effect()
-                });
-                live.insert(dev.id().to_string(), LiveDirect { key: want, effect });
+                let (effect, plugin) = match direct::build_direct(id, params) {
+                    Some(fx) => (fx, None),
+                    None => match crate::drivers::plugins::build_direct_effect(id, params) {
+                        Some(handle) => (direct::off_effect(), Some(handle)),
+                        None => {
+                            log::warn!("Unknown direct effect id '{id}' on {}; leds off", dev.id());
+                            (direct::off_effect(), None)
+                        }
+                    },
+                };
+                live.insert(
+                    dev.id().to_string(),
+                    LiveDirect {
+                        key: want,
+                        effect,
+                        plugin,
+                    },
+                );
             }
             let ld = live.get_mut(dev.id()).expect("built above");
+            let Some(rgb) = dev.as_rgb() else { continue };
+
+            if let Some(handle) = ld.plugin.clone() {
+                for rgb_zone in &rgb.descriptor().zones {
+                    let coords = zone_led_coords(rgb_zone);
+                    let leds: Vec<crate::drivers::plugins::LedCoord> = coords
+                        .iter()
+                        .map(|&(p, p_ring, nx, ny)| crate::drivers::plugins::LedCoord {
+                            p,
+                            p_ring,
+                            nx,
+                            ny,
+                        })
+                        .collect();
+                    let colors = match handle.led_colors(leds, t, dt).await {
+                        Ok(out) if out.len() == coords.len() => out
+                            .into_iter()
+                            .map(|c| RgbColor {
+                                r: linear_to_led(c.r, LED_GAMMA),
+                                g: linear_to_led(c.g, LED_GAMMA),
+                                b: linear_to_led(c.b, LED_GAMMA),
+                            })
+                            .collect(),
+                        Ok(out) => {
+                            log::warn!(
+                                "plugin direct effect '{id}' returned {} colors for {} LEDs on {}; disabling for this session",
+                                out.len(),
+                                coords.len(),
+                                dev.id()
+                            );
+                            ld.plugin = None;
+                            continue;
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "plugin direct effect '{id}' failed on {}: {e:#}; disabling for this session",
+                                dev.id()
+                            );
+                            ld.plugin = None;
+                            continue;
+                        }
+                    };
+                    if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
+                        led_colors.extend(entries);
+                        pending
+                            .entry(dev.id().to_string())
+                            .or_insert_with(|| (Arc::clone(dev), Vec::new()))
+                            .1
+                            .push((rgb_zone.id.clone(), colors));
+                    }
+                }
+                continue;
+            }
+
             if let Some(sensor_id) = ld.effect.sensor_id().map(|s| s.to_string()) {
                 if sensors.is_none() {
                     sensors = Some(self.app_state.snapshot_sensors().await);
@@ -439,7 +568,6 @@ impl RgbEngine {
                 ld.effect.set_sensor_value(value);
             }
             ld.effect.tick(t, dt);
-            let Some(rgb) = dev.as_rgb() else { continue };
             for rgb_zone in &rgb.descriptor().zones {
                 let colors = direct_zone_colors(ld.effect.as_ref(), rgb_zone, t);
                 if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
@@ -1374,5 +1502,137 @@ mod tests {
             ("floor", EffectParamValue::Float(0.0)),
             ("color_mode", EffectParamValue::Str("solid".to_string())),
         ])
+    }
+
+    // ── Plugin-declared effects (end-to-end through a live tick) ───────────
+
+    /// Load a single-file plugin declaring one pixmap and one direct effect
+    /// into the (process-wide) plugin registry. Caller must hold
+    /// `crate::drivers::plugins::TEST_GLOBALS_LOCK` for the duration.
+    fn load_test_effect_plugin() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("engine_test_fx.lua"),
+            r#"
+                return {
+                  identity = { vendor = "t", model = "t" },
+                  effects = {
+                    { kind = "pixmap", id = "solid", name = "Solid" },
+                    { kind = "direct", id = "ramp", name = "Ramp" },
+                  },
+                  render_solid = function(buf, t, dt, params)
+                    for i = 0, #buf - 1, 4 do
+                      buf:set_u8(i, 9)
+                      buf:set_u8(i + 1, 8)
+                      buf:set_u8(i + 2, 7)
+                      buf:set_u8(i + 3, 255)
+                    end
+                  end,
+                  led_colors_ramp = function(leds, t, dt, params)
+                    local out = {}
+                    for i, led in ipairs(leds) do
+                      out[i] = { r = led.p, g = 0, b = 0 }
+                    end
+                    return out
+                  end,
+                }
+            "#,
+        )
+        .unwrap();
+        crate::drivers::plugins::load_all(tmp.path());
+        tmp
+    }
+
+    async fn set_default_effect(app: &Arc<AppState>, def: EffectDef) {
+        let mut cfg = app.config.write().await;
+        let profile = cfg
+            .profiles
+            .get_mut(halod_shared::types::DEFAULT_PROFILE_NAME)
+            .unwrap();
+        profile.lighting.canvas = Some(CanvasState {
+            default_effect: Some("inst".to_string()),
+            effects: [("inst".to_string(), def)].into_iter().collect(),
+            ..Default::default()
+        });
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn tick_renders_a_plugin_pixmap_effect_end_to_end() {
+        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _tmp = load_test_effect_plugin();
+
+        let app = make_app();
+        let zone = make_zone("dev0", "ring");
+        let dev = MockRgbDevice::new_with_zones("dev0", "ring", 2, false, vec![zone]);
+        app.devices
+            .write()
+            .await
+            .push(dev.clone() as Arc<dyn Device>);
+        set_default_effect(
+            &app,
+            EffectDef {
+                effect_id: "engine_test_fx:solid".to_string(),
+                name: None,
+                params: Default::default(),
+            },
+        )
+        .await;
+
+        let engine = RgbEngine::new(app).await;
+        engine.tick(0.0, 0.016, 0).await;
+        engine.drain_writes().await;
+
+        let colors = dev.last_colors.lock().unwrap().clone().unwrap();
+        // The pixmap buffer holds linear-light bytes; the sampler gamma-encodes
+        // on read (`linear_to_led`), so the raw fill (9,8,7) comes out as this.
+        let expected = RgbColor {
+            r: linear_to_led(9.0 / 255.0, LED_GAMMA),
+            g: linear_to_led(8.0 / 255.0, LED_GAMMA),
+            b: linear_to_led(7.0 / 255.0, LED_GAMMA),
+        };
+        assert!(
+            colors.iter().all(|c| *c == expected),
+            "expected the plugin's solid fill sampled into the zone as {expected:?}, got {colors:?}"
+        );
+
+        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent-halod-test-dir"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn tick_renders_a_plugin_direct_effect_end_to_end() {
+        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _tmp = load_test_effect_plugin();
+
+        let app = make_app();
+        let dev = MockRgbDevice::new("dev0", "ring", 3, false);
+        *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+            id: "engine_test_fx:ramp".to_string(),
+            params: HashMap::new(),
+        });
+        app.devices
+            .write()
+            .await
+            .push(dev.clone() as Arc<dyn Device>);
+
+        let engine = RgbEngine::new(app).await;
+        engine.tick(0.0, 0.016, 0).await;
+        engine.drain_writes().await;
+
+        let colors = dev.last_colors.lock().unwrap().clone().unwrap();
+        assert_eq!(colors.len(), 3);
+        // led_colors_ramp returns r=p (chain fraction), gamma-encoded on the way out.
+        assert_eq!(colors[0].r, 0);
+        assert!(
+            colors[2].r > colors[0].r,
+            "ramp must increase along the chain"
+        );
+
+        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent-halod-test-dir"));
     }
 }
