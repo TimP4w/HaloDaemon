@@ -59,6 +59,14 @@ impl UserData for TransportApi {
             lua.create_string(&data)
         });
 
+        methods.add_method("read_nonblocking", |lua, this, size: usize| {
+            let data = this
+                .handle
+                .block_on(this.transport.read_nonblocking(size))
+                .map_err(to_lua_err)?;
+            lua.create_string(&data)
+        });
+
         methods.add_method(
             "write_then_read",
             |lua, this, (data, size): (Value, usize)| {

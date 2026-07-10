@@ -4,7 +4,9 @@
 //! Lua worker. Which capabilities it advertises is decided entirely by the
 //! manifest — Halo owns the capability taxonomy; the script only fills it in.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -40,6 +42,19 @@ pub struct LuaDevice {
     rgb_slot: RgbStateSlot,
     fan_slot: FanStateSlot,
     fan_channel: u8,
+
+    /// Host-run status poll: aborted on drop. `poll_paused` lets a future LCD
+    /// path silence polling during a bulk transfer without tearing it down.
+    poll_task: Option<tokio::task::JoinHandle<()>>,
+    poll_paused: Arc<AtomicBool>,
+}
+
+impl Drop for LuaDevice {
+    fn drop(&mut self) {
+        if let Some(task) = self.poll_task.take() {
+            task.abort();
+        }
+    }
 }
 
 impl LuaDevice {
@@ -55,8 +70,28 @@ impl LuaDevice {
         transport: Arc<dyn Transport>,
         handle: tokio::runtime::Handle,
     ) -> Self {
-        let worker = PluginHandle::spawn(manifest.script_source.clone(), transport, handle);
-        Self::build(id, manifest, Some(worker))
+        let worker = PluginHandle::spawn(manifest.script_source.clone(), transport, handle.clone());
+        let mut dev = Self::build(id, manifest, Some(worker.clone()));
+
+        // The status poll loop stays host-side (not in the single-threaded VM):
+        // a ticker enqueues one poll per interval, run serially by the worker.
+        if let Some(poll) = &manifest.poll {
+            let interval = Duration::from_millis(poll.interval_ms.max(1));
+            let paused = dev.poll_paused.clone();
+            dev.poll_task = Some(handle.spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                loop {
+                    ticker.tick().await;
+                    if paused.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    if worker.poll().await.is_err() {
+                        break; // worker gone
+                    }
+                }
+            }));
+        }
+        dev
     }
 
     fn build(id: String, manifest: &PluginManifest, worker: Option<PluginHandle>) -> Self {
@@ -77,7 +112,22 @@ impl LuaDevice {
             rgb_slot: RgbStateSlot::default(),
             fan_slot: FanStateSlot::default(),
             fan_channel: manifest.fan.as_ref().map(|f| f.channel).unwrap_or(0),
+            poll_task: None,
+            poll_paused: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Pause/resume the background status poll (used when an exclusive transfer
+    /// must own the transport, e.g. an LCD bulk upload).
+    pub fn set_polling_paused(&self, paused: bool) {
+        self.poll_paused.store(paused, Ordering::Relaxed);
+    }
+
+    /// Trigger one status poll synchronously (used by tests; production relies on
+    /// the ticker).
+    #[cfg(test)]
+    pub async fn poll_once(&self) -> Result<()> {
+        self.worker()?.poll().await
     }
 
     pub fn plugin_id(&self) -> &str {
@@ -338,5 +388,38 @@ mod tests {
         assert_eq!(sensors.len(), 1);
         assert_eq!(sensors[0].name, "Temp");
         assert_eq!(sensors[0].value, 30.5);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn poll_caches_status_read_by_sensors() {
+        // read_status parses a report into dev.status; get_sensors reads the
+        // cache rather than hitting hardware. Long interval => only the ticker's
+        // immediate first tick plus our explicit poll_once fire (2 reads).
+        const POLL_SCRIPT: &str = r#"
+            return {
+              match = { transport = "hid", vid = 0x1, pid = 0x2 },
+              identity = { vendor = "Test", model = "M" },
+              sensor = {},
+              poll = { interval_ms = 3600000 },
+              read_status = function(dev)
+                local b = halod.buffer(dev.transport:read_nonblocking(1))
+                return { temp = b:get_u8(0) }
+              end,
+              get_sensors = function(dev)
+                local s = dev.status or {}
+                return { { id="t", name="Temp", value = s.temp or -1, unit="celsius" } }
+              end,
+            }
+        "#;
+        let manifest = super::super::parse_manifest(POLL_SCRIPT, Path::new("poll.lua")).unwrap();
+        let mock = Arc::new(MockTransport::new(vec![vec![55], vec![55]]));
+        let dev = LuaDevice::with_transport(
+            "poll-0".into(),
+            &manifest,
+            mock.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        dev.poll_once().await.unwrap();
+        assert_eq!(dev.get_sensors().await.unwrap()[0].value, 55.0);
     }
 }

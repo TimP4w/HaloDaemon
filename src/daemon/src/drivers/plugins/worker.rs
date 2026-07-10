@@ -36,6 +36,8 @@ pub enum Call {
     },
     FanGetRpm(oneshot::Sender<Option<u32>>),
     GetSensors(oneshot::Sender<Result<Vec<Sensor>>>),
+    /// Run the `read_status` callback and cache the result as `dev.status`.
+    Poll(oneshot::Sender<()>),
 }
 
 /// Handle the `LuaDevice` holds. `UnboundedSender` is `Send + Sync`, so the
@@ -109,6 +111,10 @@ impl PluginHandle {
     pub async fn get_sensors(&self) -> Result<Vec<Sensor>> {
         self.request(Call::GetSensors).await?
     }
+
+    pub async fn poll(&self) -> Result<()> {
+        self.request(Call::Poll).await
+    }
 }
 
 /// The plugin's callback functions, looked up once by name.
@@ -121,6 +127,7 @@ struct Callbacks {
     set_duty: Option<Function>,
     get_rpm: Option<Function>,
     get_sensors: Option<Function>,
+    read_status: Option<Function>,
 }
 
 impl Callbacks {
@@ -138,6 +145,7 @@ impl Callbacks {
             set_duty: f("set_duty"),
             get_rpm: f("get_rpm"),
             get_sensors: f("get_sensors"),
+            read_status: f("read_status"),
         }
     }
 }
@@ -206,9 +214,28 @@ fn worker_main(
             Call::GetSensors(reply) => {
                 let _ = reply.send(run_get_sensors(&lua, &cb, &dev));
             }
+            Call::Poll(reply) => {
+                run_poll(&cb, &dev);
+                let _ = reply.send(());
+            }
         }
     }
     Ok(())
+}
+
+/// Run `read_status(dev)` and cache the returned table as `dev.status`. Errors
+/// (e.g. a non-blocking read with nothing pending) are logged, not fatal — the
+/// loop keeps ticking.
+fn run_poll(cb: &Callbacks, dev: &Table) {
+    let Some(f) = &cb.read_status else { return };
+    match f.call::<Value>(dev.clone()) {
+        Ok(status) => {
+            if let Err(e) = dev.set("status", status) {
+                log::debug!("plugin poll: caching status failed: {e}");
+            }
+        }
+        Err(e) => log::debug!("plugin read_status: {e}"),
+    }
 }
 
 fn run_initialize(cb: &Callbacks, dev: &Table) -> Result<bool> {

@@ -70,6 +70,20 @@ pub struct FanManifest {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SensorManifest {}
 
+fn default_poll_interval_ms() -> u64 {
+    1000
+}
+
+/// Background polling. The host runs the loop on the declared interval and calls
+/// the plugin's `read_status(dev)` callback; the returned table is stored as
+/// `dev.status` for other callbacks (sensors/fan) to read without hitting
+/// hardware on every call.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PollManifest {
+    #[serde(default = "default_poll_interval_ms")]
+    pub interval_ms: u64,
+}
+
 /// Declarative device match — compiled to the `DeviceDescriptor::matches`
 /// predicate shape. `None` fields mean "don't care".
 #[derive(Debug, Clone, Deserialize)]
@@ -110,6 +124,8 @@ struct RawManifest {
     fan: Option<FanManifest>,
     #[serde(default)]
     sensor: Option<SensorManifest>,
+    #[serde(default)]
+    poll: Option<PollManifest>,
 }
 
 /// A parsed, validated plugin ready to be matched against discovery handles.
@@ -126,6 +142,7 @@ pub struct PluginManifest {
     pub rgb: Option<RgbManifest>,
     pub fan: Option<FanManifest>,
     pub sensor: Option<SensorManifest>,
+    pub poll: Option<PollManifest>,
 }
 
 impl MatchSpec {
@@ -222,6 +239,7 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         rgb: raw.rgb,
         fan: raw.fan,
         sensor: raw.sensor,
+        poll: raw.poll,
     })
 }
 
