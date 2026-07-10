@@ -366,6 +366,12 @@ impl Device for NZXTKraken {
     }
 
     async fn initialize(&self) -> Result<bool> {
+        // Drain any stale HID reports from a previous session (e.g. unread LCD
+        // transfer ACKs from streaming) so they don't desync the init handshake.
+        if kraken_profile(self.pid).has_lcd {
+            self.protocol.drain_hid_nonblocking().await;
+        }
+
         let fw = self.protocol.initialize().await?;
         log::info!("[NZXT Kraken] Initialized, firmware: {fw}");
 
@@ -386,6 +392,18 @@ impl Device for NZXTKraken {
     }
 
     async fn close(&self) {
+        // Drain queued HID ACKs so the firmware doesn't desync on re-discovery.
+        // If the LCD was in raw streaming mode, switch back to the default
+        // display — leaving it mid-stream can crash the firmware on re-init.
+        if kraken_profile(self.pid).has_lcd {
+            use std::sync::atomic::Ordering;
+            self.protocol.polling_paused.store(true, Ordering::Relaxed);
+            self.protocol.drain_hid_nonblocking().await;
+            let _ = self.protocol.switch_to_default_display().await;
+            *self.protocol.active_bucket.lock().await = None;
+            self.raw_stream_entered.store(false, Ordering::Relaxed);
+            self.protocol.polling_paused.store(false, Ordering::Relaxed);
+        }
         self.protocol.poll_task.lock().await.take();
     }
 

@@ -392,6 +392,9 @@ return {
   },
 
   initialize = function(dev)
+    -- Drain any stale HID reports from a previous session (e.g. unread LCD
+    -- transfer ACKs from streaming) so they don't desync the init handshake.
+    drain_hid(dev)
     dev.transport:write(string.char(0x70, 0x02, 0x01, 0xB8, 0x01)) -- INIT_SET
     dev.transport:write(string.char(0x70, 0x01))                   -- firmware push
     dev.transport:write(string.char(0x10, 0x01))                   -- enable status stream
@@ -409,6 +412,17 @@ return {
         brightness = brightness, rotation = rotation,
       },
     }
+  end,
+
+  -- Drain queued HID ACKs and switch the LCD back to the built-in display so
+  -- the firmware is in a clean state for the next initialize (re-discovery,
+  -- plugin reload, …). Without this, unread 0x37 ACKs accumulate and can crash
+  -- the firmware into the bootloader.
+  close = function(dev)
+    raw_stream_entered = false
+    drain_hid(dev)
+    dev.transport:write(string.char(0x38, 0x01, 0x02, 0x00))
+    pcall(function() dev.transport:read(REPORT) end)
   end,
 
   -- Pump ring RGB.

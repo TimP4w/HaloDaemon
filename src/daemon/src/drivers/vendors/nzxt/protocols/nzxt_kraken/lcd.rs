@@ -268,7 +268,10 @@ impl NzxtKrakenProtocol<HidTransport> {
         result
     }
 
-    async fn drain_hid_nonblocking(&self) {
+    /// Drain queued HID reports (non-blocking). Call this on close/init to
+    /// prevent firmware desync from unread ACKs (the firmware crashes into
+    /// bootloader after >~19 unread `0x37` ACKs accumulate).
+    pub async fn drain_hid_nonblocking(&self) {
         for _ in 0..64 {
             match self.base.transport.read_nonblocking(64).await {
                 Ok(p) if !p.is_empty() => continue,

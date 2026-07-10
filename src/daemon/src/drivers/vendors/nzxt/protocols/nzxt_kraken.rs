@@ -133,7 +133,7 @@ pub struct NzxtKrakenProtocol<T: Transport> {
     pub status_cache: Arc<TokioMutex<KrakenStatus>>,
     /// Which bucket (0 or 1) is currently active on the device; `None` if no custom image is displayed.
     pub active_bucket: Arc<TokioMutex<Option<u8>>>,
-    polling_paused: Arc<AtomicBool>,
+    pub(crate) polling_paused: Arc<AtomicBool>,
     /// Serialises poll-task lifecycle: new task starts only after old one fully stops.
     poll_guard: Arc<TokioMutex<()>>,
     /// Persistent USB bulk transport — opened on first upload, reused after.

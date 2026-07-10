@@ -405,7 +405,8 @@ return {
   -- Hand lighting back to the controller's onboard effect on daemon exit,
   -- rather than stranding it in direct mode on the last streamed frame.
   close = function(dev)
-    local addr = dev.match.addr
+    local addr = dev.match and dev.match.addr
+    if not addr then return end
     dev.transport:batch(function(ops)
       set_direct_mode(ops, addr, false)
       return true
