@@ -38,6 +38,18 @@ fn rgb_effects_wire(is_keyboard: bool, has_per_key: bool, pk_leds_discovered: bo
     }
 }
 
+/// Remap the streaming `wire` to the wire a one-shot static fill should use.
+/// PerKey drives per-LED animation; a static colour is better served by the
+/// device's hardware effect table (RGB_EFFECTS / COLOR_LED) when it has one,
+/// falling back to the per-key path only for pure per-key devices.
+fn static_effect_wire(wire: RgbWire, has_rgb_effects: bool, has_color_led: bool) -> RgbWire {
+    match wire {
+        RgbWire::PerKey if has_rgb_effects => RgbWire::RgbEffects,
+        RgbWire::PerKey if has_color_led => RgbWire::ColorLedEffects,
+        other => other,
+    }
+}
+
 /// Build `setIndividual` pairs painting every id in `led_ids` a single colour.
 /// Used for a mouse static apply on the PerKey wire, where the keyboard-style
 /// `SET_RANGE 0x00..0xFF` of `per_key_set_all` is rejected (INVALID_ARGUMENT)
@@ -76,14 +88,21 @@ impl LogitechDevice {
     // ── RGB write helpers ─────────────────────────────────────────────────────
 
     pub(super) async fn rgb_set_static(&self, color: RgbColor) -> Result<()> {
-        let (zones, static_slots, wire) = {
+        let (zones, static_slots, wire, has_rgb_effects, has_color_led) = {
             let state = self.state.lock().await;
             (
                 state.rgb.rgb_zones.clone(),
                 state.rgb.rgb_static_slots.clone(),
                 state.rgb.rgb_wire,
+                state.features.contains_key(&feature::RGB_EFFECTS),
+                state.features.contains_key(&feature::COLOR_LED_EFFECTS),
             )
         };
+        // PerKey is a per-LED *streaming* wire; a one-shot static fill belongs on
+        // the hardware effect table when the device exposes one. per_key_set_all's
+        // whole-range paint is rejected (INVALID_ARGUMENT) by devices whose valid
+        // ids are sparse, and it would clobber the persistent hardware effect.
+        let wire = static_effect_wire(wire, has_rgb_effects, has_color_led);
         let hidpp = self.hidpp2().await;
 
         log::debug!(
@@ -97,6 +116,7 @@ impl LogitechDevice {
 
         match wire {
             RgbWire::PerKey => {
+                // Reached only by a pure per-key device (no effect table).
                 // Keyboards accept the whole-range `SET_RANGE 0x00..0xFF`; mice
                 // only accept their discovered firmware ids, so paint those
                 // explicitly to avoid an INVALID_ARGUMENT rejection.
@@ -856,6 +876,34 @@ mod tests {
     fn no_per_key_feature_always_stays_rgb_effects() {
         assert_eq!(rgb_effects_wire(false, false, true), RgbWire::RgbEffects);
         assert_eq!(rgb_effects_wire(true, false, true), RgbWire::RgbEffects);
+    }
+
+    #[test]
+    fn static_fill_prefers_effect_table_over_per_key() {
+        // A keyboard/mouse that also has an effect table must not paint a static
+        // colour via per_key_set_all's whole-range write (rejected on real hw).
+        assert_eq!(
+            static_effect_wire(RgbWire::PerKey, true, false),
+            RgbWire::RgbEffects
+        );
+        assert_eq!(
+            static_effect_wire(RgbWire::PerKey, false, true),
+            RgbWire::ColorLedEffects
+        );
+        // Pure per-key device (no effect table) stays on the per-key path.
+        assert_eq!(
+            static_effect_wire(RgbWire::PerKey, false, false),
+            RgbWire::PerKey
+        );
+        // Non-PerKey wires are untouched.
+        assert_eq!(
+            static_effect_wire(RgbWire::RgbEffects, true, true),
+            RgbWire::RgbEffects
+        );
+        assert_eq!(
+            static_effect_wire(RgbWire::ColorLedEffects, true, true),
+            RgbWire::ColorLedEffects
+        );
     }
 
     #[test]
