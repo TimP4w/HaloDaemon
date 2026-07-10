@@ -549,31 +549,41 @@ fn detail_body(
     cmd: &CommandTx,
     pending_delete: &mut Option<String>,
 ) {
-    ui.horizontal(|ui| {
-        lua_badge(ui, 44.0);
-        ui.add_space(4.0);
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(&p.name)
-                        .font(theme::bold(18.0))
-                        .color(theme::TEXT),
-                );
-                if !p.version.is_empty() {
+    egui::Sides::new().show(
+        ui,
+        |ui| {
+            lua_badge(ui, 44.0);
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(&p.version)
-                            .font(theme::mono(11.0))
-                            .color(theme::TEXT_FAINT),
+                        egui::RichText::new(&p.name)
+                            .font(theme::bold(18.0))
+                            .color(theme::TEXT),
                     );
-                }
+                    if !p.version.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&p.version)
+                                .font(theme::mono(11.0))
+                                .color(theme::TEXT_FAINT),
+                        );
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(&p.path)
+                        .font(theme::mono(10.0))
+                        .color(theme::TEXT_FAINT2),
+                );
             });
-            ui.label(
-                egui::RichText::new(&p.path)
-                    .font(theme::mono(10.0))
-                    .color(theme::TEXT_FAINT2),
+        },
+        |ui| {
+            let _ = widgets::chip_colored(
+                ui,
+                &plugin_type_label(p.plugin_type),
+                plugin_type_color(p.plugin_type),
             );
-        });
-    });
+        },
+    );
 
     ui.add_space(14.0);
     status_banner(ui, p);
@@ -598,28 +608,41 @@ fn detail_body(
         );
     }
 
-    if !p.capabilities.is_empty() {
-        ui.add_space(16.0);
-        widgets::caps_label(ui, &t!("plugins.capabilities"));
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            for c in &p.capabilities {
-                widgets::chip(ui, c);
+    if p.plugin_type == halod_shared::types::PluginKind::Device {
+        if !p.capabilities.is_empty() {
+            ui.add_space(16.0);
+            widgets::caps_label(ui, &t!("plugins.capabilities"));
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                for c in &p.capabilities {
+                    widgets::chip(ui, c);
+                }
+            });
+        }
+
+        if !p.targets.is_empty() {
+            ui.add_space(16.0);
+            widgets::caps_label(ui, &t!("plugins.targets"));
+            ui.add_space(4.0);
+            for target in &p.targets {
+                ui.label(
+                    egui::RichText::new(target)
+                        .font(theme::body(12.0))
+                        .color(theme::TEXT_DIM),
+                );
             }
-        });
+        }
     }
 
-    if !p.targets.is_empty() {
+    if !p.effect_names.is_empty() {
         ui.add_space(16.0);
-        widgets::caps_label(ui, &t!("plugins.targets"));
-        ui.add_space(4.0);
-        for target in &p.targets {
-            ui.label(
-                egui::RichText::new(target)
-                    .font(theme::body(12.0))
-                    .color(theme::TEXT_DIM),
-            );
-        }
+        widgets::caps_label(ui, &t!("plugins.effects"));
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            for name in &p.effect_names {
+                widgets::chip(ui, name);
+            }
+        });
     }
 
     if !p.declared_permissions.is_empty() {
@@ -657,6 +680,22 @@ fn detail_body(
             *pending_delete = Some(p.id.clone());
         }
     });
+}
+
+fn plugin_type_label(kind: halod_shared::types::PluginKind) -> std::borrow::Cow<'static, str> {
+    use halod_shared::types::PluginKind;
+    match kind {
+        PluginKind::Device => t!("plugins.type_device"),
+        PluginKind::Effect => t!("plugins.type_effect"),
+    }
+}
+
+fn plugin_type_color(kind: halod_shared::types::PluginKind) -> egui::Color32 {
+    use halod_shared::types::PluginKind;
+    match kind {
+        PluginKind::Device => theme::STAT_CYAN,
+        PluginKind::Effect => theme::STAT_PURPLE,
+    }
 }
 
 /// Whether every permission `p` declares has been granted.
@@ -911,7 +950,9 @@ mod tests {
             id: id.into(),
             name: format!("{id} device"),
             path: format!("/home/u/.config/halod/plugins/{id}.lua"),
+            plugin_type: halod_shared::types::PluginKind::Device,
             capabilities: vec!["RGB".into()],
+            effect_names: vec![],
             enabled,
             author: "Someone".into(),
             version: "1.0.0".into(),
@@ -982,5 +1023,22 @@ mod tests {
 
         p.granted_permissions = vec![Permission::Network, Permission::Os];
         assert!(permissions_satisfied(&p), "fully granted");
+    }
+
+    #[test]
+    fn plugin_type_label_and_color_distinguish_device_and_effect() {
+        use halod_shared::types::PluginKind;
+        assert_eq!(
+            plugin_type_label(PluginKind::Device),
+            t!("plugins.type_device")
+        );
+        assert_eq!(
+            plugin_type_label(PluginKind::Effect),
+            t!("plugins.type_effect")
+        );
+        assert_ne!(
+            plugin_type_color(PluginKind::Device),
+            plugin_type_color(PluginKind::Effect)
+        );
     }
 }

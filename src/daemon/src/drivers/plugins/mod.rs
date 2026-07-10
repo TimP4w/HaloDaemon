@@ -255,7 +255,9 @@ pub fn list() -> Vec<PluginInfo> {
             id: m.plugin_id.clone(),
             name: m.display_name().to_owned(),
             path: m.source_path.display().to_string(),
+            plugin_type: m.plugin_type.into(),
             capabilities: m.capability_labels(),
+            effect_names: m.effects.iter().map(|e| e.name.clone()).collect(),
             enabled: !is_disabled(&m.plugin_id),
             author: m.author().to_owned(),
             version: m.version().to_owned(),
@@ -618,7 +620,10 @@ mod tests {
         );
         assert_eq!(m.plugin_type, PluginType::Effect);
         assert!(!m.needs_worker());
-        assert_eq!(m.capability_labels(), vec!["Effect"]);
+        assert!(
+            m.capability_labels().is_empty(),
+            "effects aren't a capability"
+        );
         assert_eq!(m.effects.len(), 2);
         let entries = effect_entries_for(&m);
         assert_eq!(entries[0].catalog_id, "example_effects:plasma");

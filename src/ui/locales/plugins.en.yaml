@@ -9,9 +9,12 @@ plugins:
   pending_changes: You have unapplied plugin changes. Apply them to hand devices to or from their plugin.
   apply_changes: Apply changes
   # Detail panel
+  type_device: Driver
+  type_effect: Effects
   author: AUTHOR
   capabilities: CAPABILITIES
   targets: TARGET DEVICES
+  effects: EFFECTS
   status_active: Active
   status_disabled: Disabled
   status_needs_permission: Needs permission

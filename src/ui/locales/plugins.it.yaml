@@ -9,9 +9,12 @@ plugins:
   pending_changes: Hai modifiche ai plugin non ancora applicate. Applicale per attivare o disattivare i dispositivi.
   apply_changes: Applica modifiche
   # Pannello dettagli
+  type_device: Driver
+  type_effect: Effetti
   author: AUTORE
   capabilities: FUNZIONALITÀ
   targets: DISPOSITIVI SUPPORTATI
+  effects: EFFETTI
   status_active: Attivo
   status_disabled: Disattivato
   status_needs_permission: Richiede permessi

@@ -126,6 +126,28 @@ impl UserData for ByteBuf {
             this.check(start, len)?;
             Ok(ByteBuf::from_bytes(this.data[start..start + len].to_vec()))
         });
+
+        // set_bytes(start, str_or_buffer) copies a whole run in one call —
+        // the difference between one host round-trip and one per byte, which
+        // matters for a per-pixel render loop (e.g. build a row as a Lua
+        // string via string.char/table.concat, then write it in one call).
+        methods.add_method_mut(
+            "set_bytes",
+            |_, this, (start, src): (usize, mlua::Value)| {
+                let bytes: Vec<u8> = match &src {
+                    mlua::Value::String(s) => s.as_bytes().to_vec(),
+                    mlua::Value::UserData(ud) => ud.borrow::<ByteBuf>()?.data.clone(),
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(
+                            "set_bytes expects a string or a halod.buffer".into(),
+                        ))
+                    }
+                };
+                this.check(start, bytes.len())?;
+                this.data[start..start + bytes.len()].copy_from_slice(&bytes);
+                Ok(())
+            },
+        );
     }
 }
 
@@ -159,6 +181,51 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(out.as_bytes().to_vec(), vec![0x07, 0x34, 0x12, 0xEE]);
+    }
+
+    #[test]
+    fn set_bytes_writes_a_string_in_one_call() {
+        let lua = lua();
+        let out: mlua::String = lua
+            .load(
+                r#"
+                local b = halod.buffer(6)
+                b:set_u8(0, 0xFF)
+                b:set_bytes(1, string.char(1, 2, 3, 4))
+                b:set_u8(5, 0xEE)
+                return b:tostring()
+            "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(out.as_bytes().to_vec(), vec![0xFF, 1, 2, 3, 4, 0xEE]);
+    }
+
+    #[test]
+    fn set_bytes_accepts_another_buffer_as_the_source() {
+        let lua = lua();
+        let out: mlua::String = lua
+            .load(
+                r#"
+                local src = halod.buffer(string.char(9, 8, 7))
+                local dst = halod.buffer(5)
+                dst:set_bytes(1, src)
+                return dst:tostring()
+            "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(out.as_bytes().to_vec(), vec![0, 9, 8, 7, 0]);
+    }
+
+    #[test]
+    fn set_bytes_out_of_range_errors_without_partial_write() {
+        let lua = lua();
+        let err = lua
+            .load(r#"halod.buffer(4):set_bytes(2, string.char(1, 2, 3))"#)
+            .exec()
+            .unwrap_err();
+        assert!(err.to_string().contains("out of range"), "{err}");
     }
 
     #[test]

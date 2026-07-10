@@ -403,12 +403,20 @@ b:set_u16_le(1, 0x1234)            -- also _be, and u32 variants
 local x   = b:get_u16_le(1)
 local len = #b                     -- or b:len()
 local sub = b:slice(1, 2)          -- a new buffer
+b:set_bytes(4, string.char(1, 2, 3, 4))  -- write a whole run in one call
 dev.transport:write(b)             -- pass a buffer straight to the transport
 ```
 
 An out-of-range access errors at the call site (not a confusing `nil`
 downstream). Lua 5.4's `string.pack`/`string.unpack` and bitwise operators are
 also available if you prefer.
+
+`set_bytes(start, str_or_buffer)` matters for hot loops: writing a large
+buffer one `set_u8` at a time (e.g. a 400×300 pixmap) pays for one host call
+per byte. Build a chunk in pure Lua first (`string.char`/`table.concat`, no
+host round-trip) and write it with a single `set_bytes` call instead — see
+the row-batched fill in
+[`plugins/examples/example_effects.lua`](../plugins/examples/example_effects.lua).
 
 ## Sandbox
 

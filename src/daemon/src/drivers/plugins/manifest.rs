@@ -287,6 +287,15 @@ pub enum PluginType {
     Effect,
 }
 
+impl From<PluginType> for halod_shared::types::PluginKind {
+    fn from(t: PluginType) -> Self {
+        match t {
+            PluginType::Device => halod_shared::types::PluginKind::Device,
+            PluginType::Effect => halod_shared::types::PluginKind::Effect,
+        }
+    }
+}
+
 fn default_topology() -> String {
     "ring".to_owned()
 }
@@ -731,9 +740,6 @@ impl PluginManifest {
         if self.chain.is_some() {
             labels.push("Accessories".to_owned());
         }
-        if !self.effects.is_empty() {
-            labels.push("Effect".to_owned());
-        }
         labels
     }
 
@@ -1099,7 +1105,10 @@ mod tests {
         assert!(m.match_specs.is_empty());
         assert_eq!(m.plugin_type, PluginType::Effect);
         assert!(!m.needs_worker(), "effects never need the device worker");
-        assert_eq!(m.capability_labels(), vec!["Effect"]);
+        assert!(
+            m.capability_labels().is_empty(),
+            "effects aren't a capability"
+        );
         assert_eq!(m.effects.len(), 2);
         assert_eq!(m.effects[0].catalog_id("fx"), "fx:plasma");
         assert_eq!(m.effects[0].kind, EffectKind::Pixmap);
@@ -1143,7 +1152,5 @@ mod tests {
         let m = parse_manifest(src, Path::new("bundled.lua")).unwrap();
         assert_eq!(m.match_specs.len(), 1);
         assert_eq!(m.effects.len(), 1);
-        let labels = m.capability_labels();
-        assert!(labels.contains(&"Effect".to_owned()));
     }
 }

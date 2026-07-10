@@ -506,16 +506,33 @@ pub enum Permission {
     SecureStorage,
 }
 
-/// One device plugin as shown in the GUI's Plugins screen.
+/// Which discovery path a plugin registers into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginKind {
+    /// Declares hardware via `match` and (optionally) device capabilities.
+    #[default]
+    Device,
+    /// Declares RGB effects only; never opens a transport.
+    Effect,
+}
+
+/// One plugin as shown in the GUI's Plugins screen.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInfo {
     pub id: String,
     pub name: String,
     /// Filesystem path of the script.
     pub path: String,
+    #[serde(default)]
+    pub plugin_type: PluginKind,
     /// Human-readable capability labels the plugin declares (e.g. "RGB", "Fan").
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Display names of the RGB effects the plugin declares (device plugins
+    /// may bundle effects alongside their hardware capabilities).
+    #[serde(default)]
+    pub effect_names: Vec<String>,
     pub enabled: bool,
     /// Plugin author, as declared in the manifest (empty when unset).
     #[serde(default)]

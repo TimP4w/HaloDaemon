@@ -453,4 +453,70 @@ mod tests {
             "comet must light at least one LED at its head"
         );
     }
+
+    #[tokio::test]
+    async fn shipped_example_plasma_renders_a_frame_well_under_the_tick_budget() {
+        // Guards against the per-pixel-trig/per-pixel-hsv-call regression:
+        // 400x300 pixels in interpreted Lua must stay fast enough for the
+        // canvas engine's tick loop (well under its ~16ms/frame at 60fps).
+        let src = include_str!("../../../../../plugins/examples/example_effects.lua");
+        let handle = PluginEffectHandle::spawn(
+            src.to_string(),
+            "plasma".to_string(),
+            [("speed".to_string(), EffectParamValue::Float(0.8))]
+                .into_iter()
+                .collect(),
+            vec![],
+        );
+        // First call pays for VM/palette warm-up; time a subsequent one.
+        handle.render_pixmap(0.0, 0.016).await.unwrap();
+        let start = std::time::Instant::now();
+        handle.render_pixmap(0.1, 0.016).await.unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "plasma render took {elapsed:?}, expected well under one frame budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn shipped_example_comet_direction_reverses_the_sweep() {
+        let src = include_str!("../../../../../plugins/examples/example_effects.lua");
+        let leds: Vec<LedCoord> = (0..8)
+            .map(|i| LedCoord {
+                p: i as f32 / 7.0,
+                p_ring: i as f32 / 7.0,
+                nx: 0.0,
+                ny: 0.0,
+            })
+            .collect();
+
+        let mut fwd_params = params();
+        fwd_params.insert(
+            "direction".to_string(),
+            EffectParamValue::Str("forward".to_string()),
+        );
+        fwd_params.insert("speed".to_string(), EffectParamValue::Float(1.0));
+        let forward =
+            PluginEffectHandle::spawn(src.to_string(), "comet".to_string(), fwd_params, vec![]);
+        let forward_colors = forward.led_colors(leds.clone(), 0.3, 0.0).await.unwrap();
+
+        let mut back_params = params();
+        back_params.insert(
+            "direction".to_string(),
+            EffectParamValue::Str("backward".to_string()),
+        );
+        back_params.insert("speed".to_string(), EffectParamValue::Float(1.0));
+        let backward =
+            PluginEffectHandle::spawn(src.to_string(), "comet".to_string(), back_params, vec![]);
+        let backward_colors = backward.led_colors(leds, 0.3, 0.0).await.unwrap();
+
+        // Default comet color is {r:0, g:160, b:255} — compare `.g` (or `.b`),
+        // not `.r`, since red is always zero regardless of direction.
+        assert_ne!(
+            forward_colors.iter().map(|c| c.g).collect::<Vec<_>>(),
+            backward_colors.iter().map(|c| c.g).collect::<Vec<_>>(),
+            "forward vs backward direction must sweep the comet head differently"
+        );
+    }
 }
