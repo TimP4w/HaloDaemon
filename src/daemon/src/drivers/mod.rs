@@ -27,6 +27,7 @@ pub enum CapabilityRef<'a> {
     Boolean(&'a dyn BooleanCapability),
     Action(&'a dyn ActionCapability),
     Battery(&'a dyn BatteryCapability),
+    Connection(&'a dyn ConnectionCapability),
     Equalizer(&'a dyn EqualizerCapability),
     Dpi(&'a dyn DpiCapability),
     OnboardProfiles(&'a dyn OnboardProfilesCapability),
@@ -78,7 +79,7 @@ macro_rules! capability_dispatch {
 
 capability_dispatch!(
     persisting: [Fan, Rgb, Range, Choice, Boolean, Equalizer, Dpi, Lcd, KeyRemap, OnboardProfiles],
-    wire_only:  [Sensor, Action, Battery, Chain, Controller, Pairing, TransportSwitchable],
+    wire_only:  [Sensor, Action, Battery, Connection, Chain, Controller, Pairing, TransportSwitchable],
 );
 
 macro_rules! as_capability {

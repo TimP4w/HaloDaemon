@@ -7,9 +7,9 @@ use super::*;
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{
-    Battery, Boolean, ButtonMapping, ChainableChannelInfo, DeviceCapability, DpiStatus,
-    EffectParamValue, Equalizer, FanStatus, KeyRemapStatus, LcdDescriptor, LcdStatus, RgbColor,
-    RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType, SensorUnit, VisibilityState,
+    Battery, Boolean, ButtonMapping, ChainableChannelInfo, ConnectionStatus, DeviceCapability,
+    DpiStatus, EffectParamValue, Equalizer, FanStatus, KeyRemapStatus, LcdDescriptor, LcdStatus,
+    RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType, SensorUnit, VisibilityState,
     ZoneTopology,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
@@ -513,6 +513,19 @@ pub trait BatteryCapability: Send + Sync {
         serde_json::Value::Null
     }
     async fn restore_state(&self, _: &serde_json::Value) {}
+}
+
+#[async_trait]
+pub trait ConnectionCapability: Send + Sync {
+    /// The current wired/wireless link state, or `None` for a wired-only device
+    /// (which then exposes no connection indicator).
+    async fn connection_status(&self) -> Option<ConnectionStatus>;
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        self.connection_status()
+            .await
+            .map(DeviceCapability::Connection)
+    }
 }
 
 #[async_trait]

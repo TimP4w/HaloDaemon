@@ -540,7 +540,7 @@ pub enum DeviceType {
     Speaker,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionType {
     Wired,
@@ -652,6 +652,7 @@ pub enum DeviceCapability {
     Boolean(Vec<Boolean>),
     Action(Vec<Action>),
     Battery(Vec<Battery>),
+    Connection(ConnectionStatus),
     Equalizer(Equalizer),
     Sensors(Vec<Sensor>),
     Fan(FanStatus),
@@ -1082,6 +1083,14 @@ pub struct Battery {
     pub status: BatteryStatus,
 }
 
+/// Wired/wireless link state for a wireless-capable device. Present as a
+/// capability only when the device can operate over a wireless link, so the GUI
+/// shows a link indicator; wired-only devices omit it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConnectionStatus {
+    pub connection_type: ConnectionType,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EqBand {
     pub index: usize,
@@ -1482,6 +1491,22 @@ mod tests {
         };
         let json = serde_json::to_string(&d).unwrap();
         assert!(!json.contains("connection_type"));
+    }
+
+    #[test]
+    fn connection_capability_roundtrips() {
+        let cap = DeviceCapability::Connection(ConnectionStatus {
+            connection_type: ConnectionType::Wireless,
+        });
+        let json = serde_json::to_string(&cap).unwrap();
+        assert!(json.contains("\"kind\":\"connection\""));
+        let back: DeviceCapability = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            DeviceCapability::Connection(ConnectionStatus {
+                connection_type: ConnectionType::Wireless
+            })
+        ));
     }
 
     #[test]

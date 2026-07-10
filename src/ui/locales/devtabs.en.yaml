@@ -47,6 +47,7 @@ devtabs:
   cap_toggles: Toggles
   cap_actions: Actions
   cap_battery: Battery
+  cap_connection: Connection
   cap_equalizer: Equalizer
   cap_sensors: Sensors
   cap_fan: Fan

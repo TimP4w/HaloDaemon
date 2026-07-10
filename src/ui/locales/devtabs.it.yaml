@@ -47,6 +47,7 @@ devtabs:
   cap_toggles: Interruttori
   cap_actions: Azioni
   cap_battery: Batteria
+  cap_connection: Connessione
   cap_equalizer: Equalizzatore
   cap_sensors: Sensori
   cap_fan: Ventola

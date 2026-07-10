@@ -230,6 +230,7 @@ fn cap_label_tr(c: &DeviceCapability) -> std::borrow::Cow<'static, str> {
         DeviceCapability::Boolean(_) => t!("devtabs.cap_toggles"),
         DeviceCapability::Action(_) => t!("devtabs.cap_actions"),
         DeviceCapability::Battery(_) => t!("devtabs.cap_battery"),
+        DeviceCapability::Connection(_) => t!("devtabs.cap_connection"),
         DeviceCapability::Equalizer(_) => t!("devtabs.cap_equalizer"),
         DeviceCapability::Sensors(_) => t!("devtabs.cap_sensors"),
         DeviceCapability::Fan(_) => t!("devtabs.cap_fan"),

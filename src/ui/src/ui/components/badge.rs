@@ -41,6 +41,45 @@ pub fn battery_glyph(p: &egui::Painter, body: Rect, level: u8, color: Color32) {
     p.rect_filled(fill, 1.0, color);
 }
 
+/// Paint a connection glyph inside `body`: ascending signal bars for a wireless
+/// link, a plug for a wired one. Callers size and position `body` themselves.
+pub fn connection_glyph(p: &egui::Painter, body: Rect, wireless: bool, color: Color32) {
+    if wireless {
+        let (bw, gap) = (3.0, 3.0);
+        for i in 0..3 {
+            let h = body.height() * (0.4 + 0.3 * i as f32);
+            let x = body.left() + i as f32 * (bw + gap);
+            let bar = Rect::from_min_max(
+                Pos2::new(x, body.bottom() - h),
+                Pos2::new(x + bw, body.bottom()),
+            );
+            p.rect_filled(bar, 1.0, color);
+        }
+    } else {
+        let cy = body.center().y;
+        let h = body.height();
+        let plug = Rect::from_min_max(
+            Pos2::new(body.center().x, cy - h * 0.3),
+            Pos2::new(body.center().x + h * 0.55, cy + h * 0.3),
+        );
+        let stroke = Stroke::new(1.5, color);
+        p.line_segment(
+            [Pos2::new(body.left(), cy), Pos2::new(plug.left(), cy)],
+            stroke,
+        );
+        p.rect_filled(plug, 1.5, color);
+        for dy in [-h * 0.18, h * 0.18] {
+            p.line_segment(
+                [
+                    Pos2::new(plug.right(), cy + dy),
+                    Pos2::new(plug.right() + 4.0, cy + dy),
+                ],
+                stroke,
+            );
+        }
+    }
+}
+
 /// Preview swatch shown at the top of an [`effect_cell`].
 pub enum CellPreview {
     /// A solid representative color.

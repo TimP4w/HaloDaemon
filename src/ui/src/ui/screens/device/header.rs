@@ -2,7 +2,7 @@
 //! Device page header: name/badge row, status chips, battery chips.
 
 use egui::{Align2, Pos2, Rect, Stroke, Vec2};
-use halod_shared::types::{Battery, BatteryStatus, DeviceCapability, WireDevice};
+use halod_shared::types::{Battery, BatteryStatus, ConnectionType, DeviceCapability, WireDevice};
 
 use crate::ui::theme::{self, a};
 
@@ -179,29 +179,17 @@ fn batteries(dev: &WireDevice) -> Vec<&Battery> {
         .unwrap_or_default()
 }
 
+/// The device's link state, if it exposes the `Connection` capability (only
+/// wireless-capable devices do).
+fn connection(dev: &WireDevice) -> Option<ConnectionType> {
+    dev.capabilities.iter().find_map(|c| match c {
+        DeviceCapability::Connection(s) => Some(s.connection_type),
+        _ => None,
+    })
+}
+
 pub(super) fn status_chips(p: &egui::Painter, rect: Rect, dev: &WireDevice) {
     let cy = rect.center().y;
-    let cells = batteries(dev);
-    // Filter to cells with a known status; Unknown means the wireless link is
-    // down (headset off) — show the offline chip instead of stale 0% data.
-    let known: Vec<_> = cells
-        .iter()
-        .filter(|b| !matches!(b.status, BatteryStatus::Unknown))
-        .collect();
-    if dev.connected && !known.is_empty() {
-        let multi = known.len() > 1;
-        let mut right = rect.right();
-        // Lay chips right-to-left so the first cell sits leftmost.
-        for (i, b) in known.iter().enumerate().rev() {
-            let label = if multi {
-                t!("devtabs.battery_n", n = i + 1).to_string()
-            } else {
-                t!("devtabs.battery").to_string()
-            };
-            right = battery_chip(p, right, cy, b, &label) - 8.0;
-        }
-        return;
-    }
     // Only show a status chip when offline; connected devices with no battery
     // need no label ("Connected" is visually redundant — you're on its page).
     if !dev.connected {
@@ -213,15 +201,34 @@ pub(super) fn status_chips(p: &egui::Painter, rect: Rect, dev: &WireDevice) {
             theme::OFFLINE_TEXT,
         );
         p.circle_filled(Pos2::new(st.left() - 9.0, cy), 3.5, theme::OFFLINE);
+        return;
+    }
+
+    let mut right = rect.right();
+    // Filter to cells with a known status; Unknown means the wireless link is
+    // down (headset off) — show nothing rather than stale 0% data.
+    let known: Vec<_> = batteries(dev)
+        .into_iter()
+        .filter(|b| !matches!(b.status, BatteryStatus::Unknown))
+        .collect();
+    let multi = known.len() > 1;
+    // Lay chips right-to-left so the first cell sits leftmost.
+    for (i, b) in known.iter().enumerate().rev() {
+        let label = if multi {
+            t!("devtabs.battery_n", n = i + 1).to_string()
+        } else {
+            t!("devtabs.battery").to_string()
+        };
+        right = battery_chip(p, right, cy, b, &label) - 8.0;
+    }
+    if let Some(ct) = connection(dev) {
+        connection_chip(p, right, cy, ct);
     }
 }
 
-/// Draw one battery chip (glyph + percentage + label/state) with its right edge
-/// at `right`. Returns the chip's left edge.
-fn battery_chip(p: &egui::Painter, right: f32, cy: f32, b: &Battery, label: &str) -> f32 {
-    let charging = matches!(b.status, BatteryStatus::Charging);
-    let col = theme::battery_color(b.level, charging);
-    let w = 150.0;
+/// Draw a status-chip pill (background + border) of width `w` with its right
+/// edge at `right`, returning the pill rect for glyph/text placement.
+fn chip_pill(p: &egui::Painter, right: f32, cy: f32, w: f32) -> Rect {
     let pill = Rect::from_min_size(Pos2::new(right - w, cy - 17.0), Vec2::new(w, 34.0));
     p.rect_filled(pill, 9.0, theme::CARD_BG);
     p.rect_stroke(
@@ -230,7 +237,51 @@ fn battery_chip(p: &egui::Painter, right: f32, cy: f32, b: &Battery, label: &str
         Stroke::new(1.0, theme::BORDER),
         egui::StrokeKind::Middle,
     );
+    pill
+}
 
+/// Draw the wired/wireless chip with its right edge at `right`.
+fn connection_chip(p: &egui::Painter, right: f32, cy: f32, ct: ConnectionType) {
+    let wireless = matches!(ct, ConnectionType::Wireless);
+    let col = if wireless {
+        theme::STAT_CYAN
+    } else {
+        theme::TEXT_MUT
+    };
+    let pill = chip_pill(p, right, cy, 140.0);
+    let body = Rect::from_min_size(
+        Pos2::new(pill.left() + 12.0, cy - 6.0),
+        Vec2::new(18.0, 12.0),
+    );
+    crate::ui::components::connection_glyph(p, body, wireless, col);
+
+    let tx = body.right() + 12.0;
+    p.text(
+        Pos2::new(tx, cy - 8.0),
+        Align2::LEFT_CENTER,
+        t!("devtabs.info_connection"),
+        theme::body(9.0),
+        theme::TEXT_FAINT,
+    );
+    p.text(
+        Pos2::new(tx, cy + 7.0),
+        Align2::LEFT_CENTER,
+        if wireless {
+            t!("devtabs.wireless")
+        } else {
+            t!("devtabs.wired")
+        },
+        theme::semibold(12.0),
+        a(col, 0.95),
+    );
+}
+
+/// Draw one battery chip (glyph + percentage + label/state) with its right edge
+/// at `right`. Returns the chip's left edge.
+fn battery_chip(p: &egui::Painter, right: f32, cy: f32, b: &Battery, label: &str) -> f32 {
+    let charging = matches!(b.status, BatteryStatus::Charging);
+    let col = theme::battery_color(b.level, charging);
+    let pill = chip_pill(p, right, cy, 150.0);
     let body = Rect::from_min_size(
         Pos2::new(pill.left() + 12.0, cy - 6.0),
         Vec2::new(22.0, 12.0),
@@ -287,6 +338,20 @@ mod tests {
             capabilities: caps,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn connection_reads_link_from_capability() {
+        use halod_shared::types::ConnectionStatus;
+        let with = dev(
+            DeviceType::Mouse,
+            vec![DeviceCapability::Connection(ConnectionStatus {
+                connection_type: ConnectionType::Wireless,
+            })],
+        );
+        assert_eq!(connection(&with), Some(ConnectionType::Wireless));
+        // Wired-only devices omit the capability → no indicator.
+        assert_eq!(connection(&dev(DeviceType::Keyboard, vec![])), None);
     }
 
     #[test]

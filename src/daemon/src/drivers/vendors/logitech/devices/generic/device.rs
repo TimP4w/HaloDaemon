@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::drivers::vendors::logitech::protocols::hidpp::feature;
 use crate::drivers::{
     vendors::generic::devices::common::TaskHandle,
     vendors::logitech::devices::generic::onboard::start_dpi_watcher,
@@ -22,10 +23,12 @@ use crate::drivers::{
         v2::{FeatureTable, Hidpp20},
         HidppChannel, PkWriteCoordinator, RECEIVER_DEVNUM,
     },
-    CapabilityRef, ChoiceStateCache, Device, RangeStateCache, RgbStateSlot, TransportMode,
-    TransportSwitchable, VisibilitySlot,
+    CapabilityRef, ChoiceStateCache, ConnectionCapability, Device, RangeStateCache, RgbStateSlot,
+    TransportMode, TransportSwitchable, VisibilitySlot,
 };
-use halod_shared::types::{ConnectionType, DeviceType, OnboardProfiles, RgbDescriptor};
+use halod_shared::types::{
+    ConnectionStatus, ConnectionType, DeviceType, OnboardProfiles, RgbDescriptor,
+};
 
 /// Active transport for a LogitechDevice. Swapped atomically when the device
 /// transitions between wireless (via receiver) and wired (direct USB).
@@ -428,6 +431,7 @@ impl Device for LogitechDevice {
         vec![
             CapabilityRef::TransportSwitchable(self),
             CapabilityRef::Battery(self),
+            CapabilityRef::Connection(self),
             CapabilityRef::Choice(self),
             CapabilityRef::Rgb(self),
             CapabilityRef::Boolean(self),
@@ -602,6 +606,35 @@ impl TransportSwitchable for LogitechDevice {
     }
 }
 
+pub(super) fn is_wireless_capable(has_wpid: bool, is_wired: bool, has_wds_feature: bool) -> bool {
+    has_wpid || !is_wired || has_wds_feature
+}
+
+#[async_trait]
+impl ConnectionCapability for LogitechDevice {
+    async fn connection_status(&self) -> Option<ConnectionStatus> {
+        let is_wired = self.transport.lock().await.is_wired;
+        let has_wds = self
+            .state
+            .lock()
+            .await
+            .features
+            .contains_key(&feature::WIRELESS_DEVICE_STATUS);
+        is_wireless_capable(
+            self.profile.and_then(|p| p.wpid).is_some(),
+            is_wired,
+            has_wds,
+        )
+        .then_some(ConnectionStatus {
+            connection_type: if is_wired {
+                ConnectionType::Wired
+            } else {
+                ConnectionType::Wireless
+            },
+        })
+    }
+}
+
 pub(super) fn clear_active_slot_in_host_mode(profiles: &mut OnboardProfiles, host_mode: bool) {
     if !host_mode {
         return;
@@ -635,6 +668,16 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn wireless_capable_true_on_wpid_link_or_feature() {
+        // Wired-only device with no wireless identity and no WDS feature.
+        assert!(!is_wireless_capable(false, true, false));
+        // Any one signal is enough.
+        assert!(is_wireless_capable(true, true, false)); // has wpid
+        assert!(is_wireless_capable(false, false, false)); // currently wireless
+        assert!(is_wireless_capable(false, true, true)); // advertises WDS
     }
 
     #[test]
