@@ -8,7 +8,7 @@ use crate::drivers::plugins::manifest::{MatchSpec, PluginManifest};
 use crate::drivers::plugins::transport::{
     AddrScope, PluginIo, PluginTransportDescriptor, RegisterBus,
 };
-use crate::drivers::transports::smbus::downcast_smbus_device;
+use crate::drivers::transports::smbus::{downcast_smbus_device, SmbusBusKind};
 use crate::registry::discovery::DiscoveryHandle;
 
 fn matches(spec: &MatchSpec, handle: &DiscoveryHandle<'_>) -> bool {
@@ -44,9 +44,15 @@ fn validate(spec: &MatchSpec) -> Result<()> {
         bail!("smbus match requires `bus` = \"chipset\" or \"gpu\"");
     }
     match &spec.addresses {
-        Some(a) if !a.is_empty() => Ok(()),
+        Some(a) if !a.is_empty() => {}
         _ => bail!("smbus match requires a non-empty `addresses` list"),
     }
+    // A GPU bus is shared with the display's DDC/EDID lines; refuse to scan one
+    // without a PCI gate confining the probe to known cards.
+    if spec.bus_kind() == Some(SmbusBusKind::Gpu) && spec.pci_match.is_empty() {
+        bail!("smbus `bus = \"gpu\"` match requires a non-empty `pci_match` list");
+    }
+    Ok(())
 }
 
 inventory::submit!(PluginTransportDescriptor {

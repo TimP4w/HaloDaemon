@@ -90,6 +90,27 @@ several hardware shapes — e.g. an SMBus DRAM controller *and* a GPU one). The
 | `max_bytes_per_sec` | integer       | bus write-rate ceiling applied before scanning             |
 | `pre_scan`          | bool          | run the plugin's `pre_scan` before probing this bus        |
 | `probe`             | string        | `"quick"` (default), `"read_byte"`, or `"none"`            |
+| `pci_match`         | table array   | PCI-identity gate — **required for `bus = "gpu"`** (see below) |
+
+**GPU buses require a `pci_match` gate.** A GPU's I²C segment is shared with the
+monitor's DDC/EDID lines, so poking an RGB address on a card the plugin doesn't
+recognise can hang the display. A `bus = "gpu"` spec must therefore declare a
+`pci_match` list confining the scan to known cards; a GPU spec without one is
+rejected at load. Chipset/DRAM specs omit it (empty = ungated). Each entry is:
+
+| field        | type    | meaning                                              |
+|--------------|---------|------------------------------------------------------|
+| `vendor`     | integer | PCI vendor id (e.g. `0x10DE` NVIDIA); omit = wildcard |
+| `device`     | integer | PCI device id; omit = wildcard                        |
+| `sub_vendor` | integer | subsystem vendor (e.g. `0x1043` ASUS); omit = wildcard |
+| `sub_device` | integer | subsystem device id; omit = wildcard                  |
+| `confirmed`  | bool    | `true` = a verified board: emit it with **no probe** at all (the curated-whitelist path); `false`/omitted = confirm with the spec's `probe` first |
+
+The host reads each bus's PCI ids during enumeration and, **before opening the
+bus**, keeps only buses matching a `pci_match` entry: no match → the bus is left
+untouched; a `confirmed` match → emitted without any probe; any other match →
+probed with the declared `probe` (use `"read_byte"`, the gentle confirm). This
+gate is enforced in the scanner, so native drivers are held to the same rule.
 
 Any spec may also carry per-device identity overrides — `name` and
 `device_type` (`"ram"`, `"gpu"`, `"motherboard"`, …) — so one plugin labels each

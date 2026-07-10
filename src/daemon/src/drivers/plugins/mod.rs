@@ -38,7 +38,11 @@ use crate::registry::discovery::DiscoveryHandle;
 mod scan;
 
 #[cfg(test)]
+mod corsair_test;
+#[cfg(test)]
 mod ene_test;
+#[cfg(test)]
+mod zotac_test;
 
 static PLUGIN_REGISTRY: RwLock<Vec<PluginManifest>> = RwLock::new(Vec::new());
 /// Plugin ids the user disabled. `match_handle` skips these, so a disabled
@@ -93,8 +97,17 @@ pub fn is_builtin(plugin_id: &str) -> bool {
 /// Plugins shipped inside the daemon binary, loaded before directory plugins.
 /// These replace what used to be native Rust drivers (e.g. ENE SMBus RGB); the
 /// user can disable them like any other plugin.
-const BUILTIN_PLUGINS: &[(&str, &str)] =
-    &[("ene_smbus.lua", include_str!("builtins/ene_smbus.lua"))];
+const BUILTIN_PLUGINS: &[(&str, &str)] = &[
+    ("ene_smbus.lua", include_str!("builtins/ene_smbus.lua")),
+    (
+        "corsair_dram.lua",
+        include_str!("builtins/corsair_dram.lua"),
+    ),
+    (
+        "zotac_spectra_gpu.lua",
+        include_str!("builtins/zotac_spectra_gpu.lua"),
+    ),
+];
 
 fn builtin_manifests() -> Vec<PluginManifest> {
     BUILTIN_PLUGINS

@@ -13,7 +13,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::transport::{descriptor_for, known_kinds};
-use crate::drivers::transports::smbus::SmbusBusKind;
+use crate::drivers::transports::smbus::{PciMatch, SmbusBusKind};
 use crate::drivers::vendors::generic::devices::common::ring_led_positions;
 use crate::registry::discovery::DiscoveryHandle;
 
@@ -218,6 +218,12 @@ pub struct MatchSpec {
     pub pre_scan: bool,
     #[serde(default)]
     pub probe: ProbeMode,
+    /// PCI-identity gate for GPU buses. Each entry is a `{ vendor, device,
+    /// sub_vendor, sub_device, confirmed }` tuple (unset fields are wildcards).
+    /// A `bus = "gpu"` spec MUST declare at least one; chipset specs leave it
+    /// empty. See [`PciMatch`] and the smbus backend's `validate`.
+    #[serde(default)]
+    pub pci_match: Vec<PciMatch>,
 
     // ── Per-spec identity overrides (so one plugin covers several devices) ─
     #[serde(default)]
@@ -621,7 +627,8 @@ mod tests {
               { transport = "smbus", bus = "chipset", addresses = { 0x70, 0x71 },
                 device_type = "ram", name = "DRAM" },
               { transport = "smbus", bus = "gpu", addresses = { 0x67 },
-                device_type = "gpu" },
+                device_type = "gpu",
+                pci_match = { { vendor = 0x10DE, sub_vendor = 0x1043, confirmed = true } } },
             },
             identity = { vendor = "ENE", model = "SMBus" },
           }"#;
@@ -629,5 +636,42 @@ mod tests {
         assert_eq!(m.match_specs.len(), 2);
         assert_eq!(m.smbus_specs().count(), 2);
         assert_eq!(m.match_specs[0].device_type, Some(DeviceType::Ram));
+    }
+
+    #[test]
+    fn gpu_spec_without_pci_match_is_rejected() {
+        // The GPU I²C bus is shared with the display; a gate is mandatory.
+        let src = r#"return {
+            match = { transport = "smbus", bus = "gpu", addresses = { 0x67 } },
+            identity = { vendor = "x", model = "y" },
+        }"#;
+        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
+    }
+
+    #[test]
+    fn gpu_spec_with_pci_match_parses_and_round_trips() {
+        let src = r#"return {
+            match = { transport = "smbus", bus = "gpu", addresses = { 0x67 },
+              pci_match = {
+                { vendor = 0x10DE, device = 0x2684, sub_vendor = 0x1043,
+                  sub_device = 0x88BF, confirmed = true },
+              } },
+            identity = { vendor = "ENE", model = "GPU" },
+        }"#;
+        let m = parse_manifest(src, Path::new("ene.lua")).unwrap();
+        let gate = &m.match_specs[0].pci_match;
+        assert_eq!(gate.len(), 1);
+        assert_eq!(gate[0].vendor, Some(0x10DE));
+        assert_eq!(gate[0].sub_device, Some(0x88BF));
+        assert!(gate[0].confirmed);
+    }
+
+    #[test]
+    fn chipset_spec_without_pci_match_still_parses() {
+        let src = r#"return {
+            match = { transport = "smbus", bus = "chipset", addresses = { 0x70 } },
+            identity = { vendor = "x", model = "y" },
+        }"#;
+        assert!(parse_manifest(src, Path::new("ok.lua")).is_ok());
     }
 }

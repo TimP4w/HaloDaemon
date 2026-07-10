@@ -67,6 +67,11 @@ pub struct SmBusScanEntry {
     /// declare one so a rapid effect stream to several modules on one bus can't
     /// outrun what the hardware latches. `None` leaves the bus unthrottled.
     pub write_rate_limit: Option<halod_shared::types::WriteRateLimit>,
+    /// PCI-identity gate confining this scan to known cards. Empty is permitted
+    /// only on a `Chipset` bus; a `Gpu` entry MUST list at least one match or the
+    /// scanner refuses to touch any GPU bus (the display-bus hazard). See
+    /// [`crate::drivers::transports::smbus::PciMatch`].
+    pub pci_match: &'static [crate::drivers::transports::smbus::PciMatch],
 }
 inventory::collect!(SmBusScanEntry);
 

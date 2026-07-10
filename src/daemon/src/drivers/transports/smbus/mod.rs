@@ -13,6 +13,7 @@
 // `enumerate_buses`, `enumerate_gpu_buses`, `open_device`.
 
 use anyhow::{anyhow, Result};
+use serde::Deserialize;
 use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,42 @@ impl BusInfo {
 fn is_gpu_adapter_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.contains("nvidia") || lower.contains("amd radeon") || lower.contains("radeon")
+}
+
+/// A PCI-identity filter that gates a GPU-bus scan to known cards, so the daemon
+/// never pokes an RGB address on a graphics card it doesn't recognise — the GPU
+/// I²C segment is shared with the monitor's DDC/EDID lines, and a stray write
+/// there can hang the display. `None` fields are wildcards; every set field must
+/// equal the bus's corresponding PCI id.
+///
+/// `Copy`/const-constructible so a native [`SmBusScanEntry`] can declare a
+/// `static [PciMatch]`, and `Deserialize` so a Lua plugin manifest can declare
+/// the same list — both feed the identical scanner gate ([`gate_bus`]).
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct PciMatch {
+    #[serde(default)]
+    pub vendor: Option<u16>,
+    #[serde(default)]
+    pub device: Option<u16>,
+    #[serde(default)]
+    pub sub_vendor: Option<u16>,
+    #[serde(default)]
+    pub sub_device: Option<u16>,
+    /// A verified board: the scanner emits it without any probe transaction (the
+    /// curated-whitelist stance). Unset entries are confirmed by a gentle probe
+    /// before use.
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+impl PciMatch {
+    /// Do all of this filter's set fields equal `bus`'s PCI ids?
+    pub fn accepts(&self, bus: &BusInfo) -> bool {
+        self.vendor.is_none_or(|v| v == bus.pci_vendor)
+            && self.device.is_none_or(|v| v == bus.pci_device)
+            && self.sub_vendor.is_none_or(|v| v == bus.pci_sub_vendor)
+            && self.sub_device.is_none_or(|v| v == bus.pci_sub_device)
+    }
 }
 
 pub struct SmBusDevice {
@@ -275,6 +312,9 @@ struct ScanJob {
     /// A native pre-scan (fn pointer) or a plugin pre-scan (Lua source + scope).
     pre_scan: PreScan,
     probe: Probe,
+    /// PCI-identity gate. Empty ⇒ ungated (chipset default; forbidden on a GPU
+    /// job — see [`gate_bus`] and the enforcement in [`discover`]).
+    pci_match: Vec<PciMatch>,
 }
 
 enum PreScan {
@@ -313,6 +353,7 @@ fn native_scan_jobs() -> Vec<ScanJob> {
             },
             // Native entries pre-select their addresses, so every one is emitted.
             probe: Probe::Always,
+            pci_match: entry.pci_match.to_vec(),
         })
         .collect()
 }
@@ -339,8 +380,32 @@ fn plugin_scan_jobs() -> Vec<ScanJob> {
             } else {
                 PreScan::None
             },
+            pci_match: e.pci_match.clone(),
         })
         .collect()
+}
+
+/// Per-bus scan decision from a job's PCI gate, evaluated *before the bus is
+/// opened*. `None` ⇒ skip this bus (not a card the gate lists). `Some(probe)` ⇒
+/// scan it with this probe mode: a `confirmed` match downgrades to
+/// [`Probe::Always`] (emit without a probe transaction), any other match keeps
+/// the job's declared probe. An empty gate is "ungated" and returns the job's
+/// probe unchanged — permitted for chipset buses; [`discover`] forbids it on a
+/// GPU job before ever reaching here.
+fn gate_bus(pci_match: &[PciMatch], bus: &BusInfo, job_probe: Probe) -> Option<Probe> {
+    if pci_match.is_empty() {
+        return Some(job_probe);
+    }
+    let mut matched: Option<Probe> = None;
+    for m in pci_match {
+        if m.accepts(bus) {
+            if m.confirmed {
+                return Some(Probe::Always);
+            }
+            matched = Some(job_probe);
+        }
+    }
+    matched
 }
 
 /// Does `addr` respond on this bus, per the job's probe mode?
@@ -369,6 +434,18 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
     jobs.extend(plugin_scan_jobs());
 
     for job in jobs {
+        // A GPU job MUST carry a PCI gate: the GPU I²C segment is shared with the
+        // display's DDC/EDID lines, so an ungated probe could hang a monitor on a
+        // card we don't even support. Plugins are already rejected at parse; this
+        // is the backstop for native entries (which can't fail at submit time).
+        if job.bus_kind == SmbusBusKind::Gpu && job.pci_match.is_empty() {
+            log::warn!(
+                "[SmBusTransport] GPU scan entry declares no pci_match; refusing to \
+                 scan GPU buses (risk of hanging the display bus). Entry skipped."
+            );
+            continue;
+        }
+
         let buses: Vec<&BusInfo> = match job.bus_kind {
             SmbusBusKind::Chipset => chipset_buses.iter().filter(|b| !b.is_gpu_bus()).collect(),
             SmbusBusKind::Gpu => gpu_buses.iter().collect(),
@@ -380,6 +457,19 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
         );
 
         for bus_info in buses {
+            // Consult the PCI gate before opening the bus: a card the gate doesn't
+            // list is never touched. `confirmed` matches downgrade to no probe.
+            let Some(effective_probe) = gate_bus(&job.pci_match, bus_info, job.probe) else {
+                log::debug!(
+                    "[SmBusTransport] bus {} ({:04x}:{:04x} / {:04x}:{:04x}) not in PCI gate; skipping",
+                    bus_info.bus_number,
+                    bus_info.pci_vendor,
+                    bus_info.pci_device,
+                    bus_info.pci_sub_vendor,
+                    bus_info.pci_sub_device,
+                );
+                continue;
+            };
             crate::registry::discovery::set_discovery_detail(&app, bus_scan_label(bus_info)).await;
             let bus = match SmBusDevice::open(bus_info) {
                 Ok(b) => b,
@@ -411,7 +501,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
             run_pre_scan(&job.pre_scan, &bus, bus_info.bus_number).await;
 
             for &addr in &job.addresses {
-                if !probe_addr(&bus, addr, job.probe) {
+                if !probe_addr(&bus, addr, effective_probe) {
                     continue;
                 }
                 crate::registry::discovery::discover_handle(
@@ -472,7 +562,10 @@ inventory::submit!(TransportScanner {
 
 #[cfg(test)]
 mod tests {
-    use super::{bus_scan_label, is_gpu_adapter_name, BusInfo, CountingSmBusOps, SmBusSyncOps};
+    use super::{
+        bus_scan_label, gate_bus, is_gpu_adapter_name, BusInfo, CountingSmBusOps, PciMatch, Probe,
+        SmBusSyncOps,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeOps {
@@ -590,5 +683,97 @@ mod tests {
         assert!(!is_gpu_adapter_name("i801 SMBus"));
         assert!(!is_gpu_adapter_name(""));
         assert!(!is_gpu_adapter_name("Piix4 SMBus"));
+    }
+
+    // ── PCI gate ─────────────────────────────────────────────────────────────
+
+    /// An ASUS ROG STRIX RTX 4090's bus IDs.
+    fn asus_4090() -> BusInfo {
+        BusInfo {
+            bus_number: 7,
+            adapter_name: "NVIDIA i2c".to_string(),
+            pci_vendor: 0x10DE,
+            pci_device: 0x2684,
+            pci_sub_vendor: 0x1043,
+            pci_sub_device: 0x88BF,
+        }
+    }
+
+    fn m(sub_device: Option<u16>, confirmed: bool) -> PciMatch {
+        PciMatch {
+            vendor: Some(0x10DE),
+            device: Some(0x2684),
+            sub_vendor: Some(0x1043),
+            sub_device,
+            confirmed,
+        }
+    }
+
+    #[test]
+    fn accepts_matches_only_when_all_set_fields_equal() {
+        let card = asus_4090();
+        // Fully-specified exact match.
+        assert!(m(Some(0x88BF), true).accepts(&card));
+        // Wildcard sub_device still matches.
+        assert!(m(None, true).accepts(&card));
+        // Any single differing field rejects.
+        assert!(!m(Some(0x8000), true).accepts(&card));
+        assert!(!PciMatch {
+            vendor: Some(0x1002), // AMD, not this NVIDIA card
+            ..m(None, false)
+        }
+        .accepts(&card));
+    }
+
+    #[test]
+    fn gate_empty_is_ungated_passthrough() {
+        // No gate ⇒ keep the job's probe (chipset behaviour; GPU jobs are
+        // rejected before reaching gate_bus).
+        assert!(matches!(
+            gate_bus(&[], &asus_4090(), Probe::Quick),
+            Some(Probe::Quick)
+        ));
+    }
+
+    #[test]
+    fn gate_skips_unlisted_card() {
+        // Gate lists a different sub_device only ⇒ this card is not covered.
+        let gate = [m(Some(0x0000), false)];
+        assert!(gate_bus(&gate, &asus_4090(), Probe::ReadByte).is_none());
+    }
+
+    #[test]
+    fn gate_confirmed_match_skips_the_probe() {
+        let gate = [m(Some(0x88BF), true)];
+        assert!(matches!(
+            gate_bus(&gate, &asus_4090(), Probe::ReadByte),
+            Some(Probe::Always)
+        ));
+    }
+
+    #[test]
+    fn gate_unconfirmed_match_keeps_job_probe() {
+        let gate = [m(Some(0x88BF), false)];
+        assert!(matches!(
+            gate_bus(&gate, &asus_4090(), Probe::ReadByte),
+            Some(Probe::ReadByte)
+        ));
+    }
+
+    #[test]
+    fn gate_confirmed_wins_over_unconfirmed_regardless_of_order() {
+        let card = asus_4090();
+        // unconfirmed (wildcard) before confirmed (exact)
+        let a = [m(None, false), m(Some(0x88BF), true)];
+        assert!(matches!(
+            gate_bus(&a, &card, Probe::ReadByte),
+            Some(Probe::Always)
+        ));
+        // confirmed first
+        let b = [m(Some(0x88BF), true), m(None, false)];
+        assert!(matches!(
+            gate_bus(&b, &card, Probe::ReadByte),
+            Some(Probe::Always)
+        ));
     }
 }

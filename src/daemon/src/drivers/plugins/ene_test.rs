@@ -202,6 +202,41 @@ async fn initialize_reports_firmware_and_led_count() {
     assert_eq!(dev.descriptor().zones[0].leds.len(), 8);
 }
 
+#[test]
+fn gpu_spec_has_read_byte_probe_and_curated_pci_gate() {
+    let manifest = parse_manifest(ENE_SRC, Path::new("ene_smbus.lua")).unwrap();
+    let gpu = manifest
+        .match_specs
+        .iter()
+        .find(|s| s.bus.as_deref() == Some("gpu"))
+        .expect("ENE declares a gpu spec");
+
+    // Gentle confirm method, never write_quick, on the display-shared bus.
+    use crate::drivers::plugins::manifest::ProbeMode;
+    assert_eq!(gpu.probe, ProbeMode::ReadByte);
+
+    let gate = &gpu.pci_match;
+    // Two broad detectors (unconfirmed) + a curated whitelist (confirmed).
+    let broad = gate.iter().filter(|m| !m.confirmed).count();
+    let confirmed = gate.iter().filter(|m| m.confirmed).count();
+    assert_eq!(broad, 2, "NVIDIA + AMD broad ASUS detectors");
+    assert!(confirmed > 100, "full curated board table present");
+
+    // A broad detector wildcards the sub_device; a confirmed entry pins it.
+    assert!(gate
+        .iter()
+        .any(|m| !m.confirmed && m.vendor == Some(0x10DE) && m.sub_device.is_none()));
+    // ROG STRIX RTX 4090 O24G Gaming — a known confirmed board.
+    assert!(gate.iter().any(|m| m.confirmed
+        && m.vendor == Some(0x10DE)
+        && m.sub_vendor == Some(0x1043)
+        && m.sub_device == Some(0x889C)));
+    // TUF RX 7900 XTX — a known confirmed AMD board.
+    assert!(gate
+        .iter()
+        .any(|m| m.confirmed && m.vendor == Some(0x1002) && m.sub_device == Some(0x0506)));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialize_rejects_micron_module() {
     let mut state = seed_dram("LED-0116", 8);

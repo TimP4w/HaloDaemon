@@ -21,7 +21,19 @@ Two bus kinds:
 | Chipset | Adapter name does not contain "nvidia", "amd radeon", or "radeon" |
 | GPU | Adapter name contains "nvidia", "amd radeon", or "radeon" |
 
-On Linux, buses are enumerated from `/dev/i2c-*` with adapter names read from `/sys/class/i2c-adapter/`. On Windows, chipset buses are enumerated via WMI, GPU buses via `NvAPI_EnumPhysicalGPUs`.
+On Linux, buses are enumerated from `/dev/i2c-*` with adapter names read from `/sys/class/i2c-adapter/`. On Windows, chipset buses are enumerated via WMI, GPU buses via `NvAPI_EnumPhysicalGPUs`. Each `BusInfo` also carries the bus's PCI ids (vendor, device, subsystem vendor/device), read from sysfs on Linux and NvAPI on Windows.
+
+### GPU-bus PCI gate
+
+A GPU's I²C segment is shared with the monitor's DDC/EDID lines, so poking an RGB address on an unrecognised card can wedge the bus — tripping driver resets or knocking out display detection. The DRAM/chipset bus has no such coupling.
+
+The scanner therefore **gates every GPU-bus scan on the card's PCI id**. A scan entry (native `SmBusScanEntry` or a plugin's `pci_match`) declares which cards it covers; before opening a GPU bus the scanner keeps only buses matching an entry:
+
+- **no match** → the bus is never opened or probed;
+- **`confirmed` match** → emitted with no probe transaction (curated whitelist);
+- **any other match** → confirmed with the entry's probe — prefer `read_byte` over the intrusive `write_quick`.
+
+A GPU scan with an empty gate is refused (rejected at load for plugins; skipped with a warning for native entries). Chipset buses are ungated by default.
 
 ---
 

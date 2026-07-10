@@ -41,6 +41,66 @@ local RAM_ADDRESSES = {
 }
 local GPU_ADDRESS = 0x67
 
+-- PCI-identity gate for the GPU bus. The GPU I²C segment is shared with the
+-- monitor's DDC/EDID lines, so we only touch 0x67 on cards we recognise.
+--
+-- Two layers:
+--   * broad detectors (confirmed = false) — any ASUS board on NVIDIA / AMD
+--     silicon is confirmed with a gentle read_byte (the OpenRGB stance);
+--   * a curated whitelist (confirmed = true) — verified ASUS ENE-GPU boards,
+--     emitted with no scan probe at all. `initialize` still validates each via
+--     register reads, so the whitelist only removes the scan-time transaction.
+-- Board subsystem-device ids are ported from OpenRGB's `pci_ids/pci_ids.h`
+-- (ENE SMBus GPU detector). Any ASUS card not individually listed still works
+-- via the broad detector above.
+local NVIDIA_VEN = 0x10DE
+local AMD_VEN    = 0x1002
+local ASUS_SUB   = 0x1043
+local function nv(sub_device) return { vendor = NVIDIA_VEN, sub_vendor = ASUS_SUB, sub_device = sub_device, confirmed = true } end
+local function amd(sub_device) return { vendor = AMD_VEN, sub_vendor = ASUS_SUB, sub_device = sub_device, confirmed = true } end
+local GPU_PCI_MATCH = {
+  { vendor = NVIDIA_VEN, sub_vendor = ASUS_SUB, confirmed = false },
+  { vendor = AMD_VEN,    sub_vendor = ASUS_SUB, confirmed = false },
+
+  -- ── ASUS ROG STRIX / ASTRAL / MATRIX — GeForce RTX 30/40/50 ──
+  nv(0x8872), nv(0x87F3), nv(0x87F4), nv(0x8818), nv(0x87BA), nv(0x8834),
+  nv(0x8835), nv(0x87B8), nv(0x87B9), nv(0x87E0), nv(0x882D), nv(0x882C),
+  nv(0x8832), nv(0x880E), nv(0x87AA), nv(0x882F), nv(0x87AC), nv(0x87D1),
+  nv(0x8830), nv(0x882E), nv(0x886C), nv(0x886B), nv(0x8887), nv(0x8807),
+  nv(0x8809), nv(0x87AD), nv(0x87C5), nv(0x87AF), nv(0x87D9), nv(0x8886),
+  nv(0x87CD), nv(0x8870), nv(0x8908), nv(0x88FB), nv(0x88F3), nv(0x8973),
+  nv(0x8972), nv(0x88A6), nv(0x88E5), nv(0x88A7), nv(0x896B), nv(0x896D),
+  nv(0x88C0), nv(0x88C9), nv(0x88C8), nv(0x88BF), nv(0x889F), nv(0x8964),
+  nv(0x8969), nv(0x8968), nv(0x88E8), nv(0x889D), nv(0x889C), nv(0x88EF),
+  nv(0x88F0), nv(0x890C), nv(0x8932), nv(0x8933), nv(0x88C4), nv(0x88F2),
+  nv(0x88C3), nv(0x88F1), nv(0x8934), nv(0x8A0D), nv(0x89DE), nv(0x8A2B),
+  nv(0x89DF), nv(0x8A2C), nv(0x89E3), nv(0x89E4), nv(0x8A3C), nv(0x8A2E),
+  nv(0x89EC), nv(0x89ED), nv(0x8A61),
+
+  -- ── ASUS TUF — GeForce RTX 30/40/50 ──
+  nv(0x87F5), nv(0x8865), nv(0x8816), nv(0x88AC), nv(0x87C6), nv(0x8827),
+  nv(0x87C2), nv(0x87C1), nv(0x8825), nv(0x8813), nv(0x8812), nv(0x88BD),
+  nv(0x88BC), nv(0x87C4), nv(0x87CE), nv(0x87B2), nv(0x87B0), nv(0x8822),
+  nv(0x882B), nv(0x8823), nv(0x886F), nv(0x886E), nv(0x8803), nv(0x8802),
+  nv(0x87B5), nv(0x87B3), nv(0x8875), nv(0x8874), nv(0x88F6), nv(0x88DE),
+  nv(0x88DF), nv(0x88EB), nv(0x88EC), nv(0x8952), nv(0x88A4), nv(0x88DD),
+  nv(0x88A3), nv(0x88DC), nv(0x8935), nv(0x8958), nv(0x8957), nv(0x895B),
+  nv(0x88A2), nv(0x88CB), nv(0x88CA), nv(0x88A1), nv(0x8963), nv(0x8962),
+  nv(0x89C9), nv(0x889A), nv(0x889B), nv(0x88E2), nv(0x88E3), nv(0x88E6),
+  nv(0x8A1A), nv(0x89F2), nv(0x89F4), nv(0x8A37), nv(0x8A0C), nv(0x89D7),
+  nv(0x89EE), nv(0x89EF),
+
+  -- ── ASUS KO — GeForce RTX 30 ──
+  nv(0x87FB), nv(0x8821), nv(0x87CA), nv(0x87CB), nv(0x883E), nv(0x8842),
+  nv(0x87BE), nv(0x8843),
+
+  -- ── ASUS ROG STRIX / TUF — Radeon RX 6000/7000/9000 ──
+  amd(0x05D1), amd(0x05E1), amd(0x05C9), amd(0x05C7), amd(0x05E5), amd(0x04F4),
+  amd(0x04F6), amd(0x04F2), amd(0x04F0), amd(0x04FA), amd(0x04FE), amd(0x04F8), amd(0x04FC),
+  amd(0x0504), amd(0x05E9), amd(0x0607), amd(0x0512), amd(0x05FD), amd(0x0606),
+  amd(0x0601), amd(0x050C), amd(0x05ED), amd(0x0506), amd(0x0614), amd(0x0613),
+}
+
 -- ── Low-level register helpers (run inside a batch callback) ─────────────────
 
 -- ENE two-stage addressing: byte-swap the 16-bit register into command 0x00,
@@ -264,7 +324,8 @@ return {
     },
     {
       transport = "smbus", bus = "gpu",
-      addresses = { GPU_ADDRESS }, probe = "quick",
+      addresses = { GPU_ADDRESS }, probe = "read_byte",
+      pci_match = GPU_PCI_MATCH,
       name = "ASUS GPU RGB", device_type = "gpu",
     },
   },

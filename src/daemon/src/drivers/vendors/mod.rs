@@ -10,4 +10,3 @@ pub mod nzxt;
 pub mod philips;
 pub mod razer;
 pub mod steelseries;
-pub mod zotac;

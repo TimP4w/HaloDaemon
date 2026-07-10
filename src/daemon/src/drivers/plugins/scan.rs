@@ -8,7 +8,7 @@
 use halod_shared::types::WriteRateLimit;
 
 use super::manifest::ProbeMode;
-use crate::drivers::transports::smbus::SmbusBusKind;
+use crate::drivers::transports::smbus::{PciMatch, SmbusBusKind};
 
 /// One plugin-declared SMBus scan, mirroring the fields the scanner reads from a
 /// native `SmBusScanEntry` plus what it needs to run the plugin's `pre_scan`.
@@ -23,6 +23,8 @@ pub struct PluginScanEntry {
     pub write_rate_limit: Option<WriteRateLimit>,
     pub pre_scan: bool,
     pub probe: ProbeMode,
+    /// PCI-identity gate (GPU buses). Mirrors `MatchSpec.pci_match`.
+    pub pci_match: Vec<PciMatch>,
 }
 
 impl PluginScanEntry {
@@ -61,6 +63,7 @@ pub fn plugin_smbus_scan_entries() -> Vec<PluginScanEntry> {
                     .map(|max_bytes_per_sec| WriteRateLimit { max_bytes_per_sec }),
                 pre_scan: spec.pre_scan,
                 probe: spec.probe,
+                pci_match: spec.pci_match.clone(),
             });
         }
     }
