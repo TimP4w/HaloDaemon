@@ -3,8 +3,6 @@
 --
 -- Corsair NXP keyboard protocol — Lua plugin for HaloDaemon.
 --
--- Port of daemon/src/drivers/vendors/corsair/protocols/corsair_nxp.rs
--- and daemon/src/drivers/vendors/corsair/devices/nxp_keyboard.rs.
 --
 -- Currently supports the K70 RGB MK.2 Low Profile (PID 0x1B55).
 -- Adding another NXP keyboard is a new model entry in the MODELS table.
