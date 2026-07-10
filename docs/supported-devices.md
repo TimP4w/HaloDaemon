@@ -73,7 +73,7 @@ To add a device, see the [development guide](development.md).
 | Vendor | Model | VID:PID | Protocol | Transport | Platform |
 |--------|-------|---------|----------|-----------|----------|
 | ASUS | Aura USB controllers | 0b05:1866, 1867, 1872, 18a3, 18a5, 18f3, 1939, 19af, 1a30, 1a6c, 1aa6, 1b3b, 1bed | [ASUS Aura USB](protocols/asus-aura-usb.md) | [HID](transports/hid.md) | 🐧🪟 |
-| ASUS/ENE | SMBus RGB (DRAM, GPU) | — | [ENE SMBus](protocols/ene-smbus.md) | [SMBus](transports/smbus.md) | 🐧🪟 |
+| ASUS/ENE | SMBus RGB (DRAM, GPU) | — | [ENE SMBus](protocols/ene-smbus.md) (built-in [Lua plugin](plugins.md)) | [SMBus](transports/smbus.md) | 🐧🪟 |
 | Corsair | Vengeance / Dominator DDR4/DDR5 DRAM RGB | — | [Corsair DRAM](protocols/corsair-dram.md) | [SMBus](transports/smbus.md) | 🐧🪟 |
 | Zotac | RTX 5080 AMP Extreme INFINITY (SPECTRA 2.0) | 10DE:2C02 (sub 19DA:1762) | [Zotac Blackwell GPU](protocols/zotac-gpu-blackwell.md) | [SMBus](transports/smbus.md) | 🐧🪟 |
 

@@ -11,16 +11,20 @@
 //! and `make_device` consults `match_handle` before the native descriptors, so
 //! a plugin shadows a native driver for the same hardware.
 
+mod backends;
 mod bytebuf;
 mod chain_leaf;
 mod device;
 mod manifest;
 mod sandbox;
+mod transport;
 mod transport_api;
 mod worker;
 
 pub use device::LuaDevice;
-pub use manifest::{parse_manifest, PluginManifest};
+pub use manifest::{parse_manifest, PluginManifest, ProbeMode};
+pub use scan::plugin_smbus_scan_entries;
+pub use worker::run_pre_scan;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -28,10 +32,13 @@ use std::sync::{Arc, RwLock};
 
 use halod_shared::types::PluginInfo;
 
-use crate::drivers::transports::hid::HidTransport;
-use crate::drivers::transports::Transport;
 use crate::drivers::Device;
 use crate::registry::discovery::DiscoveryHandle;
+
+mod scan;
+
+#[cfg(test)]
+mod ene_test;
 
 static PLUGIN_REGISTRY: RwLock<Vec<PluginManifest>> = RwLock::new(Vec::new());
 /// Plugin ids the user disabled. `match_handle` skips these, so a disabled
@@ -69,11 +76,30 @@ pub fn list() -> Vec<PluginInfo> {
         .collect()
 }
 
-/// (Re)load every `*.lua` in `dir` into the registry, replacing prior contents.
-/// A malformed plugin is logged and skipped — it never aborts loading or the
-/// daemon. Missing directory is normal (no plugins installed).
+/// Plugins shipped inside the daemon binary, loaded before directory plugins.
+/// These replace what used to be native Rust drivers (e.g. ENE SMBus RGB); the
+/// user can disable them like any other plugin.
+const BUILTIN_PLUGINS: &[(&str, &str)] =
+    &[("ene_smbus.lua", include_str!("builtins/ene_smbus.lua"))];
+
+fn builtin_manifests() -> Vec<PluginManifest> {
+    BUILTIN_PLUGINS
+        .iter()
+        .filter_map(|(name, src)| match parse_manifest(src, Path::new(name)) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                log::error!("built-in plugin '{name}' failed to parse: {e:#}");
+                None
+            }
+        })
+        .collect()
+}
+
+/// (Re)load the built-in plugins plus every `*.lua` in `dir` into the registry,
+/// replacing prior contents. A malformed plugin is logged and skipped — it never
+/// aborts loading or the daemon. Missing directory is normal (no plugins installed).
 pub fn load_all(dir: &Path) {
-    let mut manifests = Vec::new();
+    let mut manifests = builtin_manifests();
     match std::fs::read_dir(dir) {
         Ok(entries) => {
             for entry in entries.flatten() {
@@ -107,48 +133,30 @@ fn load_one(path: &Path) -> anyhow::Result<PluginManifest> {
     parse_manifest(&source, path)
 }
 
-/// Stable device id from a matched manifest + handle.
-fn device_id(manifest: &PluginManifest, handle: &DiscoveryHandle<'_>) -> String {
-    let suffix = match handle {
-        DiscoveryHandle::Hid {
-            serial: Some(s), ..
-        } => (*s).to_owned(),
-        DiscoveryHandle::Hid { idx, .. } => idx.to_string(),
-        _ => "0".to_owned(),
-    };
+/// Stable device id from a matched manifest + handle (suffix per transport).
+fn device_id(
+    manifest: &PluginManifest,
+    spec: &manifest::MatchSpec,
+    handle: &DiscoveryHandle<'_>,
+) -> String {
+    let suffix = transport::descriptor_for(&spec.transport)
+        .map(|d| (d.id_suffix)(handle))
+        .unwrap_or_else(|| "0".to_owned());
     format!("{}-{}", manifest.id_prefix(), suffix)
 }
 
-/// Open the HID transport a plugin declares against the matched handle's path.
-fn open_hid_transport(
-    manifest: &PluginManifest,
-    handle: &DiscoveryHandle<'_>,
-) -> anyhow::Result<Arc<dyn Transport>> {
-    let DiscoveryHandle::Hid { path, .. } = handle else {
-        anyhow::bail!("plugin '{}' matched a non-HID handle", manifest.plugin_id);
-    };
-    let hid = manifest.transports.hid.clone().unwrap_or_default();
-    let transport = HidTransport::open(
-        path,
-        Some(hid.report_size),
-        hid.timeout_ms,
-        hid.feature_report,
-        None,
-    )?;
-    Ok(Arc::new(transport))
-}
-
-/// Build a device from a matched manifest and the handle that matched it.
-/// Device-only plugins need no runtime/transport; capability plugins open their
-/// transport and spawn a worker. Returns `None` if the transport can't be opened
-/// (so a native driver can still claim the hardware).
+/// Build a device from a matched manifest, the spec that matched, and the
+/// handle. Device-only plugins need no runtime/transport; capability plugins
+/// open their transport and spawn a worker. Returns `None` if the transport
+/// can't be opened (so a native driver can still claim the hardware).
 fn build_device(
     manifest: &PluginManifest,
+    spec: &manifest::MatchSpec,
     handle: &DiscoveryHandle<'_>,
 ) -> Option<Arc<dyn Device>> {
-    let id = device_id(manifest, handle);
+    let id = device_id(manifest, spec, handle);
     if !manifest.needs_worker() {
-        return Some(Arc::new(LuaDevice::device_only(id, manifest)));
+        return Some(Arc::new(LuaDevice::device_only(id, manifest, spec)));
     }
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         log::warn!(
@@ -157,21 +165,32 @@ fn build_device(
         );
         return None;
     };
-    let transport = match open_hid_transport(manifest, handle) {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!(
-                "plugin '{}' transport open failed: {e:#}",
-                manifest.plugin_id
-            );
-            return None;
-        }
+    let transport =
+        match transport::descriptor_for(&spec.transport).map(|d| (d.open)(manifest, handle)) {
+            Some(Ok(t)) => t,
+            Some(Err(e)) => {
+                log::warn!(
+                    "plugin '{}' transport open failed: {e:#}",
+                    manifest.plugin_id
+                );
+                return None;
+            }
+            None => return None,
+        };
+
+    let dev_match = worker::DevMatch {
+        transport: spec.transport.clone(),
+        bus: spec.bus.clone(),
+        addr: match handle {
+            DiscoveryHandle::Smbus { addr, .. } => Some(*addr),
+            _ => None,
+        },
     };
 
     // `new_cyclic` so the device can hand its children a `FanHub` back-reference
     // (the chain machinery, mirrored on the native NZXT Kraken).
     let device = Arc::new_cyclic(|weak| {
-        let mut dev = LuaDevice::with_transport(id, manifest, transport, runtime);
+        let mut dev = LuaDevice::with_transport(id, manifest, spec, dev_match, transport, runtime);
         dev.set_self_ref(weak.clone());
         dev
     });
@@ -195,8 +214,8 @@ pub fn match_in(
     manifests
         .iter()
         .filter(|m| !is_disabled(&m.plugin_id))
-        .find(|m| m.match_spec.matches(handle))
-        .and_then(|m| build_device(m, handle))
+        .find_map(|m| m.match_spec_for(handle).map(|spec| (m, spec)))
+        .and_then(|(m, spec)| build_device(m, spec, handle))
 }
 
 /// Match a discovery handle against every loaded plugin. Consulted by

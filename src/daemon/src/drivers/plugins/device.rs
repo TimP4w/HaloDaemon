@@ -10,18 +10,22 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use halod_shared::types::{RgbColor, RgbDescriptor, RgbState, Sensor, WriteRateStatus};
+use halod_shared::types::{
+    DeviceType, NativeEffect, RgbColor, RgbDescriptor, RgbState, RgbZone, Sensor, WriteRateStatus,
+};
 
 use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor};
-use crate::drivers::transports::Transport;
 use crate::drivers::{
     CapabilityRef, ChainCapability, Controller, Device, FanCapability, FanHub, FanStateSlot,
     RgbCapability, RgbStateSlot, SensorCapability,
 };
 
 use super::chain_leaf::ChainLeaf;
-use super::manifest::{AccessoryManifest, PluginManifest};
-use super::worker::PluginHandle;
+use super::manifest::{topology_from, AccessoryManifest, MatchSpec, PluginManifest};
+use super::transport::PluginIo;
+use super::worker::{DevMatch, InitZone, PluginHandle};
+use crate::drivers::vendors::generic::devices::common::{linear_rgb_zone, ring_led_positions};
+use halod_shared::types::ZoneTopology;
 
 /// A device whose behaviour is defined by a plugin script rather than native
 /// Rust.
@@ -31,19 +35,29 @@ pub struct LuaDevice {
     vendor: String,
     model: String,
     plugin_id: String,
+    device_type: DeviceType,
+    /// A short label for the Info UI's transport line ("hid", "smbus", …).
+    transport_kind: &'static str,
+
+    /// Firmware/model discovered at `initialize()` time, overriding the static
+    /// manifest `model` when present (e.g. an SMBus controller's version string).
+    dynamic_model: OnceLock<String>,
 
     /// Present when the plugin declares a capability (RGB/fan/sensor). Absent
     /// for a device-only plugin.
     worker: Option<PluginHandle>,
     /// Clone of the (metered) transport, kept so the device can report
     /// write-rate/throughput to the Info UI. `None` for device-only plugins.
-    transport: Option<Arc<dyn Transport>>,
+    transport: Option<PluginIo>,
 
     has_rgb: bool,
     has_fan: bool,
     has_sensor: bool,
 
     rgb_descriptor: RgbDescriptor,
+    /// RGB zones discovered at `initialize()` (dynamic LED counts). Overrides
+    /// `rgb_descriptor` when set.
+    dynamic_rgb_descriptor: OnceLock<RgbDescriptor>,
     rgb_slot: RgbStateSlot,
     fan_slot: FanStateSlot,
     fan_channel: u8,
@@ -73,22 +87,35 @@ impl Drop for LuaDevice {
 
 impl LuaDevice {
     /// A plugin that declares no capability — identity + lifecycle only.
-    pub fn device_only(id: String, manifest: &PluginManifest) -> Self {
-        Self::build(id, manifest, None, None)
+    pub fn device_only(id: String, manifest: &PluginManifest, spec: &MatchSpec) -> Self {
+        Self::build(id, manifest, spec, None, None)
     }
 
     /// A plugin with capabilities, backed by a worker over `transport`.
     pub fn with_transport(
         id: String,
         manifest: &PluginManifest,
-        transport: Arc<dyn Transport>,
+        spec: &MatchSpec,
+        dev_match: DevMatch,
+        transport: PluginIo,
         handle: tokio::runtime::Handle,
     ) -> Self {
         // Keep a handle to the (metered) transport so the device can report
         // write-rate/throughput; the worker owns the one it does I/O through.
         let rate_transport = transport.clone();
-        let worker = PluginHandle::spawn(manifest.script_source.clone(), transport, handle.clone());
-        let mut dev = Self::build(id, manifest, Some(worker.clone()), Some(rate_transport));
+        let worker = PluginHandle::spawn(
+            manifest.script_source.clone(),
+            transport,
+            dev_match,
+            handle.clone(),
+        );
+        let mut dev = Self::build(
+            id,
+            manifest,
+            spec,
+            Some(worker.clone()),
+            Some(rate_transport),
+        );
 
         // The status poll loop stays host-side (not in the single-threaded VM):
         // a ticker enqueues one poll per interval, run serially by the worker.
@@ -114,15 +141,21 @@ impl LuaDevice {
     fn build(
         id: String,
         manifest: &PluginManifest,
+        spec: &MatchSpec,
         worker: Option<PluginHandle>,
-        transport: Option<Arc<dyn Transport>>,
+        transport: Option<PluginIo>,
     ) -> Self {
         Self {
             id,
-            name: manifest.display_name().to_owned(),
+            name: manifest.display_name_for(spec),
             vendor: manifest.identity.vendor.clone(),
             model: manifest.identity.model.clone(),
             plugin_id: manifest.plugin_id.clone(),
+            device_type: spec.device_type.unwrap_or_default(),
+            transport_kind: super::transport::descriptor_for(&spec.transport)
+                .map(|d| d.kind)
+                .unwrap_or("unknown"),
+            dynamic_model: OnceLock::new(),
             worker,
             transport,
             has_rgb: manifest.rgb.is_some(),
@@ -132,6 +165,7 @@ impl LuaDevice {
                 zones: Vec::new(),
                 native_effects: Vec::new(),
             }),
+            dynamic_rgb_descriptor: OnceLock::new(),
             rgb_slot: RgbStateSlot::default(),
             fan_slot: FanStateSlot::default(),
             fan_channel: manifest.fan.as_ref().map(|f| f.channel).unwrap_or(0),
@@ -197,6 +231,37 @@ impl LuaDevice {
     }
 }
 
+/// Build an `RgbDescriptor` from `initialize`-reported zones, computing LED
+/// positions from the declared topology + count (as static accessory zones do).
+/// Native effects carry over from the static manifest descriptor.
+fn build_dynamic_descriptor(
+    zones: Vec<InitZone>,
+    native_effects: &[NativeEffect],
+) -> RgbDescriptor {
+    let zones = zones
+        .into_iter()
+        .map(|z| {
+            let topology = topology_from(&z.topology, z.rings);
+            // `ring_led_positions` only lays out ring topologies; linear zones use
+            // the evenly-spaced strip layout (as the native drivers did).
+            if matches!(topology, ZoneTopology::Linear) {
+                linear_rgb_zone(&z.id, &z.name, z.led_count as usize)
+            } else {
+                RgbZone {
+                    leds: ring_led_positions(&topology, z.led_count),
+                    id: z.id,
+                    name: z.name,
+                    topology,
+                }
+            }
+        })
+        .collect();
+    RgbDescriptor {
+        zones,
+        native_effects: native_effects.to_vec(),
+    }
+}
+
 #[async_trait]
 impl Device for LuaDevice {
     fn id(&self) -> &str {
@@ -212,14 +277,28 @@ impl Device for LuaDevice {
     }
 
     fn model(&self) -> &str {
-        &self.model
+        self.dynamic_model.get().unwrap_or(&self.model)
+    }
+
+    fn wire_device_type(&self) -> DeviceType {
+        self.device_type
     }
 
     async fn initialize(&self) -> Result<bool> {
-        match &self.worker {
-            Some(w) => w.initialize().await,
-            None => Ok(true),
+        let Some(w) = &self.worker else {
+            return Ok(true);
+        };
+        let outcome = w.initialize().await?;
+        if let Some(model) = outcome.model {
+            let _ = self.dynamic_model.set(model);
         }
+        if let Some(zones) = outcome.zones {
+            let _ = self.dynamic_rgb_descriptor.set(build_dynamic_descriptor(
+                zones,
+                &self.rgb_descriptor.native_effects,
+            ));
+        }
+        Ok(outcome.ok)
     }
 
     async fn close(&self) {
@@ -230,6 +309,10 @@ impl Device for LuaDevice {
 
     fn write_rate_status(&self) -> Option<WriteRateStatus> {
         self.transport.as_ref().map(|t| t.rate_status())
+    }
+
+    fn debug_transport(&self) -> Option<&'static str> {
+        Some(self.transport_kind)
     }
 
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
@@ -254,7 +337,9 @@ impl Device for LuaDevice {
 #[async_trait]
 impl RgbCapability for LuaDevice {
     fn descriptor(&self) -> &RgbDescriptor {
-        &self.rgb_descriptor
+        self.dynamic_rgb_descriptor
+            .get()
+            .unwrap_or(&self.rgb_descriptor)
     }
 
     async fn apply(&self, state: RgbState) -> Result<()> {
@@ -408,8 +493,30 @@ impl FanHub for LuaDevice {
 mod tests {
     use super::*;
     use crate::drivers::transports::mock::test_transport::MockTransport;
+    use crate::drivers::transports::Transport;
     use crate::drivers::{FanCapability, RgbCapability, SensorCapability};
     use std::path::Path;
+
+    fn hid_match() -> DevMatch {
+        DevMatch {
+            transport: "hid".into(),
+            bus: None,
+            addr: None,
+        }
+    }
+
+    /// Build a HID plugin device over a mock byte-stream transport.
+    fn hid_device(id: &str, manifest: &PluginManifest, transport: Arc<dyn Transport>) -> LuaDevice {
+        let spec = &manifest.match_specs[0];
+        LuaDevice::with_transport(
+            id.into(),
+            manifest,
+            spec,
+            hid_match(),
+            PluginIo::Stream(transport),
+            tokio::runtime::Handle::current(),
+        )
+    }
 
     const SCRIPT: &str = r#"
         return {
@@ -448,12 +555,7 @@ mod tests {
 
     fn device(transport: Arc<dyn Transport>) -> LuaDevice {
         let manifest = super::super::parse_manifest(SCRIPT, Path::new("t.lua")).unwrap();
-        LuaDevice::with_transport(
-            "t-0".into(),
-            &manifest,
-            transport,
-            tokio::runtime::Handle::current(),
-        )
+        hid_device("t-0", &manifest, transport)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -504,12 +606,7 @@ mod tests {
         "#;
         let manifest = super::super::parse_manifest(BUF_SCRIPT, Path::new("buf.lua")).unwrap();
         let mock = Arc::new(MockTransport::empty());
-        let dev = LuaDevice::with_transport(
-            "b-0".into(),
-            &manifest,
-            mock.clone(),
-            tokio::runtime::Handle::current(),
-        );
+        let dev = hid_device("b-0", &manifest, mock.clone());
         dev.write_frame(
             "z",
             &[RgbColor {
@@ -584,12 +681,7 @@ mod tests {
         "#;
         let manifest = super::super::parse_manifest(POLL_SCRIPT, Path::new("poll.lua")).unwrap();
         let mock = Arc::new(MockTransport::new(vec![vec![55], vec![55]]));
-        let dev = LuaDevice::with_transport(
-            "poll-0".into(),
-            &manifest,
-            mock.clone(),
-            tokio::runtime::Handle::current(),
-        );
+        let dev = hid_device("poll-0", &manifest, mock.clone());
         dev.poll_once().await.unwrap();
         assert_eq!(dev.get_sensors().await.unwrap()[0].value, 55.0);
     }
@@ -628,11 +720,14 @@ mod tests {
         use crate::drivers::chain::{ChainAdapter, ChainHost};
         use crate::drivers::CHAIN_LINK_KIND_NZXT_ARGB;
         let manifest = super::super::parse_manifest(CHAIN_SCRIPT, Path::new("kraken.lua")).unwrap();
+        let spec = &manifest.match_specs[0];
         let dev = Arc::new_cyclic(|weak| {
             let mut d = LuaDevice::with_transport(
                 "kraken-0".into(),
                 &manifest,
-                transport,
+                spec,
+                hid_match(),
+                PluginIo::Stream(transport),
                 tokio::runtime::Handle::current(),
             );
             d.set_self_ref(weak.clone());
@@ -652,11 +747,14 @@ mod tests {
         let src = include_str!("../../../../../plugins/examples/nzxt_kraken.lua");
         let manifest = super::super::parse_manifest(src, Path::new("nzxt_kraken.lua")).unwrap();
         let mock = Arc::new(MockTransport::empty());
+        let spec = &manifest.match_specs[0];
         let dev = Arc::new_cyclic(|weak| {
             let mut d = LuaDevice::with_transport(
                 "k".into(),
                 &manifest,
-                mock.clone(),
+                spec,
+                hid_match(),
+                PluginIo::Stream(mock.clone()),
                 tokio::runtime::Handle::current(),
             );
             d.set_self_ref(weak.clone());

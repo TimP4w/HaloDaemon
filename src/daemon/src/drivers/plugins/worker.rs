@@ -15,10 +15,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use halod_shared::types::{RgbColor, RgbState, Sensor};
 
-use crate::drivers::transports::Transport;
-
 use super::sandbox;
+use super::transport::{AddrScope, PluginIo, RegisterBus};
 use super::transport_api::TransportApi;
+use crate::drivers::transports::smbus::SmBusDevice;
 
 /// One accessory the plugin's `detect_accessories` reports.
 #[derive(Debug, Clone, Deserialize)]
@@ -27,9 +27,59 @@ pub struct DetectedAccessory {
     pub accessory: u8,
 }
 
+/// Identifying context injected into the plugin's `dev.match` table, so a
+/// callback can branch on which declared spec matched (e.g. an SMBus plugin
+/// reading its own bus address).
+#[derive(Debug, Clone, Default)]
+pub struct DevMatch {
+    pub transport: String,
+    pub bus: Option<String>,
+    pub addr: Option<u8>,
+}
+
+/// One RGB zone a plugin's `initialize` reports for dynamic LED counts.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InitZone {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_zone_topology")]
+    pub topology: String,
+    pub led_count: u32,
+    #[serde(default)]
+    pub rings: u8,
+}
+
+fn default_zone_topology() -> String {
+    "linear".to_owned()
+}
+
+/// What `initialize` returns: a bare bool, or a table with dynamic device info
+/// discovered from the hardware (firmware/model, RGB zones).
+#[derive(Debug, Default)]
+pub struct InitOutcome {
+    pub ok: bool,
+    pub model: Option<String>,
+    pub zones: Option<Vec<InitZone>>,
+}
+
+/// The shape `initialize` may return as a table (bool short-circuits before this).
+#[derive(Debug, Deserialize)]
+struct InitTable {
+    #[serde(default = "default_true")]
+    ok: bool,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    zones: Option<Vec<InitZone>>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// A request to the worker. Each carries its own reply channel.
 pub enum Call {
-    Initialize(oneshot::Sender<Result<bool>>),
+    Initialize(oneshot::Sender<Result<InitOutcome>>),
     Close(oneshot::Sender<()>),
     RgbApply(RgbState, oneshot::Sender<Result<()>>),
     RgbWriteFrame {
@@ -82,12 +132,12 @@ pub struct PluginHandle {
 impl PluginHandle {
     /// Spawn the worker thread. `source` is the full script; the worker builds
     /// its own VM from it (no live VM crosses threads).
-    pub fn spawn(source: String, transport: Arc<dyn Transport>, handle: Handle) -> Self {
+    pub fn spawn(source: String, transport: PluginIo, dev_match: DevMatch, handle: Handle) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         std::thread::Builder::new()
             .name("halod-plugin".into())
             .spawn(move || {
-                if let Err(e) = worker_main(&source, transport, handle, rx) {
+                if let Err(e) = worker_main(&source, transport, dev_match, handle, rx) {
                     log::error!("plugin worker stopped: {e:#}");
                 }
             })
@@ -104,7 +154,7 @@ impl PluginHandle {
             .map_err(|_| anyhow!("plugin worker dropped the reply"))
     }
 
-    pub async fn initialize(&self) -> Result<bool> {
+    pub async fn initialize(&self) -> Result<InitOutcome> {
         self.request(Call::Initialize).await?
     }
 
@@ -239,7 +289,8 @@ fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
 
 fn worker_main(
     source: &str,
-    transport: Arc<dyn Transport>,
+    transport: PluginIo,
+    dev_match: DevMatch,
     handle: Handle,
     mut rx: mpsc::UnboundedReceiver<Call>,
 ) -> Result<()> {
@@ -252,7 +303,8 @@ fn worker_main(
         .map_err(|e| lua_err("script evaluation", e))?;
     let cb = Callbacks::load(&manifest);
 
-    // The `dev` argument every callback receives: exposes the transport.
+    // The `dev` argument every callback receives: exposes the transport and the
+    // matched-spec identity (`dev.match`).
     let dev = lua.create_table().map_err(|e| lua_err("dev table", e))?;
     let api = TransportApi::new(transport, handle);
     let api_ud = lua
@@ -260,11 +312,13 @@ fn worker_main(
         .map_err(|e| lua_err("transport userdata", e))?;
     dev.set("transport", api_ud)
         .map_err(|e| lua_err("dev.transport", e))?;
+    dev.set("match", build_match_table(&lua, &dev_match)?)
+        .map_err(|e| lua_err("dev.match", e))?;
 
     while let Some(call) = rx.blocking_recv() {
         match call {
             Call::Initialize(reply) => {
-                let _ = reply.send(run_initialize(&cb, &dev));
+                let _ = reply.send(run_initialize(&lua, &cb, &dev));
             }
             Call::Close(reply) => {
                 if let Some(f) = &cb.close {
@@ -414,12 +468,81 @@ fn run_poll(cb: &Callbacks, dev: &Table) {
     }
 }
 
-fn run_initialize(cb: &Callbacks, dev: &Table) -> Result<bool> {
-    match &cb.initialize {
-        Some(f) => f
-            .call::<bool>(dev.clone())
-            .map_err(|e| lua_err("initialize", e)),
-        None => Ok(true),
+/// Run a plugin's `pre_scan(dev)` callback against a freshly opened SMBus bus,
+/// before the scanner probes addresses. Used for one-time bus preparation whose
+/// control flow depends on live reads (e.g. the ENE DRAM broadcast remap). The
+/// transport is a register bus scoped to `scope_addrs` (declared + extras), so
+/// pre_scan can never reach an address the plugin didn't declare. Runs on the
+/// calling thread (a `spawn_blocking` worker), so register batches block inline.
+pub fn run_pre_scan(
+    source: &str,
+    bus: Arc<SmBusDevice>,
+    scope_addrs: Vec<u8>,
+    handle: Handle,
+) -> Result<()> {
+    let lua = Lua::new();
+    sandbox::apply(&lua).map_err(|e| lua_err("sandbox setup", e))?;
+    let manifest: Table = lua
+        .load(source)
+        .eval()
+        .map_err(|e| lua_err("script evaluation", e))?;
+    let Ok(Value::Function(pre_scan)) = manifest.get::<Value>("pre_scan") else {
+        return Ok(()); // no pre_scan declared: nothing to do
+    };
+
+    let io = PluginIo::Register(RegisterBus::new(bus, AddrScope::new(scope_addrs)));
+    let dev = lua.create_table().map_err(|e| lua_err("dev table", e))?;
+    let api_ud = lua
+        .create_userdata(TransportApi::new(io, handle))
+        .map_err(|e| lua_err("transport userdata", e))?;
+    dev.set("transport", api_ud)
+        .map_err(|e| lua_err("dev.transport", e))?;
+    pre_scan.call::<()>(dev).map_err(|e| lua_err("pre_scan", e))
+}
+
+fn build_match_table(lua: &Lua, m: &DevMatch) -> Result<Table> {
+    let t = lua.create_table().map_err(|e| lua_err("match table", e))?;
+    t.set("transport", m.transport.clone())
+        .map_err(|e| lua_err("match.transport", e))?;
+    if let Some(bus) = &m.bus {
+        t.set("bus", bus.clone())
+            .map_err(|e| lua_err("match.bus", e))?;
+    }
+    if let Some(addr) = m.addr {
+        t.set("addr", addr).map_err(|e| lua_err("match.addr", e))?;
+    }
+    Ok(t)
+}
+
+/// Run `initialize`, accepting either a bare bool or a table with dynamic device
+/// info (`{ ok, model, zones }`). A missing callback means "present, no info".
+fn run_initialize(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<InitOutcome> {
+    let Some(f) = &cb.initialize else {
+        return Ok(InitOutcome {
+            ok: true,
+            ..Default::default()
+        });
+    };
+    let value: Value = f.call(dev.clone()).map_err(|e| lua_err("initialize", e))?;
+    match value {
+        Value::Boolean(ok) => Ok(InitOutcome {
+            ok,
+            ..Default::default()
+        }),
+        Value::Nil => Ok(InitOutcome {
+            ok: true,
+            ..Default::default()
+        }),
+        other => {
+            let t: InitTable = lua
+                .from_value(other)
+                .map_err(|e| lua_err("initialize result", e))?;
+            Ok(InitOutcome {
+                ok: t.ok,
+                model: t.model,
+                zones: t.zones,
+            })
+        }
     }
 }
 

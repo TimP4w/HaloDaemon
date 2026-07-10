@@ -7,11 +7,13 @@
 //! actually matches.
 
 use anyhow::{anyhow, bail, Result};
-use halod_shared::types::{NativeEffect, RgbDescriptor, RgbZone, ZoneTopology};
+use halod_shared::types::{DeviceType, NativeEffect, RgbDescriptor, RgbZone, ZoneTopology};
 use mlua::{DeserializeOptions, Lua, LuaSerdeExt};
 use serde::Deserialize;
 use std::path::Path;
 
+use super::transport::{descriptor_for, known_kinds};
+use crate::drivers::transports::smbus::SmbusBusKind;
 use crate::drivers::vendors::generic::devices::common::ring_led_positions;
 use crate::registry::discovery::DiscoveryHandle;
 
@@ -100,16 +102,22 @@ pub struct AccessoryManifest {
     pub fan: bool,
 }
 
+/// Map a topology name (+ ring count for "rings") to a [`ZoneTopology`]. Shared
+/// by static accessory zones and dynamic `initialize`-reported zones.
+pub fn topology_from(topology: &str, rings: u8) -> ZoneTopology {
+    match topology {
+        "linear" => ZoneTopology::Linear,
+        "grid" => ZoneTopology::Grid,
+        "rings" => ZoneTopology::Rings {
+            count: rings.max(1),
+        },
+        _ => ZoneTopology::Ring,
+    }
+}
+
 impl AccessoryManifest {
     pub fn zone_topology(&self) -> ZoneTopology {
-        match self.topology.as_str() {
-            "linear" => ZoneTopology::Linear,
-            "grid" => ZoneTopology::Grid,
-            "rings" => ZoneTopology::Rings {
-                count: self.rings.max(1),
-            },
-            _ => ZoneTopology::Ring,
-        }
+        topology_from(&self.topology, self.rings)
     }
 
     pub fn rgb_descriptor(&self) -> RgbDescriptor {
@@ -151,12 +159,33 @@ pub struct PollManifest {
     pub interval_ms: u64,
 }
 
-/// Declarative device match — compiled to the `DeviceDescriptor::matches`
-/// predicate shape. `None` fields mean "don't care".
+/// How the SMBus scanner probes a declared address before emitting a handle.
+/// Openness knob: some controllers NAK a quick-write but answer a read, and a
+/// few must not be probed at all (detection is left entirely to `initialize`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeMode {
+    /// `write_quick` ACK (the default; what `i2cdetect` uses by default).
+    #[default]
+    Quick,
+    /// `read_byte` succeeds — for devices that misbehave on quick-write.
+    ReadByte,
+    /// Emit a handle for every declared address unprobed; `initialize` decides.
+    None,
+}
+
+/// Declarative device match. One spec per hardware shape a plugin drives; a
+/// plugin may declare several (e.g. an SMBus DRAM controller *and* a GPU one).
+/// `None` fields mean "don't care". Which fields are required is enforced by
+/// the transport backend's `validate` (HID needs `vid`; SMBus needs
+/// `bus`+`addresses`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MatchSpec {
     pub transport: String,
-    pub vid: u16,
+
+    // ── HID ──────────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub vid: Option<u16>,
     #[serde(default)]
     pub pid: Option<u16>,
     /// Match any of several product ids (for device families). Takes precedence
@@ -169,6 +198,67 @@ pub struct MatchSpec {
     pub usage: Option<u16>,
     #[serde(default)]
     pub interface: Option<i32>,
+
+    // ── SMBus (match + scan declaration in one) ──────────────────────────
+    /// Bus family to scan/match: "chipset" or "gpu".
+    #[serde(default)]
+    pub bus: Option<String>,
+    /// Addresses the host may probe on the bus (the security boundary).
+    #[serde(default)]
+    pub addresses: Option<Vec<u8>>,
+    /// Extra addresses `pre_scan` may write beyond `addresses` (e.g. an ENE
+    /// DRAM broadcast address). Never probed or matched — only in `pre_scan`.
+    #[serde(default)]
+    pub extra_addresses: Option<Vec<u8>>,
+    /// Bus write-rate ceiling applied before any scan traffic.
+    #[serde(default)]
+    pub max_bytes_per_sec: Option<u32>,
+    /// Run the plugin's `pre_scan` callback on each matching bus before probing.
+    #[serde(default)]
+    pub pre_scan: bool,
+    #[serde(default)]
+    pub probe: ProbeMode,
+
+    // ── Per-spec identity overrides (so one plugin covers several devices) ─
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub device_type: Option<DeviceType>,
+}
+
+/// Accepts either a single `match` table or an array of them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum MatchSpecs {
+    One(MatchSpec),
+    Many(Vec<MatchSpec>),
+}
+
+impl MatchSpecs {
+    fn into_vec(self) -> Vec<MatchSpec> {
+        match self {
+            MatchSpecs::One(m) => vec![m],
+            MatchSpecs::Many(v) => v,
+        }
+    }
+}
+
+impl MatchSpec {
+    /// The SMBus bus family this spec targets, if it is an SMBus spec.
+    pub fn bus_kind(&self) -> Option<SmbusBusKind> {
+        match self.bus.as_deref() {
+            Some("chipset") => Some(SmbusBusKind::Chipset),
+            Some("gpu") => Some(SmbusBusKind::Gpu),
+            _ => None,
+        }
+    }
+
+    /// Addresses a `pre_scan` on this spec may write: declared + extras.
+    pub fn pre_scan_scope(&self) -> Vec<u8> {
+        let mut v = self.addresses.clone().unwrap_or_default();
+        v.extend(self.extra_addresses.iter().flatten().copied());
+        v
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,7 +275,7 @@ pub struct Identity {
 #[derive(Debug, Deserialize)]
 struct RawManifest {
     #[serde(rename = "match")]
-    match_spec: MatchSpec,
+    match_spec: MatchSpecs,
     identity: Identity,
     #[serde(default)]
     transports: TransportsConfig,
@@ -209,7 +299,7 @@ pub struct PluginManifest {
     pub source_path: std::path::PathBuf,
     /// Full script text, re-executed by the worker to build its own VM.
     pub script_source: String,
-    pub match_spec: MatchSpec,
+    pub match_specs: Vec<MatchSpec>,
     pub identity: Identity,
     pub transports: TransportsConfig,
     pub rgb: Option<RgbManifest>,
@@ -220,43 +310,43 @@ pub struct PluginManifest {
 }
 
 impl MatchSpec {
-    /// Does this spec accept the handle a bus scanner produced?
+    /// Does this spec accept the handle a bus scanner produced? Delegated to the
+    /// transport backend registered for `self.transport` (unknown kind → never).
     pub fn matches(&self, handle: &DiscoveryHandle<'_>) -> bool {
-        match (self.transport.as_str(), handle) {
-            (
-                "hid",
-                DiscoveryHandle::Hid {
-                    vid,
-                    pid,
-                    usage_page,
-                    usage,
-                    interface_number,
-                    ..
-                },
-            ) => {
-                let pid_ok = if self.pids.is_empty() {
-                    self.pid.is_none_or(|p| p == *pid)
-                } else {
-                    self.pids.contains(pid)
-                };
-                *vid == self.vid
-                    && pid_ok
-                    && self.usage_page.is_none_or(|u| u == *usage_page)
-                    && self.usage.is_none_or(|u| u == *usage)
-                    && self.interface.is_none_or(|i| Some(i) == *interface_number)
-            }
-            _ => false,
-        }
+        descriptor_for(&self.transport).is_some_and(|d| (d.matches)(self, handle))
     }
 }
 
 impl PluginManifest {
+    /// The first declared spec that accepts `handle`, if any.
+    pub fn match_spec_for(&self, handle: &DiscoveryHandle<'_>) -> Option<&MatchSpec> {
+        self.match_specs.iter().find(|s| s.matches(handle))
+    }
+
+    /// SMBus specs that request a bus scan (all SMBus specs declare addresses).
+    pub fn smbus_specs(&self) -> impl Iterator<Item = &MatchSpec> {
+        self.match_specs.iter().filter(|s| s.bus_kind().is_some())
+    }
+
+    /// Whether any declared spec drives an SMBus bus.
+    pub fn has_smbus(&self) -> bool {
+        self.smbus_specs().next().is_some()
+    }
+
     /// Stable id prefix a matched device's id is built from.
     pub fn id_prefix(&self) -> &str {
         self.identity.id.as_deref().unwrap_or(&self.plugin_id)
     }
 
-    /// Human-readable device name.
+    /// Human-readable device name for a matched spec (per-spec override wins).
+    pub fn display_name_for(&self, spec: &MatchSpec) -> String {
+        spec.name
+            .clone()
+            .or_else(|| self.identity.name.clone())
+            .unwrap_or_else(|| self.identity.model.clone())
+    }
+
+    /// Human-readable device name (first spec / identity fallback).
     pub fn display_name(&self) -> &str {
         self.identity
             .name
@@ -323,19 +413,28 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         .from_value_with(value, options)
         .map_err(|e| anyhow!("manifest table is malformed: {e}"))?;
 
-    // v1 supports HID only; other transports land in later steps.
-    if raw.match_spec.transport != "hid" {
-        bail!(
-            "unsupported match transport '{}' (only 'hid' in v1)",
-            raw.match_spec.transport
-        );
+    let match_specs = raw.match_spec.into_vec();
+    if match_specs.is_empty() {
+        bail!("plugin declares no match spec");
+    }
+    // Validate every spec against its registered transport backend: unknown
+    // kinds and missing required fields are rejected here, not at match time.
+    for spec in &match_specs {
+        match descriptor_for(&spec.transport) {
+            Some(desc) => (desc.validate)(spec)?,
+            None => bail!(
+                "unsupported match transport '{}' (known: {})",
+                spec.transport,
+                known_kinds().join(", ")
+            ),
+        }
     }
 
     Ok(PluginManifest {
         plugin_id,
         source_path: path.to_path_buf(),
         script_source: source.to_owned(),
-        match_spec: raw.match_spec,
+        match_specs,
         identity: raw.identity,
         transports: raw.transports,
         rgb: raw.rgb,
@@ -376,21 +475,21 @@ mod tests {
         assert_eq!(m.plugin_id, "acme_k1");
         assert_eq!(m.identity.vendor, "Acme");
         assert_eq!(m.display_name(), "Acme K1");
-        assert_eq!(m.match_spec.vid, 0x1234);
-        assert_eq!(m.match_spec.pid, Some(0x5678));
+        assert_eq!(m.match_specs[0].vid, Some(0x1234));
+        assert_eq!(m.match_specs[0].pid, Some(0x5678));
         assert_eq!(m.id_prefix(), "acme_k1");
     }
 
     #[test]
     fn match_predicate_respects_wildcards_and_specifics() {
         let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
-        assert!(m.match_spec.matches(&hid(0x1234, 0x5678, None)));
+        assert!(m.match_spec_for(&hid(0x1234, 0x5678, None)).is_some());
         assert!(
-            !m.match_spec.matches(&hid(0x1234, 0x9999, None)),
+            m.match_spec_for(&hid(0x1234, 0x9999, None)).is_none(),
             "pid differs"
         );
         assert!(
-            !m.match_spec.matches(&hid(0x9999, 0x5678, None)),
+            m.match_spec_for(&hid(0x9999, 0x5678, None)).is_none(),
             "vid differs"
         );
     }
@@ -402,10 +501,10 @@ mod tests {
             identity = { vendor = "NZXT", model = "Kraken" },
         }"#;
         let m = parse_manifest(src, Path::new("k.lua")).unwrap();
-        assert!(m.match_spec.matches(&hid(0x1E71, 0x3008, None)));
-        assert!(m.match_spec.matches(&hid(0x1E71, 0x300C, None)));
+        assert!(m.match_spec_for(&hid(0x1E71, 0x3008, None)).is_some());
+        assert!(m.match_spec_for(&hid(0x1E71, 0x300C, None)).is_some());
         assert!(
-            !m.match_spec.matches(&hid(0x1E71, 0x2007, None)),
+            m.match_spec_for(&hid(0x1E71, 0x2007, None)).is_none(),
             "unlisted pid"
         );
     }
@@ -422,11 +521,38 @@ mod tests {
     }
 
     #[test]
-    fn non_hid_transport_rejected() {
+    fn unknown_transport_kind_rejected() {
         let src = r#"return {
-            match = { transport = "smbus", vid = 1 },
+            match = { transport = "carrier_pigeon", vid = 1 },
             identity = { vendor = "x", model = "y" },
         }"#;
         assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
+    }
+
+    #[test]
+    fn smbus_requires_bus_and_addresses() {
+        // Missing bus/addresses is rejected by the smbus backend's validate.
+        let src = r#"return {
+            match = { transport = "smbus" },
+            identity = { vendor = "x", model = "y" },
+        }"#;
+        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
+    }
+
+    #[test]
+    fn array_of_match_specs_parses() {
+        let src = r#"return {
+            match = {
+              { transport = "smbus", bus = "chipset", addresses = { 0x70, 0x71 },
+                device_type = "ram", name = "DRAM" },
+              { transport = "smbus", bus = "gpu", addresses = { 0x67 },
+                device_type = "gpu" },
+            },
+            identity = { vendor = "ENE", model = "SMBus" },
+          }"#;
+        let m = parse_manifest(src, Path::new("ene.lua")).unwrap();
+        assert_eq!(m.match_specs.len(), 2);
+        assert_eq!(m.smbus_specs().count(), 2);
+        assert_eq!(m.match_specs[0].device_type, Some(DeviceType::Ram));
     }
 }

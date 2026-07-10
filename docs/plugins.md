@@ -34,7 +34,7 @@ calls into transport bytes.
 
 ```lua
 return {
-  -- Which hardware this plugin drives. HID only in v1.
+  -- Which hardware this plugin drives (one table, or an array of them).
   match = { transport = "hid", vid = 0x1234, pid = 0x5678 },
 
   -- Required identity.
@@ -60,15 +60,35 @@ return {
 
 ### `match`
 
+`match` is either **one** table or an **array** of tables (a plugin can drive
+several hardware shapes — e.g. an SMBus DRAM controller *and* a GPU one). The
+`transport` field selects the backend; each backend requires its own fields.
+
+**HID** (`transport = "hid"`):
+
 | field         | type            | meaning                                        |
 |---------------|-----------------|------------------------------------------------|
-| `transport`   | string          | `"hid"` (only transport in v1)                 |
-| `vid`         | integer         | USB vendor id                                  |
+| `vid`         | integer         | USB vendor id (required)                        |
 | `pid`         | integer         | USB product id (optional — omit to match any)  |
 | `pids`        | integer array   | match any of several products (device family); takes precedence over `pid` |
 | `usage_page`  | integer         | HID usage page (optional; Windows routing)     |
 | `usage`       | integer         | HID usage (optional)                           |
 | `interface`   | integer         | USB interface number (optional)                |
+
+**SMBus** (`transport = "smbus"`) — see [Register transport](#register-transport-smbus):
+
+| field               | type          | meaning                                                    |
+|---------------------|---------------|------------------------------------------------------------|
+| `bus`               | string        | `"chipset"` or `"gpu"` (required)                          |
+| `addresses`         | integer array | I2C addresses the host may probe (required; the security boundary) |
+| `extra_addresses`   | integer array | extra addresses `pre_scan` may write (e.g. a broadcast addr) |
+| `max_bytes_per_sec` | integer       | bus write-rate ceiling applied before scanning             |
+| `pre_scan`          | bool          | run the plugin's `pre_scan` before probing this bus        |
+| `probe`             | string        | `"quick"` (default), `"read_byte"`, or `"none"`            |
+
+Any spec may also carry per-device identity overrides — `name` and
+`device_type` (`"ram"`, `"gpu"`, `"motherboard"`, …) — so one plugin labels each
+matched device correctly.
 
 Omitted optional fields mean "don't care". A plugin **shadows** a native driver
 for the same hardware, so this is also how you override a built-in driver.
@@ -206,6 +226,11 @@ end,
 
 ## The transport API (`dev.transport`)
 
+The shape of `dev.transport` depends on the matched `transport`. Write rate
+limiting is applied automatically on both — you cannot outrun the hardware.
+
+### Stream transport (HID)
+
 Bytes cross as Lua strings **or** [`halod.buffer`](#the-byte-buffer-halodbuffer)
 values; reads return Lua strings.
 
@@ -218,7 +243,38 @@ values; reads return Lua strings.
 | `:feature_exchange(data, n)`        | HID feature report exchange → string    |
 | `:write_many({p1, p2, …})`          | write several packets                   |
 
-Write rate limiting is applied automatically — you cannot outrun the hardware.
+### Register transport (SMBus)
+
+SMBus is addressed register I/O, not a byte stream. All access goes through
+**`dev.transport:batch(fn)`**: `fn` receives an `ops` object and runs entirely
+inside **one bus-lock hold**, so a multi-op sequence is atomic and read results
+can drive its control flow. `batch` returns whatever `fn` returns.
+
+```lua
+local info = dev.transport:batch(function(ops)
+  ops:write_word_data(addr, 0x00, reg)      -- set a register pointer
+  return ops:read_byte_data(addr, 0x81)     -- read back → branch on it
+end)
+```
+
+| `ops` method                          | returns                                       |
+|---------------------------------------|-----------------------------------------------|
+| `:read_byte(addr)`                    | byte, or `nil` on NAK/error                    |
+| `:read_byte_data(addr, cmd)`          | byte, or `nil`                                 |
+| `:write_quick(addr)`                  | `true` if the address ACKed                    |
+| `:write_byte_data(addr, cmd, val)`    | `true` on success                              |
+| `:write_word_data(addr, cmd, val)`    | `true` on success                              |
+| `:write_block_data(addr, cmd, data)`  | `true` on success (`false` → fall back)        |
+| `:supports_block_write()`             | whether the bus supports block writes          |
+
+An op naming an address **outside** the plugin's declared `addresses` (plus
+`extra_addresses` during `pre_scan`) raises — the declared set is a hard
+boundary, so a script can never free-roam the bus.
+
+**`pre_scan(dev)`** (optional, SMBus): a top-level callback run once per matching
+bus *before* the host probes addresses. Use it for bus preparation whose control
+flow depends on live reads (e.g. an ENE DRAM broadcast remap). It drives the same
+`dev.transport:batch(fn)` API, scoped to `addresses` + `extra_addresses`.
 
 ## The byte buffer (`halod.buffer`)
 
@@ -255,7 +311,28 @@ A complete, commented example lives at
 an HID device with an RGB ring, a pump fan, a liquid-temperature sensor, and a
 background status poll — every implemented feature in one file.
 
+## Dynamic device info
+
+`initialize(dev)` may return a bare `true`/`false`, or a table with device info
+discovered from the hardware:
+
+```lua
+initialize = function(dev)
+  -- … probe the device …
+  return {
+    ok = true,
+    model = firmware_version,                 -- overrides identity.model
+    zones = { { id = "leds", name = "LEDs",   -- dynamic RGB zones (LED count
+               topology = "linear", led_count = n } },  -- known only at runtime)
+  }
+end
+```
+
+Returning `false` (or `{ ok = false }`) rejects the device, so a native driver
+can still claim it. This is how an SMBus controller reports its firmware string
+and per-stick LED count once probed.
+
 ## Roadmap
 
-Not yet available to plugins (native drivers still required): LCD panels and
-non-HID transports (SMBus, USB bulk/control). These are planned follow-ups.
+Not yet available to plugins (native drivers still required): LCD panels and the
+USB bulk/control transports. HID (stream) and SMBus (register) are supported.

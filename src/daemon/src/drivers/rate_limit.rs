@@ -321,6 +321,24 @@ impl<T: Send + Sync + 'static> Metered<T> {
             .await?;
         result
     }
+
+    /// Inline twin of [`Self::write_tallied`]: runs `f` on the calling thread
+    /// (no `spawn_blocking`, no `Send`/`'static` bound) and meters the tallied
+    /// bytes through the blocking gate. Use when the batch must call back into
+    /// non-`Send` state (e.g. a plugin's Lua VM) and the caller is already on a
+    /// thread allowed to block. A meter rejection takes precedence over `f`'s
+    /// own result.
+    pub fn write_tallied_local<R, F>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&T, &AtomicUsize) -> Result<R>,
+    {
+        let bytes = AtomicUsize::new(0);
+        let result = f(&self.inner.io, &bytes);
+        self.inner
+            .limiter
+            .acquire_blocking(bytes.load(Ordering::Relaxed))?;
+        result
+    }
 }
 
 #[cfg(test)]

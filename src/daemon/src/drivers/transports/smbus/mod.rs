@@ -24,7 +24,7 @@ use crate::{
 };
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmbusBusKind {
     Chipset,
     Gpu,
@@ -54,16 +54,27 @@ fn is_gpu_adapter_name(name: &str) -> bool {
 pub struct SmBusDevice {
     pub bus_number: u8,
     /// Rate-limits the whole bus; devices sharing a `SmBusScanEntry` already
-    /// share this gate and its bus mutex.
-    io: Metered<Mutex<SmBusInner>>,
+    /// share this gate and its bus mutex. Boxed so tests can inject a recording
+    /// backend without opening real hardware.
+    io: Metered<Mutex<Box<dyn SmBusSyncOps + Send>>>,
 }
 
 impl SmBusDevice {
     pub fn open(info: &BusInfo) -> Result<Arc<Self>> {
+        let inner: Box<dyn SmBusSyncOps + Send> = Box::new(platform::open_device(info)?);
         Ok(Arc::new(Self {
             bus_number: info.bus_number,
-            io: Metered::new(Mutex::new(platform::open_device(info)?), None),
+            io: Metered::new(Mutex::new(inner), None),
         }))
+    }
+
+    /// Wrap an arbitrary synchronous ops backend — a mock in tests.
+    #[cfg(test)]
+    pub fn from_ops(bus_number: u8, ops: Box<dyn SmBusSyncOps + Send>) -> Arc<Self> {
+        Arc::new(Self {
+            bus_number,
+            io: Metered::new(Mutex::new(ops), None),
+        })
     }
 
     /// Run a batch of synchronous SMBus ops in one `spawn_blocking` call,
@@ -77,12 +88,32 @@ impl SmBusDevice {
             .write_tallied(move |inner, bytes| {
                 let mut g = inner.lock().map_err(|_| anyhow!("smbus lock poisoned"))?;
                 let mut counting = CountingSmBusOps {
-                    inner: &mut *g,
+                    inner: &mut **g,
                     bytes,
                 };
                 f(&mut counting)
             })
             .await
+    }
+
+    /// Inline twin of [`run_batch`](Self::run_batch): runs the ops on the
+    /// **calling thread** under the bus lock (no `spawn_blocking`, no
+    /// `Send`/`'static` bound on `f`), so the closure may call back into
+    /// non-`Send` state such as a plugin's Lua VM. The caller must be off the
+    /// async runtime (a dedicated `std::thread`), since it holds the lock and
+    /// may block on the write-rate gate.
+    pub fn run_batch_local<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut dyn SmBusSyncOps) -> Result<R>,
+    {
+        self.io.write_tallied_local(move |inner, bytes| {
+            let mut g = inner.lock().map_err(|_| anyhow!("smbus lock poisoned"))?;
+            let mut counting = CountingSmBusOps {
+                inner: &mut **g,
+                bytes,
+            };
+            f(&mut counting)
+        })
     }
 
     /// Live write-rate limit and throughput for this bus.
@@ -187,8 +218,6 @@ mod platform;
 #[path = "fallback.rs"]
 mod platform;
 
-use platform::SmBusInner;
-
 /// Maximum payload length for a single SMBus block transfer (I2C_SMBUS_BLOCK_MAX).
 pub(super) const SMBUS_BLOCK_MAX: usize = 32;
 
@@ -236,6 +265,97 @@ fn bus_scan_label(bus: &BusInfo) -> String {
     }
 }
 
+/// One scan pass over a bus family: what addresses to probe, how, plus optional
+/// pre-scan and rate ceiling. Unifies native `SmBusScanEntry`s and the runtime
+/// entries plugins contribute, so both drive the identical open/probe flow.
+struct ScanJob {
+    bus_kind: SmbusBusKind,
+    addresses: Vec<u8>,
+    write_rate_limit: Option<WriteRateLimit>,
+    /// A native pre-scan (fn pointer) or a plugin pre-scan (Lua source + scope).
+    pre_scan: PreScan,
+    probe: Probe,
+}
+
+enum PreScan {
+    None,
+    Native(fn(Arc<SmBusDevice>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>),
+    Plugin {
+        plugin_id: String,
+        source: String,
+        scope: Vec<u8>,
+    },
+}
+
+/// How to gate a declared address into a discovery handle.
+#[derive(Clone, Copy)]
+enum Probe {
+    /// Always emit (native entries; plugins with `probe = "none"`).
+    Always,
+    /// Emit only if `write_quick` ACKs.
+    Quick,
+    /// Emit only if `read_byte` succeeds.
+    ReadByte,
+}
+
+use std::future::Future;
+use std::pin::Pin;
+
+fn native_scan_jobs() -> Vec<ScanJob> {
+    inventory::iter::<SmBusScanEntry>()
+        .map(|entry| ScanJob {
+            bus_kind: entry.bus_kind,
+            addresses: entry.addresses.to_vec(),
+            write_rate_limit: entry.write_rate_limit,
+            pre_scan: match entry.pre_scan {
+                Some(f) => PreScan::Native(f),
+                None => PreScan::None,
+            },
+            // Native entries pre-select their addresses, so every one is emitted.
+            probe: Probe::Always,
+        })
+        .collect()
+}
+
+fn plugin_scan_jobs() -> Vec<ScanJob> {
+    use crate::drivers::plugins::plugin_smbus_scan_entries;
+    plugin_smbus_scan_entries()
+        .into_iter()
+        .map(|e| ScanJob {
+            bus_kind: e.bus_kind,
+            addresses: e.addresses.clone(),
+            write_rate_limit: e.write_rate_limit,
+            probe: match e.probe {
+                crate::drivers::plugins::ProbeMode::Quick => Probe::Quick,
+                crate::drivers::plugins::ProbeMode::ReadByte => Probe::ReadByte,
+                crate::drivers::plugins::ProbeMode::None => Probe::Always,
+            },
+            pre_scan: if e.pre_scan {
+                PreScan::Plugin {
+                    plugin_id: e.plugin_id.clone(),
+                    source: e.script_source.clone(),
+                    scope: e.pre_scan_scope(),
+                }
+            } else {
+                PreScan::None
+            },
+        })
+        .collect()
+}
+
+/// Does `addr` respond on this bus, per the job's probe mode?
+fn probe_addr(bus: &SmBusDevice, addr: u8, probe: Probe) -> bool {
+    match probe {
+        Probe::Always => true,
+        Probe::Quick => bus
+            .run_batch_local(move |ops| Ok(ops.write_quick(addr).unwrap_or(false)))
+            .unwrap_or(false),
+        Probe::ReadByte => bus
+            .run_batch_local(move |ops| Ok(ops.read_byte(addr).is_ok()))
+            .unwrap_or(false),
+    }
+}
+
 async fn discover(app: Arc<AppState>) -> Result<()> {
     let (chipset_buses, gpu_buses) = tokio::task::spawn_blocking(|| {
         (platform::enumerate_buses(), platform::enumerate_gpu_buses())
@@ -245,14 +365,17 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
     // Failing to open a bus is non-fatal; warn once so the cause isn't silent.
     let mut open_warned = false;
 
-    for entry in inventory::iter::<SmBusScanEntry>() {
-        let buses: Vec<&BusInfo> = match entry.bus_kind {
+    let mut jobs = native_scan_jobs();
+    jobs.extend(plugin_scan_jobs());
+
+    for job in jobs {
+        let buses: Vec<&BusInfo> = match job.bus_kind {
             SmbusBusKind::Chipset => chipset_buses.iter().filter(|b| !b.is_gpu_bus()).collect(),
             SmbusBusKind::Gpu => gpu_buses.iter().collect(),
         };
         log::debug!(
             "[SmBusTransport] {:?}: {} bus(es) to scan",
-            entry.bus_kind,
+            job.bus_kind,
             buses.len()
         );
 
@@ -283,25 +406,20 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
 
             // Apply the entry's declared ceiling before any traffic (pre_scan,
             // probes, later effect streams) touches the freshly opened bus.
-            bus.set_write_rate_limit(entry.write_rate_limit);
+            bus.set_write_rate_limit(job.write_rate_limit);
 
-            if let Some(pre_scan) = entry.pre_scan {
-                if let Err(e) = pre_scan(Arc::clone(&bus)).await {
-                    log::debug!(
-                        "[SmBusTransport] pre_scan failed on bus {}: {}",
-                        bus_info.bus_number,
-                        e
-                    );
+            run_pre_scan(&job.pre_scan, &bus, bus_info.bus_number).await;
+
+            for &addr in &job.addresses {
+                if !probe_addr(&bus, addr, job.probe) {
+                    continue;
                 }
-            }
-
-            for &addr in entry.addresses {
                 crate::registry::discovery::discover_handle(
                     &app,
                     DiscoveryHandle::Smbus {
                         bus: Arc::clone(&bus) as Arc<dyn SmBusOps>,
                         addr,
-                        bus_kind: entry.bus_kind,
+                        bus_kind: job.bus_kind,
                     },
                 )
                 .await;
@@ -310,6 +428,36 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Run a job's pre-scan (native fn or plugin Lua) against a freshly opened bus.
+async fn run_pre_scan(pre_scan: &PreScan, bus: &Arc<SmBusDevice>, bus_number: u8) {
+    let result = match pre_scan {
+        PreScan::None => return,
+        PreScan::Native(f) => f(Arc::clone(bus)).await,
+        PreScan::Plugin { source, scope, .. } => {
+            let bus = Arc::clone(bus);
+            let source = source.clone();
+            let scope = scope.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::drivers::plugins::run_pre_scan(
+                    &source,
+                    bus,
+                    scope,
+                    tokio::runtime::Handle::current(),
+                )
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow!("pre_scan task panicked: {e}")))
+        }
+    };
+    if let Err(e) = result {
+        let who = match pre_scan {
+            PreScan::Plugin { plugin_id, .. } => plugin_id.as_str(),
+            _ => "native",
+        };
+        log::debug!("[SmBusTransport] pre_scan ({who}) failed on bus {bus_number}: {e}");
+    }
 }
 
 inventory::submit!(TransportScanner {
