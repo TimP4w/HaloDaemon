@@ -436,6 +436,14 @@ return {
       for i = 1, RING_LEDS do fill[i] = state.color end
       ring_grb = grb_from_colors(fill, RING_SLOTS)
       send_channels(dev)
+    elseif state.mode == "per_led" then
+      local ring_map = (state.zones or {}).ring or {}
+      local fill = {}
+      for i = 0, RING_LEDS - 1 do
+        fill[i + 1] = ring_map[tostring(i)] or {r = 0, g = 0, b = 0}
+      end
+      ring_grb = grb_from_colors(fill, RING_SLOTS)
+      send_channels(dev)
     end
   end,
 

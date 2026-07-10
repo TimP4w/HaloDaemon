@@ -563,9 +563,7 @@ fn apply_per_led_transforms(
             .collect();
         transformed.insert(zone_id.clone(), new_map);
     }
-    RgbState::PerLed {
-        zones: transformed,
-    }
+    RgbState::PerLed { zones: transformed }
 }
 
 #[async_trait]

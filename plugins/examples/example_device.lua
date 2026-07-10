@@ -71,11 +71,18 @@ return {
     dev.transport:write(pkt)
   end,
 
-  -- User-driven mode change (e.g. a solid colour picked in the UI).
+  -- User-driven mode change (static fill or per-LED paint from the UI).
   apply = function(dev, state)
     if state.mode == "static" then
       local c = state.color
       dev.write_frame(dev, "ring", { c }) -- fill from a single colour
+    elseif state.mode == "per_led" then
+      local ring_map = (state.zones or {}).ring or {}
+      local fill = {}
+      for i = 0, 23 do -- 24 LEDs in the ring
+        fill[i + 1] = ring_map[tostring(i)] or {r = 0, g = 0, b = 0}
+      end
+      dev.write_frame(dev, "ring", fill)
     end
   end,
 
