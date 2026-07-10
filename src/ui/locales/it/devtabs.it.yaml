@@ -57,6 +57,7 @@ devtabs:
   cap_onboard: Memoria onboard
   cap_lcd: LCD
   cap_key_remap: Rimappatura tasti
+  cap_keyboard_layout: Layout tastiera
 
   write_rate_shared: Frequenza di scrittura (condivisa con hub)
   write_rate: Frequenza di scrittura

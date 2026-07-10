@@ -1215,6 +1215,7 @@ pub enum DeviceCapability {
     OnboardProfiles(OnboardProfiles),
     Lcd(LcdStatus),
     KeyRemap(KeyRemapStatus),
+    KeyboardLayout(crate::keyboard::KeyboardLayoutStatus),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1370,12 +1371,15 @@ pub enum KeyboardFormFactor {
     Compact60,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyboardLayout {
     CH,
     IT,
     US,
+    DE,
+    FR,
+    UK,
     Unknown,
 }
 
@@ -1947,6 +1951,11 @@ impl WireDevice {
     find_cap!(dpi, Dpi, DpiStatus);
     find_cap!(onboard_profiles, OnboardProfiles, OnboardProfiles);
     find_cap!(key_remap, KeyRemap, KeyRemapStatus);
+    find_cap!(
+        keyboard_layout,
+        KeyboardLayout,
+        crate::keyboard::KeyboardLayoutStatus
+    );
     find_cap!(equalizer, Equalizer, Equalizer);
     find_cap!(children, Children, Vec<WireDevice>);
     find_cap!(pairing, Pairing, PairingStatus);

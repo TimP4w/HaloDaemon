@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::profiles::config::Profile;
 use crate::registry::config::{DeviceLayout, DeviceRecord};
+use halod_shared::keyboard::KeyboardLayoutSelection;
 
 // ── On-disk layout ───────────────────────────────────────────────────────────
 //
@@ -47,6 +48,7 @@ pub fn load() -> Result<Config> {
         device_layouts: devices.device_layouts,
         sensor_visibility: devices.sensor_visibility,
         device_transforms: devices.device_transforms,
+        keyboard_layouts: devices.keyboard_layouts,
         app_rules: app_rules.app_rules,
         plugins,
     })
@@ -70,6 +72,7 @@ pub fn save(cfg: &Config) -> Result<()> {
             device_layouts: cfg.device_layouts.clone(),
             sensor_visibility: cfg.sensor_visibility.clone(),
             device_transforms: cfg.device_transforms.clone(),
+            keyboard_layouts: cfg.keyboard_layouts.clone(),
         })?,
     )?;
     atomic_write(
@@ -315,6 +318,8 @@ struct DevicesFile {
     sensor_visibility: HashMap<String, VisibilityState>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    keyboard_layouts: HashMap<String, KeyboardLayoutSelection>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -399,6 +404,10 @@ pub struct Config {
     pub sensor_visibility: HashMap<String, VisibilityState>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
+    /// device_id → keyboard layout selection. Absent = Auto/Auto (both axes
+    /// resolve from the firmware-detected language).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub keyboard_layouts: HashMap<String, KeyboardLayoutSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_rules: Vec<AppRule>,
     pub plugins: PluginPolicy,
@@ -423,6 +432,7 @@ impl Default for Config {
             device_layouts: HashMap::new(),
             sensor_visibility: HashMap::new(),
             device_transforms: HashMap::new(),
+            keyboard_layouts: HashMap::new(),
             app_rules: Vec::new(),
             plugins: PluginPolicy::default(),
         }
@@ -508,6 +518,13 @@ mod tests {
         );
         cfg.sensor_visibility
             .insert("sensor1".into(), Default::default());
+        cfg.keyboard_layouts.insert(
+            "kbd1".into(),
+            KeyboardLayoutSelection {
+                variant: Some(halod_shared::keyboard::KeyVariant::Iso),
+                language: Some(halod_shared::types::KeyboardLayout::CH),
+            },
+        );
         cfg.app_rules.push(AppRule {
             process_names: vec!["game.exe".into()],
             profile: "Gäming Setup".into(),
@@ -568,6 +585,10 @@ mod tests {
         assert_eq!(reloaded.known_devices["dev1"].name, "Dev One");
         assert!(reloaded.device_layouts.contains_key("hub1"));
         assert!(reloaded.sensor_visibility.contains_key("sensor1"));
+        assert_eq!(
+            reloaded.keyboard_layouts["kbd1"].language,
+            Some(halod_shared::types::KeyboardLayout::CH)
+        );
         assert_eq!(reloaded.app_rules.len(), 1);
         assert!(reloaded.gui.seen_tours.contains("page:home"));
         assert_eq!(reloaded.cooling.fan_failsafe_duty, 60);

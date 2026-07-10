@@ -240,6 +240,7 @@ fn cap_label_tr(c: &DeviceCapability) -> std::borrow::Cow<'static, str> {
         DeviceCapability::OnboardProfiles(_) => t!("devtabs.cap_onboard"),
         DeviceCapability::Lcd(_) => t!("devtabs.cap_lcd"),
         DeviceCapability::KeyRemap(_) => t!("devtabs.cap_key_remap"),
+        DeviceCapability::KeyboardLayout(_) => t!("devtabs.cap_keyboard_layout"),
     }
 }
 

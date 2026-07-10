@@ -2,7 +2,8 @@
 //! `Slot`/`KvStateCache` state cells and the per-capability state-slot types.
 //! Re-exported from `drivers/mod.rs` so call sites keep using `crate::drivers::*`.
 
-use halod_shared::types::{RgbState, VisibilityState};
+use halod_shared::keyboard::KeyboardLayoutSelection;
+use halod_shared::types::{KeyboardLayout, RgbState, VisibilityState};
 use halod_shared::zone_transform::ZoneContentTransform;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
@@ -57,6 +58,42 @@ impl VisibilitySlot {
     }
     pub fn set(&self, state: VisibilityState) {
         self.0.set(state);
+    }
+}
+
+/// Shared slot for keyboard layout selection. Embed in keyboard device structs
+/// and return a reference from `keyboard_layout_slot()` to opt in. The daemon
+/// seeds `selection` from config before `initialize()`; the device records the
+/// firmware-`detected` language during init.
+#[derive(Default)]
+pub struct KeyboardLayoutSlot(Slot<KeyboardLayoutInner>);
+
+struct KeyboardLayoutInner {
+    selection: KeyboardLayoutSelection,
+    detected: KeyboardLayout,
+}
+
+impl Default for KeyboardLayoutInner {
+    fn default() -> Self {
+        Self {
+            selection: KeyboardLayoutSelection::default(),
+            detected: KeyboardLayout::Unknown,
+        }
+    }
+}
+
+impl KeyboardLayoutSlot {
+    pub fn selection(&self) -> KeyboardLayoutSelection {
+        self.0.with(|s| s.selection)
+    }
+    pub fn set_selection(&self, selection: KeyboardLayoutSelection) {
+        self.0.update(|s| s.selection = selection);
+    }
+    pub fn detected(&self) -> KeyboardLayout {
+        self.0.with(|s| s.detected)
+    }
+    pub fn set_detected(&self, detected: KeyboardLayout) {
+        self.0.update(|s| s.detected = detected);
     }
 }
 

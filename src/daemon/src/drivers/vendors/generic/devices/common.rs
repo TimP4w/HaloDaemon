@@ -41,8 +41,8 @@ fn key_positions(spec: &KeyLayoutSpec<'_>, col_max: f32) -> Vec<LedPosition> {
                 .map(|(driver_id, _)| *driver_id)?;
             Some(LedPosition {
                 id,
-                x: cell.col / col_max,
-                y: (cell.row + 1.5) / 9.0,
+                x: (cell.col + cell.w / 2.0) / col_max,
+                y: (cell.row + 1.5) / 7.0,
             })
         })
         .collect()
@@ -53,7 +53,15 @@ fn key_positions(spec: &KeyLayoutSpec<'_>, col_max: f32) -> Vec<LedPosition> {
 /// Grid coordinates are projected into `[0, 1]` space using the standard TKL
 /// bounds (`col ∈ [0, 17.5]`, `row ∈ [-1.5, 7.5]`).
 pub fn tkl_key_positions(spec: &KeyLayoutSpec<'_>) -> Vec<LedPosition> {
-    key_positions(spec, 17.5)
+    key_positions(spec, 18.0)
+}
+
+/// Generate `LedPosition` entries for a full-size (100%) keyboard zone.
+///
+/// Same as [`tkl_key_positions`] but normalized to the wider full-size grid
+/// (`col ∈ [0, 22.5]`) to accommodate the numpad columns.
+pub fn full_size_key_positions(spec: &KeyLayoutSpec<'_>) -> Vec<LedPosition> {
+    key_positions(spec, 23.0)
 }
 
 /// Swap the `layout` field on a `Keyboard` topology variant, leaving other topology variants unchanged.
@@ -61,7 +69,7 @@ pub fn override_keyboard_layout(topology: ZoneTopology, layout: &KeyboardLayout)
     match topology {
         ZoneTopology::Keyboard { form_factor, .. } => ZoneTopology::Keyboard {
             form_factor,
-            layout: layout.clone(),
+            layout: *layout,
         },
         other => other,
     }

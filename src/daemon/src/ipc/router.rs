@@ -220,7 +220,8 @@ fn command_target(cmd: &DaemonCommand) -> Option<&str> {
         | SetScreenVideo { id, .. }
         | ReceiverStartPairing { id, .. }
         | ReceiverStopPairing { id, .. }
-        | ReceiverUnpair { id, .. } => Some(id),
+        | ReceiverUnpair { id, .. }
+        | SetKeyboardLayout { id, .. } => Some(id),
         SetFanCurvePoints { fan_id, .. }
         | SetFanCurvePreset { fan_id, .. }
         | RemoveFanCurve { fan_id } => Some(fan_id),
@@ -420,6 +421,9 @@ async fn dispatch(
         }
         DaemonCommand::SetSensorVisibility { sensor_id, state } => {
             registry::usecases::visibility::set_sensor_visibility(sensor_id, state, app).await
+        }
+        DaemonCommand::SetKeyboardLayout { id, selection } => {
+            registry::usecases::keyboard_layout::set_keyboard_layout(id, selection, app).await
         }
         DaemonCommand::SetDeviceName { device_id, name } => {
             registry::usecases::rename::set_device_name(device_id, name, app).await

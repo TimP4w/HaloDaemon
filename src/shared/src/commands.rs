@@ -261,6 +261,12 @@ pub enum DaemonCommand {
         device_id: String,
         name: String,
     },
+    /// Choose a keyboard's physical variant and/or language layout. Either axis
+    /// absent (Auto) resolves from the firmware-detected language.
+    SetKeyboardLayout {
+        id: String,
+        selection: crate::keyboard::KeyboardLayoutSelection,
+    },
 
     // Fan speed / curves
     SetFanSpeed {
@@ -1218,6 +1224,43 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(cmd, DaemonCommand::CanvasPlaceZone { .. }));
+    }
+
+    #[test]
+    fn set_keyboard_layout_roundtrips() {
+        use crate::keyboard::{KeyVariant, KeyboardLayoutSelection};
+        use crate::types::KeyboardLayout;
+        let cmd = DaemonCommand::SetKeyboardLayout {
+            id: "kbd".into(),
+            selection: KeyboardLayoutSelection {
+                variant: Some(KeyVariant::Iso),
+                language: Some(KeyboardLayout::CH),
+            },
+        };
+        let v = roundtrip(&cmd);
+        assert_eq!(v["type"], "set_keyboard_layout");
+        assert_eq!(v["id"], "kbd");
+        assert_eq!(v["selection"]["variant"], "iso");
+        assert_eq!(v["selection"]["language"], "c_h");
+        let back: DaemonCommand = serde_json::from_value(v).unwrap();
+        match back {
+            DaemonCommand::SetKeyboardLayout { selection, .. } => {
+                assert_eq!(selection.variant, Some(KeyVariant::Iso));
+                assert_eq!(selection.language, Some(KeyboardLayout::CH));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn set_keyboard_layout_auto_omits_axes() {
+        use crate::keyboard::KeyboardLayoutSelection;
+        let v = roundtrip(&DaemonCommand::SetKeyboardLayout {
+            id: "kbd".into(),
+            selection: KeyboardLayoutSelection::default(),
+        });
+        assert!(v["selection"].get("variant").is_none());
+        assert!(v["selection"].get("language").is_none());
     }
 
     #[test]
