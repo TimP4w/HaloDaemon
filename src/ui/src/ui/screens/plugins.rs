@@ -37,16 +37,48 @@ pub struct PluginsUi {
     add: Option<AddState>,
     /// Id pending a delete confirmation, when the dialog is open.
     pending_delete: Option<String>,
+    /// Id pending a permission consent decision, when the dialog is open.
+    pending_consent: Option<String>,
+    /// Plugin ids seen as of the previous frame, used only to spot a
+    /// freshly-imported plugin. `None` until the first frame, so pre-existing
+    /// plugins at startup never spuriously pop the dialog.
+    known_ids: Option<std::collections::HashSet<String>>,
+    /// Set right when the GUI sends an import command, cleared on the next
+    /// new plugin id it sees (whichever outcome). Distinguishes "the user
+    /// just added this through the Add-plugin modal" (blocking consent
+    /// dialog here) from an auto-discovered plugin found by a directory scan
+    /// (the daemon pushes a toast notification for those instead).
+    awaiting_import: bool,
 }
 
 impl PluginsUi {
     pub fn show(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         self.selected = resolve_selection(self.selected.as_deref(), &state.plugins);
+        self.detect_new_plugin_needing_consent(&state.plugins);
 
         widgets::page_frame(ui, |ui| self.body(ui, state, cmd));
 
         self.add_modal(ui.ctx(), cmd);
         self.delete_modal(ui.ctx(), state, cmd);
+        self.consent_modal(ui.ctx(), state, cmd);
+    }
+
+    /// A plugin id that appears now but wasn't present last frame opens the
+    /// consent modal only when it arrived via our own import (see
+    /// `awaiting_import`) — an auto-discovered plugin gets a toast instead
+    /// (pushed by the daemon), not a blocking dialog.
+    fn detect_new_plugin_needing_consent(&mut self, plugins: &[PluginInfo]) {
+        let ids: std::collections::HashSet<String> = plugins.iter().map(|p| p.id.clone()).collect();
+        if let Some(known) = &self.known_ids {
+            let mut new_ids = plugins.iter().filter(|p| !known.contains(&p.id)).peekable();
+            if self.awaiting_import && new_ids.peek().is_some() {
+                if let Some(p) = new_ids.find(|p| plugin_needs_permission(p)) {
+                    self.pending_consent = Some(p.id.clone());
+                }
+                self.awaiting_import = false;
+            }
+        }
+        self.known_ids = Some(ids);
     }
 
     fn body(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
@@ -73,7 +105,7 @@ impl PluginsUi {
 
     fn list_column(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         widgets::card(ui, |ui| {
-            let active = state.plugins.iter().filter(|p| p.enabled).count();
+            let active = state.plugins.iter().filter(|p| plugin_active(p)).count();
             egui::Sides::new().show(
                 ui,
                 |ui| {
@@ -208,6 +240,9 @@ impl PluginsUi {
         );
 
         if pick_file {
+            // Optimistic: the file dialog may still be cancelled, in which case
+            // no plugin ever appears and this flag is simply never consumed.
+            self.awaiting_import = true;
             spawn_import_plugin(ctx, cmd.clone());
             return; // modal closes; import completes when the user picks a file
         }
@@ -215,6 +250,7 @@ impl PluginsUi {
             let code = add.code.trim();
             if !code.is_empty() {
                 let filename = add_filename(&add.name);
+                self.awaiting_import = true;
                 crate::domain::actions::plugins::import_plugin(cmd, filename, add.code.clone());
                 return;
             }
@@ -279,6 +315,95 @@ impl PluginsUi {
             crate::domain::actions::plugins::delete_plugin(cmd, id);
         }
     }
+
+    /// Consent prompt shown the moment a freshly-imported plugin declares
+    /// permissions. Grant accepts them; Deny leaves the plugin installed but
+    /// inert; Remove deletes the script outright.
+    fn consent_modal(&mut self, ctx: &egui::Context, state: &AppState, cmd: &CommandTx) {
+        let Some(id) = self.pending_consent.clone() else {
+            return;
+        };
+        let Some(p) = state.plugins.iter().find(|p| p.id == id) else {
+            self.pending_consent = None;
+            return;
+        };
+
+        let mut grant = false;
+        let mut deny = false;
+        let mut remove = false;
+        let dismissed = widgets::dialog(
+            ctx,
+            "plugin_consent",
+            &t!("plugins.consent_title"),
+            460.0,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(t!("plugins.consent_body", name = p.name.clone()))
+                        .font(theme::body(12.5))
+                        .color(theme::TEXT_DIM),
+                );
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    for perm in &p.declared_permissions {
+                        let _ =
+                            widgets::chip_colored(ui, &permission_label(*perm), theme::STAT_AMBER);
+                    }
+                });
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new(t!("plugins.consent_warning"))
+                        .font(theme::body(11.5))
+                        .color(theme::TEXT_MUT),
+                );
+            },
+            |ui| {
+                if widgets::button(
+                    ui,
+                    &t!("plugins.grant"),
+                    ButtonKind::Primary,
+                    Vec2::new(150.0, 34.0),
+                )
+                .clicked()
+                {
+                    grant = true;
+                }
+                if widgets::button(
+                    ui,
+                    &t!("plugins.consent_deny"),
+                    ButtonKind::Ghost,
+                    Vec2::new(90.0, 34.0),
+                )
+                .clicked()
+                {
+                    deny = true;
+                }
+                if widgets::button(
+                    ui,
+                    &t!("plugins.delete"),
+                    ButtonKind::Danger,
+                    Vec2::new(120.0, 34.0),
+                )
+                .clicked()
+                {
+                    remove = true;
+                }
+            },
+        );
+
+        if grant {
+            crate::domain::actions::plugins::grant_plugin_permissions(
+                cmd,
+                id,
+                p.declared_permissions.clone(),
+            );
+            self.pending_consent = None;
+        } else if remove {
+            crate::domain::actions::plugins::delete_plugin(cmd, id);
+            self.pending_consent = None;
+        } else if deny || dismissed {
+            self.pending_consent = None;
+        }
+    }
 }
 
 /// The plugin the detail column should show: keep the current selection if it
@@ -319,8 +444,22 @@ enum RowAction {
     Toggle,
 }
 
+/// True when `p` declares at least one permission it hasn't been granted —
+/// it stays inert regardless of its enable/disable toggle until resolved.
+fn plugin_needs_permission(p: &PluginInfo) -> bool {
+    !p.declared_permissions.is_empty() && !permissions_satisfied(p)
+}
+
+/// True when the plugin is actually running: toggled on AND (if it declares
+/// any) every permission granted.
+fn plugin_active(p: &PluginInfo) -> bool {
+    p.enabled && !plugin_needs_permission(p)
+}
+
 fn status_dot(p: &PluginInfo) -> egui::Color32 {
-    if p.enabled {
+    if plugin_needs_permission(p) {
+        theme::STAT_AMBER
+    } else if plugin_active(p) {
         theme::ONLINE
     } else {
         theme::TEXT_FAINT2
@@ -478,6 +617,11 @@ fn detail_body(
         }
     }
 
+    if !p.declared_permissions.is_empty() {
+        ui.add_space(16.0);
+        permissions_section(ui, p, cmd);
+    }
+
     ui.add_space(20.0);
     ui.separator();
     ui.add_space(14.0);
@@ -510,8 +654,90 @@ fn detail_body(
     });
 }
 
+/// Whether every permission `p` declares has been granted.
+fn permissions_satisfied(p: &PluginInfo) -> bool {
+    p.declared_permissions
+        .iter()
+        .all(|perm| p.granted_permissions.contains(perm))
+}
+
+fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'static, str> {
+    use halod_shared::types::Permission;
+    match perm {
+        Permission::Network => t!("plugins.permission_network"),
+        Permission::Os => t!("plugins.permission_os"),
+        Permission::Storage => t!("plugins.permission_storage"),
+        Permission::SecureStorage => t!("plugins.permission_secure_storage"),
+    }
+}
+
+fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
+    widgets::caps_label(ui, &t!("plugins.permissions"));
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        for perm in &p.declared_permissions {
+            let granted = p.granted_permissions.contains(perm);
+            let color = if granted {
+                theme::ONLINE
+            } else {
+                theme::TEXT_FAINT
+            };
+            let _ = widgets::chip_colored(ui, &permission_label(*perm), color);
+        }
+    });
+
+    if !permissions_satisfied(p) {
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(t!("plugins.permissions_pending"))
+                .font(theme::body(11.5))
+                .color(theme::TEXT_MUT),
+        );
+        ui.add_space(8.0);
+        if widgets::button(
+            ui,
+            &t!("plugins.grant"),
+            ButtonKind::Primary,
+            Vec2::new(160.0, 30.0),
+        )
+        .clicked()
+        {
+            crate::domain::actions::plugins::grant_plugin_permissions(
+                cmd,
+                p.id.clone(),
+                p.declared_permissions.clone(),
+            );
+        }
+    } else {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(t!("plugins.permissions_granted"))
+                    .font(theme::body(11.5))
+                    .color(theme::ONLINE_TEXT),
+            );
+            if widgets::button(
+                ui,
+                &t!("plugins.revoke"),
+                ButtonKind::Ghost,
+                Vec2::new(100.0, 26.0),
+            )
+            .clicked()
+            {
+                crate::domain::actions::plugins::revoke_plugin_permissions(cmd, p.id.clone());
+            }
+        });
+    }
+}
+
 fn status_banner(ui: &mut egui::Ui, p: &PluginInfo) {
-    let (dot, text, color) = if p.enabled {
+    let (dot, text, color) = if plugin_needs_permission(p) {
+        (
+            theme::STAT_AMBER,
+            t!("plugins.status_needs_permission"),
+            theme::STAT_AMBER,
+        )
+    } else if plugin_active(p) {
         (
             theme::ONLINE,
             t!("plugins.status_active"),
@@ -652,6 +878,8 @@ mod tests {
             description: "desc".into(),
             targets: vec!["Acme K1".into()],
             builtin: false,
+            declared_permissions: vec![],
+            granted_permissions: vec![],
         }
     }
 
@@ -695,5 +923,24 @@ mod tests {
     fn status_dot_reflects_enabled() {
         assert_eq!(status_dot(&info("a", true)), theme::ONLINE);
         assert_eq!(status_dot(&info("a", false)), theme::TEXT_FAINT2);
+    }
+
+    #[test]
+    fn permissions_satisfied_when_no_permissions_declared() {
+        assert!(permissions_satisfied(&info("a", true)));
+    }
+
+    #[test]
+    fn permissions_unsatisfied_until_every_declared_permission_is_granted() {
+        use halod_shared::types::Permission;
+        let mut p = info("a", true);
+        p.declared_permissions = vec![Permission::Network, Permission::Os];
+        assert!(!permissions_satisfied(&p), "nothing granted yet");
+
+        p.granted_permissions = vec![Permission::Network];
+        assert!(!permissions_satisfied(&p), "partial grant is not enough");
+
+        p.granted_permissions = vec![Permission::Network, Permission::Os];
+        assert!(permissions_satisfied(&p), "fully granted");
     }
 }

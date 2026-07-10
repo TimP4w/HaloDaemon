@@ -434,7 +434,7 @@ fn pre_scan_remaps_dram_sticks_off_the_broadcast_address() {
         .unwrap();
     let handle = rt.handle().clone();
     std::thread::spawn(move || {
-        crate::drivers::plugins::run_pre_scan(ENE_SRC, bus, scope, handle).unwrap();
+        crate::drivers::plugins::run_pre_scan(ENE_SRC, bus, scope, &[], handle).unwrap();
     })
     .join()
     .unwrap();

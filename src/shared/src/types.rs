@@ -355,6 +355,12 @@ pub enum NotificationCode {
     FanStalled {
         fan: String,
     },
+    /// An auto-discovered plugin (found by a directory scan, not a manual
+    /// "Add plugin" import — those get a blocking consent modal instead)
+    /// declares permissions the user hasn't granted yet, so it stays inert.
+    PluginNeedsPermission {
+        plugin: String,
+    },
     /// A generic error surfaced as free text (e.g. a failed command's error).
     /// The GUI translates only the title and shows `message` verbatim.
     Generic {
@@ -373,7 +379,8 @@ impl NotificationCode {
             KeyRemapUnavailable { .. }
             | WirelessReinitFailed { .. }
             | DeviceReconnectFailed { .. }
-            | FanStalled { .. } => NotificationSeverity::Warning,
+            | FanStalled { .. }
+            | PluginNeedsPermission { .. } => NotificationSeverity::Warning,
             ProfileSwitched { .. } => NotificationSeverity::Info,
         }
     }
@@ -476,6 +483,24 @@ pub struct AppState {
     pub plugins: Vec<PluginInfo>,
 }
 
+/// A privileged capability a plugin must declare before the daemon grants it —
+/// the enforcement boundary between "trusted to talk to its matched device"
+/// (every plugin) and "trusted to reach outside it". `Storage`/`SecureStorage`
+/// are accepted for forward-compat but not yet enforced by any backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Permission {
+    /// Open network connections (e.g. a TCP client to a local SDK server).
+    Network,
+    /// Reach OS-level primitives beyond pure computation (currently: clock
+    /// reads via `os.time`/`os.clock`).
+    Os,
+    /// Persist plain key/value data across daemon restarts.
+    Storage,
+    /// Persist secrets (tokens, credentials) in an OS-backed secure store.
+    SecureStorage,
+}
+
 /// One device plugin as shown in the GUI's Plugins screen.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInfo {
@@ -502,6 +527,14 @@ pub struct PluginInfo {
     /// True for plugins compiled into the daemon; these cannot be deleted.
     #[serde(default)]
     pub builtin: bool,
+    /// Privileged capabilities the manifest declares.
+    #[serde(default)]
+    pub declared_permissions: Vec<Permission>,
+    /// Subset of `declared_permissions` the user has granted. A plugin whose
+    /// declared permissions aren't fully granted is inert (discovered but not
+    /// activated) until the user accepts them.
+    #[serde(default)]
+    pub granted_permissions: Vec<Permission>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

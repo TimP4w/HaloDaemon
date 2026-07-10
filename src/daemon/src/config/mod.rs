@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::Result;
-use halod_shared::types::{AppRule, VisibilityState, DEFAULT_PROFILE_NAME};
+use halod_shared::types::{AppRule, Permission, VisibilityState, DEFAULT_PROFILE_NAME};
 // Types shared with wire protocol; re-exported for backward-compat.
 pub use halod_shared::types::{CanvasState, GlobalConfig, PlacedZone};
 use halod_shared::zone_transform::ZoneContentTransform;
@@ -44,6 +44,7 @@ pub fn load() -> Result<Config> {
         device_transforms: devices.device_transforms,
         app_rules: app_rules.app_rules,
         plugins_disabled: plugins.disabled,
+        plugin_permissions: plugins.granted,
     })
 }
 
@@ -74,6 +75,7 @@ pub fn save(cfg: &Config) -> Result<()> {
         &plugins_config_path(),
         &serde_yaml::to_string(&PluginsFile {
             disabled: cfg.plugins_disabled.clone(),
+            granted: cfg.plugin_permissions.clone(),
         })?,
     )?;
     save_profiles(&cfg.profiles)?;
@@ -286,6 +288,10 @@ struct PluginsFile {
     /// enabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     disabled: Vec<String>,
+    /// Permissions the user has granted per plugin id. A plugin's declared
+    /// permissions must be a subset of its entry here before it activates.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    granted: HashMap<String, Vec<Permission>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,6 +321,10 @@ pub struct Config {
     pub app_rules: Vec<AppRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins_disabled: Vec<String>,
+    /// Permissions granted per plugin id (declared permissions must be a
+    /// subset before the plugin activates).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub plugin_permissions: HashMap<String, Vec<Permission>>,
 }
 
 fn default_profile_name() -> String {
@@ -335,6 +345,7 @@ impl Default for Config {
             device_transforms: HashMap::new(),
             app_rules: Vec::new(),
             plugins_disabled: Vec::new(),
+            plugin_permissions: HashMap::new(),
         }
     }
 }
@@ -425,11 +436,17 @@ mod tests {
         });
         cfg.global.seen_tours.insert("page:home".into());
         cfg.plugins_disabled.push("nzxt_kraken".into());
+        cfg.plugin_permissions
+            .insert("wled_udp".into(), vec![Permission::Network]);
 
         save(&cfg).unwrap();
         let reloaded = load().unwrap();
 
         assert_eq!(reloaded.plugins_disabled, vec!["nzxt_kraken".to_string()]);
+        assert_eq!(
+            reloaded.plugin_permissions.get("wled_udp"),
+            Some(&vec![Permission::Network])
+        );
 
         assert_eq!(reloaded.active_profile, cfg.active_profile);
         assert_eq!(reloaded.profiles.len(), cfg.profiles.len());

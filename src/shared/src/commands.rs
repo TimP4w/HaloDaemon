@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::types::{
-    ButtonMapping, EffectDef, EffectParamValue, MacroStep, RgbState, SamplingMode, VisibilityState,
-    ZoneTopology,
+    ButtonMapping, EffectDef, EffectParamValue, MacroStep, Permission, RgbState, SamplingMode,
+    VisibilityState, ZoneTopology,
 };
 use crate::zone_transform::ZoneContentTransform;
 use serde::{Deserialize, Serialize};
@@ -180,6 +180,13 @@ pub enum DaemonCommand {
     /// plugins cannot be deleted and the daemon rejects the request.
     DeletePlugin {
         id: String,
+    },
+    /// Replace the set of permissions granted to a plugin, then re-run
+    /// discovery. An empty `granted` revokes everything, leaving the plugin
+    /// inert if it declares any permission.
+    SetPluginPermissions {
+        id: String,
+        granted: Vec<Permission>,
     },
     SetLogLevel {
         level: String,

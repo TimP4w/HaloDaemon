@@ -29,6 +29,9 @@ notify:
   fan_stalled:
     title: "Fan stalled — %{fan}"
     message: "Fan is not spinning (0 RPM) while the curve duty is applied. Check fan connections or replace the fan."
+  plugin_needs_permission:
+    title: Plugin needs permission
+    message: "%{plugin} requires permissions you haven't granted yet. Open the Plugins screen to review and grant or remove it."
 
 tray:
   open: Open HaloDaemon

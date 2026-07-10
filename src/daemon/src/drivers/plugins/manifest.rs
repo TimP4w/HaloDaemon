@@ -9,7 +9,7 @@
 use anyhow::{anyhow, bail, Result};
 use halod_shared::types::{
     ButtonDescriptor, ButtonMapping, ChoiceDisplay, ChoiceOption, DeviceType, NativeEffect,
-    RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
+    Permission, RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
 };
 use mlua::{DeserializeOptions, Lua, LuaSerdeExt};
 use serde::Deserialize;
@@ -487,6 +487,9 @@ struct RawManifest {
     onboard_profiles: Option<OnboardProfilesManifest>,
     #[serde(default)]
     key_remap: Option<KeyRemapManifest>,
+    /// Privileged capabilities this plugin needs, gated by user consent.
+    #[serde(default)]
+    permissions: Vec<Permission>,
     #[serde(default)]
     poll: Option<PollManifest>,
     #[serde(default)]
@@ -519,6 +522,7 @@ pub struct PluginManifest {
     pub pairing: Option<PairingManifest>,
     pub onboard_profiles: Option<OnboardProfilesManifest>,
     pub key_remap: Option<KeyRemapManifest>,
+    pub permissions: Vec<Permission>,
     pub poll: Option<PollManifest>,
     pub chain: Option<ChainManifest>,
 }
@@ -739,6 +743,7 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         pairing: raw.pairing,
         onboard_profiles: raw.onboard_profiles,
         key_remap: raw.key_remap,
+        permissions: raw.permissions,
         poll: raw.poll,
         chain: raw.chain,
     })
@@ -992,5 +997,23 @@ mod tests {
         let key_remap = m.key_remap.unwrap();
         assert_eq!(key_remap.buttons[0].cid, 1);
         assert!(key_remap.requires_host_mode);
+    }
+
+    #[test]
+    fn permissions_section_parses_and_defaults_to_empty() {
+        let src = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+            permissions = { "network", "os" },
+        }"#;
+        let m = parse_manifest(src, Path::new("net.lua")).unwrap();
+        assert_eq!(m.permissions, vec![Permission::Network, Permission::Os]);
+
+        let no_perms = r#"return {
+            match = { transport = "hid", vid = 1, pid = 2 },
+            identity = { vendor = "x", model = "y" },
+        }"#;
+        let m = parse_manifest(no_perms, Path::new("no_perms.lua")).unwrap();
+        assert!(m.permissions.is_empty());
     }
 }

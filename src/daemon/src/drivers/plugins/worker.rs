@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use halod_shared::types::{
     Battery, Boolean, ButtonMapping, ConnectionStatus, Equalizer, OnboardProfiles, PairingStatus,
-    RgbColor, RgbState, Sensor,
+    Permission, RgbColor, RgbState, Sensor,
 };
 
 use super::bytebuf::ByteBuf;
@@ -275,13 +275,20 @@ pub struct PluginHandle {
 
 impl PluginHandle {
     /// Spawn the worker thread. `source` is the full script; the worker builds
-    /// its own VM from it (no live VM crosses threads).
-    pub fn spawn(source: String, transport: PluginIo, dev_match: DevMatch, handle: Handle) -> Self {
+    /// its own VM from it (no live VM crosses threads). `granted` is the
+    /// plugin's currently-granted permission set, snapshotted at spawn time.
+    pub fn spawn(
+        source: String,
+        transport: PluginIo,
+        dev_match: DevMatch,
+        granted: Vec<Permission>,
+        handle: Handle,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         std::thread::Builder::new()
             .name("halod-plugin".into())
             .spawn(move || {
-                if let Err(e) = worker_main(&source, transport, dev_match, handle, rx) {
+                if let Err(e) = worker_main(&source, transport, dev_match, &granted, handle, rx) {
                     log::error!("plugin worker stopped: {e:#}");
                 }
             })
@@ -666,11 +673,12 @@ fn worker_main(
     source: &str,
     transport: PluginIo,
     dev_match: DevMatch,
+    granted: &[Permission],
     handle: Handle,
     mut rx: mpsc::UnboundedReceiver<Call>,
 ) -> Result<()> {
     let lua = Lua::new();
-    sandbox::apply(&lua).map_err(|e| lua_err("sandbox setup", e))?;
+    sandbox::apply(&lua, granted).map_err(|e| lua_err("sandbox setup", e))?;
 
     let manifest: Table = lua
         .load(source)
@@ -1318,10 +1326,11 @@ pub fn run_pre_scan(
     source: &str,
     bus: Arc<SmBusDevice>,
     scope_addrs: Vec<u8>,
+    granted: &[Permission],
     handle: Handle,
 ) -> Result<()> {
     let lua = Lua::new();
-    sandbox::apply(&lua).map_err(|e| lua_err("sandbox setup", e))?;
+    sandbox::apply(&lua, granted).map_err(|e| lua_err("sandbox setup", e))?;
     let manifest: Table = lua
         .load(source)
         .eval()

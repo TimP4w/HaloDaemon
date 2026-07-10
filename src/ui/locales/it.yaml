@@ -29,6 +29,9 @@ notify:
   fan_stalled:
     title: "Ventola bloccata — %{fan}"
     message: "La ventola non gira (0 RPM) mentre è applicato il ciclo di servizio. Controlla i cavi della ventola o sostituiscila."
+  plugin_needs_permission:
+    title: Il plugin richiede permessi
+    message: "%{plugin} richiede permessi non ancora concessi. Apri la schermata Plugin per concederli o rimuovere il plugin."
 
 tray:
   open: Apri HaloDaemon

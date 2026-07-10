@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use halod_shared::types::Permission;
 
 use crate::state::AppState;
 
@@ -25,12 +26,34 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
     Ok(())
 }
 
+/// Replace the set of permissions granted to a plugin, persist the choice,
+/// and re-run discovery — an emptied grant leaves the plugin inert if it
+/// declares any permission; a satisfied grant activates it.
+pub async fn set_permissions(
+    id: String,
+    granted: Vec<Permission>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    {
+        let mut cfg = app.config.write().await;
+        if granted.is_empty() {
+            cfg.plugin_permissions.remove(&id);
+        } else {
+            cfg.plugin_permissions.insert(id, granted);
+        }
+        crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
+    }
+    app.request_config_save();
+    rediscover_devices(app).await;
+    Ok(())
+}
+
 /// Install a Lua plugin script into the plugins directory, then re-run
 /// discovery. The source is validated as a manifest first, so a malformed
 /// script is rejected before any file is written.
 pub async fn import(filename: String, source: String, app: Arc<AppState>) -> Result<()> {
     let name = sanitize_lua_filename(&filename);
-    crate::drivers::plugins::parse_manifest(&source, Path::new(&name))
+    let manifest = crate::drivers::plugins::parse_manifest(&source, Path::new(&name))
         .context("plugin script is not a valid manifest")?;
 
     let dir = crate::config::plugins_dir();
@@ -39,6 +62,11 @@ pub async fn import(filename: String, source: String, app: Arc<AppState>) -> Res
     let path = dir.join(&name);
     std::fs::write(&path, source).with_context(|| format!("writing plugin {}", path.display()))?;
     log::info!("Imported plugin {}", path.display());
+
+    // A manual import gets the GUI's blocking consent modal instead of the
+    // auto-discovery toast — suppress it before the reload below would
+    // otherwise fire one for this exact plugin.
+    crate::drivers::plugins::suppress_permission_notice(&manifest.plugin_id);
 
     reload_and_rediscover(app).await;
     Ok(())
@@ -82,7 +110,11 @@ pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
 /// the disabled set, then run a clean-slate re-discovery.
 async fn reload_and_rediscover(app: Arc<AppState>) {
     crate::drivers::plugins::load_all(&crate::config::plugins_dir());
-    crate::drivers::plugins::set_disabled(&app.config.read().await.plugins_disabled);
+    {
+        let cfg = app.config.read().await;
+        crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
+        crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
+    }
     rediscover_devices(app).await;
 }
 

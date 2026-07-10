@@ -11,10 +11,26 @@ plugins:
   targets: TARGET DEVICES
   status_active: Active
   status_disabled: Disabled
+  status_needs_permission: Needs permission
   enable: Enable
   disable: Disable
   delete: Delete script
   builtin_note: Built-in — cannot be deleted
+  # Permissions
+  permissions: PERMISSIONS
+  permissions_pending: This plugin needs permissions you haven't granted yet — it stays inactive until you decide.
+  permissions_granted: Granted
+  grant: Grant permissions
+  revoke: Revoke
+  permission_network: Network
+  permission_os: OS
+  permission_storage: Storage
+  permission_secure_storage: Secure storage
+  # Permission consent dialog (shown right after importing a plugin that declares permissions)
+  consent_title: Permission request
+  consent_body: "%{name} requires the following permissions to work:"
+  consent_warning: Only grant permissions to plugins you trust - a script with Network or OS access could send data off this machine or read the system clock. You can revoke access at any time from this screen.
+  consent_deny: Not now
   # Add dialog
   add_title: Add a plugin
   add_sub: Install a Lua device driver from a file or paste its source.

@@ -39,11 +39,29 @@ pub async fn seed_known_devices(app: Arc<AppState>) {
 
 pub async fn initialize_app_state(app: Arc<AppState>) {
     crate::drivers::plugins::load_all(&crate::config::plugins_dir());
-    crate::drivers::plugins::set_disabled(&app.config.read().await.plugins_disabled);
+    {
+        let cfg = app.config.read().await;
+        crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
+        crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
+    }
+    notify_ungranted_plugins(&app).await;
     discovery::discover_devices(app.clone()).await;
     seed_known_devices(app.clone()).await;
     usecases::chain::restore_saved_chains(app.clone()).await;
     crate::profiles::usecases::profiles::load_active_profile(app.clone()).await;
+}
+
+/// Toast one notification per auto-discovered plugin that needs a permission
+/// grant. A manually-imported plugin is pre-marked notified by the import
+/// usecase (the GUI shows a blocking consent modal for that flow instead).
+pub(crate) async fn notify_ungranted_plugins(app: &Arc<AppState>) {
+    for plugin in crate::drivers::plugins::take_newly_ungranted_plugins() {
+        crate::platform::notify::send(
+            app,
+            halod_shared::types::NotificationCode::PluginNeedsPermission { plugin },
+        )
+        .await;
+    }
 }
 
 #[cfg(test)]

@@ -525,15 +525,21 @@ async fn run_pre_scan(pre_scan: &PreScan, bus: &Arc<SmBusDevice>, bus_number: u8
     let result = match pre_scan {
         PreScan::None => return,
         PreScan::Native(f) => f(Arc::clone(bus)).await,
-        PreScan::Plugin { source, scope, .. } => {
+        PreScan::Plugin {
+            plugin_id,
+            source,
+            scope,
+        } => {
             let bus = Arc::clone(bus);
             let source = source.clone();
             let scope = scope.clone();
+            let granted = crate::drivers::plugins::granted_for(plugin_id);
             tokio::task::spawn_blocking(move || {
                 crate::drivers::plugins::run_pre_scan(
                     &source,
                     bus,
                     scope,
+                    &granted,
                     tokio::runtime::Handle::current(),
                 )
             })

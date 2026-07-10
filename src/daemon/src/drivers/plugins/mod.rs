@@ -27,11 +27,11 @@ pub use manifest::{parse_manifest, PluginManifest, ProbeMode};
 pub use scan::plugin_smbus_scan_entries;
 pub use worker::run_pre_scan;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use halod_shared::types::PluginInfo;
+use halod_shared::types::{Permission, PluginInfo};
 
 use crate::drivers::Device;
 use crate::registry::discovery::DiscoveryHandle;
@@ -63,6 +63,74 @@ fn is_disabled(plugin_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Permissions the user has granted per plugin (from `config.plugin_permissions`).
+/// Built-ins are auto-granted their own declared permissions at load time (see
+/// `builtin_manifests`), since they ship with the daemon and are already trusted.
+static GRANTED: RwLock<Option<HashMap<String, Vec<Permission>>>> = RwLock::new(None);
+
+/// Replace the granted-permissions map (from `config.plugin_permissions`).
+pub fn set_granted(granted: &HashMap<String, Vec<Permission>>) {
+    *GRANTED.write().expect("plugin granted map poisoned") = Some(granted.clone());
+}
+
+pub(crate) fn granted_for(plugin_id: &str) -> Vec<Permission> {
+    GRANTED
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(plugin_id).cloned()))
+        .unwrap_or_default()
+}
+
+/// True when every permission `manifest` declares has been granted. A plugin
+/// declaring no permissions is always satisfied (the common case).
+fn permissions_satisfied(manifest: &PluginManifest) -> bool {
+    if manifest.permissions.is_empty() {
+        return true;
+    }
+    let granted = granted_for(&manifest.plugin_id);
+    manifest.permissions.iter().all(|p| granted.contains(p))
+}
+
+/// Plugin ids already surfaced via a "needs permission" notification (or
+/// explicitly suppressed — see [`suppress_permission_notice`]), so a plugin
+/// is only ever announced once, not on every rescan.
+static NOTIFIED: RwLock<Option<HashSet<String>>> = RwLock::new(None);
+
+/// Suppress the auto-discovery notification for a plugin id — used when the
+/// GUI is already showing its own consent modal (a manual "Add plugin"
+/// import), so the user isn't told about it twice.
+pub fn suppress_permission_notice(plugin_id: &str) {
+    NOTIFIED
+        .write()
+        .expect("plugin notified set poisoned")
+        .get_or_insert_with(HashSet::new)
+        .insert(plugin_id.to_owned());
+}
+
+/// Pure filter behind [`take_newly_ungranted_plugins`]: which manifests are
+/// ungranted and not yet in `notified` (inserting each as it's returned).
+fn ungranted_in(manifests: &[PluginManifest], notified: &mut HashSet<String>) -> Vec<String> {
+    manifests
+        .iter()
+        .filter(|m| !permissions_satisfied(m) && notified.insert(m.plugin_id.clone()))
+        .map(|m| m.display_name().to_owned())
+        .collect()
+}
+
+/// Display names of plugins that need a permission grant and haven't been
+/// announced yet (auto-discovered, not manually imported — those are marked
+/// via [`suppress_permission_notice`] before this is ever called). Marks
+/// every returned plugin as notified so a later rescan won't repeat it.
+pub fn take_newly_ungranted_plugins() -> Vec<String> {
+    let registry = match PLUGIN_REGISTRY.read() {
+        Ok(g) => g,
+        Err(_) => return Vec::new(),
+    };
+    let mut guard = NOTIFIED.write().expect("plugin notified set poisoned");
+    let notified = guard.get_or_insert_with(HashSet::new);
+    ungranted_in(&registry, notified)
+}
+
 /// Every loaded plugin with its enable state, for the management UI.
 pub fn list() -> Vec<PluginInfo> {
     let registry = match PLUGIN_REGISTRY.read() {
@@ -82,6 +150,8 @@ pub fn list() -> Vec<PluginInfo> {
             description: m.description().to_owned(),
             targets: m.target_labels(),
             builtin: is_builtin(&m.plugin_id),
+            declared_permissions: m.permissions.clone(),
+            granted_permissions: granted_for(&m.plugin_id),
         })
         .collect()
 }
@@ -242,7 +312,7 @@ pub fn match_in(
 ) -> Option<Arc<dyn Device>> {
     manifests
         .iter()
-        .filter(|m| !is_disabled(&m.plugin_id))
+        .filter(|m| !is_disabled(&m.plugin_id) && permissions_satisfied(m))
         .find_map(|m| m.match_spec_for(handle).map(|spec| (m, spec)))
         .and_then(|(m, spec)| build_device(m, spec, handle))
 }
@@ -325,6 +395,83 @@ mod tests {
     }
 
     #[test]
+    fn plugin_with_ungranted_permission_does_not_match() {
+        let src = r#"
+            return {
+              match = { transport = "hid", vid = 0xCCCC, pid = 0xDDDD },
+              identity = { vendor = "Acme", model = "K2" },
+              permissions = { "network" },
+            }
+        "#;
+        let manifests = vec![parse_manifest(src, Path::new("needs_network.lua")).unwrap()];
+        let handle = hid(0xCCCC, 0xDDDD, Some("S"), 0);
+        set_disabled(&[]);
+        set_granted(&HashMap::new());
+        assert!(
+            match_in(&manifests, &handle).is_none(),
+            "declared-but-ungranted permission must keep the plugin inert"
+        );
+
+        let mut granted = HashMap::new();
+        granted.insert("needs_network".to_string(), vec![Permission::Network]);
+        set_granted(&granted);
+        assert!(
+            match_in(&manifests, &handle).is_some(),
+            "fully granted plugin activates"
+        );
+        set_granted(&HashMap::new());
+    }
+
+    #[test]
+    fn permissions_satisfied_true_when_none_declared() {
+        let src = r#"
+            return {
+              match = { transport = "hid", vid = 1, pid = 2 },
+              identity = { vendor = "x", model = "y" },
+            }
+        "#;
+        let m = parse_manifest(src, Path::new("no_perms.lua")).unwrap();
+        assert!(permissions_satisfied(&m));
+    }
+
+    #[test]
+    fn ungranted_in_reports_once_then_stays_silent() {
+        let src = r#"
+            return {
+              match = { transport = "hid", vid = 1, pid = 2 },
+              identity = { vendor = "x", model = "y", name = "Needs Net" },
+              permissions = { "network" },
+            }
+        "#;
+        let m = parse_manifest(src, Path::new("needs_net2.lua")).unwrap();
+        let manifests = vec![m];
+        let mut notified = HashSet::new();
+
+        let first = ungranted_in(&manifests, &mut notified);
+        assert_eq!(first, vec!["Needs Net".to_string()]);
+
+        // Same manifest, same notified set: already announced, not repeated.
+        let second = ungranted_in(&manifests, &mut notified);
+        assert!(
+            second.is_empty(),
+            "must not repeat an already-notified plugin"
+        );
+    }
+
+    #[test]
+    fn ungranted_in_skips_satisfied_manifests() {
+        let src = r#"
+            return {
+              match = { transport = "hid", vid = 1, pid = 2 },
+              identity = { vendor = "x", model = "y" },
+            }
+        "#;
+        let m = parse_manifest(src, Path::new("no_perms2.lua")).unwrap();
+        let mut notified = HashSet::new();
+        assert!(ungranted_in(&[m], &mut notified).is_empty());
+    }
+
+    #[test]
     fn ene_smbus_is_builtin_others_are_not() {
         assert!(is_builtin("ene_smbus"));
         assert!(!is_builtin("wled_udp"));
@@ -340,6 +487,31 @@ mod tests {
         assert_eq!(m.capability_labels(), vec!["RGB", "Fan", "Sensor"]);
         assert!(m.needs_worker());
         assert_eq!(m.poll.as_ref().map(|p| p.interval_ms), Some(500));
+    }
+
+    #[test]
+    fn shipped_permission_demo_plugin_parses_and_is_inert_until_granted() {
+        // Guards the permission-demo example against drift, and demonstrates
+        // the gate: declared-but-ungranted is unsatisfied; fully granted is
+        // satisfied. (Not routed through `match_in` — this plugin declares a
+        // `sensor` capability, so `needs_worker()` is true and full device
+        // construction would need a real HID transport, not just a runtime.)
+        let src = include_str!("../../../../../plugins/examples/permission_demo.lua");
+        let m = parse_manifest(src, Path::new("permission_demo.lua")).unwrap();
+        assert_eq!(m.permissions, vec![Permission::Os]);
+        assert!(m.needs_worker());
+
+        set_granted(&HashMap::new());
+        assert!(
+            !permissions_satisfied(&m),
+            "ungranted os permission keeps it inert"
+        );
+
+        let mut granted = HashMap::new();
+        granted.insert("permission_demo".to_string(), vec![Permission::Os]);
+        set_granted(&granted);
+        assert!(permissions_satisfied(&m));
+        set_granted(&HashMap::new());
     }
 
     #[test]

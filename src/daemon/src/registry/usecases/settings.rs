@@ -147,7 +147,12 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     // Re-read the plugins directory so a freshly-dropped script is picked up by
     // a "Scan now" without restarting the daemon.
     crate::drivers::plugins::load_all(&crate::config::plugins_dir());
-    crate::drivers::plugins::set_disabled(&app.config.read().await.plugins_disabled);
+    {
+        let cfg = app.config.read().await;
+        crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
+        crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
+    }
+    crate::registry::notify_ungranted_plugins(&app).await;
     crate::registry::discovery::discover_devices(Arc::clone(&app)).await;
 
     let controllers: Vec<std::sync::Arc<dyn crate::drivers::Device>> =

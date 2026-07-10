@@ -173,10 +173,12 @@ impl LuaDevice {
         // Keep a handle to the (metered) transport so the device can report
         // write-rate/throughput; the worker owns the one it does I/O through.
         let rate_transport = transport.clone();
+        let granted = super::granted_for(&manifest.plugin_id);
         let worker = PluginHandle::spawn(
             manifest.script_source.clone(),
             transport,
             dev_match,
+            granted,
             handle.clone(),
         );
         let mut dev = Self::build(

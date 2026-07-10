@@ -11,10 +11,26 @@ plugins:
   targets: DISPOSITIVI SUPPORTATI
   status_active: Attivo
   status_disabled: Disattivato
+  status_needs_permission: Richiede permessi
   enable: Attiva
   disable: Disattiva
   delete: Elimina script
   builtin_note: Integrato — non eliminabile
+  # Permessi
+  permissions: PERMESSI
+  permissions_pending: Questo plugin richiede permessi non ancora concessi, resterà inattivo finché non li concedi.
+  permissions_granted: Concesso
+  grant: Concedi permessi
+  revoke: Revoca
+  permission_network: Rete
+  permission_os: Sistema Operativo
+  permission_storage: Archiviazione
+  permission_secure_storage: Archiviazione sicura
+  # Finestra di consenso permessi (mostrata subito dopo l'importazione di un plugin che richiede permessi)
+  consent_title: Richiesta di permessi
+  consent_body: "%{name} richiede i seguenti permessi per funzionare:"
+  consent_warning: Concedi i permessi solo a plugin di cui ti fidi — uno script con accesso a Rete o Sistema Operativo potrebbe inviare dati fuori da questo computer o leggere il clock di sistema. Puoi revocare l'accesso in qualsiasi momento da questa schermata.
+  consent_deny: Non ora
   # Finestra di aggiunta
   add_title: Aggiungi un plugin
   add_sub: Installa un driver Lua da un file o incollane il sorgente.
