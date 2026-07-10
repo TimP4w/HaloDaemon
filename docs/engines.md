@@ -51,18 +51,27 @@ The engine broadcasts a PNG preview and per-LED RGB data on a high-frequency cha
 
 ### Effects
 
-| Effect | Description | Parameters |
-|--------|-------------|------------|
-| `static_color` | Solid fill | RGB color |
-| `breathing` | Sine-wave brightness pulse | RGB color, speed |
-| `rainbow` | Horizontal hue scroll across the canvas | Speed, scale |
-| `screen_sampler` | Mirror monitor content | — |
+Only `screen_sampler` and the effect designer's `designer` pixmap are native
+Rust (`daemon/src/lighting/rgb_engine/canvas/effects.rs`). Every other
+pixmap effect ships as the built-in `halo_effects.lua` plugin
+(`daemon/src/drivers/plugins/builtins/halo_effects.lua`) — see
+[plugins.md](plugins.md#rgb-effects) for the plugin effect API.
+
+| Effect | Kind | Description | Parameters |
+|--------|------|-------------|------------|
+| `screen_sampler` | native | Mirror monitor content | — |
+| `plasma` | plugin | Animated plasma noise | Speed |
+| `rainbow` | plugin | Horizontal hue scroll across the canvas | Speed, scale |
+| `random_flash` | plugin | Deterministic per-cell flash, decaying exponentially | Cells, interval, decay, random color, color |
+| `audio_spectrum` | plugin | 64-bar spectrum reading `halod.audio()`, bars or solid fill | Low/high color, fill |
 
 The `screen_sampler` effect captures the screen via XDG Desktop Portal (Linux, Wayland) or DXGI (Windows) and blits the result onto the canvas each tick.
 
 ### Direct effect: Sensor Gradient
 
-`sensor_gradient` (`daemon/src/lighting/rgb_engine/direct.rs`) is a per-device direct effect — no pixmap — that colors a zone from a live sensor reading. It picks any sensor via a `Sensor`-kind param (including the synthesized fan readings below), normalizes the reading against a configurable `[min, max]` range, smooths it (0–5 s time constant), and blends along a two-stop `color_a`→`color_b` gradient:
+`sensor_gradient` and its sibling `sensor_steps` are direct effects — no pixmap — shipped in the built-in `halo_effects.lua` plugin (not native Rust). They color a zone from a live sensor reading, delivered each tick as the 5th argument to the effect's `led_colors_<id>` callback (`nil` when the sensor is unset or unavailable) — the plugin-effect equivalent of the native `DirectLedEffect::sensor_id`/`set_sensor_value` pair used by the `designer` effect below.
+
+`sensor_gradient` picks any sensor via a `Sensor`-kind param (including the synthesized fan readings below), normalizes the reading against a configurable `[min, max]` range, smooths it (0–5 s time constant), and blends along a two-stop `color_a`→`color_b` gradient:
 
 | Mode | Behavior |
 |------|----------|
@@ -71,7 +80,7 @@ The `screen_sampler` effect captures the screen via XDG Desktop Portal (Linux, W
 
 `sensor_steps` is its sibling for discrete thresholds: an editable list of `value → color` steps (add/remove rows in the GUI, `ParamKind::Steps` on the wire). The zone snaps to the color of the highest step the smoothed reading has reached; readings below every threshold take the first step's color. Thresholds are in raw sensor units — no `[min, max]` normalization.
 
-When the sensor is unset or its reading is unavailable, the effect fades to black rather than freezing on its last color. Like the other direct effects, it applies to one device or many via the same `RgbApply` command and lighting UI — see [Audio capture & media](#audio-capture--media) below for how the engine feeds a direct effect a value each tick (`DirectLedEffect::sensor_id`/`set_sensor_value`, mirroring the audio handle pattern).
+When the sensor is unset or its reading is unavailable, both effects fade to black rather than freezing on their last color. Like the other direct effects, they apply to one device or many via the same `RgbApply` command and lighting UI — see [Audio capture & media](#audio-capture--media) below for how the engine feeds a live sensor value each tick.
 
 ### Fan sensors
 
@@ -182,14 +191,13 @@ Both modules back a `shared()` function acquired by consumers in `from_params` (
 
 Captures the default audio sink's loopback (Linux: PipeWire stream targeting the monitor; Windows: WASAPI shared-mode loopback) and feeds a platform-neutral DSP pipeline (`dsp.rs`, `rustfft`): Hann-windowed FFT, folded into 64 log-spaced bands with per-band attack/release smoothing, RMS level, bass energy-flux beat detection with a refractory period, and a downsampled waveform. Consumers poll the latest `SpectrumFrame` via `AudioHandle::latest()` — latest-only, no ring buffer; scrolling history (spectrum bars, waveform trace) lives in the consuming effect, keyed off `SpectrumFrame::seq`.
 
-Four RGB effects consume it with no engine/trait changes — they hold `Arc<AudioHandle>` privately and read `latest()` in `tick()`/`render()`:
+Three RGB effects consume it, all shipped in the built-in `halo_effects.lua` plugin (not native Rust) via the `halod.audio()` callback helper, which returns the latest `SpectrumFrame` fields (`level`, `flux`, `beat`, `seq`, `bands`):
 
 | Effect | Kind | Behavior |
 | --- | --- | --- |
 | `audio_beat` | direct | flash + exponential decay on detected beats |
 | `audio_level` | direct | brightness follows smoothed RMS, optional level→hue shift |
 | `audio_spectrum` | pixmap | 64-bar spectrum, bars or solid fill |
-| `audio_waveform` | pixmap | scrolling oscilloscope trace |
 
 Two LCD widgets (`AudioSpectrum`, `AudioLevel`) read the same handle from `CustomTemplate`, acquired in `from_params` alongside the RGB registries.
 

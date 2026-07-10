@@ -280,8 +280,12 @@ pub fn is_builtin(plugin_id: &str) -> bool {
 }
 
 /// Plugins shipped inside the daemon binary, loaded before directory plugins.
-/// These replace what used to be native Rust drivers (e.g. ENE SMBus RGB); the
-/// user can disable them like any other plugin.
+/// Most replace what used to be native Rust drivers (e.g. ENE SMBus RGB);
+/// `halo_effects.lua` is the reference effect-plugin implementation
+/// instead of a separate example file, so it's always available to inspect
+/// and to exercise the RGB effect plugin API without dropping anything into
+/// the plugins directory. The user can disable any of these like any other
+/// plugin.
 const BUILTIN_PLUGINS: &[(&str, &str)] = &[
     ("ene_smbus.lua", include_str!("builtins/ene_smbus.lua")),
     (
@@ -289,6 +293,10 @@ const BUILTIN_PLUGINS: &[(&str, &str)] = &[
         include_str!("builtins/corsair_dram.lua"),
     ),
     ("nzxt_kraken.lua", include_str!("builtins/nzxt_kraken.lua")),
+    (
+        "halo_effects.lua",
+        include_str!("builtins/halo_effects.lua"),
+    ),
 ];
 
 fn builtin_manifests() -> Vec<PluginManifest> {
@@ -612,8 +620,8 @@ mod tests {
     #[test]
     fn shipped_example_effects_plugin_parses() {
         // Guards the documented effects example against drift with the schema.
-        let src = include_str!("../../../../../plugins/examples/example_effects.lua");
-        let m = parse_manifest(src, Path::new("example_effects.lua")).unwrap();
+        let src = include_str!("builtins/halo_effects.lua");
+        let m = parse_manifest(src, Path::new("halo_effects.lua")).unwrap();
         assert!(
             m.match_specs.is_empty(),
             "effect-only plugin needs no match"
@@ -624,12 +632,13 @@ mod tests {
             m.capability_labels().is_empty(),
             "effects aren't a capability"
         );
-        assert_eq!(m.effects.len(), 2);
+        assert_eq!(m.effects.len(), 10);
         let entries = effect_entries_for(&m);
-        assert_eq!(entries[0].catalog_id, "example_effects:plasma");
+        assert_eq!(entries[0].catalog_id, "halo_effects:plasma");
         assert_eq!(entries[0].kind, EffectKind::Pixmap);
-        assert_eq!(entries[1].catalog_id, "example_effects:comet");
-        assert_eq!(entries[1].kind, EffectKind::Direct);
+        assert!(entries
+            .iter()
+            .any(|e| e.catalog_id == "halo_effects:comet" && e.kind == EffectKind::Direct));
     }
 
     #[test]

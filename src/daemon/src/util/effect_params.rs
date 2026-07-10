@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::collections::HashMap;
 
-use halod_shared::types::{ColorStep, EffectParamValue, RgbColor};
+use halod_shared::types::{EffectParamValue, RgbColor};
 
 pub(crate) fn param_color(
     params: &HashMap<String, EffectParamValue>,
@@ -40,16 +40,5 @@ pub(crate) fn param_bool(
     match params.get(id) {
         Some(EffectParamValue::Bool(b)) => *b,
         _ => default,
-    }
-}
-
-pub(crate) fn param_steps(
-    params: &HashMap<String, EffectParamValue>,
-    id: &str,
-    default: &[ColorStep],
-) -> Vec<ColorStep> {
-    match params.get(id) {
-        Some(EffectParamValue::Steps(s)) if !s.is_empty() => s.clone(),
-        _ => default.to_vec(),
     }
 }

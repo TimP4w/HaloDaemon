@@ -16,6 +16,8 @@ use tokio::sync::{watch, Mutex};
 
 use super::canvas::{self, FrameSource, Sampler};
 use super::color::linear_to_led;
+#[cfg(test)]
+use super::color::LinearColor;
 use super::direct::{self, DirectLedEffect};
 use crate::{
     config::{CanvasState, PlacedZone},
@@ -506,6 +508,20 @@ impl RgbEngine {
             let Some(rgb) = dev.as_rgb() else { continue };
 
             if let Some(handle) = ld.plugin.clone() {
+                let sensor_value = match params.get("sensor") {
+                    Some(halod_shared::types::EffectParamValue::Str(sensor_id))
+                        if !sensor_id.is_empty() =>
+                    {
+                        if sensors.is_none() {
+                            sensors = Some(self.app_state.snapshot_sensors().await);
+                        }
+                        sensors
+                            .as_ref()
+                            .and_then(|m| m.get(sensor_id))
+                            .map(|s| s.value)
+                    }
+                    _ => None,
+                };
                 for rgb_zone in &rgb.descriptor().zones {
                     let coords = zone_led_coords(rgb_zone);
                     let leds: Vec<crate::drivers::plugins::LedCoord> = coords
@@ -517,7 +533,7 @@ impl RgbEngine {
                             ny,
                         })
                         .collect();
-                    let colors = match handle.led_colors(leds, t, dt).await {
+                    let colors = match handle.led_colors(leds, t, dt, sensor_value).await {
                         Ok(out) if out.len() == coords.len() => out
                             .into_iter()
                             .map(|c| RgbColor {
@@ -951,9 +967,26 @@ mod tests {
         assert_eq!(params_key(&a), params_key(&b));
     }
 
+    /// Position-independent pulse `sin(t*0.5*pi)^2` (black at t=0, peak at
+    /// t=1), brightness-scaling a fixed color — a minimal `DirectLedEffect`
+    /// fixture for exercising `direct_zone_colors`'s coordinate/gamma math
+    /// (breathing itself is now a plugin effect, not native; see
+    /// `halo_effects.lua`).
+    struct PulseTestEffect;
+    impl DirectLedEffect for PulseTestEffect {
+        fn led_color(&self, _p: f32, _p_ring: f32, _nx: f32, _ny: f32, t: f32) -> LinearColor {
+            let brightness = (t * 0.5 * std::f32::consts::PI).sin().powi(2);
+            LinearColor {
+                r: 0.0,
+                g: brightness,
+                b: brightness,
+            }
+        }
+    }
+
     #[test]
     fn direct_breathing_is_black_at_phase_zero() {
-        let fx = direct::build_direct("breathing", &HashMap::new()).unwrap();
+        let fx: Box<dyn DirectLedEffect> = Box::new(PulseTestEffect);
         let zone = RgbZone {
             id: "z".into(),
             name: "z".into(),
@@ -977,7 +1010,7 @@ mod tests {
 
     #[test]
     fn direct_breathing_peak_is_uniform_and_lit() {
-        let fx = direct::build_direct("breathing", &HashMap::new()).unwrap();
+        let fx: Box<dyn DirectLedEffect> = Box::new(PulseTestEffect);
         let zone = RgbZone {
             id: "z".into(),
             name: "z".into(),
@@ -1145,15 +1178,53 @@ mod tests {
         assert!(dev.write_count.load(Ordering::SeqCst) >= 1);
     }
 
-    #[tokio::test]
-    async fn tick_direct_sensor_gradient_uses_live_sensor_reading() {
-        let app = make_app();
+    /// Load a single-file plugin declaring one direct effect that echoes the
+    /// live `sensor` callback arg into its red channel, so a test can assert
+    /// the engine actually threads a live sensor reading through to a
+    /// plugin-declared direct effect (mirrors `load_test_effect_plugin`
+    /// above but exercises the `sensor` param/arg wiring instead). Caller
+    /// must hold `crate::drivers::plugins::TEST_GLOBALS_LOCK`.
+    fn load_test_sensor_plugin() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("engine_sensor_fx.lua"),
+            r#"
+                return {
+                  identity = { vendor = "t", model = "t" },
+                  effects = {
+                    { kind = "direct", id = "probe", name = "Probe" },
+                  },
+                  led_colors_probe = function(leds, t, dt, params, sensor)
+                    local v = 0.0
+                    if sensor ~= nil then v = sensor / 100.0 end
+                    local out = {}
+                    for i in ipairs(leds) do
+                      out[i] = { r = v, g = 0, b = 0 }
+                    end
+                    return out
+                  end,
+                }
+            "#,
+        )
+        .unwrap();
+        crate::drivers::plugins::load_all(tmp.path());
+        tmp
+    }
 
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn tick_direct_plugin_effect_receives_live_sensor_reading() {
+        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _tmp = load_test_sensor_plugin();
+
+        let app = make_app();
         let sensor_dev = crate::test_support::MockDevice::new("sensor_dev").with_sensor(vec![
             halod_shared::types::Sensor {
                 id: "temp1".into(),
                 name: "CPU".into(),
-                value: 90.0, // == configured max, should converge to color_b (white)
+                value: 80.0,
                 unit: halod_shared::types::SensorUnit::Celsius,
                 sensor_type: halod_shared::types::SensorType::Temperature,
                 visibility: halod_shared::types::VisibilityState::Visible,
@@ -1167,23 +1238,8 @@ mod tests {
         let dev = MockRgbDevice::new("dev0", "ring", 2, false);
         let mut params = HashMap::new();
         params.insert("sensor".into(), EffectParamValue::Str("temp1".into()));
-        params.insert("min".into(), EffectParamValue::Float(20.0));
-        params.insert("max".into(), EffectParamValue::Float(90.0));
-        params.insert("smoothing".into(), EffectParamValue::Float(0.0));
-        params.insert(
-            "color_a".into(),
-            EffectParamValue::Color(RgbColor { r: 0, g: 0, b: 0 }),
-        );
-        params.insert(
-            "color_b".into(),
-            EffectParamValue::Color(RgbColor {
-                r: 255,
-                g: 255,
-                b: 255,
-            }),
-        );
         *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
-            id: direct::SENSOR_GRADIENT_EFFECT_ID.to_string(),
+            id: "engine_sensor_fx:probe".to_string(),
             params,
         });
         app.devices
@@ -1196,10 +1252,14 @@ mod tests {
         engine.drain_writes().await;
 
         let colors = dev.last_colors.lock().unwrap().clone().unwrap();
+        // 80.0 / 100.0 = 0.8, gamma-encoded on the way out.
+        let expected_r = linear_to_led(0.8, LED_GAMMA);
         assert!(
-            colors.iter().all(|c| c.r > 200 && c.g > 200 && c.b > 200),
-            "expected near-white after converging to the hot end, got {colors:?}"
+            colors.iter().all(|c| c.r == expected_r),
+            "expected the live sensor reading gamma-encoded into red, got {colors:?}"
         );
+
+        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent-halod-test-dir"));
     }
 
     #[tokio::test]

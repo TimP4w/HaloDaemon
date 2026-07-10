@@ -415,8 +415,9 @@ also available if you prefer.
 buffer one `set_u8` at a time (e.g. a 400×300 pixmap) pays for one host call
 per byte. Build a chunk in pure Lua first (`string.char`/`table.concat`, no
 host round-trip) and write it with a single `set_bytes` call instead — see
-the row-batched fill in
-[`plugins/examples/example_effects.lua`](../plugins/examples/example_effects.lua).
+the row-batched fill in the built-in
+[`halo_effects.lua`](../src/daemon/src/drivers/plugins/builtins/halo_effects.lua)
+plugin.
 
 ## Sandbox
 
@@ -495,19 +496,34 @@ effect or another plugin's. Two kinds:
   `render_<id>(buf, t, dt, params)` mutates `buf` (a `halod.buffer` of
   `halod.canvas_w * halod.canvas_h * 4` bytes) in place; no return value.
 - **`direct`** — computes one color per LED directly, once per zone per
-  frame. Callback `led_colors_<id>(leds, t, dt, params) -> colors` receives
-  an array of `{p, p_ring, nx, ny}` (chain/spatial coordinates) and returns
-  one `{r, g, b}` per LED, linear-light `0..1` (clamped on the host side).
+  frame. Callback `led_colors_<id>(leds, t, dt, params, sensor) -> colors`
+  receives an array of `{p, p_ring, nx, ny}` (chain/spatial coordinates) and
+  returns one `{r, g, b}` per LED, linear-light `0..1` (clamped on the host
+  side). `sensor` is the live reading for the effect's declared `sensor`-kind
+  param (`nil` while unset/unavailable) — the plugin-effect equivalent of a
+  native `DirectLedEffect`'s `sensor_id`/`set_sensor_value`. Since a device
+  with multiple zones calls `led_colors_<id>` once per zone per tick (all
+  sharing the same `t`), an effect that keeps state across calls (a
+  smoothed/eased value, a decaying pulse) must guard its update on `t`
+  actually advancing, or it will double-update multi-zone devices — see the
+  `last_t` guard in `halo_effects.lua`'s `audio_beat`/`audio_level`/
+  `sensor_gradient`/`sensor_steps`.
 
 `t`/`dt` are the engine clock/delta, same as native effects. `params` is the
 declared param table with the user's current values. `halod.hsv(h, s, v)`
-converts to sRGB bytes for convenience. A script that errors, or one whose
-per-frame instruction budget runs out (a runaway loop is killed rather than
-stalling the engine), falls back to a native default (solid/off) and is
-disabled for the rest of the session rather than being retried every frame.
+converts to sRGB bytes, and `halod.audio()` returns the latest audio-capture
+`SpectrumFrame` as `{level, flux, beat, seq, bands}` (`bands` a 64-entry
+0..1 array) — see [Audio capture & media](engines.md#audio-capture--media).
+A script that errors, or one whose per-frame instruction budget runs out (a
+runaway loop is killed rather than stalling the engine), falls back to a
+native default (solid/off) and is disabled for the rest of the session
+rather than being retried every frame.
 
-A complete example lives at
-[`plugins/examples/example_effects.lua`](../plugins/examples/example_effects.lua).
+The built-in `halo_effects.lua` plugin (enable/disable it like any other
+plugin in the Plugins screen, not a separate example file) is both the
+reference implementation and the stock effect library — it ships every
+pixmap/direct effect except `screen_sampler` and the effect designer at
+[`src/daemon/src/drivers/plugins/builtins/halo_effects.lua`](../src/daemon/src/drivers/plugins/builtins/halo_effects.lua).
 
 ## Roadmap
 

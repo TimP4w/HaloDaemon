@@ -68,6 +68,7 @@ enum EffectCall {
         leds: Vec<LedCoord>,
         t: f32,
         dt: f32,
+        sensor: Option<f64>,
         reply: oneshot::Sender<Result<Vec<PluginLedColor>>>,
     },
 }
@@ -117,15 +118,23 @@ impl PluginEffectHandle {
             .await?
     }
 
-    /// Compute one color per LED coordinate, order preserved.
+    /// Compute one color per LED coordinate, order preserved. `sensor` is the
+    /// live reading for the effect's declared `sensor` param, if any.
     pub async fn led_colors(
         &self,
         leds: Vec<LedCoord>,
         t: f32,
         dt: f32,
+        sensor: Option<f64>,
     ) -> Result<Vec<PluginLedColor>> {
-        self.request(|reply| EffectCall::LedColors { leds, t, dt, reply })
-            .await?
+        self.request(|reply| EffectCall::LedColors {
+            leds,
+            t,
+            dt,
+            sensor,
+            reply,
+        })
+        .await?
     }
 }
 
@@ -157,8 +166,9 @@ fn hsv_to_srgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     )
 }
 
-/// `halod.canvas_w`/`halod.canvas_h`/`halod.hsv` — the small helper surface
-/// effect scripts get beyond the base sandbox (`log`, `halod.buffer`).
+/// `halod.canvas_w`/`halod.canvas_h`/`halod.hsv`/`halod.audio` — the small
+/// helper surface effect scripts get beyond the base sandbox (`log`,
+/// `halod.buffer`).
 fn register_effect_helpers(lua: &Lua) -> mlua::Result<()> {
     let halod: Table = lua.globals().get("halod")?;
     halod.set("canvas_w", CANVAS_W)?;
@@ -166,6 +176,23 @@ fn register_effect_helpers(lua: &Lua) -> mlua::Result<()> {
     halod.set(
         "hsv",
         lua.create_function(|_, (h, s, v): (f32, f32, f32)| Ok(hsv_to_srgb(h, s, v)))?,
+    )?;
+    halod.set(
+        "audio",
+        lua.create_function(|lua, ()| {
+            let frame = crate::services::audio::shared().latest();
+            let bands = lua.create_table()?;
+            for (i, v) in frame.bands.iter().enumerate() {
+                bands.set(i + 1, *v)?;
+            }
+            let t = lua.create_table()?;
+            t.set("level", frame.level)?;
+            t.set("flux", frame.flux)?;
+            t.set("beat", frame.beat)?;
+            t.set("seq", frame.seq)?;
+            t.set("bands", bands)?;
+            Ok(t)
+        })?,
     )?;
     Ok(())
 }
@@ -228,7 +255,13 @@ fn worker_main(
                     &params_v,
                 ));
             }
-            EffectCall::LedColors { leds, t, dt, reply } => {
+            EffectCall::LedColors {
+                leds,
+                t,
+                dt,
+                sensor,
+                reply,
+            } => {
                 let _ = reply.send(run_led_colors(
                     &lua,
                     led_colors_fn.as_ref(),
@@ -236,6 +269,7 @@ fn worker_main(
                     t,
                     dt,
                     &params_v,
+                    sensor,
                 ));
             }
         }
@@ -272,12 +306,13 @@ fn run_led_colors(
     t: f32,
     dt: f32,
     params: &mlua::Value,
+    sensor: Option<f64>,
 ) -> Result<Vec<PluginLedColor>> {
     let f = f.ok_or_else(|| anyhow!("effect has no led_colors_<id>() callback"))?;
     let n = leds.len();
     let leds_v = lua.to_value(&leds).map_err(|e| lua_err("leds arg", e))?;
     let value: mlua::Value = f
-        .call((leds_v, t, dt, params.clone()))
+        .call((leds_v, t, dt, params.clone(), sensor))
         .map_err(|e| lua_err("led_colors", e))?;
     let raw: Vec<PluginLedColor> = lua
         .from_value(value)
@@ -349,7 +384,7 @@ mod tests {
                 ny: 0.0,
             },
         ];
-        let colors = handle.led_colors(leds, 0.0, 0.016).await.unwrap();
+        let colors = handle.led_colors(leds, 0.0, 0.016, None).await.unwrap();
         assert_eq!(colors.len(), 3);
         assert_eq!(colors[0].r, 0.0);
         assert_eq!(colors[1].r, 0.5);
@@ -375,6 +410,7 @@ mod tests {
                 }],
                 0.0,
                 0.0,
+                None,
             )
             .await
             .unwrap();
@@ -389,7 +425,7 @@ mod tests {
         let handle =
             PluginEffectHandle::spawn(src.to_string(), "nope".to_string(), params(), vec![]);
         assert!(handle.render_pixmap(0.0, 0.0).await.is_err());
-        assert!(handle.led_colors(vec![], 0.0, 0.0).await.is_err());
+        assert!(handle.led_colors(vec![], 0.0, 0.0, None).await.is_err());
     }
 
     #[tokio::test]
@@ -419,7 +455,7 @@ mod tests {
     async fn shipped_example_effects_plugin_renders_without_error() {
         // Guards the documented example against drift: both callbacks must
         // run clean and produce plausible output.
-        let src = include_str!("../../../../../plugins/examples/example_effects.lua");
+        let src = include_str!("builtins/halo_effects.lua");
 
         let pixmap = PluginEffectHandle::spawn(
             src.to_string(),
@@ -446,7 +482,7 @@ mod tests {
                 ny: 0.0,
             })
             .collect();
-        let colors = direct.led_colors(leds, 0.0, 0.016).await.unwrap();
+        let colors = direct.led_colors(leds, 0.0, 0.016, None).await.unwrap();
         assert_eq!(colors.len(), 8);
         assert!(
             colors.iter().any(|c| c.r > 0.0 || c.g > 0.0 || c.b > 0.0),
@@ -459,7 +495,7 @@ mod tests {
         // Guards against the per-pixel-trig/per-pixel-hsv-call regression:
         // 400x300 pixels in interpreted Lua must stay fast enough for the
         // canvas engine's tick loop (well under its ~16ms/frame at 60fps).
-        let src = include_str!("../../../../../plugins/examples/example_effects.lua");
+        let src = include_str!("builtins/halo_effects.lua");
         let handle = PluginEffectHandle::spawn(
             src.to_string(),
             "plasma".to_string(),
@@ -481,7 +517,7 @@ mod tests {
 
     #[tokio::test]
     async fn shipped_example_comet_direction_reverses_the_sweep() {
-        let src = include_str!("../../../../../plugins/examples/example_effects.lua");
+        let src = include_str!("builtins/halo_effects.lua");
         let leds: Vec<LedCoord> = (0..8)
             .map(|i| LedCoord {
                 p: i as f32 / 7.0,
@@ -499,7 +535,10 @@ mod tests {
         fwd_params.insert("speed".to_string(), EffectParamValue::Float(1.0));
         let forward =
             PluginEffectHandle::spawn(src.to_string(), "comet".to_string(), fwd_params, vec![]);
-        let forward_colors = forward.led_colors(leds.clone(), 0.3, 0.0).await.unwrap();
+        let forward_colors = forward
+            .led_colors(leds.clone(), 0.3, 0.0, None)
+            .await
+            .unwrap();
 
         let mut back_params = params();
         back_params.insert(
@@ -509,7 +548,7 @@ mod tests {
         back_params.insert("speed".to_string(), EffectParamValue::Float(1.0));
         let backward =
             PluginEffectHandle::spawn(src.to_string(), "comet".to_string(), back_params, vec![]);
-        let backward_colors = backward.led_colors(leds, 0.3, 0.0).await.unwrap();
+        let backward_colors = backward.led_colors(leds, 0.3, 0.0, None).await.unwrap();
 
         // Default comet color is {r:0, g:160, b:255} — compare `.g` (or `.b`),
         // not `.r`, since red is always zero regardless of direction.
