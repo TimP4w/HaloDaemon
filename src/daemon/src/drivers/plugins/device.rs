@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use halod_shared::types::{RgbColor, RgbDescriptor, RgbState, Sensor};
+use halod_shared::types::{RgbColor, RgbDescriptor, RgbState, Sensor, WriteRateStatus};
 
 use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor};
 use crate::drivers::transports::Transport;
@@ -35,6 +35,9 @@ pub struct LuaDevice {
     /// Present when the plugin declares a capability (RGB/fan/sensor). Absent
     /// for a device-only plugin.
     worker: Option<PluginHandle>,
+    /// Clone of the (metered) transport, kept so the device can report
+    /// write-rate/throughput to the Info UI. `None` for device-only plugins.
+    transport: Option<Arc<dyn Transport>>,
 
     has_rgb: bool,
     has_fan: bool,
@@ -71,7 +74,7 @@ impl Drop for LuaDevice {
 impl LuaDevice {
     /// A plugin that declares no capability — identity + lifecycle only.
     pub fn device_only(id: String, manifest: &PluginManifest) -> Self {
-        Self::build(id, manifest, None)
+        Self::build(id, manifest, None, None)
     }
 
     /// A plugin with capabilities, backed by a worker over `transport`.
@@ -81,8 +84,11 @@ impl LuaDevice {
         transport: Arc<dyn Transport>,
         handle: tokio::runtime::Handle,
     ) -> Self {
+        // Keep a handle to the (metered) transport so the device can report
+        // write-rate/throughput; the worker owns the one it does I/O through.
+        let rate_transport = transport.clone();
         let worker = PluginHandle::spawn(manifest.script_source.clone(), transport, handle.clone());
-        let mut dev = Self::build(id, manifest, Some(worker.clone()));
+        let mut dev = Self::build(id, manifest, Some(worker.clone()), Some(rate_transport));
 
         // The status poll loop stays host-side (not in the single-threaded VM):
         // a ticker enqueues one poll per interval, run serially by the worker.
@@ -105,7 +111,12 @@ impl LuaDevice {
         dev
     }
 
-    fn build(id: String, manifest: &PluginManifest, worker: Option<PluginHandle>) -> Self {
+    fn build(
+        id: String,
+        manifest: &PluginManifest,
+        worker: Option<PluginHandle>,
+        transport: Option<Arc<dyn Transport>>,
+    ) -> Self {
         Self {
             id,
             name: manifest.display_name().to_owned(),
@@ -113,6 +124,7 @@ impl LuaDevice {
             model: manifest.identity.model.clone(),
             plugin_id: manifest.plugin_id.clone(),
             worker,
+            transport,
             has_rgb: manifest.rgb.is_some(),
             has_fan: manifest.fan.is_some(),
             has_sensor: manifest.sensor.is_some(),
@@ -214,6 +226,10 @@ impl Device for LuaDevice {
         if let Some(w) = &self.worker {
             w.close().await;
         }
+    }
+
+    fn write_rate_status(&self) -> Option<WriteRateStatus> {
+        self.transport.as_ref().map(|t| t.rate_status())
     }
 
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
@@ -527,6 +543,13 @@ mod tests {
         assert_eq!(*mock.written.lock().await, vec![vec![0xFA, 50]]);
         assert_eq!(dev.get_duty().await.unwrap(), 42);
         assert_eq!(dev.get_rpm().await, Some(1200));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reports_write_rate_from_transport() {
+        // The Info UI's throughput meter reads Device::write_rate_status().
+        let dev = device(Arc::new(MockTransport::empty()));
+        assert!(dev.write_rate_status().is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
