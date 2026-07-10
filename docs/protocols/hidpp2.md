@@ -229,6 +229,23 @@ For a **native firmware effect** the block is the effect's 15-byte `base` (byte 
 
 **Explicit per-key writes** (`encode_individual_pairs`) batch up to four `(key, r, g, b)` per `setIndividual`, padding a short final batch with its last pair (so key 0 is never zero-keyed), then `commit`.
 
+### COLOR_LED_EFFECTS (`0x8070`) — `rgb/color_led.rs`
+
+The **older** LED effect-type system, used by devices that predate `0x8071` RGB_EFFECTS (e.g. G502 Hero). Zones are addressed by index; each zone advertises an effect table. Codecs live in `rgb/color_led.rs`; the typed ops in `rgb/mod.rs`.
+
+| Function | Bytes sent | Params | Notes |
+|----------|-----------|--------|-------|
+| getInfo (`0x00`) | `11 dd fi 01 ··` | none | reply byte 0 = zone count (≥5-byte reply); bytes 2–3 = capabilities (`parse_color_led_zone_count`) |
+| getZoneInfo (`0x10`) | `11 dd fi 11 <z> ··` | `[zone]` | reply `[index, loc_hi, loc_lo, count, caps_hi, caps_lo]` → `(zone_index, location, effect_count)` (`parse_color_led_zone_info`) |
+| getZoneEffectInfo (`0x20`) | `11 dd fi 21 <z> <slot> ··` | `[zone, slot]` | reply bytes 2–3 = effect_id (BE); slot with `0x0001` = static (`parse_color_led_effect_entry`) |
+| setEffect (`0x30`) | `11 dd fi 31 <zone> <slot> <10 param bytes>` | `[zone, slot, params…]` | `encode_color_led_set_effect_static`: Static (ID `0x01`) writes colour at param offset 0, ramp at 3 |
+| getSwControl (`0x70`) | `11 dd fi 71 ··` | none | current SW-control state |
+| setSwControl (`0x80`) | `11 dd fi 81 01 ··` | `[0x01]` | claim host LED control before writing effects |
+
+**Zone locations** (`color_led_location_name`, per Solaar `LEDZoneLocations`): `0x0001` Primary, `0x0002` Logo, `0x0003` Left Side, `0x0004` Right Side, `0x0005` Combined, `0x0006`–`0x000B` Primary 1–6; anything else → "Unknown".
+
+**Effect table** (`LED_EFFECTS`): Disabled `0x00`, Static `0x01`, Pulse `0x02`, Cycle `0x03`, Wave `0x04`, Boot `0x08`, Demo `0x09`, Breathe `0x0A`, Ripple `0x0B`, Decomposition `0x0E`, Signature1 `0x0F`, Signature2 `0x10`. Each carries a `LedEffectLayout` mapping param names → `(offset, size)` within the 10-byte payload (ID byte stripped). Only the static path is currently encoded; the others are decode/lookup only.
+
 ### KEYBOARD_LAYOUT_2 (`0x4540`)
 
 `Hidpp20::read_keyboard_layout` reads func `0x00`; reply byte 0 is a country code (1 → US, 13 → CH, 14 → IT).
