@@ -44,10 +44,6 @@ mod corsair_test;
 mod ene_test;
 #[cfg(test)]
 mod lcd_test;
-#[cfg(test)]
-mod razer_test;
-#[cfg(test)]
-mod zotac_test;
 
 static PLUGIN_REGISTRY: RwLock<Vec<PluginManifest>> = RwLock::new(Vec::new());
 /// Plugin ids the user disabled. `match_handle` skips these, so a disabled
@@ -108,15 +104,7 @@ const BUILTIN_PLUGINS: &[(&str, &str)] = &[
         "corsair_dram.lua",
         include_str!("builtins/corsair_dram.lua"),
     ),
-    (
-        "zotac_spectra_gpu.lua",
-        include_str!("builtins/zotac_spectra_gpu.lua"),
-    ),
     ("nzxt_kraken.lua", include_str!("builtins/nzxt_kraken.lua")),
-    (
-        "razer_basilisk.lua",
-        include_str!("builtins/razer_basilisk.lua"),
-    ),
 ];
 
 fn builtin_manifests() -> Vec<PluginManifest> {
