@@ -90,7 +90,7 @@ pub fn visible(
     should_show(
         &DepCheckGate {
             connected,
-            suppressed: state.global_config.suppress_dependency_warning,
+            suppressed: state.gui.suppress_dependency_warning,
             dismissed: st.dismissed,
             within_grace,
         },
@@ -109,7 +109,7 @@ pub fn show(
 ) {
     let gate = DepCheckGate {
         connected,
-        suppressed: state.global_config.suppress_dependency_warning,
+        suppressed: state.gui.suppress_dependency_warning,
         dismissed: st.dismissed,
         within_grace,
     };
@@ -158,9 +158,9 @@ pub fn show(
         if st.dont_show_again {
             crate::domain::actions::system::set_ui_config(
                 cmd,
-                state.global_config.close_to_tray,
+                state.gui.close_to_tray,
                 true,
-                state.global_config.hide_window_controls,
+                state.gui.hide_window_controls,
             );
         }
     }

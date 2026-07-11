@@ -53,8 +53,8 @@ pub struct PluginsUi {
 
 impl PluginsUi {
     pub fn show(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
-        self.selected = resolve_selection(self.selected.as_deref(), &state.plugins);
-        self.detect_new_plugin_needing_consent(&state.plugins);
+        self.selected = resolve_selection(self.selected.as_deref(), &state.plugins.plugins);
+        self.detect_new_plugin_needing_consent(&state.plugins.plugins);
 
         widgets::page_frame(ui, |ui| self.body(ui, state, cmd));
 
@@ -95,7 +95,7 @@ impl PluginsUi {
         );
         ui.add_space(18.0);
 
-        if state.plugins_rediscover_pending {
+        if state.plugins.rediscover_pending {
             pending_changes_banner(ui, cmd);
             ui.add_space(18.0);
         }
@@ -110,7 +110,12 @@ impl PluginsUi {
 
     fn list_column(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         widgets::card(ui, |ui| {
-            let active = state.plugins.iter().filter(|p| plugin_active(p)).count();
+            let active = state
+                .plugins
+                .plugins
+                .iter()
+                .filter(|p| plugin_active(p))
+                .count();
             egui::Sides::new().show(
                 ui,
                 |ui| {
@@ -123,7 +128,7 @@ impl PluginsUi {
                         ui.label(
                             egui::RichText::new(t!(
                                 "plugins.counts",
-                                count = state.plugins.len(),
+                                count = state.plugins.plugins.len(),
                                 active = active
                             ))
                             .font(theme::mono(10.0))
@@ -146,7 +151,7 @@ impl PluginsUi {
             );
             ui.add_space(12.0);
 
-            if state.plugins.is_empty() {
+            if state.plugins.plugins.is_empty() {
                 ui.label(
                     egui::RichText::new(t!("plugins.empty_title"))
                         .font(theme::body(12.0))
@@ -159,7 +164,7 @@ impl PluginsUi {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
-                    for p in &state.plugins {
+                    for p in &state.plugins.plugins {
                         let selected = self.selected.as_deref() == Some(p.id.as_str());
                         match list_row(ui, p, selected) {
                             RowAction::Select => self.selected = Some(p.id.clone()),
@@ -180,7 +185,7 @@ impl PluginsUi {
         let Some(p) = self
             .selected
             .as_deref()
-            .and_then(|id| state.plugins.iter().find(|p| p.id == id))
+            .and_then(|id| state.plugins.plugins.iter().find(|p| p.id == id))
         else {
             widgets::empty_state(
                 ui,
@@ -278,7 +283,7 @@ impl PluginsUi {
         let name = self
             .pending_delete
             .as_deref()
-            .and_then(|id| state.plugins.iter().find(|p| p.id == id))
+            .and_then(|id| state.plugins.plugins.iter().find(|p| p.id == id))
             .map(|p| p.name.clone())
             .unwrap_or_default();
 
@@ -334,7 +339,7 @@ impl PluginsUi {
         let Some(id) = self.pending_consent.clone() else {
             return;
         };
-        let Some(p) = state.plugins.iter().find(|p| p.id == id) else {
+        let Some(p) = state.plugins.plugins.iter().find(|p| p.id == id) else {
             self.pending_consent = None;
             return;
         };

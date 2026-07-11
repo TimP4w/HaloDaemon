@@ -273,7 +273,7 @@ mod tests {
         assert!((zones[0].y - 0.2).abs() < 1e-5);
         assert_eq!(zones[0].effect.as_deref(), Some("bars"));
         assert!(
-            app.config.read().await.global.engine_canvas_enabled,
+            app.config.read().await.rgb.canvas_enabled,
             "placing a zone must enable the canvas engine so it animates"
         );
     }
@@ -455,7 +455,7 @@ mod tests {
 
         stop(app.clone()).await.unwrap();
 
-        assert!(!app.config.read().await.global.engine_canvas_enabled);
+        assert!(!app.config.read().await.rgb.canvas_enabled);
         assert!(matches!(
             dev.rgb.as_ref().unwrap().current_state(),
             Some(RgbState::Static {

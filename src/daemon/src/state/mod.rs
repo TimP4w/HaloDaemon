@@ -330,25 +330,31 @@ mod tests {
 
     #[test]
     fn canvas_and_lcd_fps_are_clamped_to_1_240() {
-        use crate::config::GlobalConfig;
+        use crate::config::{LcdConfig, RgbConfig};
 
         // Below the floor: clamps to 1 fps → 1000 ms tick.
-        let floor = GlobalConfig {
-            engine_canvas_fps: 0,
-            engine_lcd_fps: 0,
+        let rgb_floor = RgbConfig {
+            canvas_fps: 0,
             ..Default::default()
         };
-        assert_eq!(EngineRunConfig::canvas(&floor).tick_ms, 1000);
-        assert_eq!(EngineRunConfig::lcd(&floor).tick_ms, 1000);
+        let lcd_floor = LcdConfig {
+            fps: 0,
+            ..Default::default()
+        };
+        assert_eq!(EngineRunConfig::canvas(&rgb_floor).tick_ms, 1000);
+        assert_eq!(EngineRunConfig::lcd(&lcd_floor).tick_ms, 1000);
 
         // Above the ceiling: clamps to 240 fps → 4 ms tick.
-        let ceiling = GlobalConfig {
-            engine_canvas_fps: 10_000,
-            engine_lcd_fps: 10_000,
+        let rgb_ceiling = RgbConfig {
+            canvas_fps: 10_000,
             ..Default::default()
         };
-        assert_eq!(EngineRunConfig::canvas(&ceiling).tick_ms, 1000 / 240);
-        assert_eq!(EngineRunConfig::lcd(&ceiling).tick_ms, 1000 / 240);
+        let lcd_ceiling = LcdConfig {
+            fps: 10_000,
+            ..Default::default()
+        };
+        assert_eq!(EngineRunConfig::canvas(&rgb_ceiling).tick_ms, 1000 / 240);
+        assert_eq!(EngineRunConfig::lcd(&lcd_ceiling).tick_ms, 1000 / 240);
     }
 
     #[tokio::test]

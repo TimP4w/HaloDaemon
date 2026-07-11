@@ -2,7 +2,9 @@
 use anyhow::Result;
 use halod_shared::types::{AppRule, Permission, VisibilityState, DEFAULT_PROFILE_NAME};
 // Types shared with wire protocol; re-exported for backward-compat.
-pub use halod_shared::types::{CanvasState, GlobalConfig, PlacedZone};
+pub use halod_shared::types::{
+    CanvasState, CoolingConfig, GuiConfig, LcdConfig, PlacedZone, RgbConfig,
+};
 use halod_shared::zone_transform::ZoneContentTransform;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -16,7 +18,7 @@ use crate::registry::config::{DeviceLayout, DeviceRecord};
 //
 // The single in-memory `Config` is split across several files by concern, each
 // independently atomic (tmp+rename) and independently defaultable:
-//   config.yaml          - active_profile + GlobalConfig
+//   config.yaml          - active_profile + cooling/rgb/lcd/gui config
 //   devices.yaml          - known_devices, device_layouts, device_transforms, sensor_visibility
 //   app_rules.yaml        - app_rules
 //   profiles/<slug>.yaml  - one Profile per file, named for a human to read
@@ -31,14 +33,17 @@ pub fn load() -> Result<Config> {
         profiles.insert(DEFAULT_PROFILE_NAME.to_string(), Profile::default());
     }
 
-    let mut global = main.global;
-    global.fan_failsafe_duty = global.fan_failsafe_duty.min(100);
+    let mut cooling = main.cooling;
+    cooling.fan_failsafe_duty = cooling.fan_failsafe_duty.min(100);
 
     Ok(Config {
         active_profile: main.active_profile,
         profiles,
         known_devices: devices.known_devices,
-        global,
+        cooling,
+        rgb: main.rgb,
+        lcd: main.lcd,
+        gui: main.gui,
         device_layouts: devices.device_layouts,
         sensor_visibility: devices.sensor_visibility,
         device_transforms: devices.device_transforms,
@@ -56,7 +61,10 @@ pub fn save(cfg: &Config) -> Result<()> {
         &main_config_path(),
         &serde_yaml::to_string(&MainFile {
             active_profile: cfg.active_profile.clone(),
-            global: cfg.global.clone(),
+            cooling: cfg.cooling.clone(),
+            rgb: cfg.rgb.clone(),
+            lcd: cfg.lcd.clone(),
+            gui: cfg.gui.clone(),
         })?,
     )?;
     atomic_write(
@@ -257,15 +265,26 @@ pub fn plugins_dir() -> PathBuf {
 struct MainFile {
     #[serde(default = "default_profile_name")]
     active_profile: String,
+    // The daemon's persisted RGB config key is `rgb`; the wire side names the
+    // same struct `lighting.config`.
     #[serde(default)]
-    global: GlobalConfig,
+    cooling: CoolingConfig,
+    #[serde(default)]
+    rgb: RgbConfig,
+    #[serde(default)]
+    lcd: LcdConfig,
+    #[serde(default)]
+    gui: GuiConfig,
 }
 
 impl Default for MainFile {
     fn default() -> Self {
         Self {
             active_profile: default_profile_name(),
-            global: GlobalConfig::default(),
+            cooling: CoolingConfig::default(),
+            rgb: RgbConfig::default(),
+            lcd: LcdConfig::default(),
+            gui: GuiConfig::default(),
         }
     }
 }
@@ -331,7 +350,13 @@ pub struct Config {
     #[serde(default)]
     pub known_devices: HashMap<String, DeviceRecord>,
     #[serde(default)]
-    pub global: GlobalConfig,
+    pub cooling: CoolingConfig,
+    #[serde(default)]
+    pub rgb: RgbConfig,
+    #[serde(default)]
+    pub lcd: LcdConfig,
+    #[serde(default)]
+    pub gui: GuiConfig,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub device_layouts: HashMap<String, DeviceLayout>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -371,7 +396,10 @@ impl Default for Config {
             active_profile: DEFAULT_PROFILE_NAME.to_string(),
             profiles,
             known_devices: HashMap::new(),
-            global: GlobalConfig::default(),
+            cooling: CoolingConfig::default(),
+            rgb: RgbConfig::default(),
+            lcd: LcdConfig::default(),
+            gui: GuiConfig::default(),
             device_layouts: HashMap::new(),
             sensor_visibility: HashMap::new(),
             device_transforms: HashMap::new(),
@@ -390,9 +418,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn global_config_close_to_tray_defaults_to_true_when_field_absent() {
+    fn gui_config_close_to_tray_defaults_to_true_when_field_absent() {
         let yaml = "log_level: info";
-        let cfg: GlobalConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: GuiConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.close_to_tray);
     }
 
@@ -469,7 +497,10 @@ mod tests {
             profile: "Gäming Setup".into(),
             enabled: true,
         });
-        cfg.global.seen_tours.insert("page:home".into());
+        cfg.gui.seen_tours.insert("page:home".into());
+        cfg.cooling.fan_failsafe_duty = 60;
+        cfg.rgb.canvas_fps = 45;
+        cfg.lcd.enabled = false;
         cfg.plugins_disabled.push("nzxt_kraken".into());
         cfg.plugin_permissions
             .insert("wled_udp".into(), vec![Permission::Network]);
@@ -519,7 +550,10 @@ mod tests {
         assert!(reloaded.device_layouts.contains_key("hub1"));
         assert!(reloaded.sensor_visibility.contains_key("sensor1"));
         assert_eq!(reloaded.app_rules.len(), 1);
-        assert!(reloaded.global.seen_tours.contains("page:home"));
+        assert!(reloaded.gui.seen_tours.contains("page:home"));
+        assert_eq!(reloaded.cooling.fan_failsafe_duty, 60);
+        assert_eq!(reloaded.rgb.canvas_fps, 45);
+        assert!(!reloaded.lcd.enabled);
 
         unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }

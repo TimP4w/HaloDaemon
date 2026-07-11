@@ -94,7 +94,7 @@ Engines live inside their owning domain module, not a shared `engines/` tree: **
 
 Persisted as a directory of YAML files under `~/.config/halod/` (Linux) or `%APPDATA%\halod\` (Windows), split by concern — see [daemon/src/config/mod.rs](src/daemon/src/config/mod.rs):
 
-- `config.yaml` — `active_profile` + `GlobalConfig` (engine toggles, log level, close-to-tray)
+- `config.yaml` — `active_profile` + per-domain config (`cooling`, `rgb`, `lcd`, `gui`: engine toggles, log level, close-to-tray)
 - `devices.yaml` — known devices, chain layouts, zone transforms, sensor visibility
 - `app_rules.yaml` — app-focus → profile rules
 - `profiles/<name>.yaml` — one file per profile (device capability state, canvas overrides, RGB Lighting targets)

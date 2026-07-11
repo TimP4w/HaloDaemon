@@ -135,14 +135,14 @@ pub struct TrayModel {
 
 impl TrayModel {
     fn from_state(state: &AppState) -> Self {
-        let active = if state.active_profile.is_empty() {
+        let active = if state.profiles.active.is_empty() {
             DEFAULT_PROFILE_NAME.to_string()
         } else {
-            state.active_profile.clone()
+            state.profiles.active.clone()
         };
         Self {
             battery_lines: battery_lines(state),
-            profiles: state.profiles.clone(),
+            profiles: state.profiles.available.clone(),
             active,
         }
     }

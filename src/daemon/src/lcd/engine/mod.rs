@@ -521,24 +521,23 @@ mod tests {
     /// `load_active_profile`) reach `engine`.
     async fn install_engines(app: &Arc<AppState>, engine: &Arc<LcdEngine>) {
         use crate::state::EngineRunConfig;
-        let global = crate::config::GlobalConfig::default();
         app.lighting.set_engine(
             crate::lighting::rgb_engine::RgbEngine::new(Arc::clone(app)).await,
-            watch::channel(EngineRunConfig::canvas(&global)).0,
+            watch::channel(EngineRunConfig::canvas(&Default::default())).0,
         );
         app.cooling.set_engine(
             crate::cooling::fan_curve::FanCurveEngine::new(Arc::clone(app)),
-            watch::channel(EngineRunConfig::fan_curve(&global)).0,
+            watch::channel(EngineRunConfig::fan_curve(&Default::default())).0,
             watch::channel(75).0,
         );
         app.lcd.set_engine(
             Arc::clone(engine),
             video::VideoEngine::new(Arc::clone(app), engine.frame_sender()),
-            watch::channel(EngineRunConfig::lcd(&global)).0,
+            watch::channel(EngineRunConfig::lcd(&Default::default())).0,
         );
         app.focus.set_engine(
             crate::profiles::focus_watcher::FocusWatcherEngine::new(Arc::clone(app)),
-            watch::channel(EngineRunConfig::focus_watcher(&global)).0,
+            watch::channel(EngineRunConfig::focus_watcher()).0,
         );
     }
 
@@ -624,7 +623,7 @@ mod tests {
 
         let mut frames = engine.subscribe();
         let (_cfg_tx, cfg_rx) =
-            watch::channel(EngineRunConfig::lcd(&crate::config::GlobalConfig::default()));
+            watch::channel(EngineRunConfig::lcd(&crate::config::LcdConfig::default()));
         let handle = Arc::clone(&engine).start(cfg_rx).await;
         // Let the engine park idle before the profile load.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

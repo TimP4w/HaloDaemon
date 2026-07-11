@@ -297,7 +297,7 @@ pub(super) fn canvas_view(
         );
     }
 
-    if state.global_config.engine_canvas_enabled {
+    if state.lighting.config.canvas_enabled {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(50));
     }

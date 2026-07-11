@@ -20,7 +20,7 @@ impl App {
             false
         }) {
             self.state_cache = std::sync::Arc::new(self.ui.state.borrow_and_update().clone());
-            crate::ui::screens::settings::apply_locale(&self.state_cache.global_config.language);
+            crate::ui::screens::settings::apply_locale(&self.state_cache.gui.language);
         }
         let state = std::sync::Arc::clone(&self.state_cache);
         self.tray.sync(ctx, &state);
@@ -207,7 +207,7 @@ impl App {
             }
         }
         if let Page::Profile(name) = &self.page {
-            if !state.profiles.contains(name) {
+            if !state.profiles.available.contains(name) {
                 self.page = Page::Home;
             }
         }
@@ -372,12 +372,12 @@ impl App {
             &self.device_ui,
             self.lighting_ui.tab,
             &self.tour,
-            &state.global_config.seen_tours,
+            &state.gui.seen_tours,
         );
         crate::ui::tour::show(
             ctx,
             &mut self.tour,
-            &state.global_config.seen_tours,
+            &state.gui.seen_tours,
             &self.cmd,
             tour_key,
             connected,

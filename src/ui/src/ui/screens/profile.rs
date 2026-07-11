@@ -340,10 +340,10 @@ pub fn title_button(
     let switching = st.switching_to.is_some();
 
     let p = ui.painter();
-    let profile_name = if state.active_profile.is_empty() {
+    let profile_name = if state.profiles.active.is_empty() {
         "default"
     } else {
-        &state.active_profile
+        &state.profiles.active
     };
 
     // Measure the text components to size the pill.
@@ -487,13 +487,13 @@ pub fn title_dropdown(
     .show(|ui| {
         ui.set_width(drop_w - 16.0);
 
-        let active = if state.active_profile.is_empty() {
+        let active = if state.profiles.active.is_empty() {
             DEFAULT_PROFILE_NAME
         } else {
-            &state.active_profile
+            &state.profiles.active
         };
 
-        for profile in &state.profiles {
+        for profile in &state.profiles.available {
             let is_active = profile == active;
             let is_default = profile == DEFAULT_PROFILE_NAME;
             let is_switch_target = st.switching_to.as_deref() == Some(profile.as_str());
@@ -670,10 +670,10 @@ pub fn title_dropdown(
         st.dropdown_open = false;
     }
     if nav_to_settings_page {
-        let active = if state.active_profile.is_empty() {
+        let active = if state.profiles.active.is_empty() {
             DEFAULT_PROFILE_NAME.to_string()
         } else {
-            state.active_profile.clone()
+            state.profiles.active.clone()
         };
         *page = Page::Profile(active);
         st.dropdown_open = false;
@@ -688,6 +688,7 @@ fn name_available(state: &AppState, trimmed: &str) -> bool {
     !trimmed.is_empty()
         && !state
             .profiles
+            .available
             .iter()
             .any(|p| p.eq_ignore_ascii_case(trimmed))
 }
@@ -846,8 +847,8 @@ pub fn show(
 ) {
     seed_if_profile_changed(st, profile);
 
-    let is_active = state.active_profile == profile
-        || (state.active_profile.is_empty() && profile == DEFAULT_PROFILE_NAME);
+    let is_active = state.profiles.active == profile
+        || (state.profiles.active.is_empty() && profile == DEFAULT_PROFILE_NAME);
     let is_default = profile == DEFAULT_PROFILE_NAME;
 
     egui::ScrollArea::vertical()
@@ -1011,6 +1012,7 @@ fn auto_activate_card(
 ) {
     // Collect all data before entering the closure so we can split-borrow st.
     let rule_processes: Vec<(usize, Vec<String>)> = state
+        .profiles
         .app_rules
         .iter()
         .enumerate()
@@ -1097,6 +1099,7 @@ fn auto_activate_card(
     // different rule.
     if let Some((rule_idx, proc_name)) = remove_process {
         if let Some(rule) = state
+            .profiles
             .app_rules
             .get(rule_idx)
             .filter(|r| r.profile == profile)
@@ -1219,7 +1222,7 @@ fn overrides_section(
                 return;
             }
 
-            let overrides = &state.profile_overrides;
+            let overrides = &state.profiles.overrides;
             if overrides.device_capabilities.is_empty() && !overrides.canvas {
                 ui.label(
                     egui::RichText::new(t!("profile.overrides_empty"))
@@ -1511,6 +1514,7 @@ pub fn process_picker(
         if !selected.is_empty() {
             // Find an existing rule for this profile to merge into, or create new one.
             let existing_rule = state
+                .profiles
                 .app_rules
                 .iter()
                 .enumerate()
@@ -1562,9 +1566,12 @@ mod tests {
 
     fn state_with_profiles(profiles: &[&str], active: &str, rules: Vec<AppRule>) -> AppState {
         AppState {
-            profiles: profiles.iter().map(|s| s.to_string()).collect(),
-            active_profile: active.to_string(),
-            app_rules: rules,
+            profiles: halod_shared::types::ProfileState {
+                active: active.to_string(),
+                available: profiles.iter().map(|s| s.to_string()).collect(),
+                app_rules: rules,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }

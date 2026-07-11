@@ -141,12 +141,7 @@ pub fn show(
                             .color(theme::TEXT_MUT),
                     );
                 });
-                canvas::chrome(
-                    ui,
-                    canvas_ui,
-                    cmd,
-                    state.global_config.engine_canvas_enabled,
-                );
+                canvas::chrome(ui, canvas_ui, cmd, state.lighting.config.canvas_enabled);
             });
             ui.add_space(14.0);
             let labels = [t!("lighting.tab_canvas"), t!("lighting.tab_direct")];
@@ -220,10 +215,10 @@ fn direct_effects(
 /// profile switch. Offline devices stay in the saved selection so reconnecting
 /// restores them.
 fn seed_if_profile_changed(st: &mut LightingUi, state: &AppState) {
-    if st.seeded_for.as_deref() != Some(state.active_profile.as_str()) {
+    if st.seeded_for.as_deref() != Some(state.profiles.active.as_str()) {
         st.sel_ids = state.lighting.targets.device_ids.clone();
         st.zone_sel = state.lighting.targets.zones.clone();
-        st.seeded_for = Some(state.active_profile.clone());
+        st.seeded_for = Some(state.profiles.active.clone());
     }
 }
 
@@ -1849,7 +1844,10 @@ mod tests {
 
     fn state_with_targets(profile: &str, ids: &[&str]) -> AppState {
         AppState {
-            active_profile: profile.into(),
+            profiles: halod_shared::types::ProfileState {
+                active: profile.into(),
+                ..Default::default()
+            },
             lighting: halod_shared::types::LightingState {
                 targets: halod_shared::types::LightingTargets {
                     device_ids: ids.iter().map(|s| s.to_string()).collect(),

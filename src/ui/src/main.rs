@@ -8,7 +8,7 @@
 extern crate rust_i18n;
 
 // Translation catalogs live in ui/locales/<code>.yaml; `t!(...)` looks up the
-// active locale (set from GlobalConfig.language), falling back to English.
+// active locale (set from GuiConfig.language), falling back to English.
 i18n!("locales", fallback = "en");
 
 mod app;

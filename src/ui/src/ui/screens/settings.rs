@@ -328,13 +328,13 @@ fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         &t!("settings.close_to_tray_title"),
         &t!("settings.close_to_tray_sub"),
     );
-    let on = state.global_config.close_to_tray;
+    let on = state.gui.close_to_tray;
     if row_toggle(ui, rect, on, "close_to_tray") {
         crate::domain::actions::system::set_ui_config(
             cmd,
             !on,
-            state.global_config.suppress_dependency_warning,
-            state.global_config.hide_window_controls,
+            state.gui.suppress_dependency_warning,
+            state.gui.hide_window_controls,
         );
     }
     bottom_border(ui, rect);
@@ -348,12 +348,12 @@ fn window_controls_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         &t!("settings.window_controls_title"),
         &t!("settings.window_controls_sub"),
     );
-    let on = !state.global_config.hide_window_controls;
+    let on = !state.gui.hide_window_controls;
     if row_toggle(ui, rect, on, "window_controls") {
         crate::domain::actions::system::set_ui_config(
             cmd,
-            state.global_config.close_to_tray,
-            state.global_config.suppress_dependency_warning,
+            state.gui.close_to_tray,
+            state.gui.suppress_dependency_warning,
             on,
         );
     }
@@ -368,13 +368,13 @@ fn dependency_warning_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) 
         &t!("settings.startup_healthcheck_title"),
         &t!("settings.startup_healthcheck_sub"),
     );
-    let warn_on = !state.global_config.suppress_dependency_warning;
+    let warn_on = !state.gui.suppress_dependency_warning;
     if row_toggle(ui, rect, warn_on, "dependency_warning") {
         crate::domain::actions::system::set_ui_config(
             cmd,
-            state.global_config.close_to_tray,
+            state.gui.close_to_tray,
             warn_on,
-            state.global_config.hide_window_controls,
+            state.gui.hide_window_controls,
         );
     }
     bottom_border(ui, rect);
@@ -417,8 +417,8 @@ fn lcd_engine_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(ui, rect, "LCD", &t!("settings.lcd_engine_sub"));
 
-    let lcd_enabled = state.global_config.engine_lcd_enabled;
-    let lcd_fps = state.global_config.engine_lcd_fps;
+    let lcd_enabled = state.lcd.config.enabled;
+    let lcd_fps = state.lcd.config.fps;
 
     let chip_w = 72.0_f32;
     let fps_chip_rect = Rect::from_min_size(
@@ -693,7 +693,7 @@ fn language_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(ui, rect, &t!("settings.language"), "");
 
-    let current = state.global_config.language.as_str();
+    let current = state.gui.language.as_str();
     let combo_w = 130.0;
     let combo_rect = Rect::from_min_size(
         Pos2::new(rect.right() - combo_w, rect.top() + 11.0),
@@ -737,7 +737,7 @@ fn log_level_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         &t!("settings.log_level_sub"),
     );
 
-    let current = state.global_config.log_level.to_lowercase();
+    let current = state.gui.log_level.to_lowercase();
     let combo_w = 130.0;
     let combo_rect = Rect::from_min_size(
         Pos2::new(rect.right() - combo_w, rect.top() + 11.0),

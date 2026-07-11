@@ -73,7 +73,7 @@ impl App {
         domain::lifecycle::classify_close(
             close_requested,
             self.force_quit.load(Ordering::SeqCst),
-            self.state_cache.global_config.close_to_tray,
+            self.state_cache.gui.close_to_tray,
         )
     }
 

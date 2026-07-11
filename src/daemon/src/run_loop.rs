@@ -11,32 +11,32 @@ pub struct EngineRunConfig {
 }
 
 impl EngineRunConfig {
-    /// Run config for the fan-curve engine from global settings.
-    pub fn fan_curve(g: &crate::config::GlobalConfig) -> Self {
+    /// Run config for the fan-curve engine from cooling settings.
+    pub fn fan_curve(c: &crate::config::CoolingConfig) -> Self {
         Self {
-            enabled: g.engine_fan_curve_enabled,
-            tick_ms: g.engine_fan_curve_tick_ms,
+            enabled: c.fan_curve_enabled,
+            tick_ms: c.fan_curve_tick_ms,
         }
     }
 
     /// Run config for the canvas engine (fps → ms).
-    pub fn canvas(g: &crate::config::GlobalConfig) -> Self {
+    pub fn canvas(c: &crate::config::RgbConfig) -> Self {
         Self {
-            enabled: g.engine_canvas_enabled,
-            tick_ms: 1000 / g.engine_canvas_fps.clamp(1, 240) as u64,
+            enabled: c.canvas_enabled,
+            tick_ms: 1000 / c.canvas_fps.clamp(1, 240) as u64,
         }
     }
 
     /// Run config for the LCD engine (fps → ms).
-    pub fn lcd(g: &crate::config::GlobalConfig) -> Self {
+    pub fn lcd(c: &crate::config::LcdConfig) -> Self {
         Self {
-            enabled: g.engine_lcd_enabled,
-            tick_ms: 1000 / g.engine_lcd_fps.clamp(1, 240) as u64,
+            enabled: c.enabled,
+            tick_ms: 1000 / c.fps.clamp(1, 240) as u64,
         }
     }
 
     /// Run config for the focus-watcher engine.
-    pub fn focus_watcher(_g: &crate::config::GlobalConfig) -> Self {
+    pub fn focus_watcher() -> Self {
         Self {
             enabled: true,
             tick_ms: 0,

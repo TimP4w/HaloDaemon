@@ -265,19 +265,69 @@ impl Default for CanvasState {
     }
 }
 
+/// Cooling engine config, nested into [`CoolingState`]. Persisted on the daemon
+/// under `config.yaml`'s `cooling` key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GlobalConfig {
-    pub engine_fan_curve_enabled: bool,
+pub struct CoolingConfig {
+    pub fan_curve_enabled: bool,
     /// Milliseconds between fan-curve ticks.
-    pub engine_fan_curve_tick_ms: u64,
-    pub engine_canvas_enabled: bool,
-    pub engine_canvas_fps: u32,
-    pub engine_lcd_enabled: bool,
-    pub engine_lcd_fps: u32,
+    pub fan_curve_tick_ms: u64,
     /// Duty (0-100) applied when a fan's assigned sensor is absent.
     pub fan_failsafe_duty: u8,
-    pub log_level: String,
+}
+
+impl Default for CoolingConfig {
+    fn default() -> Self {
+        Self {
+            fan_curve_enabled: DEFAULT_ENGINE_ENABLED,
+            fan_curve_tick_ms: DEFAULT_FAN_CURVE_TICK_MS,
+            fan_failsafe_duty: DEFAULT_FAN_FAILSAFE_DUTY,
+        }
+    }
+}
+
+/// RGB engine config, nested into [`LightingState`]. Persisted on the daemon
+/// under `config.yaml`'s `rgb` key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RgbConfig {
+    pub canvas_enabled: bool,
+    pub canvas_fps: u32,
+}
+
+impl Default for RgbConfig {
+    fn default() -> Self {
+        Self {
+            canvas_enabled: DEFAULT_ENGINE_ENABLED,
+            canvas_fps: DEFAULT_CANVAS_FPS,
+        }
+    }
+}
+
+/// LCD engine config, nested into [`LcdState`]. Persisted on the daemon under
+/// `config.yaml`'s `lcd` key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LcdConfig {
+    pub enabled: bool,
+    pub fps: u32,
+}
+
+impl Default for LcdConfig {
+    fn default() -> Self {
+        Self {
+            enabled: DEFAULT_ENGINE_ENABLED,
+            fps: DEFAULT_LCD_FPS,
+        }
+    }
+}
+
+/// GUI-facing preferences and daemon log level, sent as `AppState.gui` and
+/// persisted on the daemon under `config.yaml`'s `gui` key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuiConfig {
     /// UI language code (e.g. "en", "it"); the GUI translates against it.
     pub language: String,
     pub close_to_tray: bool,
@@ -288,24 +338,18 @@ pub struct GlobalConfig {
     /// Persistence keys (e.g. "page:home", "tab:cooling") of tutorials the
     /// user has completed or skipped.
     pub seen_tours: BTreeSet<String>,
+    pub log_level: String,
 }
 
-impl Default for GlobalConfig {
+impl Default for GuiConfig {
     fn default() -> Self {
         Self {
-            engine_fan_curve_enabled: DEFAULT_ENGINE_ENABLED,
-            engine_fan_curve_tick_ms: DEFAULT_FAN_CURVE_TICK_MS,
-            engine_canvas_enabled: DEFAULT_ENGINE_ENABLED,
-            engine_canvas_fps: DEFAULT_CANVAS_FPS,
-            engine_lcd_enabled: DEFAULT_ENGINE_ENABLED,
-            engine_lcd_fps: DEFAULT_LCD_FPS,
-            fan_failsafe_duty: DEFAULT_FAN_FAILSAFE_DUTY,
-            log_level: DEFAULT_LOG_LEVEL.to_string(),
             language: DEFAULT_LANGUAGE.to_string(),
             close_to_tray: DEFAULT_CLOSE_TO_TRAY,
             suppress_dependency_warning: DEFAULT_SUPPRESS_DEPENDENCY_WARNING,
             hide_window_controls: DEFAULT_HIDE_WINDOW_CONTROLS,
             seen_tours: BTreeSet::new(),
+            log_level: DEFAULT_LOG_LEVEL.to_string(),
         }
     }
 }
@@ -440,32 +484,23 @@ pub struct ProfileOverrides {
     pub active_is_default: bool,
 }
 
+/// Active profile, the available profile names, app-focus rules, and the
+/// active profile's per-device capability overrides.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AppState {
+pub struct ProfileState {
     #[serde(default)]
-    pub discovery: DiscoveryStatus,
+    pub active: String,
     #[serde(default)]
-    pub devices: Vec<WireDevice>,
-    #[serde(default)]
-    pub active_profile: String,
-    #[serde(default)]
-    pub profiles: Vec<String>,
-    #[serde(default)]
-    pub cooling: CoolingState,
-    #[serde(default)]
-    pub lighting: LightingState,
-    #[serde(default)]
-    pub lcd: LcdState,
-    #[serde(default)]
-    pub global_config: GlobalConfig,
-    #[serde(default)]
-    pub log_entries: Vec<LogEntry>,
-    /// Filesystem path to the daemon's config directory; the UI displays and
-    /// opens it without recomputing client-side.
-    #[serde(default)]
-    pub config_dir: String,
+    pub available: Vec<String>,
     #[serde(default)]
     pub app_rules: Vec<AppRule>,
+    #[serde(default)]
+    pub overrides: ProfileOverrides,
+}
+
+/// Results of the daemon's host-capability probes, gating optional UI features.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HealthCheckState {
     /// False when no supported compositor/platform backend was found.
     /// Default false so the UI doesn't flash "supported" before the first broadcast.
     #[serde(default)]
@@ -473,14 +508,11 @@ pub struct AppState {
     /// Whether `ffmpeg` is available on the daemon's host, gating LCD video mode.
     #[serde(default)]
     pub ffmpeg_available: bool,
-    #[serde(default)]
-    pub profile_overrides: ProfileOverrides,
-    /// Resolved `process_name -> icon` for every process referenced by an app
-    /// rule, so the UI can show app icons on rule badges without re-resolving.
-    /// On Linux the icon is a theme name or absolute path from the matching
-    /// `.desktop` file; on Windows an absolute path to a cached PNG.
-    #[serde(default)]
-    pub process_icons: HashMap<String, String>,
+}
+
+/// Device plugins and their pending-apply state, for the Plugins screen.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginsState {
     /// Device plugins discovered in the plugins directory, with their
     /// enable/disable state, for the Plugins management screen.
     #[serde(default)]
@@ -489,7 +521,41 @@ pub struct AppState {
     /// but not yet applied to live devices — the Plugins screen invites the
     /// user to apply it explicitly rather than rediscovering on every edit.
     #[serde(default)]
-    pub plugins_rediscover_pending: bool,
+    pub rediscover_pending: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppState {
+    #[serde(default)]
+    pub discovery: DiscoveryStatus,
+    #[serde(default)]
+    pub devices: Vec<WireDevice>,
+    #[serde(default)]
+    pub profiles: ProfileState,
+    #[serde(default)]
+    pub cooling: CoolingState,
+    #[serde(default)]
+    pub lighting: LightingState,
+    #[serde(default)]
+    pub lcd: LcdState,
+    #[serde(default)]
+    pub gui: GuiConfig,
+    #[serde(default)]
+    pub log_entries: Vec<LogEntry>,
+    /// Filesystem path to the daemon's config directory; the UI displays and
+    /// opens it without recomputing client-side.
+    #[serde(default)]
+    pub config_dir: String,
+    #[serde(default)]
+    pub health: HealthCheckState,
+    /// Resolved `process_name -> icon` for every process referenced by an app
+    /// rule, so the UI can show app icons on rule badges without re-resolving.
+    /// On Linux the icon is a theme name or absolute path from the matching
+    /// `.desktop` file; on Windows an absolute path to a cached PNG.
+    #[serde(default)]
+    pub process_icons: HashMap<String, String>,
+    #[serde(default)]
+    pub plugins: PluginsState,
 }
 
 /// A privileged capability a plugin must declare before the daemon grants it —
@@ -628,6 +694,8 @@ pub struct CoolingState {
     pub fan_curves: Vec<WireFanCurve>,
     #[serde(default)]
     pub preset_curves: Vec<WirePresetCurve>,
+    #[serde(default)]
+    pub config: CoolingConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -637,6 +705,8 @@ pub struct LightingState {
     /// Active profile's saved RGB Lighting selection.
     #[serde(default)]
     pub targets: LightingTargets,
+    #[serde(default)]
+    pub config: RgbConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -646,6 +716,8 @@ pub struct LcdState {
     /// Names of saved custom LCD templates (`lcd/<name>.yaml`), sorted.
     #[serde(default)]
     pub templates: Vec<String>,
+    #[serde(default)]
+    pub config: LcdConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1563,7 +1635,7 @@ mod app_rule_tests {
     #[test]
     fn app_state_defaults_empty_app_rules() {
         let state: AppState = serde_json::from_str("{}").unwrap();
-        assert!(state.app_rules.is_empty());
+        assert!(state.profiles.app_rules.is_empty());
     }
 
     #[test]
@@ -1574,19 +1646,93 @@ mod app_rule_tests {
     }
 
     #[test]
-    fn global_config_seen_tours_round_trip() {
-        let mut cfg = GlobalConfig::default();
+    fn gui_config_seen_tours_round_trip() {
+        let mut cfg = GuiConfig::default();
         cfg.seen_tours.insert("page:home".into());
         cfg.seen_tours.insert("tab:cooling".into());
         let json = serde_json::to_string(&cfg).unwrap();
-        let back: GlobalConfig = serde_json::from_str(&json).unwrap();
+        let back: GuiConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.seen_tours, cfg.seen_tours);
     }
 
     #[test]
-    fn global_config_seen_tours_defaults_empty_for_old_configs() {
-        let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
+    fn gui_config_seen_tours_defaults_empty_for_old_configs() {
+        let cfg: GuiConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.seen_tours.is_empty());
+    }
+
+    #[test]
+    fn cooling_config_defaults() {
+        let c: CoolingConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.fan_curve_enabled, DEFAULT_ENGINE_ENABLED);
+        assert_eq!(c.fan_curve_tick_ms, DEFAULT_FAN_CURVE_TICK_MS);
+        assert_eq!(c.fan_failsafe_duty, DEFAULT_FAN_FAILSAFE_DUTY);
+    }
+
+    #[test]
+    fn rgb_config_defaults() {
+        let c: RgbConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.canvas_enabled, DEFAULT_ENGINE_ENABLED);
+        assert_eq!(c.canvas_fps, DEFAULT_CANVAS_FPS);
+    }
+
+    #[test]
+    fn lcd_config_defaults() {
+        let c: LcdConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.enabled, DEFAULT_ENGINE_ENABLED);
+        assert_eq!(c.fps, DEFAULT_LCD_FPS);
+    }
+
+    #[test]
+    fn gui_config_defaults() {
+        let c: GuiConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.language, DEFAULT_LANGUAGE);
+        assert_eq!(c.close_to_tray, DEFAULT_CLOSE_TO_TRAY);
+        assert_eq!(
+            c.suppress_dependency_warning,
+            DEFAULT_SUPPRESS_DEPENDENCY_WARNING
+        );
+        assert_eq!(c.hide_window_controls, DEFAULT_HIDE_WINDOW_CONTROLS);
+        assert_eq!(c.log_level, DEFAULT_LOG_LEVEL);
+    }
+
+    /// An empty AppState JSON must materialize the manual config defaults through
+    /// the nested `config` fields — the easiest silent regression to introduce.
+    #[test]
+    fn app_state_empty_json_config_defaults() {
+        let state: AppState = serde_json::from_str("{}").unwrap();
+        assert!(state.gui.close_to_tray);
+        assert_eq!(
+            state.cooling.config.fan_failsafe_duty,
+            DEFAULT_FAN_FAILSAFE_DUTY
+        );
+        assert_eq!(state.lighting.config.canvas_fps, DEFAULT_CANVAS_FPS);
+        assert_eq!(state.lcd.config.fps, DEFAULT_LCD_FPS);
+    }
+
+    #[test]
+    fn app_state_regrouped_json_round_trips() {
+        let mut state = AppState::default();
+        state.profiles.active = "gaming".into();
+        state.profiles.available = vec!["default".into(), "gaming".into()];
+        state.gui.language = "it".into();
+        state.gui.seen_tours.insert("page:home".into());
+        state.cooling.config.fan_failsafe_duty = 42;
+        state.lighting.config.canvas_fps = 33;
+        state.lcd.config.enabled = false;
+        state.health.ffmpeg_available = true;
+        state.plugins.rediscover_pending = true;
+        let value = serde_json::to_value(&state).unwrap();
+        let back: AppState = serde_json::from_value(value).unwrap();
+        assert_eq!(back.profiles.active, "gaming");
+        assert_eq!(back.profiles.available, state.profiles.available);
+        assert_eq!(back.gui.language, "it");
+        assert_eq!(back.gui.seen_tours, state.gui.seen_tours);
+        assert_eq!(back.cooling.config.fan_failsafe_duty, 42);
+        assert_eq!(back.lighting.config.canvas_fps, 33);
+        assert!(!back.lcd.config.enabled);
+        assert!(back.health.ffmpeg_available);
+        assert!(back.plugins.rediscover_pending);
     }
 }
 
@@ -2026,14 +2172,8 @@ mod default_tests {
     }
 
     #[test]
-    fn global_config_defaults_close_to_tray_when_omitted() {
-        let c: GlobalConfig = serde_json::from_str(
-            r#"{"engine_fan_curve_enabled":true,"engine_fan_curve_tick_ms":2000,
-                "engine_canvas_enabled":true,"engine_canvas_fps":20,
-                "engine_lcd_enabled":true,"engine_lcd_fps":20,
-                "fan_failsafe_duty":75,"log_level":"info"}"#,
-        )
-        .unwrap();
+    fn gui_config_defaults_close_to_tray_when_omitted() {
+        let c: GuiConfig = serde_json::from_str(r#"{"language":"en","log_level":"info"}"#).unwrap();
         assert!(c.close_to_tray, "default_close_to_tray");
         assert!(
             !c.suppress_dependency_warning,

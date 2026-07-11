@@ -424,7 +424,7 @@ pub fn title_bar(
     // desktop: flat caption buttons on Windows, circular buttons elsewhere; on
     // GNOME the `button-layout` preference decides which buttons show, their order
     // and side. The user can hide them entirely (tiling window managers).
-    let cfg = ChromeConfig::resolve(state.global_config.hide_window_controls);
+    let cfg = ChromeConfig::resolve(state.gui.hide_window_controls);
     let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
     let (buttons, ctl_span) = window_controls_layout(rect, &cfg);
     for (ctl, btn_rect) in &buttons {

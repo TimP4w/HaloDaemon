@@ -94,6 +94,8 @@ impl LightingState {
                 sample_radius: finite_or(cs.sample_radius, DEFAULT_SAMPLE_RADIUS),
             },
             targets: cfg.active_profile_data().lighting.targets.clone(),
+            // Overwritten by the serializer from the persisted config.
+            config: Default::default(),
         }
     }
 }

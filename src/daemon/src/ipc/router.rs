@@ -771,10 +771,8 @@ mod tests {
         app.lcd.set_engine(
             Arc::clone(&engine),
             VideoEngine::new(Arc::clone(&app), engine.frame_sender()),
-            tokio::sync::watch::channel(EngineRunConfig::lcd(
-                &crate::config::GlobalConfig::default(),
-            ))
-            .0,
+            tokio::sync::watch::channel(EngineRunConfig::lcd(&crate::config::LcdConfig::default()))
+                .0,
         );
         let _ = app.engines_ready.send(true);
         (app, engine)

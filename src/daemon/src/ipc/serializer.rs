@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::state::AppState;
-use halod_shared::types::AppState as WireAppState;
+use halod_shared::types::{AppState as WireAppState, HealthCheckState, PluginsState, ProfileState};
 
 pub async fn serialize_state(
     app: &Arc<AppState>,
@@ -13,33 +13,45 @@ pub async fn serialize_state(
 ) -> Value {
     let disc = app.discovery.lock().await.clone();
     let snap = app.snapshot_devices(&cfg).await;
-    let cooling = app.cooling.snapshot(snap.fan_curves).await;
-    let lighting = app.lighting.snapshot(&cfg, snap.placed_zones).await;
-    let lcd = app
+    // The daemon persists each domain's config separately; the wire form nests
+    // it under the matching State struct, so inject it here (the domain
+    // snapshots stay config-free).
+    let mut cooling = app.cooling.snapshot(snap.fan_curves).await;
+    cooling.config = cfg.cooling.clone();
+    let mut lighting = app.lighting.snapshot(&cfg, snap.placed_zones).await;
+    lighting.config = cfg.rgb.clone();
+    let mut lcd = app
         .lcd
         .snapshot(snap.lcd_templates, snap.lcd_template_params)
         .await;
+    lcd.config = cfg.lcd.clone();
 
     let wire = WireAppState {
         discovery: disc,
         devices: snap.devices,
-        active_profile: cfg.active_profile.clone(),
-        profiles: cfg.profile_names(),
+        profiles: ProfileState {
+            active: cfg.active_profile.clone(),
+            available: cfg.profile_names(),
+            app_rules: cfg.app_rules.clone(),
+            overrides: cfg.profile_overrides(),
+        },
         cooling,
         lighting,
         lcd,
-        global_config: cfg.global.clone(),
+        gui: cfg.gui.clone(),
         log_entries: app.recent_logs(100),
         config_dir: crate::config::config_dir().display().to_string(),
-        app_rules: cfg.app_rules.clone(),
-        focus_watcher_supported: app.focus.supported(),
-        ffmpeg_available: crate::lcd::engine::video::ffmpeg_available(),
-        profile_overrides: cfg.profile_overrides(),
+        health: HealthCheckState {
+            focus_watcher_supported: app.focus.supported(),
+            ffmpeg_available: crate::lcd::engine::video::ffmpeg_available(),
+        },
         process_icons,
-        plugins: crate::drivers::plugins::list(app.secret_store.as_ref()),
-        plugins_rediscover_pending: app
-            .plugins_rediscover_pending
-            .load(std::sync::atomic::Ordering::Relaxed),
+        plugins: PluginsState {
+            plugins: crate::drivers::plugins::list(app.secret_store.as_ref()),
+            rediscover_pending: app
+                .plugins_rediscover_pending
+                .load(std::sync::atomic::Ordering::Relaxed),
+        },
     };
     match serde_json::to_value(wire) {
         Ok(v) => v,
@@ -58,10 +70,20 @@ mod tests {
     #[tokio::test]
     async fn serialize_empty_state() {
         let app = Arc::new(AppState::new(Config::default()));
-        let cfg = app.config.read().await.clone();
+        let mut cfg = app.config.read().await.clone();
+        cfg.cooling.fan_failsafe_duty = 42;
+        cfg.rgb.canvas_fps = 33;
+        cfg.lcd.fps = 12;
+        cfg.gui.language = "it".into();
         let value = serialize_state(&app, cfg, HashMap::new()).await;
         let wire: halod_shared::types::AppState = serde_json::from_value(value).unwrap();
         assert_eq!(wire.devices.len(), 0);
+        // The per-domain config is injected into each nested State struct.
+        assert_eq!(wire.cooling.config.fan_failsafe_duty, 42);
+        assert_eq!(wire.lighting.config.canvas_fps, 33);
+        assert_eq!(wire.lcd.config.fps, 12);
+        assert_eq!(wire.gui.language, "it");
+        assert_eq!(wire.profiles.active, "default");
     }
 
     #[tokio::test]

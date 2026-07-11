@@ -336,7 +336,7 @@ pub(crate) fn fps_modal(
 ) {
     // Re-seed unless mid-edit, else the slider snaps back every frame.
     if time - canvas_ui.fps_edit_at >= 1.0 {
-        canvas_ui.canvas_fps = state.global_config.engine_canvas_fps as f32;
+        canvas_ui.canvas_fps = state.lighting.config.canvas_fps as f32;
     }
     let mut done = false;
     let closed = widgets::dialog(

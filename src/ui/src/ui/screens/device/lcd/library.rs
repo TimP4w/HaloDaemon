@@ -55,7 +55,7 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
     );
     ui.add_space(10.0);
 
-    let enabled = ctx.state.ffmpeg_available;
+    let enabled = ctx.state.health.ffmpeg_available;
     if widgets::button(
         ui,
         &t!("lcd.choose_video"),

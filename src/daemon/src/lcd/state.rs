@@ -80,6 +80,8 @@ impl LcdEngineState {
         halod_shared::types::LcdState {
             engine: LcdEngine::wire_state(device_templates, device_template_params),
             templates: self.templates.read().await.clone(),
+            // Overwritten by the serializer from the persisted config.
+            config: Default::default(),
         }
     }
 }

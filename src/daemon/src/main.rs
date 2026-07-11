@@ -119,11 +119,8 @@ fn spawn_engine_supervisor(
 /// On Windows, register-bus access is delegated to the elevated `halod-broker`
 /// on demand (see `drivers::transports::register_ops`); nothing here elevates.
 async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
-    let initial_level: log::LevelFilter = cfg
-        .global
-        .log_level
-        .parse()
-        .unwrap_or(log::LevelFilter::Info);
+    let initial_level: log::LevelFilter =
+        cfg.gui.log_level.parse().unwrap_or(log::LevelFilter::Info);
 
     let env_logger = env_logger::Builder::new()
         .filter_level(initial_level)
@@ -176,15 +173,16 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
         });
     }
 
-    let global = {
+    let (cooling_cfg, rgb_cfg, lcd_cfg) = {
         let cfg = app.config.read().await;
-        cfg.global.clone()
+        (cfg.cooling.clone(), cfg.rgb.clone(), cfg.lcd.clone())
     };
 
-    let (fan_curve_cfg_tx, fan_curve_cfg_rx) = watch::channel(EngineRunConfig::fan_curve(&global));
-    let (failsafe_duty_tx, failsafe_duty_rx) = watch::channel(global.fan_failsafe_duty);
-    let (rgb_cfg_tx, rgb_cfg_rx) = watch::channel(EngineRunConfig::canvas(&global));
-    let (lcd_cfg_tx, lcd_cfg_rx) = watch::channel(EngineRunConfig::lcd(&global));
+    let (fan_curve_cfg_tx, fan_curve_cfg_rx) =
+        watch::channel(EngineRunConfig::fan_curve(&cooling_cfg));
+    let (failsafe_duty_tx, failsafe_duty_rx) = watch::channel(cooling_cfg.fan_failsafe_duty);
+    let (rgb_cfg_tx, rgb_cfg_rx) = watch::channel(EngineRunConfig::canvas(&rgb_cfg));
+    let (lcd_cfg_tx, lcd_cfg_rx) = watch::channel(EngineRunConfig::lcd(&lcd_cfg));
 
     let fan_curve = cooling::fan_curve::FanCurveEngine::new(app.clone());
     let rgb = lighting::rgb_engine::RgbEngine::new(app.clone()).await;
@@ -196,7 +194,7 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
     app.focus.set_ctrl_tx(focus_ctrl_tx).await;
 
     let (focus_watcher_cfg_tx, focus_watcher_cfg_rx) =
-        watch::channel(EngineRunConfig::focus_watcher(&global));
+        watch::channel(EngineRunConfig::focus_watcher());
 
     let focus_watcher = profiles::focus_watcher::FocusWatcherEngine::new(app.clone());
 

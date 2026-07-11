@@ -81,6 +81,8 @@ impl CoolingEngineState {
                 .iter()
                 .map(|p| p.serialize())
                 .collect(),
+            // Overwritten by the serializer from the persisted config.
+            config: Default::default(),
         }
     }
 }

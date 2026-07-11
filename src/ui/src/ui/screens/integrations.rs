@@ -115,6 +115,7 @@ impl IntegrationsUi {
 
         let integrations: Vec<&PluginInfo> = state
             .plugins
+            .plugins
             .iter()
             .filter(|p| is_visible_integration(p))
             .collect();

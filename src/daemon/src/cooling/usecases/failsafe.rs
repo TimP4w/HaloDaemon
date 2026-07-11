@@ -8,15 +8,15 @@ use crate::state::AppState;
 pub async fn set_fan_failsafe_duty(duty: u8, app: Arc<AppState>) -> Result<()> {
     let duty = duty.min(100);
 
-    let cfg_snap = {
+    let cooling = {
         let mut cfg = app.config.write().await;
-        cfg.global.fan_failsafe_duty = duty;
-        cfg.global.clone()
+        cfg.cooling.fan_failsafe_duty = duty;
+        cfg.cooling.clone()
     };
     app.request_config_save();
 
     if let Some(tx) = app.cooling.cfg_tx() {
-        let _ = tx.send(EngineRunConfig::fan_curve(&cfg_snap));
+        let _ = tx.send(EngineRunConfig::fan_curve(&cooling));
     }
     if let Some(tx) = app.cooling.failsafe_duty_tx() {
         let _ = tx.send(duty);
@@ -34,7 +34,7 @@ mod tests {
     async fn set_fan_failsafe_duty_clamps_to_100() {
         with_tmp_config(|app| async move {
             set_fan_failsafe_duty(200, app.clone()).await.unwrap();
-            assert_eq!(app.config.read().await.global.fan_failsafe_duty, 100);
+            assert_eq!(app.config.read().await.cooling.fan_failsafe_duty, 100);
         })
         .await;
     }

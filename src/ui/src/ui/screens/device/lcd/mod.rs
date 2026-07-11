@@ -84,14 +84,14 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     // Seed the media tab from the daemon's mode, once per profile: a switch
     // re-applies that profile's LCD state, so the tab (and the editor's def)
     // must follow it instead of keeping the previous profile's selection.
-    if st.lcd.seeded_profile.as_deref() != Some(ctx.state.active_profile.as_str()) {
+    if st.lcd.seeded_profile.as_deref() != Some(ctx.state.profiles.active.as_str()) {
         st.lcd.media_tab = match lcd.mode {
             LcdMode::Video => LcdMediaTab::Video,
             LcdMode::Engine => LcdMediaTab::Template,
             _ => LcdMediaTab::Images,
         };
         st.lcd.editor.seeded = false;
-        st.lcd.seeded_profile = Some(ctx.state.active_profile.clone());
+        st.lcd.seeded_profile = Some(ctx.state.profiles.active.clone());
         // The profile already set the daemon to this mode; suppress re-activation.
         st.lcd.prev_mode_tab = Some(st.lcd.media_tab);
     }
@@ -189,7 +189,7 @@ fn mode_header(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                 st.lcd.media_tab = LcdMediaTab::Template;
             }
             let video_active = st.lcd.media_tab == LcdMediaTab::Video;
-            if ctx.state.ffmpeg_available {
+            if ctx.state.health.ffmpeg_available {
                 if widgets::pill(ui, &t!("lcd.tab_video"), video_active) {
                     st.lcd.media_tab = LcdMediaTab::Video;
                 }
@@ -359,7 +359,10 @@ mod tests {
             std::fs::create_dir_all(tmp.path().join(halod_shared::types::LCD_IMAGES_SUBDIR))
                 .unwrap();
             let state = AppState {
-                ffmpeg_available: true,
+                health: halod_shared::types::HealthCheckState {
+                    ffmpeg_available: true,
+                    ..Default::default()
+                },
                 devices: vec![dev.clone()],
                 config_dir: tmp.path().to_string_lossy().into_owned(),
                 ..Default::default()
@@ -691,7 +694,7 @@ mod tests {
     fn profile_switch_reseeds_media_tab_and_editor() {
         // Opened under a profile driving the LCD via the engine → Editor tab.
         let mut fx = Fixture::new(LcdMode::Engine, None);
-        fx.state.active_profile = "A".into();
+        fx.state.profiles.active = "A".into();
         let mut st = DeviceUi::new("lcd".into());
         fx.frame(&mut st);
         assert!(st.lcd.media_tab == LcdMediaTab::Template);
@@ -704,7 +707,7 @@ mod tests {
         st.lcd.media_tab = LcdMediaTab::Template;
 
         // The daemon switches to a profile with a static image selected.
-        fx.state.active_profile = "B".into();
+        fx.state.profiles.active = "B".into();
         fx.images = vec!["a.png".into()];
         fx.put_image("a.png", &make_png());
         fx.set_lcd(LcdMode::Image, Some("a.png"));
