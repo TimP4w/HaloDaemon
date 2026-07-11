@@ -145,6 +145,10 @@ Include a section to advertise that capability:
 - `chain = { channels = { … }, accessories = { … } }` — host detachable child
   accessories (fan hubs / ARGB chains); see [Chained accessories](#chained-accessories).
 
+Not a capability, but declarable by any plugin: `config = { fields = { … } }`
+— user-editable settings (e.g. a server host/port); see
+[Config fields](#config-fields).
+
 ## Callbacks
 
 Every callback receives `dev` as its first argument. `dev.transport` is the
@@ -360,6 +364,22 @@ raw passthrough** — no report id, no padding — when the script builds the ex
 wire buffer itself (e.g. the Razer 90-byte feature report). `feature_report = true`
 routes `:write` through `send_feature_report`.
 
+### Stream transport (TCP)
+
+Same `:write`/`:read`/`:write_then_read` shape as HID, over a plain TCP
+connection (see the [TCP transport](transports/tcp.md)) — but `:read(n)` is
+**exact**: it returns exactly `n` bytes or errors (timeout / connection
+closed), never a short read, since a byte stream has no report framing to
+fall back on. Only [integration plugins](#integration-plugins) can declare
+this transport today.
+
+`transports = { tcp = { host_key, port_key, timeout_ms } }` — `host_key`/
+`port_key` (default `"host"`/`"port"`) name which of the plugin's own
+[config fields](#config-fields) hold the address to connect to, so the same
+values the user edits in the Plugins screen are what the transport connects
+with; `timeout_ms` (default `5000`) bounds the connect attempt and every
+subsequent read/write.
+
 ### Register transport (SMBus)
 
 SMBus is addressed register I/O, not a byte stream. All access goes through
@@ -428,7 +448,125 @@ plugin.
 
 Removed globals: `os`, `io`, `package`, `require`, `dofile`, `loadfile`, `load`,
 `debug`, `collectgarbage`. Available: `string`, `table`, `math` (incl. Lua 5.4
-bitwise ops and `string.pack`), plus `log(msg)` and `halod.buffer`.
+bitwise ops and `string.pack`), plus `log(msg)`, `halod.buffer`, and
+`halod.config` (see [Config fields](#config-fields)).
+
+## Config fields
+
+Any plugin — device, effect, or integration — can declare user-editable
+settings that show up as inputs in its Plugins-screen detail panel:
+
+```lua
+config = {
+  fields = {
+    { key = "host", label = "Server host", kind = "text", default = "127.0.0.1" },
+    { key = "port", label = "Server port", kind = "number", default = "6742" },
+    { key = "token", label = "API token", secure = true },
+  },
+},
+```
+
+| field     | type   | meaning                                                        |
+|-----------|--------|-----------------------------------------------------------------|
+| `key`     | string | required; the name callbacks read it back by                    |
+| `label`   | string | required; shown in the GUI                                      |
+| `kind`    | string | `"text"` (default) or `"number"` — a display/validation hint only, the value is still read as a string |
+| `default` | string | value shown before the user sets one                            |
+| `category`| string | groups fields under a heading in the GUI                        |
+| `secure`  | bool   | see [Secure fields](#secure-fields) below                        |
+
+Every callback's `dev` argument doesn't carry config — read it from the
+sandboxed **`halod.config`** table instead, e.g. `halod.config.host`. It holds
+only this plugin's own values (never another plugin's — each plugin's Lua VM
+is built with only its own config), pre-filled with each field's `default`
+until the user changes it.
+
+### Secure fields
+
+A field with `secure = true` is a **secret** (an API token, a device
+password): its value is encrypted at rest — the OS keyring (Windows
+Credential Manager / Linux Secret Service) when reachable, falling back to a
+machine-local encrypted file otherwise — masked in the GUI, and **never**
+sent to the GUI in plaintext (the GUI only ever learns whether a secret is
+currently set, not its value). Leaving a secure field's input blank when
+saving keeps the existing stored secret; you must type a new value to change
+it.
+
+Reading a secure field's value from `halod.config` additionally requires the
+plugin to declare (and the user to grant) the **`secure_storage`**
+permission — see [Permissions](#permissions). Without that grant the key is
+simply absent from `halod.config`, not present-but-empty.
+
+**Threat model, stated plainly:** this protects secrets against casual at-rest
+disclosure — config backups, dotfile sync, another user on the same machine.
+It does not protect against an attacker who already runs code as you (the
+same trust boundary the plugin sandbox itself operates under) or who has your
+OS login/keyring unlocked.
+
+## Integration plugins
+
+An integration plugin connects to a **network service** instead of matching
+local hardware — the built-in [OpenRGB](protocols/openrgb.md) client is the
+reference example. Set `type = "integration"` and declare no `match` at all:
+the plugin is instantiated from its own [config fields](#config-fields) (a
+host/port the user types), not a discovery handle.
+
+```lua
+type = "integration",
+permissions = { "network", "os" }, -- `os` only if you need to throttle sends, see below
+config = {
+  fields = {
+    { key = "host", label = "Server host", kind = "text", default = "127.0.0.1" },
+    { key = "port", label = "Server port", kind = "number", default = "6742" },
+  },
+},
+transports = { tcp = { host_key = "host", port_key = "port" } },
+
+enumerate_controllers = function(dev)
+  return {
+    { index = 0, name = "Keyboard", zones = {
+        { id = "0", name = "Main", topology = "linear", led_count = 20 },
+    } },
+  }
+end,
+
+write_controller_frame = function(dev, index, zone, colors)
+  -- `zone` is the zone's `id` string as declared above.
+end,
+```
+
+Two callbacks replace the device capability sections a `Device`-type plugin
+would use:
+
+- **`enumerate_controllers(dev) -> controllers`** — called once per
+  discovery pass. Returns an array of `{ index, name, zones }`; each becomes
+  a separate top-level device (not nested under the integration plugin), so
+  they show up in the device list exactly like any native device. Each zone
+  needs `id`, `name`, `topology` (`"ring"`/`"linear"`/`"grid"`/`"rings"`), and
+  `led_count` — the same shape [chained accessories](#chained-accessories)
+  use, since both build an `RgbDescriptor` the same way. **`zone.id` should
+  be whatever value `write_controller_frame` needs to address that zone** —
+  for OpenRGB that's the zone's ordinal index as a string, since the wire
+  protocol addresses zones by position, not name.
+- **`write_controller_frame(dev, index, zone, colors)`** — an RGB frame for
+  one controller's zone. `index` is the controller's index from
+  `enumerate_controllers`; `zone` is that zone's `id`; `colors` is an array of
+  `{r, g, b}`. There is one shared `dev.transport` for the whole integration
+  (one connection), addressed per-call by `index`/`zone` — unlike a `Device`
+  plugin's `write_frame`, which is called on a transport already scoped to
+  one physical device.
+
+There's no reconnect/hotplug monitor for a dropped network connection today —
+if the server restarts, re-run discovery (or toggle the plugin) to reconnect.
+
+The wire protocol itself typically gives no acknowledgement of when a sent
+frame is actually applied — the server may queue and process frames on its
+own schedule, so pushing them faster than it can drain that queue makes the
+visible output lag further and further behind. If that's the case for your
+target service, throttle `write_controller_frame` client-side (drop a send
+if too little time has passed since the last one actually sent for that
+zone, using `os.clock()` — needs the `os` permission) rather than trying to
+"cancel" frames already written to the socket, which isn't possible.
 
 ## Example
 
@@ -466,16 +604,25 @@ A plugin that needs a privileged capability declares it up front:
 permissions = { "network", "os" },
 ```
 
-Known permissions: `network` (no backend consumes this yet — reserved for a
-future TCP transport), `os` (re-enables the read-only wall clock —
+Known permissions: `network` (required to open a [`tcp` transport](#stream-transport-tcp)
+— gates whether a config-instantiated [integration plugin](#integration-plugins)
+is ever connected at all), `os` (re-enables the read-only wall clock —
 `os.time()`/`os.clock()` — inside the sandbox; every other `os.*` function
-stays stripped), `storage`/`secure_storage` (accepted for forward-compat, not
-yet enforced). A plugin with any declared permission loads but stays
+stays stripped), `secure_storage` (required to read a `secure` [config
+field](#secure-fields)'s decrypted value from `halod.config` — without it the
+key is simply absent). A plugin with any declared permission loads but stays
 **inert** — discovered, listed in the Plugins screen, but never matched
-against hardware — until the user grants it. Manually importing such a
-plugin (Add plugin) prompts for consent immediately; one found by a
-directory scan instead gets a toast notification. Revoking a grant reverts
-the plugin to inert on the next rediscovery.
+against hardware (or, for an integration plugin, never connected) — until the
+user grants it. Manually importing such a plugin (Add plugin) prompts for
+consent immediately; one found by a directory scan instead gets a toast
+notification. Revoking a grant reverts the plugin to inert on the next
+rediscovery.
+
+**Built-in plugins are auto-granted their own declared permissions** — they
+ship inside the trusted daemon binary itself, so the consent step (which
+exists to gate untrusted third-party scripts) doesn't apply to them. This is
+why the built-in [OpenRGB integration](protocols/openrgb.md) works out of the
+box once you set its host/port, with no separate "grant network" click.
 
 ## RGB effects
 
@@ -533,7 +680,11 @@ pixmap/direct effect except `screen_sampler` and the effect designer at
 ## Roadmap
 
 Not yet available to plugins (native drivers still required): the USB
-bulk/control transports beyond what LCD streaming already uses, and a
-network transport (the `network` permission is declared but unenforced —
-see [Permissions](#permissions)). HID (stream) and SMBus (register) are
-supported.
+bulk/control transports beyond what LCD streaming already uses. HID (stream),
+SMBus (register), and TCP (stream, [integration plugins](#integration-plugins)
+only) are supported.
+
+On Windows, the process that runs plugin code is elevated (Administrator),
+since some native transports (chipset/GPU SMBus, SuperIO fans) need that —
+plugins run with the same privilege the daemon itself does, there's no
+separate sandboxing by privilege level today.
