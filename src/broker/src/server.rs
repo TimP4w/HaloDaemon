@@ -9,7 +9,7 @@
 //! `find_bars` state isolated.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -21,11 +21,9 @@ use halod_hwaccess::winsec;
 
 use crate::pipe::{create_instance, wait_for_client, PipeSecurity, PipeStream};
 
-/// Live client connections, and whether any client has ever connected. Used by
-/// [`wait_until_idle`] so the on-demand service can stop itself once its worker
-/// is gone rather than sitting elevated forever.
+/// Live client connections, so [`wait_until_idle`] can stop the on-demand
+/// service once its worker is gone rather than sitting elevated forever.
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-static EVER_CONNECTED: AtomicBool = AtomicBool::new(false);
 
 /// Accept connections forever, serving each on its own thread. Returns only on
 /// a fatal error creating the secured pipe.
@@ -41,7 +39,6 @@ pub fn serve_forever() -> Result<()> {
             drop(stream);
             continue;
         }
-        EVER_CONNECTED.store(true, Ordering::SeqCst);
         ACTIVE.fetch_add(1, Ordering::SeqCst);
         std::thread::spawn(move || {
             serve(stream);
@@ -50,16 +47,17 @@ pub fn serve_forever() -> Result<()> {
     }
 }
 
-/// Block until the broker has served at least one client and then had zero live
-/// connections continuously for `grace`, so the caller can stop the elevated
-/// service. The worker holds its bus handles for the whole session, so in
-/// practice this returns shortly after the worker exits (all connections drop).
+/// Block until there have been zero live connections continuously for `grace`,
+/// so the caller can stop the elevated service. The timer runs from startup, so
+/// this also fires if a client never connects at all (e.g. the worker spawned
+/// the broker but then gave up before it was ready) — the elevated helper must
+/// not linger with no client. The worker holds its bus handles for the whole
+/// session, so in the normal case this returns shortly after the worker exits.
 pub fn wait_until_idle(grace: Duration) {
-    let mut empty_since: Option<Instant> = None;
+    let mut empty_since: Option<Instant> = Some(Instant::now());
     loop {
         std::thread::sleep(Duration::from_secs(1));
-        let idle = EVER_CONNECTED.load(Ordering::SeqCst) && ACTIVE.load(Ordering::SeqCst) == 0;
-        if idle {
+        if ACTIVE.load(Ordering::SeqCst) == 0 {
             let since = *empty_since.get_or_insert_with(Instant::now);
             if since.elapsed() >= grace {
                 return;

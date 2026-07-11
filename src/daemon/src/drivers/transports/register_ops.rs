@@ -8,8 +8,9 @@
 //!     in-process `halod-hwaccess` impl (Linux SMBus access is gated by
 //!     `/dev/i2c-*` permissions, not elevation, so no broker is needed).
 //!   - **Windows** — an RPC client to the elevated `halod-broker` process over
-//!     its named pipe. Under the service the supervisor already runs the broker;
-//!     on a dev run the client brings it up itself with one UAC prompt.
+//!     its named pipe. The client brings the broker up on first use: an
+//!     installed on-demand `HalodBroker` service is started via the SCM (no
+//!     UAC); a dev run with no service falls back to one `runas` UAC prompt.
 //!
 //! The trait boundaries (`SmBusSyncOps` for a bus, `PawnioOps` for a PawnIO
 //! module) are unchanged, so every call site is agnostic to which backend it
