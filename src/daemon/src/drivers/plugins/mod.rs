@@ -51,6 +51,8 @@ mod ene_test;
 mod lcd_test;
 #[cfg(test)]
 mod openrgb_test;
+#[cfg(test)]
+mod philips_test;
 
 /// The whole registry lives in one immutable snapshot (see [`PluginState`]);
 /// any test (in this module or elsewhere, e.g. the RGB engine's plugin-effect
@@ -542,6 +544,10 @@ const BUILTIN_PLUGINS: &[(&str, &str)] = &[
         include_str!("builtins/nzxt_control_hub.lua"),
     ),
     (
+        "philips_evnia.lua",
+        include_str!("builtins/philips_evnia.lua"),
+    ),
+    (
         "halo_effects.lua",
         include_str!("builtins/halo_effects.lua"),
     ),
@@ -678,6 +684,7 @@ fn build_device(
         },
         pid: match handle {
             DiscoveryHandle::Hid { pid, .. } => Some(*pid),
+            DiscoveryHandle::UsbNonHid { pid, .. } => Some(*pid),
             _ => None,
         },
     };
@@ -1101,6 +1108,44 @@ mod tests {
         let chain = m.chain.as_ref().unwrap();
         assert_eq!(chain.channels.len(), 5);
         assert!(chain.accessories.iter().all(|a| a.fan));
+    }
+
+    #[test]
+    fn shipped_philips_evnia_plugin_parses_merged_capabilities() {
+        // The merged monitor + Ambiglow plugin: one match on the DDC chip, a
+        // bundled Ambiglow control endpoint, and every capability of both native
+        // devices (RGB + range/choice/boolean/action).
+        let src = include_str!("builtins/philips_evnia.lua");
+        let m = parse_manifest(src, Path::new("philips_evnia.lua")).unwrap();
+        assert_eq!(m.match_specs.len(), 1);
+        assert_eq!(m.match_specs[0].transport, "usb_control");
+        assert_eq!(m.match_specs[0].vid, Some(0x2109));
+        assert_eq!(m.match_specs[0].pid, Some(0x8884));
+        assert_eq!(m.match_specs[0].device_type, Some(DeviceType::Monitor));
+
+        // The Ambiglow chip is bundled as a secondary control endpoint.
+        let uc = m
+            .transports
+            .usb_control
+            .as_ref()
+            .expect("declares a usb_control transport");
+        assert_eq!(uc.endpoints.len(), 1);
+        assert_eq!(uc.endpoints[0].id, "ambiglow");
+        assert_eq!(uc.endpoints[0].vid, 0x0CF2);
+        assert_eq!(uc.endpoints[0].pid, 0xB201);
+
+        // Both chips' capabilities present on one device.
+        let labels = m.capability_labels();
+        assert!(labels.contains(&"RGB".to_owned()));
+        assert!(labels.contains(&"Settings".to_owned())); // choice
+        assert!(labels.contains(&"Controls".to_owned())); // range/boolean/action
+        let rgb = m.rgb.as_ref().unwrap();
+        assert_eq!(rgb.zones[0].leds.len(), 44);
+        assert!(rgb.native_effects.iter().any(|e| e.id == "monitor"));
+        assert_eq!(m.range.as_ref().unwrap().ranges.len(), 12);
+        assert_eq!(m.choice.as_ref().unwrap().choices.len(), 14);
+        assert_eq!(m.boolean.as_ref().unwrap().booleans.len(), 10);
+        assert_eq!(m.action.as_ref().unwrap().actions.len(), 1);
     }
 
     #[test]

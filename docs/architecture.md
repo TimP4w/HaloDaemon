@@ -74,7 +74,7 @@ A protocol module sits on top of a transport and turns intent ("set zone 2 to
 red", "read fan RPM") into the exact byte sequences the chip expects, and parses
 replies back. Protocols hold a transport (often `Mutex<Option<T>>` so it can be
 opened/closed) and expose typed methods. See
-[philips_evnia.rs](../src/daemon/src/drivers/vendors/philips/protocols/philips_evnia.rs)
+[aura_usb.rs](../src/daemon/src/drivers/vendors/asus/protocols/aura_usb.rs)
 for a compact example. When you port a wire format from third-party code, add the
 SPDX attribution header (`CLAUDE.md` → *Licensing & attribution*) and document the
 format in [docs/protocols/](protocols/).

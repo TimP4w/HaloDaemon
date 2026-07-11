@@ -155,13 +155,19 @@ fn default_lcd_brightness() -> u8 {
 }
 
 /// What `initialize` returns: a bare bool, or a table with dynamic device info
-/// discovered from the hardware (firmware/model, RGB zones, LCD panel).
+/// discovered from the hardware (firmware/model, RGB zones, LCD panel, and the
+/// live range/choice values read back from the device to seed the host caches).
 #[derive(Debug, Default)]
 pub struct InitOutcome {
     pub ok: bool,
     pub model: Option<String>,
     pub zones: Option<Vec<InitZone>>,
     pub lcd: Option<InitLcd>,
+    /// Current range-control values keyed by control key, seeding the host's
+    /// range cache so the UI reflects the device instead of manifest defaults.
+    pub ranges: Option<HashMap<String, i32>>,
+    /// Current choice selections keyed by control key (selected option index).
+    pub choices: Option<HashMap<String, usize>>,
 }
 
 /// The shape `initialize` may return as a table (bool short-circuits before this).
@@ -175,6 +181,10 @@ struct InitTable {
     zones: Option<Vec<InitZone>>,
     #[serde(default)]
     lcd: Option<InitLcd>,
+    #[serde(default)]
+    ranges: Option<HashMap<String, i32>>,
+    #[serde(default)]
+    choices: Option<HashMap<String, usize>>,
 }
 
 fn default_true() -> bool {
@@ -303,6 +313,8 @@ impl PluginHandle {
                         model: t.model,
                         zones: t.zones,
                         lcd: t.lcd,
+                        ranges: t.ranges,
+                        choices: t.choices,
                     })
                 }
             }

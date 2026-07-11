@@ -6,3 +6,4 @@
 mod hid;
 mod smbus;
 mod tcp;
+mod usb_control;

@@ -45,6 +45,7 @@ pub fn apply(
     })?;
     globals.set("log", logger)?;
     bytebuf::register(lua)?;
+    register_sleep(lua)?;
     super::image_api::register(lua)?;
     inject_config(lua, config)?;
 
@@ -64,6 +65,25 @@ pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
         globals.set(*name, mlua::Value::Nil)?;
     }
     Ok(())
+}
+
+/// Longest a single `halod.sleep_ms` call may block the worker thread. A plugin
+/// can already busy-loop its own worker (there is no runtime instruction budget),
+/// so this only bounds a single call from pathologically stalling the device's
+/// command queue — protocol inter-transfer gaps are milliseconds, not seconds.
+const MAX_SLEEP_MS: u64 = 5_000;
+
+/// Expose `halod.sleep_ms(ms)`: a blocking sleep on the (per-device) worker
+/// thread, for protocols that need timed gaps between transfers (DDC/CI's write
+/// gap and read delay, say). Blocking the worker only serializes that one
+/// device's own queued commands — the async runtime is untouched.
+fn register_sleep(lua: &Lua) -> mlua::Result<()> {
+    let halod: Table = lua.globals().get("halod")?;
+    let sleep = lua.create_function(|_, ms: u64| {
+        std::thread::sleep(std::time::Duration::from_millis(ms.min(MAX_SLEEP_MS)));
+        Ok(())
+    })?;
+    halod.set("sleep_ms", sleep)
 }
 
 /// Populate `halod.config` with this plugin's resolved values. Read-only in

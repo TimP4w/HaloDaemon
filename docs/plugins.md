@@ -80,6 +80,14 @@ several hardware shapes — e.g. an SMBus DRAM controller *and* a GPU one). The
 | `usage`       | integer         | HID usage (optional)                           |
 | `interface`   | integer         | USB interface number (optional)                |
 
+**USB control** (`transport = "usb_control"`) — see [USB control transport](#usb-control-transport-usb_control):
+
+| field  | type          | meaning                                              |
+|--------|---------------|------------------------------------------------------|
+| `vid`  | integer       | USB vendor id (required)                              |
+| `pid`  | integer       | USB product id (required, or use `pids`)             |
+| `pids` | integer array | match any of several products; takes precedence over `pid` |
+
 **SMBus** (`transport = "smbus"`) — see [Register transport](#register-transport-smbus):
 
 | field               | type          | meaning                                                    |
@@ -413,6 +421,48 @@ bus *before* the host probes addresses. Use it for bus preparation whose control
 flow depends on live reads (e.g. an ENE DRAM broadcast remap). It drives the same
 `dev.transport:batch(fn)` API, scoped to `addresses` + `extra_addresses`.
 
+### USB control transport (`usb_control`)
+
+For USB vendor control transfers (DDC/CI over a hub controller, ENE RGB
+controllers, …). Matched by `vid` + `pid` on a `UsbNonHid` device:
+
+```lua
+match = { transport = "usb_control", vid = 0x2109, pid = 0x8884 },
+```
+
+Two methods issue a single blocking control transfer each. The first argument
+names the **endpoint** — `""` is the matched (primary) device:
+
+```lua
+-- write: (endpoint, bmRequestType, bRequest, wValue, wIndex, data)
+dev.transport:control_write("", 0x40, 0xB2, 0x00, 0x00, packet)
+-- read: (endpoint, bmRequestType, bRequest, wValue, wIndex, length) → string
+local reply = dev.transport:control_read("", 0xC0, 0xA3, 0x00, 0x006F, 32)
+```
+
+**Bundling several chips as one device.** A control device may declare
+*secondary* endpoints — separate physical USB devices opened by their own
+VID/PID — so a plugin can present, say, a monitor's DDC controller and its LED
+controller as a single device. Declare them under `transports.usb_control`, then
+reach each by its `id`:
+
+```lua
+transports = {
+  usb_control = {
+    interface = 0,
+    endpoints = { { id = "ambiglow", vid = 0x0CF2, pid = 0xB201, interface = 0 } },
+  },
+},
+-- …then, in a callback:
+dev.transport:control_write("ambiglow", 0x40, 0x80, 0x00, 0xE100, frame)
+```
+
+Control transfers have no framing/rate helper of their own; a protocol that needs
+timed gaps between transfers (DDC/CI's inter-write gap and read delay) drives them
+with **`halod.sleep_ms(ms)`** — a blocking sleep on the device's own worker thread,
+so it only serializes that device's queued commands. See the built-in
+`philips_evnia` plugin for a full worked example.
+
 ## The byte buffer (`halod.buffer`)
 
 Building/parsing packets with raw Lua strings is error-prone (1-based indexing,
@@ -448,8 +498,10 @@ plugin.
 
 Removed globals: `os`, `io`, `package`, `require`, `dofile`, `loadfile`, `load`,
 `debug`, `collectgarbage`. Available: `string`, `table`, `math` (incl. Lua 5.4
-bitwise ops and `string.pack`), plus `log(msg)`, `halod.buffer`, and
-`halod.config` (see [Config fields](#config-fields)).
+bitwise ops and `string.pack`), plus `log(msg)`, `halod.buffer`,
+`halod.sleep_ms(ms)` (a blocking sleep on the device's own worker thread, for
+protocol inter-transfer gaps; capped at 5 s per call), and `halod.config` (see
+[Config fields](#config-fields)).
 
 ## Config fields
 
@@ -696,10 +748,10 @@ pixmap/direct effect except `screen_sampler` and the effect designer at
 
 ## Roadmap
 
-Not yet available to plugins (native drivers still required): the USB
-bulk/control transports beyond what LCD streaming already uses. HID (stream),
-SMBus (register), and TCP (stream, [integration plugins](#integration-plugins)
-only) are supported.
+Supported transports: HID (stream), SMBus (register), USB vendor control
+(`usb_control`), and TCP (stream, [integration plugins](#integration-plugins)
+only). Not yet available to plugins: the USB *bulk* transport beyond what LCD
+streaming already exposes via `write_bulk`.
 
 On Windows, the process that runs plugin code is elevated (Administrator),
 since some native transports (chipset/GPU SMBus, SuperIO fans) need that —

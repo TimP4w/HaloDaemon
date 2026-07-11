@@ -21,7 +21,7 @@ use crate::drivers::transports::smbus::SmBusSyncOps;
 use crate::drivers::transports::Transport;
 
 use super::ffi::{bytes_from, to_lua_err};
-use super::transport::{AddrScope, BulkEndpoint, PluginIo, RegisterBus};
+use super::transport::{AddrScope, BulkEndpoint, ControlEndpoints, PluginIo, RegisterBus};
 
 /// Lua userdata wrapping one transport. Rate limiting is inherited: this holds
 /// the real (metered) transport, so a script cannot outrun the hardware.
@@ -38,8 +38,9 @@ impl TransportApi {
     fn stream(&self) -> mlua::Result<&std::sync::Arc<dyn Transport>> {
         match &self.io {
             PluginIo::Stream { transport, .. } => Ok(transport),
-            PluginIo::Register(_) => Err(mlua::Error::RuntimeError(
-                "this transport is a register bus (SMBus); use transport:batch(fn)".into(),
+            _ => Err(mlua::Error::RuntimeError(
+                "this transport is not a byte stream; use transport:write/read on a HID device"
+                    .into(),
             )),
         }
     }
@@ -58,8 +59,18 @@ impl TransportApi {
     fn register(&self) -> mlua::Result<&RegisterBus> {
         match &self.io {
             PluginIo::Register(r) => Ok(r),
-            PluginIo::Stream { .. } => Err(mlua::Error::RuntimeError(
-                "this transport is a byte stream (HID); use transport:write/read".into(),
+            _ => Err(mlua::Error::RuntimeError(
+                "this transport is not a register bus (SMBus); use transport:batch(fn)".into(),
+            )),
+        }
+    }
+
+    fn control(&self) -> mlua::Result<&ControlEndpoints> {
+        match &self.io {
+            PluginIo::Control(c) => Ok(c),
+            _ => Err(mlua::Error::RuntimeError(
+                "this transport is not a USB control bus; use transport:control_write/control_read"
+                    .into(),
             )),
         }
     }
@@ -122,6 +133,53 @@ impl UserData for TransportApi {
             let bytes = bytes_from(&data)?;
             this.bulk()?.write(&bytes).map_err(to_lua_err)
         });
+
+        // ── USB vendor control (DDC/CI, ENE RGB) ─────────────────────────
+        // `endpoint` names which bundled device to talk to: "" is the matched
+        // (primary) device; other names come from `transports.usb_control.endpoints`.
+        // Both calls issue a single blocking control transfer on the worker thread.
+        methods.add_method(
+            "control_write",
+            |_,
+             this,
+             (endpoint, bm_request_type, b_request, w_value, w_index, data): (
+                String,
+                u8,
+                u8,
+                u16,
+                u16,
+                Value,
+            )| {
+                let bytes = bytes_from(&data)?;
+                let t = this.control()?.get(&endpoint).ok_or_else(|| {
+                    mlua::Error::RuntimeError(format!("unknown control endpoint '{endpoint}'"))
+                })?;
+                t.write_control(bm_request_type, b_request, w_value, w_index, &bytes)
+                    .map_err(to_lua_err)
+            },
+        );
+        methods.add_method(
+            "control_read",
+            |lua,
+             this,
+             (endpoint, bm_request_type, b_request, w_value, w_index, len): (
+                String,
+                u8,
+                u8,
+                u16,
+                u16,
+                usize,
+            )| {
+                let t = this.control()?.get(&endpoint).ok_or_else(|| {
+                    mlua::Error::RuntimeError(format!("unknown control endpoint '{endpoint}'"))
+                })?;
+                let mut buf = vec![0u8; len];
+                let n = t
+                    .read_control(bm_request_type, b_request, w_value, w_index, &mut buf)
+                    .map_err(to_lua_err)?;
+                lua.create_string(&buf[..n])
+            },
+        );
 
         // ── Register (SMBus) ─────────────────────────────────────────────
         // One atomic batch: the callback receives a scoped `ops` object and

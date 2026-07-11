@@ -468,6 +468,18 @@ impl Device for LuaDevice {
             self.lcd_slot.set_latches_last_frame(lcd.latches);
             let _ = self.lcd_descriptor.set(build_lcd_descriptor(&lcd));
         }
+        // Seed the host range/choice caches with the values the device reported,
+        // so the UI shows live hardware state rather than manifest defaults.
+        if let Some(ranges) = outcome.ranges {
+            for (key, value) in ranges {
+                self.range_cache.record(&key, value);
+            }
+        }
+        if let Some(choices) = outcome.choices {
+            for (key, selected) in choices {
+                self.choice_cache.record(&key, selected);
+            }
+        }
         Ok(outcome.ok)
     }
 
@@ -1522,6 +1534,35 @@ mod tests {
         dev.set_range("poll_hz", 5000).await.unwrap(); // above max, clamped
         assert_eq!(*mock.written.lock().await, vec![vec![0xA0, 232]]); // 1000 & 0xFF
         assert_eq!(dev.range_cache().get("poll_hz"), Some(1000));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_seeds_range_and_choice_caches_from_reported_values() {
+        // A plugin whose `initialize` reads live hardware values reports them
+        // back; the host seeds its range/choice caches so the UI shows the
+        // device state instead of the manifest defaults.
+        use crate::drivers::{ChoiceCapability, RangeCapability};
+        const SEED_SCRIPT: &str = r#"
+            return {
+              match = { transport = "hid", vid = 0x1, pid = 0x2 },
+              identity = { vendor = "Test", model = "M" },
+              range = { ranges = { { key = "hz", label = "Hz", min = 0, max = 1000, default = 500 } } },
+              choice = { choices = { { key = "mode", label = "Mode", default = 0,
+                options = { { id = "0", label = "A" }, { id = "1", label = "B" } } } } },
+              initialize = function(dev)
+                return { ok = true, ranges = { hz = 250 }, choices = { mode = 1 } }
+              end,
+              set_range = function(dev, key, value) end,
+              set_choice = function(dev, key, selected) end,
+            }
+        "#;
+        let manifest = super::super::parse_manifest(SEED_SCRIPT, Path::new("seed.lua")).unwrap();
+        let dev = hid_device("seed-0", &manifest, Arc::new(MockTransport::empty()));
+        // Before initialize: caches empty, so the wire value falls back to default.
+        assert_eq!(dev.range_cache().get("hz"), None);
+        dev.initialize().await.unwrap();
+        assert_eq!(dev.range_cache().get("hz"), Some(250));
+        assert_eq!(dev.choice_cache().get("mode"), Some(1));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

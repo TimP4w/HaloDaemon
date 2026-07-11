@@ -87,12 +87,38 @@ impl Default for TcpConfig {
     }
 }
 
+/// A secondary USB vendor-control device a plugin bundles alongside its matched
+/// device, so several physical chips present as one merged device. Opened by
+/// VID/PID and reached from Lua by `id` (the matched device is the unnamed
+/// primary endpoint).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UsbControlEndpoint {
+    pub id: String,
+    pub vid: u16,
+    pub pid: u16,
+    #[serde(default)]
+    pub interface: u8,
+}
+
+/// USB vendor-control transport parameters. `interface` claims the matched
+/// device's interface; `endpoints` lists any extra control devices the plugin
+/// drives (the DDC controller + Ambiglow LED controller of one monitor, say).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UsbControlConfig {
+    #[serde(default)]
+    pub interface: u8,
+    #[serde(default)]
+    pub endpoints: Vec<UsbControlEndpoint>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TransportsConfig {
     #[serde(default)]
     pub hid: Option<HidConfig>,
     #[serde(default)]
     pub tcp: Option<TcpConfig>,
+    #[serde(default)]
+    pub usb_control: Option<UsbControlConfig>,
 }
 
 /// RGB capability data (zones + native effects). Callbacks (`apply`,

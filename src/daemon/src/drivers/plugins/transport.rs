@@ -20,7 +20,7 @@ use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 
 use crate::drivers::transports::smbus::{SmBusDevice, SmBusSyncOps};
 use crate::drivers::transports::usb_bulk::UsbBulkTransport;
-use crate::drivers::transports::Transport;
+use crate::drivers::transports::{ControlTransport, Transport};
 use crate::registry::discovery::DiscoveryHandle;
 
 use super::manifest::{MatchSpec, PluginManifest};
@@ -95,6 +95,13 @@ pub enum PluginIo {
         bulk: Option<Arc<BulkEndpoint>>,
     },
     Register(RegisterBus),
+    /// One or more USB vendor-control endpoints (DDC/CI, ENE RGB controllers).
+    /// Unlike the byte-stream/register shapes, a control device can bundle
+    /// *several* physical USB devices behind one plugin — a plugin that presents
+    /// two chips as a single device (e.g. a monitor's DDC controller plus its
+    /// Ambiglow LED controller) declares the extra ones in its manifest and
+    /// reaches them by name.
+    Control(ControlEndpoints),
 }
 
 impl PluginIo {
@@ -103,6 +110,7 @@ impl PluginIo {
         match self {
             PluginIo::Stream { transport, .. } => transport.rate_status(),
             PluginIo::Register(r) => r.rate_status(),
+            PluginIo::Control(c) => c.rate_status(),
         }
     }
 
@@ -110,6 +118,46 @@ impl PluginIo {
         match self {
             PluginIo::Stream { transport, .. } => transport.set_write_rate_limit(limit),
             PluginIo::Register(r) => r.set_write_rate_limit(limit),
+            PluginIo::Control(c) => c.set_write_rate_limit(limit),
+        }
+    }
+}
+
+/// A set of named USB vendor-control endpoints. The device the discovery handle
+/// matched lives under [`ControlEndpoints::PRIMARY`] (the empty string); any
+/// secondary endpoints a plugin declares (`transports.usb_control.endpoints`)
+/// are keyed by their declared id. A script reaches each through the `transport`
+/// object's `control_write`/`control_read`, naming the endpoint (`""` = primary).
+#[derive(Clone)]
+pub struct ControlEndpoints {
+    endpoints: Arc<HashMap<String, Arc<dyn ControlTransport>>>,
+}
+
+impl ControlEndpoints {
+    /// Key under which the matched (primary) device is stored.
+    pub const PRIMARY: &'static str = "";
+
+    pub fn new(endpoints: HashMap<String, Arc<dyn ControlTransport>>) -> Self {
+        Self {
+            endpoints: Arc::new(endpoints),
+        }
+    }
+
+    /// The endpoint registered under `name`, or `None` if the manifest never
+    /// declared it (`""` is always the matched device).
+    pub fn get(&self, name: &str) -> Option<&Arc<dyn ControlTransport>> {
+        self.endpoints.get(name)
+    }
+
+    fn rate_status(&self) -> WriteRateStatus {
+        self.get(Self::PRIMARY)
+            .map(|t| t.rate_status())
+            .unwrap_or_default()
+    }
+
+    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
+        for t in self.endpoints.values() {
+            t.set_write_rate_limit(limit);
         }
     }
 }
@@ -215,4 +263,86 @@ pub fn known_kinds() -> Vec<&'static str> {
     inventory::iter::<PluginTransportDescriptor>()
         .map(|d| d.kind)
         .collect()
+}
+
+/// One captured USB control transfer, for asserting a plugin's wire output in
+/// tests without touching hardware (mirrors [`BulkEndpoint::Recording`]).
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlTransfer {
+    pub bm_request_type: u8,
+    pub b_request: u8,
+    pub w_value: u16,
+    pub w_index: u16,
+    pub data: Vec<u8>,
+}
+
+/// A `ControlTransport` that records every write instead of issuing it, and
+/// returns queued canned replies for reads. Test-only backing for a
+/// [`PluginIo::Control`] endpoint.
+#[cfg(test)]
+pub struct RecordingControl {
+    writes: std::sync::Mutex<Vec<ControlTransfer>>,
+    reads: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
+}
+
+#[cfg(test)]
+impl RecordingControl {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            writes: std::sync::Mutex::new(Vec::new()),
+            reads: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        })
+    }
+
+    /// Every write transfer captured so far, in order.
+    pub fn writes(&self) -> Vec<ControlTransfer> {
+        self.writes.lock().unwrap().clone()
+    }
+
+    /// Queue a canned reply to be returned by the next `read_control`.
+    pub fn queue_read(&self, reply: Vec<u8>) {
+        self.reads.lock().unwrap().push_back(reply);
+    }
+}
+
+#[cfg(test)]
+impl ControlTransport for RecordingControl {
+    fn write_control(
+        &self,
+        bm_request_type: u8,
+        b_request: u8,
+        w_value: u16,
+        w_index: u16,
+        data: &[u8],
+    ) -> Result<()> {
+        self.writes.lock().unwrap().push(ControlTransfer {
+            bm_request_type,
+            b_request,
+            w_value,
+            w_index,
+            data: data.to_vec(),
+        });
+        Ok(())
+    }
+
+    fn read_control(
+        &self,
+        _bm_request_type: u8,
+        _b_request: u8,
+        _w_value: u16,
+        _w_index: u16,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        let reply = self.reads.lock().unwrap().pop_front().unwrap_or_default();
+        let n = reply.len().min(buf.len());
+        buf[..n].copy_from_slice(&reply[..n]);
+        Ok(n)
+    }
+
+    fn rate_status(&self) -> WriteRateStatus {
+        WriteRateStatus::default()
+    }
+
+    fn set_write_rate_limit(&self, _limit: Option<WriteRateLimit>) {}
 }
