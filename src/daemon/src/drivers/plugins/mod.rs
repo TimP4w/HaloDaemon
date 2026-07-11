@@ -210,7 +210,7 @@ pub(crate) fn granted_for(plugin_id: &str) -> Vec<Permission> {
         // going through `load_all`) so a built-in's own permissions are
         // reliably granted regardless of registry state.
         if let Some(m) = builtin_manifests()
-            .into_iter()
+            .iter()
             .find(|m| m.plugin_id == plugin_id)
         {
             for p in &m.permissions {
@@ -481,24 +481,31 @@ const BUILTIN_PLUGINS: &[(&str, &str)] = &[
     ("openrgb.lua", include_str!("builtins/openrgb.lua")),
 ];
 
-fn builtin_manifests() -> Vec<PluginManifest> {
-    BUILTIN_PLUGINS
-        .iter()
-        .filter_map(|(name, src)| match parse_manifest(src, Path::new(name)) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                log::error!("built-in plugin '{name}' failed to parse: {e:#}");
-                None
-            }
-        })
-        .collect()
+/// Parsed once and cached: `granted_for` is a discovery hot path (called
+/// per-plugin under the `PLUGIN_REGISTRY` read guard), and re-parsing every
+/// built-in Lua script (`Lua::new()` ×N) on each call held that lock long
+/// enough to deadlock against a concurrent `load_all` write.
+fn builtin_manifests() -> &'static [PluginManifest] {
+    static CACHE: std::sync::OnceLock<Vec<PluginManifest>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        BUILTIN_PLUGINS
+            .iter()
+            .filter_map(|(name, src)| match parse_manifest(src, Path::new(name)) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    log::error!("built-in plugin '{name}' failed to parse: {e:#}");
+                    None
+                }
+            })
+            .collect()
+    })
 }
 
 /// (Re)load the built-in plugins plus every `*.lua` in `dir` into the registry,
 /// replacing prior contents. A malformed plugin is logged and skipped — it never
 /// aborts loading or the daemon. Missing directory is normal (no plugins installed).
 pub fn load_all(dir: &Path) {
-    let mut manifests = builtin_manifests();
+    let mut manifests = builtin_manifests().to_vec();
     match std::fs::read_dir(dir) {
         Ok(entries) => {
             for entry in entries.flatten() {
@@ -640,8 +647,22 @@ pub fn match_in(
 /// Match a discovery handle against every loaded plugin. Consulted by
 /// `make_device` *before* the native descriptors so a plugin shadows native.
 pub fn match_handle(handle: &DiscoveryHandle<'_>) -> Option<Arc<dyn Device>> {
-    let registry = PLUGIN_REGISTRY.read().ok()?;
-    match_in(&registry, handle)
+    // Resolve the match under the read guard, then release it before
+    // `build_device` — which re-reads `PLUGIN_REGISTRY` via `config_for` /
+    // `secure_config_keys_for`. Holding the guard across that recursive read
+    // deadlocks a concurrent `load_all` write (std RwLock is writer-preferring,
+    // so the second read parks behind the queued writer).
+    let (manifest, spec) = {
+        let registry = PLUGIN_REGISTRY.read().ok()?;
+        registry
+            .iter()
+            .filter(|m| !is_disabled(&m.plugin_id) && permissions_satisfied(m))
+            .find_map(|m| {
+                m.match_spec_for(handle)
+                    .map(|spec| (m.clone(), spec.clone()))
+            })?
+    };
+    build_device(&manifest, &spec, handle)
 }
 
 pub fn has_match(handle: &DiscoveryHandle<'_>) -> bool {
