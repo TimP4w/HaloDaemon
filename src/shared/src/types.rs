@@ -49,6 +49,10 @@ pub enum LcdUploadStage {
     Processing,
     /// Writing the processed image to the device.
     Applying,
+    /// The image finished uploading and was applied to the device (terminal).
+    Done,
+    /// The upload or device write failed and was aborted (terminal).
+    Failed,
 }
 
 /// A rendered LCD engine frame broadcast to subscribed clients.
@@ -1606,6 +1610,26 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         let back: EffectParamValue = serde_json::from_str(&json).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn lcd_upload_stage_serde_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&LcdUploadStage::Done).unwrap(),
+            "\"done\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LcdUploadStage::Failed).unwrap(),
+            "\"failed\""
+        );
+        let p = LcdUploadProgress {
+            device_id: "lcd".into(),
+            stage: LcdUploadStage::Failed,
+            percent: None,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: LcdUploadProgress = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
     }
 
     #[test]

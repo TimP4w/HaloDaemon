@@ -86,9 +86,19 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
 
 // ── Image section ─────────────────────────────────────────────────────────────
 
-/// The upload spinner's `upload_base`, cleared once the refreshed library has
-/// grown past the size captured when the upload was sent.
-fn cleared_upload_base(base: Option<usize>, lib_len: usize) -> Option<usize> {
+/// The upload spinner's `upload_base`, cleared either by a fresh terminal
+/// (`Done`/`Failed`) upload signal for this device, or — as a fallback — once
+/// the refreshed library has grown past the size captured when the upload was
+/// sent.
+fn cleared_upload_base(
+    base: Option<usize>,
+    lib_len: usize,
+    terminal: Option<&LcdUploadProgress>,
+    device_id: &str,
+) -> Option<usize> {
+    if crate::ui::screens::device::is_terminal_upload_for(terminal, device_id) {
+        return None;
+    }
     base.filter(|&b| lib_len <= b)
 }
 
@@ -104,7 +114,12 @@ pub(super) fn image_section(
     let active_template_id = ctx.state.lcd.engine.device_templates.get(id).cloned();
     let highlighted = lcd.active_image.as_deref();
 
-    st.lcd.upload_base = cleared_upload_base(st.lcd.upload_base, ctx.lcd_images.len());
+    st.lcd.upload_base = cleared_upload_base(
+        st.lcd.upload_base,
+        ctx.lcd_images.len(),
+        ctx.lcd_upload_terminal.as_ref(),
+        id,
+    );
 
     decode_next_thumb(ui, ctx, st, ctx.lcd_images.iter().take(MAX_TILES));
 
@@ -170,7 +185,12 @@ pub(super) fn image_picker(
     id: &str,
     current: &str,
 ) -> Option<String> {
-    st.lcd.upload_base = cleared_upload_base(st.lcd.upload_base, ctx.lcd_images.len());
+    st.lcd.upload_base = cleared_upload_base(
+        st.lcd.upload_base,
+        ctx.lcd_images.len(),
+        ctx.lcd_upload_terminal.as_ref(),
+        id,
+    );
     decode_next_thumb(ui, ctx, st, ctx.lcd_images.iter());
 
     let mut picked = None;
@@ -329,6 +349,9 @@ fn upload_label(progress: Option<&LcdUploadProgress>, device_id: &str) -> String
             }
             (LcdUploadStage::Processing, None) => t!("lcd.upload_processing").to_string(),
             (LcdUploadStage::Applying, _) => t!("lcd.upload_writing").to_string(),
+            // Terminal stages clear the spinner the same frame; the label is a
+            // transient fallback only.
+            (LcdUploadStage::Done | LcdUploadStage::Failed, _) => t!("lcd.uploading").to_string(),
         },
         _ => t!("lcd.uploading").to_string(),
     }
@@ -518,15 +541,42 @@ pub(super) fn draw_thumb_tile(
 mod tests {
     use super::*;
 
+    fn terminal(stage: LcdUploadStage, device_id: &str) -> LcdUploadProgress {
+        LcdUploadProgress {
+            device_id: device_id.into(),
+            stage,
+            percent: None,
+        }
+    }
+
     #[test]
     fn upload_spinner_clears_only_once_the_library_grows() {
         // No spinner armed → stays cleared regardless of library size.
-        assert_eq!(cleared_upload_base(None, 5), None);
+        assert_eq!(cleared_upload_base(None, 5, None, "lcd"), None);
         // Armed at 3: still uploading while the library hasn't grown past 3.
-        assert_eq!(cleared_upload_base(Some(3), 3), Some(3));
-        assert_eq!(cleared_upload_base(Some(3), 2), Some(3));
+        assert_eq!(cleared_upload_base(Some(3), 3, None, "lcd"), Some(3));
+        assert_eq!(cleared_upload_base(Some(3), 2, None, "lcd"), Some(3));
         // The refreshed library grew past the captured size → spinner clears.
-        assert_eq!(cleared_upload_base(Some(3), 4), None);
+        assert_eq!(cleared_upload_base(Some(3), 4, None, "lcd"), None);
+    }
+
+    #[test]
+    fn upload_spinner_clears_on_terminal_signal() {
+        // A fresh Done for this device clears even without library growth.
+        let done = terminal(LcdUploadStage::Done, "lcd");
+        assert_eq!(cleared_upload_base(Some(3), 3, Some(&done), "lcd"), None);
+        // A Failed likewise clears (the reported bug: a failed device write).
+        let failed = terminal(LcdUploadStage::Failed, "lcd");
+        assert_eq!(cleared_upload_base(Some(3), 3, Some(&failed), "lcd"), None);
+        // A terminal for a different device is ignored.
+        let other = terminal(LcdUploadStage::Failed, "other");
+        assert_eq!(
+            cleared_upload_base(Some(3), 3, Some(&other), "lcd"),
+            Some(3)
+        );
+        // Staleness: a retained terminal is delivered as a `None` one-shot on
+        // non-arrival frames, so a freshly-armed spinner is not cleared.
+        assert_eq!(cleared_upload_base(Some(3), 3, None, "lcd"), Some(3));
     }
 
     #[test]

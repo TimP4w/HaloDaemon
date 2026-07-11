@@ -325,6 +325,7 @@ mod tests {
             lcd_images: &[],
             lcd_preview: None,
             lcd_upload: None,
+            lcd_upload_terminal: None,
             lcd_template: None,
             lcd_editor_render: None,
             led_colors: crate::ui::screens::device::empty_led_colors(),

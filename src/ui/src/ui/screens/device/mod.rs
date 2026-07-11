@@ -329,6 +329,9 @@ pub struct TabCtx<'a> {
     pub lcd_preview: Option<crate::runtime::ipc::DecodedFrame>,
     /// Stage/percent of the in-flight LCD image upload; `None` when idle.
     pub lcd_upload: Option<halod_shared::types::LcdUploadProgress>,
+    /// A terminal (`Done`/`Failed`) upload signal, delivered as a one-shot edge:
+    /// `Some` only on the frame it arrives. Clears the upload/preview spinners.
+    pub lcd_upload_terminal: Option<halod_shared::types::LcdUploadProgress>,
     /// A just-loaded named LCD template, consumed once by the open editor.
     pub lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
     /// Latest on-demand LCD editor render (per-widget sprites) for the open
@@ -339,6 +342,20 @@ pub struct TabCtx<'a> {
     /// Rolling history of the device's effective write-rate throughput
     /// (bytes/sec). `None` until the first sample lands.
     pub write_rate_history: Option<&'a std::collections::VecDeque<f32>>,
+}
+
+/// Whether `terminal` is a one-shot upload result (`Done`/`Failed`) for
+/// `device_id` — the signal the LCD spinner gates clear on.
+pub(super) fn is_terminal_upload_for(
+    terminal: Option<&halod_shared::types::LcdUploadProgress>,
+    device_id: &str,
+) -> bool {
+    use halod_shared::types::LcdUploadStage;
+    matches!(
+        terminal,
+        Some(p) if p.device_id == device_id
+            && matches!(p.stage, LcdUploadStage::Done | LcdUploadStage::Failed)
+    )
 }
 
 /// Shared empty LED-color map for contexts without live canvas frames (tests).
@@ -369,6 +386,7 @@ pub fn show(
     lcd_images: &[String],
     lcd_preview: Option<crate::runtime::ipc::DecodedFrame>,
     lcd_upload: Option<halod_shared::types::LcdUploadProgress>,
+    lcd_upload_terminal: Option<halod_shared::types::LcdUploadProgress>,
     lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
     lcd_editor_render: Option<crate::runtime::ipc::DecodedEditorRender>,
     led_colors: &crate::ui::screens::canvas::LedColorMap,
@@ -430,6 +448,7 @@ pub fn show(
                     lcd_images,
                     lcd_preview,
                     lcd_upload,
+                    lcd_upload_terminal,
                     lcd_template,
                     lcd_editor_render,
                     led_colors,
@@ -581,6 +600,7 @@ mod tests {
                 0.0,
                 None,
                 &[],
+                None,
                 None,
                 None,
                 None,

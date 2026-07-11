@@ -539,6 +539,29 @@ mod tests {
     }
 
     #[test]
+    fn terminal_upload_frames_land_on_the_watch_channel() {
+        use halod_shared::types::LcdUploadStage;
+        // The spinner-clearing terminals ride the same untouched handler.
+        for (raw, stage) in [
+            (
+                br#"{"type":"lcd_upload_progress","data":{"device_id":"lcd","stage":"done"}}"#
+                    .as_slice(),
+                LcdUploadStage::Done,
+            ),
+            (
+                br#"{"type":"lcd_upload_progress","data":{"device_id":"lcd","stage":"failed"}}"#
+                    .as_slice(),
+                LcdUploadStage::Failed,
+            ),
+        ] {
+            let (tx, rx) = test_tx();
+            assert!(!handle_json(raw, &tx, &|| {}));
+            let got = rx.borrow().clone().expect("terminal routed");
+            assert_eq!(got.stage, stage);
+        }
+    }
+
+    #[test]
     fn image_uploaded_clears_progress_and_requests_refresh() {
         let (tx, rx) = test_tx();
         tx.lcd_upload.send_replace(Some(LcdUploadProgress {

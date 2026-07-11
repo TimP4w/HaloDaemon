@@ -54,6 +54,20 @@ impl App {
         } else {
             None
         };
+        // A terminal (`Done`/`Failed`) is consumed as a one-shot edge: `Some`
+        // only on the frame it newly arrives, so a retained stale terminal
+        // can't clear a freshly-armed upload spinner.
+        let lcd_upload_terminal = if self.ui.lcd_upload.has_changed().unwrap_or(false) {
+            self.ui.lcd_upload.borrow_and_update().clone().filter(|p| {
+                matches!(
+                    p.stage,
+                    halod_shared::types::LcdUploadStage::Done
+                        | halod_shared::types::LcdUploadStage::Failed
+                )
+            })
+        } else {
+            None
+        };
         let lcd_upload = self.ui.lcd_upload.borrow().clone();
         if self.ui.lcd_template.has_changed().unwrap_or(false) {
             self.pending_lcd_template = self.ui.lcd_template.borrow_and_update().clone();
@@ -258,6 +272,7 @@ impl App {
                             &lcd_images,
                             lcd_preview,
                             lcd_upload,
+                            lcd_upload_terminal,
                             lcd_template,
                             lcd_editor_render,
                             self.canvas_ui.led_colors(),

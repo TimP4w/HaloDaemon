@@ -4,7 +4,7 @@
 
 use egui::{Color32, Rect, Sense, Stroke, Vec2};
 use halod_shared::commands::DaemonCommand;
-use halod_shared::types::{LcdStatus, ScreenRotation, ScreenShape};
+use halod_shared::types::{LcdStatus, LcdUploadProgress, ScreenRotation, ScreenShape};
 
 use super::{drive_preview, preview_key, rot_label, DeviceUi, TabCtx};
 use crate::ui::components as widgets;
@@ -100,6 +100,20 @@ fn paint_spinner(ui: &egui::Ui, center: egui::Pos2, time: f64) {
     ui.ctx().request_repaint();
 }
 
+/// Whether the "setting image" preview spinner should clear: either the daemon
+/// confirmed `pending` as the active image and its texture is ready, or a fresh
+/// terminal (`Done`/`Failed`) upload signal arrived for this device.
+fn preview_pending_cleared(
+    pending: &str,
+    active_image: Option<&str>,
+    tex_ready: bool,
+    terminal: Option<&LcdUploadProgress>,
+    device_id: &str,
+) -> bool {
+    (active_image == Some(pending) && tex_ready)
+        || crate::ui::screens::device::is_terminal_upload_for(terminal, device_id)
+}
+
 pub(super) fn display_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
@@ -114,13 +128,20 @@ pub(super) fn display_card(
         |ui| {
             drive_preview(ui, ctx, st, lcd);
 
-            // Clear the "setting image" spinner only once the daemon confirms
-            // the image *and* its texture is ready (a GIF's first frame may lag).
+            // Clear the "setting image" spinner once the daemon confirms the
+            // image *and* its texture is ready (a GIF's first frame may lag), or
+            // when a terminal upload signal (`Done`/`Failed`) lands — so a failed
+            // device write can't leave it spinning forever.
             if let Some(pending) = st.lcd.preview_pending.clone() {
-                let confirmed = lcd.active_image.as_deref() == Some(pending.as_str());
                 let tex_ready = st.lcd.preview_tex.is_some()
                     && st.lcd.preview_key == preview_key(&lcd.mode, Some(&pending));
-                if confirmed && tex_ready {
+                if preview_pending_cleared(
+                    &pending,
+                    lcd.active_image.as_deref(),
+                    tex_ready,
+                    ctx.lcd_upload_terminal.as_ref(),
+                    id,
+                ) {
                     st.lcd.preview_pending = None;
                 }
             }
@@ -255,6 +276,55 @@ pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, lcd: 
 mod tests {
     use super::super::gif::rgba_texture;
     use super::*;
+    use halod_shared::types::LcdUploadStage;
+
+    fn terminal(stage: LcdUploadStage, device_id: &str) -> LcdUploadProgress {
+        LcdUploadProgress {
+            device_id: device_id.into(),
+            stage,
+            percent: None,
+        }
+    }
+
+    #[test]
+    fn preview_spinner_clears_on_confirm_or_terminal() {
+        // Confirmed active image + texture ready → clears.
+        assert!(preview_pending_cleared(
+            "a.png",
+            Some("a.png"),
+            true,
+            None,
+            "lcd"
+        ));
+        // Confirmed but texture not yet ready, no terminal → keep spinning.
+        assert!(!preview_pending_cleared(
+            "a.png",
+            Some("a.png"),
+            false,
+            None,
+            "lcd"
+        ));
+        // A device-write failure clears even though the image never became active.
+        let failed = terminal(LcdUploadStage::Failed, "lcd");
+        assert!(preview_pending_cleared(
+            "a.png",
+            None,
+            false,
+            Some(&failed),
+            "lcd"
+        ));
+        // Staleness: no fresh terminal (delivered as `None`) → keep spinning.
+        assert!(!preview_pending_cleared("a.png", None, false, None, "lcd"));
+        // A terminal for another device is ignored.
+        let other = terminal(LcdUploadStage::Failed, "other");
+        assert!(!preview_pending_cleared(
+            "a.png",
+            None,
+            false,
+            Some(&other),
+            "lcd"
+        ));
+    }
 
     #[test]
     fn cover_uv_center_crops_to_a_square_without_distortion() {
