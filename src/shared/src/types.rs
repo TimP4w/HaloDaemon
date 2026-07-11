@@ -513,6 +513,10 @@ pub enum PluginKind {
     Device,
     /// Declares RGB effects only; never opens a transport.
     Effect,
+    /// Instantiated from its own config values (e.g. a server host/port)
+    /// rather than a hardware discovery handle; its children are the
+    /// individual things the remote service reports.
+    Integration,
 }
 
 /// One plugin as shown in the GUI's Plugins screen.

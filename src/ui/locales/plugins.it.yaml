@@ -11,6 +11,7 @@ plugins:
   # Pannello dettagli
   type_device: Driver
   type_effect: Effetti
+  type_integration: Integrazione
   author: AUTORE
   capabilities: FUNZIONALITÀ
   targets: DISPOSITIVI SUPPORTATI

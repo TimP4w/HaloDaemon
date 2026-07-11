@@ -352,13 +352,19 @@ impl EffectManifest {
 
 /// Which discovery path a plugin registers into. `Device` (the default)
 /// declares hardware via `match`; `Effect` declares RGB effects and needs no
-/// `match` spec at all — it never opens a transport or a worker.
+/// `match` spec at all — it never opens a transport or a worker. `Integration`
+/// also declares no `match` — it is instantiated from its own `config` values
+/// (e.g. a server host/port) rather than a hardware discovery handle, and its
+/// `discover_children()` enumerates one top-level `Device` per thing the
+/// remote service reports (see `enumerate_controllers`), instead of the
+/// chain-accessory path `Device` plugins use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginType {
     #[default]
     Device,
     Effect,
+    Integration,
 }
 
 impl From<PluginType> for halod_shared::types::PluginKind {
@@ -366,6 +372,7 @@ impl From<PluginType> for halod_shared::types::PluginKind {
         match t {
             PluginType::Device => halod_shared::types::PluginKind::Device,
             PluginType::Effect => halod_shared::types::PluginKind::Effect,
+            PluginType::Integration => halod_shared::types::PluginKind::Integration,
         }
     }
 }
@@ -775,7 +782,11 @@ impl PluginManifest {
     /// True when the plugin declares any capability that needs a live transport
     /// + worker. Device-only plugins skip the worker.
     pub fn needs_worker(&self) -> bool {
-        self.rgb.is_some()
+        // An integration plugin declares no capability section (it isn't a
+        // capability-bearing device itself), but its root always needs a live
+        // transport + Lua worker for `enumerate_controllers`/frame writes.
+        self.plugin_type == PluginType::Integration
+            || self.rgb.is_some()
             || self.fan.is_some()
             || self.sensor.is_some()
             || self.lcd.is_some()
@@ -886,7 +897,10 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         .map_err(|e| anyhow!("manifest table is malformed: {e}"))?;
 
     let match_specs = raw.match_spec.map(MatchSpecs::into_vec).unwrap_or_default();
-    if match_specs.is_empty() && raw.effects.is_empty() {
+    if match_specs.is_empty()
+        && raw.effects.is_empty()
+        && raw.plugin_type != PluginType::Integration
+    {
         bail!("plugin declares neither a match spec nor any effects");
     }
     // Validate every spec against its registered transport backend: unknown
@@ -1366,5 +1380,51 @@ mod tests {
         assert_eq!(tcp.host_key, "host");
         assert_eq!(tcp.port_key, "port");
         assert_eq!(tcp.timeout_ms, 2000);
+    }
+
+    #[test]
+    fn integration_plugin_parses_with_no_match_spec() {
+        let src = r#"return {
+            identity = { vendor = "x", model = "y", name = "OpenRGB" },
+            type = "integration",
+            permissions = { "network" },
+            config = { fields = {
+              { key = "host", label = "Host", default = "127.0.0.1" },
+              { key = "port", label = "Port", default = "6742" },
+            } },
+            transports = { tcp = {} },
+        }"#;
+        let m = parse_manifest(src, Path::new("integ.lua")).unwrap();
+        assert!(m.match_specs.is_empty());
+        assert_eq!(m.plugin_type, PluginType::Integration);
+        assert_eq!(
+            halod_shared::types::PluginKind::from(m.plugin_type),
+            halod_shared::types::PluginKind::Integration
+        );
+    }
+
+    #[test]
+    fn integration_plugin_needs_a_worker_even_with_no_capability_sections() {
+        let src = r#"return {
+            identity = { vendor = "x", model = "y" },
+            type = "integration",
+        }"#;
+        let m = parse_manifest(src, Path::new("integ2.lua")).unwrap();
+        assert!(m.needs_worker());
+        assert!(
+            m.capability_labels().is_empty(),
+            "an integration root isn't a capability-bearing device itself"
+        );
+    }
+
+    #[test]
+    fn integration_plugin_with_neither_match_nor_config_still_parses() {
+        // Integration only exempts the match-spec guard; it's still a valid,
+        // if minimal, plugin without any config fields declared.
+        let src = r#"return {
+            identity = { vendor = "x", model = "y" },
+            type = "integration",
+        }"#;
+        assert!(parse_manifest(src, Path::new("integ3.lua")).is_ok());
     }
 }

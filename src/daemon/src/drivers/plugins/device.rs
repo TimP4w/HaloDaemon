@@ -27,9 +27,10 @@ use crate::drivers::{
 };
 
 use super::chain_leaf::ChainLeaf;
+use super::integration_leaf::{IntegrationHub, IntegrationLeaf};
 use super::manifest::{
     topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DpiManifest, MatchSpec,
-    PluginManifest, RangeDef,
+    PluginManifest, PluginType, RangeDef,
 };
 use super::transport::PluginIo;
 use super::worker::{DevMatch, InitLcd, InitZone, PluginHandle};
@@ -55,6 +56,7 @@ pub struct LuaDevice {
     vendor: String,
     model: String,
     plugin_id: String,
+    plugin_type: PluginType,
     device_type: DeviceType,
     /// A short label for the Info UI's transport line ("hid", "smbus", …).
     transport_kind: &'static str,
@@ -158,7 +160,7 @@ impl Drop for LuaDevice {
 impl LuaDevice {
     /// A plugin that declares no capability — identity + lifecycle only.
     pub fn device_only(id: String, manifest: &PluginManifest, spec: &MatchSpec) -> Self {
-        Self::build(id, manifest, spec, None, None)
+        Self::build(id, manifest, Some(spec), None, None)
     }
 
     /// A plugin with capabilities, backed by a worker over `transport`.
@@ -166,6 +168,35 @@ impl LuaDevice {
         id: String,
         manifest: &PluginManifest,
         spec: &MatchSpec,
+        dev_match: DevMatch,
+        transport: PluginIo,
+        handle: tokio::runtime::Handle,
+    ) -> Self {
+        Self::with_worker(id, manifest, Some(spec), dev_match, transport, handle)
+    }
+
+    /// The headless root of a config-instantiated integration plugin (e.g. an
+    /// OpenRGB SDK client): no `MatchSpec` (it wasn't found by a bus scan), no
+    /// capabilities of its own — `discover_children()` is its only job,
+    /// enumerating one top-level `Device` per thing the remote service
+    /// reports (see `Controller` impl below).
+    pub fn integration_root(
+        id: String,
+        manifest: &PluginManifest,
+        transport: PluginIo,
+        handle: tokio::runtime::Handle,
+    ) -> Self {
+        let dev_match = DevMatch {
+            transport: "tcp".to_owned(),
+            ..Default::default()
+        };
+        Self::with_worker(id, manifest, None, dev_match, transport, handle)
+    }
+
+    fn with_worker(
+        id: String,
+        manifest: &PluginManifest,
+        spec: Option<&MatchSpec>,
         dev_match: DevMatch,
         transport: PluginIo,
         handle: tokio::runtime::Handle,
@@ -215,20 +246,24 @@ impl LuaDevice {
     fn build(
         id: String,
         manifest: &PluginManifest,
-        spec: &MatchSpec,
+        spec: Option<&MatchSpec>,
         worker: Option<PluginHandle>,
         transport: Option<PluginIo>,
     ) -> Self {
         Self {
             id,
-            name: manifest.display_name_for(spec),
+            name: spec
+                .map(|s| manifest.display_name_for(s))
+                .unwrap_or_else(|| manifest.display_name().to_owned()),
             vendor: manifest.identity.vendor.clone(),
             model: manifest.identity.model.clone(),
             plugin_id: manifest.plugin_id.clone(),
-            device_type: spec.device_type.unwrap_or_default(),
-            transport_kind: super::transport::descriptor_for(&spec.transport)
+            plugin_type: manifest.plugin_type,
+            device_type: spec.and_then(|s| s.device_type).unwrap_or_default(),
+            transport_kind: spec
+                .and_then(|s| super::transport::descriptor_for(&s.transport))
                 .map(|d| d.kind)
-                .unwrap_or("unknown"),
+                .unwrap_or("tcp"),
             dynamic_model: OnceLock::new(),
             worker,
             transport,
@@ -613,6 +648,15 @@ impl SensorCapability for LuaDevice {
 #[async_trait]
 impl Controller for LuaDevice {
     async fn discover_children(&self) -> Vec<Arc<dyn Device>> {
+        if self.plugin_type == PluginType::Integration {
+            return self.discover_controllers().await;
+        }
+        self.discover_chain_accessories().await
+    }
+}
+
+impl LuaDevice {
+    async fn discover_chain_accessories(&self) -> Vec<Arc<dyn Device>> {
         let (Some(worker), Some(host)) = (&self.worker, self.chain_host.get()) else {
             return Vec::new();
         };
@@ -662,6 +706,62 @@ impl Controller for LuaDevice {
             out.push(leaf);
         }
         out
+    }
+
+    /// Integration path: one `IntegrationLeaf` per controller the plugin's
+    /// `enumerate_controllers` reports. Unlike the chain path, these children
+    /// share the root's connection directly (see `IntegrationHub`) rather than
+    /// composing into one `ChainHost` frame.
+    async fn discover_controllers(&self) -> Vec<Arc<dyn Device>> {
+        let Some(worker) = &self.worker else {
+            return Vec::new();
+        };
+        let detected = match worker.enumerate_controllers().await {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("plugin '{}' enumerate_controllers: {e:#}", self.plugin_id);
+                return Vec::new();
+            }
+        };
+        let Some(parent) = self.self_ref.upgrade() else {
+            return Vec::new();
+        };
+        let hub: Arc<dyn IntegrationHub> = parent;
+
+        let mut out = Vec::new();
+        for controller in detected {
+            let leaf: Arc<dyn Device> = Arc::new(IntegrationLeaf::new(
+                format!("{}_ctrl_{}", self.id, controller.index),
+                controller.name.clone(),
+                self.vendor.clone(),
+                controller.index,
+                controller.rgb_descriptor(),
+                hub.clone(),
+            ));
+            if let Err(e) = leaf.initialize().await {
+                log::warn!(
+                    "plugin '{}' controller child init failed: {e:#}",
+                    self.plugin_id
+                );
+                continue;
+            }
+            out.push(leaf);
+        }
+        out
+    }
+}
+
+#[async_trait]
+impl IntegrationHub for LuaDevice {
+    async fn write_controller_frame(
+        &self,
+        index: u32,
+        zone: &str,
+        colors: &[RgbColor],
+    ) -> Result<()> {
+        self.worker()?
+            .write_controller_frame(index, zone, colors)
+            .await
     }
 }
 
@@ -1918,5 +2018,133 @@ mod tests {
             *mock.written.lock().await.last().unwrap(),
             vec![0xE0, 5, 5, 5, 5, 5, 5, 5, 5]
         );
+    }
+
+    const INTEGRATION_SCRIPT: &str = r#"
+        return {
+          type = "integration",
+          identity = { vendor = "Test", model = "Hub" },
+          config = { fields = { { key = "host", label = "Host" }, { key = "port", label = "Port" } } },
+          transports = { tcp = {} },
+
+          enumerate_controllers = function(dev)
+            return {
+              { index = 0, name = "Keyboard", zones = {
+                  { id = "main", name = "Main", topology = "linear", led_count = 4 },
+              } },
+              { index = 1, name = "Mobo", zones = {
+                  { id = "aux", name = "Aux", topology = "linear", led_count = 2 },
+                  { id = "z2", name = "Zone 2", topology = "linear", led_count = 3 },
+              } },
+            }
+          end,
+
+          write_controller_frame = function(dev, index, zone, colors)
+            local bytes = { index, string.byte(zone, 1) }
+            for _, c in ipairs(colors) do
+              bytes[#bytes+1] = c.r
+              bytes[#bytes+1] = c.g
+              bytes[#bytes+1] = c.b
+            end
+            dev.transport:write(string.char(table.unpack(bytes)))
+          end,
+        }
+    "#;
+
+    fn integration_device(transport: Arc<dyn Transport>) -> Arc<LuaDevice> {
+        let manifest =
+            super::super::parse_manifest(INTEGRATION_SCRIPT, Path::new("integ.lua")).unwrap();
+        Arc::new_cyclic(|weak| {
+            let mut d = LuaDevice::integration_root(
+                "integ-0".into(),
+                &manifest,
+                PluginIo::Stream {
+                    transport,
+                    bulk: None,
+                },
+                tokio::runtime::Handle::current(),
+            );
+            d.set_self_ref(weak.clone());
+            d
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integration_root_discovers_one_child_per_controller() {
+        use crate::drivers::Controller;
+        let dev = integration_device(Arc::new(MockTransport::empty()));
+
+        let children = dev.discover_children().await;
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].id(), "integ-0_ctrl_0");
+        assert_eq!(children[0].name(), "Keyboard");
+        assert_eq!(children[1].id(), "integ-0_ctrl_1");
+        assert_eq!(children[1].name(), "Mobo");
+
+        let mobo_rgb = children[1].as_rgb().expect("has rgb");
+        assert_eq!(mobo_rgb.descriptor().zones.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integration_leaf_write_frame_routes_to_the_parent_with_its_own_index() {
+        use crate::drivers::Controller;
+        let mock = Arc::new(MockTransport::empty());
+        let dev = integration_device(mock.clone());
+        let children = dev.discover_children().await;
+
+        let keyboard_rgb = children[0].as_rgb().expect("has rgb");
+        keyboard_rgb
+            .write_frame("main", &[RgbColor { r: 9, g: 8, b: 7 }; 4])
+            .await
+            .unwrap();
+        // index 0, zone 'main' -> byte('m') = 109, then 4x(9,8,7).
+        assert_eq!(
+            *mock.written.lock().await.last().unwrap(),
+            vec![0, 109, 9, 8, 7, 9, 8, 7, 9, 8, 7, 9, 8, 7]
+        );
+
+        let mobo_rgb = children[1].as_rgb().expect("has rgb");
+        mobo_rgb
+            .write_frame("z2", &[RgbColor { r: 1, g: 1, b: 1 }; 2])
+            .await
+            .unwrap();
+        // index 1, zone 'z2' -> byte('z') = 122, then 2x(1,1,1).
+        assert_eq!(
+            *mock.written.lock().await.last().unwrap(),
+            vec![1, 122, 1, 1, 1, 1, 1, 1]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integration_leaf_write_frame_rejects_an_unknown_zone() {
+        use crate::drivers::Controller;
+        let dev = integration_device(Arc::new(MockTransport::empty()));
+        let children = dev.discover_children().await;
+        let rgb = children[0].as_rgb().expect("has rgb");
+        assert!(rgb.write_frame("nope", &[]).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integration_leaf_apply_static_broadcasts_to_every_zone() {
+        use crate::drivers::Controller;
+        let mock = Arc::new(MockTransport::empty());
+        let dev = integration_device(mock.clone());
+        let children = dev.discover_children().await;
+        let mobo_rgb = children[1].as_rgb().expect("has rgb");
+
+        mobo_rgb
+            .apply(RgbState::Static {
+                color: RgbColor { r: 3, g: 3, b: 3 },
+            })
+            .await
+            .unwrap();
+
+        let written = mock.written.lock().await;
+        assert_eq!(written.len(), 2, "one write per zone");
+        // 'aux' has 2 LEDs; 'z2' has 3. index 1, byte('a')=97 / byte('z')=122.
+        assert!(written.iter().any(|w| *w == vec![1, 97, 3, 3, 3, 3, 3, 3]));
+        assert!(written
+            .iter()
+            .any(|w| *w == vec![1, 122, 3, 3, 3, 3, 3, 3, 3, 3, 3]));
     }
 }

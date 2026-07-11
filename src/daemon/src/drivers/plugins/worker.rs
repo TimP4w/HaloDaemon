@@ -16,20 +16,78 @@ use tokio::sync::{mpsc, oneshot};
 
 use halod_shared::types::{
     Battery, Boolean, ButtonMapping, ConnectionStatus, Equalizer, OnboardProfiles, PairingStatus,
-    Permission, RgbColor, RgbState, Sensor,
+    Permission, RgbColor, RgbDescriptor, RgbState, RgbZone, Sensor, ZoneTopology,
 };
 
 use super::bytebuf::ByteBuf;
+use super::manifest::topology_from;
 use super::sandbox;
 use super::transport::{AddrScope, PluginIo, RegisterBus};
 use super::transport_api::TransportApi;
 use crate::drivers::transports::smbus::SmBusDevice;
+use crate::drivers::vendors::generic::devices::common::{linear_rgb_zone, ring_led_positions};
 
 /// One accessory the plugin's `detect_accessories` reports.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DetectedAccessory {
     pub channel: u8,
     pub accessory: u8,
+}
+
+/// One RGB zone of a controller an integration plugin's `enumerate_controllers`
+/// reports. Mirrors `manifest::AccessoryManifest`'s topology fields, but comes
+/// from a live callback return rather than the static manifest table.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DetectedControllerZone {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub topology: String,
+    /// Ring count for `topology = "rings"`.
+    #[serde(default)]
+    pub rings: u8,
+    pub led_count: u32,
+}
+
+/// One controller the plugin's `enumerate_controllers` reports — becomes one
+/// top-level `IntegrationLeaf` device (see `mod::integration_leaf`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetectedController {
+    pub index: u32,
+    pub name: String,
+    #[serde(default)]
+    pub zones: Vec<DetectedControllerZone>,
+}
+
+impl DetectedController {
+    /// Build the `RgbDescriptor` an `IntegrationLeaf` advertises, computing LED
+    /// positions from each zone's declared topology + count — the same
+    /// approach `initialize`-reported dynamic zones use (`build_dynamic_descriptor`).
+    pub fn rgb_descriptor(&self) -> RgbDescriptor {
+        let zones = self
+            .zones
+            .iter()
+            .map(|z| {
+                let topology = topology_from(&z.topology, z.rings);
+                if matches!(topology, ZoneTopology::Linear) {
+                    linear_rgb_zone(&z.id, &z.name, z.led_count as usize)
+                } else {
+                    RgbZone {
+                        leds: ring_led_positions(&topology, z.led_count),
+                        id: z.id.clone(),
+                        name: z.name.clone(),
+                        topology,
+                    }
+                }
+            })
+            .collect();
+        RgbDescriptor {
+            zones,
+            native_effects: Vec::new(),
+        }
+    }
 }
 
 /// Identifying context injected into the plugin's `dev.match` table, so a
@@ -144,6 +202,14 @@ pub enum Call {
     DetectAccessories(oneshot::Sender<Result<Vec<DetectedAccessory>>>),
     WriteExtFrame {
         channel: String,
+        colors: Vec<RgbColor>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    // ── integration children ─────────────────────────────────────────────
+    EnumerateControllers(oneshot::Sender<Result<Vec<DetectedController>>>),
+    WriteControllerFrame {
+        index: u32,
+        zone: String,
         colors: Vec<RgbColor>,
         reply: oneshot::Sender<Result<()>>,
     },
@@ -370,6 +436,27 @@ impl PluginHandle {
         .await?
     }
 
+    pub async fn enumerate_controllers(&self) -> Result<Vec<DetectedController>> {
+        self.request(Call::EnumerateControllers).await?
+    }
+
+    pub async fn write_controller_frame(
+        &self,
+        index: u32,
+        zone: &str,
+        colors: &[RgbColor],
+    ) -> Result<()> {
+        let zone = zone.to_owned();
+        let colors = colors.to_vec();
+        self.request(|reply| Call::WriteControllerFrame {
+            index,
+            zone,
+            colors,
+            reply,
+        })
+        .await?
+    }
+
     pub async fn hub_fan_rpm(&self, channel: u8) -> Result<u32> {
         self.request(|reply| Call::HubFanRpm { channel, reply })
             .await?
@@ -583,6 +670,8 @@ struct Callbacks {
     read_status: Option<Function>,
     detect_accessories: Option<Function>,
     write_ext_frame: Option<Function>,
+    enumerate_controllers: Option<Function>,
+    write_controller_frame: Option<Function>,
     fan_rpm: Option<Function>,
     fan_duty: Option<Function>,
     fan_controllable: Option<Function>,
@@ -635,6 +724,8 @@ impl Callbacks {
             read_status: f("read_status"),
             detect_accessories: f("detect_accessories"),
             write_ext_frame: f("write_ext_frame"),
+            enumerate_controllers: f("enumerate_controllers"),
+            write_controller_frame: f("write_controller_frame"),
             fan_rpm: f("fan_rpm"),
             fan_duty: f("fan_duty"),
             fan_controllable: f("fan_controllable"),
@@ -754,6 +845,19 @@ fn worker_main(
                 reply,
             } => {
                 let _ = reply.send(run_write_ext_frame(&lua, &cb, &dev, &channel, &colors));
+            }
+            Call::EnumerateControllers(reply) => {
+                let _ = reply.send(run_enumerate_controllers(&lua, &cb, &dev));
+            }
+            Call::WriteControllerFrame {
+                index,
+                zone,
+                colors,
+                reply,
+            } => {
+                let _ = reply.send(run_write_controller_frame(
+                    &lua, &cb, &dev, index, &zone, &colors,
+                ));
             }
             Call::HubFanRpm { channel, reply } => {
                 let _ = reply.send(call_u32(&cb.fan_rpm, "fan_rpm", &dev, channel));
@@ -1273,6 +1377,40 @@ fn run_write_ext_frame(
         .map_err(|e| lua_err("write_ext_frame arg", e))?;
     f.call::<()>((dev.clone(), channel.to_owned(), colors_v))
         .map_err(|e| lua_err("write_ext_frame", e))
+}
+
+fn run_enumerate_controllers(
+    lua: &Lua,
+    cb: &Callbacks,
+    dev: &Table,
+) -> Result<Vec<DetectedController>> {
+    let Some(f) = &cb.enumerate_controllers else {
+        return Ok(Vec::new());
+    };
+    let value: Value = f
+        .call(dev.clone())
+        .map_err(|e| lua_err("enumerate_controllers", e))?;
+    lua.from_value(value)
+        .map_err(|e| lua_err("enumerate_controllers result", e))
+}
+
+fn run_write_controller_frame(
+    lua: &Lua,
+    cb: &Callbacks,
+    dev: &Table,
+    index: u32,
+    zone: &str,
+    colors: &[RgbColor],
+) -> Result<()> {
+    let f = cb
+        .write_controller_frame
+        .as_ref()
+        .ok_or_else(|| anyhow!("plugin has no write_controller_frame()"))?;
+    let colors_v = lua
+        .to_value(colors)
+        .map_err(|e| lua_err("write_controller_frame arg", e))?;
+    f.call::<()>((dev.clone(), index, zone.to_owned(), colors_v))
+        .map_err(|e| lua_err("write_controller_frame", e))
 }
 
 fn call_u32(f: &Option<Function>, name: &str, dev: &Table, channel: u8) -> Result<u32> {

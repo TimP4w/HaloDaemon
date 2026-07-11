@@ -17,6 +17,8 @@ mod chain_leaf;
 mod device;
 mod effect_worker;
 mod image_api;
+mod integration_leaf;
+mod integration_scan;
 mod manifest;
 mod sandbox;
 mod transport;
@@ -300,6 +302,26 @@ fn permissions_satisfied(manifest: &PluginManifest) -> bool {
     }
     let granted = granted_for(&manifest.plugin_id);
     manifest.permissions.iter().all(|p| granted.contains(p))
+}
+
+/// Every enabled, permission-satisfied `Integration` plugin, for the
+/// integration `TransportScanner` (`integration_scan.rs`) — it has no
+/// `DiscoveryHandle` to match against, so it iterates these directly instead
+/// of going through `match_handle`.
+pub(super) fn integration_manifests() -> Vec<PluginManifest> {
+    PLUGIN_REGISTRY
+        .read()
+        .map(|reg| {
+            reg.iter()
+                .filter(|m| {
+                    m.plugin_type == manifest::PluginType::Integration
+                        && !is_disabled(&m.plugin_id)
+                        && permissions_satisfied(m)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Plugin ids already surfaced via a "needs permission" notification (or
@@ -982,6 +1004,43 @@ mod tests {
     #[test]
     fn config_for_unknown_plugin_is_empty() {
         assert!(config_for("does-not-exist").is_empty());
+    }
+
+    #[test]
+    fn integration_manifests_filters_by_type_disabled_and_permissions() {
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let integ_src = r#"return {
+            identity = { vendor = "x", model = "y" },
+            type = "integration",
+        }"#;
+        let device_src = r#"return {
+            identity = { vendor = "x", model = "y" },
+            match = { transport = "hid", vid = 1, pid = 2 },
+        }"#;
+        let needs_perm_src = r#"return {
+            identity = { vendor = "x", model = "y" },
+            type = "integration",
+            permissions = { "network" },
+        }"#;
+        *PLUGIN_REGISTRY.write().unwrap() = vec![
+            parse_manifest(integ_src, Path::new("integ_ok.lua")).unwrap(),
+            parse_manifest(device_src, Path::new("device_only.lua")).unwrap(),
+            parse_manifest(needs_perm_src, Path::new("integ_needs_perm.lua")).unwrap(),
+        ];
+        set_disabled(&[]);
+        set_granted(&HashMap::new());
+
+        let ids: Vec<String> = integration_manifests()
+            .into_iter()
+            .map(|m| m.plugin_id)
+            .collect();
+        assert_eq!(ids, vec!["integ_ok"]);
+
+        set_disabled(&["integ_ok".to_string()]);
+        assert!(integration_manifests().is_empty());
+
+        set_disabled(&[]);
+        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
     }
 
     #[test]

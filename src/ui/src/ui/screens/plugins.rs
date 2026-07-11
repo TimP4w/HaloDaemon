@@ -704,6 +704,7 @@ fn plugin_type_label(kind: halod_shared::types::PluginKind) -> std::borrow::Cow<
     match kind {
         PluginKind::Device => t!("plugins.type_device"),
         PluginKind::Effect => t!("plugins.type_effect"),
+        PluginKind::Integration => t!("plugins.type_integration"),
     }
 }
 
@@ -712,6 +713,7 @@ fn plugin_type_color(kind: halod_shared::types::PluginKind) -> egui::Color32 {
     match kind {
         PluginKind::Device => theme::STAT_CYAN,
         PluginKind::Effect => theme::STAT_PURPLE,
+        PluginKind::Integration => theme::STAT_GREEN,
     }
 }
 

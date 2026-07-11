@@ -11,6 +11,7 @@ plugins:
   # Detail panel
   type_device: Driver
   type_effect: Effects
+  type_integration: Integration
   author: AUTHOR
   capabilities: CAPABILITIES
   targets: TARGET DEVICES

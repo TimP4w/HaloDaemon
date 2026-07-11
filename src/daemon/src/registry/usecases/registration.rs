@@ -157,6 +157,23 @@ pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bo
     true
 }
 
+/// Register `device`, then — if it's a `Controller` — discover and register
+/// its children too. Shared by every scanner that hosts children (HID hubs,
+/// the plugin-integration scanner): register the parent first so children can
+/// resolve it (e.g. as a `ChainHub`/`FanHub`), then walk `discover_children()`.
+/// Returns whether the parent itself was registered.
+pub async fn register_device_and_children(app: &Arc<AppState>, device: Arc<dyn Device>) -> bool {
+    if !register_device(app, device.clone()).await {
+        return false;
+    }
+    if let Some(ctrl) = device.as_controller() {
+        for child in ctrl.discover_children().await {
+            register_device(app, child).await;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
