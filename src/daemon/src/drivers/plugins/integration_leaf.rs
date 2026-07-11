@@ -3,16 +3,16 @@
 //! controller a config-instantiated integration plugin's `enumerate_controllers`
 //! reports (e.g. one OpenRGB controller). Unlike `ChainLeaf` (which composes
 //! several children into one shared chain frame), each leaf here is addressed
-//! independently by its controller `index`; it holds no transport of its own —
-//! every write routes back to the parent's shared connection.
+//! independently by its controller `index` and owns its own worker (connection
+//! + Lua VM), so writes to different controllers run in parallel and a slow
+//! controller can't stall the others.
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
 
 use halod_shared::types::{DeviceType, RgbColor, RgbDescriptor, RgbState};
 
-use super::device::LuaDevice;
+use super::worker::PluginHandle;
 use crate::drivers::vendors::generic::devices::common::transformed_zone_frame;
 use crate::drivers::{CapabilityRef, Device, RgbCapability, RgbStateSlot, VisibilitySlot};
 
@@ -24,9 +24,8 @@ pub struct IntegrationLeaf {
     rgb_descriptor: RgbDescriptor,
     rgb: RgbStateSlot,
     visibility: VisibilitySlot,
-    /// The integration root; controller children share its worker/connection
-    /// rather than holding a transport of their own.
-    hub: Arc<LuaDevice>,
+    /// This controller's own worker (connection + Lua VM).
+    worker: PluginHandle,
 }
 
 impl IntegrationLeaf {
@@ -36,7 +35,7 @@ impl IntegrationLeaf {
         vendor: String,
         index: u32,
         rgb_descriptor: RgbDescriptor,
-        hub: Arc<LuaDevice>,
+        worker: PluginHandle,
     ) -> Self {
         Self {
             id,
@@ -46,7 +45,7 @@ impl IntegrationLeaf {
             rgb_descriptor,
             rgb: RgbStateSlot::default(),
             visibility: VisibilitySlot::default(),
-            hub,
+            worker,
         }
     }
 
@@ -55,7 +54,7 @@ impl IntegrationLeaf {
             RgbState::Static { color } => {
                 for zone in &self.rgb_descriptor.zones {
                     let colors = vec![*color; zone.leds.len()];
-                    self.hub
+                    self.worker
                         .write_controller_frame(self.index, &zone.id, &colors)
                         .await?;
                 }
@@ -66,7 +65,7 @@ impl IntegrationLeaf {
                         continue;
                     };
                     let colors = transformed_zone_frame(zone, &self.rgb, leds);
-                    self.hub
+                    self.worker
                         .write_controller_frame(self.index, &zone.id, &colors)
                         .await?;
                 }
@@ -97,7 +96,9 @@ impl Device for IntegrationLeaf {
         Ok(true)
     }
 
-    async fn close(&self) {}
+    async fn close(&self) {
+        self.worker.close().await;
+    }
 
     fn wire_device_type(&self) -> DeviceType {
         DeviceType::LedStrip
@@ -131,7 +132,7 @@ impl RgbCapability for IntegrationLeaf {
         if !self.rgb_descriptor.zones.iter().any(|z| z.id == zone_id) {
             anyhow::bail!("unknown zone: {zone_id}");
         }
-        self.hub
+        self.worker
             .write_controller_frame(self.index, zone_id, colors)
             .await
     }

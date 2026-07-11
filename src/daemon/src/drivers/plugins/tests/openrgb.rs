@@ -15,9 +15,10 @@ use tokio::sync::Mutex;
 
 use halod_shared::types::RgbColor;
 
-use super::super::device::LuaDevice;
+use super::super::device::{ChildWorkerFactory, LuaDevice};
 use super::super::parse_manifest;
 use super::super::transport::PluginIo;
+use super::super::worker::{DevMatch, PluginHandle};
 use crate::drivers::transports::tcp::TcpTransport;
 use crate::drivers::Device;
 
@@ -121,11 +122,11 @@ fn controller_data_payload() -> Vec<u8> {
     payload
 }
 
-/// Run the fake server for exactly the packet sequence this test drives:
-/// SetClientName, RequestProtocolVersion, RequestControllerCount,
-/// RequestControllerData(0), then record whatever comes after (SetCustomMode
-/// + UpdateZoneLEDs from the frame write).
-async fn run_fake_server(mut stream: TcpStream, recorder: Arc<Mutex<Vec<Received>>>) {
+/// Root connection: the enumeration handshake only. Each controller now gets
+/// its own connection (see `run_child_server`), so no frame writes arrive here.
+/// Drives SetClientName, RequestProtocolVersion, RequestControllerCount,
+/// RequestControllerData(0), then returns (caller drops the stream).
+async fn run_root_server(mut stream: TcpStream) {
     // SetClientName — no reply.
     let pkt = read_packet(&mut stream).await;
     assert_eq!(pkt.packet_id, 50);
@@ -134,15 +135,13 @@ async fn run_fake_server(mut stream: TcpStream, recorder: Arc<Mutex<Vec<Received
     // RequestProtocolVersion — reply with version 3.
     let pkt = read_packet(&mut stream).await;
     assert_eq!(pkt.packet_id, 40);
-    let reply = header_bytes(0, 40, 4);
-    stream.write_all(&reply).await.unwrap();
+    stream.write_all(&header_bytes(0, 40, 4)).await.unwrap();
     stream.write_all(&3u32.to_le_bytes()).await.unwrap();
 
     // RequestControllerCount — reply with count 1.
     let pkt = read_packet(&mut stream).await;
     assert_eq!(pkt.packet_id, 0);
-    let reply = header_bytes(0, 0, 4);
-    stream.write_all(&reply).await.unwrap();
+    stream.write_all(&header_bytes(0, 0, 4)).await.unwrap();
     stream.write_all(&1u32.to_le_bytes()).await.unwrap();
 
     // RequestControllerData(0) — reply with our one hand-built controller.
@@ -150,9 +149,26 @@ async fn run_fake_server(mut stream: TcpStream, recorder: Arc<Mutex<Vec<Received
     assert_eq!(pkt.packet_id, 1);
     assert_eq!(pkt.device_idx, 0);
     let body = controller_data_payload();
-    let reply = header_bytes(0, 1, body.len() as u32);
-    stream.write_all(&reply).await.unwrap();
+    stream
+        .write_all(&header_bytes(0, 1, body.len() as u32))
+        .await
+        .unwrap();
     stream.write_all(&body).await.unwrap();
+}
+
+/// Per-controller connection: its own SetClientName + RequestProtocolVersion
+/// handshake, then record whatever comes after (SetCustomMode + UpdateZoneLEDs
+/// from the frame writes).
+async fn run_child_server(mut stream: TcpStream, recorder: Arc<Mutex<Vec<Received>>>) {
+    // SetClientName — no reply.
+    let pkt = read_packet(&mut stream).await;
+    assert_eq!(pkt.packet_id, 50);
+
+    // RequestProtocolVersion — reply with version 3.
+    let pkt = read_packet(&mut stream).await;
+    assert_eq!(pkt.packet_id, 40);
+    stream.write_all(&header_bytes(0, 40, 4)).await.unwrap();
+    stream.write_all(&3u32.to_le_bytes()).await.unwrap();
 
     // Whatever comes next (SetCustomMode, UpdateZoneLEDs) — just record it.
     loop {
@@ -182,15 +198,46 @@ async fn openrgb_plugin_enumerates_and_writes_a_frame_end_to_end() {
 
     let recorder = Arc::new(Mutex::new(Vec::new()));
     let server_recorder = recorder.clone();
+    // The root connects first (enumeration), then the one controller opens its
+    // own connection for the frame writes.
     let server_task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        run_fake_server(stream, server_recorder).await;
+        let (root, _) = listener.accept().await.unwrap();
+        run_root_server(root).await;
+        let (child, _) = listener.accept().await.unwrap();
+        run_child_server(child, server_recorder).await;
     });
 
     let manifest = parse_manifest(OPENRGB_SRC, std::path::Path::new("openrgb.lua")).unwrap();
     let client = TcpTransport::connect(&addr.ip().to_string(), addr.port(), 2000)
         .await
         .unwrap();
+
+    // Each controller child opens its own connection to the same fake server.
+    // The child worker needs the plugin's declared permissions (`os` backs the
+    // throttle's wall clock), so grant them exactly as the real host would.
+    let child_ip = addr.ip().to_string();
+    let child_port = addr.port();
+    let child_source = manifest.script_source.clone();
+    let child_granted = super::super::granted_for(&manifest.plugin_id);
+    let child_handle = tokio::runtime::Handle::current();
+    let child_worker: ChildWorkerFactory = Arc::new(move || {
+        let transport = TcpTransport::connect_blocking(&child_ip, child_port, 2000)?;
+        Ok(PluginHandle::spawn(
+            child_source.clone(),
+            PluginIo::Stream {
+                transport: Arc::new(transport),
+                bulk: None,
+            },
+            DevMatch {
+                transport: "tcp".to_owned(),
+                ..Default::default()
+            },
+            child_granted.clone(),
+            std::collections::HashMap::new(),
+            child_handle.clone(),
+        ))
+    });
+
     let dev = Arc::new_cyclic(|weak| {
         let mut d = LuaDevice::integration_root(
             "openrgb-0".into(),
@@ -199,6 +246,7 @@ async fn openrgb_plugin_enumerates_and_writes_a_frame_end_to_end() {
                 transport: Arc::new(client),
                 bulk: None,
             },
+            child_worker,
             tokio::runtime::Handle::current(),
         );
         d.set_self_ref(weak.clone());

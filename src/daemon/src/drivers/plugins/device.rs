@@ -47,6 +47,13 @@ use crate::drivers::vendors::generic::devices::common::{
 };
 use halod_shared::types::ZoneTopology;
 
+/// Spawns a fresh worker (its own connection + Lua VM) for one integration
+/// child. Injectable so tests can back it with a mock transport instead of a
+/// real socket. Each OpenRGB controller gets its own worker, so writes to
+/// different controllers run in parallel rather than serializing behind one
+/// shared connection.
+pub(super) type ChildWorkerFactory = Arc<dyn Fn() -> Result<PluginHandle> + Send + Sync>;
+
 /// A device whose behaviour is defined by a plugin script rather than native
 /// Rust.
 pub struct LuaDevice {
@@ -61,6 +68,8 @@ pub struct LuaDevice {
     dynamic_model: OnceLock<String>,
     worker: Option<PluginHandle>,
     transport: Option<PluginIo>,
+    /// For integration roots only: spawns a per-controller child worker.
+    integration_child_worker: Option<ChildWorkerFactory>,
 
     has_rgb: bool,
     has_fan: bool,
@@ -171,13 +180,16 @@ impl LuaDevice {
         id: String,
         manifest: &PluginManifest,
         transport: PluginIo,
+        child_worker: ChildWorkerFactory,
         handle: tokio::runtime::Handle,
     ) -> Self {
         let dev_match = DevMatch {
             transport: "tcp".to_owned(),
             ..Default::default()
         };
-        Self::with_worker(id, manifest, None, dev_match, transport, handle)
+        let mut dev = Self::with_worker(id, manifest, None, dev_match, transport, handle);
+        dev.integration_child_worker = Some(child_worker);
+        dev
     }
 
     fn with_worker(
@@ -254,6 +266,7 @@ impl LuaDevice {
             dynamic_model: OnceLock::new(),
             worker,
             transport,
+            integration_child_worker: None,
             has_rgb: manifest.rgb.is_some(),
             has_fan: manifest.fan.is_some(),
             has_sensor: manifest.sensor.is_some(),
@@ -709,9 +722,10 @@ impl LuaDevice {
     }
 
     /// Integration path: one `IntegrationLeaf` per controller the plugin's
-    /// `enumerate_controllers` reports. Unlike the chain path, these children
-    /// share the root's connection directly (see `IntegrationHub`) rather than
-    /// composing into one `ChainHost` frame.
+    /// `enumerate_controllers` reports. Each controller gets its own worker
+    /// (connection + Lua VM) via the injected child-worker factory, so writes
+    /// to different controllers run in parallel instead of serializing behind
+    /// one shared connection.
     async fn discover_controllers(&self) -> Vec<Arc<dyn Device>> {
         let Some(worker) = &self.worker else {
             return Vec::new();
@@ -723,46 +737,58 @@ impl LuaDevice {
                 return Vec::new();
             }
         };
-        let Some(parent) = self.self_ref.upgrade() else {
+        let Some(factory) = self.integration_child_worker.clone() else {
+            log::error!(
+                "plugin '{}': integration root has no child-worker factory — this is a daemon bug",
+                self.plugin_id
+            );
             return Vec::new();
         };
 
         let mut out = Vec::new();
         for controller in detected {
+            // Open a fresh connection + worker for this controller. The connect
+            // can block for the transport's timeout, so run it off the runtime.
+            let factory = factory.clone();
+            let child = match tokio::task::spawn_blocking(move || factory()).await {
+                Ok(Ok(w)) => w,
+                Ok(Err(e)) => {
+                    log::warn!(
+                        "plugin '{}' controller {} connect failed: {e:#}",
+                        self.plugin_id,
+                        controller.index
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "plugin '{}' controller {} connect task panicked: {e}",
+                        self.plugin_id,
+                        controller.index
+                    );
+                    continue;
+                }
+            };
+            if let Err(e) = child.initialize().await {
+                log::warn!(
+                    "plugin '{}' controller {} init failed: {e:#}",
+                    self.plugin_id,
+                    controller.index
+                );
+                child.close().await;
+                continue;
+            }
             let leaf: Arc<dyn Device> = Arc::new(IntegrationLeaf::new(
                 format!("{}_ctrl_{}", self.id, controller.index),
                 controller.name.clone(),
                 self.vendor.clone(),
                 controller.index,
                 controller.rgb_descriptor(),
-                parent.clone(),
+                child,
             ));
-            if let Err(e) = leaf.initialize().await {
-                log::warn!(
-                    "plugin '{}' controller child init failed: {e:#}",
-                    self.plugin_id
-                );
-                continue;
-            }
             out.push(leaf);
         }
         out
-    }
-}
-
-impl LuaDevice {
-    /// Route an integration child's RGB frame through the shared worker. Called
-    /// by [`IntegrationLeaf`] — the root's controller children share its
-    /// connection rather than holding transports of their own.
-    pub(super) async fn write_controller_frame(
-        &self,
-        index: u32,
-        zone: &str,
-        colors: &[RgbColor],
-    ) -> Result<()> {
-        self.worker()?
-            .write_controller_frame(index, zone, colors)
-            .await
     }
 }
 
@@ -2084,6 +2110,27 @@ mod tests {
     fn integration_device(transport: Arc<dyn Transport>) -> Arc<LuaDevice> {
         let manifest =
             super::super::parse_manifest(INTEGRATION_SCRIPT, Path::new("integ.lua")).unwrap();
+        // Every controller child spawns its own worker over the same mock
+        // transport (a real integration opens a fresh socket per controller).
+        let child_source = manifest.script_source.clone();
+        let child_transport = transport.clone();
+        let child_handle = tokio::runtime::Handle::current();
+        let child_worker: ChildWorkerFactory = Arc::new(move || {
+            Ok(PluginHandle::spawn(
+                child_source.clone(),
+                PluginIo::Stream {
+                    transport: child_transport.clone(),
+                    bulk: None,
+                },
+                DevMatch {
+                    transport: "tcp".to_owned(),
+                    ..Default::default()
+                },
+                Vec::new(),
+                HashMap::new(),
+                child_handle.clone(),
+            ))
+        });
         Arc::new_cyclic(|weak| {
             let mut d = LuaDevice::integration_root(
                 "integ-0".into(),
@@ -2092,6 +2139,7 @@ mod tests {
                     transport,
                     bulk: None,
                 },
+                child_worker,
                 tokio::runtime::Handle::current(),
             );
             d.set_self_ref(weak.clone());
@@ -2202,5 +2250,29 @@ mod tests {
         assert!(written
             .iter()
             .any(|w| *w == vec![1, 122, 3, 3, 3, 3, 3, 3, 3, 3, 3]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integration_leaf_close_shuts_down_only_its_own_worker() {
+        // Each controller owns its own worker/connection, so closing one leaf
+        // must not disturb its siblings — this is what lets writes to different
+        // controllers run in parallel instead of sharing one serial worker.
+        let dev = integration_device(Arc::new(MockTransport::empty()));
+        let children = dev.as_controller().unwrap().discover_children().await;
+
+        children[0].close().await;
+        // The closed child's worker is gone: a write now errors.
+        let keyboard = children[0].as_rgb().expect("has rgb");
+        assert!(keyboard
+            .write_frame("main", &[RgbColor { r: 1, g: 1, b: 1 }; 4])
+            .await
+            .is_err());
+
+        // A sibling still has a live worker of its own.
+        let mobo = children[1].as_rgb().expect("has rgb");
+        assert!(mobo
+            .write_frame("z2", &[RgbColor { r: 2, g: 2, b: 2 }; 3])
+            .await
+            .is_ok());
     }
 }

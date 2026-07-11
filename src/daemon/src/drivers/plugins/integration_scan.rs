@@ -8,13 +8,16 @@
 
 use std::sync::Arc;
 
+use anyhow::Result;
+
 use crate::registry::discovery::{DiscoveryHandle, TransportScanner};
 use crate::registry::usecases::registration::register_device_and_children;
 use crate::state::AppState;
 
-use super::device::LuaDevice;
+use super::device::{ChildWorkerFactory, LuaDevice};
 use super::manifest::PluginManifest;
 use super::transport::PluginIo;
+use super::worker::{DevMatch, PluginHandle};
 use super::{granted_for, resolved_config_for};
 
 /// Sanitize a config value for use in a device id: keep it stable and
@@ -76,28 +79,27 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
         return;
     }
 
-    // The connect can block for the plugin's full timeout (default 5s) — run
-    // it on a blocking-pool thread so a slow/unreachable server only stalls
-    // this one scanner pass, not the whole async runtime.
+    // Opens one fresh connection to the configured server. A real connect can
+    // block for the transport's timeout, so callers run it off the async runtime.
     let open_manifest = manifest.clone();
     let open_config = config.clone();
-    let opened = tokio::task::spawn_blocking(move || {
-        super::transport::descriptor_for("tcp")
-            .map(|d| (d.open)(&open_manifest, &placeholder_handle(), &open_config))
-    })
-    .await;
+    let open_transport: Arc<dyn Fn() -> Result<PluginIo> + Send + Sync> =
+        Arc::new(move || match super::transport::descriptor_for("tcp") {
+            Some(d) => (d.open)(&open_manifest, &placeholder_handle(), &open_config),
+            None => anyhow::bail!("integration plugin: no 'tcp' transport backend registered"),
+        });
 
-    let transport: PluginIo = match opened {
-        Ok(Some(Ok(t))) => t,
-        Ok(Some(Err(e))) => {
+    // The root connection is used only to enumerate controllers; each controller
+    // then gets its own connection + worker (see `discover_controllers`), so a
+    // slow controller can't head-of-line-block the others.
+    let root_open = open_transport.clone();
+    let transport: PluginIo = match tokio::task::spawn_blocking(move || root_open()).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
             log::warn!(
                 "integration plugin '{}' connect failed: {e:#}",
                 manifest.plugin_id
             );
-            return;
-        }
-        Ok(None) => {
-            log::error!("integration plugin '{}': no 'tcp' transport backend registered — this is a daemon bug", manifest.plugin_id);
             return;
         }
         Err(e) => {
@@ -109,8 +111,27 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
         }
     };
 
-    let device = Arc::new_cyclic(|weak| {
-        let mut dev = LuaDevice::integration_root(id, &manifest, transport, runtime);
+    let child_source = manifest.script_source.clone();
+    let child_granted = granted.clone();
+    let child_config = config.clone();
+    let child_runtime = runtime.clone();
+    let child_worker: ChildWorkerFactory = Arc::new(move || {
+        let transport = open_transport()?;
+        Ok(PluginHandle::spawn(
+            child_source.clone(),
+            transport,
+            DevMatch {
+                transport: "tcp".to_owned(),
+                ..Default::default()
+            },
+            child_granted.clone(),
+            child_config.clone(),
+            child_runtime.clone(),
+        ))
+    });
+
+    let device = Arc::new_cyclic(move |weak| {
+        let mut dev = LuaDevice::integration_root(id, &manifest, transport, child_worker, runtime);
         dev.set_self_ref(weak.clone());
         dev
     });
