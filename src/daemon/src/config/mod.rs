@@ -47,6 +47,7 @@ pub fn load() -> Result<Config> {
         plugin_permissions: plugins.granted,
         plugin_config: plugins.config,
         integrations_disabled: plugins.integrations_disabled,
+        plugin_acknowledged: plugins.acknowledged,
     })
 }
 
@@ -80,6 +81,7 @@ pub fn save(cfg: &Config) -> Result<()> {
             granted: cfg.plugin_permissions.clone(),
             config: cfg.plugin_config.clone(),
             integrations_disabled: cfg.integrations_disabled.clone(),
+            acknowledged: cfg.plugin_acknowledged.clone(),
         })?,
     )?;
     save_profiles(&cfg.profiles)?;
@@ -306,6 +308,11 @@ struct PluginsFile {
     /// all). Everything present-and-not-listed is active.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     integrations_disabled: Vec<String>,
+    /// Content hash (hex SHA-256) of the exact script the user consented to,
+    /// per plugin id. A plugin whose current script hashes differently is
+    /// treated as not-yet-consented and stays inert until re-acknowledged.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    acknowledged: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,6 +353,10 @@ pub struct Config {
     /// independent of `plugins_disabled`. See `PluginsFile::integrations_disabled`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub integrations_disabled: Vec<String>,
+    /// Content hash (hex SHA-256) of the script the user consented to, per
+    /// plugin id. See `PluginsFile::acknowledged`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub plugin_acknowledged: HashMap<String, String>,
 }
 
 fn default_profile_name() -> String {
@@ -369,6 +380,7 @@ impl Default for Config {
             plugin_permissions: HashMap::new(),
             plugin_config: HashMap::new(),
             integrations_disabled: Vec::new(),
+            plugin_acknowledged: HashMap::new(),
         }
     }
 }
@@ -465,6 +477,8 @@ mod tests {
             "openrgb".into(),
             HashMap::from([("host".to_string(), "127.0.0.1".to_string())]),
         );
+        cfg.plugin_acknowledged
+            .insert("wled_udp".into(), "abc123".into());
 
         save(&cfg).unwrap();
         let reloaded = load().unwrap();
@@ -473,6 +487,10 @@ mod tests {
         assert_eq!(
             reloaded.plugin_permissions.get("wled_udp"),
             Some(&vec![Permission::Network])
+        );
+        assert_eq!(
+            reloaded.plugin_acknowledged.get("wled_udp"),
+            Some(&"abc123".to_string())
         );
         assert_eq!(
             reloaded

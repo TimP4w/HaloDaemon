@@ -12,9 +12,11 @@ use halod_shared::types::{
     EffectParamDescriptor, NativeEffect, Permission, RangeDisplay, RgbDescriptor, RgbZone,
     ZoneTopology,
 };
-use mlua::{DeserializeOptions, Lua, LuaSerdeExt};
+use mlua::{DeserializeOptions, HookTriggers, Lua, LuaSerdeExt, VmState};
 use serde::Deserialize;
+use std::cell::Cell;
 use std::path::Path;
+use std::rc::Rc;
 
 use super::transport::{descriptor_for, known_kinds};
 use crate::drivers::transports::smbus::{PciMatch, SmbusBusKind};
@@ -697,6 +699,14 @@ impl PluginManifest {
         self.match_specs.iter().find(|s| s.matches(handle))
     }
 
+    /// Hex SHA-256 of the exact script source. Consent is pinned to this, so an
+    /// edited script no longer matches the hash the user acknowledged.
+    pub fn content_hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.script_source.as_bytes());
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
     /// SMBus specs that request a bus scan (all SMBus specs declare addresses).
     pub fn smbus_specs(&self) -> impl Iterator<Item = &MatchSpec> {
         self.match_specs.iter().filter(|s| s.bus_kind().is_some())
@@ -854,6 +864,36 @@ impl PluginManifest {
 }
 
 /// Parse (and validate) a plugin script's manifest. Does not register it.
+/// Cap on the throwaway parse VM's heap (8 MiB) — a manifest is small
+/// declarative data, so this only bites a script trying to exhaust memory
+/// before it ever gets consent.
+const MANIFEST_MEMORY_LIMIT: usize = 8 * 1024 * 1024;
+
+/// Instruction budget for evaluating a manifest. Ample for the declarative
+/// table plus any trivial helper definitions, but bounds a top-level
+/// `while true do end` from hanging daemon load.
+const MANIFEST_INSTRUCTION_BUDGET: u64 = 5_000_000;
+
+/// Error the parse VM once it burns through `MANIFEST_INSTRUCTION_BUDGET`, so a
+/// runaway top-level body can't hang `load_all`.
+fn install_parse_budget_hook(lua: &Lua) {
+    const STEP: u64 = 10_000;
+    let counter = Rc::new(Cell::new(0u64));
+    lua.set_hook(
+        HookTriggers::new().every_nth_instruction(STEP as u32),
+        move |_, _| {
+            let n = counter.get().saturating_add(STEP);
+            counter.set(n);
+            if n > MANIFEST_INSTRUCTION_BUDGET {
+                return Err(mlua::Error::RuntimeError(
+                    "plugin manifest exceeded its evaluation budget".into(),
+                ));
+            }
+            Ok(VmState::Continue)
+        },
+    );
+}
+
 pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
     let plugin_id = path
         .file_stem()
@@ -862,6 +902,12 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         .ok_or_else(|| anyhow!("plugin path has no file stem: {}", path.display()))?;
 
     let lua = Lua::new();
+    // Reading the manifest evaluates the whole script, so strip the same escape
+    // hatches the runtime sandbox does and bound its work — a dropped-in file
+    // must not run `os`/`io`/`require` or hang the daemon before consent.
+    super::sandbox::strip_escape_hatches(&lua).map_err(|e| anyhow!("sandbox setup failed: {e}"))?;
+    let _ = lua.set_memory_limit(MANIFEST_MEMORY_LIMIT);
+    install_parse_budget_hook(&lua);
     let value: mlua::Value = lua
         .load(source)
         .eval()
@@ -1031,6 +1077,38 @@ mod tests {
     #[test]
     fn non_table_return_is_error() {
         assert!(parse_manifest("return 42", Path::new("bad.lua")).is_err());
+    }
+
+    #[test]
+    fn parse_vm_has_no_escape_hatches() {
+        // A dropped-in file that tries to run `os`/`io`/`require` at load
+        // time must not reach them — evaluating its manifest errors instead.
+        for hatch in [
+            "os.execute('touch /tmp/pwned')",
+            "io.open('/tmp/x', 'w')",
+            "require('os')",
+        ] {
+            let src = format!(
+                r#"{hatch}
+                   return {{ match = {{ transport = "hid", vid = 1, pid = 2 }},
+                             identity = {{ vendor = "x", model = "y" }} }}"#
+            );
+            assert!(
+                parse_manifest(&src, Path::new("evil.lua")).is_err(),
+                "escape hatch reachable at parse time: {hatch}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_vm_bounds_a_runaway_loop() {
+        let src = r#"while true do end
+                     return { match = { transport = "hid", vid = 1, pid = 2 },
+                              identity = { vendor = "x", model = "y" } }"#;
+        assert!(
+            parse_manifest(src, Path::new("loop.lua")).is_err(),
+            "an infinite top-level loop must be bounded, not hang"
+        );
     }
 
     #[test]

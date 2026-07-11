@@ -26,21 +26,29 @@ plugins:
   # Permessi
   permissions: PERMESSI
   permissions_pending: Questo plugin richiede permessi non ancora concessi, resterà inattivo finché non li concedi.
+  permissions_not_granted_tag: Non concesso
+  permissions_enable_hint: Attivando questo plugin verranno richiesti i permessi sopra elencati.
   permissions_granted: Concesso
   grant: Concedi permessi
-  revoke: Revoca
+  revoke: Revoca e disattiva
   permissions_builtin_note: Integrato — i permessi sono sempre concessi e non possono essere revocati.
   permission_network: Rete
   permission_os: Sistema Operativo
   permission_secure_storage: Archiviazione sicura
+  permission_network_desc: Apre connessioni di rete (es. a un SDK/server locale). Uno script malevolo potrebbe inviare dati fuori da questo computer.
+  permission_os_desc: Legge il clock di sistema (os.time / os.clock). Basso rischio - nessun accesso a file o processi viene mai concesso.
+  permission_secure_storage_desc: Legge i valori segreti salvati di questo plugin (es. un token API) in chiaro durante l'esecuzione.
   # Campi di configurazione
   settings: IMPOSTAZIONI
   save_settings: Salva
   secret_set_hint: (un segreto è memorizzato)
-  # Finestra di consenso permessi (mostrata subito dopo l'importazione di un plugin che richiede permessi)
-  consent_title: Richiesta di permessi
-  consent_body: "%{name} richiede i seguenti permessi per funzionare:"
-  consent_warning: Concedi i permessi solo a plugin di cui ti fidi — uno script con accesso a Rete o Sistema Operativo potrebbe inviare dati fuori da questo computer o leggere il clock di sistema. Puoi revocare l'accesso in qualsiasi momento da questa schermata.
+  # Finestra di consenso permessi (mostrata quando si attiva un plugin che richiede permessi)
+  consent_title: Concedi permessi
+  consent_body: "%{name} richiede quanto segue per funzionare."
+  consent_warning: I permessi sono concessi come pacchetto. Puoi revocarli in qualsiasi momento — il che disattiva il plugin.
+  consent_modified: Lo script di questo plugin è cambiato dall'ultima autorizzazione — rivedi di nuovo i permessi.
+  consent_grant_enable: Concedi e attiva
+  consent_cancel: Annulla
   consent_deny: Non ora
   # Finestra di aggiunta
   add_title: Aggiungi un plugin

@@ -26,21 +26,29 @@ plugins:
   # Permissions
   permissions: PERMISSIONS
   permissions_pending: This plugin needs permissions you haven't granted yet — it stays inactive until you decide.
+  permissions_not_granted_tag: Not granted
+  permissions_enable_hint: Enabling this plugin will request the permissions above.
   permissions_granted: Granted
   grant: Grant permissions
-  revoke: Revoke
+  revoke: Revoke & disable
   permissions_builtin_note: Built-in — permissions are always granted and can't be revoked.
   permission_network: Network
   permission_os: OS
   permission_secure_storage: Secure storage
+  permission_network_desc: Opens network connections (e.g. to a local SDK/server). A malicious script could send data off this machine.
+  permission_os_desc: Reads the system clock (os.time / os.clock). Low risk - no file or process access is ever granted.
+  permission_secure_storage_desc: Reads this plugin's own saved secret values (e.g. an API token) in clear text while it runs.
   # Config fields
   settings: SETTINGS
   save_settings: Save
   secret_set_hint: (a secret is stored)
-  # Permission consent dialog (shown right after importing a plugin that declares permissions)
-  consent_title: Permission request
-  consent_body: "%{name} requires the following permissions to work:"
-  consent_warning: Only grant permissions to plugins you trust - a script with Network or OS access could send data off this machine or read the system clock. You can revoke access at any time from this screen.
+  # Permission consent dialog (shown when enabling a plugin that declares permissions)
+  consent_title: Grant permissions
+  consent_body: "%{name} needs the following to run."
+  consent_warning: Permissions are granted as a package. You can revoke them anytime — which disables the plugin.
+  consent_modified: This plugin's script changed since you last allowed it — review the permissions again.
+  consent_grant_enable: Grant & enable
+  consent_cancel: Cancel
   consent_deny: Not now
   # Add dialog
   add_title: Add a plugin

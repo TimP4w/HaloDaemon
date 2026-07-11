@@ -164,11 +164,8 @@ impl PluginsUi {
                         match list_row(ui, p, selected) {
                             RowAction::Select => self.selected = Some(p.id.clone()),
                             RowAction::Toggle => {
-                                crate::domain::actions::plugins::set_plugin_enabled(
-                                    cmd,
-                                    p.id.clone(),
-                                    !p.enabled,
-                                );
+                                self.pending_consent =
+                                    request_toggle(cmd, p, self.pending_consent.take())
                             }
                             RowAction::None => {}
                         }
@@ -196,7 +193,15 @@ impl PluginsUi {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                widgets::card(ui, |ui| detail_body(ui, p, cmd, &mut self.pending_delete));
+                widgets::card(ui, |ui| {
+                    detail_body(
+                        ui,
+                        p,
+                        cmd,
+                        &mut self.pending_delete,
+                        &mut self.pending_consent,
+                    )
+                });
             });
     }
 
@@ -321,9 +326,10 @@ impl PluginsUi {
         }
     }
 
-    /// Consent prompt shown the moment a freshly-imported plugin declares
-    /// permissions. Grant accepts them; Deny leaves the plugin installed but
-    /// inert; Remove deletes the script outright.
+    /// Grant-permission prompt: shown when the user turns on a plugin that
+    /// declares permissions (or right after importing one). Lists each
+    /// permission with what it lets the plugin do; "Grant & Enable" accepts and
+    /// activates, "Cancel" leaves the plugin installed but off.
     fn consent_modal(&mut self, ctx: &egui::Context, state: &AppState, cmd: &CommandTx) {
         let Some(id) = self.pending_consent.clone() else {
             return;
@@ -334,8 +340,7 @@ impl PluginsUi {
         };
 
         let mut grant = false;
-        let mut deny = false;
-        let mut remove = false;
+        let mut cancel = false;
         let dismissed = widgets::dialog(
             ctx,
             "plugin_consent",
@@ -347,14 +352,20 @@ impl PluginsUi {
                         .font(theme::body(12.5))
                         .color(theme::TEXT_DIM),
                 );
-                ui.add_space(10.0);
-                ui.horizontal_wrapped(|ui| {
-                    for perm in &p.declared_permissions {
-                        let _ =
-                            widgets::chip_colored(ui, &permission_label(*perm), theme::STAT_AMBER);
-                    }
-                });
-                ui.add_space(10.0);
+                if p.content_changed {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(t!("plugins.consent_modified"))
+                            .font(theme::body(11.5))
+                            .color(theme::STAT_AMBER),
+                    );
+                }
+                ui.add_space(12.0);
+                for perm in &p.declared_permissions {
+                    permission_card(ui, *perm);
+                    ui.add_space(8.0);
+                }
+                ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new(t!("plugins.consent_warning"))
                         .font(theme::body(11.5))
@@ -364,9 +375,9 @@ impl PluginsUi {
             |ui| {
                 if widgets::button(
                     ui,
-                    &t!("plugins.grant"),
+                    &t!("plugins.consent_grant_enable"),
                     ButtonKind::Primary,
-                    Vec2::new(150.0, 34.0),
+                    Vec2::new(170.0, 34.0),
                 )
                 .clicked()
                 {
@@ -374,38 +385,25 @@ impl PluginsUi {
                 }
                 if widgets::button(
                     ui,
-                    &t!("plugins.consent_deny"),
+                    &t!("plugins.consent_cancel"),
                     ButtonKind::Ghost,
-                    Vec2::new(90.0, 34.0),
+                    Vec2::new(100.0, 34.0),
                 )
                 .clicked()
                 {
-                    deny = true;
-                }
-                if widgets::button(
-                    ui,
-                    &t!("plugins.delete"),
-                    ButtonKind::Danger,
-                    Vec2::new(120.0, 34.0),
-                )
-                .clicked()
-                {
-                    remove = true;
+                    cancel = true;
                 }
             },
         );
 
         if grant {
-            crate::domain::actions::plugins::grant_plugin_permissions(
+            crate::domain::actions::plugins::grant_and_enable(
                 cmd,
                 id,
                 p.declared_permissions.clone(),
             );
             self.pending_consent = None;
-        } else if remove {
-            crate::domain::actions::plugins::delete_plugin(cmd, id);
-            self.pending_consent = None;
-        } else if deny || dismissed {
+        } else if cancel || dismissed {
             self.pending_consent = None;
         }
     }
@@ -449,23 +447,64 @@ enum RowAction {
     Toggle,
 }
 
-/// True when `p` declares at least one permission it hasn't been granted —
-/// it stays inert regardless of its enable/disable toggle until resolved.
-/// Shared with the Integrations screen, whose integrations are plugins too.
+/// True when `p` declares permissions the user hasn't consented to (never
+/// granted, or the script changed since it was granted). It stays inert until
+/// the user grants them. Shared with the Integrations screen, whose
+/// integrations are plugins too.
 pub(crate) fn plugin_needs_permission(p: &PluginInfo) -> bool {
-    !p.declared_permissions.is_empty() && !permissions_satisfied(p)
+    !p.declared_permissions.is_empty() && !p.consented
 }
 
-/// True when the plugin is actually running: toggled on AND (if it declares
-/// any) every permission granted.
+/// True when the plugin is actually running: toggled on AND consent-satisfied
+/// (a permissioned plugin needs its grant; a permission-free one always is).
 fn plugin_active(p: &PluginInfo) -> bool {
-    p.enabled && !plugin_needs_permission(p)
+    p.enabled && p.consented
+}
+
+/// What a toggle click should do, given the plugin's current state.
+#[derive(Debug, PartialEq, Eq)]
+enum ToggleDecision {
+    /// Active → turn it off.
+    Disable,
+    /// Off and consent-satisfied → turn it on.
+    Enable,
+    /// Off and declares ungranted permissions → open the grant modal first.
+    NeedsConsent,
+}
+
+/// Pure toggle logic: an active plugin turns off; a permission-free (or already
+/// granted) one turns on; one needing permission must be granted first.
+fn toggle_decision(p: &PluginInfo) -> ToggleDecision {
+    if plugin_active(p) {
+        ToggleDecision::Disable
+    } else if plugin_needs_permission(p) {
+        ToggleDecision::NeedsConsent
+    } else {
+        ToggleDecision::Enable
+    }
+}
+
+/// Apply a toggle click through the consent gate. Enabling/disabling dispatches
+/// immediately; a plugin needing permission returns its id as the new
+/// `pending_consent` so the grant modal opens instead. Returns the
+/// `pending_consent` to keep.
+fn request_toggle(cmd: &CommandTx, p: &PluginInfo, pending: Option<String>) -> Option<String> {
+    use crate::domain::actions::plugins::set_plugin_enabled;
+    match toggle_decision(p) {
+        ToggleDecision::Disable => {
+            set_plugin_enabled(cmd, p.id.clone(), false);
+            pending
+        }
+        ToggleDecision::Enable => {
+            set_plugin_enabled(cmd, p.id.clone(), true);
+            pending
+        }
+        ToggleDecision::NeedsConsent => Some(p.id.clone()),
+    }
 }
 
 fn status_dot(p: &PluginInfo) -> egui::Color32 {
-    if plugin_needs_permission(p) {
-        theme::STAT_AMBER
-    } else if plugin_active(p) {
+    if plugin_active(p) {
         theme::ONLINE
     } else {
         theme::TEXT_FAINT2
@@ -511,7 +550,9 @@ fn list_row(ui: &mut egui::Ui, p: &PluginInfo, selected: bool) -> RowAction {
         ui.id().with(("plugin_toggle", &p.id)),
         Sense::click(),
     );
-    let t = ui.ctx().animate_bool_with_time(tresp.id, p.enabled, 0.15);
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(tresp.id, plugin_active(p), 0.15);
     widgets::paint_toggle(ui.painter(), toggle_rect, t);
     if tresp.hovered() || resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -549,6 +590,7 @@ fn detail_body(
     p: &PluginInfo,
     cmd: &CommandTx,
     pending_delete: &mut Option<String>,
+    pending_consent: &mut Option<String>,
 ) {
     egui::Sides::new().show(
         ui,
@@ -609,30 +651,15 @@ fn detail_body(
         );
     }
 
-    if p.plugin_type == halod_shared::types::PluginKind::Device {
-        if !p.capabilities.is_empty() {
-            ui.add_space(16.0);
-            widgets::caps_label(ui, &t!("plugins.capabilities"));
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                for c in &p.capabilities {
-                    widgets::chip(ui, c);
-                }
-            });
-        }
-
-        if !p.targets.is_empty() {
-            ui.add_space(16.0);
-            widgets::caps_label(ui, &t!("plugins.targets"));
-            ui.add_space(4.0);
-            for target in &p.targets {
-                ui.label(
-                    egui::RichText::new(target)
-                        .font(theme::body(12.0))
-                        .color(theme::TEXT_DIM),
-                );
+    if p.plugin_type == halod_shared::types::PluginKind::Device && !p.capabilities.is_empty() {
+        ui.add_space(16.0);
+        widgets::caps_label(ui, &t!("plugins.capabilities"));
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            for c in &p.capabilities {
+                widgets::chip(ui, c);
             }
-        }
+        });
     }
 
     if !p.effect_names.is_empty() {
@@ -646,27 +673,25 @@ fn detail_body(
         });
     }
 
-    if !p.declared_permissions.is_empty() {
-        ui.add_space(16.0);
-        permissions_section(ui, p, cmd);
-    }
+    targets_permissions_row(ui, p, cmd);
 
     ui.add_space(20.0);
     ui.separator();
     ui.add_space(14.0);
     ui.horizontal(|ui| {
-        let label = if p.enabled {
+        let active = plugin_active(p);
+        let label = if active {
             t!("plugins.disable")
         } else {
             t!("plugins.enable")
         };
-        let kind = if p.enabled {
+        let kind = if active {
             ButtonKind::Ghost
         } else {
             ButtonKind::Primary
         };
         if widgets::button(ui, &label, kind, Vec2::new(120.0, 34.0)).clicked() {
-            crate::domain::actions::plugins::set_plugin_enabled(cmd, p.id.clone(), !p.enabled);
+            *pending_consent = request_toggle(cmd, p, pending_consent.take());
         }
         if p.builtin {
             widgets::caps_label_inline(ui, &t!("plugins.builtin_note"));
@@ -701,21 +726,6 @@ fn plugin_type_color(kind: halod_shared::types::PluginKind) -> egui::Color32 {
     }
 }
 
-/// Whether every permission `p` declares has been granted.
-fn permissions_satisfied(p: &PluginInfo) -> bool {
-    p.declared_permissions
-        .iter()
-        .all(|perm| p.granted_permissions.contains(perm))
-}
-
-/// Whether the Grant/Revoke controls should be interactive: a built-in is
-/// auto-granted its own declared permissions at the daemon level regardless
-/// of what's revoked here (see `drivers::plugins::granted_for`), so a Revoke
-/// button would look like it does something when it never can.
-pub(crate) fn permission_controls_editable(p: &PluginInfo) -> bool {
-    !p.builtin
-}
-
 fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'static, str> {
     use halod_shared::types::Permission;
     match perm {
@@ -725,78 +735,163 @@ fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'
     }
 }
 
-/// Declared permissions + grant/revoke controls. Shared with the
-/// Integrations screen — permissions (network/os) are a plugin-level
-/// concept, not integration-specific.
-pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
-    widgets::caps_label(ui, &t!("plugins.permissions"));
-    ui.add_space(6.0);
-    ui.horizontal_wrapped(|ui| {
-        for perm in &p.declared_permissions {
-            let granted = p.granted_permissions.contains(perm);
-            let color = if granted {
-                theme::ONLINE
-            } else {
-                theme::TEXT_FAINT
-            };
-            let _ = widgets::chip_colored(ui, &permission_label(*perm), color);
+/// One line explaining what a permission lets the plugin do — and the risk —
+/// so the user can make an informed grant decision.
+fn permission_description(perm: halod_shared::types::Permission) -> std::borrow::Cow<'static, str> {
+    use halod_shared::types::Permission;
+    match perm {
+        Permission::Network => t!("plugins.permission_network_desc"),
+        Permission::Os => t!("plugins.permission_os_desc"),
+        Permission::SecureStorage => t!("plugins.permission_secure_storage_desc"),
+    }
+}
+
+/// A colored dot glyph, laid out inline.
+fn dot(ui: &mut egui::Ui, color: egui::Color32) {
+    let (r, _) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
+    ui.painter().circle_filled(r.center(), 3.0, color);
+}
+
+/// One permission as a bullet: a colored dot + mono label, then its
+/// explanation on the next line. `color` marks granted (green) vs requested
+/// (amber) vs faint.
+fn permission_bullet(
+    ui: &mut egui::Ui,
+    perm: halod_shared::types::Permission,
+    color: egui::Color32,
+) {
+    ui.horizontal(|ui| {
+        dot(ui, color);
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new(permission_label(perm))
+                .font(theme::mono(11.0))
+                .color(theme::TEXT),
+        );
+    });
+    ui.label(
+        egui::RichText::new(permission_description(perm))
+            .font(theme::body(11.0))
+            .color(theme::TEXT_MUT),
+    );
+}
+
+/// One permission as a full-width dark card for the grant modal: an amber dot +
+/// mono label, then its explanation.
+fn permission_card(ui: &mut egui::Ui, perm: halod_shared::types::Permission) {
+    egui::Frame::NONE
+        .fill(theme::INNER_BG)
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                dot(ui, theme::STAT_AMBER);
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(permission_label(perm))
+                        .font(theme::mono(12.0))
+                        .color(theme::TEXT),
+                );
+            });
+            ui.add_space(3.0);
+            ui.label(
+                egui::RichText::new(permission_description(perm))
+                    .font(theme::body(11.5))
+                    .color(theme::TEXT_MUT),
+            );
+        });
+}
+
+/// Side-by-side "TARGET DEVICES | PERMISSIONS" row of the detail view. Either
+/// column is omitted when empty.
+fn targets_permissions_row(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
+    let has_targets =
+        p.plugin_type == halod_shared::types::PluginKind::Device && !p.targets.is_empty();
+    let has_perms = !p.declared_permissions.is_empty();
+    if !has_targets && !has_perms {
+        return;
+    }
+    ui.add_space(16.0);
+    ui.columns(2, |cols| {
+        if has_targets {
+            widgets::caps_label(&mut cols[0], &t!("plugins.targets"));
+            cols[0].add_space(6.0);
+            for target in &p.targets {
+                cols[0].label(
+                    egui::RichText::new(target)
+                        .font(theme::body(12.0))
+                        .color(theme::TEXT_DIM),
+                );
+            }
+        }
+        if has_perms {
+            permissions_section(&mut cols[1], p, cmd);
         }
     });
+}
 
-    if !permissions_satisfied(p) {
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new(t!("plugins.permissions_pending"))
-                .font(theme::body(11.5))
-                .color(theme::TEXT_MUT),
-        );
-        ui.add_space(8.0);
-        if widgets::button(
-            ui,
-            &t!("plugins.grant"),
-            ButtonKind::Primary,
-            Vec2::new(160.0, 30.0),
-        )
-        .clicked()
-        {
-            crate::domain::actions::plugins::grant_plugin_permissions(
-                cmd,
-                p.id.clone(),
-                p.declared_permissions.clone(),
-            );
-        }
-    } else {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
+/// Declared permissions as a bulleted list with a granted/not-granted marker,
+/// plus a Revoke control once granted. Grants happen through the enable-time
+/// consent modal, not here. Shared with the Integrations screen.
+pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
+    ui.horizontal(|ui| {
+        widgets::caps_label_inline(ui, &t!("plugins.permissions"));
+        if !p.builtin {
+            let (text, color) = if p.consented {
+                (t!("plugins.permissions_granted"), theme::ONLINE_TEXT)
+            } else {
+                (t!("plugins.permissions_not_granted_tag"), theme::STAT_AMBER)
+            };
             ui.label(
-                egui::RichText::new(t!("plugins.permissions_granted"))
-                    .font(theme::body(11.5))
-                    .color(theme::ONLINE_TEXT),
-            );
-            // A built-in is auto-granted its own declared permissions at the
-            // daemon level regardless of what's revoked here (see
-            // `drivers::plugins::granted_for`) — showing Revoke would look
-            // like it does something when it can never have any effect.
-            if permission_controls_editable(p)
-                && widgets::button(
-                    ui,
-                    &t!("plugins.revoke"),
-                    ButtonKind::Ghost,
-                    Vec2::new(100.0, 26.0),
-                )
-                .clicked()
-            {
-                crate::domain::actions::plugins::revoke_plugin_permissions(cmd, p.id.clone());
-            }
-        });
-        if !permission_controls_editable(p) {
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(t!("plugins.permissions_builtin_note"))
+                egui::RichText::new(text)
                     .font(theme::body(11.0))
-                    .color(theme::TEXT_FAINT),
+                    .color(color),
             );
         }
+    });
+    ui.add_space(6.0);
+
+    for perm in &p.declared_permissions {
+        let color = if p.builtin || p.granted_permissions.contains(perm) {
+            theme::ONLINE
+        } else {
+            theme::STAT_AMBER
+        };
+        permission_bullet(ui, *perm, color);
+        ui.add_space(6.0);
+    }
+
+    if p.builtin {
+        ui.label(
+            egui::RichText::new(t!("plugins.permissions_builtin_note"))
+                .font(theme::body(11.0))
+                .color(theme::TEXT_FAINT),
+        );
+    } else if !p.consented {
+        if p.content_changed {
+            ui.label(
+                egui::RichText::new(t!("plugins.consent_modified"))
+                    .font(theme::body(11.0))
+                    .color(theme::STAT_AMBER),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new(t!("plugins.permissions_enable_hint"))
+                    .font(theme::body(11.0))
+                    .color(theme::TEXT_MUT),
+            );
+        }
+    } else if widgets::button(
+        ui,
+        &t!("plugins.revoke"),
+        ButtonKind::Ghost,
+        Vec2::new(150.0, 28.0),
+    )
+    .clicked()
+    {
+        crate::domain::actions::plugins::revoke_and_disable(cmd, p.id.clone());
     }
 }
 
@@ -836,13 +931,7 @@ fn pending_changes_banner(ui: &mut egui::Ui, cmd: &CommandTx) {
 }
 
 fn status_banner(ui: &mut egui::Ui, p: &PluginInfo) {
-    let (dot, text, color) = if plugin_needs_permission(p) {
-        (
-            theme::STAT_AMBER,
-            t!("plugins.status_needs_permission"),
-            theme::STAT_AMBER,
-        )
-    } else if plugin_active(p) {
+    let (dot, text, color) = if plugin_active(p) {
         (
             theme::ONLINE,
             t!("plugins.status_active"),
@@ -991,6 +1080,8 @@ mod tests {
             config_values: Default::default(),
             secret_set: Default::default(),
             integration_enabled: true,
+            consented: true,
+            content_changed: false,
         }
     }
 
@@ -1037,36 +1128,57 @@ mod tests {
     }
 
     #[test]
-    fn permissions_satisfied_when_no_permissions_declared() {
-        assert!(permissions_satisfied(&info("a", true)));
-    }
-
-    #[test]
-    fn permissions_unsatisfied_until_every_declared_permission_is_granted() {
+    fn needs_permission_only_when_declaring_ungranted_permissions() {
         use halod_shared::types::Permission;
+        // No declared permissions → never needs permission (runs freely).
+        assert!(!plugin_needs_permission(&info("a", true)));
+
+        // Declares a permission but the daemon reports it unconsented.
         let mut p = info("a", true);
-        p.declared_permissions = vec![Permission::Network, Permission::Os];
-        assert!(!permissions_satisfied(&p), "nothing granted yet");
+        p.declared_permissions = vec![Permission::Network];
+        p.consented = false;
+        assert!(plugin_needs_permission(&p));
 
-        p.granted_permissions = vec![Permission::Network];
-        assert!(!permissions_satisfied(&p), "partial grant is not enough");
-
-        p.granted_permissions = vec![Permission::Network, Permission::Os];
-        assert!(permissions_satisfied(&p), "fully granted");
+        // Consented → satisfied.
+        p.consented = true;
+        assert!(!plugin_needs_permission(&p));
     }
 
     #[test]
-    fn permission_controls_are_editable_only_for_non_builtin_plugins() {
-        // A built-in is auto-granted its own declared permissions at the
-        // daemon level regardless of what's revoked in the GUI (see
-        // `drivers::plugins::granted_for`), so the Revoke control must not
-        // be offered — it would look like it does something when it can't.
-        let mut p = info("a", true);
-        p.builtin = false;
-        assert!(permission_controls_editable(&p));
+    fn toggle_decision_routes_through_the_consent_gate() {
+        use halod_shared::types::Permission;
+        // Permission-free, off → straight enable.
+        let mut p = info("a", false);
+        assert_eq!(toggle_decision(&p), ToggleDecision::Enable);
 
-        p.builtin = true;
-        assert!(!permission_controls_editable(&p));
+        // Permission-free, on → disable.
+        p.enabled = true;
+        assert_eq!(toggle_decision(&p), ToggleDecision::Disable);
+
+        // Declares a permission, not yet consented, off → must consent first.
+        let mut q = info("b", false);
+        q.declared_permissions = vec![Permission::Network];
+        q.consented = false;
+        assert_eq!(toggle_decision(&q), ToggleDecision::NeedsConsent);
+
+        // Even "enabled" but unconsented is not active → still needs consent.
+        q.enabled = true;
+        assert_eq!(toggle_decision(&q), ToggleDecision::NeedsConsent);
+
+        // Granted (consented) + enabled → active → disable.
+        q.consented = true;
+        assert_eq!(toggle_decision(&q), ToggleDecision::Disable);
+    }
+
+    #[test]
+    fn plugin_active_requires_enabled_and_consented() {
+        let mut p = info("a", true);
+        assert!(plugin_active(&p));
+        p.consented = false;
+        assert!(!plugin_active(&p), "unconsented is inert even if enabled");
+        p.consented = true;
+        p.enabled = false;
+        assert!(!plugin_active(&p), "disabled is not active");
     }
 
     #[test]

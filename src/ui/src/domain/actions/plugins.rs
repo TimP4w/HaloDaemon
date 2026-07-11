@@ -45,6 +45,20 @@ pub fn revoke_plugin_permissions(cmd: &CommandTx, id: String) {
     );
 }
 
+/// Accept a plugin's consent prompt: grant every permission it declares and
+/// enable it in one step ("Grant & Enable").
+pub fn grant_and_enable(cmd: &CommandTx, id: String, declared: Vec<Permission>) {
+    grant_plugin_permissions(cmd, id.clone(), declared);
+    set_plugin_enabled(cmd, id, true);
+}
+
+/// Revoke a plugin's permissions and disable it in one step, per the consent
+/// model: withdrawing trust also takes the plugin offline.
+pub fn revoke_and_disable(cmd: &CommandTx, id: String) {
+    revoke_plugin_permissions(cmd, id.clone());
+    set_plugin_enabled(cmd, id, false);
+}
+
 pub fn apply_pending_plugin_changes(cmd: &CommandTx) {
     ipc::send(cmd, DaemonCommand::ApplyPendingPluginChanges);
 }

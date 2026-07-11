@@ -577,6 +577,17 @@ pub struct PluginInfo {
     /// plugin, where the field is meaningless.
     #[serde(default = "default_true")]
     pub integration_enabled: bool,
+    /// Whether the user has consented to running this exact script: its content
+    /// hash matches the acknowledged one and every declared permission is
+    /// granted. `false` for a never-acknowledged or since-modified disk plugin
+    /// (which stays inert until re-consented). Always `true` for built-ins.
+    #[serde(default = "default_true")]
+    pub consented: bool,
+    /// Whether the script on disk differs from the version the user last
+    /// consented to (a grant existed but the content hash no longer matches).
+    /// Drives the "this plugin was modified since you allowed it" prompt.
+    #[serde(default)]
+    pub content_changed: bool,
 }
 
 fn default_true() -> bool {

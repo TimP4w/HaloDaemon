@@ -275,6 +275,8 @@ mod tests {
             config_values: Default::default(),
             secret_set: Default::default(),
             integration_enabled,
+            consented: true,
+            content_changed: false,
         }
     }
 
@@ -339,6 +341,7 @@ mod tests {
     fn integration_state_prioritizes_permission_over_connection() {
         let mut p = plugin("openrgb", true, true);
         p.declared_permissions = vec![halod_shared::types::Permission::Network];
+        p.consented = false;
         let status = IntegrationStatus {
             connected: true,
             device_count: 2,

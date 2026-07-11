@@ -27,21 +27,37 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
     Ok(())
 }
 
-/// Replace the set of permissions granted to a plugin and persist the
-/// choice. Staged — see the module docs.
+/// Replace the set of permissions granted to a plugin and persist the choice.
+/// Also records the plugin's current script hash as acknowledged: granting is
+/// an explicit consent to run *this* script, so the plugin activates and stays
+/// active only until its content changes (trust-on-first-use). Staged — see the
+/// module docs.
 pub async fn set_permissions(
     id: String,
     granted: Vec<Permission>,
     app: Arc<AppState>,
 ) -> Result<()> {
+    let hash = crate::drivers::plugins::content_hash_for(&id);
     {
         let mut cfg = app.config.write().await;
         if granted.is_empty() {
+            // Revoke: drop the grant and its content pin, back to pristine.
             cfg.plugin_permissions.remove(&id);
+            cfg.plugin_acknowledged.remove(&id);
         } else {
-            cfg.plugin_permissions.insert(id, granted);
+            cfg.plugin_permissions.insert(id.clone(), granted);
+            // Pin the grant to the exact script the user is consenting to.
+            match hash {
+                Some(h) => {
+                    cfg.plugin_acknowledged.insert(id, h);
+                }
+                None => {
+                    cfg.plugin_acknowledged.remove(&id);
+                }
+            }
         }
         crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
+        crate::drivers::plugins::set_acknowledged(&cfg.plugin_acknowledged);
     }
     app.request_config_save();
     mark_pending_and_broadcast(&app).await;
@@ -185,6 +201,7 @@ async fn reload_registry(app: &Arc<AppState>) {
     let cfg = app.config.read().await;
     crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
     crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
+    crate::drivers::plugins::set_acknowledged(&cfg.plugin_acknowledged);
     crate::drivers::plugins::set_config_values(&cfg.plugin_config);
     crate::drivers::plugins::set_integrations_disabled(&cfg.integrations_disabled);
     crate::drivers::plugins::set_secret_store(app.secret_store.clone());
@@ -311,6 +328,62 @@ mod tests {
         crate::drivers::plugins::load_all(dir.path());
         f().await;
         crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_permissions_records_the_acknowledged_content_hash() {
+        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(|| async {
+                set_permissions("cfgtest".into(), vec![Permission::Network], app.clone())
+                    .await
+                    .unwrap();
+                let expected = crate::drivers::plugins::content_hash_for("cfgtest");
+                assert!(expected.is_some());
+                let cfg = app.config.read().await;
+                assert_eq!(cfg.plugin_acknowledged.get("cfgtest"), expected.as_ref());
+                assert_eq!(
+                    cfg.plugin_permissions.get("cfgtest"),
+                    Some(&vec![Permission::Network])
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn revoking_clears_both_the_grant_and_the_content_pin() {
+        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(|| async {
+                set_permissions("cfgtest".into(), vec![Permission::Network], app.clone())
+                    .await
+                    .unwrap();
+                assert!(app
+                    .config
+                    .read()
+                    .await
+                    .plugin_acknowledged
+                    .contains_key("cfgtest"));
+
+                // Empty grant = revoke: both the grant and its pin are dropped.
+                set_permissions("cfgtest".into(), vec![], app.clone())
+                    .await
+                    .unwrap();
+                let cfg = app.config.read().await;
+                assert!(!cfg.plugin_permissions.contains_key("cfgtest"));
+                assert!(!cfg.plugin_acknowledged.contains_key("cfgtest"));
+            })
+            .await;
+        })
+        .await;
     }
 
     #[tokio::test]

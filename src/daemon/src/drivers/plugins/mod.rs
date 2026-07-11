@@ -243,6 +243,36 @@ pub(crate) fn granted_for(plugin_id: &str) -> Vec<Permission> {
     granted
 }
 
+/// Content hash (hex SHA-256) the user consented to per plugin (from
+/// `config.plugin_acknowledged`). A disk plugin is only consent-satisfied when
+/// its current script hashes to the value here — see `consent_satisfied`.
+static ACKNOWLEDGED: RwLock<Option<HashMap<String, String>>> = RwLock::new(None);
+
+/// Replace the acknowledged-hash map (from `config.plugin_acknowledged`).
+pub fn set_acknowledged(acknowledged: &HashMap<String, String>) {
+    *ACKNOWLEDGED
+        .write()
+        .expect("plugin acknowledged map poisoned") = Some(acknowledged.clone());
+}
+
+/// The content hash the user acknowledged for `plugin_id`, if any.
+fn acknowledged_hash_for(plugin_id: &str) -> Option<String> {
+    ACKNOWLEDGED
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(plugin_id).cloned()))
+}
+
+/// The current on-disk content hash for `plugin_id` from the loaded registry,
+/// for recording an acknowledgment when the user consents. `None` if unknown.
+pub fn content_hash_for(plugin_id: &str) -> Option<String> {
+    PLUGIN_REGISTRY.read().ok().and_then(|reg| {
+        reg.iter()
+            .find(|m| m.plugin_id == plugin_id)
+            .map(|m| m.content_hash())
+    })
+}
+
 /// Non-secure config values the user has set per plugin (from
 /// `config.plugin_config`). Secure values never live here — see the secret
 /// store.
@@ -347,14 +377,21 @@ pub fn secure_config_keys_for(plugin_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// True when every permission `manifest` declares has been granted. A plugin
-/// declaring no permissions is always satisfied (the common case).
-fn permissions_satisfied(manifest: &PluginManifest) -> bool {
-    if manifest.permissions.is_empty() || is_builtin(&manifest.plugin_id) {
+/// True when the plugin may activate. Built-ins ship in the trusted binary; a
+/// plugin declaring no permissions runs freely (it can only talk to its matched
+/// device — the base trust every plugin has). A plugin that *declares*
+/// permissions must have every one granted **and** the grant pinned to the
+/// exact script content the user consented to: editing the script after a grant
+/// revokes consent until it is granted again (trust-on-first-use).
+fn consent_satisfied(manifest: &PluginManifest) -> bool {
+    if is_builtin(&manifest.plugin_id) || manifest.permissions.is_empty() {
         return true;
     }
     let granted = granted_for(&manifest.plugin_id);
-    manifest.permissions.iter().all(|p| granted.contains(p))
+    if !manifest.permissions.iter().all(|p| granted.contains(p)) {
+        return false;
+    }
+    acknowledged_hash_for(&manifest.plugin_id).as_deref() == Some(&manifest.content_hash())
 }
 
 /// Every enabled, permission-satisfied `Integration` plugin, for the
@@ -370,7 +407,7 @@ pub(super) fn integration_manifests() -> Vec<PluginManifest> {
                     m.plugin_type == manifest::PluginType::Integration
                         && !is_disabled(&m.plugin_id)
                         && !is_integration_disabled(&m.plugin_id)
-                        && permissions_satisfied(m)
+                        && consent_satisfied(m)
                 })
                 .cloned()
                 .collect()
@@ -409,7 +446,7 @@ pub fn suppress_permission_notice(plugin_id: &str) {
 fn ungranted_in(manifests: &[PluginManifest], notified: &mut HashSet<String>) -> Vec<String> {
     manifests
         .iter()
-        .filter(|m| !permissions_satisfied(m) && notified.insert(m.plugin_id.clone()))
+        .filter(|m| !consent_satisfied(m) && notified.insert(m.plugin_id.clone()))
         .map(|m| m.display_name().to_owned())
         .collect()
 }
@@ -477,6 +514,9 @@ pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
                 config_values: config_values_for(m),
                 secret_set,
                 integration_enabled: !is_integration_disabled(&m.plugin_id),
+                consented: consent_satisfied(m),
+                content_changed: !is_builtin(&m.plugin_id)
+                    && acknowledged_hash_for(&m.plugin_id).is_some_and(|h| h != m.content_hash()),
             }
         })
         .collect()
@@ -678,7 +718,7 @@ pub fn match_in(
 ) -> Option<Arc<dyn Device>> {
     manifests
         .iter()
-        .filter(|m| !is_disabled(&m.plugin_id) && permissions_satisfied(m))
+        .filter(|m| !is_disabled(&m.plugin_id) && consent_satisfied(m))
         .find_map(|m| m.match_spec_for(handle).map(|spec| (m, spec)))
         .and_then(|(m, spec)| build_device(m, spec, handle))
 }
@@ -695,7 +735,7 @@ pub fn match_handle(handle: &DiscoveryHandle<'_>) -> Option<Arc<dyn Device>> {
         let registry = PLUGIN_REGISTRY.read().ok()?;
         registry
             .iter()
-            .filter(|m| !is_disabled(&m.plugin_id) && permissions_satisfied(m))
+            .filter(|m| !is_disabled(&m.plugin_id) && consent_satisfied(m))
             .find_map(|m| {
                 m.match_spec_for(handle)
                     .map(|spec| (m.clone(), spec.clone()))
@@ -710,7 +750,7 @@ pub fn has_match(handle: &DiscoveryHandle<'_>) -> bool {
     };
     registry
         .iter()
-        .filter(|m| !is_disabled(&m.plugin_id) && permissions_satisfied(m))
+        .filter(|m| !is_disabled(&m.plugin_id) && consent_satisfied(m))
         .any(|m| m.match_spec_for(handle).is_some())
 }
 
@@ -747,6 +787,16 @@ mod tests {
         }
     }
 
+    /// Acknowledge every manifest's current content, as user consent would, so
+    /// `consent_satisfied` treats them as consented. Callers hold `GLOBALS_LOCK`.
+    fn acknowledge(manifests: &[PluginManifest]) {
+        let map = manifests
+            .iter()
+            .map(|m| (m.plugin_id.clone(), m.content_hash()))
+            .collect();
+        set_acknowledged(&map);
+    }
+
     #[test]
     fn matching_handle_builds_device_with_identity() {
         let manifests = vec![manifest()];
@@ -761,6 +811,54 @@ mod tests {
         let manifests = vec![manifest()];
         let dev = match_in(&manifests, &hid(0x1234, 0x5678, None, 3)).expect("matches");
         assert_eq!(dev.id(), "acme_k1-3");
+    }
+
+    #[test]
+    fn granted_permission_is_pinned_to_script_content() {
+        // A permissioned plugin activates only while its granted content pin
+        // matches the current script; editing the script revokes consent.
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let src = r#"
+            return {
+              match = { transport = "hid", vid = 0xCCCC, pid = 0xDDDD },
+              identity = { vendor = "Acme", model = "K2" },
+              permissions = { "network" },
+            }
+        "#;
+        let manifests = vec![parse_manifest(src, Path::new("needs_network.lua")).unwrap()];
+        let handle = hid(0xCCCC, 0xDDDD, Some("S"), 0);
+        set_disabled(&[]);
+        set_granted(&HashMap::from([(
+            "needs_network".to_string(),
+            vec![Permission::Network],
+        )]));
+
+        // Granted but not pinned to content → inert.
+        set_acknowledged(&HashMap::new());
+        assert!(
+            match_in(&manifests, &handle).is_none(),
+            "a grant with no content pin must not activate"
+        );
+
+        // Pinned to the current content → active.
+        acknowledge(&manifests);
+        assert!(
+            match_in(&manifests, &handle).is_some(),
+            "grant pinned to the current script activates"
+        );
+
+        // Content changed (stale pin) → inert again.
+        set_acknowledged(&HashMap::from([(
+            "needs_network".to_string(),
+            "deadbeef".to_string(),
+        )]));
+        assert!(
+            match_in(&manifests, &handle).is_none(),
+            "a since-modified script must revert to needing consent"
+        );
+
+        set_granted(&HashMap::new());
+        set_acknowledged(&HashMap::new());
     }
 
     #[test]
@@ -802,6 +900,7 @@ mod tests {
         let manifests = vec![parse_manifest(src, Path::new("needs_network.lua")).unwrap()];
         let handle = hid(0xCCCC, 0xDDDD, Some("S"), 0);
         set_disabled(&[]);
+        acknowledge(&manifests);
         set_granted(&HashMap::new());
         assert!(
             match_in(&manifests, &handle).is_none(),
@@ -816,10 +915,14 @@ mod tests {
             "fully granted plugin activates"
         );
         set_granted(&HashMap::new());
+        set_acknowledged(&HashMap::new());
     }
 
     #[test]
-    fn permissions_satisfied_true_when_none_declared() {
+    fn consent_satisfied_true_when_no_permissions_declared() {
+        // A plugin that declares no permissions runs freely — it can only talk
+        // to its matched device, the base trust every plugin has.
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let src = r#"
             return {
               match = { transport = "hid", vid = 1, pid = 2 },
@@ -827,7 +930,42 @@ mod tests {
             }
         "#;
         let m = parse_manifest(src, Path::new("no_perms.lua")).unwrap();
-        assert!(permissions_satisfied(&m));
+        set_acknowledged(&HashMap::new());
+        assert!(consent_satisfied(&m));
+    }
+
+    #[test]
+    fn load_all_never_runs_a_dropped_in_scripts_side_effects() {
+        // A malicious file dropped into the plugins dir tries to write a
+        // sentinel at top level. `load_all` evaluates its manifest, but the
+        // sandbox strips `io`/`os`, so the write never happens and the plugin
+        // is skipped — dropping a file can't run code before consent.
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("pwned.txt");
+        let evil = format!(
+            r#"local f = io.open([[{}]], "w"); f:write("x"); f:close()
+               return {{ match = {{ transport = "hid", vid = 1, pid = 2 }},
+                         identity = {{ vendor = "x", model = "y" }} }}"#,
+            sentinel.display()
+        );
+        std::fs::write(dir.path().join("evil.lua"), evil).unwrap();
+
+        load_all(dir.path());
+
+        assert!(
+            !sentinel.exists(),
+            "a dropped-in script's filesystem write must never execute at load time"
+        );
+        assert!(
+            !PLUGIN_REGISTRY
+                .read()
+                .unwrap()
+                .iter()
+                .any(|m| m.plugin_id == "evil"),
+            "a script that errors under the sandbox must be skipped, not registered"
+        );
+        load_all(Path::new("/nonexistent"));
     }
 
     #[test]
@@ -1028,7 +1166,7 @@ mod tests {
         set_granted(&HashMap::new());
         let src = include_str!("builtins/openrgb.lua");
         let m = parse_manifest(src, Path::new("openrgb.lua")).unwrap();
-        assert!(permissions_satisfied(&m));
+        assert!(consent_satisfied(&m));
     }
 
     #[test]
@@ -1101,17 +1239,20 @@ mod tests {
         assert_eq!(m.permissions, vec![Permission::Os]);
         assert!(m.needs_worker());
 
+        // Acknowledged, so this isolates the permission gate (not the consent gate).
+        acknowledge(std::slice::from_ref(&m));
         set_granted(&HashMap::new());
         assert!(
-            !permissions_satisfied(&m),
+            !consent_satisfied(&m),
             "ungranted os permission keeps it inert"
         );
 
         let mut granted = HashMap::new();
         granted.insert("permission_demo".to_string(), vec![Permission::Os]);
         set_granted(&granted);
-        assert!(permissions_satisfied(&m));
+        assert!(consent_satisfied(&m));
         set_granted(&HashMap::new());
+        set_acknowledged(&HashMap::new());
     }
 
     #[test]

@@ -38,9 +38,7 @@ pub fn apply(
     config: &HashMap<String, String>,
 ) -> mlua::Result<()> {
     let globals = lua.globals();
-    for name in REMOVED {
-        globals.set(*name, mlua::Value::Nil)?;
-    }
+    strip_escape_hatches(lua)?;
     let logger = lua.create_function(|_, msg: mlua::String| {
         log::info!("[plugin] {}", msg.to_string_lossy());
         Ok(())
@@ -52,6 +50,18 @@ pub fn apply(
 
     if granted.contains(&Permission::Os) {
         reinject_clock(lua)?;
+    }
+    Ok(())
+}
+
+/// Remove every filesystem/process/native escape hatch from `lua`'s globals.
+/// Shared by the runtime sandbox and the manifest parser, so a plugin script
+/// can't reach `os`/`io`/`require`/… even while its manifest table is being
+/// read (which evaluates the whole script).
+pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
+    let globals = lua.globals();
+    for name in REMOVED {
+        globals.set(*name, mlua::Value::Nil)?;
     }
     Ok(())
 }
