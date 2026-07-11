@@ -93,7 +93,7 @@ pub enum DependencyRule {
     Powerprofilesctl,
     XdgDesktopPortal,
     Pawnio,
-    Administrator,
+    Broker,
     GnomeExtension,
 }
 
@@ -110,7 +110,7 @@ impl DependencyRule {
         DependencyRule::Powerprofilesctl,
         DependencyRule::XdgDesktopPortal,
         DependencyRule::Pawnio,
-        DependencyRule::Administrator,
+        DependencyRule::Broker,
         DependencyRule::GnomeExtension,
     ];
 
@@ -126,7 +126,7 @@ impl DependencyRule {
             DependencyRule::Powerprofilesctl => "powerprofilesctl",
             DependencyRule::XdgDesktopPortal => "xdg_desktop_portal",
             DependencyRule::Pawnio => "pawnio",
-            DependencyRule::Administrator => "administrator",
+            DependencyRule::Broker => "broker",
             DependencyRule::GnomeExtension => "gnome_extension",
         }
     }

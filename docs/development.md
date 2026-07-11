@@ -80,6 +80,83 @@ design, threat model and process topology.
 
 ---
 
+## Building the Windows installer
+
+The release installer (`halod-setup-x64.exe`) bundles all three binaries, the
+PawnIO blobs, and a GPL ffmpeg build for LCD video mode. CI produces it in the
+`windows-installer` job of [create-release.yml](../.github/workflows/create-release.yml);
+locally, [`packaging/windows/build-installer.ps1`](../packaging/windows/build-installer.ps1)
+runs the same three stages end to end (build → stage → compile).
+
+### One-time prerequisites
+
+On top of the MSYS2 UCRT64 toolchain above, install ffmpeg + the dependency
+walker used by staging, and the Inno Setup compiler:
+
+```powershell
+# ffmpeg.exe (bundled for LCD video) + ntldd (collects ffmpeg's DLL deps)
+C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-ffmpeg mingw-w64-ucrt-x86_64-ntldd"
+
+# Inno Setup 6 — the installer compiler (ISCC.exe)
+winget install --id JRSoftware.InnoSetup
+```
+
+`winget` may drop Inno Setup in a per-user path (`%LOCALAPPDATA%\Programs\Inno Setup 6\`)
+rather than `C:\Program Files (x86)\` — the build script probes both plus `PATH`,
+so you don't need to hardcode it.
+
+### Build it
+
+From the repo root, in PowerShell:
+
+```powershell
+# Full run: build release binaries, stage, compile the installer
+.\packaging\windows\build-installer.ps1
+
+# Stamp a real version (as CI does with the release tag)
+.\packaging\windows\build-installer.ps1 -AppVersion 1.2.3
+
+# Install the ffmpeg/ntldd/Inno Setup prerequisites first, then build
+.\packaging\windows\build-installer.ps1 -InstallDeps
+
+# Reuse the existing src\target\release binaries (skip the cargo build)
+.\packaging\windows\build-installer.ps1 -SkipBuild
+```
+
+The result lands at `packaging\windows\Output\halod-setup-x64.exe`. The three
+stages can also be run by hand:
+
+1. `cargo build --release -p halod -p halod-gui -p halod-broker` (from `src/`).
+2. `.\packaging\windows\stage-release.ps1` — copies the exes, ffmpeg + its DLLs,
+   and the PawnIO blobs into `packaging\windows\staging\`.
+3. `ISCC.exe /DAppVersion=<version> packaging\windows\halod.iss` — compiles the
+   staged tree into the installer.
+
+> A local build without `cargo-about` on `PATH` logs a warning and omits the
+> Rust-crate license page; CI sets `HALOD_REQUIRE_LICENSES=1` to make that fatal
+> for release artifacts. The `PrivilegesRequired=admin` + HKCU compiler warning
+> is expected — the installer only cleans up the tray's HKCU "Start on boot"
+> value on uninstall (see the `[Registry]` note in `halod.iss`).
+
+### Testing the installer
+
+Install into a throwaway VM or Windows Sandbox, not your daily machine — it
+registers a LocalSystem service and writes under `%ProgramFiles%`. After running
+the installer, sanity-check:
+
+- Files land in `%ProgramFiles%\HaloDaemon` (three exes, `ffmpeg.exe` + `libav*` DLLs,
+  the four `.bin` blobs, license texts).
+- `sc.exe query HalodBroker` shows the broker service registered as `DEMAND_START`
+  and stopped.
+- Launching `halod-gui.exe` spawns the user-level `halod.exe` (`Get-Process halod, halod-gui`).
+- First register-bus device access raises **one** UAC prompt for
+  `halod-broker.exe`; HID and network/plugin devices work without it.
+- Re-running the installer over an existing install upgrades cleanly (the
+  `PrepareToInstall` step stops the service/processes first), and uninstalling
+  removes the service and program files.
+
+---
+
 ## Project layout
 
 Crates under `src/`:

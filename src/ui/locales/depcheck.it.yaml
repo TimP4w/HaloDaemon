@@ -44,10 +44,10 @@ depcheck:
       title: PawnIO
       impact: "Accesso SMBus del chipset (RGB DRAM, sensori scheda madre)"
       fix: Installa PawnIO da pawnio.eu
-    administrator:
-      title: Amministratore
+    broker:
+      title: Broker con privilegi elevati
       impact: "Accesso SMBus del chipset (RGB DRAM, sensori scheda madre, alcuni RGB GPU)"
-      fix: Esci da HaloDaemon e riavvialo, accettando la richiesta di Amministratore (UAC)
+      fix: Reinstalla HaloDaemon per registrare il servizio broker con privilegi elevati (HalodBroker)
     gnome_extension:
       title: Estensione GNOME Shell
       impact: Cambio profilo per app tramite il focus della finestra su GNOME

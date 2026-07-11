@@ -147,10 +147,10 @@ fn health_rules(ffmpeg_available: bool) -> Vec<HealthRule> {
             check: Box::new(|| pawnio_present().unwrap_or(false)),
         },
         HealthRule {
-            id: DependencyRule::Administrator,
+            id: DependencyRule::Broker,
             required: false,
             platform: "Windows",
-            check: Box::new(is_elevated),
+            check: Box::new(|| broker_service_present().unwrap_or(false)),
         },
     ]);
 
@@ -546,6 +546,27 @@ fn pawnio_present() -> Option<bool> {
 #[cfg(not(windows))]
 fn pawnio_present() -> Option<bool> {
     None
+}
+
+/// Whether the elevated `HalodBroker` service is registered with the SCM. Since
+/// the privilege split the worker never runs elevated itself — chipset SMBus /
+/// PawnIO access goes through this on-demand service, which the worker starts
+/// without a UAC prompt. If it isn't installed, register-bus access falls back
+/// to a per-session UAC prompt (a dev run), so its absence is what limits
+/// chipset RGB/sensors — not the worker's own elevation. `None` off Windows.
+#[cfg(windows)]
+fn broker_service_present() -> Option<bool> {
+    use halod_hwaccess::proto::BROKER_SERVICE_NAME;
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager =
+        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+    Some(
+        manager
+            .open_service(BROKER_SERVICE_NAME, ServiceAccess::QUERY_STATUS)
+            .is_ok(),
+    )
 }
 
 /// Whether `60-halod.rules` is installed in one of the standard udev

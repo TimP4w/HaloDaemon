@@ -44,10 +44,10 @@ depcheck:
       title: PawnIO
       impact: "Chipset SMBus access (DRAM RGB, motherboard sensors)"
       fix: Install PawnIO from pawnio.eu
-    administrator:
-      title: Administrator
+    broker:
+      title: Elevated broker
       impact: "Chipset SMBus access (DRAM RGB, motherboard sensors, some GPU RGB)"
-      fix: Quit HaloDaemon and start it again, accepting the Administrator (UAC) prompt
+      fix: Reinstall HaloDaemon so the elevated broker service (HalodBroker) is registered
     gnome_extension:
       title: GNOME Shell extension
       impact: Per-app profile switching via window focus on GNOME

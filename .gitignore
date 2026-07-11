@@ -32,3 +32,7 @@ refs/
 .claude
 .claude/settings.local.json
 superpowers/
+
+# Windows
+packaging/windows/staging
+packaging/windows/Output
