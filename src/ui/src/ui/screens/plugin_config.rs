@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use egui::Stroke;
 use halod_shared::types::{PluginConfigField, PluginConfigFieldKind, PluginInfo};
 
 use crate::ui::components::{self as widgets, ButtonKind};
@@ -58,7 +59,7 @@ pub fn config_section(
     mut on_save: impl FnMut(HashMap<String, String>),
 ) {
     widgets::caps_label(ui, &t!("plugins.settings"));
-    ui.add_space(6.0);
+    ui.add_space(8.0);
 
     let mut groups: std::collections::BTreeMap<String, Vec<&PluginConfigField>> =
         std::collections::BTreeMap::new();
@@ -66,52 +67,34 @@ pub fn config_section(
         groups.entry(f.category.clone()).or_default().push(f);
     }
 
-    for (category, fields) in &groups {
-        if !category.is_empty() {
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(category.as_str())
-                    .font(theme::body(11.0))
-                    .color(theme::TEXT_FAINT),
-            );
-        }
-        for f in fields {
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(&f.label)
-                    .font(theme::body(12.0))
-                    .color(theme::TEXT_DIM),
-            );
-            let buf = edits.entry(f.key.clone()).or_default();
-            let hint = if f.secure && p.secret_set.get(&f.key).copied().unwrap_or(false) {
-                t!("plugins.secret_set_hint")
-            } else {
-                std::borrow::Cow::Borrowed("")
-            };
-            ui.horizontal(|ui| {
-                let mut edit = egui::TextEdit::singleline(buf).desired_width(220.0);
-                if f.secure {
-                    edit = edit.password(true);
+    // The Configure panel sits on its own inset surface (darker than the card)
+    // so the editable region reads apart from the status chrome above it.
+    egui::Frame::NONE
+        .fill(theme::INNER_BG)
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 4))
+        .show(ui, |ui| {
+            let mut first = true;
+            for (category, fields) in &groups {
+                if !category.is_empty() {
+                    if !first {
+                        field_separator(ui);
+                    }
+                    ui.add_space(8.0);
+                    widgets::caps_label(ui, category);
                 }
-                if matches!(f.kind, PluginConfigFieldKind::Number) {
-                    // Numeric fields are still stored/sent as strings (the
-                    // plugin/Lua side interprets them); this only nudges the
-                    // on-screen keyboard/validation, it doesn't change the type.
-                    edit = edit.hint_text("0");
+                for f in fields {
+                    if !first {
+                        field_separator(ui);
+                    }
+                    first = false;
+                    config_field_row(ui, p, f, edits);
                 }
-                ui.add(edit);
-                if !hint.is_empty() {
-                    ui.label(
-                        egui::RichText::new(hint.as_ref())
-                            .font(theme::body(11.0))
-                            .color(theme::TEXT_FAINT),
-                    );
-                }
-            });
-        }
-    }
+            }
+        });
 
-    ui.add_space(10.0);
+    ui.add_space(12.0);
     if widgets::button(
         ui,
         &t!("plugins.save_settings"),
@@ -128,6 +111,65 @@ pub fn config_section(
             }
         }
     }
+}
+
+/// One field laid out as a row: label on the left, padded input on the right.
+fn config_field_row(
+    ui: &mut egui::Ui,
+    p: &PluginInfo,
+    f: &PluginConfigField,
+    edits: &mut HashMap<String, String>,
+) {
+    let secret_set = f.secure && p.secret_set.get(&f.key).copied().unwrap_or(false);
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::hover());
+
+    let mut left = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    left.label(
+        egui::RichText::new(&f.label)
+            .font(theme::body(12.5))
+            .color(theme::TEXT),
+    );
+
+    let mut right = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    let buf = edits.entry(f.key.clone()).or_default();
+    let mut edit = egui::TextEdit::singleline(buf)
+        .desired_width(200.0)
+        .margin(egui::Margin::symmetric(9, 6))
+        .horizontal_align(egui::Align::RIGHT);
+    if f.secure {
+        edit = edit.password(true);
+    }
+    if secret_set {
+        // A secure field always starts blank; the hint tells the user a secret
+        // is already stored so an untouched field leaves it be.
+        edit = edit.hint_text(t!("plugins.secret_set_hint"));
+    } else if matches!(f.kind, PluginConfigFieldKind::Number) {
+        // Numeric fields are still stored/sent as strings (the plugin/Lua side
+        // interprets them); this only nudges the on-screen keyboard/validation,
+        // it doesn't change the type.
+        edit = edit.hint_text("0");
+    }
+    right.add(edit);
+}
+
+/// A hairline divider between config rows, inset to the panel's content width.
+fn field_separator(ui: &mut egui::Ui) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0, theme::BORDER_SOFT),
+    );
 }
 
 #[cfg(test)]

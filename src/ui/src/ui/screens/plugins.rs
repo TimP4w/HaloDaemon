@@ -900,8 +900,8 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
 /// live devices yet.
 fn pending_changes_banner(ui: &mut egui::Ui, cmd: &CommandTx) {
     egui::Frame::NONE
-        .fill(theme::a(theme::STAT_AMBER, 0.12))
-        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.4)))
+        .fill(theme::a(theme::CYAN, 0.10))
+        .stroke(Stroke::new(1.0, theme::a(theme::CYAN, 0.35)))
         .corner_radius(10.0)
         .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {

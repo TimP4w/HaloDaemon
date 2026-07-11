@@ -182,38 +182,50 @@ impl IntegrationsUi {
 
             ui.add_space(10.0);
             let status = integration_status(state, &p.id);
-            status_row(ui, p, &status);
+            let has_config = !p.config_fields.is_empty();
+            let expanded = self.expanded.as_deref() == Some(p.id.as_str());
+
+            // Status on the left, the Configure toggle pinned bottom-right.
+            egui::Sides::new().show(
+                ui,
+                |ui| status_row(ui, p, &status),
+                |ui| {
+                    if has_config {
+                        let label = if expanded {
+                            t!("integrations.hide_configure")
+                        } else {
+                            t!("integrations.configure")
+                        };
+                        if widgets::button(
+                            ui,
+                            &label,
+                            ButtonKind::Ghost,
+                            egui::Vec2::new(120.0, 28.0),
+                        )
+                        .clicked()
+                        {
+                            self.expanded = if expanded { None } else { Some(p.id.clone()) };
+                        }
+                    }
+                },
+            );
 
             if plugin_needs_permission(p) {
                 ui.add_space(12.0);
                 permissions_section(ui, p, cmd);
             }
 
-            if !p.config_fields.is_empty() {
+            if has_config && expanded {
                 ui.add_space(12.0);
-                let expanded = self.expanded.as_deref() == Some(p.id.as_str());
-                let label = if expanded {
-                    t!("integrations.hide_configure")
-                } else {
-                    t!("integrations.configure")
-                };
-                if widgets::button(ui, &label, ButtonKind::Ghost, egui::Vec2::new(120.0, 28.0))
-                    .clicked()
-                {
-                    self.expanded = if expanded { None } else { Some(p.id.clone()) };
-                }
-                if expanded {
-                    ui.add_space(10.0);
-                    seed_config_edit_if_needed(&mut self.config_edit, &p.id, &p.config_values);
-                    let edits = &mut self.config_edit.as_mut().expect("just seeded above").1;
-                    config_section(ui, p, edits, |values| {
-                        crate::domain::actions::integrations::set_integration_config(
-                            cmd,
-                            p.id.clone(),
-                            values,
-                        );
-                    });
-                }
+                seed_config_edit_if_needed(&mut self.config_edit, &p.id, &p.config_values);
+                let edits = &mut self.config_edit.as_mut().expect("just seeded above").1;
+                config_section(ui, p, edits, |values| {
+                    crate::domain::actions::integrations::set_integration_config(
+                        cmd,
+                        p.id.clone(),
+                        values,
+                    );
+                });
             }
         });
     }
