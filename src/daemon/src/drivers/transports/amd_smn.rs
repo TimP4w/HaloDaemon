@@ -14,8 +14,9 @@
 
 use anyhow::{bail, Result};
 
-use super::pawnio::PawnioModule;
+use crate::drivers::transports::register_ops;
 use crate::drivers::Metered;
+use halod_hwaccess::pawnio::PawnioOps;
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 
 pub struct AmdSmnBus {
@@ -23,28 +24,27 @@ pub struct AmdSmnBus {
     /// even though this bus only ever reads: `rate_status` legitimately
     /// reports zero writes, and if a write op is ever added here it's
     /// already behind the gate.
-    io: Metered<PawnioModule>,
+    io: Metered<Box<dyn PawnioOps>>,
 }
 
 impl AmdSmnBus {
     /// Open a fresh PawnIO handle with the AMD Family 17h+ module loaded.
     pub fn open(limit: Option<WriteRateLimit>) -> Result<Self> {
         Ok(Self {
-            io: Metered::new(PawnioModule::open(&["AMDFamily17.bin"])?, limit),
+            io: Metered::new(register_ops::open_pawnio("AMDFamily17.bin")?, limit),
         })
     }
 
     /// Read one 32-bit SMN register at `offset`.
     pub fn read_smn(&self, offset: u32) -> Result<u32> {
-        let mut out = [0u64; 1];
-        let n = self
+        let out = self
             .io
             .read_access()
-            .exec(c"ioctl_read_smn", &[offset as u64], &mut out)?;
-        if n == 0 {
+            .execute("ioctl_read_smn", &[offset as u64])?;
+        let Some(&first) = out.first() else {
             bail!("ioctl_read_smn(0x{offset:08X}) returned no data");
-        }
-        Ok((out[0] & 0xFFFF_FFFF) as u32)
+        };
+        Ok((first & 0xFFFF_FFFF) as u32)
     }
 
     pub fn rate_status(&self) -> WriteRateStatus {

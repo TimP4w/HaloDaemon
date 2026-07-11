@@ -51,9 +51,6 @@ pub struct AppState {
     /// Notified to request a graceful daemon shutdown (e.g. an IPC `shutdown`
     /// command from the tray on a dev/plain run).
     pub shutdown: tokio::sync::Notify,
-    /// True when this process is the service `--worker` (relaunched by the
-    /// supervisor). Determines how an IPC `shutdown` is handled.
-    pub is_service_worker: bool,
     /// Set when a plugin enable/disable/grant/import/delete has been staged
     /// but not yet applied to live devices. Batches the expensive
     /// close-everything-and-rediscover cycle so several plugin edits in a
@@ -88,7 +85,6 @@ impl AppState {
             ))),
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
-            is_service_worker: false,
             plugins_rediscover_pending: std::sync::atomic::AtomicBool::new(false),
             secret_store: Arc::new(crate::secrets::FileKeyStore::new()),
         }
@@ -113,15 +109,8 @@ impl AppState {
         let _ = self.persistence.save_tx.send(());
     }
 
-    /// Mark this process as the service `--worker`. Builder-style so existing
-    /// `AppState::new(cfg)` call sites (including tests) are unaffected.
-    pub fn with_service_worker(mut self, is_worker: bool) -> Self {
-        self.is_service_worker = is_worker;
-        self
-    }
-
     /// Override the secret store (e.g. with `crate::secrets::open_secret_store()`
-    /// to prefer the OS keyring). Builder-style, like `with_service_worker`.
+    /// to prefer the OS keyring). Builder-style, like `with_secret_store`.
     pub fn with_secret_store(mut self, store: Arc<dyn crate::secrets::SecretStore>) -> Self {
         self.secret_store = store;
         self

@@ -57,17 +57,40 @@ cargo build -p halod-gui
 cargo run -p halod-gui
 ```
 
+### Windows privilege separation
+
+On Windows the privileged register-bus transports (chipset SMBus / PawnIO, AMD
+SMN) run in a separate elevated process, `halod-broker.exe`; everything else —
+including `halod.exe` itself — runs at the user's normal (medium) integrity.
+`halod.exe` is **never** elevated and is **not** a service: the GUI launches it
+as a plain user process, and it brings the broker up on first register-bus
+access. When the `HalodBroker` service is installed it starts on demand via the
+SCM (no UAC); the broker self-stops once idle. `halod-broker.exe` links only
+`halod-hwaccess` + `windows` — it cannot run Lua.
+
+For a **dev run** (`cargo run -p halod`, no service installed) the daemon
+launches the broker itself: the **first** time it touches a DRAM/GPU/SuperIO
+register you get **one UAC prompt for `halod-broker.exe`**. Accept it and
+register-bus devices work; decline it and they're unavailable (a clear log line
+explains why) while HID and network/plugin devices keep working. To skip the
+broker entirely and run everything in-process, set `HALOD_NO_BROKER=1`.
+
+See [Windows privilege separation](windows-privilege-separation.md) for the full
+design, threat model and process topology.
+
 ---
 
 ## Project layout
 
-Three crates under `src/`:
+Crates under `src/`:
 
 | Crate | Purpose |
 |-------|---------|
 | `halod` | Background device I/O, engine loops, config persistence |
 | `halod-gui` | GUI with system tray |
 | `halod-shared` | Shared wire types (IPC messages) |
+| `halod-hwaccess` | Raw privileged register-bus primitives (SMBus, PawnIO) + the broker RPC protocol; shared by `halod` and `halod-broker` |
+| `halod-broker` | Windows-only elevated register-bus broker (see [Windows privilege separation](#windows-privilege-separation)) |
 
 The daemon and UI communicate over a local IPC channel, a Unix domain socket (`$XDG_RUNTIME_DIR/halod.sock`) on Linux, a named pipe (`\\.\pipe\halod`) on Windows — using binary-framed JSON messages.
 

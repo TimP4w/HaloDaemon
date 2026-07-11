@@ -50,7 +50,11 @@ if (Test-Path $StagingDir) { Remove-Item $StagingDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
 
 # --- 1. Executables -----------------------------------------------------------
-$exes = "halod.exe", "halod-gui.exe"
+# halod-broker.exe is the elevated register-bus broker (see the privilege-
+# separation design): the supervisor spawns it under the user's linked token
+# while halod.exe --worker runs at medium integrity. It must be code-signed
+# alongside the other two exes wherever CI signs the staged binaries.
+$exes = "halod.exe", "halod-gui.exe", "halod-broker.exe"
 foreach ($exe in $exes) {
     $src = Join-Path $TargetDir $exe
     if (-not (Test-Path $src)) { Fail "missing built executable: $src (run cargo build --release first)" }

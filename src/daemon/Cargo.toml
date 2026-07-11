@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 halod-shared = { path = "../shared" }
+halod-hwaccess = { path = "../hwaccess" }
 
 tokio      = { workspace = true }
 serde      = { workspace = true }

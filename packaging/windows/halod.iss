@@ -1,9 +1,10 @@
 ; Inno Setup script for HaloDaemon — Windows installer.
 ;
 ; Builds a single halod-setup-x64.exe that:
-;   * installs halod.exe, halod-gui.exe and the PawnIO blobs into {pf}\HaloDaemon,
-;   * registers halod as an auto-starting service (the supervisor;
-;     see src/daemon/src/service/mod.rs),
+;   * installs halod.exe, halod-gui.exe, halod-broker.exe and the PawnIO blobs into {pf}\HaloDaemon,
+;   * registers halod-broker.exe as a demand-start LocalSystem service (the only
+;     elevated component; see src/broker/src/service.rs and
+;     docs/windows-privilege-separation.md),
 ;   * adds Start Menu shortcuts and an optional sign-in entry for the tray.
 ;
 ; Run packaging\windows\stage-release.ps1 first to populate packaging\windows\staging\,
@@ -44,7 +45,9 @@ UninstallDisplayIcon={app}\halod-gui.exe
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-; The service must run elevated (chipset SMBus via PawnIO).
+; Admin is needed only to register the LocalSystem broker service at install
+; time. At runtime only halod-broker.exe is elevated (on demand); halod.exe and
+; the GUI run unprivileged — see docs/windows-privilege-separation.md.
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -87,30 +90,45 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
   Flags: uninsdeletevalue dontcreatekey
 
 [Run]
-; Register and start the supervisor service (idempotent — safe on upgrades).
-Filename: "{app}\halod.exe"; Parameters: "--install-service"; \
-  StatusMsg: "Registering the HaloDaemon service..."; Flags: runhidden waituntilterminated
-; One post-install launch: open the UI.
+; Register the on-demand elevated broker service (idempotent — safe on upgrades).
+; The unprivileged daemon (launched by the GUI) starts it on demand; nothing is
+; auto-started here. The privileged binary is halod-broker.exe — halod.exe is
+; never a service and never elevated.
+Filename: "{app}\halod-broker.exe"; Parameters: "--install-service"; \
+  StatusMsg: "Registering the HaloDaemon broker service..."; Flags: runhidden waituntilterminated
+; One post-install launch: open the UI (which starts the user-level daemon).
 Filename: "{app}\halod-gui.exe"; Description: "Launch HaloDaemon"; \
   Flags: postinstall skipifsilent nowait
 
 [UninstallRun]
-; Stop and remove the service before the files are deleted.
-Filename: "{app}\halod.exe"; Parameters: "--uninstall-service"; \
-  RunOnceId: "UninstallHalodService"; Flags: runhidden waituntilterminated
+; Stop and remove the broker service before the files are deleted.
+Filename: "{app}\halod-broker.exe"; Parameters: "--uninstall-service"; \
+  RunOnceId: "UninstallHalodBrokerService"; Flags: runhidden waituntilterminated
 
 [Code]
-{ On an upgrade the running supervisor service keeps halod.exe
-  locked. Stop it before files are copied; failure (e.g. a first install where
-  the service does not exist yet) is harmless and ignored. }
+{ Before copying files, stop everything holding the executables:
+  - the new broker service (HalodBroker) if this is a reinstall/upgrade,
+  - the OLD supervisor service (HalodDaemon) from pre-split installs, which is
+    now obsolete and points at a role halod.exe no longer has — delete it,
+  - the user-level worker/broker processes.
+  All failures (e.g. a first install) are harmless and ignored. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin
   Result := '';
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop HalodBroker', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  { Obsolete pre-split service — stop and remove it. }
   Exec(ExpandConstant('{sys}\sc.exe'), 'stop HalodDaemon', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  { The supervisor polls every ~2 s; give it time to terminate the worker and
-    release the executable before the copy step. }
-  Sleep(5000);
+  Exec(ExpandConstant('{sys}\sc.exe'), 'delete HalodDaemon', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  { The user-level daemon/broker processes may still hold their exes. }
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im halod.exe', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im halod-broker.exe', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  { Give the SCM / processes a moment to release the executables. }
+  Sleep(3000);
 end;

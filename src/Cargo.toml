@@ -1,5 +1,5 @@
 [workspace]
-members = ["shared", "daemon", "ui"]
+members = ["shared", "hwaccess", "broker", "daemon", "ui"]
 resolver = "2"
 
 [workspace.package]

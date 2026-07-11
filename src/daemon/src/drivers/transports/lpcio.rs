@@ -5,23 +5,26 @@
 //!
 //! Provides the four PawnIO `LpcIO.bin` IOCTLs used by SuperIO fan control:
 //! `ioctl_select_slot`, `ioctl_find_bars`, `ioctl_superio_inb/outb`, and the
-//! raw `ioctl_pio_inb/outb`. PawnIO plumbing (DLL loading, blob caching,
-//! `pawnio_execute` dispatch) lives in [`super::pawnio`].
+//! raw `ioctl_pio_inb/outb`. The PawnIO module is obtained through
+//! [`crate::drivers::transports::register_ops`], so in-process it is a direct
+//! `halod-hwaccess` handle and under the service it is a broker handle — either
+//! way its `select_slot`/`find_bars` state stays isolated to this `LpcIoBus`.
 
 use anyhow::Result;
 
-use super::pawnio::PawnioModule;
+use crate::drivers::transports::register_ops;
 use crate::drivers::Metered;
+use halod_hwaccess::pawnio::PawnioOps;
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 
 pub struct LpcIoBus {
-    io: Metered<PawnioModule>,
+    io: Metered<Box<dyn PawnioOps>>,
 }
 
 impl LpcIoBus {
     pub fn open(limit: Option<WriteRateLimit>) -> Result<Self> {
         Ok(Self {
-            io: Metered::new(PawnioModule::open(&["LpcIO.bin"])?, limit),
+            io: Metered::new(register_ops::open_pawnio("LpcIO.bin")?, limit),
         })
     }
 
@@ -31,7 +34,7 @@ impl LpcIoBus {
     pub fn select_slot(&self, slot: u8) -> Result<()> {
         self.io
             .read_access()
-            .exec(c"ioctl_select_slot", &[slot as u64], &mut [])?;
+            .execute("ioctl_select_slot", &[slot as u64])?;
         Ok(())
     }
 
@@ -40,30 +43,26 @@ impl LpcIoBus {
     /// `read_port`/`write_port` works against the registered BAR range for
     /// the lifetime of this `LpcIoBus` instance.
     pub fn find_bars(&self) -> Result<()> {
-        self.io
-            .read_access()
-            .exec(c"ioctl_find_bars", &[], &mut [])?;
+        self.io.read_access().execute("ioctl_find_bars", &[])?;
         Ok(())
     }
 
     /// Read one byte from an I/O port (raw LPC access).
     pub fn read_port(&self, port: u16) -> Result<u8> {
-        let mut out = [0u64; 1];
-        self.io
+        let out = self
+            .io
             .read_access()
-            .exec(c"ioctl_pio_inb", &[port as u64], &mut out)?;
-        Ok((out[0] & 0xFF) as u8)
+            .execute("ioctl_pio_inb", &[port as u64])?;
+        Ok((out.first().copied().unwrap_or(0) & 0xFF) as u8)
     }
 
     /// Write one byte to an I/O port. Gated by the write-rate limit — only
     /// call from a thread that's allowed to block (see
     /// `Metered::write_access_blocking`).
     pub fn write_port(&self, port: u16, value: u8) -> Result<()> {
-        self.io.write_access_blocking(1)?.exec(
-            c"ioctl_pio_outb",
-            &[port as u64, value as u64],
-            &mut [],
-        )?;
+        self.io
+            .write_access_blocking(1)?
+            .execute("ioctl_pio_outb", &[port as u64, value as u64])?;
         Ok(())
     }
 
@@ -71,22 +70,20 @@ impl LpcIoBus {
     /// mode). The PawnIO module knows the index/data port pair from the most
     /// recent `select_slot` call.
     pub fn superio_inb(&self, register: u8) -> Result<u8> {
-        let mut out = [0u64; 1];
-        self.io
+        let out = self
+            .io
             .read_access()
-            .exec(c"ioctl_superio_inb", &[register as u64], &mut out)?;
-        Ok((out[0] & 0xFF) as u8)
+            .execute("ioctl_superio_inb", &[register as u64])?;
+        Ok((out.first().copied().unwrap_or(0) & 0xFF) as u8)
     }
 
     /// Write a SuperIO configuration register. Gated by the write-rate limit —
     /// only call from a thread that's allowed to block (see
     /// `Metered::write_access_blocking`).
     pub fn superio_outb(&self, register: u8, value: u8) -> Result<()> {
-        self.io.write_access_blocking(1)?.exec(
-            c"ioctl_superio_outb",
-            &[register as u64, value as u64],
-            &mut [],
-        )?;
+        self.io
+            .write_access_blocking(1)?
+            .execute("ioctl_superio_outb", &[register as u64, value as u64])?;
         Ok(())
     }
 

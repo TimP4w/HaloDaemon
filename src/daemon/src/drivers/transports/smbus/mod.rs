@@ -25,31 +25,17 @@ use crate::{
 };
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 
+// The raw SMBus primitives — the ops trait, `BusInfo`, and the platform
+// backends — now live in `halod-hwaccess` (shared with the elevated broker).
+// Re-exported so every device driver / discovery / plugin call site that
+// imports `transports::smbus::{BusInfo, SmBusSyncOps}` keeps resolving.
+use halod_hwaccess::smbus::{enumerate_buses, enumerate_gpu_buses};
+pub use halod_hwaccess::smbus::{BusInfo, SmBusSyncOps};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmbusBusKind {
     Chipset,
     Gpu,
-}
-
-#[derive(Clone, Debug)]
-pub struct BusInfo {
-    pub bus_number: u8,
-    pub adapter_name: String,
-    pub pci_vendor: u16,
-    pub pci_device: u16,
-    pub pci_sub_vendor: u16,
-    pub pci_sub_device: u16,
-}
-
-impl BusInfo {
-    pub fn is_gpu_bus(&self) -> bool {
-        is_gpu_adapter_name(&self.adapter_name)
-    }
-}
-
-fn is_gpu_adapter_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("nvidia") || lower.contains("amd radeon") || lower.contains("radeon")
 }
 
 /// A PCI-identity filter that gates a GPU-bus scan to known cards, so the daemon
@@ -98,7 +84,7 @@ pub struct SmBusDevice {
 
 impl SmBusDevice {
     pub fn open(info: &BusInfo) -> Result<Arc<Self>> {
-        let inner: Box<dyn SmBusSyncOps + Send> = Box::new(platform::open_device(info)?);
+        let inner = super::register_ops::open_smbus(info)?;
         Ok(Arc::new(Self {
             bus_number: info.bus_number,
             io: Metered::new(Mutex::new(inner), None),
@@ -243,51 +229,18 @@ pub fn downcast_smbus_device(bus: Arc<dyn SmBusOps>) -> Arc<SmBusDevice> {
         .expect("SmBusOps handle was not a SmBusDevice")
 }
 
-#[cfg(target_os = "linux")]
-#[path = "linux.rs"]
-mod platform;
-
-#[cfg(target_os = "windows")]
-#[path = "windows/mod.rs"]
-mod platform;
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-#[path = "fallback.rs"]
-mod platform;
-
-/// Maximum payload length for a single SMBus block transfer (I2C_SMBUS_BLOCK_MAX).
-pub(super) const SMBUS_BLOCK_MAX: usize = 32;
-
-/// Synchronous SMBus operations, available inside a `SmBusDevice::run_batch` closure.
-pub trait SmBusSyncOps {
-    fn read_byte(&mut self, addr: u8) -> Result<u8>;
-    fn read_byte_data(&mut self, addr: u8, cmd: u8) -> Result<u8>;
-    fn write_quick(&mut self, addr: u8) -> Result<bool>;
-    fn write_byte_data(&mut self, addr: u8, cmd: u8, val: u8) -> Result<()>;
-    fn write_word_data(&mut self, addr: u8, cmd: u8, val: u16) -> Result<()>;
-    fn write_block_data(&mut self, addr: u8, cmd: u8, data: &[u8]) -> Result<()>;
-    /// Returns `false` if this backend does not support block writes.
-    /// Callers can check this statically to avoid attempting a block write
-    /// that will always return a runtime error (e.g. NvAPI GPU buses).
-    fn supports_block_write(&self) -> bool {
-        true
-    }
-}
-
 pub struct SmBusTransport;
 
 impl SmBusTransport {
     /// Enumerate every chipset and GPU SMBus controller without opening any.
     /// Returns `(chipset_buses, gpu_buses)`; used by the debug usecase.
     pub async fn enumerate_for_debug() -> (Vec<BusInfo>, Vec<BusInfo>) {
-        tokio::task::spawn_blocking(|| {
-            (platform::enumerate_buses(), platform::enumerate_gpu_buses())
-        })
-        .await
-        .unwrap_or_else(|e| {
-            log::error!("[SmBus] enumerate_for_debug task panicked: {e}");
-            Default::default()
-        })
+        tokio::task::spawn_blocking(|| (enumerate_buses(), enumerate_gpu_buses()))
+            .await
+            .unwrap_or_else(|e| {
+                log::error!("[SmBus] enumerate_for_debug task panicked: {e}");
+                Default::default()
+            })
     }
 }
 
@@ -422,10 +375,8 @@ fn probe_addr(bus: &SmBusDevice, addr: u8, probe: Probe) -> bool {
 }
 
 async fn discover(app: Arc<AppState>) -> Result<()> {
-    let (chipset_buses, gpu_buses) = tokio::task::spawn_blocking(|| {
-        (platform::enumerate_buses(), platform::enumerate_gpu_buses())
-    })
-    .await?;
+    let (chipset_buses, gpu_buses) =
+        tokio::task::spawn_blocking(|| (enumerate_buses(), enumerate_gpu_buses())).await?;
 
     // Failing to open a bus is non-fatal; warn once so the cause isn't silent.
     let mut open_warned = false;
@@ -569,8 +520,7 @@ inventory::submit!(TransportScanner {
 #[cfg(test)]
 mod tests {
     use super::{
-        bus_scan_label, gate_bus, is_gpu_adapter_name, BusInfo, CountingSmBusOps, PciMatch, Probe,
-        SmBusSyncOps,
+        bus_scan_label, gate_bus, BusInfo, CountingSmBusOps, PciMatch, Probe, SmBusSyncOps,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -668,27 +618,6 @@ mod tests {
     fn bus_scan_label_falls_back_to_bus_number() {
         assert_eq!(bus_scan_label(&bus(5, "   ")), "SMBus bus 5");
         assert_eq!(bus_scan_label(&bus(0, "")), "SMBus bus 0");
-    }
-
-    #[test]
-    fn is_gpu_adapter_name_nvidia() {
-        assert!(is_gpu_adapter_name("NVIDIA GeForce RTX 4090"));
-        assert!(is_gpu_adapter_name("nvidia display"));
-    }
-
-    #[test]
-    fn is_gpu_adapter_name_amd_radeon() {
-        assert!(is_gpu_adapter_name("AMD Radeon RX 7900 XTX"));
-        assert!(is_gpu_adapter_name("Radeon Graphics"));
-        assert!(is_gpu_adapter_name("radeon rx 580"));
-    }
-
-    #[test]
-    fn is_gpu_adapter_name_non_gpu() {
-        assert!(!is_gpu_adapter_name("Intel SMBus"));
-        assert!(!is_gpu_adapter_name("i801 SMBus"));
-        assert!(!is_gpu_adapter_name(""));
-        assert!(!is_gpu_adapter_name("Piix4 SMBus"));
     }
 
     // ── PCI gate ─────────────────────────────────────────────────────────────

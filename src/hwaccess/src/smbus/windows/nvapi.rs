@@ -8,7 +8,7 @@
 use anyhow::{anyhow, Result};
 use std::sync::OnceLock;
 
-use crate::drivers::transports::smbus::BusInfo;
+use crate::smbus::BusInfo;
 
 use super::{SMBUS_BYTE, SMBUS_BYTE_DATA, SMBUS_QUICK, SMBUS_READ, SMBUS_WORD_DATA, SMBUS_WRITE};
 

@@ -667,16 +667,9 @@ async fn dispatch(
 /// `Shutdown` command and "no client has been connected for a while" both
 /// route through the same stop path.
 pub(crate) fn request_shutdown(app: &Arc<AppState>) {
-    if app.is_service_worker {
-        #[cfg(windows)]
-        match crate::platform::service::request_stop() {
-            Ok(()) => {
-                log::info!("asked the SCM to stop the HalodDaemon service");
-                return;
-            }
-            Err(e) => log::error!("failed to stop service ({e}); exiting worker directly"),
-        }
-    }
+    // The daemon is a plain user process launched by the GUI — nothing
+    // relaunches it, so exiting is the whole shutdown. (The on-demand broker
+    // service self-stops once this worker's register-bus connections drop.)
     app.shutdown.notify_one();
 }
 
@@ -760,7 +753,6 @@ mod tests {
     #[tokio::test]
     async fn shutdown_request_signals_a_plain_daemon() {
         let app = Arc::new(AppState::new(Config::default()));
-        assert!(!app.is_service_worker, "default daemon is not a worker");
 
         request_shutdown(&app);
 

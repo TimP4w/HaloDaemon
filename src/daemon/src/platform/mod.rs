@@ -4,6 +4,4 @@ pub mod elevation;
 pub mod env;
 pub mod notify;
 #[cfg(windows)]
-pub mod service;
-#[cfg(windows)]
 pub mod win32;

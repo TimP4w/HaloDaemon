@@ -179,8 +179,7 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
 }
 
 /// Retry a daemon start every Nth reconnect attempt (~500ms apart) rather than
-/// every attempt, so a long outage doesn't hammer `sc.exe`/spawn a process
-/// every 500ms.
+/// every attempt, so a long outage doesn't spawn a process every 500ms.
 const ENSURE_DAEMON_UP_EVERY: u32 = 10;
 
 async fn reconnect_loop(tx: UiTx, mut cmd_rx: CommandRx, repaint: impl Fn()) {

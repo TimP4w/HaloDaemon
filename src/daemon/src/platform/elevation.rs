@@ -1,87 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Startup self-elevation (Windows).
+//! Elevation helpers (Windows).
 //!
-//! Chipset SMBus access (DRAM and GPU RGB via PawnIO) requires Administrator
-//! privileges; unelevated, `pawnio_open` fails with `E_ACCESSDENIED` and those
-//! devices never appear. On startup we offer a UAC prompt to relaunch elevated;
-//! accepting hands off to the elevated instance, declining is non-fatal.
-
-/// Ensure the process is elevated, prompting via UAC if it is not.
-///
-/// No-op on non-Windows platforms — Linux SMBus access is governed by
-/// `/dev/i2c-*` permissions (the `i2c` group), not process elevation.
-#[cfg(not(windows))]
-pub fn ensure_elevated() {}
-
-#[cfg(windows)]
-pub fn ensure_elevated() {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-    if is_elevated() {
-        return;
-    }
-
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!("[elevation] cannot locate executable ({e}); continuing unelevated");
-            return;
-        }
-    };
-
-    // Preserve the working directory; `ShellExecuteExW` otherwise starts the
-    // elevated process in System32, breaking CWD-relative lookups (config, the
-    // PawnIO `pwnio/` module folder).
-    let cwd = std::env::current_dir().unwrap_or_default();
-
-    let params: String = std::env::args()
-        .skip(1)
-        .map(|a| quote_arg(&a))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let verb = wide("runas");
-    let file = wide_path(&exe);
-    let params_w = wide(&params);
-    let dir_w = wide_path(&cwd);
-
-    let mut info = SHELLEXECUTEINFOW {
-        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_NOASYNC,
-        lpVerb: PCWSTR(verb.as_ptr()),
-        lpFile: PCWSTR(file.as_ptr()),
-        lpParameters: if params.is_empty() {
-            PCWSTR::null()
-        } else {
-            PCWSTR(params_w.as_ptr())
-        },
-        lpDirectory: if cwd.as_os_str().is_empty() {
-            PCWSTR::null()
-        } else {
-            PCWSTR(dir_w.as_ptr())
-        },
-        nShow: SW_SHOWNORMAL.0,
-        ..Default::default()
-    };
-
-    // SAFETY: `info` and every string buffer it points at outlive the call.
-    match unsafe { ShellExecuteExW(&mut info) } {
-        Ok(()) => {
-            // Hand off to the elevated instance so two daemons don't contend
-            // for the IPC pipe.
-            log::info!("[elevation] relaunched with Administrator privileges");
-            std::process::exit(0);
-        }
-        Err(e) => {
-            log::warn!(
-                "[elevation] not granted Administrator privileges ({e}), continuing \
-                 anyway; chipset SMBus (DRAM / GPU RGB) devices will be unavailable"
-            );
-        }
-    }
-}
+//! Since the privilege split, `halod.exe --worker` **never** self-elevates —
+//! doing so would put the plugin/network code back at Administrator, defeating
+//! the whole point. Chipset SMBus / PawnIO register access instead goes through
+//! the elevated `halod-broker` process. "Elevation" here therefore means one of
+//! two things:
+//!   - [`is_elevated`] — a read-only check still used by the action executor and
+//!     the debug usecase.
+//!   - [`spawn_broker_elevated`] — on a **dev run** (no installed service to
+//!     launch the broker), bring the broker up ourselves with one UAC prompt.
 
 /// Whether the current process token is elevated.
 #[cfg(windows)]
@@ -113,6 +41,51 @@ pub(crate) fn is_elevated() -> bool {
     }
 }
 
+/// Launch `halod-broker.exe` (next to this executable) elevated via a UAC
+/// prompt. Used only on a dev run, where no supervisor service exists to spawn
+/// the broker — see [`crate::drivers::transports::register_ops`]. Declining the
+/// prompt is surfaced as an error by the caller (register-bus devices become
+/// unavailable, HID/network keep working).
+#[cfg(windows)]
+pub(crate) fn spawn_broker_elevated() -> anyhow::Result<()> {
+    use anyhow::{anyhow, Context};
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let exe = std::env::current_exe().context("locating halod.exe")?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow!("cannot resolve install directory"))?;
+    let broker = dir.join("halod-broker.exe");
+    if !broker.exists() {
+        return Err(anyhow!(
+            "halod-broker.exe not found next to {}",
+            exe.display()
+        ));
+    }
+
+    let verb = wide("runas");
+    let file = wide_path(&broker);
+    let dir_w = wide_path(dir);
+
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOASYNC,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpDirectory: PCWSTR(dir_w.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+
+    // SAFETY: `info` and every string buffer it points at outlive the call.
+    unsafe { ShellExecuteExW(&mut info) }
+        .map_err(|e| anyhow!("ShellExecuteExW(runas) for halod-broker: {e}"))?;
+    log::info!("[elevation] launched halod-broker with a UAC prompt");
+    Ok(())
+}
+
 #[cfg(windows)]
 use crate::platform::win32::{wide, wide_path};
 
@@ -121,7 +94,7 @@ use crate::platform::win32::{wide, wide_path};
 /// - Wrap in double quotes if the argument is empty or contains spaces/tabs/quotes.
 /// - Backslashes before a `"` (or the closing quote) are doubled.
 #[cfg(windows)]
-fn quote_arg(arg: &str) -> String {
+pub(crate) fn quote_arg(arg: &str) -> String {
     let needs_quoting = arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
     if !needs_quoting {
         return arg.to_string();

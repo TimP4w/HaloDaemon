@@ -7,8 +7,7 @@ pub mod hwmon;
 #[cfg(target_os = "windows")]
 pub mod lpcio;
 pub mod mock;
-#[cfg(target_os = "windows")]
-pub mod pawnio;
+pub mod register_ops;
 pub mod smbus;
 pub mod tcp;
 pub mod usb_bulk;
@@ -40,6 +39,9 @@ impl UsbClaim {
 
     /// Claim an interface on an already-opened device handle.
     pub fn claim(handle: rusb::DeviceHandle<rusb::Context>, interface: u8) -> Result<Self> {
+        // Only the Linux `cfg` block below reassigns this; elsewhere it stays
+        // `false`, so `mut` is unused off Linux.
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut had_kernel_driver = false;
         #[cfg(target_os = "linux")]
         match handle.kernel_driver_active(interface) {

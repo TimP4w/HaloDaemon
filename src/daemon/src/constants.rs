@@ -20,6 +20,3 @@ pub const VIRTUAL_POINTER_NAME: &str = "HaloDaemon Virtual Pointer";
 
 /// Client name the canvas engine's screen-capture session registers under.
 pub const SCREEN_CAPTURE_CLIENT: &str = "halod-screen";
-
-/// Filename of the Windows service supervisor's log file.
-pub const SERVICE_LOG_FILENAME: &str = "halod-service.log";

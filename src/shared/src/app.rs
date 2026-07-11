@@ -22,8 +22,3 @@ pub const GUI_PROCESS_NAME: &str = "halod-gui";
 /// the base name of the desktop entry / D-Bus well-known name it registers
 /// (`{APP_ID}.desktop`).
 pub const APP_ID: &str = "dev.timp4w.Halod";
-
-/// Name the daemon registers itself under in the Windows Service Control
-/// Manager. The daemon's service supervisor and the GUI's "Start daemon" button
-/// must agree on this; both reference it here.
-pub const WINDOWS_SERVICE_NAME: &str = "HalodDaemon";

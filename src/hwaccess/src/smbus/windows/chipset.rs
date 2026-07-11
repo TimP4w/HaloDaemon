@@ -3,8 +3,7 @@
 //!
 //! Chipset SMBus controllers (Intel i801, AMD FCH/PIIX4) are driven through the
 //! PawnIO kernel driver (<https://pawnio.eu/>). PawnIO plumbing (DLL loading,
-//! blob caching, ioctl dispatch) lives in
-//! [`crate::drivers::transports::pawnio`].
+//! blob caching, ioctl dispatch) lives in [`crate::pawnio`].
 
 use anyhow::{anyhow, Result};
 
@@ -34,8 +33,8 @@ impl Drop for MutexGuard {
     }
 }
 
-use crate::drivers::transports::pawnio::PawnioModule;
-use crate::drivers::transports::smbus::BusInfo;
+use crate::pawnio::PawnioModule;
+use crate::smbus::BusInfo;
 
 use super::{
     SMBUS_BLOCK_DATA, SMBUS_BLOCK_MAX, SMBUS_BYTE, SMBUS_BYTE_DATA, SMBUS_QUICK, SMBUS_READ,

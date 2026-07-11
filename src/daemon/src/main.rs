@@ -29,36 +29,20 @@ use crate::registry::initialize_app_state;
 use crate::state::EngineRunConfig;
 
 /// How this process was invoked, decided purely from argv.
+///
+/// The daemon is always a plain user process now — Windows service registration
+/// and the elevated register-bus broker live in `halod-broker.exe`, and the GUI
+/// launches this daemon directly. The only knob is `--headless`, which opts out
+/// of idle-shutdown (see [`crate::lifecycle`]) for a frontend-less deployment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessRole {
-    /// `--install-service`: register the Windows service, then exit.
-    InstallService,
-    /// `--uninstall-service`: remove the Windows service, then exit.
-    UninstallService,
-    /// `--service`: run the SCM supervisor.
-    Supervisor,
-    /// Run the device server. `worker` is true when the supervisor relaunched
-    /// this exe into the user session (`--worker`): it is already elevated, so
-    /// the UAC self-elevation must be skipped. `headless` opts out of
-    /// idle-shutdown (see [`crate::lifecycle`]) for a frontend-less deployment.
-    Server { worker: bool, headless: bool },
+    Server { headless: bool },
 }
 
-/// The service-control flags take precedence; `--worker`/`--headless` only
-/// refine a plain server run.
 fn process_role(args: &[String]) -> ProcessRole {
     let has = |flag: &str| args.iter().any(|a| a == flag);
-    if has("--install-service") {
-        ProcessRole::InstallService
-    } else if has("--uninstall-service") {
-        ProcessRole::UninstallService
-    } else if has("--service") {
-        ProcessRole::Supervisor
-    } else {
-        ProcessRole::Server {
-            worker: has("--worker"),
-            headless: has(halod_shared::lifecycle::HEADLESS_ARG),
-        }
+    ProcessRole::Server {
+        headless: has(halod_shared::lifecycle::HEADLESS_ARG),
     }
 }
 
@@ -66,19 +50,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let role = process_role(&args);
 
-    // Windows service control entry points, dispatched before any runtime exists.
-    #[cfg(windows)]
-    match role {
-        ProcessRole::InstallService => return platform::service::install(),
-        ProcessRole::UninstallService => return platform::service::uninstall(),
-        ProcessRole::Supervisor => return platform::service::run_supervisor(),
-        ProcessRole::Server { .. } => {}
-    }
-
-    // A `--worker` run is already elevated (the supervisor passed it an
-    // elevated token), so it must not prompt for UAC; a plain/dev run does.
-    let is_worker = matches!(role, ProcessRole::Server { worker: true, .. });
-    let headless = matches!(role, ProcessRole::Server { headless: true, .. });
+    let headless = matches!(role, ProcessRole::Server { headless: true });
 
     // Before the runtime starts (still single-threaded, no env-reader race).
     #[cfg(target_os = "linux")]
@@ -107,7 +79,7 @@ fn main() -> Result<()> {
         .worker_threads(4)
         .enable_all()
         .build()?;
-    runtime.block_on(run_daemon(is_worker, headless, cfg))
+    runtime.block_on(run_daemon(headless, cfg))
 }
 
 /// Watches one engine's join handle and notifies the user if it exits other
@@ -143,9 +115,10 @@ fn spawn_engine_supervisor(
     })
 }
 
-/// The actual device server. Runs for a dev/plain launch and for the service
-/// `--worker` process alike.
-async fn run_daemon(is_worker: bool, headless: bool, cfg: crate::config::Config) -> Result<()> {
+/// The actual device server — always a plain, unprivileged user process.
+/// On Windows, register-bus access is delegated to the elevated `halod-broker`
+/// on demand (see `drivers::transports::register_ops`); nothing here elevates.
+async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
     let initial_level: log::LevelFilter = cfg
         .global
         .log_level
@@ -157,11 +130,7 @@ async fn run_daemon(is_worker: bool, headless: bool, cfg: crate::config::Config)
         .parse_default_env()
         .build();
 
-    let app = Arc::new(
-        state::AppState::new(cfg)
-            .with_service_worker(is_worker)
-            .with_secret_store(secrets::open_secret_store()),
-    );
+    let app = Arc::new(state::AppState::new(cfg).with_secret_store(secrets::open_secret_store()));
     let _save_worker = crate::state::start_config_save_worker(app.clone());
     let _persist_worker = crate::state::start_persist_worker(app.clone());
 
@@ -170,12 +139,6 @@ async fn run_daemon(is_worker: bool, headless: bool, cfg: crate::config::Config)
         log::warn!("logger already installed: {e}");
     }
     log::set_max_level(initial_level);
-
-    // The service worker is already elevated by the supervisor, so it must NOT
-    // prompt — only a dev/plain run requests UAC (declining is non-fatal).
-    if !is_worker {
-        platform::elevation::ensure_elevated();
-    }
 
     log::info!(
         "Starting halod v{} (build {})",
@@ -358,21 +321,7 @@ mod tests {
     fn no_args_runs_a_plain_server() {
         assert_eq!(
             process_role(&argv(&[])),
-            ProcessRole::Server {
-                worker: false,
-                headless: false
-            }
-        );
-    }
-
-    #[test]
-    fn worker_flag_marks_a_worker_server() {
-        assert_eq!(
-            process_role(&argv(&["--worker"])),
-            ProcessRole::Server {
-                worker: true,
-                headless: false
-            }
+            ProcessRole::Server { headless: false }
         );
     }
 
@@ -380,42 +329,33 @@ mod tests {
     fn headless_flag_marks_a_headless_server() {
         assert_eq!(
             process_role(&argv(&["--headless"])),
-            ProcessRole::Server {
-                worker: false,
-                headless: true
-            }
+            ProcessRole::Server { headless: true }
         );
     }
 
     #[test]
-    fn service_control_flags_select_their_roles() {
-        assert_eq!(
-            process_role(&argv(&["--install-service"])),
-            ProcessRole::InstallService
-        );
-        assert_eq!(
-            process_role(&argv(&["--uninstall-service"])),
-            ProcessRole::UninstallService
-        );
-        assert_eq!(process_role(&argv(&["--service"])), ProcessRole::Supervisor);
-    }
-
-    #[test]
-    fn service_control_flags_take_precedence_over_worker() {
-        assert_eq!(
-            process_role(&argv(&["--worker", "--install-service"])),
-            ProcessRole::InstallService
-        );
+    fn former_service_and_worker_flags_are_now_ignored() {
+        // Service registration + the elevated broker moved to halod-broker.exe;
+        // these flags no longer mean anything to the daemon.
+        for flag in [
+            "--service",
+            "--install-service",
+            "--uninstall-service",
+            "--worker",
+        ] {
+            assert_eq!(
+                process_role(&argv(&[flag])),
+                ProcessRole::Server { headless: false },
+                "{flag} should be ignored",
+            );
+        }
     }
 
     #[test]
     fn unknown_arguments_are_ignored() {
         assert_eq!(
             process_role(&argv(&["--frobnicate", "foo"])),
-            ProcessRole::Server {
-                worker: false,
-                headless: false
-            }
+            ProcessRole::Server { headless: false }
         );
     }
 
