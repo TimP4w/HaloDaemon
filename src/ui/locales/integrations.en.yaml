@@ -1,0 +1,12 @@
+integrations:
+  title: Integrations
+  subtitle: Bridge HALO to third-party applications. Active integrations expose their devices to the workspace.
+  empty_title: No integrations available
+  empty_hint: You don't currently have any integrations.
+  configure: Configure
+  hide_configure: Hide
+  status_connected: Connected
+  status_connecting: Not connected
+  status_disabled: Disabled
+  status_needs_permission: Needs permission
+  devices_exposed: "%{count} devices"

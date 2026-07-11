@@ -173,6 +173,7 @@ pub struct WireDeviceBuilder {
     connection_type: Option<ConnectionType>,
     serial_number: Option<String>,
     control_layout: Vec<CategoryLayout>,
+    integration_id: Option<String>,
 }
 
 impl WireDeviceBuilder {
@@ -200,6 +201,7 @@ impl WireDeviceBuilder {
             connection_type: None,
             serial_number: None,
             control_layout: Vec::new(),
+            integration_id: None,
         }
     }
 
@@ -244,6 +246,14 @@ impl WireDeviceBuilder {
         self
     }
 
+    /// Mark this device as the root of an integration (owned by `plugin_id`)
+    /// rather than a real device. `None` (the default) for everything else,
+    /// including the devices an integration exposes as children.
+    pub fn integration_id(mut self, integration_id: Option<String>) -> Self {
+        self.integration_id = integration_id;
+        self
+    }
+
     pub fn build(self) -> WireDevice {
         WireDevice {
             id: self.id,
@@ -262,6 +272,7 @@ impl WireDeviceBuilder {
             // reports them.
             write_rate: Default::default(),
             control_layout: self.control_layout,
+            integration_id: self.integration_id,
         }
     }
 }

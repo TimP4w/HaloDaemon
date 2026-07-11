@@ -46,6 +46,7 @@ pub fn load() -> Result<Config> {
         plugins_disabled: plugins.disabled,
         plugin_permissions: plugins.granted,
         plugin_config: plugins.config,
+        integrations_disabled: plugins.integrations_disabled,
     })
 }
 
@@ -78,6 +79,7 @@ pub fn save(cfg: &Config) -> Result<()> {
             disabled: cfg.plugins_disabled.clone(),
             granted: cfg.plugin_permissions.clone(),
             config: cfg.plugin_config.clone(),
+            integrations_disabled: cfg.integrations_disabled.clone(),
         })?,
     )?;
     save_profiles(&cfg.profiles)?;
@@ -299,6 +301,11 @@ struct PluginsFile {
     /// secret store instead.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     config: HashMap<String, HashMap<String, String>>,
+    /// Integration plugin ids the user has disabled *as an integration* —
+    /// independent of `disabled` (which governs whether the Lua may run at
+    /// all). Everything present-and-not-listed is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    integrations_disabled: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,6 +342,10 @@ pub struct Config {
     /// Non-secure user-editable config values per plugin id (key -> value).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub plugin_config: HashMap<String, HashMap<String, String>>,
+    /// Integration plugin ids the user has disabled *as an integration* —
+    /// independent of `plugins_disabled`. See `PluginsFile::integrations_disabled`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub integrations_disabled: Vec<String>,
 }
 
 fn default_profile_name() -> String {
@@ -357,6 +368,7 @@ impl Default for Config {
             plugins_disabled: Vec::new(),
             plugin_permissions: HashMap::new(),
             plugin_config: HashMap::new(),
+            integrations_disabled: Vec::new(),
         }
     }
 }

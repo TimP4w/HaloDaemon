@@ -123,6 +123,16 @@ async fn discover(app: Arc<AppState>) {
     }
 }
 
+/// Connect and register a single integration by plugin id, for a scoped
+/// reconnect (enable toggle, config change) that must not touch any other
+/// device. No-op if `plugin_id` isn't currently an enabled, permission-
+/// satisfied integration.
+pub(crate) async fn discover_one(app: &Arc<AppState>, plugin_id: &str) {
+    if let Some(manifest) = super::integration_manifest(plugin_id) {
+        build_and_register(app, manifest).await;
+    }
+}
+
 inventory::submit!(TransportScanner {
     name: "plugin-integrations",
     platform: None,

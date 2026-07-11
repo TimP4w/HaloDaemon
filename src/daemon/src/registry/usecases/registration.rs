@@ -174,6 +174,31 @@ pub async fn register_device_and_children(app: &Arc<AppState>, device: Arc<dyn D
     true
 }
 
+/// The mirror of [`register_device_and_children`]: close and drop `root_id`
+/// plus every child registered alongside it (ids prefixed `{root_id}_ctrl_`,
+/// the scheme `LuaDevice::discover_controllers` uses for `IntegrationLeaf`
+/// children) from `app.devices`. Used for a scoped reload of a single
+/// integration without touching any other device.
+pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) {
+    let prefix = format!("{root_id}_ctrl_");
+    let removed: Vec<Arc<dyn Device>> = {
+        let mut devices = app.devices.write().await;
+        let mut removed = Vec::new();
+        devices.retain(|d| {
+            if d.id() == root_id || d.id().starts_with(&prefix) {
+                removed.push(d.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    };
+    for device in &removed {
+        device.close().await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,5 +540,33 @@ mod tests {
             "lcd template id must be cleared after registering a disabled device, \
              so the LCD engine treats it as non-participating"
         );
+    }
+
+    #[tokio::test]
+    async fn unregister_device_and_children_removes_only_the_matching_subtree() {
+        let app = make_app();
+        let root = Arc::new(MockDevice::new("openrgb-127_0_0_1_6742"));
+        let child1 = Arc::new(MockDevice::new("openrgb-127_0_0_1_6742_ctrl_0"));
+        let child2 = Arc::new(MockDevice::new("openrgb-127_0_0_1_6742_ctrl_1"));
+        let unrelated = Arc::new(MockDevice::new("other-device"));
+        {
+            let mut devices = app.devices.write().await;
+            devices.push(root.clone());
+            devices.push(child1.clone());
+            devices.push(child2.clone());
+            devices.push(unrelated.clone());
+        }
+
+        unregister_device_and_children(&app, "openrgb-127_0_0_1_6742").await;
+
+        let remaining = app.devices.read().await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id(), "other-device");
+        drop(remaining);
+
+        assert!(root.closed.load(Ordering::SeqCst));
+        assert!(child1.closed.load(Ordering::SeqCst));
+        assert!(child2.closed.load(Ordering::SeqCst));
+        assert!(!unrelated.closed.load(Ordering::SeqCst));
     }
 }

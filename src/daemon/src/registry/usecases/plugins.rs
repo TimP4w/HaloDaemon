@@ -48,39 +48,51 @@ pub async fn set_permissions(
     Ok(())
 }
 
+/// Split `values` into the plaintext `cfg.plugin_config` map and the secret
+/// store (for manifest-declared `secure` fields), then re-publish the
+/// plaintext config to the plugin registry and persist. Shared by
+/// [`set_config`] (staged, applies via [`apply_pending_changes`]) and
+/// [`super::integrations::set_integration_config`] (applies immediately,
+/// scoped to one integration). An absent (or empty) secure value leaves the
+/// previously stored secret untouched, so the GUI never has to round-trip a
+/// secret to keep it.
+pub(crate) async fn persist_config_values(
+    id: &str,
+    values: &std::collections::HashMap<String, String>,
+    app: &Arc<AppState>,
+) -> Result<()> {
+    let secure_keys: std::collections::HashSet<String> =
+        crate::drivers::plugins::secure_config_keys_for(id)
+            .into_iter()
+            .collect();
+    let mut cfg = app.config.write().await;
+    let plaintext = cfg.plugin_config.entry(id.to_owned()).or_default();
+    for (key, value) in values {
+        if secure_keys.contains(key) {
+            if !value.is_empty() {
+                app.secret_store
+                    .set(id, key, value)
+                    .with_context(|| format!("storing secret '{key}' for plugin '{id}'"))?;
+            }
+        } else {
+            plaintext.insert(key.clone(), value.clone());
+        }
+    }
+    if plaintext.is_empty() {
+        cfg.plugin_config.remove(id);
+    }
+    crate::drivers::plugins::set_config_values(&cfg.plugin_config);
+    Ok(())
+}
+
 /// Replace a plugin's user-editable config values and persist the choice.
-/// Values keyed to a manifest-declared `secure` field go through
-/// [`AppState::secret_store`] instead of the plaintext config file; an absent
-/// (or empty) secure key leaves the previously stored secret untouched, so
-/// the GUI never has to round-trip a secret to keep it. Staged.
+/// Staged — see the module docs.
 pub async fn set_config(
     id: String,
     values: std::collections::HashMap<String, String>,
     app: Arc<AppState>,
 ) -> Result<()> {
-    let secure_keys: std::collections::HashSet<String> =
-        crate::drivers::plugins::secure_config_keys_for(&id)
-            .into_iter()
-            .collect();
-    {
-        let mut cfg = app.config.write().await;
-        let plaintext = cfg.plugin_config.entry(id.clone()).or_default();
-        for (key, value) in &values {
-            if secure_keys.contains(key) {
-                if !value.is_empty() {
-                    app.secret_store
-                        .set(&id, key, value)
-                        .with_context(|| format!("storing secret '{key}' for plugin '{id}'"))?;
-                }
-            } else {
-                plaintext.insert(key.clone(), value.clone());
-            }
-        }
-        if plaintext.is_empty() {
-            cfg.plugin_config.remove(&id);
-        }
-        crate::drivers::plugins::set_config_values(&cfg.plugin_config);
-    }
+    persist_config_values(&id, &values, &app).await?;
     app.request_config_save();
     mark_pending_and_broadcast(&app).await;
     Ok(())
@@ -174,6 +186,7 @@ async fn reload_registry(app: &Arc<AppState>) {
     crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
     crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
     crate::drivers::plugins::set_config_values(&cfg.plugin_config);
+    crate::drivers::plugins::set_integrations_disabled(&cfg.integrations_disabled);
     crate::drivers::plugins::set_secret_store(app.secret_store.clone());
 }
 

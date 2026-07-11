@@ -1,0 +1,213 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Per-integration enable/disable and config, independent of the generic
+//! plugin toggle (which only governs whether the Lua may run at all — see
+//! `usecases::plugins`). Unlike plugin edits, these apply immediately and are
+//! scoped to the one integration: only its root device and the children it
+//! exposes are torn down and rebuilt, never the whole device set.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::Result;
+
+use super::registration::unregister_device_and_children;
+use crate::drivers::plugins::integration_scan;
+use crate::state::AppState;
+
+/// Close and drop `id`'s integration root (and the children it exposes) from
+/// `app.devices`, if currently registered. No-op otherwise.
+async fn disable_one(app: &Arc<AppState>, id: &str) {
+    let root_id = {
+        let devices = app.devices.read().await;
+        devices
+            .iter()
+            .find(|d| d.integration_id().as_deref() == Some(id))
+            .map(|d| d.id().to_owned())
+    };
+    if let Some(root_id) = root_id {
+        unregister_device_and_children(app, &root_id).await;
+    }
+}
+
+/// Connect and register `id`'s integration root (and its children), if it's
+/// currently enabled and permission-satisfied. No-op otherwise.
+async fn enable_one(app: &Arc<AppState>, id: &str) {
+    integration_scan::discover_one(app, id).await;
+}
+
+/// Enable or disable a single integration, independent of the generic plugin
+/// toggle. Applies immediately and only touches this one integration's root
+/// + exposed devices — no global rediscovery.
+pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
+    {
+        let mut cfg = app.config.write().await;
+        cfg.integrations_disabled.retain(|x| x != &id);
+        if !enabled {
+            cfg.integrations_disabled.push(id.clone());
+        }
+        crate::drivers::plugins::set_integrations_disabled(&cfg.integrations_disabled);
+    }
+    app.request_config_save();
+
+    if enabled {
+        enable_one(&app, &id).await;
+    } else {
+        disable_one(&app, &id).await;
+    }
+    crate::ipc::broadcast_state(&app).await;
+    Ok(())
+}
+
+/// Replace a single integration's user-editable config values and reconnect
+/// just that integration (e.g. a changed host/port takes effect immediately)
+/// — every other device is left untouched.
+pub async fn set_integration_config(
+    id: String,
+    values: HashMap<String, String>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    super::plugins::persist_config_values(&id, &values, &app).await?;
+    app.request_config_save();
+
+    disable_one(&app, &id).await;
+    enable_one(&app, &id).await;
+    crate::ipc::broadcast_state(&app).await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::MockDevice;
+    use std::sync::atomic::Ordering;
+
+    /// An integration-type plugin declaring the one secure config field the
+    /// secret-store test exercises. `timeout_ms` is tiny so a scoped reconnect
+    /// attempt (nothing is actually listening) fails fast rather than
+    /// stalling the test.
+    const INTEGRATION_CONFIG_TEST_PLUGIN: &str = r#"
+        return {
+          identity = { vendor = "x", model = "y" },
+          type = "integration",
+          config = { fields = {
+            { key = "host", label = "Host", default = "127.0.0.1" },
+            { key = "token", label = "Token", secure = true },
+          } },
+          transports = { tcp = { host_key = "host", port_key = "port", timeout_ms = 50 } },
+        }
+    "#;
+
+    /// Loads `INTEGRATION_CONFIG_TEST_PLUGIN` into the (process-wide) plugin
+    /// registry for the duration of `f`. Callers must already hold
+    /// `TEST_GLOBALS_LOCK`.
+    async fn with_integration_config_test_plugin<F, Fut>(f: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("inttest.lua"),
+            INTEGRATION_CONFIG_TEST_PLUGIN,
+        )
+        .unwrap();
+        crate::drivers::plugins::load_all(dir.path());
+        f().await;
+        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn set_integration_enabled_persists_without_touching_the_global_pending_flag() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let root = Arc::new(MockDevice::new("openrgb-root").with_integration_id("openrgb"));
+            let child = Arc::new(MockDevice::new("openrgb-root_ctrl_0"));
+            let unrelated = Arc::new(MockDevice::new("other-device"));
+            {
+                let mut devices = app.devices.write().await;
+                devices.push(root.clone());
+                devices.push(child.clone());
+                devices.push(unrelated.clone());
+            }
+
+            set_integration_enabled("openrgb".into(), false, app.clone())
+                .await
+                .unwrap();
+
+            assert!(app
+                .config
+                .read()
+                .await
+                .integrations_disabled
+                .contains(&"openrgb".to_string()));
+            assert!(
+                !app.plugins_rediscover_pending.load(Ordering::Relaxed),
+                "a scoped integration toggle must not trigger the global rediscover flag"
+            );
+
+            let remaining = app.devices.read().await;
+            assert_eq!(
+                remaining.len(),
+                1,
+                "only the integration's subtree is torn down"
+            );
+            assert_eq!(remaining[0].id(), "other-device");
+            drop(remaining);
+
+            assert!(root.closed.load(Ordering::SeqCst));
+            assert!(child.closed.load(Ordering::SeqCst));
+            assert!(!unrelated.closed.load(Ordering::SeqCst));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_integration_config_splits_secure_values_into_the_secret_store() {
+        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::test_support::with_tmp_config(|app| async move {
+            with_integration_config_test_plugin(|| async {
+                let mut values = HashMap::new();
+                values.insert("host".to_string(), "127.0.0.1".to_string());
+                values.insert("token".to_string(), "s3cr3t".to_string());
+                set_integration_config("inttest".into(), values, app.clone())
+                    .await
+                    .unwrap();
+
+                let cfg = app.config.read().await;
+                assert_eq!(
+                    cfg.plugin_config.get("inttest").and_then(|m| m.get("host")),
+                    Some(&"127.0.0.1".to_string())
+                );
+                assert!(
+                    !cfg.plugin_config
+                        .get("inttest")
+                        .is_some_and(|m| m.contains_key("token")),
+                    "a secure value must never land in the plaintext config map"
+                );
+                drop(cfg);
+                assert_eq!(
+                    app.secret_store.get("inttest", "token").unwrap(),
+                    Some("s3cr3t".to_string())
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn disable_one_is_a_no_op_when_the_integration_is_not_registered() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let unrelated = Arc::new(MockDevice::new("other-device"));
+            app.devices.write().await.push(unrelated.clone());
+
+            disable_one(&app, "does-not-exist").await;
+
+            assert_eq!(app.devices.read().await.len(), 1);
+            assert!(!unrelated.closed.load(Ordering::SeqCst));
+        })
+        .await;
+    }
+}

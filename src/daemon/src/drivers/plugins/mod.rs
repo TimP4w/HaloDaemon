@@ -18,7 +18,7 @@ mod device;
 mod effect_worker;
 mod image_api;
 mod integration_leaf;
-mod integration_scan;
+pub(crate) mod integration_scan;
 mod manifest;
 mod sandbox;
 mod transport;
@@ -175,6 +175,26 @@ pub fn set_disabled(ids: &[String]) {
 
 fn is_disabled(plugin_id: &str) -> bool {
     DISABLED
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|s| s.contains(plugin_id)))
+        .unwrap_or(false)
+}
+
+/// Integration ids the user disabled *as an integration* — independent of
+/// `DISABLED` (which governs whether the Lua may run at all). Only meaningful
+/// for `PluginType::Integration` plugins.
+static INTEGRATIONS_DISABLED: RwLock<Option<HashSet<String>>> = RwLock::new(None);
+
+/// Replace the integration-disabled set (from `config.integrations_disabled`).
+pub fn set_integrations_disabled(ids: &[String]) {
+    *INTEGRATIONS_DISABLED
+        .write()
+        .expect("integration disabled set poisoned") = Some(ids.iter().cloned().collect());
+}
+
+fn is_integration_disabled(plugin_id: &str) -> bool {
+    INTEGRATIONS_DISABLED
         .read()
         .ok()
         .and_then(|g| g.as_ref().map(|s| s.contains(plugin_id)))
@@ -349,12 +369,23 @@ pub(super) fn integration_manifests() -> Vec<PluginManifest> {
                 .filter(|m| {
                     m.plugin_type == manifest::PluginType::Integration
                         && !is_disabled(&m.plugin_id)
+                        && !is_integration_disabled(&m.plugin_id)
                         && permissions_satisfied(m)
                 })
                 .cloned()
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The single enabled, permission-satisfied `Integration` manifest for
+/// `plugin_id`, for a scoped reconnect of just that one integration (see
+/// `registry::usecases::integrations`). `None` if it's missing, plugin-
+/// disabled, integration-disabled, or lacks its declared permissions.
+pub(super) fn integration_manifest(plugin_id: &str) -> Option<PluginManifest> {
+    integration_manifests()
+        .into_iter()
+        .find(|m| m.plugin_id == plugin_id)
 }
 
 /// Plugin ids already surfaced via a "needs permission" notification (or
@@ -445,6 +476,7 @@ pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
                 config_fields: m.config_fields().iter().map(Into::into).collect(),
                 config_values: config_values_for(m),
                 secret_set,
+                integration_enabled: !is_integration_disabled(&m.plugin_id),
             }
         })
         .collect()
@@ -1201,8 +1233,20 @@ mod tests {
 
         set_disabled(&["integ_ok".to_string()]);
         assert!(integration_manifests().is_empty());
-
         set_disabled(&[]);
+
+        // `integrations_disabled` is a second, independent gate: it must
+        // exclude the integration even though the plugin itself is enabled.
+        set_integrations_disabled(&["integ_ok".to_string()]);
+        assert!(integration_manifests().is_empty());
+        assert!(integration_manifest("integ_ok").is_none());
+        set_integrations_disabled(&[]);
+
+        assert_eq!(
+            integration_manifest("integ_ok").map(|m| m.plugin_id),
+            Some("integ_ok".to_string())
+        );
+
         *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
     }
 

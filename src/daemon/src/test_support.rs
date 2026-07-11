@@ -91,6 +91,11 @@ pub struct MockDevice {
     init_behavior: InitBehavior,
     /// Set to `true` by the default `load_state()` override when tracking is enabled.
     pub load_called: Arc<AtomicBool>,
+    /// Set to `true` by `close()`, for tests asserting a device was torn down.
+    pub closed: Arc<AtomicBool>,
+    /// Owning plugin id when this device stands in for an integration root
+    /// (see `Device::integration_id`). `None` for a normal device.
+    pub integration_id: Option<String>,
     // Capability slots — `None` means the capability is absent.
     pub fan: Option<FanStateSlot>,
     /// RPM returned by `get_rpm()`; `None` (the default) means "no tachometer".
@@ -138,6 +143,8 @@ impl MockDevice {
             visibility: VisibilitySlot::default(),
             init_behavior: InitBehavior::OkTrue,
             load_called: Arc::new(AtomicBool::new(false)),
+            closed: Arc::new(AtomicBool::new(false)),
+            integration_id: None,
             fan: None,
             fan_rpm: None,
             rgb: None,
@@ -191,6 +198,13 @@ impl MockDevice {
 
     pub fn with_model(mut self, model: &str) -> Self {
         self.model = model.to_string();
+        self
+    }
+
+    /// Stand in for an integration root owned by plugin `id` (see
+    /// `Device::integration_id`).
+    pub fn with_integration_id(mut self, id: &str) -> Self {
+        self.integration_id = Some(id.to_string());
         self
     }
 
@@ -316,7 +330,13 @@ impl Device for MockDevice {
             InitBehavior::Panic => panic!("initialize must not be called"),
         }
     }
-    async fn close(&self) {}
+    async fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn integration_id(&self) -> Option<String> {
+        self.integration_id.clone()
+    }
 
     async fn load_state(&self, state: &serde_json::Value) {
         self.load_called.store(true, Ordering::SeqCst);

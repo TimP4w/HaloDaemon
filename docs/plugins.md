@@ -453,8 +453,13 @@ bitwise ops and `string.pack`), plus `log(msg)`, `halod.buffer`, and
 
 ## Config fields
 
-Any plugin — device, effect, or integration — can declare user-editable
-settings that show up as inputs in its Plugins-screen detail panel:
+Any plugin — device, effect, or integration — can *declare* user-editable
+settings, but only an integration plugin's fields are ever actually editable
+in the GUI: they show up on the dedicated **Integrations** screen (see
+[Integration plugins](#integration-plugins)). The Plugins screen lists every
+plugin and governs whether its Lua may run at all, but never shows a config
+editor — a device or effect plugin declaring `config.fields` has nowhere to
+edit them today.
 
 ```lua
 config = {
@@ -511,6 +516,17 @@ reference example. Set `type = "integration"` and declare no `match` at all:
 the plugin is instantiated from its own [config fields](#config-fields) (a
 host/port the user types), not a discovery handle.
 
+Its root device (the thing that connects and enumerates controllers) carries
+no capabilities of its own, so it never appears in Home or the device
+sidebar — it's shown, enabled/disabled, and configured on the dedicated
+**Integrations** screen instead. Only the controllers it enumerates (below)
+show up as ordinary top-level devices in the workspace. The Integrations
+screen's own enable toggle is independent of the plugin toggle on the
+Plugins screen: disabling it there tears down just this integration's root
+and the devices it exposes, without touching anything else; saving a config
+change (e.g. a new host/port) does the same before reconnecting with the new
+values — neither one runs the full device rediscovery.
+
 ```lua
 type = "integration",
 permissions = { "network", "os" }, -- `os` only if you need to throttle sends, see below
@@ -557,7 +573,8 @@ would use:
   one physical device.
 
 There's no reconnect/hotplug monitor for a dropped network connection today —
-if the server restarts, re-run discovery (or toggle the plugin) to reconnect.
+if the server restarts, use the Integrations screen's enable toggle (off then
+on) to reconnect just this integration.
 
 The wire protocol itself typically gives no acknowledgement of when a sent
 frame is actually applied — the server may queue and process frames on its

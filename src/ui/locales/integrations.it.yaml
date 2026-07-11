@@ -1,0 +1,12 @@
+integrations:
+  title: Integrazioni
+  subtitle: Collega HALO ad altre applicazioni. Le integrazioni attive espongono i loro dispositivi.
+  empty_title: Nessuna integrazione disponibile
+  empty_hint: Al momento non hai nessuna integrazione.
+  configure: Configura
+  hide_configure: Nascondi
+  status_connected: Connesso
+  status_connecting: Non connesso
+  status_disabled: Disattivata
+  status_needs_permission: Richiede permessi
+  devices_exposed: "%{count} dispositivi"

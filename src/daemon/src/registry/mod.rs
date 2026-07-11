@@ -44,6 +44,7 @@ pub async fn initialize_app_state(app: Arc<AppState>) {
         crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
         crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
         crate::drivers::plugins::set_config_values(&cfg.plugin_config);
+        crate::drivers::plugins::set_integrations_disabled(&cfg.integrations_disabled);
     }
     crate::drivers::plugins::set_secret_store(app.secret_store.clone());
     notify_ungranted_plugins(&app).await;

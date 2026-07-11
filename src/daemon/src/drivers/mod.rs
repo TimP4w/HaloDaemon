@@ -139,11 +139,20 @@ pub trait Device: Send + Sync {
         .serial_number(self.wire_serial_number())
         .connected(self.wire_device_connected().await)
         .capabilities(caps)
+        .integration_id(self.integration_id())
         .build()
     }
 
     fn wire_device_type(&self) -> DeviceType {
         DeviceType::Other
+    }
+
+    /// The owning plugin id when this device *is* an integration's root
+    /// (e.g. the OpenRGB SDK client) rather than a real device. `None` for
+    /// every other device, including the devices an integration exposes as
+    /// children.
+    fn integration_id(&self) -> Option<String> {
+        None
     }
 
     async fn wire_connection_type(&self) -> Option<ConnectionType> {

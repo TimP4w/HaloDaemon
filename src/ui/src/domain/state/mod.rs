@@ -27,6 +27,7 @@ pub enum Page {
     Device(String),
     Settings,
     Plugins,
+    Integrations,
     Profile(String),
 }
 

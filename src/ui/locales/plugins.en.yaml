@@ -29,6 +29,7 @@ plugins:
   permissions_granted: Granted
   grant: Grant permissions
   revoke: Revoke
+  permissions_builtin_note: Built-in — permissions are always granted and can't be revoked.
   permission_network: Network
   permission_os: OS
   permission_secure_storage: Secure storage

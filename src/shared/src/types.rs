@@ -571,6 +571,16 @@ pub struct PluginInfo {
     /// plaintext never crosses the IPC boundary.
     #[serde(default)]
     pub secret_set: HashMap<String, bool>,
+    /// For a `PluginKind::Integration` plugin, whether the *integration
+    /// itself* is enabled — independent of `enabled` (which only governs
+    /// whether its Lua may run at all). Always `true` for a non-integration
+    /// plugin, where the field is meaningless.
+    #[serde(default = "default_true")]
+    pub integration_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Interpretation hint for a [`PluginConfigField`] value.
@@ -712,6 +722,13 @@ pub struct WireDevice {
     /// today's behavior.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub control_layout: Vec<CategoryLayout>,
+    /// Set to the owning plugin id when this device *is* an integration's
+    /// root (e.g. the OpenRGB SDK client) rather than a real device — the GUI
+    /// hides it from Home/sidebar and shows it on the Integrations page
+    /// instead. `None` for every other device, including the devices an
+    /// integration exposes as children.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_id: Option<String>,
 }
 
 fn span_default() -> u8 {

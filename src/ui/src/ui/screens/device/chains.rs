@@ -922,6 +922,7 @@ mod tests {
             transport: None,
             write_rate: Default::default(),
             control_layout: Vec::new(),
+            integration_id: None,
         }
     }
 

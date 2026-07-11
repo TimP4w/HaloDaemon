@@ -49,12 +49,6 @@ pub struct PluginsUi {
     /// dialog here) from an auto-discovered plugin found by a directory scan
     /// (the daemon pushes a toast notification for those instead).
     awaiting_import: bool,
-    /// Local edit buffer for the selected plugin's config fields: `(plugin_id,
-    /// field key -> typed value)`. Reset whenever the selection changes (see
-    /// `seed_config_edit_if_needed`) — a secure field's buffer starts blank
-    /// (never seeded from the stored secret), so leaving it blank on Save
-    /// keeps the existing secret untouched.
-    config_edit: Option<(String, std::collections::HashMap<String, String>)>,
 }
 
 impl PluginsUi {
@@ -199,15 +193,10 @@ impl PluginsUi {
             return;
         };
 
-        seed_config_edit_if_needed(&mut self.config_edit, &p.id, &p.config_values);
-        let edits = &mut self.config_edit.as_mut().expect("just seeded above").1;
-
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                widgets::card(ui, |ui| {
-                    detail_body(ui, p, cmd, &mut self.pending_delete, edits)
-                });
+                widgets::card(ui, |ui| detail_body(ui, p, cmd, &mut self.pending_delete));
             });
     }
 
@@ -462,7 +451,8 @@ enum RowAction {
 
 /// True when `p` declares at least one permission it hasn't been granted —
 /// it stays inert regardless of its enable/disable toggle until resolved.
-fn plugin_needs_permission(p: &PluginInfo) -> bool {
+/// Shared with the Integrations screen, whose integrations are plugins too.
+pub(crate) fn plugin_needs_permission(p: &PluginInfo) -> bool {
     !p.declared_permissions.is_empty() && !permissions_satisfied(p)
 }
 
@@ -559,7 +549,6 @@ fn detail_body(
     p: &PluginInfo,
     cmd: &CommandTx,
     pending_delete: &mut Option<String>,
-    config_edits: &mut std::collections::HashMap<String, String>,
 ) {
     egui::Sides::new().show(
         ui,
@@ -662,11 +651,6 @@ fn detail_body(
         permissions_section(ui, p, cmd);
     }
 
-    if !p.config_fields.is_empty() {
-        ui.add_space(16.0);
-        config_section(ui, p, cmd, config_edits);
-    }
-
     ui.add_space(20.0);
     ui.separator();
     ui.add_space(14.0);
@@ -724,6 +708,14 @@ fn permissions_satisfied(p: &PluginInfo) -> bool {
         .all(|perm| p.granted_permissions.contains(perm))
 }
 
+/// Whether the Grant/Revoke controls should be interactive: a built-in is
+/// auto-granted its own declared permissions at the daemon level regardless
+/// of what's revoked here (see `drivers::plugins::granted_for`), so a Revoke
+/// button would look like it does something when it never can.
+pub(crate) fn permission_controls_editable(p: &PluginInfo) -> bool {
+    !p.builtin
+}
+
 fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'static, str> {
     use halod_shared::types::Permission;
     match perm {
@@ -733,7 +725,10 @@ fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'
     }
 }
 
-fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
+/// Declared permissions + grant/revoke controls. Shared with the
+/// Integrations screen — permissions (network/os) are a plugin-level
+/// concept, not integration-specific.
+pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
     widgets::caps_label(ui, &t!("plugins.permissions"));
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
@@ -778,137 +773,29 @@ fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
                     .font(theme::body(11.5))
                     .color(theme::ONLINE_TEXT),
             );
-            if widgets::button(
-                ui,
-                &t!("plugins.revoke"),
-                ButtonKind::Ghost,
-                Vec2::new(100.0, 26.0),
-            )
-            .clicked()
+            // A built-in is auto-granted its own declared permissions at the
+            // daemon level regardless of what's revoked here (see
+            // `drivers::plugins::granted_for`) — showing Revoke would look
+            // like it does something when it can never have any effect.
+            if permission_controls_editable(p)
+                && widgets::button(
+                    ui,
+                    &t!("plugins.revoke"),
+                    ButtonKind::Ghost,
+                    Vec2::new(100.0, 26.0),
+                )
+                .clicked()
             {
                 crate::domain::actions::plugins::revoke_plugin_permissions(cmd, p.id.clone());
             }
         });
-    }
-}
-
-/// Reset the edit buffer when the selection moves to a different plugin, so
-/// stale text from a previous plugin's fields never leaks into another's. A
-/// secure field's buffer always starts blank — never seeded from
-/// `config_values` (which never carries a secret's plaintext) — so an
-/// untouched secure field sends nothing and the stored secret is left alone.
-fn seed_config_edit_if_needed(
-    edit: &mut Option<(String, std::collections::HashMap<String, String>)>,
-    plugin_id: &str,
-    config_values: &std::collections::HashMap<String, String>,
-) {
-    if edit.as_ref().map(|(id, _)| id.as_str()) != Some(plugin_id) {
-        *edit = Some((plugin_id.to_owned(), config_values.clone()));
-    }
-}
-
-/// What `Save` actually sends: every non-secure field's current buffer value,
-/// plus a secure field's value only when the user typed something into it —
-/// an empty secure buffer means "leave the stored secret unchanged" (see
-/// `SetPluginConfig`).
-fn config_values_to_send(
-    edits: &std::collections::HashMap<String, String>,
-    fields: &[halod_shared::types::PluginConfigField],
-) -> std::collections::HashMap<String, String> {
-    fields
-        .iter()
-        .filter_map(|f| {
-            let v = edits.get(&f.key)?;
-            if f.secure && v.is_empty() {
-                None
-            } else {
-                Some((f.key.clone(), v.clone()))
-            }
-        })
-        .collect()
-}
-
-fn config_section(
-    ui: &mut egui::Ui,
-    p: &PluginInfo,
-    cmd: &CommandTx,
-    edits: &mut std::collections::HashMap<String, String>,
-) {
-    use halod_shared::types::PluginConfigFieldKind;
-
-    widgets::caps_label(ui, &t!("plugins.settings"));
-    ui.add_space(6.0);
-
-    let mut groups: std::collections::BTreeMap<
-        String,
-        Vec<&halod_shared::types::PluginConfigField>,
-    > = std::collections::BTreeMap::new();
-    for f in &p.config_fields {
-        groups.entry(f.category.clone()).or_default().push(f);
-    }
-
-    for (category, fields) in &groups {
-        if !category.is_empty() {
-            ui.add_space(8.0);
+        if !permission_controls_editable(p) {
+            ui.add_space(4.0);
             ui.label(
-                egui::RichText::new(category.as_str())
+                egui::RichText::new(t!("plugins.permissions_builtin_note"))
                     .font(theme::body(11.0))
                     .color(theme::TEXT_FAINT),
             );
-        }
-        for f in fields {
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(&f.label)
-                    .font(theme::body(12.0))
-                    .color(theme::TEXT_DIM),
-            );
-            let buf = edits.entry(f.key.clone()).or_default();
-            let hint = if f.secure && p.secret_set.get(&f.key).copied().unwrap_or(false) {
-                t!("plugins.secret_set_hint")
-            } else {
-                std::borrow::Cow::Borrowed("")
-            };
-            ui.horizontal(|ui| {
-                let mut edit = egui::TextEdit::singleline(buf).desired_width(220.0);
-                if f.secure {
-                    edit = edit.password(true);
-                }
-                if matches!(f.kind, PluginConfigFieldKind::Number) {
-                    // Numeric fields are still stored/sent as strings (the
-                    // plugin/Lua side interprets them); this only nudges the
-                    // on-screen keyboard/validation, it doesn't change the type.
-                    edit = edit.hint_text("0");
-                }
-                ui.add(edit);
-                if !hint.is_empty() {
-                    ui.label(
-                        egui::RichText::new(hint.as_ref())
-                            .font(theme::body(11.0))
-                            .color(theme::TEXT_FAINT),
-                    );
-                }
-            });
-        }
-    }
-
-    ui.add_space(10.0);
-    if widgets::button(
-        ui,
-        &t!("plugins.save_settings"),
-        ButtonKind::Primary,
-        Vec2::new(140.0, 30.0),
-    )
-    .clicked()
-    {
-        let values = config_values_to_send(edits, &p.config_fields);
-        crate::domain::actions::plugins::set_plugin_config(cmd, p.id.clone(), values);
-        // Blank out secure buffers again post-send so a stored secret's typed
-        // replacement doesn't linger on screen after Save.
-        for f in &p.config_fields {
-            if f.secure {
-                edits.insert(f.key.clone(), String::new());
-            }
         }
     }
 }
@@ -1103,6 +990,7 @@ mod tests {
             config_fields: vec![],
             config_values: Default::default(),
             secret_set: Default::default(),
+            integration_enabled: true,
         }
     }
 
@@ -1168,6 +1056,20 @@ mod tests {
     }
 
     #[test]
+    fn permission_controls_are_editable_only_for_non_builtin_plugins() {
+        // A built-in is auto-granted its own declared permissions at the
+        // daemon level regardless of what's revoked in the GUI (see
+        // `drivers::plugins::granted_for`), so the Revoke control must not
+        // be offered — it would look like it does something when it can't.
+        let mut p = info("a", true);
+        p.builtin = false;
+        assert!(permission_controls_editable(&p));
+
+        p.builtin = true;
+        assert!(!permission_controls_editable(&p));
+    }
+
+    #[test]
     fn plugin_type_label_and_color_distinguish_device_and_effect() {
         use halod_shared::types::PluginKind;
         assert_eq!(
@@ -1182,78 +1084,5 @@ mod tests {
             plugin_type_color(PluginKind::Device),
             plugin_type_color(PluginKind::Effect)
         );
-    }
-
-    fn field(key: &str, secure: bool) -> halod_shared::types::PluginConfigField {
-        halod_shared::types::PluginConfigField {
-            key: key.to_string(),
-            label: key.to_string(),
-            kind: halod_shared::types::PluginConfigFieldKind::Text,
-            category: String::new(),
-            secure,
-        }
-    }
-
-    #[test]
-    fn seed_config_edit_initializes_from_config_values_on_first_use() {
-        let mut edit = None;
-        let values = std::collections::HashMap::from([("host".to_string(), "1.2.3.4".to_string())]);
-        seed_config_edit_if_needed(&mut edit, "openrgb", &values);
-        assert_eq!(edit, Some(("openrgb".to_string(), values)));
-    }
-
-    #[test]
-    fn seed_config_edit_resets_on_plugin_change_but_not_same_plugin() {
-        let mut edit = Some((
-            "openrgb".to_string(),
-            std::collections::HashMap::from([("host".to_string(), "typed-value".to_string())]),
-        ));
-        let stored = std::collections::HashMap::from([("host".to_string(), "1.2.3.4".to_string())]);
-
-        // Same plugin still selected: keep whatever the user is typing.
-        seed_config_edit_if_needed(&mut edit, "openrgb", &stored);
-        assert_eq!(
-            edit.as_ref().unwrap().1.get("host"),
-            Some(&"typed-value".to_string())
-        );
-
-        // Selection moved to a different plugin: reseed from its own values.
-        seed_config_edit_if_needed(&mut edit, "other", &stored);
-        assert_eq!(edit, Some(("other".to_string(), stored)));
-    }
-
-    #[test]
-    fn config_values_to_send_always_includes_non_secure_fields() {
-        let edits = std::collections::HashMap::from([("host".to_string(), "1.2.3.4".to_string())]);
-        let fields = vec![field("host", false)];
-        let sent = config_values_to_send(&edits, &fields);
-        assert_eq!(sent.get("host"), Some(&"1.2.3.4".to_string()));
-    }
-
-    #[test]
-    fn config_values_to_send_omits_a_blank_secure_field() {
-        let edits = std::collections::HashMap::from([("token".to_string(), String::new())]);
-        let fields = vec![field("token", true)];
-        let sent = config_values_to_send(&edits, &fields);
-        assert!(
-            !sent.contains_key("token"),
-            "an untouched secure field must not be sent, so the stored secret is left alone"
-        );
-    }
-
-    #[test]
-    fn config_values_to_send_includes_a_typed_secure_field() {
-        let edits =
-            std::collections::HashMap::from([("token".to_string(), "new-secret".to_string())]);
-        let fields = vec![field("token", true)];
-        let sent = config_values_to_send(&edits, &fields);
-        assert_eq!(sent.get("token"), Some(&"new-secret".to_string()));
-    }
-
-    #[test]
-    fn config_values_to_send_skips_fields_with_no_buffer_entry() {
-        let edits = std::collections::HashMap::new();
-        let fields = vec![field("host", false)];
-        assert!(config_values_to_send(&edits, &fields).is_empty());
     }
 }

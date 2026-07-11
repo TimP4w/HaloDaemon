@@ -15,6 +15,7 @@ pub enum Icon {
     Cooling,
     Settings,
     Plugins,
+    Integrations,
 }
 
 impl Icon {
@@ -25,6 +26,7 @@ impl Icon {
             Icon::Cooling => include_bytes!("../../assets/icons/cooling.svg"),
             Icon::Settings => include_bytes!("../../assets/icons/settings.svg"),
             Icon::Plugins => include_bytes!("../../assets/icons/plugins.svg"),
+            Icon::Integrations => include_bytes!("../../assets/icons/integrations.svg"),
         }
     }
 
@@ -35,6 +37,7 @@ impl Icon {
             Icon::Cooling => "nav_cooling",
             Icon::Settings => "nav_settings",
             Icon::Plugins => "nav_plugins",
+            Icon::Integrations => "nav_integrations",
         }
     }
 }
@@ -213,7 +216,13 @@ mod tests {
     /// wrong include path at build time rather than as a blank sidebar glyph.
     #[test]
     fn every_nav_icon_rasterizes() {
-        for icon in [Icon::Home, Icon::Lighting, Icon::Cooling, Icon::Settings] {
+        for icon in [
+            Icon::Home,
+            Icon::Lighting,
+            Icon::Cooling,
+            Icon::Settings,
+            Icon::Integrations,
+        ] {
             let img = rasterize(icon.svg(), ICON_PX)
                 .unwrap_or_else(|| panic!("{} failed to rasterize", icon.key()));
             assert_eq!(img.width().max(img.height()), ICON_PX as usize);

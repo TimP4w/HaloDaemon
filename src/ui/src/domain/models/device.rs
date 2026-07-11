@@ -73,8 +73,16 @@ pub fn battery_level(level: u8, charging: bool) -> BatteryLevel {
     }
 }
 
+/// Whether `d` *is* an integration's root (e.g. the OpenRGB SDK client)
+/// rather than a real device — it belongs on the Integrations page, not
+/// Home/sidebar. The devices an integration exposes as children have no
+/// `integration_id` of their own, so they stay listable.
+pub fn is_integration_root(d: &WireDevice) -> bool {
+    d.integration_id.is_some()
+}
+
 pub fn listable(d: &WireDevice) -> bool {
-    !matches!(d.device_type, DeviceType::Sensor)
+    !matches!(d.device_type, DeviceType::Sensor) && !is_integration_root(d)
 }
 
 pub fn is_hidden(d: &WireDevice) -> bool {
@@ -431,9 +439,20 @@ mod tests {
     }
 
     #[test]
-    fn listable_excludes_only_sensors() {
+    fn listable_excludes_sensors_and_integration_roots() {
         assert!(listable(&dev(DeviceType::Keyboard, vec![])));
         assert!(!listable(&dev(DeviceType::Sensor, vec![])));
+
+        let mut integration_root = dev(DeviceType::Other, vec![]);
+        integration_root.integration_id = Some("openrgb".into());
+        assert!(is_integration_root(&integration_root));
+        assert!(!listable(&integration_root));
+
+        // The devices an integration exposes as children carry no
+        // integration_id of their own, so they stay listable.
+        let child = dev(DeviceType::LedStrip, vec![]);
+        assert!(!is_integration_root(&child));
+        assert!(listable(&child));
     }
 
     #[test]

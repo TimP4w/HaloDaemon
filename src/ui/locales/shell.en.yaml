@@ -3,6 +3,7 @@ shell:
   nav_lighting: RGB Lighting
   nav_cooling: Cooling
   nav_plugins: Plugins
+  nav_integrations: Integrations
   nav_settings: Settings
   workspace: WORKSPACE
   my_devices: MY DEVICES

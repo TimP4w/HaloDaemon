@@ -202,6 +202,21 @@ pub enum DaemonCommand {
     /// `DeletePlugin`, `SetPluginPermissions`, `SetPluginConfig`) by running
     /// the actual close-everything-and-rediscover cycle once.
     ApplyPendingPluginChanges,
+    /// Enable or disable a single integration, independent of the generic
+    /// plugin toggle (which only governs whether its Lua may run at all —
+    /// see `SetPluginEnabled`). Applies immediately, scoped to just this
+    /// integration's root device and the devices it exposes.
+    SetIntegrationEnabled {
+        id: String,
+        enabled: bool,
+    },
+    /// Replace a single integration's user-editable config values and
+    /// reconnect just that integration. Applies immediately — unlike
+    /// `SetPluginConfig`, this is not staged behind `ApplyPendingPluginChanges`.
+    SetIntegrationConfig {
+        id: String,
+        values: HashMap<String, String>,
+    },
     SetLogLevel {
         level: String,
     },
@@ -727,6 +742,32 @@ mod tests {
         assert_eq!(
             v,
             json!({"type": "set_plugin_config", "id": "openrgb", "values": {"host": "127.0.0.1"}})
+        );
+    }
+
+    #[test]
+    fn set_integration_enabled_wire_format() {
+        let v = roundtrip(&DaemonCommand::SetIntegrationEnabled {
+            id: "openrgb".into(),
+            enabled: false,
+        });
+        assert_eq!(
+            v,
+            json!({"type": "set_integration_enabled", "id": "openrgb", "enabled": false})
+        );
+    }
+
+    #[test]
+    fn set_integration_config_wire_format() {
+        let mut values = HashMap::new();
+        values.insert("host".to_string(), "127.0.0.1".to_string());
+        let v = roundtrip(&DaemonCommand::SetIntegrationConfig {
+            id: "openrgb".into(),
+            values,
+        });
+        assert_eq!(
+            v,
+            json!({"type": "set_integration_config", "id": "openrgb", "values": {"host": "127.0.0.1"}})
         );
     }
 

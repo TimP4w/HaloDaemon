@@ -300,6 +300,12 @@ async fn dispatch(
         DaemonCommand::ApplyPendingPluginChanges => {
             registry::usecases::plugins::apply_pending_changes(app).await
         }
+        DaemonCommand::SetIntegrationEnabled { id, enabled } => {
+            registry::usecases::integrations::set_integration_enabled(id, enabled, app).await
+        }
+        DaemonCommand::SetIntegrationConfig { id, values } => {
+            registry::usecases::integrations::set_integration_config(id, values, app).await
+        }
         DaemonCommand::SetLogLevel { level } => {
             registry::usecases::settings::set_log_level(level, app).await
         }

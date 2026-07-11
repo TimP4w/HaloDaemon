@@ -29,6 +29,7 @@ plugins:
   permissions_granted: Concesso
   grant: Concedi permessi
   revoke: Revoca
+  permissions_builtin_note: Integrato — i permessi sono sempre concessi e non possono essere revocati.
   permission_network: Rete
   permission_os: Sistema Operativo
   permission_secure_storage: Archiviazione sicura

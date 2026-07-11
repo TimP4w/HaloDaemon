@@ -9,6 +9,7 @@
 pub mod canvas;
 pub mod cooling;
 pub mod devices;
+pub mod integrations;
 pub mod keys;
 pub mod lcd;
 pub mod lighting;

@@ -443,6 +443,10 @@ impl Device for LuaDevice {
         self.device_type
     }
 
+    fn integration_id(&self) -> Option<String> {
+        (self.plugin_type == PluginType::Integration).then(|| self.plugin_id.clone())
+    }
+
     async fn initialize(&self) -> Result<bool> {
         let Some(w) = &self.worker else {
             return Ok(true);
@@ -2067,6 +2071,23 @@ mod tests {
         // just the trait method.
         let dev = integration_device(Arc::new(MockTransport::empty()));
         assert!(dev.as_controller().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integration_root_marks_itself_on_the_wire_but_not_its_children() {
+        // The GUI hides an integration's root from Home/sidebar via this
+        // marker (see `Device::integration_id`) — a device plugin and every
+        // `IntegrationLeaf` child must never set it, or they'd disappear too.
+        let dev = integration_device(Arc::new(MockTransport::empty()));
+        assert_eq!(dev.integration_id(), Some("integ".to_string()));
+        let wire = dev.serialize().await;
+        assert_eq!(wire.integration_id, Some("integ".to_string()));
+
+        let children = dev.as_controller().unwrap().discover_children().await;
+        for child in &children {
+            assert_eq!(child.integration_id(), None);
+            assert_eq!(child.serialize().await.integration_id, None);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -9,10 +9,11 @@ use crate::domain::state::Page;
 use crate::ui::icons::{self, Icon};
 use crate::ui::theme::{self, a};
 
-const NAV: [(Icon, &str, Page); 5] = [
+const NAV: [(Icon, &str, Page); 6] = [
     (Icon::Home, "Home", Page::Home),
     (Icon::Lighting, "RGB Lighting", Page::Lighting),
     (Icon::Cooling, "Cooling", Page::Cooling),
+    (Icon::Integrations, "Integrations", Page::Integrations),
     (Icon::Plugins, "Plugins", Page::Plugins),
     (Icon::Settings, "Settings", Page::Settings),
 ];
@@ -196,6 +197,7 @@ fn nav_label(page: &Page) -> std::borrow::Cow<'static, str> {
         Page::Lighting => t!("shell.nav_lighting"),
         Page::Cooling => t!("shell.nav_cooling"),
         Page::Plugins => t!("shell.nav_plugins"),
+        Page::Integrations => t!("shell.nav_integrations"),
         Page::Settings => t!("shell.nav_settings"),
         _ => t!("shell.nav_home"),
     }
