@@ -191,12 +191,36 @@ pub fn set_granted(granted: &HashMap<String, Vec<Permission>>) {
     *GRANTED.write().expect("plugin granted map poisoned") = Some(granted.clone());
 }
 
+/// Permissions actually granted to `plugin_id`'s Lua sandbox: the user-set
+/// grants, plus — for a built-in — its own declared permissions. Built-ins
+/// ship inside the trusted daemon binary, so (as with `permissions_satisfied`)
+/// no separate consent step applies to them; without this, a built-in
+/// declaring e.g. `os` would still run with the sandbox's `os.clock()`
+/// stripped, since nothing else populates `GRANTED` on a built-in's behalf.
 pub(crate) fn granted_for(plugin_id: &str) -> Vec<Permission> {
-    GRANTED
+    let mut granted = GRANTED
         .read()
         .ok()
         .and_then(|g| g.as_ref().and_then(|m| m.get(plugin_id).cloned()))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if is_builtin(plugin_id) {
+        // Looked up from the built-in sources directly (not `PLUGIN_REGISTRY`,
+        // which may not have been populated yet in this process — e.g. in a
+        // test building a `LuaDevice` straight from a parsed manifest without
+        // going through `load_all`) so a built-in's own permissions are
+        // reliably granted regardless of registry state.
+        if let Some(m) = builtin_manifests()
+            .into_iter()
+            .find(|m| m.plugin_id == plugin_id)
+        {
+            for p in &m.permissions {
+                if !granted.contains(p) {
+                    granted.push(*p);
+                }
+            }
+        }
+    }
+    granted
 }
 
 /// Non-secure config values the user has set per plugin (from
@@ -883,7 +907,7 @@ mod tests {
         );
         assert_eq!(m.plugin_type, PluginType::Integration);
         assert!(m.needs_worker());
-        assert_eq!(m.permissions, vec![Permission::Network]);
+        assert_eq!(m.permissions, vec![Permission::Network, Permission::Os]);
         let tcp = m.transports.tcp.as_ref().expect("declares a tcp transport");
         assert_eq!(tcp.host_key, "host");
         assert_eq!(tcp.port_key, "port");
@@ -904,6 +928,39 @@ mod tests {
         let src = include_str!("builtins/openrgb.lua");
         let m = parse_manifest(src, Path::new("openrgb.lua")).unwrap();
         assert!(permissions_satisfied(&m));
+    }
+
+    #[test]
+    fn granted_for_auto_grants_a_builtins_own_declared_permissions() {
+        // Regression: `permissions_satisfied` (discovery gating) bypassing
+        // consent for built-ins isn't enough on its own — `granted_for` feeds
+        // the *sandbox's* actual permission list (e.g. whether `os.clock()`
+        // is reinjected), and previously had no built-in bypass at all, so a
+        // built-in's own declared permissions were never actually granted at
+        // the Lua level despite `permissions_satisfied` letting it through.
+        // Uses the real `openrgb.lua` (declares `network` + `os`) since the
+        // lookup is against the built-in sources, not `PLUGIN_REGISTRY` —
+        // this must hold even before `load_all` has ever populated it.
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_granted(&HashMap::new());
+        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
+
+        let granted = granted_for("openrgb");
+        assert!(granted.contains(&Permission::Network));
+        assert!(granted.contains(&Permission::Os));
+
+        // A non-builtin with the same declared permissions must NOT be
+        // auto-granted — only an explicit user grant satisfies it.
+        let src = r#"return {
+            identity = { vendor = "x", model = "y" },
+            type = "integration",
+            permissions = { "network", "os" },
+        }"#;
+        *PLUGIN_REGISTRY.write().unwrap() =
+            vec![parse_manifest(src, Path::new("some_other_plugin.lua")).unwrap()];
+        assert!(granted_for("some_other_plugin").is_empty());
+
+        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
     }
 
     #[test]

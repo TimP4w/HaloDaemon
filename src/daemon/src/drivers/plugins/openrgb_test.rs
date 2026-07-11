@@ -226,6 +226,10 @@ async fn openrgb_plugin_enumerates_and_writes_a_frame_end_to_end() {
     // with the exact expected wire bytes.
     let colors = [RgbColor { r: 1, g: 2, b: 3 }; 4];
     rgb.write_frame("0", &colors).await.unwrap();
+    // The plugin throttles sends to the same zone to at most 60/s so it
+    // doesn't outrun OpenRGB's own internal frame queue; space these out so
+    // both actually hit the wire.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     // Second write must NOT repeat SetCustomMode.
     rgb.write_frame("0", &colors).await.unwrap();
 

@@ -36,6 +36,19 @@ local CLIENT_PROTOCOL_VERSION = 3
 -- reset) on every single frame.
 local custom_mode_sent = {}
 
+-- Minimum spacing between two `UpdateZoneLEDs` sends to the same zone. Real
+-- OpenRGB servers queue and process incoming frames on their own internal
+-- worker rather than applying them immediately, so an effect loop pushing
+-- frames faster than the server can drain that queue builds up a growing
+-- backlog — LEDs visibly lag behind the current frame. There is no ack in
+-- the protocol to know when a frame has actually been applied, so the fix is
+-- to simply not send more often than this from our side.
+local MIN_SEND_INTERVAL = 1 / 60
+
+-- Per "index:zone" key: `os.clock()` timestamp of the last frame actually
+-- sent, so each zone is throttled independently.
+local last_sent = {}
+
 -- ── wire framing ──────────────────────────────────────────────────────────
 
 local function send_packet(dev, device_idx, packet_id, payload)
@@ -139,7 +152,7 @@ return {
     author = "HaloDaemon",
     description = "Connects to an OpenRGB server and exposes its controllers as devices.",
   },
-  permissions = { "network" },
+  permissions = { "network", "os" },
   config = {
     fields = {
       { key = "host", label = "Server host", kind = "text", default = "127.0.0.1" },
@@ -218,6 +231,14 @@ return {
   end,
 
   write_controller_frame = function(dev, index, zone, colors)
+    local key = index .. ":" .. zone
+    local now = os.clock()
+    local last = last_sent[key]
+    if last and (now - last) < MIN_SEND_INTERVAL then
+      return -- too soon after the last actual send to this zone; drop it
+    end
+    last_sent[key] = now
+
     if not custom_mode_sent[index] then
       send_packet(dev, index, PKT_RGBCONTROLLER_SETCUSTOMMODE)
       custom_mode_sent[index] = true
