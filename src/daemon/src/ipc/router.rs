@@ -287,8 +287,8 @@ async fn dispatch(
         DaemonCommand::SetPluginEnabled { id, enabled } => {
             registry::usecases::plugins::set_enabled(id, enabled, app).await
         }
-        DaemonCommand::ImportPlugin { filename, source } => {
-            registry::usecases::plugins::import(filename, source, app).await
+        DaemonCommand::ImportPlugin { source_dir } => {
+            registry::usecases::plugins::import(source_dir, app).await
         }
         DaemonCommand::DeletePlugin { id } => registry::usecases::plugins::delete(id, app).await,
         DaemonCommand::SetPluginPermissions { id, granted } => {
@@ -300,6 +300,25 @@ async fn dispatch(
         DaemonCommand::ApplyPendingPluginChanges => {
             registry::usecases::plugins::apply_pending_changes(app).await
         }
+        DaemonCommand::AddPluginRepo { url, branch } => {
+            registry::usecases::repos::add_repo(url, branch, app).await
+        }
+        DaemonCommand::RemovePluginRepo { slug } => {
+            registry::usecases::repos::remove_repo(slug, app).await
+        }
+        DaemonCommand::CheckPluginRepoUpdates => {
+            registry::usecases::repos::check_repo_updates(app, client).await
+        }
+        DaemonCommand::UpdatePluginRepo { slug } => {
+            registry::usecases::repos::update_repo(slug, app).await
+        }
+        DaemonCommand::CheckPluginUpdates { slug } => {
+            registry::usecases::repos::check_plugin_updates(slug, app, client).await
+        }
+        DaemonCommand::UpdatePlugin { plugin_id } => {
+            registry::usecases::repos::update_plugin(plugin_id, app).await
+        }
+        DaemonCommand::UpdateAllPlugins => registry::usecases::repos::update_all_plugins(app).await,
         DaemonCommand::SetIntegrationEnabled { id, enabled } => {
             registry::usecases::integrations::set_integration_enabled(id, enabled, app).await
         }
@@ -498,6 +517,9 @@ async fn dispatch(
         DaemonCommand::ListLcdImages => lcd::usecases::lcd::list_lcd_images(client).await,
         DaemonCommand::DeleteLcdImage { filename } => {
             lcd::usecases::lcd::delete_lcd_image(filename, app).await
+        }
+        DaemonCommand::GetPluginAsset { plugin_id, name } => {
+            registry::usecases::plugins::get_asset(plugin_id, name, client).await
         }
 
         DaemonCommand::CanvasUpsertEffect { instance_id, def } => {

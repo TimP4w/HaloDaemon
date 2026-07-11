@@ -10,12 +10,12 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Context, Result};
 
-use crate::drivers::plugins::manifest::{MatchSpec, PluginManifest};
+use crate::drivers::plugins::manifest::{DeviceSpec, PluginManifest};
 use crate::drivers::plugins::transport::{PluginIo, PluginTransportDescriptor};
 use crate::drivers::transports::tcp::TcpTransport;
 use crate::registry::discovery::DiscoveryHandle;
 
-fn matches(_spec: &MatchSpec, _handle: &DiscoveryHandle<'_>) -> bool {
+fn matches(_spec: &DeviceSpec, _handle: &DiscoveryHandle<'_>) -> bool {
     false
 }
 
@@ -60,7 +60,7 @@ fn id_suffix(_handle: &DiscoveryHandle<'_>) -> String {
     "0".to_owned()
 }
 
-fn validate(_spec: &MatchSpec) -> Result<()> {
+fn validate(_spec: &DeviceSpec) -> Result<()> {
     Ok(())
 }
 
@@ -79,12 +79,9 @@ mod tests {
     use std::path::Path;
 
     fn manifest_with_tcp() -> PluginManifest {
-        // A real `match` spec is only needed to satisfy `parse_manifest`'s
-        // "declares neither a match nor effects" guard — the `tcp` backend's
-        // `open` never looks at it (it reads host/port from `config`).
+        // The device spec only satisfies parse_manifest's guard; `open` reads host/port from `config`.
         let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             config = { fields = {
               { key = "host", label = "Host" },
               { key = "port", label = "Port" },
@@ -109,7 +106,9 @@ mod tests {
 
     #[test]
     fn matches_is_always_false() {
-        let spec = MatchSpec {
+        let spec = DeviceSpec {
+            vendor: "x".to_string(),
+            model: "y".to_string(),
             transport: "tcp".to_string(),
             vid: None,
             pid: None,

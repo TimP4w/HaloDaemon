@@ -249,14 +249,6 @@ per-channel frame composition (you never write a child device):
 The status poll is paused automatically while `detect_accessories` runs, so its
 reads don't race the background poll.
 
-The built-in
-[`nzxt_kraken.lua`](../src/daemon/src/drivers/plugins/builtins/nzxt_kraken.lua)
-plugin is a full port of the NZXT Kraken Z/Elite family: pump RGB, pump fan,
-liquid-temp sensor, status poll, an attached RGB fan as a child, and LCD.
-[`nzxt_kraken_x3.lua`](../src/daemon/src/drivers/plugins/builtins/nzxt_kraken_x3.lua)
-covers the older X53/X63/X73 wire family (ring + logo RGB and the same
-accessory-fan-child chaining, but no LCD and no software pump/fan speed
-control).
 
 ### Polling
 
@@ -639,10 +631,11 @@ zone, using `os.clock()` — needs the `os` permission) rather than trying to
 
 ## Example
 
-A complete, commented example lives at
-[`plugins/examples/example_device.lua`](../plugins/examples/example_device.lua):
-an HID device with an RGB ring, a pump fan, a liquid-temperature sensor, and a
-background status poll — every implemented feature in one file.
+A complete, commented example package — an HID device with an RGB ring, a pump
+fan, a liquid-temperature sensor, and a background status poll, exercising
+every implemented feature — lives in the official plugin repo rather than
+this one; see [Packaging & the official repo](#packaging--the-official-repo)
+below.
 
 ## Dynamic device info
 
@@ -740,11 +733,75 @@ runaway loop is killed rather than stalling the engine), falls back to a
 native default (solid/off) and is disabled for the rest of the session
 rather than being retried every frame.
 
-The built-in `halo_effects.lua` plugin (enable/disable it like any other
-plugin in the Plugins screen, not a separate example file) is both the
-reference implementation and the stock effect library — it ships every
-pixmap/direct effect except `screen_sampler` and the effect designer at
-[`src/daemon/src/drivers/plugins/builtins/halo_effects.lua`](../src/daemon/src/drivers/plugins/builtins/halo_effects.lua).
+The official plugin repo's `halo_effects` plugin (enable/disable it like any
+other plugin in the Plugins screen) is both the reference implementation and
+the stock effect library — it ships every pixmap/direct effect except
+`screen_sampler` and the effect designer.
+
+## Packaging & the official repo
+
+Every plugin is a **directory package**: a folder containing `plugin.yaml`
+(the manifest — `id`, `type`, identity fields, `entry`, `permissions`,
+`devices`, `transports`, optional `logo`/`effects` asset references) plus its
+entry Lua file (`main.lua` by default) and an optional `assets/` subdirectory
+for the logo/effect thumbnails. `plugin.yaml`'s `id` **must equal the
+directory name**. There is no single-file plugin format and nothing is
+compiled into the daemon binary.
+
+A plugin's **content hash** (`sha256(plugin.yaml bytes || entry script
+bytes)`) is what user consent is pinned to (trust-on-first-use): granting a
+plugin's declared permissions records this hash, and editing the script —
+even swapping the file on disk after a grant — changes the hash and revokes
+consent until the user re-approves. This applies uniformly to every plugin,
+including the official repo's — nothing is consent-exempt.
+
+Plugins install from three sources:
+
+- **Local** — a package dropped into `~/.config/halod/plugins/<id>/` (Linux)
+  or `%APPDATA%\halod\plugins\<id>\` (Windows), or imported via the Plugins
+  screen's "Add plugin" (a folder picker).
+- **The official repo** — a git repository the daemon seeds a non-removable
+  record for and clones at startup (network failure is logged, not fatal —
+  the daemon just has no official plugins until a later successful clone).
+  Official plugins go through the same consent flow as any other; the repo
+  *record* just can't be removed.
+- **Community repos** — any other git repository registered via the
+  Plugins screen's "+ Add repository", each cloned under
+  `~/.config/halod/plugin_repos/<slug>/` and scanned for a package at its
+  root and/or under a `plugins/<id>/` subdirectory.
+
+A plugin id is owned by whichever source loads it first — official repo,
+then local, then other repos in registration order — so a community repo can
+never shadow an existing plugin id; a collision is rejected and surfaced to
+the user rather than silently dropped.
+
+**Updates are per-plugin and never automatic.** The daemon compares a
+repo-sourced plugin's content hash against its repo's fetched remote tip
+(read straight from git's object database, no working-tree checkout) and
+flags it in the Plugins screen when they differ — independent of whether the
+containing repo as a whole is "behind", since a repo can have unrelated
+commits while a given plugin's own files are unchanged. Accepting an update
+checks out only that plugin's files, leaving sibling plugins in the same repo
+untouched, and (since the content changed) re-requires consent.
+
+**Testing a package without hardware.** A package may ship a `test.lua`
+alongside its `plugin.yaml`, which the daemon can run directly:
+
+```sh
+halod plugin-test <package-dir>
+```
+
+This drives the package's declared devices through the real Lua worker
+against a recording mock transport — no hardware required — and is how the
+official plugin repo's own CI validates a driver change. `test.lua` returns
+`function(h) … end`; `h:open(spec)` builds a device over a recording
+transport (`spec.reads` optionally scripts read replies), and the returned
+`dev` exposes `dev:initialize()`, `dev:apply(state)`, `dev:writes()` (the
+recorded write log), and `dev:clear()`. `h:assert(cond, msg)` and
+`h:assert_eq(a, b, msg)` record pass/fail; the process exits non-zero if any
+assertion failed. Today this covers `hid`/`tcp`-transport device plugins —
+see [drivers/plugins/plugin_test.rs](../src/daemon/src/drivers/plugins/plugin_test.rs)
+if a package needs SMBus/`usb_control` coverage.
 
 ## Roadmap
 

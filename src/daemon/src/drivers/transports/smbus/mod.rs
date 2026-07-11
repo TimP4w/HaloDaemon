@@ -13,7 +13,7 @@
 // `enumerate_buses`, `enumerate_gpu_buses`, `open_device`.
 
 use anyhow::{anyhow, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,7 +47,7 @@ pub enum SmbusBusKind {
 /// `Copy`/const-constructible so a native [`SmBusScanEntry`] can declare a
 /// `static [PciMatch]`, and `Deserialize` so a Lua plugin manifest can declare
 /// the same list — both feed the identical scanner gate ([`gate_bus`]).
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PciMatch {
     #[serde(default)]
     pub vendor: Option<u16>,

@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::state::AppState;
-use halod_shared::types::{AppState as WireAppState, HealthCheckState, PluginsState, ProfileState};
+use halod_shared::types::{
+    AppState as WireAppState, HealthCheckState, PluginRepoInfo, PluginsState, ProfileState,
+};
 
 pub async fn serialize_state(
     app: &Arc<AppState>,
@@ -51,6 +53,18 @@ pub async fn serialize_state(
             rediscover_pending: app
                 .plugins_rediscover_pending
                 .load(std::sync::atomic::Ordering::Relaxed),
+            repos: cfg
+                .plugin_repos
+                .iter()
+                .map(|r| PluginRepoInfo {
+                    url: r.url.clone(),
+                    slug: r.slug.clone(),
+                    branch: r.branch.clone(),
+                    locked_sha: r.locked_sha.clone(),
+                    last_sync: r.last_sync.clone(),
+                    official: r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG,
+                })
+                .collect(),
         },
     };
     match serde_json::to_value(wire) {

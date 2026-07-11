@@ -19,7 +19,7 @@ use halod_shared::lcd_custom::{CustomTemplateDef, LcdEditorRender};
 use halod_shared::socket::socket_path;
 use halod_shared::types::{
     AppState, CanvasFrame, LcdEngineFrame, LcdUploadProgress, Notification, NotificationCode,
-    RunningApp,
+    PluginUpdateStatus, RepoUpdateStatus, RunningApp,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -78,6 +78,12 @@ pub struct UiRx {
     pub lcd_frames: watch::Receiver<HashMap<String, DecodedFrame>>,
     pub canvas_frame: watch::Receiver<Option<CanvasFrame>>,
     pub running_apps: watch::Receiver<Vec<RunningApp>>,
+    /// Decoded plugin display assets, keyed by `plugin_asset_cache_key`.
+    pub plugin_assets: watch::Receiver<HashMap<String, Vec<u8>>>,
+    /// Latest repo update-check result; empty until one is requested.
+    pub repo_updates: watch::Receiver<Vec<RepoUpdateStatus>>,
+    /// Latest per-plugin update-check result; empty until one is requested.
+    pub plugin_updates: watch::Receiver<Vec<PluginUpdateStatus>>,
     /// Stage/percent of the in-flight LCD image upload; `None` when idle.
     pub lcd_upload: watch::Receiver<Option<LcdUploadProgress>>,
     /// The most recently loaded named LCD template, pushed in response to
@@ -97,6 +103,9 @@ struct UiTx {
     lcd_frames: watch::Sender<HashMap<String, DecodedFrame>>,
     canvas_frame: watch::Sender<Option<CanvasFrame>>,
     running_apps: watch::Sender<Vec<RunningApp>>,
+    plugin_assets: watch::Sender<HashMap<String, Vec<u8>>>,
+    repo_updates: watch::Sender<Vec<RepoUpdateStatus>>,
+    plugin_updates: watch::Sender<Vec<PluginUpdateStatus>>,
     lcd_upload: watch::Sender<Option<LcdUploadProgress>>,
     lcd_template: watch::Sender<Option<(String, CustomTemplateDef)>>,
     lcd_editor_render: watch::Sender<Option<DecodedEditorRender>>,
@@ -129,6 +138,9 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
     let (frames_s, frames_r) = watch::channel(HashMap::new());
     let (canvas_s, canvas_r) = watch::channel(None);
     let (apps_s, apps_r) = watch::channel(Vec::new());
+    let (assets_s, assets_r) = watch::channel(HashMap::new());
+    let (repo_updates_s, repo_updates_r) = watch::channel(Vec::new());
+    let (plugin_updates_s, plugin_updates_r) = watch::channel(Vec::new());
     let (upload_s, upload_r) = watch::channel(None);
     let (template_s, template_r) = watch::channel(None);
     let (editor_render_s, editor_render_r) = watch::channel(None);
@@ -142,6 +154,9 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
         lcd_frames: frames_s,
         canvas_frame: canvas_s,
         running_apps: apps_s,
+        plugin_assets: assets_s,
+        repo_updates: repo_updates_s,
+        plugin_updates: plugin_updates_s,
         lcd_upload: upload_s,
         lcd_template: template_s,
         lcd_editor_render: editor_render_s,
@@ -155,6 +170,9 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
         lcd_frames: frames_r,
         canvas_frame: canvas_r,
         running_apps: apps_r,
+        plugin_assets: assets_r,
+        repo_updates: repo_updates_r,
+        plugin_updates: plugin_updates_r,
         lcd_upload: upload_r,
         lcd_template: template_r,
         lcd_editor_render: editor_render_r,
@@ -319,6 +337,11 @@ fn push_notification(tx: &UiTx, n: Notification, repaint: &impl Fn()) {
     repaint();
 }
 
+/// Key an asset is stored/looked up under in `UiRx::plugin_assets`.
+pub fn plugin_asset_cache_key(plugin_id: &str, name: &str) -> String {
+    format!("{plugin_id}/{name}")
+}
+
 /// Route one inbound JSON frame onto the right channel. Returns `true` when the
 /// caller should re-request the LCD image library (an upload just completed).
 fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
@@ -473,6 +496,40 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             repaint();
             return false;
         }
+        Some("plugin_asset") => {
+            let plugin_id = value.get("plugin_id").and_then(|v| v.as_str());
+            let name = value.get("name").and_then(|v| v.as_str());
+            let data_b64 = value.get("data_b64").and_then(|v| v.as_str());
+            if let (Some(plugin_id), Some(name), Some(data_b64)) = (plugin_id, name, data_b64) {
+                use base64::Engine as _;
+                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data_b64) {
+                    let key = plugin_asset_cache_key(plugin_id, name);
+                    tx.plugin_assets.send_modify(|m| {
+                        m.insert(key, bytes);
+                    });
+                    repaint();
+                }
+            }
+            return false;
+        }
+        Some("plugin_repo_updates") => {
+            let statuses: Vec<RepoUpdateStatus> = value
+                .get("repos")
+                .and_then(|r| serde_json::from_value(r.clone()).ok())
+                .unwrap_or_default();
+            tx.repo_updates.send_replace(statuses);
+            repaint();
+            return false;
+        }
+        Some("plugin_updates") => {
+            let statuses: Vec<PluginUpdateStatus> = value
+                .get("plugins")
+                .and_then(|p| serde_json::from_value(p.clone()).ok())
+                .unwrap_or_default();
+            tx.plugin_updates.send_replace(statuses);
+            repaint();
+            return false;
+        }
         Some("lcd_template") => {
             let name = value
                 .get("name")
@@ -520,6 +577,9 @@ mod tests {
             lcd_frames: watch::channel(HashMap::new()).0,
             canvas_frame: watch::channel(None).0,
             running_apps: watch::channel(Vec::new()).0,
+            plugin_assets: watch::channel(HashMap::new()).0,
+            repo_updates: watch::channel(Vec::new()).0,
+            plugin_updates: watch::channel(Vec::new()).0,
             lcd_upload: upload_s,
             lcd_template: watch::channel(None).0,
             lcd_editor_render: watch::channel(None).0,
@@ -536,6 +596,61 @@ mod tests {
         let got = rx.borrow().clone().expect("progress routed");
         assert_eq!(got.device_id, "lcd");
         assert_eq!(got.percent, Some(42));
+    }
+
+    #[test]
+    fn plugin_asset_cache_key_is_scoped_per_plugin() {
+        assert_eq!(plugin_asset_cache_key("acme", "logo.png"), "acme/logo.png");
+        assert_ne!(
+            plugin_asset_cache_key("acme", "logo.png"),
+            plugin_asset_cache_key("other", "logo.png"),
+        );
+    }
+
+    #[test]
+    fn plugin_asset_frame_lands_on_the_watch_channel() {
+        use base64::Engine as _;
+        let (tx, _upload_r) = test_tx();
+        let mut assets_r = tx.plugin_assets.subscribe();
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(b"PNGDATA");
+        let payload = format!(
+            r#"{{"type":"plugin_asset","plugin_id":"acme","name":"logo.png","data_b64":"{data_b64}"}}"#
+        );
+        assert!(!handle_json(payload.as_bytes(), &tx, &|| {}));
+        let got = assets_r
+            .borrow_and_update()
+            .get("acme/logo.png")
+            .cloned()
+            .expect("asset routed");
+        assert_eq!(got, b"PNGDATA");
+    }
+
+    #[test]
+    fn plugin_repo_updates_frame_lands_on_the_watch_channel() {
+        let (tx, _upload_r) = test_tx();
+        let mut repo_updates_r = tx.repo_updates.subscribe();
+        let payload = br#"{"type":"plugin_repo_updates","repos":[
+            {"slug":"foo","locked_sha":"aaa","remote_sha":"bbb","behind":true}
+        ]}"#;
+        assert!(!handle_json(payload, &tx, &|| {}));
+        let got = repo_updates_r.borrow_and_update().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].slug, "foo");
+        assert!(got[0].behind);
+    }
+
+    #[test]
+    fn plugin_updates_frame_lands_on_the_watch_channel() {
+        let (tx, _upload_r) = test_tx();
+        let mut plugin_updates_r = tx.plugin_updates.subscribe();
+        let payload = br#"{"type":"plugin_updates","plugins":[
+            {"plugin_id":"wled_udp","slug":"foo","update_available":true,"current_version":"1.0.0","available_version":"1.1.0"}
+        ]}"#;
+        assert!(!handle_json(payload, &tx, &|| {}));
+        let got = plugin_updates_r.borrow_and_update().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].plugin_id, "wled_udp");
+        assert!(got[0].update_available);
     }
 
     #[test]

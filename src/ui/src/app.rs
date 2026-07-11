@@ -24,6 +24,8 @@ pub struct App {
     pub(crate) state_cache: Arc<AppState>,
     /// LCD library filenames, re-cloned only when the watch channel changes.
     pub(crate) lcd_images_cache: Arc<Vec<String>>,
+    /// Decoded plugin display assets, keyed by `ipc::plugin_asset_cache_key`.
+    pub(crate) plugin_assets_cache: Arc<HashMap<String, Vec<u8>>>,
     pub(crate) cmd: CommandTx,
     pub(crate) entered: bool,
     pub(crate) show_hidden: bool,
@@ -61,6 +63,10 @@ pub struct App {
     /// rather than going back to `None`.
     pub(crate) lcd_editor_render_cache: Option<ipc::DecodedEditorRender>,
     pub(crate) depcheck_grace: ui::screens::depcheck::GraceState,
+    /// Latest repo update-check result; persists like `lcd_editor_render_cache`.
+    pub(crate) repo_updates_cache: Vec<halod_shared::types::RepoUpdateStatus>,
+    /// Latest per-plugin update-check result; persists like `repo_updates_cache`.
+    pub(crate) plugin_updates_cache: Vec<halod_shared::types::PluginUpdateStatus>,
 }
 
 impl App {
@@ -89,6 +95,7 @@ impl App {
             ui,
             state_cache: Arc::new(AppState::default()),
             lcd_images_cache: Arc::new(Vec::new()),
+            plugin_assets_cache: Arc::new(HashMap::new()),
             cmd,
             entered: false,
             show_hidden: false,
@@ -116,6 +123,8 @@ impl App {
             pending_lcd_template: None,
             lcd_editor_render_cache: None,
             depcheck_grace: ui::screens::depcheck::GraceState::default(),
+            repo_updates_cache: Vec::new(),
+            plugin_updates_cache: Vec::new(),
         }
     }
 

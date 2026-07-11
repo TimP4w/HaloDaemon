@@ -485,14 +485,40 @@ mod tests {
         assert!(result.is_err(), "runaway script must error, not hang");
     }
 
-    #[tokio::test]
-    async fn shipped_example_effects_plugin_renders_without_error() {
-        // Guards the documented example against drift: both callbacks must
-        // run clean and produce plausible output.
-        let src = include_str!("builtins/halo_effects.lua");
+    /// A tiny pixmap + direction-aware direct effect, standing in for a real
+    /// shipped effect plugin (now hosted in the official plugin repo) so the
+    /// worker's pixmap/led_colors/param-passing mechanics stay covered here.
+    const MINI_FX: &str = r#"return {
+        render_plasma = function(buf, t, dt, params)
+            local speed = params.speed or 1.0
+            local v = (math.sin(t * speed) + 1.0) * 0.5
+            local byte = math.floor(v * 255)
+            for i = 0, #buf - 1, 4 do
+                buf:set_u8(i, byte)
+                buf:set_u8(i + 1, byte)
+                buf:set_u8(i + 2, byte)
+                buf:set_u8(i + 3, 255)
+            end
+        end,
+        led_colors_comet = function(leds, t, dt, params)
+            local dir = params.direction or "forward"
+            local speed = params.speed or 1.0
+            local head = (t * speed) % 1.0
+            if dir == "backward" then head = 1.0 - head end
+            local out = {}
+            for i, led in ipairs(leds) do
+                local d = math.abs(led.p - head)
+                local v = math.max(0.0, 1.0 - d * 4.0)
+                out[i] = { r = 0, g = v, b = v }
+            end
+            return out
+        end,
+    }"#;
 
+    #[tokio::test]
+    async fn mini_effect_plugin_renders_pixmap_and_led_colors_without_error() {
         let pixmap = PluginEffectHandle::spawn(
-            src.to_string(),
+            MINI_FX.to_string(),
             "plasma".to_string(),
             [("speed".to_string(), EffectParamValue::Float(0.8))]
                 .into_iter()
@@ -508,7 +534,7 @@ mod tests {
         );
 
         let direct = PluginEffectHandle::spawn(
-            src.to_string(),
+            MINI_FX.to_string(),
             "comet".to_string(),
             params(),
             vec![],
@@ -531,35 +557,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shipped_audio_spectrum_bars_mode_renders_without_nil_gap() {
-        // Regression: in "bars" mode, the 1px gap between a band's x_end and
-        // the next band's x0 (at the real 400px canvas width, 64 bands) was
-        // never written into the row buffer, leaving a nil hole that crashed
-        // `table.concat` at render time.
-        let src = include_str!("builtins/halo_effects.lua");
-        let params: HashMap<String, EffectParamValue> = [(
-            "fill".to_string(),
-            EffectParamValue::Str("bars".to_string()),
-        )]
-        .into_iter()
-        .collect();
+    async fn mini_effect_plugin_renders_a_frame_well_under_the_tick_budget() {
         let handle = PluginEffectHandle::spawn(
-            src.to_string(),
-            "audio_spectrum".to_string(),
-            params,
-            vec![],
-            HashMap::new(),
-        );
-        let bytes = handle.render_pixmap(0.0, 0.016).await.unwrap();
-        assert_eq!(bytes.len(), (CANVAS_W * CANVAS_H * 4) as usize);
-    }
-
-    #[tokio::test]
-    async fn shipped_example_plasma_renders_a_frame_well_under_the_tick_budget() {
-        // Guards against the per-pixel-trig/per-pixel-hsv-call regression
-        let src = include_str!("builtins/halo_effects.lua");
-        let handle = PluginEffectHandle::spawn(
-            src.to_string(),
+            MINI_FX.to_string(),
             "plasma".to_string(),
             [("speed".to_string(), EffectParamValue::Float(0.8))]
                 .into_iter()
@@ -567,7 +567,7 @@ mod tests {
             vec![],
             HashMap::new(),
         );
-        // First call pays for VM/palette warm-up; time a subsequent one.
+        // First call pays for VM warm-up; time a subsequent one.
         handle.render_pixmap(0.0, 0.016).await.unwrap();
         let start = std::time::Instant::now();
         handle.render_pixmap(0.1, 0.016).await.unwrap();
@@ -579,8 +579,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shipped_example_comet_direction_reverses_the_sweep() {
-        let src = include_str!("builtins/halo_effects.lua");
+    async fn mini_effect_plugin_comet_direction_reverses_the_sweep() {
         let leds: Vec<LedCoord> = (0..8)
             .map(|i| LedCoord {
                 p: i as f32 / 7.0,
@@ -597,7 +596,7 @@ mod tests {
         );
         fwd_params.insert("speed".to_string(), EffectParamValue::Float(1.0));
         let forward = PluginEffectHandle::spawn(
-            src.to_string(),
+            MINI_FX.to_string(),
             "comet".to_string(),
             fwd_params,
             vec![],
@@ -615,7 +614,7 @@ mod tests {
         );
         back_params.insert("speed".to_string(), EffectParamValue::Float(1.0));
         let backward = PluginEffectHandle::spawn(
-            src.to_string(),
+            MINI_FX.to_string(),
             "comet".to_string(),
             back_params,
             vec![],
@@ -623,8 +622,6 @@ mod tests {
         );
         let backward_colors = backward.led_colors(leds, 0.3, 0.0, None).await.unwrap();
 
-        // Default comet color is {r:0, g:160, b:255} — compare `.g` (or `.b`),
-        // not `.r`, since red is always zero regardless of direction.
         assert_ne!(
             forward_colors.iter().map(|c| c.g).collect::<Vec<_>>(),
             backward_colors.iter().map(|c| c.g).collect::<Vec<_>>(),

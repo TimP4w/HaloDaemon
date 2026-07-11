@@ -169,13 +169,13 @@ pub enum DaemonCommand {
         id: String,
         enabled: bool,
     },
-    /// Install a Lua plugin script into the plugins directory. The daemon
-    /// sanitizes `filename` and validates the source. Staged.
+    /// Install a plugin package (a directory containing `plugin.yaml` + its
+    /// entry script) into the plugins directory. `source_dir` is a local
+    /// filesystem path — the GUI's folder picker already runs on the same
+    /// host as the daemon. The daemon validates the package before copying
+    /// it in. Staged.
     ImportPlugin {
-        /// Suggested file name, e.g. `"my-driver.lua"`.
-        filename: String,
-        /// Full Lua source of the plugin script.
-        source: String,
+        source_dir: String,
     },
     /// Delete a user plugin script by id. Built-in plugins cannot be deleted
     /// and the daemon rejects the request. Staged.
@@ -202,6 +202,34 @@ pub enum DaemonCommand {
     /// `DeletePlugin`, `SetPluginPermissions`, `SetPluginConfig`) by running
     /// the actual close-everything-and-rediscover cycle once.
     ApplyPendingPluginChanges,
+    /// Register a git-repo plugin source, cloning it and pinning `locked_sha` to the checked-out commit.
+    AddPluginRepo {
+        url: String,
+        branch: Option<String>,
+    },
+    /// Unregister a git-repo plugin source, purging every plugin id it contributed.
+    RemovePluginRepo {
+        slug: String,
+    },
+    /// Check every registered repo's remote tip against `locked_sha`, replying with `plugin_repo_updates`.
+    CheckPluginRepoUpdates,
+    /// Fetch and check out a repo's remote tip, advancing `locked_sha`.
+    UpdatePluginRepo {
+        slug: String,
+    },
+    /// Check repo-sourced plugins for a per-plugin content update, replying
+    /// with `plugin_updates`. `slug` scopes the check to one repo; `None`
+    /// checks every repo. Finer-grained than `CheckPluginRepoUpdates`.
+    CheckPluginUpdates {
+        slug: Option<String>,
+    },
+    /// Update one plugin: check out only its subtree from its repo's remote
+    /// tip, leaving sibling plugins in the same repo untouched. Never automatic.
+    UpdatePlugin {
+        plugin_id: String,
+    },
+    /// Update every plugin currently flagged with an update available, across every repo.
+    UpdateAllPlugins,
     /// Enable or disable a single integration, independent of the generic
     /// plugin toggle (which only governs whether its Lua may run at all —
     /// see `SetPluginEnabled`). Applies immediately, scoped to just this
@@ -390,6 +418,11 @@ pub enum DaemonCommand {
     ListLcdImages,
     DeleteLcdImage {
         filename: String,
+    },
+    /// Fetch a plugin's display-only asset; the daemon replies with a `plugin_asset` frame of base64 bytes.
+    GetPluginAsset {
+        plugin_id: String,
+        name: String,
     },
 
     // Canvas
@@ -714,12 +747,11 @@ mod tests {
     #[test]
     fn import_plugin_wire_format() {
         let v = roundtrip(&DaemonCommand::ImportPlugin {
-            filename: "my-driver.lua".into(),
-            source: "return {}".into(),
+            source_dir: "/home/user/my-driver".into(),
         });
         assert_eq!(
             v,
-            json!({"type": "import_plugin", "filename": "my-driver.lua", "source": "return {}"})
+            json!({"type": "import_plugin", "source_dir": "/home/user/my-driver"})
         );
     }
 
@@ -729,6 +761,70 @@ mod tests {
             id: "my_driver".into(),
         });
         assert_eq!(v, json!({"type": "delete_plugin", "id": "my_driver"}));
+    }
+
+    #[test]
+    fn get_plugin_asset_wire_format() {
+        let v = roundtrip(&DaemonCommand::GetPluginAsset {
+            plugin_id: "my_driver".into(),
+            name: "logo.png".into(),
+        });
+        assert_eq!(
+            v,
+            json!({"type": "get_plugin_asset", "plugin_id": "my_driver", "name": "logo.png"})
+        );
+    }
+
+    #[test]
+    fn add_plugin_repo_wire_format() {
+        let v = roundtrip(&DaemonCommand::AddPluginRepo {
+            url: "https://example.com/foo.git".into(),
+            branch: Some("main".into()),
+        });
+        assert_eq!(
+            v,
+            json!({"type": "add_plugin_repo", "url": "https://example.com/foo.git", "branch": "main"})
+        );
+    }
+
+    #[test]
+    fn remove_plugin_repo_wire_format() {
+        let v = roundtrip(&DaemonCommand::RemovePluginRepo { slug: "foo".into() });
+        assert_eq!(v, json!({"type": "remove_plugin_repo", "slug": "foo"}));
+    }
+
+    #[test]
+    fn check_plugin_repo_updates_wire_format() {
+        let v = roundtrip(&DaemonCommand::CheckPluginRepoUpdates);
+        assert_eq!(v, json!({"type": "check_plugin_repo_updates"}));
+    }
+
+    #[test]
+    fn update_plugin_repo_wire_format() {
+        let v = roundtrip(&DaemonCommand::UpdatePluginRepo { slug: "foo".into() });
+        assert_eq!(v, json!({"type": "update_plugin_repo", "slug": "foo"}));
+    }
+
+    #[test]
+    fn check_plugin_updates_wire_format() {
+        let v = roundtrip(&DaemonCommand::CheckPluginUpdates {
+            slug: Some("foo".into()),
+        });
+        assert_eq!(v, json!({"type": "check_plugin_updates", "slug": "foo"}));
+    }
+
+    #[test]
+    fn update_plugin_wire_format() {
+        let v = roundtrip(&DaemonCommand::UpdatePlugin {
+            plugin_id: "wled_udp".into(),
+        });
+        assert_eq!(v, json!({"type": "update_plugin", "plugin_id": "wled_udp"}));
+    }
+
+    #[test]
+    fn update_all_plugins_wire_format() {
+        let v = roundtrip(&DaemonCommand::UpdateAllPlugins);
+        assert_eq!(v, json!({"type": "update_all_plugins"}));
     }
 
     #[test]

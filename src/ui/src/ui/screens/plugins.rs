@@ -5,36 +5,48 @@
 //! scripts can be added (upload a `.lua` file or paste source) and deleted;
 //! built-ins can be toggled but not deleted.
 
-use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{AppState, PluginInfo};
+use std::collections::{HashMap, HashSet};
 
-use crate::runtime::ipc::CommandTx;
+use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
+use halod_shared::types::{
+    AppState, PluginInfo, PluginRepoInfo, PluginSource, PluginUpdateStatus, RepoUpdateStatus,
+};
+
+use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::theme;
 
-/// Which input the add-plugin modal is collecting.
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
-enum AddTab {
-    #[default]
-    Upload,
-    Paste,
+/// In-progress state of the add-plugin modal. A plugin is always a directory
+/// package (`plugin.yaml` + entry script) — there is no single-file/pasted
+/// import path.
+#[derive(Default)]
+struct AddState;
+
+/// In-progress state of the "Add repository" modal.
+#[derive(Default)]
+struct AddRepoState {
+    url: String,
+    branch: String,
 }
 
-/// In-progress state of the add-plugin modal.
-#[derive(Default)]
-struct AddState {
-    tab: AddTab,
-    name: String,
-    code: String,
+/// What the detail column shows: a plugin, a repo, or nothing (empty state).
+#[derive(Default, Clone, PartialEq, Eq, Debug)]
+enum Selection {
+    Plugin(String),
+    Repo(String),
+    #[default]
+    None,
 }
 
 /// Local UI state for the Plugins screen (selection + open dialogs).
 #[derive(Default)]
 pub struct PluginsUi {
-    /// Id of the plugin shown in the detail column.
-    selected: Option<String>,
+    /// What the detail column shows.
+    selection: Selection,
     /// The add-plugin modal, when open.
     add: Option<AddState>,
+    /// The add-repository modal, when open.
+    add_repo: Option<AddRepoState>,
     /// Id pending a delete confirmation, when the dialog is open.
     pending_delete: Option<String>,
     /// Id pending a permission consent decision, when the dialog is open.
@@ -49,18 +61,77 @@ pub struct PluginsUi {
     /// dialog here) from an auto-discovered plugin found by a directory scan
     /// (the daemon pushes a toast notification for those instead).
     awaiting_import: bool,
+    /// Asset cache keys already requested, so a pending fetch isn't re-sent.
+    requested_assets: HashSet<String>,
+    /// Decoded asset bytes turned into textures, keyed like `requested_assets`.
+    asset_textures: HashMap<String, egui::TextureHandle>,
 }
 
 impl PluginsUi {
-    pub fn show(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
-        self.selected = resolve_selection(self.selected.as_deref(), &state.plugins.plugins);
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &AppState,
+        cmd: &CommandTx,
+        plugin_assets: &HashMap<String, Vec<u8>>,
+        repo_updates: &[RepoUpdateStatus],
+        plugin_updates: &[PluginUpdateStatus],
+    ) {
+        self.selection = resolve_selection(
+            self.selection.clone(),
+            &state.plugins.plugins,
+            &state.plugins.repos,
+        );
         self.detect_new_plugin_needing_consent(&state.plugins.plugins);
+        self.sync_assets(ui.ctx(), cmd, &state.plugins.plugins, plugin_assets);
 
-        widgets::page_frame(ui, |ui| self.body(ui, state, cmd));
+        widgets::page_frame(ui, |ui| {
+            self.body(ui, state, cmd, repo_updates, plugin_updates)
+        });
 
         self.add_modal(ui.ctx(), cmd);
+        self.add_repo_modal(ui.ctx(), cmd);
         self.delete_modal(ui.ctx(), state, cmd);
         self.consent_modal(ui.ctx(), state, cmd);
+    }
+
+    /// Request undeclared assets for the selected plugin and decode new bytes.
+    fn sync_assets(
+        &mut self,
+        ctx: &egui::Context,
+        cmd: &CommandTx,
+        plugins: &[PluginInfo],
+        plugin_assets: &HashMap<String, Vec<u8>>,
+    ) {
+        if let Selection::Plugin(id) = &self.selection {
+            if let Some(p) = plugins.iter().find(|p| &p.id == id) {
+                for (plugin_id, name) in assets_to_request(p, plugin_assets, &self.requested_assets)
+                {
+                    self.requested_assets
+                        .insert(ipc::plugin_asset_cache_key(&plugin_id, &name));
+                    crate::domain::actions::plugins::get_plugin_asset(cmd, plugin_id, name);
+                }
+            }
+        }
+        for (key, bytes) in plugin_assets {
+            if self.asset_textures.contains_key(key) {
+                continue;
+            }
+            if let Some(img) = image::load_from_memory(bytes).ok().map(|i| i.into_rgba8()) {
+                let (w, h) = (img.width() as usize, img.height() as usize);
+                let pixels: Vec<egui::Color32> = img
+                    .into_raw()
+                    .chunks_exact(4)
+                    .map(|c| egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
+                    .collect();
+                let tex = ctx.load_texture(
+                    key.clone(),
+                    egui::ColorImage::new([w, h], pixels),
+                    egui::TextureOptions::LINEAR,
+                );
+                self.asset_textures.insert(key.clone(), tex);
+            }
+        }
     }
 
     /// A plugin id that appears now but wasn't present last frame opens the
@@ -81,7 +152,14 @@ impl PluginsUi {
         self.known_ids = Some(ids);
     }
 
-    fn body(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+    fn body(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &AppState,
+        cmd: &CommandTx,
+        repo_updates: &[RepoUpdateStatus],
+        plugin_updates: &[PluginUpdateStatus],
+    ) {
         ui.label(
             egui::RichText::new(t!("plugins.title"))
                 .font(theme::bold(22.0))
@@ -100,15 +178,28 @@ impl PluginsUi {
             ui.add_space(18.0);
         }
 
+        let due = plugin_updates.iter().filter(|s| s.update_available).count();
+        if due > 0 {
+            update_all_banner(ui, cmd, due);
+            ui.add_space(18.0);
+        }
+
         widgets::split_columns(ui, 320.0, 18.0, |left, right| {
-            self.list_column(left, state, cmd);
-            self.detail_column(right, state, cmd);
+            self.list_column(left, state, cmd, repo_updates, plugin_updates);
+            self.detail_column(right, state, cmd, plugin_updates);
         });
     }
 
-    // ── Left: plugin list ───────────────────────────────────────────────────
+    // ── Left: plugin list + repositories ────────────────────────────────────
 
-    fn list_column(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+    fn list_column(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &AppState,
+        cmd: &CommandTx,
+        repo_updates: &[RepoUpdateStatus],
+        plugin_updates: &[PluginUpdateStatus],
+    ) {
         widgets::card(ui, |ui| {
             let active = state
                 .plugins
@@ -145,7 +236,7 @@ impl PluginsUi {
                     )
                     .clicked()
                     {
-                        self.add = Some(AddState::default());
+                        self.add = Some(AddState);
                     }
                 },
             );
@@ -157,68 +248,152 @@ impl PluginsUi {
                         .font(theme::body(12.0))
                         .color(theme::TEXT_MUT),
                 );
-                return;
+            } else {
+                let updating: HashSet<&str> = plugin_updates
+                    .iter()
+                    .filter(|s| s.update_available)
+                    .map(|s| s.plugin_id.as_str())
+                    .collect();
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 3.0;
+                        for p in &state.plugins.plugins {
+                            let selected = self.selection == Selection::Plugin(p.id.clone());
+                            let has_update = updating.contains(p.id.as_str());
+                            let logo_tex = p
+                                .logo
+                                .as_deref()
+                                .map(|name| ipc::plugin_asset_cache_key(&p.id, name))
+                                .and_then(|key| self.asset_textures.get(&key));
+                            match list_row(ui, p, selected, has_update, logo_tex) {
+                                RowAction::Select => {
+                                    self.selection = Selection::Plugin(p.id.clone())
+                                }
+                                RowAction::Toggle => {
+                                    self.pending_consent =
+                                        request_toggle(cmd, p, self.pending_consent.take())
+                                }
+                                RowAction::None => {}
+                            }
+                        }
+                    });
             }
 
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 3.0;
-                    for p in &state.plugins.plugins {
-                        let selected = self.selected.as_deref() == Some(p.id.as_str());
-                        match list_row(ui, p, selected) {
-                            RowAction::Select => self.selected = Some(p.id.clone()),
-                            RowAction::Toggle => {
-                                self.pending_consent =
-                                    request_toggle(cmd, p, self.pending_consent.take())
-                            }
-                            RowAction::None => {}
-                        }
+            ui.add_space(18.0);
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    widgets::caps_label_inline(ui, &t!("plugins.repos_title"));
+                },
+                |ui| {
+                    if widgets::button(ui, "+", ButtonKind::Ghost, Vec2::new(28.0, 26.0)).clicked()
+                    {
+                        self.add_repo = Some(AddRepoState::default());
                     }
-                });
+                },
+            );
+            ui.add_space(8.0);
+
+            let rows = repo_rows(&state.plugins.repos, repo_updates);
+            if rows.is_empty() {
+                ui.label(
+                    egui::RichText::new(t!("plugins.repos_empty"))
+                        .font(theme::body(11.5))
+                        .color(theme::TEXT_MUT),
+                );
+                return;
+            }
+            for row in rows {
+                let selected = self.selection == Selection::Repo(row.slug.to_owned());
+                if repo_row(ui, &row, selected) {
+                    self.selection = Selection::Repo(row.slug.to_owned());
+                }
+            }
         });
     }
 
     // ── Right: detail ───────────────────────────────────────────────────────
 
-    fn detail_column(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
-        let Some(p) = self
-            .selected
-            .as_deref()
-            .and_then(|id| state.plugins.plugins.iter().find(|p| p.id == id))
-        else {
-            widgets::empty_state(
-                ui,
-                &t!("plugins.empty_title"),
-                Some(&t!("plugins.empty_hint")),
-            );
-            return;
-        };
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                widgets::card(ui, |ui| {
-                    detail_body(
+    fn detail_column(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &AppState,
+        cmd: &CommandTx,
+        plugin_updates: &[PluginUpdateStatus],
+    ) {
+        match &self.selection {
+            Selection::Plugin(id) => {
+                let Some(p) = state.plugins.plugins.iter().find(|p| &p.id == id) else {
+                    widgets::empty_state(
                         ui,
-                        p,
-                        cmd,
-                        &mut self.pending_delete,
-                        &mut self.pending_consent,
-                    )
-                });
-            });
+                        &t!("plugins.empty_title"),
+                        Some(&t!("plugins.empty_hint")),
+                    );
+                    return;
+                };
+                let logo_tex = p
+                    .logo
+                    .as_deref()
+                    .map(|name| ipc::plugin_asset_cache_key(&p.id, name))
+                    .and_then(|key| self.asset_textures.get(&key));
+                let update = plugin_updates.iter().find(|s| &s.plugin_id == id);
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        widgets::card(ui, |ui| {
+                            detail_body(
+                                ui,
+                                p,
+                                cmd,
+                                logo_tex,
+                                update,
+                                &mut self.pending_delete,
+                                &mut self.pending_consent,
+                            )
+                        });
+                    });
+            }
+            Selection::Repo(slug) => {
+                let Some(r) = state.plugins.repos.iter().find(|r| &r.slug == slug) else {
+                    widgets::empty_state(
+                        ui,
+                        &t!("plugins.empty_title"),
+                        Some(&t!("plugins.empty_hint")),
+                    );
+                    return;
+                };
+                let mut select_plugin = None;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        widgets::card(ui, |ui| {
+                            select_plugin = repo_detail_body(ui, r, &state.plugins.plugins, cmd);
+                        });
+                    });
+                if let Some(id) = select_plugin {
+                    self.selection = Selection::Plugin(id);
+                }
+            }
+            Selection::None => {
+                widgets::empty_state(
+                    ui,
+                    &t!("plugins.empty_title"),
+                    Some(&t!("plugins.empty_hint")),
+                );
+            }
+        }
     }
 
     // ── Dialogs ─────────────────────────────────────────────────────────────
 
     fn add_modal(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
-        let Some(mut add) = self.add.take() else {
+        let Some(add) = self.add.take() else {
             return;
         };
-        let tab = add.tab;
-        let mut pick_file = false;
-        let mut confirm = false;
+        let mut pick_folder = false;
         let mut cancel = false;
 
         let dismissed = widgets::dialog(
@@ -226,20 +401,18 @@ impl PluginsUi {
             "add_plugin",
             &t!("plugins.add_title"),
             480.0,
-            |ui| add_body(ui, &mut add),
+            add_body,
             |ui| {
                 // `dialog` lays actions out right-to-left; add the primary first.
-                let label = match tab {
-                    AddTab::Upload => t!("plugins.choose_file"),
-                    AddTab::Paste => t!("plugins.add"),
-                };
-                if widgets::button(ui, &label, ButtonKind::Primary, Vec2::new(130.0, 34.0))
-                    .clicked()
+                if widgets::button(
+                    ui,
+                    &t!("plugins.choose_folder"),
+                    ButtonKind::Primary,
+                    Vec2::new(150.0, 34.0),
+                )
+                .clicked()
                 {
-                    match tab {
-                        AddTab::Upload => pick_file = true,
-                        AddTab::Paste => confirm = true,
-                    }
+                    pick_folder = true;
                 }
                 if widgets::button(
                     ui,
@@ -254,26 +427,92 @@ impl PluginsUi {
             },
         );
 
-        if pick_file {
-            // Optimistic: the file dialog may still be cancelled, in which case
-            // no plugin ever appears and this flag is simply never consumed.
+        if pick_folder {
+            // Optimistic: the folder dialog may still be cancelled, in which
+            // case no plugin ever appears and this flag is simply never consumed.
             self.awaiting_import = true;
             spawn_import_plugin(ctx, cmd.clone());
-            return; // modal closes; import completes when the user picks a file
+            return; // modal closes; import completes when the user picks a folder
         }
+        if cancel || dismissed {
+            return;
+        }
+        self.add = Some(add);
+    }
+
+    fn add_repo_modal(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
+        let Some(mut form) = self.add_repo.take() else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+
+        let dismissed = widgets::dialog(
+            ctx,
+            "add_plugin_repo",
+            &t!("plugins.repos_add_title"),
+            420.0,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(t!("plugins.repos_add_sub"))
+                        .font(theme::body(11.5))
+                        .color(theme::TEXT_MUT),
+                );
+                ui.add_space(14.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut form.url)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(t!("plugins.repos_url_hint")),
+                );
+                ui.add_space(8.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut form.branch)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(t!("plugins.repos_branch_hint")),
+                );
+            },
+            |ui| {
+                // `dialog` lays actions out right-to-left; add the primary first.
+                if widgets::button(
+                    ui,
+                    &t!("plugins.repos_add"),
+                    ButtonKind::Primary,
+                    Vec2::new(110.0, 34.0),
+                )
+                .clicked()
+                {
+                    confirm = true;
+                }
+                if widgets::button(
+                    ui,
+                    &t!("plugins.cancel"),
+                    ButtonKind::Ghost,
+                    Vec2::new(90.0, 34.0),
+                )
+                .clicked()
+                {
+                    cancel = true;
+                }
+            },
+        );
+
         if confirm {
-            let code = add.code.trim();
-            if !code.is_empty() {
-                let filename = add_filename(&add.name);
-                self.awaiting_import = true;
-                crate::domain::actions::plugins::import_plugin(cmd, filename, add.code.clone());
+            let url = form.url.trim().to_owned();
+            if !url.is_empty() {
+                let branch = form.branch.trim();
+                let branch = if branch.is_empty() {
+                    None
+                } else {
+                    Some(branch.to_owned())
+                };
+                crate::domain::actions::plugins::add_plugin_repo(cmd, url, branch);
                 return;
             }
         }
         if cancel || dismissed {
             return;
         }
-        self.add = Some(add);
+        self.add_repo = Some(form);
     }
 
     fn delete_modal(&mut self, ctx: &egui::Context, state: &AppState, cmd: &CommandTx) {
@@ -414,15 +653,166 @@ impl PluginsUi {
     }
 }
 
-/// The plugin the detail column should show: keep the current selection if it
-/// still exists, otherwise fall back to the first plugin (or `None` if empty).
-fn resolve_selection(current: Option<&str>, plugins: &[PluginInfo]) -> Option<String> {
-    if let Some(id) = current {
-        if plugins.iter().any(|p| p.id == id) {
-            return Some(id.to_owned());
-        }
+// ── Plugin repository rows ──────────────────────────────────────────────────
+
+/// One repo row as shown in the repositories list.
+struct RepoRow<'a> {
+    slug: &'a str,
+    branch: Option<&'a str>,
+    official: bool,
+    locked_short: String,
+    remote_short: Option<String>,
+    behind: bool,
+}
+
+/// A commit SHA truncated to a short, still-unambiguous display form.
+fn truncate_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(8)]
+}
+
+/// Pair each repo with its update status, sorted by slug for a stable order
+/// — except the official repo, which always sorts first.
+fn repo_rows<'a>(repos: &'a [PluginRepoInfo], updates: &[RepoUpdateStatus]) -> Vec<RepoRow<'a>> {
+    let mut rows: Vec<RepoRow> = repos
+        .iter()
+        .map(|r| {
+            let status = updates.iter().find(|u| u.slug == r.slug);
+            let behind = status.is_some_and(|s| s.behind);
+            RepoRow {
+                slug: &r.slug,
+                branch: r.branch.as_deref(),
+                official: r.official,
+                locked_short: truncate_sha(&r.locked_sha).to_owned(),
+                remote_short: status
+                    .filter(|_| behind)
+                    .map(|s| truncate_sha(&s.remote_sha).to_owned()),
+                behind,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.official.cmp(&a.official).then_with(|| a.slug.cmp(b.slug)));
+    rows
+}
+
+/// A small colored tile with a fork glyph, for a repo row/detail header.
+fn repo_icon_tile(ui: &mut egui::Ui, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    ui.painter().rect_filled(rect, 9.0, theme::hex(0x161320));
+    ui.painter().rect_stroke(
+        rect,
+        9.0,
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Middle,
+    );
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        "⑂",
+        theme::body(size * 0.36),
+        theme::TEXT_MUT,
+    );
+}
+
+/// One selectable repo row in the list column. Returns whether it was clicked.
+fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+    if selected {
+        ui.painter().rect_filled(rect, 9.0, theme::ROW_ACTIVE);
+    } else if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 9.0, theme::a(theme::ROW_ACTIVE, 0.55));
     }
-    plugins.first().map(|p| p.id.clone())
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 8.0, rect.center().y - 12.0),
+        Vec2::splat(24.0),
+    );
+    ui.painter()
+        .rect_filled(icon_rect, 6.0, theme::hex(0x161320));
+    ui.painter().text(
+        icon_rect.center(),
+        Align2::CENTER_CENTER,
+        "⑂",
+        theme::body(12.0),
+        theme::TEXT_MUT,
+    );
+
+    let text_x = rect.left() + 40.0;
+    ui.painter().text(
+        Pos2::new(text_x, rect.top() + 12.0),
+        Align2::LEFT_TOP,
+        row.slug,
+        theme::semibold(12.0),
+        theme::TEXT,
+    );
+    let sha_text = match &row.remote_short {
+        Some(remote) => format!("{} → {}", row.locked_short, remote),
+        None => row.locked_short.clone(),
+    };
+    ui.painter().text(
+        Pos2::new(text_x, rect.top() + 26.0),
+        Align2::LEFT_TOP,
+        sha_text,
+        theme::mono(9.5),
+        if row.behind {
+            theme::STAT_AMBER
+        } else {
+            theme::TEXT_FAINT2
+        },
+    );
+
+    if let Some(branch) = row.branch {
+        let branch_pos = Pos2::new(rect.right() - 10.0, rect.center().y);
+        ui.painter().text(
+            branch_pos,
+            Align2::RIGHT_CENTER,
+            branch,
+            theme::mono(9.5),
+            theme::TEXT_FAINT,
+        );
+    }
+
+    resp.clicked()
+}
+
+/// What the detail column should show: keep the current selection if its
+/// target still exists, otherwise fall back to the first plugin (or `None`).
+fn resolve_selection(
+    current: Selection,
+    plugins: &[PluginInfo],
+    repos: &[PluginRepoInfo],
+) -> Selection {
+    match &current {
+        Selection::Plugin(id) if plugins.iter().any(|p| &p.id == id) => return current,
+        Selection::Repo(slug) if repos.iter().any(|r| &r.slug == slug) => return current,
+        _ => {}
+    }
+    match plugins.first() {
+        Some(p) => Selection::Plugin(p.id.clone()),
+        None => Selection::None,
+    }
+}
+
+/// Which of `p`'s declared display assets aren't cached or already requested.
+fn assets_to_request(
+    p: &PluginInfo,
+    cache: &HashMap<String, Vec<u8>>,
+    already_requested: &HashSet<String>,
+) -> Vec<(String, String)> {
+    let mut names: Vec<String> = p.logo.iter().cloned().collect();
+    names.extend(p.effect_thumbnails.iter().map(|t| t.thumbnail.clone()));
+    names
+        .into_iter()
+        .filter(|name| {
+            let key = ipc::plugin_asset_cache_key(&p.id, name);
+            !cache.contains_key(&key) && !already_requested.contains(&key)
+        })
+        .map(|name| (p.id.clone(), name))
+        .collect()
 }
 
 /// The file name shown for a plugin (the basename of its script path).
@@ -431,17 +821,6 @@ fn plugin_file_name(p: &PluginInfo) -> &str {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(&p.path)
-}
-
-/// Build the suggested script file name from the modal's name field. The daemon
-/// re-sanitizes, so this only needs to be a reasonable default.
-fn add_filename(name: &str) -> String {
-    let name = name.trim();
-    if name.is_empty() {
-        "plugin.lua".to_owned()
-    } else {
-        format!("{name}.lua")
-    }
 }
 
 // ── Row + detail painters ───────────────────────────────────────────────────
@@ -516,7 +895,13 @@ fn status_dot(p: &PluginInfo) -> egui::Color32 {
     }
 }
 
-fn list_row(ui: &mut egui::Ui, p: &PluginInfo, selected: bool) -> RowAction {
+fn list_row(
+    ui: &mut egui::Ui,
+    p: &PluginInfo,
+    selected: bool,
+    has_update: bool,
+    logo_tex: Option<&egui::TextureHandle>,
+) -> RowAction {
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::click());
     if selected {
@@ -526,10 +911,24 @@ fn list_row(ui: &mut egui::Ui, p: &PluginInfo, selected: bool) -> RowAction {
             .rect_filled(rect, 9.0, theme::a(theme::ROW_ACTIVE, 0.55));
     }
     let center_y = rect.center().y;
-    ui.painter()
-        .circle_filled(Pos2::new(rect.left() + 12.0, center_y), 3.5, status_dot(p));
 
-    let text_x = rect.left() + 26.0;
+    let tile_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 8.0, center_y - 14.0),
+        Vec2::splat(28.0),
+    );
+    match logo_tex {
+        Some(tex) => {
+            ui.painter().image(
+                tex.id(),
+                tile_rect,
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        None => initials_tile_at(ui, tile_rect, &p.name, &p.id),
+    }
+
+    let text_x = tile_rect.right() + 10.0;
     ui.painter().text(
         Pos2::new(text_x, rect.top() + 9.0),
         Align2::LEFT_TOP,
@@ -544,6 +943,14 @@ fn list_row(ui: &mut egui::Ui, p: &PluginInfo, selected: bool) -> RowAction {
         theme::mono(9.5),
         theme::TEXT_FAINT,
     );
+    if has_update {
+        ui.painter().circle_filled(
+            Pos2::new(tile_rect.right() - 2.0, tile_rect.top() + 2.0),
+            4.0,
+            theme::STAT_AMBER,
+        );
+    }
+    let _ = status_dot(p); // kept for the toggle animation's initial state below
 
     // Toggle sits on top of the row; handle it before the row-select click.
     let toggle_rect = Rect::from_min_size(
@@ -572,35 +979,91 @@ fn list_row(ui: &mut egui::Ui, p: &PluginInfo, selected: bool) -> RowAction {
     }
 }
 
-fn lua_badge(ui: &mut egui::Ui, size: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    ui.painter().rect_filled(rect, 10.0, theme::hex(0x191527));
+/// Deterministic background color for a colored-initials tile, from a small
+/// hash of `id` — stable across reloads/reorders since it never depends on
+/// list position.
+fn initials_color(id: &str) -> egui::Color32 {
+    const PALETTE: [egui::Color32; 6] = [
+        theme::STAT_CYAN,
+        theme::STAT_PURPLE,
+        theme::STAT_GREEN,
+        theme::STAT_AMBER,
+        theme::CYAN,
+        theme::TRAFFIC_GREEN,
+    ];
+    let hash = id
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    PALETTE[(hash as usize) % PALETTE.len()]
+}
+
+/// Up to 2 uppercase initials from `name` (first letter of the first two
+/// words), falling back to "?" for an empty name.
+fn initials_for(name: &str) -> String {
+    let initials: String = name
+        .split_whitespace()
+        .filter_map(|w| w.chars().next())
+        .take(2)
+        .flat_map(|c| c.to_uppercase())
+        .collect();
+    if initials.is_empty() {
+        "?".to_owned()
+    } else {
+        initials
+    }
+}
+
+/// A colored-initials tile at an already-allocated `rect` (for the list rows,
+/// which lay out several elements on one hand-painted row).
+fn initials_tile_at(ui: &mut egui::Ui, rect: Rect, name: &str, id: &str) {
+    let color = initials_color(id);
+    ui.painter().rect_filled(rect, 8.0, theme::a(color, 0.16));
     ui.painter().rect_stroke(
         rect,
-        10.0,
-        Stroke::new(1.0, theme::a(theme::CYAN, 0.45)),
+        8.0,
+        Stroke::new(1.0, theme::a(color, 0.5)),
         egui::StrokeKind::Middle,
     );
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
-        "lua",
-        theme::mono_semibold(10.0),
-        theme::CYAN,
+        initials_for(name),
+        theme::mono_semibold(rect.height() * 0.34),
+        color,
     );
+}
+
+/// A colored-initials tile that allocates its own `size`×`size` space (for
+/// the detail column's header, where nothing else shares the row).
+fn initials_tile(ui: &mut egui::Ui, name: &str, id: &str, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    initials_tile_at(ui, rect, name, id);
 }
 
 fn detail_body(
     ui: &mut egui::Ui,
     p: &PluginInfo,
     cmd: &CommandTx,
+    logo_tex: Option<&egui::TextureHandle>,
+    update: Option<&PluginUpdateStatus>,
     pending_delete: &mut Option<String>,
     pending_consent: &mut Option<String>,
 ) {
     egui::Sides::new().show(
         ui,
         |ui| {
-            lua_badge(ui, 44.0);
+            match logo_tex {
+                Some(tex) => {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+                    ui.painter().image(
+                        tex.id(),
+                        rect,
+                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+                None => initials_tile(ui, &p.name, &p.id, 44.0),
+            }
             ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
@@ -635,6 +1098,29 @@ fn detail_body(
 
     ui.add_space(14.0);
     status_banner(ui, p);
+
+    if !p.license.is_empty() || !matches!(p.source, PluginSource::Local) {
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
+            if !p.license.is_empty() {
+                widgets::chip(ui, &format!("⚖ {}", p.license));
+            }
+            if let PluginSource::Repo { slug } = &p.source {
+                widgets::chip(ui, &format!("⑂ {slug}"));
+            }
+        });
+    }
+
+    if let Some(update) = update.filter(|u| u.update_available) {
+        ui.add_space(14.0);
+        update_banner(
+            ui,
+            cmd,
+            &update.plugin_id,
+            &update.current_version,
+            &update.available_version,
+        );
+    }
 
     if !p.description.is_empty() {
         ui.add_space(16.0);
@@ -698,17 +1184,19 @@ fn detail_body(
         if widgets::button(ui, &label, kind, Vec2::new(120.0, 34.0)).clicked() {
             *pending_consent = request_toggle(cmd, p, pending_consent.take());
         }
-        if p.builtin {
-            widgets::caps_label_inline(ui, &t!("plugins.builtin_note"));
-        } else if widgets::button(
-            ui,
-            &t!("plugins.delete"),
-            ButtonKind::Danger,
-            Vec2::new(120.0, 34.0),
-        )
-        .clicked()
-        {
-            *pending_delete = Some(p.id.clone());
+        if matches!(p.source, halod_shared::types::PluginSource::Local) {
+            if widgets::button(
+                ui,
+                &t!("plugins.delete"),
+                ButtonKind::Danger,
+                Vec2::new(120.0, 34.0),
+            )
+            .clicked()
+            {
+                *pending_delete = Some(p.id.clone());
+            }
+        } else {
+            widgets::caps_label_inline(ui, &t!("plugins.repo_sourced_note"));
         }
     });
 }
@@ -843,23 +1331,21 @@ fn targets_permissions_row(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
 pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
     ui.horizontal(|ui| {
         widgets::caps_label_inline(ui, &t!("plugins.permissions"));
-        if !p.builtin {
-            let (text, color) = if p.consented {
-                (t!("plugins.permissions_granted"), theme::ONLINE_TEXT)
-            } else {
-                (t!("plugins.permissions_not_granted_tag"), theme::STAT_AMBER)
-            };
-            ui.label(
-                egui::RichText::new(text)
-                    .font(theme::body(11.0))
-                    .color(color),
-            );
-        }
+        let (text, color) = if p.consented {
+            (t!("plugins.permissions_granted"), theme::ONLINE_TEXT)
+        } else {
+            (t!("plugins.permissions_not_granted_tag"), theme::STAT_AMBER)
+        };
+        ui.label(
+            egui::RichText::new(text)
+                .font(theme::body(11.0))
+                .color(color),
+        );
     });
     ui.add_space(6.0);
 
     for perm in &p.declared_permissions {
-        let color = if p.builtin || p.granted_permissions.contains(perm) {
+        let color = if p.granted_permissions.contains(perm) {
             theme::ONLINE
         } else {
             theme::STAT_AMBER
@@ -868,13 +1354,7 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
         ui.add_space(6.0);
     }
 
-    if p.builtin {
-        ui.label(
-            egui::RichText::new(t!("plugins.permissions_builtin_note"))
-                .font(theme::body(11.0))
-                .color(theme::TEXT_FAINT),
-        );
-    } else if !p.consented {
+    if !p.consented {
         if p.content_changed {
             ui.label(
                 egui::RichText::new(t!("plugins.consent_modified"))
@@ -967,9 +1447,251 @@ fn status_banner(ui: &mut egui::Ui, p: &PluginInfo) {
         });
 }
 
+/// Amber "N plugin update(s) available / Update all" banner at the top of the page.
+fn update_all_banner(ui: &mut egui::Ui, cmd: &CommandTx, count: usize) {
+    egui::Frame::NONE
+        .fill(theme::a(theme::STAT_AMBER, 0.10))
+        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                        ui.painter()
+                            .circle_filled(r.center(), 3.5, theme::STAT_AMBER);
+                        ui.label(
+                            egui::RichText::new(t!("plugins.updates_available", count = count))
+                                .font(theme::body(12.5))
+                                .color(theme::TEXT),
+                        );
+                    });
+                },
+                |ui| {
+                    if widgets::button(
+                        ui,
+                        &t!("plugins.update_all"),
+                        ButtonKind::Primary,
+                        Vec2::new(120.0, 32.0),
+                    )
+                    .clicked()
+                    {
+                        crate::domain::actions::plugins::update_all_plugins(cmd);
+                    }
+                },
+            );
+        });
+}
+
+/// Amber "Update available vX → vY / Update" banner in a plugin's detail. Never automatic.
+fn update_banner(
+    ui: &mut egui::Ui,
+    cmd: &CommandTx,
+    plugin_id: &str,
+    current: &str,
+    available: &str,
+) {
+    egui::Frame::NONE
+        .fill(theme::a(theme::STAT_AMBER, 0.10))
+        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 11))
+        .show(ui, |ui| {
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(t!("plugins.update_available"))
+                                .font(theme::body(12.0))
+                                .color(theme::TEXT),
+                        );
+                        if !current.is_empty() || !available.is_empty() {
+                            ui.label(
+                                egui::RichText::new(format!("{current} → {available}"))
+                                    .font(theme::mono(11.0))
+                                    .color(theme::STAT_AMBER),
+                            );
+                        }
+                    });
+                },
+                |ui| {
+                    if widgets::button(
+                        ui,
+                        &t!("plugins.repos_update"),
+                        ButtonKind::Primary,
+                        Vec2::new(90.0, 30.0),
+                    )
+                    .clicked()
+                    {
+                        crate::domain::actions::plugins::update_plugin(cmd, plugin_id.to_owned());
+                    }
+                },
+            );
+        });
+}
+
+/// A repo's stat box (SOURCE / LAST SYNC / DRIVERS).
+fn stat_box(ui: &mut egui::Ui, label: &str, value: &str) {
+    egui::Frame::NONE
+        .fill(theme::INNER_BG)
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 11))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::caps_label(ui, label);
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(value)
+                    .font(theme::body(12.5))
+                    .color(theme::TEXT),
+            );
+        });
+}
+
+/// The repo detail panel: header, stat boxes, "Check for updates", the list
+/// of plugins it provides, and Remove (hidden for the official repo). Returns
+/// a clicked plugin id, if any, so the caller can switch the selection to it.
+fn repo_detail_body(
+    ui: &mut egui::Ui,
+    r: &PluginRepoInfo,
+    plugins: &[PluginInfo],
+    cmd: &CommandTx,
+) -> Option<String> {
+    egui::Sides::new().show(
+        ui,
+        |ui| {
+            ui.horizontal(|ui| {
+                repo_icon_tile(ui, 44.0);
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(&r.slug)
+                                .font(theme::bold(18.0))
+                                .color(theme::TEXT),
+                        );
+                        if let Some(branch) = &r.branch {
+                            widgets::chip(ui, branch);
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new(&r.url)
+                            .font(theme::mono(10.0))
+                            .color(theme::TEXT_FAINT2),
+                    );
+                });
+            });
+        },
+        |_ui| {},
+    );
+
+    ui.add_space(16.0);
+    let repo_plugins: Vec<&PluginInfo> = plugins
+        .iter()
+        .filter(|p| matches!(&p.source, PluginSource::Repo { slug } if *slug == r.slug))
+        .collect();
+    ui.columns(3, |cols| {
+        stat_box(&mut cols[0], &t!("plugins.repo_source"), "Git remote");
+        stat_box(
+            &mut cols[1],
+            &t!("plugins.repo_last_sync"),
+            r.last_sync
+                .as_deref()
+                .unwrap_or(&t!("plugins.repo_never_synced")),
+        );
+        stat_box(
+            &mut cols[2],
+            &t!("plugins.repo_drivers"),
+            &t!("plugins.repo_drivers_count", count = repo_plugins.len()),
+        );
+    });
+
+    ui.add_space(14.0);
+    if widgets::button(
+        ui,
+        &t!("plugins.repos_check_updates"),
+        ButtonKind::Primary,
+        Vec2::new(180.0, 32.0),
+    )
+    .clicked()
+    {
+        crate::domain::actions::plugins::check_plugin_updates(cmd, Some(r.slug.clone()));
+    }
+
+    ui.add_space(20.0);
+    widgets::caps_label(ui, &t!("plugins.repo_drivers_from"));
+    ui.add_space(8.0);
+
+    let mut clicked = None;
+    for p in &repo_plugins {
+        let (rect, resp) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
+        if resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, 8.0, theme::a(theme::ROW_ACTIVE, 0.55));
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let tile_rect = Rect::from_min_size(
+            Pos2::new(rect.left() + 6.0, rect.center().y - 12.0),
+            Vec2::splat(24.0),
+        );
+        initials_tile_at(ui, tile_rect, &p.name, &p.id);
+        let text_x = tile_rect.right() + 10.0;
+        ui.painter().text(
+            Pos2::new(text_x, rect.top() + 6.0),
+            Align2::LEFT_TOP,
+            &p.name,
+            theme::semibold(12.0),
+            theme::TEXT,
+        );
+        let sub = if p.license.is_empty() {
+            plugin_file_name(p).to_owned()
+        } else {
+            format!("{} · {}", plugin_file_name(p), p.license)
+        };
+        ui.painter().text(
+            Pos2::new(text_x, rect.top() + 22.0),
+            Align2::LEFT_TOP,
+            sub,
+            theme::mono(9.5),
+            theme::TEXT_FAINT,
+        );
+        ui.painter().circle_filled(
+            Pos2::new(rect.right() - 12.0, rect.center().y),
+            3.5,
+            status_dot(p),
+        );
+        if resp.clicked() {
+            clicked = Some(p.id.clone());
+        }
+    }
+
+    if !r.official {
+        ui.add_space(20.0);
+        ui.separator();
+        ui.add_space(14.0);
+        if widgets::button(
+            ui,
+            &t!("plugins.repos_remove"),
+            ButtonKind::Danger,
+            Vec2::new(150.0, 34.0),
+        )
+        .clicked()
+        {
+            crate::domain::actions::plugins::remove_plugin_repo(cmd, r.slug.clone());
+        }
+    }
+
+    clicked
+}
+
 // ── Add-plugin modal body ───────────────────────────────────────────────────
 
-fn add_body(ui: &mut egui::Ui, add: &mut AddState) {
+fn add_body(ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new(t!("plugins.add_sub"))
             .font(theme::body(11.5))
@@ -977,85 +1699,37 @@ fn add_body(ui: &mut egui::Ui, add: &mut AddState) {
     );
     ui.add_space(14.0);
 
-    ui.horizontal(|ui| {
-        if widgets::pill(ui, &t!("plugins.tab_upload"), add.tab == AddTab::Upload) {
-            add.tab = AddTab::Upload;
-        }
-        if widgets::pill(ui, &t!("plugins.tab_paste"), add.tab == AddTab::Paste) {
-            add.tab = AddTab::Paste;
-        }
-    });
-    ui.add_space(14.0);
-
-    match add.tab {
-        AddTab::Upload => {
-            egui::Frame::NONE
-                .fill(theme::INNER_BG)
-                .stroke(Stroke::new(1.0, theme::BORDER))
-                .corner_radius(10.0)
-                .inner_margin(egui::Margin::symmetric(20, 26))
-                .show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            egui::RichText::new(t!("plugins.upload_hint"))
-                                .font(theme::body(12.5))
-                                .color(theme::TEXT),
-                        );
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(t!("plugins.upload_sub"))
-                                .font(theme::body(11.0))
-                                .color(theme::TEXT_MUT),
-                        );
-                    });
-                });
-        }
-        AddTab::Paste => {
-            ui.add(
-                egui::TextEdit::multiline(&mut add.code)
-                    .font(theme::mono(11.5))
-                    .desired_rows(8)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(t!("plugins.paste_hint")),
-            );
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
+    egui::Frame::NONE
+        .fill(theme::INNER_BG)
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(20, 26))
+        .show(ui, |ui| {
+            ui.vertical_centered(|ui| {
                 ui.label(
-                    egui::RichText::new(t!("plugins.name"))
-                        .font(theme::body(11.5))
+                    egui::RichText::new(t!("plugins.upload_hint"))
+                        .font(theme::body(12.5))
+                        .color(theme::TEXT),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(t!("plugins.upload_sub"))
+                        .font(theme::body(11.0))
                         .color(theme::TEXT_MUT),
                 );
-                ui.add(
-                    egui::TextEdit::singleline(&mut add.name)
-                        .desired_width(f32::INFINITY)
-                        .hint_text(t!("plugins.name_hint")),
-                );
             });
-        }
-    }
+        });
 }
 
-/// Open a native `.lua` picker on a background thread, read the file, and send
-/// an import command straight from the thread (the command channel is cheap to
-/// clone). Mirrors `effect_designer::spawn_import`.
+/// Open a native folder picker on a background thread and send an import
+/// command for the chosen plugin package directory straight from the thread
+/// (the command channel is cheap to clone). Mirrors `effect_designer::spawn_import`.
 fn spawn_import_plugin(ctx: &egui::Context, cmd: CommandTx) {
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Lua plugin", &["lua"])
-            .pick_file()
-        {
-            match std::fs::read_to_string(&path) {
-                Ok(source) => {
-                    let filename = path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("plugin.lua")
-                        .to_owned();
-                    crate::domain::actions::plugins::import_plugin(&cmd, filename, source);
-                }
-                Err(e) => log::warn!("failed to read plugin {path:?}: {e}"),
-            }
+        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+            let source_dir = path.to_string_lossy().into_owned();
+            crate::domain::actions::plugins::import_plugin(&cmd, source_dir);
         }
         ctx.request_repaint();
     });
@@ -1078,7 +1752,11 @@ mod tests {
             version: "1.0.0".into(),
             description: "desc".into(),
             targets: vec!["Acme K1".into()],
-            builtin: false,
+            license: String::new(),
+            devices: vec![],
+            logo: None,
+            effect_thumbnails: vec![],
+            source: Default::default(),
             declared_permissions: vec![],
             granted_permissions: vec![],
             config_fields: vec![],
@@ -1091,25 +1769,182 @@ mod tests {
     }
 
     #[test]
+    fn assets_to_request_lists_undeclared_logo_and_thumbnails() {
+        let mut p = info("a", true);
+        p.logo = Some("logo.png".into());
+        p.effect_thumbnails = vec![halod_shared::types::PluginEffectAsset {
+            id: "rainbow".into(),
+            thumbnail: "rainbow.png".into(),
+        }];
+        let reqs = assets_to_request(&p, &HashMap::new(), &HashSet::new());
+        assert_eq!(
+            reqs,
+            vec![
+                ("a".to_owned(), "logo.png".to_owned()),
+                ("a".to_owned(), "rainbow.png".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn assets_to_request_skips_cached_and_already_requested() {
+        let mut p = info("a", true);
+        p.logo = Some("logo.png".into());
+        p.effect_thumbnails = vec![halod_shared::types::PluginEffectAsset {
+            id: "rainbow".into(),
+            thumbnail: "rainbow.png".into(),
+        }];
+        let mut cache = HashMap::new();
+        cache.insert(ipc::plugin_asset_cache_key("a", "logo.png"), vec![1, 2, 3]);
+        let mut requested = HashSet::new();
+        requested.insert(ipc::plugin_asset_cache_key("a", "rainbow.png"));
+
+        assert!(assets_to_request(&p, &cache, &requested).is_empty());
+    }
+
+    #[test]
+    fn assets_to_request_empty_when_plugin_declares_no_assets() {
+        let p = info("a", true);
+        assert!(assets_to_request(&p, &HashMap::new(), &HashSet::new()).is_empty());
+    }
+
+    fn repo(slug: &str, locked_sha: &str) -> PluginRepoInfo {
+        PluginRepoInfo {
+            url: format!("https://example.com/{slug}.git"),
+            slug: slug.to_owned(),
+            branch: None,
+            locked_sha: locked_sha.to_owned(),
+            last_sync: None,
+            official: false,
+        }
+    }
+
+    #[test]
+    fn truncate_sha_shortens_a_full_hash_and_passes_through_a_short_one() {
+        assert_eq!(truncate_sha("0123456789abcdef"), "01234567");
+        assert_eq!(truncate_sha("abc"), "abc");
+    }
+
+    #[test]
+    fn repo_rows_sorts_by_slug_and_marks_up_to_date_repos_unbehind() {
+        let repos = vec![repo("zebra", "aaaaaaaa1111"), repo("alpha", "bbbbbbbb2222")];
+        let rows = repo_rows(&repos, &[]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].slug, "alpha");
+        assert_eq!(rows[1].slug, "zebra");
+        assert!(!rows[0].behind);
+        assert!(rows[0].remote_short.is_none());
+        assert_eq!(rows[0].locked_short, "bbbbbbbb");
+    }
+
+    #[test]
+    fn repo_rows_surfaces_the_remote_sha_only_when_behind() {
+        let repos = vec![repo("foo", "aaaaaaaa")];
+        let up_to_date = [RepoUpdateStatus {
+            slug: "foo".into(),
+            locked_sha: "aaaaaaaa".into(),
+            remote_sha: "aaaaaaaa".into(),
+            behind: false,
+        }];
+        let rows = repo_rows(&repos, &up_to_date);
+        assert!(!rows[0].behind);
+        assert!(rows[0].remote_short.is_none());
+
+        let behind = [RepoUpdateStatus {
+            slug: "foo".into(),
+            locked_sha: "aaaaaaaa".into(),
+            remote_sha: "cccccccc9999".into(),
+            behind: true,
+        }];
+        let rows = repo_rows(&repos, &behind);
+        assert!(rows[0].behind);
+        assert_eq!(rows[0].remote_short.as_deref(), Some("cccccccc"));
+    }
+
+    #[test]
+    fn repo_rows_puts_the_official_repo_first_regardless_of_slug() {
+        let mut official = repo("aaa-not-alphabetically-first", "aaaaaaaa");
+        official.official = true;
+        let repos = vec![repo("alpha", "bbbbbbbb"), official];
+        let rows = repo_rows(&repos, &[]);
+        assert!(rows[0].official, "the official repo must sort first");
+        assert_eq!(rows[1].slug, "alpha");
+    }
+
+    #[test]
+    fn initials_for_takes_first_letter_of_first_two_words() {
+        assert_eq!(initials_for("WLED UDP"), "WU");
+        assert_eq!(initials_for("kraken"), "K");
+        assert_eq!(initials_for(""), "?");
+        assert_eq!(initials_for("  "), "?");
+    }
+
+    #[test]
+    fn initials_color_is_deterministic_and_not_constant() {
+        assert_eq!(initials_color("wled_udp"), initials_color("wled_udp"));
+        // Not every id needs a different color, but the derivation must be
+        // sensitive to the id (not just returning the same palette entry).
+        let colors: std::collections::HashSet<_> = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(|id| initials_color(id).to_srgba_unmultiplied())
+            .collect();
+        assert!(
+            colors.len() > 1,
+            "distinct ids must not all collapse to one color"
+        );
+    }
+
+    #[test]
     fn selection_keeps_valid_current() {
         let plugins = vec![info("a", true), info("b", false)];
-        assert_eq!(resolve_selection(Some("b"), &plugins).as_deref(), Some("b"));
+        assert_eq!(
+            resolve_selection(Selection::Plugin("b".into()), &plugins, &[]),
+            Selection::Plugin("b".into())
+        );
     }
 
     #[test]
     fn selection_falls_back_to_first_when_missing_or_none() {
         let plugins = vec![info("a", true), info("b", false)];
         assert_eq!(
-            resolve_selection(Some("gone"), &plugins).as_deref(),
-            Some("a")
+            resolve_selection(Selection::Plugin("gone".into()), &plugins, &[]),
+            Selection::Plugin("a".into())
         );
-        assert_eq!(resolve_selection(None, &plugins).as_deref(), Some("a"));
+        assert_eq!(
+            resolve_selection(Selection::None, &plugins, &[]),
+            Selection::Plugin("a".into())
+        );
     }
 
     #[test]
     fn selection_is_none_for_empty_list() {
-        assert_eq!(resolve_selection(Some("a"), &[]), None);
-        assert_eq!(resolve_selection(None, &[]), None);
+        assert_eq!(
+            resolve_selection(Selection::Plugin("a".into()), &[], &[]),
+            Selection::None
+        );
+        assert_eq!(
+            resolve_selection(Selection::None, &[], &[]),
+            Selection::None
+        );
+    }
+
+    #[test]
+    fn selection_keeps_a_valid_repo_selection() {
+        let plugins = vec![info("a", true)];
+        let repos = vec![repo("foo", "aaaaaaaa")];
+        assert_eq!(
+            resolve_selection(Selection::Repo("foo".into()), &plugins, &repos),
+            Selection::Repo("foo".into())
+        );
+    }
+
+    #[test]
+    fn selection_falls_back_when_the_selected_repo_is_gone() {
+        let plugins = vec![info("a", true)];
+        assert_eq!(
+            resolve_selection(Selection::Repo("gone".into()), &plugins, &[]),
+            Selection::Plugin("a".into())
+        );
     }
 
     #[test]
@@ -1118,12 +1953,6 @@ mod tests {
         let mut p = info("x", true);
         p.path = "ene_smbus.lua".into();
         assert_eq!(plugin_file_name(&p), "ene_smbus.lua");
-    }
-
-    #[test]
-    fn add_filename_defaults_and_appends_extension() {
-        assert_eq!(add_filename("  "), "plugin.lua");
-        assert_eq!(add_filename(" Nanoleaf "), "Nanoleaf.lua");
     }
 
     #[test]

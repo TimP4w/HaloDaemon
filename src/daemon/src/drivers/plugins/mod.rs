@@ -21,6 +21,9 @@ mod image_api;
 mod integration_leaf;
 pub(crate) mod integration_scan;
 mod manifest;
+#[cfg(feature = "plugin-test")]
+pub mod plugin_test;
+pub mod repo;
 mod sandbox;
 mod transport;
 mod transport_api;
@@ -28,7 +31,9 @@ mod worker;
 
 pub use device::LuaDevice;
 pub use effect_worker::{LedCoord, PluginEffectHandle};
-pub use manifest::{parse_manifest, EffectKind, PluginManifest, ProbeMode};
+#[cfg(test)]
+pub(crate) use manifest::parse_manifest;
+pub use manifest::{parse_manifest_from_dir, EffectKind, PluginManifest, ProbeMode};
 pub use scan::plugin_smbus_scan_entries;
 pub use worker::run_pre_scan;
 
@@ -224,36 +229,13 @@ pub fn set_granted(granted: &HashMap<String, Vec<Permission>>) {
     update(|s| s.granted = granted.clone());
 }
 
-/// Permissions actually granted to `plugin_id`'s Lua sandbox: the user-set
-/// grants, plus — for a built-in — its own declared permissions. Built-ins
-/// ship inside the trusted daemon binary, so (as with `consent_satisfied`)
-/// no separate consent step applies to them; without this, a built-in
-/// declaring e.g. `os` would still run with the sandbox's `os.clock()`
-/// stripped, since nothing else populates the granted map on its behalf.
+/// Permissions actually granted to `plugin_id`'s Lua sandbox: the user-set grants.
 pub(crate) fn granted_for(plugin_id: &str) -> Vec<Permission> {
-    let mut granted = snapshot()
+    snapshot()
         .granted
         .get(plugin_id)
         .cloned()
-        .unwrap_or_default();
-    if is_builtin(plugin_id) {
-        // Looked up from the built-in sources directly (not the snapshot's
-        // manifests, which may not have been populated yet in this process —
-        // e.g. in a test building a `LuaDevice` straight from a parsed manifest
-        // without going through `load_all`) so a built-in's own permissions are
-        // reliably granted regardless of registry state.
-        if let Some(m) = builtin_manifests()
-            .iter()
-            .find(|m| m.plugin_id == plugin_id)
-        {
-            for p in &m.permissions {
-                if !granted.contains(p) {
-                    granted.push(*p);
-                }
-            }
-        }
-    }
-    granted
+        .unwrap_or_default()
 }
 
 /// Replace the acknowledged-hash map (from `config.plugin_acknowledged`).
@@ -366,14 +348,15 @@ pub fn secure_config_keys_for(plugin_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// True when the plugin may activate. Built-ins ship in the trusted binary; a
-/// plugin declaring no permissions runs freely (it can only talk to its matched
-/// device — the base trust every plugin has). A plugin that *declares*
-/// permissions must have every one granted **and** the grant pinned to the
-/// exact script content the user consented to: editing the script after a grant
-/// revokes consent until it is granted again (trust-on-first-use).
+/// True when the plugin may activate. A plugin declaring no permissions runs
+/// freely (it can only talk to its matched device — the base trust every
+/// plugin has). A plugin that *declares* permissions must have every one
+/// granted **and** the grant pinned to the exact script content the user
+/// consented to: editing the script after a grant revokes consent until it is
+/// granted again (trust-on-first-use). This applies uniformly to every
+/// plugin, including those from the official repo — nothing is consent-exempt.
 fn consent_satisfied(manifest: &PluginManifest) -> bool {
-    if is_builtin(&manifest.plugin_id) || manifest.permissions.is_empty() {
+    if manifest.permissions.is_empty() {
         return true;
     }
     let granted = granted_for(&manifest.plugin_id);
@@ -449,6 +432,38 @@ pub fn take_newly_ungranted_plugins() -> Vec<String> {
     ungranted_in(&state.manifests, notified)
 }
 
+/// Where `plugin_dir` came from: `Repo { slug }` under `plugin_repos_dir()`, else `Local`.
+fn plugin_source_for(plugin_dir: &Path) -> halod_shared::types::PluginSource {
+    let repos_dir = crate::config::plugin_repos_dir();
+    match plugin_dir.strip_prefix(&repos_dir).ok().and_then(|rel| {
+        rel.components().next().and_then(|c| match c {
+            std::path::Component::Normal(slug) => Some(slug.to_string_lossy().into_owned()),
+            _ => None,
+        })
+    }) {
+        Some(slug) => halod_shared::types::PluginSource::Repo { slug },
+        None => halod_shared::types::PluginSource::Local,
+    }
+}
+
+/// For a repo-sourced plugin, its repo slug and path within that repo's clone
+/// (`""` for a root-level plugin, `plugins/<id>` for a subdir one) — the same
+/// pair [`crate::drivers::plugins::repo::remote_plugin_content`] and
+/// `checkout_subtree` need. `None` for an unknown or `Local` plugin.
+pub fn repo_location_for(plugin_id: &str) -> Option<(String, std::path::PathBuf)> {
+    let state = snapshot();
+    let manifest = state.manifests.iter().find(|m| m.plugin_id == plugin_id)?;
+    let repos_dir = crate::config::plugin_repos_dir();
+    let rel = manifest.plugin_dir.strip_prefix(&repos_dir).ok()?;
+    let mut components = rel.components();
+    let slug = match components.next()? {
+        std::path::Component::Normal(s) => s.to_string_lossy().into_owned(),
+        _ => return None,
+    };
+    let subpath = components.as_path().to_path_buf();
+    Some((slug, subpath))
+}
+
 /// Every loaded plugin with its enable state, for the management UI.
 /// `secrets` resolves whether each declared secure field currently has a
 /// value stored, without ever reading the plaintext (see `PluginInfo::secret_set`).
@@ -479,7 +494,7 @@ pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
                 .collect();
             PluginInfo {
                 id: m.plugin_id.clone(),
-                name: m.display_name().to_owned(),
+                name: m.display_name(),
                 path: m.source_path.display().to_string(),
                 plugin_type: m.plugin_type,
                 capabilities: m.capability_labels(),
@@ -487,9 +502,29 @@ pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
                 enabled: !is_disabled(&m.plugin_id),
                 author: m.author().to_owned(),
                 version: m.version().to_owned(),
+                license: m.license().to_owned(),
                 description: m.description().to_owned(),
                 targets: m.target_labels(),
-                builtin: is_builtin(&m.plugin_id),
+                devices: m
+                    .devices
+                    .iter()
+                    .map(|d| halod_shared::types::PluginDeviceInfo {
+                        vendor: d.vendor.clone(),
+                        model: d.model.clone(),
+                        name: d.display_name().to_owned(),
+                        device_type: d.device_type,
+                    })
+                    .collect(),
+                logo: m.logo.clone(),
+                effect_thumbnails: m
+                    .effect_thumbnails
+                    .iter()
+                    .map(|e| halod_shared::types::PluginEffectAsset {
+                        id: e.id.clone(),
+                        thumbnail: e.thumbnail.clone(),
+                    })
+                    .collect(),
+                source: plugin_source_for(&m.plugin_dir),
                 declared_permissions: m.permissions.clone(),
                 granted_permissions: granted_for(&m.plugin_id),
                 config_fields: m.config_fields().iter().map(Into::into).collect(),
@@ -497,115 +532,149 @@ pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
                 secret_set,
                 integration_enabled: !is_integration_disabled(&m.plugin_id),
                 consented: consent_satisfied(m),
-                content_changed: !is_builtin(&m.plugin_id)
-                    && acknowledged_hash_for(&m.plugin_id).is_some_and(|h| h != m.content_hash()),
+                content_changed: acknowledged_hash_for(&m.plugin_id)
+                    .is_some_and(|h| h != m.content_hash()),
             }
         })
         .collect()
 }
 
-/// A plugin compiled into the daemon binary (built-in), keyed by its stem.
-/// Built-ins have no on-disk script in the plugins directory, so they can be
-/// disabled but never deleted through the GUI.
-pub fn is_builtin(plugin_id: &str) -> bool {
-    BUILTIN_PLUGINS
+/// Read a plugin's display-only asset (logo/effect thumbnail) from `<plugin_dir>/assets/<name>`.
+pub fn read_asset(plugin_id: &str, name: &str) -> anyhow::Result<Vec<u8>> {
+    halod_shared::types::validate_image_filename(name)
+        .map_err(|e| anyhow::anyhow!("invalid asset name '{name}': {e}"))?;
+    let state = snapshot();
+    let manifest = state
+        .manifests
         .iter()
-        .any(|(name, _)| Path::new(name).file_stem().and_then(|s| s.to_str()) == Some(plugin_id))
+        .find(|m| m.plugin_id == plugin_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown plugin '{plugin_id}'"))?;
+    if manifest.plugin_dir.as_os_str().is_empty() {
+        anyhow::bail!("plugin '{plugin_id}' has no on-disk assets");
+    }
+    let path = manifest.plugin_dir.join("assets").join(name);
+    std::fs::read(&path).map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))
 }
 
-/// Plugins shipped inside the daemon binary, loaded before directory plugins.
-/// Most replace what used to be native Rust drivers (e.g. ENE SMBus RGB);
-/// `halo_effects.lua` is the reference effect-plugin implementation
-/// instead of a separate example file, so it's always available to inspect
-/// and to exercise the RGB effect plugin API without dropping anything into
-/// the plugins directory. The user can disable any of these like any other
-/// plugin.
-const BUILTIN_PLUGINS: &[(&str, &str)] = &[
-    ("ene_smbus.lua", include_str!("builtins/ene_smbus.lua")),
-    (
-        "corsair_dram.lua",
-        include_str!("builtins/corsair_dram.lua"),
-    ),
-    ("nzxt_kraken.lua", include_str!("builtins/nzxt_kraken.lua")),
-    (
-        "nzxt_kraken_x3.lua",
-        include_str!("builtins/nzxt_kraken_x3.lua"),
-    ),
-    (
-        "nzxt_control_hub.lua",
-        include_str!("builtins/nzxt_control_hub.lua"),
-    ),
-    (
-        "philips_evnia.lua",
-        include_str!("builtins/philips_evnia.lua"),
-    ),
-    (
-        "halo_effects.lua",
-        include_str!("builtins/halo_effects.lua"),
-    ),
-    ("openrgb.lua", include_str!("builtins/openrgb.lua")),
-];
+/// A plugin id is owned by whichever source loads it first (see
+/// [`load_all_with_repos`]'s load order: official repo, then local `plugins/`,
+/// then other repos). Any later source declaring the same id is rejected here
+/// and surfaced via [`take_plugin_load_warnings`] instead of silently
+/// dropped — so a community repo can never shadow an existing plugin id.
+static LOAD_WARNINGS: RwLock<Vec<PluginLoadWarning>> = RwLock::new(Vec::new());
 
-/// Parsed once and cached. `granted_for` needs a built-in's declared
-/// permissions even before `load_all` has populated the snapshot (see its
-/// built-in branch), and it is a discovery hot path — so the built-in sources
-/// are parsed a single time here rather than on every call.
-fn builtin_manifests() -> &'static [PluginManifest] {
-    static CACHE: std::sync::OnceLock<Vec<PluginManifest>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| {
-        BUILTIN_PLUGINS
-            .iter()
-            .filter_map(|(name, src)| match parse_manifest(src, Path::new(name)) {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    log::error!("built-in plugin '{name}' failed to parse: {e:#}");
-                    None
-                }
-            })
-            .collect()
-    })
+/// A rejected plugin load: an id collision (with an earlier source) or a bad manifest.
+#[derive(Clone, Debug)]
+pub struct PluginLoadWarning {
+    pub plugin_id: String,
+    pub path: String,
+    pub reason: String,
 }
 
-/// (Re)load the built-in plugins plus every `*.lua` in `dir` into the registry,
-/// replacing prior contents. A malformed plugin is logged and skipped — it never
-/// aborts loading or the daemon. Missing directory is normal (no plugins installed).
-pub fn load_all(dir: &Path) {
-    let mut manifests = builtin_manifests().to_vec();
-    match std::fs::read_dir(dir) {
+/// Every load warning recorded during the most recent [`load_all_with_repos`],
+/// draining the set so a later poll doesn't repeat it.
+pub fn take_plugin_load_warnings() -> Vec<PluginLoadWarning> {
+    std::mem::take(
+        &mut LOAD_WARNINGS
+            .write()
+            .expect("plugin load warnings poisoned"),
+    )
+}
+
+/// Parse `dir` as one plugin directory and push it into `out`, skipping (never failing) a bad manifest.
+fn try_load_plugin_dir(dir: &Path, out: &mut Vec<PluginManifest>) {
+    if !dir.join("plugin.yaml").is_file() {
+        return;
+    }
+    match parse_manifest_from_dir(dir) {
+        Ok(m) if out.iter().any(|e| e.plugin_id == m.plugin_id) => {
+            let reason = format!("id '{}' is already claimed by another source", m.plugin_id);
+            log::warn!("Ignoring plugin {}: {reason}", dir.display());
+            LOAD_WARNINGS
+                .write()
+                .expect("plugin load warnings poisoned")
+                .push(PluginLoadWarning {
+                    plugin_id: m.plugin_id,
+                    path: dir.display().to_string(),
+                    reason,
+                });
+        }
+        Ok(m) => {
+            log::info!(
+                "Loaded device plugin '{}' from {}",
+                m.plugin_id,
+                dir.display()
+            );
+            out.push(m);
+        }
+        Err(e) => log::warn!("Skipping plugin {}: {e:#}", dir.display()),
+    }
+}
+
+/// Scan every immediate subdirectory of `root` that contains a `plugin.yaml`.
+fn scan_plugin_subdirs(root: &Path, out: &mut Vec<PluginManifest>) {
+    match std::fs::read_dir(root) {
         Ok(entries) => {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("lua") {
-                    continue;
-                }
-                match load_one(&path) {
-                    Ok(m) if is_builtin(&m.plugin_id) => {
-                        // A disk plugin whose id collides with a built-in would be
-                        // treated as built-in by id (consent-exempt, auto-granted the
-                        // built-in's declared permissions). Refuse it so a file drop
-                        // can never impersonate a trusted compiled-in plugin.
-                        log::warn!(
-                            "Ignoring plugin {}: id '{}' collides with a built-in",
-                            path.display(),
-                            m.plugin_id
-                        );
-                    }
-                    Ok(m) => {
-                        log::info!(
-                            "Loaded device plugin '{}' from {}",
-                            m.plugin_id,
-                            path.display()
-                        );
-                        manifests.push(m);
-                    }
-                    Err(e) => log::warn!("Skipping plugin {}: {e:#}", path.display()),
+                if path.is_dir() {
+                    try_load_plugin_dir(&path, out);
                 }
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::debug!("No plugins directory at {}", dir.display());
+            log::debug!("No plugins directory at {}", root.display());
         }
-        Err(e) => log::warn!("Cannot read plugins directory {}: {e}", dir.display()),
+        Err(e) => log::warn!("Cannot read plugins directory {}: {e}", root.display()),
+    }
+}
+
+/// Load a git-repo plugin source: a single plugin at `repo_dir`, a `plugins/` subdirectory, or both.
+fn scan_repo(repo_dir: &Path, out: &mut Vec<PluginManifest>) {
+    try_load_plugin_dir(repo_dir, out);
+    scan_plugin_subdirs(&repo_dir.join("plugins"), out);
+}
+
+/// Plugin ids discoverable under a repo's clone directory, for purging a removed repo's state.
+pub fn repo_plugin_ids(repo_dir: &Path) -> Vec<String> {
+    let mut manifests = Vec::new();
+    scan_repo(repo_dir, &mut manifests);
+    manifests.into_iter().map(|m| m.plugin_id).collect()
+}
+
+/// Every configured repo's checked-out clone directory, for [`load_all_with_repos`].
+pub fn repo_plugin_dirs(repos: &[crate::config::PluginRepoRecord]) -> Vec<std::path::PathBuf> {
+    repos
+        .iter()
+        .map(|r| crate::config::plugin_repos_dir().join(&r.slug))
+        .collect()
+}
+
+/// [`load_all_with_repos`] with no configured repos.
+pub fn load_all(dir: &Path) {
+    load_all_with_repos(dir, &[]);
+}
+
+/// (Re)load the local and git-repo (`repo_dirs`) plugins, replacing prior
+/// contents. Load order is security-ranked: the official repo first, then
+/// local `plugins/`, then other repos in config order — so an id is owned by
+/// whichever source provides it first and no later source can shadow it (see
+/// [`try_load_plugin_dir`]'s collision handling).
+pub fn load_all_with_repos(dir: &Path, repo_dirs: &[std::path::PathBuf]) {
+    LOAD_WARNINGS
+        .write()
+        .expect("plugin load warnings poisoned")
+        .clear();
+    let mut manifests = Vec::new();
+    let is_official = |d: &std::path::PathBuf| {
+        d.file_name().and_then(|n| n.to_str()) == Some(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+    };
+    for repo_dir in repo_dirs.iter().filter(|d| is_official(d)) {
+        scan_repo(repo_dir, &mut manifests);
+    }
+    scan_plugin_subdirs(dir, &mut manifests);
+    for repo_dir in repo_dirs.iter().filter(|d| !is_official(d)) {
+        scan_repo(repo_dir, &mut manifests);
     }
     let effects: Vec<PluginEffectEntry> = manifests.iter().flat_map(effect_entries_for).collect();
     update(|s| {
@@ -614,15 +683,10 @@ pub fn load_all(dir: &Path) {
     });
 }
 
-fn load_one(path: &Path) -> anyhow::Result<PluginManifest> {
-    let source = std::fs::read_to_string(path)?;
-    parse_manifest(&source, path)
-}
-
 /// Stable device id from a matched manifest + handle (suffix per transport).
 fn device_id(
     manifest: &PluginManifest,
-    spec: &manifest::MatchSpec,
+    spec: &manifest::DeviceSpec,
     handle: &DiscoveryHandle<'_>,
 ) -> String {
     let suffix = transport::descriptor_for(&spec.transport)
@@ -637,7 +701,7 @@ fn device_id(
 /// can't be opened (so a native driver can still claim the hardware).
 fn build_device(
     manifest: &PluginManifest,
-    spec: &manifest::MatchSpec,
+    spec: &manifest::DeviceSpec,
     handle: &DiscoveryHandle<'_>,
 ) -> Option<Arc<dyn Device>> {
     let id = device_id(manifest, spec, handle);
@@ -708,7 +772,7 @@ pub fn match_in(
     manifests
         .iter()
         .filter(|m| !is_disabled(&m.plugin_id) && consent_satisfied(m))
-        .find_map(|m| m.match_spec_for(handle).map(|spec| (m, spec)))
+        .find_map(|m| m.device_for(handle).map(|spec| (m, spec)))
         .and_then(|(m, spec)| build_device(m, spec, handle))
 }
 
@@ -724,7 +788,7 @@ pub fn match_handle(handle: &DiscoveryHandle<'_>) -> Option<Arc<dyn Device>> {
         .manifests
         .iter()
         .filter(|m| !state.disabled.contains(&m.plugin_id) && consent_satisfied(m))
-        .find_map(|m| m.match_spec_for(handle).map(|spec| (m, spec)))?;
+        .find_map(|m| m.device_for(handle).map(|spec| (m, spec)))?;
     build_device(manifest, spec, handle)
 }
 
@@ -734,5 +798,5 @@ pub fn has_match(handle: &DiscoveryHandle<'_>) -> bool {
         .manifests
         .iter()
         .filter(|m| !state.disabled.contains(&m.plugin_id) && consent_satisfied(m))
-        .any(|m| m.match_spec_for(handle).is_some())
+        .any(|m| m.device_for(handle).is_some())
 }

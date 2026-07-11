@@ -34,12 +34,35 @@ use crate::state::EngineRunConfig;
 /// and the elevated register-bus broker live in `halod-broker.exe`, and the GUI
 /// launches this daemon directly. The only knob is `--headless`, which opts out
 /// of idle-shutdown (see [`crate::lifecycle`]) for a frontend-less deployment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `plugin-test <package-dir>` (behind the `plugin-test` cargo feature) is a
+/// separate mode entirely: it drives one plugin package's `test.lua` against
+/// a recording mock transport (see `drivers::plugins::plugin_test`) and never
+/// touches config, device discovery, or the engines — the official plugin
+/// repo's CI runs it once per package, not the daemon proper.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ProcessRole {
-    Server { headless: bool },
+    Server {
+        headless: bool,
+    },
+    #[cfg(feature = "plugin-test")]
+    PluginTest {
+        package: std::path::PathBuf,
+    },
 }
 
 fn process_role(args: &[String]) -> ProcessRole {
+    #[cfg(feature = "plugin-test")]
+    if args.first().map(String::as_str) == Some("plugin-test") {
+        let package = args
+            .get(1)
+            .unwrap_or_else(|| {
+                eprintln!("usage: halod plugin-test <package-dir>");
+                std::process::exit(2);
+            })
+            .into();
+        return ProcessRole::PluginTest { package };
+    }
     let has = |flag: &str| args.iter().any(|a| a == flag);
     ProcessRole::Server {
         headless: has(halod_shared::lifecycle::HEADLESS_ARG),
@@ -49,6 +72,17 @@ fn process_role(args: &[String]) -> ProcessRole {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let role = process_role(&args);
+
+    #[cfg(feature = "plugin-test")]
+    if let ProcessRole::PluginTest { package } = &role {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?;
+        let handle = runtime.handle().clone();
+        let exit_code = drivers::plugins::plugin_test::run(handle, package)?;
+        std::process::exit(exit_code);
+    }
 
     let headless = matches!(role, ProcessRole::Server { headless: true });
 

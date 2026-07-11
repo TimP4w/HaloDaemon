@@ -23,7 +23,7 @@ pub struct PluginScanEntry {
     pub write_rate_limit: Option<WriteRateLimit>,
     pub pre_scan: bool,
     pub probe: ProbeMode,
-    /// PCI-identity gate (GPU buses). Mirrors `MatchSpec.pci_match`.
+    /// PCI-identity gate (GPU buses). Mirrors `DeviceSpec.pci_match`.
     pub pci_match: Vec<PciMatch>,
 }
 
@@ -45,7 +45,7 @@ pub fn plugin_smbus_scan_entries() -> Vec<PluginScanEntry> {
         if state.disabled.contains(&m.plugin_id) {
             continue;
         }
-        for spec in m.smbus_specs() {
+        for spec in m.smbus_devices() {
             let Some(bus_kind) = spec.bus_kind() else {
                 continue;
             };

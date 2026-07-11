@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 
-use crate::drivers::plugins::manifest::{MatchSpec, PluginManifest};
+use crate::drivers::plugins::manifest::{DeviceSpec, PluginManifest};
 use crate::drivers::plugins::transport::{BulkEndpoint, PluginIo, PluginTransportDescriptor};
 use crate::drivers::transports::hid::HidTransport;
 use crate::registry::discovery::DiscoveryHandle;
 
-fn matches(spec: &MatchSpec, handle: &DiscoveryHandle<'_>) -> bool {
+fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     let DiscoveryHandle::Hid {
         vid,
         pid,
@@ -67,7 +67,7 @@ fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {
     }
 }
 
-fn validate(spec: &MatchSpec) -> Result<()> {
+fn validate(spec: &DeviceSpec) -> Result<()> {
     if spec.vid.is_none() {
         bail!("hid match requires a `vid`");
     }

@@ -144,13 +144,34 @@ it in `AppState`, restores its saved config, runs `discover_children()`, and cal
 
 Native drivers register at **compile time** via `inventory`. **Device plugins**
 ([drivers/plugins/](../src/daemon/src/drivers/plugins/)) add a parallel **runtime**
-registry: `load_all()` reads Lua scripts from the plugins directory at startup, and
+registry: `load_all_with_repos()` reads directory packages (`plugin.yaml` + entry
+script) from the local plugins directory and every registered git-repo source, and
 `make_device()` consults `plugins::match_handle()` *before* the native descriptors —
 so a plugin **shadows** a native driver for the same hardware. A single generic
 `LuaDevice` implements the `Device` + capability traits and forwards each call into a
 per-device Lua worker thread (which owns the VM + transport). Plugins expose only
 existing capability *kinds*; the capability taxonomy and engines stay native and
 type-safe. See [docs/plugins.md](plugins.md) for the authoring guide.
+
+There are no plugins compiled into the daemon binary. At startup the daemon seeds
+a non-removable **official plugin repo** record and clones it over the network
+(`registry::ensure_official_repo`) — a clone failure (e.g. no network on first
+launch) is logged and never fails boot, so the daemon simply has no official
+plugins until a later successful clone. Official plugins go through the exact
+same consent/permission flow as any other plugin: nothing is exempt. A plugin id
+is owned by whichever source loads it first (official repo, then local
+`plugins/`, then other repos in config order — see `load_all_with_repos`), so a
+community repo can never shadow an existing plugin id; a collision is rejected
+and surfaced via `take_plugin_load_warnings` rather than silently dropped.
+
+Repo-sourced plugins support **per-plugin update detection**: `repo::remote_plugin_content`
+reads a plugin's `plugin.yaml` + entry script straight out of git's object
+database at the repo's fetched remote tip (no working-tree checkout) and
+compares its content hash to the loaded manifest's — finer-grained than a
+whole-repo SHA compare, since a repo can be behind while a given plugin's own
+files are unchanged. Accepting an update (`repo::checkout_subtree`) checks out
+only that plugin's subtree, leaving sibling plugins in the same repo untouched;
+updates are never automatic.
 
 ## IPC and usecases — the daemon's public API
 

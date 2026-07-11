@@ -29,7 +29,7 @@ use crate::drivers::{
 use super::chain_leaf::ChainLeaf;
 use super::integration_leaf::IntegrationLeaf;
 use super::manifest::{
-    topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DpiManifest, MatchSpec,
+    topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DeviceSpec, DpiManifest,
     PluginManifest, RangeDef,
 };
 use super::transport::PluginIo;
@@ -155,7 +155,7 @@ impl Drop for LuaDevice {
 
 impl LuaDevice {
     /// A plugin that declares no capability — identity + lifecycle only.
-    pub fn device_only(id: String, manifest: &PluginManifest, spec: &MatchSpec) -> Self {
+    pub fn device_only(id: String, manifest: &PluginManifest, spec: &DeviceSpec) -> Self {
         Self::build(id, manifest, Some(spec), None, None)
     }
 
@@ -163,7 +163,7 @@ impl LuaDevice {
     pub fn with_transport(
         id: String,
         manifest: &PluginManifest,
-        spec: &MatchSpec,
+        spec: &DeviceSpec,
         dev_match: DevMatch,
         transport: PluginIo,
         handle: tokio::runtime::Handle,
@@ -172,7 +172,7 @@ impl LuaDevice {
     }
 
     /// The headless root of a config-instantiated integration plugin (e.g. an
-    /// OpenRGB SDK client): no `MatchSpec` (it wasn't found by a bus scan), no
+    /// OpenRGB SDK client): no `DeviceSpec` (it wasn't found by a bus scan), no
     /// capabilities of its own — `discover_children()` is its only job,
     /// enumerating one top-level `Device` per thing the remote service
     /// reports (see `Controller` impl below).
@@ -195,7 +195,7 @@ impl LuaDevice {
     fn with_worker(
         id: String,
         manifest: &PluginManifest,
-        spec: Option<&MatchSpec>,
+        spec: Option<&DeviceSpec>,
         dev_match: DevMatch,
         transport: PluginIo,
         handle: tokio::runtime::Handle,
@@ -245,17 +245,17 @@ impl LuaDevice {
     fn build(
         id: String,
         manifest: &PluginManifest,
-        spec: Option<&MatchSpec>,
+        spec: Option<&DeviceSpec>,
         worker: Option<PluginHandle>,
         transport: Option<PluginIo>,
     ) -> Self {
         Self {
             id,
             name: spec
-                .map(|s| manifest.display_name_for(s))
-                .unwrap_or_else(|| manifest.display_name().to_owned()),
-            vendor: manifest.identity.vendor.clone(),
-            model: manifest.identity.model.clone(),
+                .map(|s| s.display_name().to_owned())
+                .unwrap_or_else(|| manifest.display_name()),
+            vendor: spec.map(|s| s.vendor.clone()).unwrap_or_default(),
+            model: spec.map(|s| s.model.clone()).unwrap_or_default(),
             plugin_id: manifest.plugin_id.clone(),
             plugin_type: manifest.plugin_type,
             device_type: spec.and_then(|s| s.device_type).unwrap_or_default(),
@@ -1303,7 +1303,7 @@ mod tests {
 
     /// Build a HID plugin device over a mock byte-stream transport.
     fn hid_device(id: &str, manifest: &PluginManifest, transport: Arc<dyn Transport>) -> LuaDevice {
-        let spec = &manifest.match_specs[0];
+        let spec = &manifest.devices[0];
         LuaDevice::with_transport(
             id.into(),
             manifest,
@@ -1319,8 +1319,7 @@ mod tests {
 
     const SCRIPT: &str = r#"
         return {
-          match = { transport = "hid", vid = 0x1, pid = 0x2 },
-          identity = { vendor = "Test", model = "M" },
+          devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
           transports = { hid = { report_size = 8 } },
           rgb = { zones = { {
               id = "z", name = "Z", topology = { type = "linear" },
@@ -1387,8 +1386,7 @@ mod tests {
         // buffer (0-based, mutable) and passed straight to transport:write.
         const BUF_SCRIPT: &str = r#"
             return {
-              match = { transport = "hid", vid = 0x1, pid = 0x2 },
-              identity = { vendor = "Test", model = "M" },
+              devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
               rgb = { zones = { { id="z", name="Z", topology={type="linear"}, leds={ {id=0,x=0,y=0} } } } },
               write_frame = function(dev, zone, colors)
                 local b = halod.buffer(1 + 3 * #colors)
@@ -1467,8 +1465,7 @@ mod tests {
         // immediate first tick plus our explicit poll_once fire (2 reads).
         const POLL_SCRIPT: &str = r#"
             return {
-              match = { transport = "hid", vid = 0x1, pid = 0x2 },
-              identity = { vendor = "Test", model = "M" },
+              devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
               sensor = {},
               poll = { interval_ms = 3600000 },
               read_status = function(dev)
@@ -1492,8 +1489,7 @@ mod tests {
 
     const CONTROLS_SCRIPT: &str = r#"
         return {
-          match = { transport = "hid", vid = 0x1, pid = 0x2 },
-          identity = { vendor = "Test", model = "M" },
+          devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
           range = { ranges = { { key = "poll_hz", label = "Poll Rate", min = 125, max = 1000, default = 500 } } },
           boolean = { booleans = { { key = "sniper", label = "Sniper" } } },
           action = { actions = { { key = "calibrate", label = "Calibrate" } } },
@@ -1570,8 +1566,7 @@ mod tests {
         use crate::drivers::{ChoiceCapability, RangeCapability};
         const SEED_SCRIPT: &str = r#"
             return {
-              match = { transport = "hid", vid = 0x1, pid = 0x2 },
-              identity = { vendor = "Test", model = "M" },
+              devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
               range = { ranges = { { key = "hz", label = "Hz", min = 0, max = 1000, default = 500 } } },
               choice = { choices = { { key = "mode", label = "Mode", default = 0,
                 options = { { id = "0", label = "A" }, { id = "1", label = "B" } } } } },
@@ -1654,8 +1649,7 @@ mod tests {
 
     const RECEIVER_SCRIPT: &str = r#"
         return {
-          match = { transport = "hid", vid = 0x1, pid = 0x2 },
-          identity = { vendor = "Test", model = "Receiver" },
+          devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "Receiver" } },
           pairing = {},
           onboard_profiles = {},
           key_remap = {
@@ -1784,8 +1778,7 @@ mod tests {
 
     const CHAIN_SCRIPT: &str = r#"
         return {
-          match = { transport = "hid", vid = 0x1, pid = 0x2 },
-          identity = { vendor = "NZXT", model = "Kraken" },
+          devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "NZXT", model = "Kraken" } },
           chain = {
             channels = { { id = "0", name = "External", max_leds = 40 } },
             accessories = {
@@ -1814,7 +1807,7 @@ mod tests {
         use crate::drivers::chain::{ChainAdapter, ChainHost};
         use crate::drivers::CHAIN_LINK_KIND_NZXT_ARGB;
         let manifest = super::super::parse_manifest(CHAIN_SCRIPT, Path::new("kraken.lua")).unwrap();
-        let spec = &manifest.match_specs[0];
+        let spec = &manifest.devices[0];
         let dev = Arc::new_cyclic(|weak| {
             let mut d = LuaDevice::with_transport(
                 "kraken-0".into(),
@@ -1833,206 +1826,6 @@ mod tests {
         let adapter: Arc<dyn ChainAdapter> = dev.clone();
         dev.install_chain_host(ChainHost::new(adapter, CHAIN_LINK_KIND_NZXT_ARGB));
         dev
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn kraken_example_emits_native_wire_bytes() {
-        // Conformance: pins the shipped Kraken plugin's wire encoding (Z/Elite
-        // 0x26 0x14 GRB, 0x72 duty profiles) against the documented protocol
-        // (there is no native Rust Kraken driver to cross-check against).
-        use crate::drivers::chain::{ChainAdapter, ChainHost};
-        use crate::drivers::CHAIN_LINK_KIND_NZXT_ARGB;
-        let src = include_str!("builtins/nzxt_kraken.lua");
-        let manifest = super::super::parse_manifest(src, Path::new("nzxt_kraken.lua")).unwrap();
-        let mock = Arc::new(MockTransport::empty());
-        let spec = &manifest.match_specs[0];
-        let dev = Arc::new_cyclic(|weak| {
-            let mut d = LuaDevice::with_transport(
-                "k".into(),
-                &manifest,
-                spec,
-                hid_match(),
-                PluginIo::Stream {
-                    transport: mock.clone(),
-                    bulk: None,
-                },
-                tokio::runtime::Handle::current(),
-            );
-            d.set_self_ref(weak.clone());
-            d
-        });
-        let adapter: Arc<dyn ChainAdapter> = dev.clone();
-        dev.install_chain_host(ChainHost::new(adapter, CHAIN_LINK_KIND_NZXT_ARGB));
-
-        // Pump duty: [0x72,0x01,0x00,0x00] + 40 x clamp(duty,20,100).
-        dev.set_duty(60).await.unwrap();
-        {
-            let w = mock.written.lock().await;
-            let pkt = w.last().unwrap();
-            assert_eq!(&pkt[0..4], &[0x72, 0x01, 0x00, 0x00]);
-            assert_eq!(pkt.len(), 4 + 40);
-            assert!(pkt[4..].iter().all(|&d| d == 60));
-        }
-
-        // Ring RGB: [0x26,0x14,0x01,0x01] + 120 GRB bytes; LED0 = g,r,b.
-        let mut colors = vec![RgbColor { r: 0, g: 0, b: 0 }; 24];
-        colors[0] = RgbColor {
-            r: 10,
-            g: 20,
-            b: 30,
-        };
-        dev.write_frame("ring", &colors).await.unwrap();
-        {
-            let w = mock.written.lock().await;
-            let pkt = w.last().unwrap();
-            assert_eq!(&pkt[0..4], &[0x26, 0x14, 0x01, 0x01]);
-            assert_eq!(pkt.len(), 4 + 120);
-            assert_eq!(&pkt[4..7], &[20, 10, 30]); // GRB order
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn kraken_x3_example_emits_native_wire_bytes() {
-        // Conformance: pins the shipped Kraken X plugin's X3-family wire
-        // encoding (0x22 0x10 per-channel data + 0x22 0xA0 commit; 0x2A 0x04
-        // logo) against the documented protocol.
-        let src = include_str!("builtins/nzxt_kraken_x3.lua");
-        let manifest = super::super::parse_manifest(src, Path::new("nzxt_kraken_x3.lua")).unwrap();
-        let mock = Arc::new(MockTransport::empty());
-        let spec = &manifest.match_specs[0];
-        let dev_match = DevMatch {
-            transport: "hid".into(),
-            bus: None,
-            addr: None,
-            pid: Some(0x2007),
-        };
-        let dev = LuaDevice::with_transport(
-            "k".into(),
-            &manifest,
-            spec,
-            dev_match,
-            PluginIo::Stream {
-                transport: mock.clone(),
-                bulk: None,
-            },
-            tokio::runtime::Handle::current(),
-        );
-
-        // Ring RGB (8 LEDs): two 64-byte 0x22 0x10|n data packets + a 16-byte
-        // 0x22 0xA0 commit.
-        let colors = vec![
-            RgbColor {
-                r: 10,
-                g: 20,
-                b: 30
-            };
-            8
-        ];
-        dev.write_frame("ring", &colors).await.unwrap();
-        {
-            let w = mock.written.lock().await;
-            assert_eq!(w.len(), 3);
-            assert_eq!(&w[0][0..4], &[0x22, 0x10, 0x02, 0x00]);
-            assert_eq!(w[0].len(), 64);
-            assert_eq!(&w[0][4..7], &[20, 10, 30]); // GRB order
-            assert_eq!(&w[1][0..4], &[0x22, 0x11, 0x02, 0x00]);
-            assert_eq!(
-                &w[2][..],
-                &[
-                    0x22, 0xA0, 0x02, 0x00, 0x01, 0x00, 0x00, 0x28, 0x00, 0x00, 0x80, 0x00, 0x32,
-                    0x00, 0x00, 0x01
-                ]
-            );
-        }
-
-        // Logo: 0x2A 0x04 header, GRB at bytes 7-9, footer at bytes 56-59.
-        dev.write_frame(
-            "logo",
-            &[RgbColor {
-                r: 255,
-                g: 0,
-                b: 128,
-            }],
-        )
-        .await
-        .unwrap();
-        {
-            let w = mock.written.lock().await;
-            let pkt = w.last().unwrap();
-            assert_eq!(pkt.len(), 64);
-            assert_eq!(&pkt[0..7], &[0x2A, 0x04, 0x04, 0x04, 0x00, 0x32, 0x00]);
-            assert_eq!((pkt[7], pkt[8], pkt[9]), (0, 255, 128)); // G, R, B
-            assert_eq!(&pkt[56..60], &[0x01, 0x00, 0x01, 0x03]);
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn nzxt_control_hub_example_emits_native_wire_bytes() {
-        // Conformance: pins the shipped Control Hub plugin's wire encoding
-        // (0x26 0x04 data / 0x26 0x06 commit lighting, 0x62 0x01 fan duty)
-        // against the documented protocol (Linux kernel nzxt-smart2).
-        use crate::drivers::chain::ChainAdapter;
-        use crate::drivers::FanHub;
-        let src = include_str!("builtins/nzxt_control_hub.lua");
-        let manifest =
-            super::super::parse_manifest(src, Path::new("nzxt_control_hub.lua")).unwrap();
-        let mock = Arc::new(MockTransport::empty());
-        let spec = &manifest.match_specs[0];
-        let dev_match = DevMatch {
-            transport: "hid".into(),
-            bus: None,
-            addr: None,
-            pid: Some(0x2022),
-        };
-        let dev = LuaDevice::with_transport(
-            "hub".into(),
-            &manifest,
-            spec,
-            dev_match,
-            PluginIo::Stream {
-                transport: mock.clone(),
-                bulk: None,
-            },
-            tokio::runtime::Handle::current(),
-        );
-
-        // Channel 1 RGB: 0x26 0x04 data (unpadded) + 64-byte 0x26 0x06 commit,
-        // channel bitmask 1<<1 = 0x02.
-        let colors = vec![
-            RgbColor {
-                r: 10,
-                g: 20,
-                b: 30,
-            };
-            2
-        ];
-        ChainAdapter::write_composed_frame(&dev, "1", &colors)
-            .await
-            .unwrap();
-        {
-            let w = mock.written.lock().await;
-            assert_eq!(w.len(), 2);
-            assert_eq!(&w[0][0..4], &[0x26, 0x04, 0x02, 0x00]);
-            assert_eq!(w[0].len(), 4 + 6);
-            assert_eq!(&w[0][4..7], &[20, 10, 30]); // GRB order
-            assert_eq!(w[1].len(), 64);
-            assert_eq!(
-                &w[1][0..16],
-                &[
-                    0x26, 0x06, 0x02, 0x00, 0x01, 0x00, 0x00, 0x18, 0x00, 0x00, 0x80, 0x00, 0x32,
-                    0x00, 0x00, 0x01
-                ]
-            );
-            assert!(w[1][16..].iter().all(|&b| b == 0));
-        }
-
-        // Fan duty: [0x62,0x01,bitmask,duty@3+ch] — channel 2 → bitmask 0x04.
-        FanHub::set_fan_duty(&dev, 2, 75).await.unwrap();
-        {
-            let w = mock.written.lock().await;
-            let pkt = w.last().unwrap();
-            assert_eq!(&pkt[..], &[0x62, 0x01, 0x04, 0, 0, 75, 0, 0, 0, 0, 0]);
-        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2079,7 +1872,7 @@ mod tests {
     const INTEGRATION_SCRIPT: &str = r#"
         return {
           type = "integration",
-          identity = { vendor = "Test", model = "Hub" },
+          identity = { name = "Test Hub" },
           config = { fields = { { key = "host", label = "Host" }, { key = "port", label = "Port" } } },
           transports = { tcp = {} },
 

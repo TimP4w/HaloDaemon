@@ -9,6 +9,11 @@ description = "Peripheral control daemon with an egui UI (fan curves, RGB, LCD, 
 [lints]
 workspace = true
 
+[features]
+# `halod plugin-test <package-dir>` — drives a plugin package's `test.lua`
+# against a recording mock transport, for the official plugin repo's own CI.
+plugin-test = []
+
 [[bin]]
 name = "halod"
 path = "src/main.rs"
@@ -49,6 +54,8 @@ chacha20poly1305 = "0.11.0"
 sha2 = "0.10"
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
 keyring = "4.1.4"
+# Fully vendored (libgit2/libssh2/openssl via `cc`), matching mlua's `vendored` Lua.
+git2 = { version = "0.19", default-features = false, features = ["ssh", "https", "vendored-libgit2", "vendored-openssl"] }
 
 [dev-dependencies]
 tempfile = "3"

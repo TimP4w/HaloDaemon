@@ -6,8 +6,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use base64::Engine as _;
 use halod_shared::types::Permission;
+use serde_json::json;
 
+use crate::ipc::ClientHandle;
 use crate::state::AppState;
 
 /// Enable or disable a plugin and persist the choice. Staged — see the module
@@ -101,6 +104,19 @@ pub(crate) async fn persist_config_values(
     Ok(())
 }
 
+/// Fetch a plugin's display-only asset and send it to the client as base64. Not staged — a pure read.
+pub async fn get_asset(plugin_id: String, name: String, client: ClientHandle) -> Result<()> {
+    let bytes = crate::drivers::plugins::read_asset(&plugin_id, &name)?;
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    client.send_json(&json!({
+        "type": "plugin_asset",
+        "plugin_id": plugin_id,
+        "name": name,
+        "data_b64": data_b64,
+    }));
+    Ok(())
+}
+
 /// Replace a plugin's user-editable config values and persist the choice.
 /// Staged — see the module docs.
 pub async fn set_config(
@@ -114,20 +130,46 @@ pub async fn set_config(
     Ok(())
 }
 
-/// Install a Lua plugin script into the plugins directory. The source is
-/// validated as a manifest first, so a malformed script is rejected before
-/// any file is written. Staged — see the module docs.
-pub async fn import(filename: String, source: String, app: Arc<AppState>) -> Result<()> {
-    let name = sanitize_lua_filename(&filename);
-    let manifest = crate::drivers::plugins::parse_manifest(&source, Path::new(&name))
-        .context("plugin script is not a valid manifest")?;
+/// Recursively copy `src` into `dst` (both directories), creating `dst`.
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)
+        .with_context(|| format!("creating plugin dir {}", dst.display()))?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)
+                .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
+}
 
-    let dir = crate::config::plugins_dir();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating plugins dir {}", dir.display()))?;
-    let path = dir.join(&name);
-    std::fs::write(&path, source).with_context(|| format!("writing plugin {}", path.display()))?;
-    log::info!("Imported plugin {}", path.display());
+/// Install a plugin package (a directory containing `plugin.yaml` + its entry
+/// script) as a new plugin directory: validated in place first, then copied
+/// in and re-parsed from its final location. Staged — see the module docs.
+pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
+    let src = Path::new(&source_dir);
+    let parsed = crate::drivers::plugins::parse_manifest_from_dir(src)
+        .context("plugin package is not a valid manifest")?;
+    let id = parsed.plugin_id.clone();
+
+    let dst = crate::config::plugins_dir().join(&id);
+    if dst.exists() {
+        bail!("a plugin '{id}' is already installed");
+    }
+    copy_dir_all(src, &dst)?;
+    log::info!(
+        "Imported plugin package {} into {}",
+        src.display(),
+        dst.display()
+    );
+
+    let manifest = crate::drivers::plugins::parse_manifest_from_dir(&dst)
+        .context("re-parsing imported plugin directory")?;
 
     // A manual import gets the GUI's blocking consent modal instead of the
     // auto-discovery toast — suppress it before the reload below would
@@ -139,52 +181,56 @@ pub async fn import(filename: String, source: String, app: Arc<AppState>) -> Res
     Ok(())
 }
 
-/// Delete a user plugin script by id. Built-in plugins have no on-disk
-/// script and are refused. Staged — see the module docs.
+/// Delete a user plugin directory by id. A repo-sourced plugin has no
+/// standalone directory to delete on its own — remove its repo instead —
+/// so this refuses anything but a `Local` plugin. Staged — see the module docs.
 pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
-    if crate::drivers::plugins::is_builtin(&id) {
-        bail!("cannot delete built-in plugin '{id}'");
+    let is_local = crate::drivers::plugins::list(&*app.secret_store)
+        .into_iter()
+        .find(|p| p.id == id)
+        .map(|p| matches!(p.source, halod_shared::types::PluginSource::Local))
+        .unwrap_or(true);
+    if !is_local {
+        bail!("plugin '{id}' is provided by a repository — remove the repository instead");
     }
-    let path = crate::config::plugins_dir().join(format!("{id}.lua"));
-    match std::fs::remove_file(&path) {
-        Ok(()) => log::info!("Deleted plugin {}", path.display()),
+    let dir = crate::config::plugins_dir().join(&id);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => log::info!("Deleted plugin {}", dir.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::warn!("Plugin {} already gone", path.display());
+            log::warn!("Plugin {} already gone", dir.display());
         }
-        Err(e) => return Err(e).with_context(|| format!("deleting {}", path.display())),
+        Err(e) => return Err(e).with_context(|| format!("deleting {}", dir.display())),
     }
 
-    // Purge any stored secrets before the registry reload drops the manifest
-    // that names which keys were secure.
-    for key in crate::drivers::plugins::secure_config_keys_for(&id) {
-        if let Err(e) = app.secret_store.delete(&id, &key) {
-            log::warn!("deleting secret '{key}' for plugin '{id}': {e:#}");
-        }
-    }
-
-    // Drop it from the disabled set and plaintext config too, so a later
-    // re-import starts clean.
-    let changed = {
-        let mut cfg = app.config.write().await;
-        let before = cfg.plugins_disabled.len();
-        cfg.plugins_disabled.retain(|x| x != &id);
-        let disabled_changed = cfg.plugins_disabled.len() != before;
-        let config_changed = cfg.plugin_config.remove(&id).is_some();
-        if disabled_changed {
-            crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
-        }
-        if config_changed {
-            crate::drivers::plugins::set_config_values(&cfg.plugin_config);
-        }
-        disabled_changed || config_changed
-    };
-    if changed {
+    if purge_plugin_state(&id, &app).await {
         app.request_config_save();
     }
 
     reload_registry(&app).await;
     mark_pending_and_broadcast(&app).await;
     Ok(())
+}
+
+/// Purge one plugin id's secret, disabled flag, and plaintext config; returns whether config changed. Shared by [`delete`] and `repos::remove_repo`.
+pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
+    for key in crate::drivers::plugins::secure_config_keys_for(id) {
+        if let Err(e) = app.secret_store.delete(id, &key) {
+            log::warn!("deleting secret '{key}' for plugin '{id}': {e:#}");
+        }
+    }
+
+    let mut cfg = app.config.write().await;
+    let before = cfg.plugins_disabled.len();
+    cfg.plugins_disabled.retain(|x| x != id);
+    let disabled_changed = cfg.plugins_disabled.len() != before;
+    let config_changed = cfg.plugin_config.remove(id).is_some();
+    if disabled_changed {
+        crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
+    }
+    if config_changed {
+        crate::drivers::plugins::set_config_values(&cfg.plugin_config);
+    }
+    disabled_changed || config_changed
 }
 
 pub async fn apply_pending_changes(app: Arc<AppState>) -> Result<()> {
@@ -194,11 +240,13 @@ pub async fn apply_pending_changes(app: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-/// Re-read the plugins directory (picking up added/removed scripts) and
-/// re-apply the disabled/granted sets, without touching live devices.
-async fn reload_registry(app: &Arc<AppState>) {
-    crate::drivers::plugins::load_all(&crate::config::plugins_dir());
+/// Re-read the plugins directory and every configured git-repo source, and re-apply the disabled/granted sets. Shared with `repos.rs`.
+pub(crate) async fn reload_registry(app: &Arc<AppState>) {
     let cfg = app.config.read().await;
+    crate::drivers::plugins::load_all_with_repos(
+        &crate::config::plugins_dir(),
+        &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugin_repos),
+    );
     crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
     crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
     crate::drivers::plugins::set_acknowledged(&cfg.plugin_acknowledged);
@@ -207,9 +255,8 @@ async fn reload_registry(app: &Arc<AppState>) {
     crate::drivers::plugins::set_secret_store(app.secret_store.clone());
 }
 
-/// Flag a rediscovery as needed and push the updated plugin listing (and the
-/// pending flag itself) so the GUI can show it immediately.
-async fn mark_pending_and_broadcast(app: &Arc<AppState>) {
+/// Flag a rediscovery as needed and push the updated plugin listing so the GUI shows it immediately. Shared with `repos.rs`.
+pub(crate) async fn mark_pending_and_broadcast(app: &Arc<AppState>) {
     app.plugins_rediscover_pending
         .store(true, Ordering::Relaxed);
     crate::ipc::broadcast_state(app).await;
@@ -233,11 +280,8 @@ async fn rediscover_devices(app: Arc<AppState>) {
     crate::ipc::broadcast_state(&app).await;
 }
 
-/// Sanitize a user-supplied file name into a safe `<slug>.lua` file name: the
-/// stem lower-cased to `[a-z0-9-]` with runs of other characters collapsed to a
-/// single `-`, trimmed, then the `.lua` extension. Guards against path
-/// traversal (separators become `-`) and empty names.
-fn sanitize_lua_filename(filename: &str) -> String {
+/// Sanitize a file name or repo URL into a safe plugin id / directory name (lower-cased `[a-z0-9-]`, path-traversal-proof).
+pub(crate) fn sanitize_slug(filename: &str) -> String {
     let stem = Path::new(filename)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -251,8 +295,11 @@ fn sanitize_lua_filename(filename: &str) -> String {
         }
     }
     let slug = slug.trim_matches('-');
-    let slug = if slug.is_empty() { "plugin" } else { slug };
-    format!("{slug}.lua")
+    if slug.is_empty() {
+        "plugin".to_owned()
+    } else {
+        slug.to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -260,18 +307,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sanitize_slugs_and_forces_lua_extension() {
-        assert_eq!(sanitize_lua_filename("My Driver.lua"), "my-driver.lua");
-        assert_eq!(sanitize_lua_filename("wled_udp"), "wled-udp.lua");
-        assert_eq!(sanitize_lua_filename("a  b--c.lua"), "a-b-c.lua");
+    fn sanitize_slugs_a_file_name() {
+        assert_eq!(sanitize_slug("My Driver.lua"), "my-driver");
+        assert_eq!(sanitize_slug("wled_udp"), "wled-udp");
+        assert_eq!(sanitize_slug("a  b--c.lua"), "a-b-c");
     }
 
     #[test]
     fn sanitize_strips_path_traversal_and_handles_empty() {
-        // A path separator can never survive into the written file name.
-        assert!(!sanitize_lua_filename("../../etc/passwd").contains('/'));
-        assert_eq!(sanitize_lua_filename("///"), "plugin.lua");
-        assert_eq!(sanitize_lua_filename(""), "plugin.lua");
+        // A path separator can never survive into the written directory name.
+        assert!(!sanitize_slug("../../etc/passwd").contains('/'));
+        assert_eq!(sanitize_slug("///"), "plugin");
+        assert_eq!(sanitize_slug(""), "plugin");
     }
 
     #[tokio::test]
@@ -306,14 +353,23 @@ mod tests {
 
     const CONFIG_TEST_PLUGIN: &str = r#"
         return {
-          identity = { vendor = "x", model = "y" },
-          match = { transport = "hid", vid = 1, pid = 2 },
           config = { fields = {
             { key = "host", label = "Host" },
             { key = "token", label = "Token", secure = true },
           } },
         }
     "#;
+
+    /// `devices` must be declared here — a directory plugin's own Lua manifest fields are overlaid away.
+    const CONFIG_TEST_PLUGIN_YAML: &str =
+        "id: cfgtest\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n";
+
+    fn write_config_test_plugin(root: &std::path::Path) {
+        let dir = root.join("cfgtest");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.yaml"), CONFIG_TEST_PLUGIN_YAML).unwrap();
+        std::fs::write(dir.join("main.lua"), CONFIG_TEST_PLUGIN).unwrap();
+    }
 
     /// Loads `CONFIG_TEST_PLUGIN` into the (process-wide) plugin registry for
     /// the duration of `f`, then restores the registry to just the built-ins.
@@ -324,10 +380,69 @@ mod tests {
         Fut: std::future::Future<Output = ()>,
     {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("cfgtest.lua"), CONFIG_TEST_PLUGIN).unwrap();
+        write_config_test_plugin(dir.path());
         crate::drivers::plugins::load_all(dir.path());
         f().await;
         crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent"));
+    }
+
+    fn test_client() -> (
+        ClientHandle,
+        tokio::sync::mpsc::Receiver<std::sync::Arc<Vec<u8>>>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<std::sync::Arc<Vec<u8>>>(16);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: std::sync::Arc::default(),
+        };
+        (client, rx)
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn get_asset_replies_with_base64_bytes() {
+        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("assetplug");
+        std::fs::create_dir_all(plugin_dir.join("assets")).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.yaml"),
+            "id: assetplug\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n\
+             logo: logo.png\n",
+        )
+        .unwrap();
+        std::fs::write(plugin_dir.join("main.lua"), "return {}").unwrap();
+        std::fs::write(plugin_dir.join("assets/logo.png"), b"PNGDATA").unwrap();
+        crate::drivers::plugins::load_all(dir.path());
+
+        let (client, mut rx) = test_client();
+        get_asset("assetplug".into(), "logo.png".into(), client)
+            .await
+            .unwrap();
+
+        let frame = rx.try_recv().expect("a frame was queued");
+        let v: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
+        assert_eq!(v["type"], "plugin_asset");
+        assert_eq!(v["plugin_id"], "assetplug");
+        assert_eq!(v["name"], "logo.png");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(v["data_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, b"PNGDATA");
+
+        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn get_asset_errors_for_unknown_plugin() {
+        let (client, _rx) = test_client();
+        let err = get_asset("does-not-exist".into(), "logo.png".into(), client)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown plugin"));
     }
 
     #[tokio::test]
@@ -463,7 +578,7 @@ mod tests {
         crate::test_support::with_tmp_config(|app| async move {
             let dir = crate::config::plugins_dir();
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("cfgtest.lua"), CONFIG_TEST_PLUGIN).unwrap();
+            write_config_test_plugin(&dir);
             crate::drivers::plugins::load_all(&dir);
 
             let mut values = std::collections::HashMap::new();

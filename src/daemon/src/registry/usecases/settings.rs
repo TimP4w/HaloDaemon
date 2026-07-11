@@ -148,9 +148,12 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     log::info!("Rediscovery triggered via UI");
     // Re-read the plugins directory so a freshly-dropped script is picked up by
     // a "Scan now" without restarting the daemon.
-    crate::drivers::plugins::load_all(&crate::config::plugins_dir());
     {
         let cfg = app.config.read().await;
+        crate::drivers::plugins::load_all_with_repos(
+            &crate::config::plugins_dir(),
+            &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugin_repos),
+        );
         crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
         crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
         crate::drivers::plugins::set_acknowledged(&cfg.plugin_acknowledged);

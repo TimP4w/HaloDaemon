@@ -5,7 +5,6 @@
 
 use super::super::*;
 use crate::secrets::SecretStore as _;
-use halod_shared::types::DeviceType;
 use std::path::Path;
 
 use super::super::TEST_GLOBALS_LOCK as GLOBALS_LOCK;
@@ -13,8 +12,7 @@ use super::super::TEST_GLOBALS_LOCK as GLOBALS_LOCK;
 fn manifest() -> PluginManifest {
     let src = r#"
         return {
-          match = { transport = "hid", vid = 0x1234, pid = 0x5678 },
-          identity = { vendor = "Acme", model = "K1", name = "Acme K1" },
+          devices = { { transport = "hid", vid = 0x1234, pid = 0x5678, vendor = "Acme", model = "K1", name = "Acme K1" } },
         }
     "#;
     parse_manifest(src, Path::new("acme_k1.lua")).unwrap()
@@ -77,8 +75,7 @@ fn granted_permission_is_pinned_to_script_content() {
     let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let src = r#"
         return {
-          match = { transport = "hid", vid = 0xCCCC, pid = 0xDDDD },
-          identity = { vendor = "Acme", model = "K2" },
+          devices = { { transport = "hid", vid = 0xCCCC, pid = 0xDDDD, vendor = "Acme", model = "K2" } },
           permissions = { "network" },
         }
     "#;
@@ -129,8 +126,7 @@ fn disabled_plugin_does_not_match() {
     let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let src = r#"
         return {
-          match = { transport = "hid", vid = 0xAAAA, pid = 0xBBBB },
-          identity = { vendor = "Acme", model = "K1" },
+          devices = { { transport = "hid", vid = 0xAAAA, pid = 0xBBBB, vendor = "Acme", model = "K1" } },
         }
     "#;
     let manifests = vec![parse_manifest(src, Path::new("disabled_only_plugin.lua")).unwrap()];
@@ -149,8 +145,7 @@ fn plugin_with_ungranted_permission_does_not_match() {
     let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let src = r#"
         return {
-          match = { transport = "hid", vid = 0xCCCC, pid = 0xDDDD },
-          identity = { vendor = "Acme", model = "K2" },
+          devices = { { transport = "hid", vid = 0xCCCC, pid = 0xDDDD, vendor = "Acme", model = "K2" } },
           permissions = { "network" },
         }
     "#;
@@ -182,13 +177,51 @@ fn consent_satisfied_true_when_no_permissions_declared() {
     let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let src = r#"
         return {
-          match = { transport = "hid", vid = 1, pid = 2 },
-          identity = { vendor = "x", model = "y" },
+          devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         }
     "#;
     let m = parse_manifest(src, Path::new("no_perms.lua")).unwrap();
     set_acknowledged(&HashMap::new());
     assert!(consent_satisfied(&m));
+}
+
+#[test]
+fn load_all_with_repos_discovers_a_repo_sourced_plugin_and_tags_its_source() {
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cfg_guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let config_dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HALOD_CONFIG_DIR", config_dir.path()) };
+
+    let local_dir = tempfile::tempdir().unwrap();
+    let repos_root = crate::config::plugin_repos_dir();
+    let repo_dir = repos_root.join("acme-repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::write(
+        repo_dir.join("plugin.yaml"),
+        "id: acme-repo\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+    )
+    .unwrap();
+    std::fs::write(repo_dir.join("main.lua"), "return {}").unwrap();
+
+    load_all_with_repos(local_dir.path(), std::slice::from_ref(&repo_dir));
+
+    let secrets = FakeSecretStore::default();
+    let infos = list(&secrets);
+    let p = infos
+        .iter()
+        .find(|p| p.id == "acme-repo")
+        .expect("repo-sourced plugin discovered");
+    assert_eq!(
+        p.source,
+        halod_shared::types::PluginSource::Repo {
+            slug: "acme-repo".to_string()
+        }
+    );
+
+    load_all(Path::new("/nonexistent"));
+    unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
 }
 
 #[test]
@@ -202,11 +235,17 @@ fn load_all_never_runs_a_dropped_in_scripts_side_effects() {
     let sentinel = dir.path().join("pwned.txt");
     let evil = format!(
         r#"local f = io.open([[{}]], "w"); f:write("x"); f:close()
-           return {{ match = {{ transport = "hid", vid = 1, pid = 2 }},
-                     identity = {{ vendor = "x", model = "y" }} }}"#,
+           return {{}}"#,
         sentinel.display()
     );
-    std::fs::write(dir.path().join("evil.lua"), evil).unwrap();
+    let plugin_dir = dir.path().join("evil");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.yaml"),
+        "id: evil\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+    )
+    .unwrap();
+    std::fs::write(plugin_dir.join("main.lua"), evil).unwrap();
 
     load_all(dir.path());
 
@@ -225,8 +264,8 @@ fn load_all_never_runs_a_dropped_in_scripts_side_effects() {
 fn ungranted_in_reports_once_then_stays_silent() {
     let src = r#"
         return {
-          match = { transport = "hid", vid = 1, pid = 2 },
-          identity = { vendor = "x", model = "y", name = "Needs Net" },
+          devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+          identity = { name = "Needs Net" },
           permissions = { "network" },
         }
     "#;
@@ -249,8 +288,7 @@ fn ungranted_in_reports_once_then_stays_silent() {
 fn ungranted_in_skips_satisfied_manifests() {
     let src = r#"
         return {
-          match = { transport = "hid", vid = 1, pid = 2 },
-          identity = { vendor = "x", model = "y" },
+          devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         }
     "#;
     let m = parse_manifest(src, Path::new("no_perms2.lua")).unwrap();
@@ -259,277 +297,69 @@ fn ungranted_in_skips_satisfied_manifests() {
 }
 
 #[test]
-fn ene_smbus_is_builtin_others_are_not() {
-    assert!(is_builtin("ene_smbus"));
-    assert!(!is_builtin("wled_udp"));
-    assert!(!is_builtin("ene_smbus.lua")); // stem only, not the file name
-}
-
-#[test]
-fn disk_plugin_cannot_impersonate_a_builtin_id() {
+fn official_repo_plugin_cannot_be_shadowed_by_a_later_source() {
     let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // A file dropped as `openrgb.lua` claims a built-in id; if loaded it
-    // would be consent-exempt and auto-granted the built-in's permissions.
-    let evil = r#"
-        return {
-          match = { transport = "hid", vid = 1, pid = 2 },
-          identity = { vendor = "EVIL", model = "y" },
-          permissions = { "network", "os" },
-        }
-    "#;
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("openrgb.lua"), evil).unwrap();
-    load_all(dir.path());
+    let tmp = tempfile::tempdir().unwrap();
+    let local_dir = tmp.path().join("plugins");
+    let official_dir = tmp.path().join("official");
+    std::fs::create_dir_all(&local_dir).unwrap();
+
+    let write_dup = |dir: &Path, vendor: &str| {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!(
+                "id: dup\ndevices:\n  - vendor: {vendor}\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+    };
+    // A repo-root plugin's id must equal its directory name (the slug), so
+    // the official repo provides "dup" from a `plugins/<id>/` subdir instead.
+    write_dup(&official_dir.join("plugins").join("dup"), "Official");
+    write_dup(&local_dir.join("dup"), "Community");
+
+    take_plugin_load_warnings(); // drain any stale state from a prior test
+    load_all_with_repos(&local_dir, std::slice::from_ref(&official_dir));
 
     let state = snapshot();
-    let openrgb: Vec<_> = state
+    let dup: Vec<_> = state
         .manifests
         .iter()
-        .filter(|m| m.plugin_id == "openrgb")
+        .filter(|m| m.plugin_id == "dup")
         .collect();
-    assert_eq!(openrgb.len(), 1, "disk shadow must not join the built-in");
-    assert_ne!(
-        openrgb[0].identity.vendor, "EVIL",
-        "the surviving 'openrgb' must be the compiled-in built-in, not the disk file"
+    assert_eq!(
+        dup.len(),
+        1,
+        "the community copy must not join the official one"
+    );
+    assert_eq!(
+        dup[0].devices[0].vendor, "Official",
+        "the official repo loads first and owns the id"
     );
     drop(state);
+
+    let warnings = take_plugin_load_warnings();
+    assert!(
+        warnings.iter().any(|w| w.plugin_id == "dup"),
+        "the shadow attempt must be surfaced, not silently dropped"
+    );
+
     load_all(Path::new("/nonexistent"));
 }
 
 #[test]
-fn shipped_example_plugin_parses() {
-    // Guards the documented example against drift with the manifest schema.
-    let src = include_str!("../../../../../../plugins/examples/example_device.lua");
-    let m = parse_manifest(src, Path::new("example_device.lua")).unwrap();
-    assert_eq!(m.identity.vendor, "Example");
-    assert_eq!(m.capability_labels(), vec!["RGB", "Fan", "Sensor"]);
-    assert!(m.needs_worker());
-    assert_eq!(m.poll.as_ref().map(|p| p.interval_ms), Some(500));
-}
-
-#[test]
-fn shipped_nzxt_kraken_plugin_parses_per_pid_identity() {
-    // Guards the Z/Elite family plugin's per-PID name/device_type fix
-    // (regression: every matched PID used to show as "Kraken Z" and
-    // categorize as "unknown" instead of AIO).
-    let src = include_str!("../builtins/nzxt_kraken.lua");
-    let m = parse_manifest(src, Path::new("nzxt_kraken.lua")).unwrap();
-    assert_eq!(m.match_specs.len(), 5);
-    for spec in &m.match_specs {
-        assert_eq!(spec.device_type, Some(DeviceType::AIO));
-        assert!(spec.name.is_some(), "every PID needs its own display name");
-    }
-    let elite_v2 = m
-        .match_specs
-        .iter()
-        .find(|s| s.pid == Some(0x3012))
-        .expect("0x3012 (Elite V2) must be matched");
-    assert_eq!(elite_v2.name.as_deref(), Some("Kraken Elite V2"));
-    assert!(m.fan.is_some());
-    assert!(m.lcd.is_some());
-}
-
-#[test]
-fn shipped_nzxt_kraken_x3_plugin_parses() {
-    // X53/X63/X73: distinct wire family — ring+logo RGB only, no
-    // software pump/fan control, no LCD.
-    let src = include_str!("../builtins/nzxt_kraken_x3.lua");
-    let m = parse_manifest(src, Path::new("nzxt_kraken_x3.lua")).unwrap();
-    assert_eq!(m.match_specs.len(), 2);
-    for spec in &m.match_specs {
-        assert_eq!(spec.device_type, Some(DeviceType::AIO));
-        assert_eq!(spec.name.as_deref(), Some("Kraken X53/X63/X73"));
-    }
-    assert!(m.match_specs.iter().any(|s| s.pid == Some(0x2007)));
-    assert!(m.match_specs.iter().any(|s| s.pid == Some(0x2014)));
-    assert!(m.fan.is_none(), "X3 has no software pump/fan control");
-    assert!(m.lcd.is_none(), "X3 has no LCD");
-    let zones = &m.rgb.as_ref().unwrap().zones;
-    assert_eq!(zones.len(), 2);
-    assert_eq!(zones[0].leds.len(), 8);
-    assert_eq!(zones[1].leds.len(), 1);
-}
-
-#[test]
-fn shipped_nzxt_control_hub_plugin_parses() {
-    let src = include_str!("../builtins/nzxt_control_hub.lua");
-    let m = parse_manifest(src, Path::new("nzxt_control_hub.lua")).unwrap();
-    assert_eq!(m.match_specs.len(), 1);
-    assert_eq!(m.match_specs[0].pid, Some(0x2022));
-    assert_eq!(m.match_specs[0].device_type, Some(DeviceType::Hub));
-    assert!(m.rgb.is_none(), "hub has no LEDs of its own");
-    assert!(m.fan.is_none(), "hub has no fan of its own");
-    assert!(m.sensor.is_none());
-    let chain = m.chain.as_ref().unwrap();
-    assert_eq!(chain.channels.len(), 5);
-    assert!(chain.accessories.iter().all(|a| a.fan));
-}
-
-#[test]
-fn shipped_philips_evnia_plugin_parses_merged_capabilities() {
-    // The merged monitor + Ambiglow plugin: one match on the DDC chip, a
-    // bundled Ambiglow control endpoint, and every capability of both native
-    // devices (RGB + range/choice/boolean/action).
-    let src = include_str!("../builtins/philips_evnia.lua");
-    let m = parse_manifest(src, Path::new("philips_evnia.lua")).unwrap();
-    assert_eq!(m.match_specs.len(), 1);
-    assert_eq!(m.match_specs[0].transport, "usb_control");
-    assert_eq!(m.match_specs[0].vid, Some(0x2109));
-    assert_eq!(m.match_specs[0].pid, Some(0x8884));
-    assert_eq!(m.match_specs[0].device_type, Some(DeviceType::Monitor));
-
-    // The Ambiglow chip is bundled as a secondary control endpoint.
-    let uc = m
-        .transports
-        .usb_control
-        .as_ref()
-        .expect("declares a usb_control transport");
-    assert_eq!(uc.endpoints.len(), 1);
-    assert_eq!(uc.endpoints[0].id, "ambiglow");
-    assert_eq!(uc.endpoints[0].vid, 0x0CF2);
-    assert_eq!(uc.endpoints[0].pid, 0xB201);
-
-    // Both chips' capabilities present on one device.
-    let labels = m.capability_labels();
-    assert!(labels.contains(&"RGB".to_owned()));
-    assert!(labels.contains(&"Settings".to_owned())); // choice
-    assert!(labels.contains(&"Controls".to_owned())); // range/boolean/action
-    let rgb = m.rgb.as_ref().unwrap();
-    assert_eq!(rgb.zones[0].leds.len(), 44);
-    assert!(rgb.native_effects.iter().any(|e| e.id == "monitor"));
-    assert_eq!(m.range.as_ref().unwrap().ranges.len(), 12);
-    assert_eq!(m.choice.as_ref().unwrap().choices.len(), 14);
-    assert_eq!(m.boolean.as_ref().unwrap().booleans.len(), 10);
-    assert_eq!(m.action.as_ref().unwrap().actions.len(), 1);
-}
-
-#[test]
-fn shipped_example_effects_plugin_parses() {
-    // Guards the documented effects example against drift with the schema.
-    let src = include_str!("../builtins/halo_effects.lua");
-    let m = parse_manifest(src, Path::new("halo_effects.lua")).unwrap();
-    assert!(
-        m.match_specs.is_empty(),
-        "effect-only plugin needs no match"
-    );
-    assert_eq!(m.plugin_type, PluginKind::Effect);
-    assert!(!m.needs_worker());
-    assert!(
-        m.capability_labels().is_empty(),
-        "effects aren't a capability"
-    );
-    assert_eq!(m.effects.len(), 10);
-    let entries = effect_entries_for(&m);
-    assert_eq!(entries[0].catalog_id, "halo_effects:plasma");
-    assert_eq!(entries[0].kind, EffectKind::Pixmap);
-    assert!(entries
-        .iter()
-        .any(|e| e.catalog_id == "halo_effects:comet" && e.kind == EffectKind::Direct));
-}
-
-#[test]
-fn shipped_openrgb_plugin_parses() {
-    // Guards the built-in OpenRGB integration against drift with the schema.
-    let src = include_str!("../builtins/openrgb.lua");
-    let m = parse_manifest(src, Path::new("openrgb.lua")).unwrap();
-    assert!(
-        m.match_specs.is_empty(),
-        "integration plugin needs no match"
-    );
-    assert_eq!(m.plugin_type, PluginKind::Integration);
-    assert!(m.needs_worker());
-    assert_eq!(m.permissions, vec![Permission::Network, Permission::Os]);
-    let tcp = m.transports.tcp.as_ref().expect("declares a tcp transport");
-    assert_eq!(tcp.host_key, "host");
-    assert_eq!(tcp.port_key, "port");
-    let fields = m.config_fields();
-    assert_eq!(fields.len(), 2);
-    assert_eq!(fields[0].key, "host");
-    assert_eq!(fields[0].default, "127.0.0.1");
-    assert_eq!(fields[1].key, "port");
-    assert_eq!(fields[1].default, "6742");
-}
-
-#[test]
-fn builtin_plugins_are_permission_satisfied_without_a_grant() {
-    // openrgb.lua declares `network`; being built-in (shipped with the
-    // trusted daemon binary) must be enough — no manual consent step.
+fn permission_gate_is_inert_until_granted_then_satisfied_once_acknowledged() {
+    // Demonstrates the consent gate uniformly: declared-but-ungranted is
+    // unsatisfied; fully granted + acknowledged is satisfied. This applies
+    // to every plugin now — no source is exempt.
     let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    set_granted(&HashMap::new());
-    let src = include_str!("../builtins/openrgb.lua");
-    let m = parse_manifest(src, Path::new("openrgb.lua")).unwrap();
-    assert!(consent_satisfied(&m));
-}
-
-#[test]
-fn granted_for_auto_grants_a_builtins_own_declared_permissions() {
-    // Regression: `permissions_satisfied` (discovery gating) bypassing
-    // consent for built-ins isn't enough on its own — `granted_for` feeds
-    // the *sandbox's* actual permission list (e.g. whether `os.clock()`
-    // is reinjected), and previously had no built-in bypass at all, so a
-    // built-in's own declared permissions were never actually granted at
-    // the Lua level despite `permissions_satisfied` letting it through.
-    // Uses the real `openrgb.lua` (declares `network` + `os`) since the
-    // lookup is against the built-in sources, not `PLUGIN_REGISTRY` —
-    // this must hold even before `load_all` has ever populated it.
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    set_granted(&HashMap::new());
-    set_registry(Vec::new());
-
-    let granted = granted_for("openrgb");
-    assert!(granted.contains(&Permission::Network));
-    assert!(granted.contains(&Permission::Os));
-
-    // A non-builtin with the same declared permissions must NOT be
-    // auto-granted — only an explicit user grant satisfies it.
     let src = r#"return {
-        identity = { vendor = "x", model = "y" },
-        type = "integration",
-        permissions = { "network", "os" },
+        devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+        sensor = {},
+        permissions = { "os" },
     }"#;
-    set_registry(vec![parse_manifest(
-        src,
-        Path::new("some_other_plugin.lua"),
-    )
-    .unwrap()]);
-    assert!(granted_for("some_other_plugin").is_empty());
-
-    set_registry(Vec::new());
-}
-
-#[test]
-fn effect_entries_for_namespaces_ids_and_carries_kind() {
-    let src = r#"return {
-        identity = { vendor = "x", model = "Effects" },
-        effects = {
-          { kind = "pixmap", id = "plasma", name = "Plasma" },
-          { kind = "direct", id = "comet", name = "Comet" },
-        },
-    }"#;
-    let m = parse_manifest(src, Path::new("fx.lua")).unwrap();
-    let entries = effect_entries_for(&m);
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].catalog_id, "fx:plasma");
-    assert_eq!(entries[0].kind, EffectKind::Pixmap);
-    assert_eq!(entries[0].descriptor.id, "fx:plasma");
-    assert_eq!(entries[1].catalog_id, "fx:comet");
-    assert_eq!(entries[1].kind, EffectKind::Direct);
-}
-
-#[test]
-fn effect_entries_for_empty_for_a_device_only_plugin() {
-    assert!(effect_entries_for(&manifest()).is_empty());
-}
-
-#[test]
-fn shipped_permission_demo_plugin_parses_and_is_inert_until_granted() {
-    // Guards the permission-demo example against drift, and demonstrates
-    // the gate: declared-but-ungranted is unsatisfied; fully granted is
-    // satisfied. (Not routed through `match_in` — this plugin declares a
-    // `sensor` capability, so `needs_worker()` is true and full device
-    // construction would need a real HID transport, not just a runtime.)
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let src = include_str!("../../../../../../plugins/examples/permission_demo.lua");
     let m = parse_manifest(src, Path::new("permission_demo.lua")).unwrap();
     assert_eq!(m.permissions, vec![Permission::Os]);
     assert!(m.needs_worker());
@@ -551,11 +381,35 @@ fn shipped_permission_demo_plugin_parses_and_is_inert_until_granted() {
 }
 
 #[test]
+fn effect_entries_for_namespaces_ids_and_carries_kind() {
+    let src = r#"return {
+        type = "effect",
+        identity = { name = "Effects" },
+        effects = {
+          { kind = "pixmap", id = "plasma", name = "Plasma" },
+          { kind = "direct", id = "comet", name = "Comet" },
+        },
+    }"#;
+    let m = parse_manifest(src, Path::new("fx.lua")).unwrap();
+    let entries = effect_entries_for(&m);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].catalog_id, "fx:plasma");
+    assert_eq!(entries[0].kind, EffectKind::Pixmap);
+    assert_eq!(entries[0].descriptor.id, "fx:plasma");
+    assert_eq!(entries[1].catalog_id, "fx:comet");
+    assert_eq!(entries[1].kind, EffectKind::Direct);
+}
+
+#[test]
+fn effect_entries_for_empty_for_a_device_only_plugin() {
+    assert!(effect_entries_for(&manifest()).is_empty());
+}
+
+#[test]
 fn capability_labels_reflect_manifest_sections() {
     let src = r#"
         return {
-          match = { transport = "hid", vid = 1, pid = 2 },
-          identity = { vendor = "V", model = "M" },
+          devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
           rgb = { zones = {} },
           sensor = {},
         }
@@ -603,8 +457,7 @@ impl crate::secrets::SecretStore for FakeSecretStore {
 fn config_for_defaults_unset_fields_and_overrides_set_ones() {
     let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let src = r#"return {
-        match = { transport = "hid", vid = 1, pid = 2 },
-        identity = { vendor = "x", model = "y" },
+        devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         config = { fields = {
           { key = "host", label = "Host", default = "127.0.0.1" },
           { key = "port", label = "Port", default = "6742" },
@@ -640,15 +493,12 @@ fn config_for_unknown_plugin_is_empty() {
 fn integration_manifests_filters_by_type_disabled_and_permissions() {
     let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let integ_src = r#"return {
-        identity = { vendor = "x", model = "y" },
         type = "integration",
     }"#;
     let device_src = r#"return {
-        identity = { vendor = "x", model = "y" },
-        match = { transport = "hid", vid = 1, pid = 2 },
+        devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
     }"#;
     let needs_perm_src = r#"return {
-        identity = { vendor = "x", model = "y" },
         type = "integration",
         permissions = { "network" },
     }"#;
@@ -689,8 +539,7 @@ fn integration_manifests_filters_by_type_disabled_and_permissions() {
 fn secure_config_keys_for_returns_declared_secure_keys() {
     let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let src = r#"return {
-        match = { transport = "hid", vid = 1, pid = 2 },
-        identity = { vendor = "x", model = "y" },
+        devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         config = { fields = {
           { key = "host", label = "Host" },
           { key = "token", label = "Token", secure = true },
@@ -710,8 +559,7 @@ fn secure_config_keys_for_returns_declared_secure_keys() {
 fn list_reports_config_fields_values_and_secret_set() {
     let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let src = r#"return {
-        match = { transport = "hid", vid = 1, pid = 2 },
-        identity = { vendor = "x", model = "y" },
+        devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         config = { fields = {
           { key = "host", label = "Host", default = "127.0.0.1" },
           { key = "token", label = "Token", secure = true },
@@ -736,4 +584,123 @@ fn list_reports_config_fields_values_and_secret_set() {
     assert_eq!(info.secret_set.get("token"), Some(&true));
 
     set_registry(Vec::new());
+}
+
+// ── Assets ────────────────────────────────────────────────────────
+
+fn write_asset_plugin(root: &Path, id: &str, logo_bytes: Option<&[u8]>) -> std::path::PathBuf {
+    let dir = root.join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("plugin.yaml"),
+        format!(
+            "id: {id}\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n\
+             logo: logo.png\neffects:\n  - id: rainbow\n    thumbnail: rainbow.png\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+    if let Some(bytes) = logo_bytes {
+        let assets = dir.join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(assets.join("logo.png"), bytes).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn list_surfaces_declared_logo_and_effect_thumbnails() {
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    write_asset_plugin(tmp.path(), "assetplug", None);
+    load_all(tmp.path());
+
+    let secrets = FakeSecretStore::default();
+    let infos = list(&secrets);
+    let info = infos.iter().find(|p| p.id == "assetplug").expect("present");
+    assert_eq!(info.logo.as_deref(), Some("logo.png"));
+    assert_eq!(info.effect_thumbnails.len(), 1);
+    assert_eq!(info.effect_thumbnails[0].id, "rainbow");
+    assert_eq!(info.effect_thumbnails[0].thumbnail, "rainbow.png");
+    assert_eq!(info.source, halod_shared::types::PluginSource::Local);
+
+    load_all(Path::new("/nonexistent"));
+}
+
+#[test]
+fn list_leaves_logo_and_thumbnails_empty_when_undeclared() {
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("noassets");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("plugin.yaml"),
+        "id: noassets\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+    load_all(tmp.path());
+
+    let secrets = FakeSecretStore::default();
+    let infos = list(&secrets);
+    let info = infos.iter().find(|p| p.id == "noassets").expect("present");
+    assert!(info.logo.is_none());
+    assert!(info.effect_thumbnails.is_empty());
+
+    load_all(Path::new("/nonexistent"));
+}
+
+#[test]
+fn read_asset_returns_bytes_for_a_declared_logo() {
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    write_asset_plugin(tmp.path(), "readable", Some(b"PNGDATA"));
+    load_all(tmp.path());
+
+    let bytes = read_asset("readable", "logo.png").unwrap();
+    assert_eq!(bytes, b"PNGDATA");
+
+    load_all(Path::new("/nonexistent"));
+}
+
+#[test]
+fn read_asset_rejects_missing_file_and_unknown_plugin() {
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    write_asset_plugin(tmp.path(), "nofile", None);
+    load_all(tmp.path());
+
+    assert!(
+        read_asset("nofile", "logo.png").is_err(),
+        "declared asset with no file on disk must error"
+    );
+    assert!(
+        read_asset("does-not-exist", "logo.png").is_err(),
+        "unknown plugin id must error"
+    );
+
+    load_all(Path::new("/nonexistent"));
+}
+
+#[test]
+fn read_asset_rejects_path_traversal_and_bad_extensions() {
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    write_asset_plugin(tmp.path(), "traversal", Some(b"PNGDATA"));
+    load_all(tmp.path());
+
+    for bad in [
+        "../plugin.yaml",
+        "../../etc/passwd",
+        "logo",
+        "logo.txt",
+        "/etc/passwd",
+    ] {
+        assert!(
+            read_asset("traversal", bad).is_err(),
+            "'{bad}' must be rejected"
+        );
+    }
+
+    load_all(Path::new("/nonexistent"));
 }

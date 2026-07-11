@@ -5,6 +5,27 @@ plugins:
   empty_title: No plugins installed
   empty_hint: Add a Lua plugin script to extend HALO with new devices.
   add: Add plugin
+  # Plugin repositories
+  repos_title: Repositories
+  repos_check_updates: Check for updates
+  repos_url_hint: Git URL (https://...)
+  repos_branch_hint: Branch (optional)
+  repos_add: Add
+  repos_add_title: Add repository
+  repos_add_sub: Point HALO at a Git remote to browse, install, and update its plugins.
+  repos_empty: No plugin repositories registered.
+  repos_update: Update
+  repos_remove: Remove repository
+  repo_source: SOURCE
+  repo_last_sync: LAST SYNC
+  repo_never_synced: never
+  repo_drivers: DRIVERS
+  repo_drivers_count: "%{count} installed"
+  repo_drivers_from: DRIVERS FROM THIS REPOSITORY
+  # Per-plugin updates
+  updates_available: "%{count} plugin update available"
+  update_all: Update all
+  update_available: Update available
   # Pending changes banner
   pending_changes: You have unapplied plugin changes. Apply them to hand devices to or from their plugin.
   apply_changes: Apply changes
@@ -22,7 +43,7 @@ plugins:
   enable: Enable
   disable: Disable
   delete: Delete script
-  builtin_note: Built-in — cannot be deleted
+  repo_sourced_note: Provided by a repository — remove the repository to uninstall
   # Permissions
   permissions: PERMISSIONS
   permissions_pending: This plugin needs permissions you haven't granted yet — it stays inactive until you decide.
@@ -31,7 +52,6 @@ plugins:
   permissions_granted: Granted
   grant: Grant permissions
   revoke: Revoke & disable
-  permissions_builtin_note: Built-in — permissions are always granted and can't be revoked.
   permission_network: Network
   permission_os: OS
   permission_secure_storage: Secure storage
@@ -52,15 +72,10 @@ plugins:
   consent_deny: Not now
   # Add dialog
   add_title: Add a plugin
-  add_sub: Install a Lua device driver from a file or paste its source.
-  tab_upload: Upload .lua
-  tab_paste: Paste code
-  choose_file: Choose .lua file…
-  upload_hint: Choose a .lua file
+  add_sub: Install a plugin package — a folder containing plugin.yaml and its entry script.
+  choose_folder: Choose folder…
+  upload_hint: Choose a plugin package folder
   upload_sub: It is copied into your plugins folder.
-  paste_hint: "-- paste your Lua driver here"
-  name: Name
-  name_hint: e.g. Nanoleaf Shapes
   cancel: Cancel
   # Delete confirmation
   delete_title: Delete script?

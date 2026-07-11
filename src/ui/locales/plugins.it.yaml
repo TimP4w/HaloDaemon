@@ -5,6 +5,27 @@ plugins:
   empty_title: Nessun plugin installato
   empty_hint: Aggiungi uno script Lua per estendere HALO con nuovi dispositivi.
   add: Aggiungi plugin
+  # Repository dei plugin
+  repos_title: Repository
+  repos_check_updates: Controlla aggiornamenti
+  repos_url_hint: URL Git (https://...)
+  repos_branch_hint: Branch (opzionale)
+  repos_add: Aggiungi
+  repos_add_title: Aggiungi repository
+  repos_add_sub: Collega HALO a un remote Git per sfogliare, installare e aggiornare i suoi plugin.
+  repos_empty: Nessun repository di plugin registrato.
+  repos_update: Aggiorna
+  repos_remove: Rimuovi repository
+  repo_source: ORIGINE
+  repo_last_sync: ULTIMA SINCRONIZZAZIONE
+  repo_never_synced: mai
+  repo_drivers: DRIVER
+  repo_drivers_count: "%{count} installati"
+  repo_drivers_from: DRIVER DA QUESTO REPOSITORY
+  # Aggiornamenti per plugin
+  updates_available: "%{count} aggiornamento plugin disponibile"
+  update_all: Aggiorna tutto
+  update_available: Aggiornamento disponibile
   # Banner modifiche in sospeso
   pending_changes: Hai modifiche ai plugin non ancora applicate. Applicale per attivare o disattivare i dispositivi.
   apply_changes: Applica modifiche
@@ -22,7 +43,7 @@ plugins:
   enable: Attiva
   disable: Disattiva
   delete: Elimina script
-  builtin_note: Integrato — non eliminabile
+  repo_sourced_note: Fornito da un repository — rimuovi il repository per disinstallarlo
   # Permessi
   permissions: PERMESSI
   permissions_pending: Questo plugin richiede permessi non ancora concessi, resterà inattivo finché non li concedi.
@@ -31,7 +52,6 @@ plugins:
   permissions_granted: Concesso
   grant: Concedi permessi
   revoke: Revoca e disattiva
-  permissions_builtin_note: Integrato — i permessi sono sempre concessi e non possono essere revocati.
   permission_network: Rete
   permission_os: Sistema Operativo
   permission_secure_storage: Archiviazione sicura
@@ -52,15 +72,10 @@ plugins:
   consent_deny: Non ora
   # Finestra di aggiunta
   add_title: Aggiungi un plugin
-  add_sub: Installa un driver Lua da un file o incollane il sorgente.
-  tab_upload: Carica .lua
-  tab_paste: Incolla codice
-  choose_file: Scegli file .lua…
-  upload_hint: Scegli un file .lua
-  upload_sub: Verrà copiato nella cartella dei plugin.
-  paste_hint: "-- incolla qui il tuo driver Lua"
-  name: Nome
-  name_hint: es. Nanoleaf Shapes
+  add_sub: Installa un pacchetto plugin — una cartella con plugin.yaml e il suo script principale.
+  choose_folder: Scegli cartella…
+  upload_hint: Scegli una cartella del pacchetto plugin
+  upload_sub: Verrà copiata nella cartella dei plugin.
   cancel: Annulla
   # Conferma eliminazione
   delete_title: Eliminare lo script?

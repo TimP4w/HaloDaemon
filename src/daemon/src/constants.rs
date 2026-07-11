@@ -20,3 +20,13 @@ pub const VIRTUAL_POINTER_NAME: &str = "HaloDaemon Virtual Pointer";
 
 /// Client name the canvas engine's screen-capture session registers under.
 pub const SCREEN_CAPTURE_CLIENT: &str = "halod-screen";
+
+/// The official plugin repository's URL, seeded into config and cloned at
+/// startup (see `registry::ensure_official_repo`). Not bundled: nothing here
+/// is embedded in the daemon binary, so this is a network fetch, not a build input.
+pub const OFFICIAL_PLUGIN_REPO_URL: &str = "https://github.com/TimP4w/HaloDaemon-plugins";
+
+/// Fixed slug for the official plugin repo record — never derived from the
+/// URL, so a future URL change can't orphan the non-removable guard in
+/// `registry::usecases::repos::remove_repo`.
+pub const OFFICIAL_PLUGIN_REPO_SLUG: &str = "official";

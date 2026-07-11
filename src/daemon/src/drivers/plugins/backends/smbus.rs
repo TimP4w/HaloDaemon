@@ -6,14 +6,14 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
-use crate::drivers::plugins::manifest::{MatchSpec, PluginManifest};
+use crate::drivers::plugins::manifest::{DeviceSpec, PluginManifest};
 use crate::drivers::plugins::transport::{
     AddrScope, PluginIo, PluginTransportDescriptor, RegisterBus,
 };
 use crate::drivers::transports::smbus::{downcast_smbus_device, SmbusBusKind};
 use crate::registry::discovery::DiscoveryHandle;
 
-fn matches(spec: &MatchSpec, handle: &DiscoveryHandle<'_>) -> bool {
+fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     let DiscoveryHandle::Smbus { addr, bus_kind, .. } = handle else {
         return false;
     };
@@ -45,7 +45,7 @@ fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {
     }
 }
 
-fn validate(spec: &MatchSpec) -> Result<()> {
+fn validate(spec: &DeviceSpec) -> Result<()> {
     if spec.bus_kind().is_none() {
         bail!("smbus match requires `bus` = \"chipset\" or \"gpu\"");
     }

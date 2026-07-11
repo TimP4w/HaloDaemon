@@ -36,6 +36,26 @@ impl App {
                 std::sync::Arc::new(self.ui.lcd_images.borrow_and_update().clone());
         }
         let lcd_images = std::sync::Arc::clone(&self.lcd_images_cache);
+        if self.ui.plugin_assets.has_changed().unwrap_or_else(|_| {
+            log::warn!("IPC plugin_assets channel closed");
+            false
+        }) {
+            self.plugin_assets_cache =
+                std::sync::Arc::new(self.ui.plugin_assets.borrow_and_update().clone());
+        }
+        let plugin_assets = std::sync::Arc::clone(&self.plugin_assets_cache);
+        if self.ui.repo_updates.has_changed().unwrap_or_else(|_| {
+            log::warn!("IPC repo_updates channel closed");
+            false
+        }) {
+            self.repo_updates_cache = self.ui.repo_updates.borrow_and_update().clone();
+        }
+        if self.ui.plugin_updates.has_changed().unwrap_or_else(|_| {
+            log::warn!("IPC plugin_updates channel closed");
+            false
+        }) {
+            self.plugin_updates_cache = self.ui.plugin_updates.borrow_and_update().clone();
+        }
         let lcd_preview = if let Page::Device(ref id) = self.page {
             self.ui.lcd_frames.borrow().get(id).cloned()
         } else {
@@ -316,7 +336,14 @@ impl App {
                         );
                     }
                     Page::Plugins => {
-                        self.plugins_ui.show(ui, &state, &self.cmd);
+                        self.plugins_ui.show(
+                            ui,
+                            &state,
+                            &self.cmd,
+                            &plugin_assets,
+                            &self.repo_updates_cache,
+                            &self.plugin_updates_cache,
+                        );
                     }
                     Page::Integrations => {
                         self.integrations_ui.show(ui, &state, &self.cmd);

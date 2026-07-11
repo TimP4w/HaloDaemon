@@ -87,13 +87,10 @@ mod tests {
     /// stalling the test.
     const INTEGRATION_CONFIG_TEST_PLUGIN: &str = r#"
         return {
-          identity = { vendor = "x", model = "y" },
-          type = "integration",
           config = { fields = {
             { key = "host", label = "Host", default = "127.0.0.1" },
             { key = "token", label = "Token", secure = true },
           } },
-          transports = { tcp = { host_key = "host", port_key = "port", timeout_ms = 50 } },
         }
     "#;
 
@@ -106,11 +103,14 @@ mod tests {
         Fut: std::future::Future<Output = ()>,
     {
         let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("inttest");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
-            dir.path().join("inttest.lua"),
-            INTEGRATION_CONFIG_TEST_PLUGIN,
+            plugin_dir.join("plugin.yaml"),
+            "id: inttest\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\n",
         )
         .unwrap();
+        std::fs::write(plugin_dir.join("main.lua"), INTEGRATION_CONFIG_TEST_PLUGIN).unwrap();
         crate::drivers::plugins::load_all(dir.path());
         f().await;
         crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent"));

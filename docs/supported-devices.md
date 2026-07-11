@@ -1,26 +1,13 @@
 # Supported Devices
 
-HaloDaemon supports the devices below. The list mostly tracks hardware owned by the author and friends; more may be added over time. 🐧 = Linux, 🪟 = Windows.
+HaloDaemon ships with support to the following devices by default. More devices are however provided by the [official plugin](https://github.com/TimP4w/HaloDaemon-plugins) repository and are not listed here.
 
-To add a device, see the [development guide](development.md).
-
-## AIO Coolers
-
-| Vendor | Model | VID:PID | Protocol | Transport | Platform |
-|--------|-------|---------|----------|-----------|----------|
-| NZXT | Kraken X53, X63, X73 | 1e71:2007, 1e71:2014 | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | Kraken Z53, Z63, Z73 | 1e71:3008 | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | Kraken Elite 2023 | 1e71:300c | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | Kraken 2023 | 1e71:300e | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | Kraken Elite V2 | 1e71:3012 | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | Kraken Plus 2024 | 1e71:3014 | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
+🐧 = Linux, 🪟 = Windows.
 
 ## Fans & Controllers
 
 | Vendor | Model | VID:PID | Protocol | Transport | Platform |
 |--------|-------|---------|----------|-----------|----------|
-| NZXT | Control Hub | 1e71:2022 | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | F120/F140/F240/F360/F420 RGB (via Control Hub) | — | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
 | (All) | Motherboard fan headers | — | sysfs | [hwmon](transports/hwmon.md) | 🐧 |
 | (All) | Motherboard fan headers (NCT677x) | — | [NCT677x SuperIO](protocols/nct677x-superio.md) | [LpcIO](transports/lpcio.md) | 🪟 |
 
@@ -71,14 +58,7 @@ To add a device, see the [development guide](development.md).
 | Vendor | Model | VID:PID | Protocol | Transport | Platform |
 |--------|-------|---------|----------|-----------|----------|
 | ASUS | Aura USB controllers | 0b05:1866, 1867, 1872, 18a3, 18a5, 18f3, 1939, 19af, 1a30, 1a6c, 1aa6, 1b3b, 1bed | [ASUS Aura USB](protocols/asus-aura-usb.md) | [HID](transports/hid.md) | 🐧🪟 |
-| ASUS/ENE | SMBus RGB (DRAM, GPU) | — | [ENE SMBus](protocols/ene-smbus.md) (built-in [Lua plugin](plugins.md)) | [SMBus](transports/smbus.md) | 🐧🪟 |
-| Corsair | Vengeance / Dominator DDR4/DDR5 DRAM RGB | — | [Corsair DRAM](protocols/corsair-dram.md) (built-in [Lua plugin](plugins.md)) | [SMBus](transports/smbus.md) | 🐧🪟 |
 
-## Integrations (network)
-
-| Vendor | Model | Protocol | Transport | Platform |
-|--------|-------|----------|-----------|----------|
-| OpenRGB | Any device OpenRGB itself supports, via its SDK server | [OpenRGB SDK](protocols/openrgb.md) (built-in [Lua plugin](plugins.md)) | [TCP](transports/tcp.md) | 🐧🪟 |
 
 ## Sensors
 

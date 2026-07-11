@@ -23,7 +23,7 @@ use crate::drivers::transports::usb_bulk::UsbBulkTransport;
 use crate::drivers::transports::{ControlTransport, Transport};
 use crate::registry::discovery::DiscoveryHandle;
 
-use super::manifest::{MatchSpec, PluginManifest};
+use super::manifest::{DeviceSpec, PluginManifest};
 
 /// A lazily-opened USB bulk-OUT endpoint paired with a HID stream transport, for
 /// plugins that must push payloads larger than a HID report (LCD image frames).
@@ -239,7 +239,7 @@ pub struct PluginTransportDescriptor {
     /// The `match.transport` discriminator (e.g. "hid", "smbus").
     pub kind: &'static str,
     /// Does this spec (of this kind) accept the discovered handle?
-    pub matches: fn(&MatchSpec, &DiscoveryHandle<'_>) -> bool,
+    pub matches: fn(&DeviceSpec, &DiscoveryHandle<'_>) -> bool,
     /// Open the live transport for a matched handle. `config` is the plugin's
     /// resolved non-secure config values (see `plugins::config_for`) — HID/
     /// SMBus ignore it; the `tcp` backend reads its host/port keys from it,
@@ -249,7 +249,7 @@ pub struct PluginTransportDescriptor {
     /// Stable per-device id suffix from the matched handle.
     pub id_suffix: fn(&DiscoveryHandle<'_>) -> String,
     /// Reject a manifest whose match spec omits a field this kind requires.
-    pub validate: fn(&MatchSpec) -> Result<()>,
+    pub validate: fn(&DeviceSpec) -> Result<()>,
 }
 inventory::collect!(PluginTransportDescriptor);
 

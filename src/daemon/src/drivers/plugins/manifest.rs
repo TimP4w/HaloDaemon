@@ -1,21 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Parsing a plugin script's `return`ed table into a `PluginManifest`.
-//!
-//! Parsing runs the script once in a throwaway Lua VM purely to read the
-//! declarative `match`/`identity` tables; that VM is dropped immediately. The
-//! per-device worker later builds its own VM from `script_source` when a device
-//! actually matches.
+//! Parsing a plugin's manifest into a [`PluginManifest`].
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use halod_shared::types::{
     Animation, ButtonDescriptor, ButtonMapping, ChoiceDisplay, ChoiceOption, DeviceType,
     EffectParamDescriptor, NativeEffect, Permission, PluginConfigFieldKind, PluginKind,
     RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
 };
 use mlua::{DeserializeOptions, HookTriggers, Lua, LuaSerdeExt, VmState};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::cell::Cell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use super::transport::{descriptor_for, known_kinds};
@@ -33,7 +28,7 @@ fn default_timeout_ms() -> i32 {
 
 /// HID transport parameters a plugin declares. The device path comes from the
 /// matched discovery handle, not the manifest.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HidConfig {
     #[serde(default = "default_report_size")]
     pub report_size: usize,
@@ -67,7 +62,7 @@ fn default_tcp_timeout_ms() -> u64 {
 
 /// Names the `config` fields holding host/port rather than literals, so one
 /// manifest section is both the GUI-editable settings and the connection source.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpConfig {
     #[serde(default = "default_host_key")]
     pub host_key: String,
@@ -91,7 +86,7 @@ impl Default for TcpConfig {
 /// device, so several physical chips present as one merged device. Opened by
 /// VID/PID and reached from Lua by `id` (the matched device is the unnamed
 /// primary endpoint).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsbControlEndpoint {
     pub id: String,
     pub vid: u16,
@@ -103,7 +98,7 @@ pub struct UsbControlEndpoint {
 /// USB vendor-control transport parameters. `interface` claims the matched
 /// device's interface; `endpoints` lists any extra control devices the plugin
 /// drives (the DDC controller + Ambiglow LED controller of one monitor, say).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsbControlConfig {
     #[serde(default)]
     pub interface: u8,
@@ -111,7 +106,7 @@ pub struct UsbControlConfig {
     pub endpoints: Vec<UsbControlEndpoint>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransportsConfig {
     #[serde(default)]
     pub hid: Option<HidConfig>,
@@ -119,6 +114,12 @@ pub struct TransportsConfig {
     pub tcp: Option<TcpConfig>,
     #[serde(default)]
     pub usb_control: Option<UsbControlConfig>,
+}
+
+impl TransportsConfig {
+    fn is_empty(&self) -> bool {
+        self.hid.is_none() && self.tcp.is_none() && self.usb_control.is_none()
+    }
 }
 
 /// RGB capability data (zones + native effects). Callbacks (`apply`,
@@ -462,7 +463,7 @@ pub struct PollManifest {
 /// How the SMBus scanner probes a declared address before emitting a handle.
 /// Openness knob: some controllers NAK a quick-write but answer a read, and a
 /// few must not be probed at all (detection is left entirely to `initialize`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeMode {
     /// `write_quick` ACK (the default; what `i2cdetect` uses by default).
@@ -474,13 +475,21 @@ pub enum ProbeMode {
     None,
 }
 
-/// Declarative device match. One spec per hardware shape a plugin drives; a
-/// plugin may declare several (e.g. an SMBus DRAM controller *and* a GPU one).
-/// `None` fields mean "don't care". Which fields are required is enforced by
-/// the transport backend's `validate` (HID needs `vid`; SMBus needs
-/// `bus`+`addresses`).
-#[derive(Debug, Clone, Deserialize)]
-pub struct MatchSpec {
+/// Declarative device match + per-device identity (`None` match fields mean "don't care").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceSpec {
+    /// Required (validated non-empty in `validate_manifest`).
+    #[serde(default)]
+    pub vendor: String,
+    /// Required (validated non-empty in `validate_manifest`).
+    #[serde(default)]
+    pub model: String,
+    /// Display-name override; defaults to `model`.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub device_type: Option<DeviceType>,
+
     pub transport: String,
 
     // ── HID ──────────────────────────────────────────────────────────────
@@ -524,26 +533,18 @@ pub struct MatchSpec {
     /// empty. See [`PciMatch`] and the smbus backend's `validate`.
     #[serde(default)]
     pub pci_match: Vec<PciMatch>,
-
-    // ── Per-spec identity overrides (so one plugin covers several devices) ─
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub device_type: Option<DeviceType>,
 }
 
-/// Deserialize the `match` field, which may be a single `match` table or an
-/// array of them, into a flat `Vec`. (Absence is handled by `#[serde(default)]`,
-/// so this is only called when `match` is present.)
-fn de_match_specs<'de, D>(deserializer: D) -> Result<Vec<MatchSpec>, D::Error>
+/// Deserialize `devices` as either a single device table or an array of them.
+fn de_device_specs<'de, D>(deserializer: D) -> Result<Vec<DeviceSpec>, D::Error>
 where
     D: Deserializer<'de>,
 {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum OneOrMany {
-        One(Box<MatchSpec>),
-        Many(Vec<MatchSpec>),
+        One(Box<DeviceSpec>),
+        Many(Vec<DeviceSpec>),
     }
     Ok(match OneOrMany::deserialize(deserializer)? {
         OneOrMany::One(m) => vec![*m],
@@ -551,7 +552,12 @@ where
     })
 }
 
-impl MatchSpec {
+impl DeviceSpec {
+    /// Delegates to `self.transport`'s registered backend (unknown kind → never).
+    pub fn matches(&self, handle: &DiscoveryHandle<'_>) -> bool {
+        descriptor_for(&self.transport).is_some_and(|d| (d.matches)(self, handle))
+    }
+
     /// The SMBus bus family this spec targets, if it is an SMBus spec.
     pub fn bus_kind(&self) -> Option<SmbusBusKind> {
         match self.bus.as_deref() {
@@ -560,15 +566,27 @@ impl MatchSpec {
             _ => None,
         }
     }
+
+    /// Human-readable device name (`name` override, defaulting to `model`).
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.model)
+    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// One effect's thumbnail, a display-only asset under `assets/` in the plugin directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectAssetRef {
+    pub id: String,
+    /// Bare filename under `<plugin_dir>/assets/` (no path separators).
+    pub thumbnail: String,
+}
+
+/// Plugin-level metadata only — vendor/model live on each [`DeviceSpec`] instead.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Identity {
-    pub vendor: String,
-    pub model: String,
     #[serde(default)]
     pub name: Option<String>,
-    /// Optional stable id prefix; defaults to the plugin id (script file stem).
+    /// Optional stable id prefix; defaults to the plugin id.
     #[serde(default)]
     pub id: Option<String>,
     /// Who wrote the plugin (surfaced in the Plugins screen).
@@ -577,30 +595,41 @@ pub struct Identity {
     /// Plugin version string, e.g. "1.2.0".
     #[serde(default)]
     pub version: Option<String>,
+    /// SPDX license identifier or free-text license name.
+    #[serde(default)]
+    pub license: Option<String>,
     /// Free-text description of what the plugin does.
     #[serde(default)]
     pub description: Option<String>,
 }
 
-/// A parsed, validated plugin ready to be matched against discovery handles.
-///
-/// Deserialized straight from the plugin's `return`ed table — callback functions
-/// at sibling keys (`apply`, `write_frame`, …) are ignored as unknown fields.
-/// The three `#[serde(skip)]` fields are computed and filled by
-/// [`parse_manifest`], which also runs the cross-field validation.
+/// A parsed, validated plugin, built by [`parse_manifest`] or [`parse_manifest_from_dir`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
-    /// Unique per plugin (the script file stem).
+    /// Unique per plugin: the directory name, or the script file stem for a built-in.
     #[serde(skip)]
     pub plugin_id: String,
     #[serde(skip)]
-    pub source_path: std::path::PathBuf,
-    /// Full script text, re-executed by the worker to build its own VM.
+    pub source_path: PathBuf,
+    /// Full entry-script text, re-executed by the worker to build its own VM.
     #[serde(skip)]
     pub script_source: String,
-    #[serde(rename = "match", default, deserialize_with = "de_match_specs")]
-    pub match_specs: Vec<MatchSpec>,
+    /// Directory a plugin was loaded from; empty for a built-in / single-file import.
+    #[serde(skip)]
+    pub plugin_dir: PathBuf,
+    /// Raw bytes of `plugin.yaml`, folded into [`Self::content_hash`]; empty otherwise.
+    #[serde(skip)]
+    pub manifest_bytes: Vec<u8>,
+    #[serde(rename = "devices", default, deserialize_with = "de_device_specs")]
+    pub devices: Vec<DeviceSpec>,
+    #[serde(default)]
     pub identity: Identity,
+    /// Display-only logo asset; directory plugins only, empty for a built-in.
+    #[serde(skip)]
+    pub logo: Option<String>,
+    /// Per-effect thumbnails; directory plugins only, empty for a built-in.
+    #[serde(skip)]
+    pub effect_thumbnails: Vec<EffectAssetRef>,
     #[serde(rename = "type", default)]
     pub plugin_type: PluginKind,
     #[serde(default)]
@@ -648,31 +677,65 @@ pub struct PluginManifest {
     pub config: Option<ConfigManifest>,
 }
 
-impl MatchSpec {
-    /// Does this spec accept the handle a bus scanner produced? Delegated to the
-    /// transport backend registered for `self.transport` (unknown kind → never).
-    pub fn matches(&self, handle: &DiscoveryHandle<'_>) -> bool {
-        descriptor_for(&self.transport).is_some_and(|d| (d.matches)(self, handle))
-    }
+/// `plugin.yaml`: the authoritative manifest for a directory plugin (see [`parse_manifest_from_dir`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginMeta {
+    /// Required; must equal the plugin's directory name.
+    pub id: String,
+    #[serde(rename = "type", default)]
+    pub plugin_type: PluginKind,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_entry")]
+    pub entry: String,
+    #[serde(default)]
+    pub permissions: Vec<Permission>,
+    #[serde(default, deserialize_with = "de_device_specs")]
+    pub devices: Vec<DeviceSpec>,
+    #[serde(default)]
+    pub transports: TransportsConfig,
+    /// Display-only logo, a bare filename under the plugin's `assets/` directory.
+    #[serde(default)]
+    pub logo: Option<String>,
+    /// Per-effect thumbnails, keyed by the entry Lua's declared effect ids.
+    #[serde(default)]
+    pub effects: Vec<EffectAssetRef>,
+}
+
+fn default_entry() -> String {
+    "main.lua".to_owned()
 }
 
 impl PluginManifest {
-    /// The first declared spec that accepts `handle`, if any.
-    pub fn match_spec_for(&self, handle: &DiscoveryHandle<'_>) -> Option<&MatchSpec> {
-        self.match_specs.iter().find(|s| s.matches(handle))
+    /// The first declared device spec that accepts `handle`, if any.
+    pub fn device_for(&self, handle: &DiscoveryHandle<'_>) -> Option<&DeviceSpec> {
+        self.devices.iter().find(|s| s.matches(handle))
     }
 
-    /// Hex SHA-256 of the exact script source. Consent is pinned to this, so an
-    /// edited script no longer matches the hash the user acknowledged.
+    /// Hex SHA-256 of `manifest_bytes` + `script_source`; consent is pinned to this.
     pub fn content_hash(&self) -> String {
         use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(self.script_source.as_bytes());
-        digest.iter().map(|b| format!("{b:02x}")).collect()
+        let mut hasher = Sha256::new();
+        hasher.update(&self.manifest_bytes);
+        hasher.update(self.script_source.as_bytes());
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
-    /// SMBus specs that request a bus scan (all SMBus specs declare addresses).
-    pub fn smbus_specs(&self) -> impl Iterator<Item = &MatchSpec> {
-        self.match_specs.iter().filter(|s| s.bus_kind().is_some())
+    /// Device specs that request an SMBus scan.
+    pub fn smbus_devices(&self) -> impl Iterator<Item = &DeviceSpec> {
+        self.devices.iter().filter(|s| s.bus_kind().is_some())
     }
 
     /// Stable id prefix a matched device's id is built from.
@@ -680,20 +743,17 @@ impl PluginManifest {
         self.identity.id.as_deref().unwrap_or(&self.plugin_id)
     }
 
-    /// Human-readable device name for a matched spec (per-spec override wins).
-    pub fn display_name_for(&self, spec: &MatchSpec) -> String {
-        spec.name
-            .clone()
-            .or_else(|| self.identity.name.clone())
-            .unwrap_or_else(|| self.identity.model.clone())
+    /// Human-readable device name for a matched spec.
+    pub fn display_name_for(&self, spec: &DeviceSpec) -> String {
+        spec.display_name().to_owned()
     }
 
-    /// Human-readable device name (first spec / identity fallback).
-    pub fn display_name(&self) -> &str {
+    /// Plugin display name (`identity.name`, falling back to the plugin id).
+    pub fn display_name(&self) -> String {
         self.identity
             .name
-            .as_deref()
-            .unwrap_or(&self.identity.model)
+            .clone()
+            .unwrap_or_else(|| self.plugin_id.clone())
     }
 
     /// Declared plugin author (empty when unset).
@@ -706,16 +766,20 @@ impl PluginManifest {
         self.identity.version.as_deref().unwrap_or("")
     }
 
+    /// Declared plugin license (empty when unset).
+    pub fn license(&self) -> &str {
+        self.identity.license.as_deref().unwrap_or("")
+    }
+
     /// Declared plugin description (empty when unset).
     pub fn description(&self) -> &str {
         self.identity.description.as_deref().unwrap_or("")
     }
 
-    /// Device labels the plugin targets — the per-spec display name of every
-    /// match spec, de-duplicated in declaration order.
+    /// Display name of every declared device, de-duplicated in declaration order.
     pub fn target_labels(&self) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
-        self.match_specs
+        self.devices
             .iter()
             .map(|spec| self.display_name_for(spec))
             .filter(|label| seen.insert(label.clone()))
@@ -857,13 +921,8 @@ fn install_parse_budget_hook(lua: &Lua) {
     );
 }
 
-pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
-    let plugin_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("plugin path has no file stem: {}", path.display()))?;
-
+/// Evaluate a plugin's Lua source and deserialize its returned table into a bare `PluginManifest`.
+fn eval_manifest_table(source: &str) -> Result<PluginManifest> {
     let lua = Lua::new();
     // Reading the manifest evaluates the whole script, so strip the same escape
     // hatches the runtime sandbox does and bound its work — a dropped-in file
@@ -879,35 +938,131 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
     // unsupported types (functions → nil) so serde ignores them, rather than
     // erroring on the first function it meets.
     let options = DeserializeOptions::new().deny_unsupported_types(false);
-    let mut manifest: PluginManifest = lua
-        .from_value_with(value, options)
-        .map_err(|e| anyhow!("manifest table is malformed: {e}"))?;
-    manifest.plugin_id = plugin_id;
-    manifest.source_path = path.to_path_buf();
-    manifest.script_source = source.to_owned();
+    lua.from_value_with(value, options)
+        .map_err(|e| anyhow!("manifest table is malformed: {e}"))
+}
 
-    if manifest.match_specs.is_empty()
-        && manifest.effects.is_empty()
-        && manifest.plugin_type != PluginKind::Integration
-    {
-        bail!("plugin declares neither a match spec nor any effects");
-    }
-    // Validate every spec against its registered transport backend: unknown
-    // kinds and missing required fields are rejected here, not at match time.
-    for spec in &manifest.match_specs {
-        match descriptor_for(&spec.transport) {
-            Some(desc) => (desc.validate)(spec)?,
-            None => bail!(
-                "unsupported match transport '{}' (known: {})",
-                spec.transport,
-                known_kinds().join(", ")
-            ),
+/// Cross-field validation, gated by `plugin_type`.
+fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
+    match manifest.plugin_type {
+        PluginKind::Device => {
+            if manifest.devices.is_empty() {
+                bail!("device plugin declares no devices");
+            }
+            for spec in &manifest.devices {
+                if spec.vendor.is_empty() || spec.model.is_empty() {
+                    bail!("every device must declare a non-empty vendor and model");
+                }
+                match descriptor_for(&spec.transport) {
+                    Some(desc) => (desc.validate)(spec)?,
+                    None => bail!(
+                        "unsupported device transport '{}' (known: {})",
+                        spec.transport,
+                        known_kinds().join(", ")
+                    ),
+                }
+            }
         }
+        PluginKind::Effect => {
+            if manifest.effects.is_empty() {
+                bail!("effect plugin declares no effects");
+            }
+            if !manifest.devices.is_empty() {
+                bail!("effect plugin must not declare devices");
+            }
+            if !manifest.transports.is_empty() {
+                bail!("effect plugin must not declare transports");
+            }
+        }
+        PluginKind::Integration => {
+            if !manifest.devices.is_empty() {
+                bail!("integration plugin must not declare devices");
+            }
+        }
+    }
+    // Only a `device` plugin may hold a usb_control endpoint open.
+    if manifest.transports.usb_control.is_some() && manifest.plugin_type != PluginKind::Device {
+        bail!("usb_control transport is only valid for a device plugin");
     }
     if manifest.effects.iter().any(|e| e.id.is_empty()) {
         bail!("effect declares an empty id");
     }
+    Ok(())
+}
 
+/// Parse a single-file plugin source straight from an in-memory string, with
+/// the Lua table as the whole manifest. Every real plugin is a directory
+/// package (see [`parse_manifest_from_dir`]); this exists only to build inline
+/// Lua fixtures in tests without writing them to disk.
+#[cfg(test)]
+pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
+    let plugin_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("plugin path has no file stem: {}", path.display()))?;
+
+    let mut manifest = eval_manifest_table(source)?;
+    manifest.plugin_id = plugin_id;
+    manifest.source_path = path.to_path_buf();
+    manifest.script_source = source.to_owned();
+
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+/// Parse a directory plugin: `dir/plugin.yaml` overlaid on `dir/<entry>`'s capability sections/callbacks.
+pub fn parse_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
+    let dir_name = dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow!("plugin directory has no name: {}", dir.display()))?;
+
+    let meta_path = dir.join("plugin.yaml");
+    let manifest_bytes =
+        std::fs::read(&meta_path).with_context(|| format!("reading {}", meta_path.display()))?;
+    let meta: PluginMeta = serde_yaml::from_slice(&manifest_bytes)
+        .with_context(|| format!("parsing {}", meta_path.display()))?;
+
+    if meta.id.is_empty() {
+        bail!("{} declares an empty id", meta_path.display());
+    }
+    if meta.id != dir_name {
+        bail!(
+            "plugin.yaml id '{}' does not match its directory name '{}'",
+            meta.id,
+            dir_name
+        );
+    }
+
+    let entry_path = dir.join(&meta.entry);
+    let source = std::fs::read_to_string(&entry_path)
+        .with_context(|| format!("reading {}", entry_path.display()))?;
+
+    // plugin.yaml overlays the entry Lua's table for these fields.
+    let mut manifest = eval_manifest_table(&source)?;
+    manifest.plugin_type = meta.plugin_type;
+    manifest.devices = meta.devices;
+    manifest.transports = meta.transports;
+    manifest.permissions = meta.permissions;
+    manifest.identity = Identity {
+        name: meta.name,
+        id: Some(meta.id.clone()),
+        author: meta.author,
+        version: meta.version,
+        license: meta.license,
+        description: meta.description,
+    };
+    manifest.logo = meta.logo;
+    manifest.effect_thumbnails = meta.effects;
+
+    manifest.plugin_id = meta.id;
+    manifest.source_path = entry_path;
+    manifest.script_source = source;
+    manifest.plugin_dir = dir.to_path_buf();
+    manifest.manifest_bytes = manifest_bytes;
+
+    validate_manifest(&manifest)?;
     Ok(manifest)
 }
 
@@ -917,8 +1072,8 @@ mod tests {
 
     const SAMPLE: &str = r#"
         return {
-          match = { transport = "hid", vid = 0x1234, pid = 0x5678 },
-          identity = { vendor = "Acme", model = "K1", name = "Acme K1" },
+          devices = { { transport = "hid", vid = 0x1234, pid = 0x5678, vendor = "Acme", model = "K1" } },
+          identity = { name = "Acme K1" },
         }
     "#;
 
@@ -936,46 +1091,48 @@ mod tests {
     }
 
     #[test]
-    fn parses_match_and_identity() {
+    fn parses_devices_and_identity() {
         let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
         assert_eq!(m.plugin_id, "acme_k1");
-        assert_eq!(m.identity.vendor, "Acme");
-        assert_eq!(m.display_name(), "Acme K1");
-        assert_eq!(m.match_specs[0].vid, Some(0x1234));
-        assert_eq!(m.match_specs[0].pid, Some(0x5678));
+        assert_eq!(m.devices[0].vendor, "Acme");
+        assert_eq!(m.devices[0].model, "K1");
+        assert_eq!(m.display_name_for(&m.devices[0]), "K1");
+        assert_eq!(m.devices[0].vid, Some(0x1234));
+        assert_eq!(m.devices[0].pid, Some(0x5678));
         assert_eq!(m.id_prefix(), "acme_k1");
         assert_eq!(m.author(), "");
         assert_eq!(m.version(), "");
+        assert_eq!(m.license(), "");
         assert_eq!(m.description(), "");
     }
 
     #[test]
-    fn author_version_description_parse() {
+    fn author_version_license_description_parse() {
         let src = r#"
             return {
-              match = { transport = "hid", vid = 1, pid = 2 },
+              devices = { { transport = "hid", vid = 1, pid = 2, vendor = "Acme", model = "K1" } },
               identity = {
-                vendor = "Acme", model = "K1",
-                author = "Jane", version = "2.1.0", description = "A keyboard.",
+                author = "Jane", version = "2.1.0", license = "MIT",
+                description = "A keyboard.",
               },
             }
         "#;
         let m = parse_manifest(src, Path::new("k.lua")).unwrap();
         assert_eq!(m.author(), "Jane");
         assert_eq!(m.version(), "2.1.0");
+        assert_eq!(m.license(), "MIT");
         assert_eq!(m.description(), "A keyboard.");
     }
 
     #[test]
-    fn target_labels_dedupe_per_spec_names() {
+    fn target_labels_dedupe_per_device_names() {
         let src = r#"
             return {
-              match = {
-                { transport = "hid", vid = 1, pid = 2, name = "Acme K1" },
-                { transport = "hid", vid = 1, pid = 3, name = "Acme K2" },
-                { transport = "hid", vid = 1, pid = 4, name = "Acme K1" },
+              devices = {
+                { transport = "hid", vid = 1, pid = 2, vendor = "Acme", model = "K1", name = "Acme K1" },
+                { transport = "hid", vid = 1, pid = 3, vendor = "Acme", model = "K2", name = "Acme K2" },
+                { transport = "hid", vid = 1, pid = 4, vendor = "Acme", model = "K1b", name = "Acme K1" },
               },
-              identity = { vendor = "Acme", model = "K" },
             }
         "#;
         let m = parse_manifest(src, Path::new("k.lua")).unwrap();
@@ -983,15 +1140,40 @@ mod tests {
     }
 
     #[test]
+    fn multi_device_plugin_parses_distinct_vendor_model() {
+        let src = r#"
+            return {
+              devices = {
+                { transport = "hid", vid = 1, pid = 2, vendor = "Acme", model = "K1" },
+                { transport = "hid", vid = 1, pid = 3, vendor = "Acme", model = "K2" },
+              },
+            }
+        "#;
+        let m = parse_manifest(src, Path::new("multi.lua")).unwrap();
+        assert_eq!(m.devices.len(), 2);
+        assert_eq!(m.devices[0].model, "K1");
+        assert_eq!(m.devices[1].model, "K2");
+
+        let a = m
+            .device_for(&hid(1, 2, None))
+            .expect("first device matches");
+        assert_eq!(a.model, "K1");
+        let b = m
+            .device_for(&hid(1, 3, None))
+            .expect("second device matches");
+        assert_eq!(b.model, "K2");
+    }
+
+    #[test]
     fn match_predicate_respects_wildcards_and_specifics() {
         let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
-        assert!(m.match_spec_for(&hid(0x1234, 0x5678, None)).is_some());
+        assert!(m.device_for(&hid(0x1234, 0x5678, None)).is_some());
         assert!(
-            m.match_spec_for(&hid(0x1234, 0x9999, None)).is_none(),
+            m.device_for(&hid(0x1234, 0x9999, None)).is_none(),
             "pid differs"
         );
         assert!(
-            m.match_spec_for(&hid(0x9999, 0x5678, None)).is_none(),
+            m.device_for(&hid(0x9999, 0x5678, None)).is_none(),
             "vid differs"
         );
     }
@@ -999,14 +1181,14 @@ mod tests {
     #[test]
     fn pids_list_matches_any_listed_product() {
         let src = r#"return {
-            match = { transport = "hid", vid = 0x1E71, pids = { 0x3008, 0x300C } },
-            identity = { vendor = "NZXT", model = "Kraken" },
+            devices = { { transport = "hid", vid = 0x1E71, pids = { 0x3008, 0x300C },
+                          vendor = "NZXT", model = "Kraken" } },
         }"#;
         let m = parse_manifest(src, Path::new("k.lua")).unwrap();
-        assert!(m.match_spec_for(&hid(0x1E71, 0x3008, None)).is_some());
-        assert!(m.match_spec_for(&hid(0x1E71, 0x300C, None)).is_some());
+        assert!(m.device_for(&hid(0x1E71, 0x3008, None)).is_some());
+        assert!(m.device_for(&hid(0x1E71, 0x300C, None)).is_some());
         assert!(
-            m.match_spec_for(&hid(0x1E71, 0x2007, None)).is_none(),
+            m.device_for(&hid(0x1E71, 0x2007, None)).is_none(),
             "unlisted pid"
         );
     }
@@ -1027,8 +1209,8 @@ mod tests {
         ] {
             let src = format!(
                 r#"{hatch}
-                   return {{ match = {{ transport = "hid", vid = 1, pid = 2 }},
-                             identity = {{ vendor = "x", model = "y" }} }}"#
+                   return {{ devices = {{ transport = "hid", vid = 1, pid = 2,
+                                           vendor = "x", model = "y" }} }}"#
             );
             assert!(
                 parse_manifest(&src, Path::new("evil.lua")).is_err(),
@@ -1040,8 +1222,8 @@ mod tests {
     #[test]
     fn parse_vm_bounds_a_runaway_loop() {
         let src = r#"while true do end
-                     return { match = { transport = "hid", vid = 1, pid = 2 },
-                              identity = { vendor = "x", model = "y" } }"#;
+                     return { devices = { transport = "hid", vid = 1, pid = 2,
+                                           vendor = "x", model = "y" } }"#;
         assert!(
             parse_manifest(src, Path::new("loop.lua")).is_err(),
             "an infinite top-level loop must be bounded, not hang"
@@ -1049,16 +1231,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_identity_is_error() {
-        let src = r#"return { match = { transport = "hid", vid = 1 } }"#;
+    fn device_without_vendor_or_model_is_rejected() {
+        let src = r#"return { devices = { transport = "hid", vid = 1 } }"#;
         assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
     }
 
     #[test]
     fn unknown_transport_kind_rejected() {
         let src = r#"return {
-            match = { transport = "carrier_pigeon", vid = 1 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "carrier_pigeon", vid = 1, vendor = "x", model = "y" } },
         }"#;
         assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
     }
@@ -1067,28 +1248,26 @@ mod tests {
     fn smbus_requires_bus_and_addresses() {
         // Missing bus/addresses is rejected by the smbus backend's validate.
         let src = r#"return {
-            match = { transport = "smbus" },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "smbus", vendor = "x", model = "y" } },
         }"#;
         assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
     }
 
     #[test]
-    fn array_of_match_specs_parses() {
+    fn array_of_devices_parses() {
         let src = r#"return {
-            match = {
+            devices = {
               { transport = "smbus", bus = "chipset", addresses = { 0x70, 0x71 },
-                device_type = "ram", name = "DRAM" },
+                device_type = "ram", vendor = "ENE", model = "DRAM", name = "DRAM" },
               { transport = "smbus", bus = "gpu", addresses = { 0x67 },
-                device_type = "gpu",
+                device_type = "gpu", vendor = "ENE", model = "GPU",
                 pci_match = { { vendor = 0x10DE, sub_vendor = 0x1043, confirmed = true } } },
             },
-            identity = { vendor = "ENE", model = "SMBus" },
           }"#;
         let m = parse_manifest(src, Path::new("ene.lua")).unwrap();
-        assert_eq!(m.match_specs.len(), 2);
-        assert_eq!(m.smbus_specs().count(), 2);
-        assert_eq!(m.match_specs[0].device_type, Some(DeviceType::Ram));
+        assert_eq!(m.devices.len(), 2);
+        assert_eq!(m.smbus_devices().count(), 2);
+        assert_eq!(m.devices[0].device_type, Some(DeviceType::Ram));
     }
 
     #[test]
@@ -1098,19 +1277,19 @@ mod tests {
         // all-caps `AIO` variant becomes "a_i_o", not the more intuitive
         // "aio" — a real footgun for plugin authors declaring `device_type`.
         let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2, device_type = "a_i_o" },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, device_type = "a_i_o",
+                           vendor = "x", model = "y" } },
         }"#;
         let m = parse_manifest(src, Path::new("k.lua")).unwrap();
-        assert_eq!(m.match_specs[0].device_type, Some(DeviceType::AIO));
+        assert_eq!(m.devices[0].device_type, Some(DeviceType::AIO));
     }
 
     #[test]
     fn gpu_spec_without_pci_match_is_rejected() {
         // The GPU I²C bus is shared with the display; a gate is mandatory.
         let src = r#"return {
-            match = { transport = "smbus", bus = "gpu", addresses = { 0x67 } },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "smbus", bus = "gpu", addresses = { 0x67 },
+                           vendor = "x", model = "y" } },
         }"#;
         assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
     }
@@ -1118,15 +1297,15 @@ mod tests {
     #[test]
     fn gpu_spec_with_pci_match_parses_and_round_trips() {
         let src = r#"return {
-            match = { transport = "smbus", bus = "gpu", addresses = { 0x67 },
+            devices = { { transport = "smbus", bus = "gpu", addresses = { 0x67 },
+              vendor = "ENE", model = "GPU",
               pci_match = {
                 { vendor = 0x10DE, device = 0x2684, sub_vendor = 0x1043,
                   sub_device = 0x88BF, confirmed = true },
-              } },
-            identity = { vendor = "ENE", model = "GPU" },
+              } } },
         }"#;
         let m = parse_manifest(src, Path::new("ene.lua")).unwrap();
-        let gate = &m.match_specs[0].pci_match;
+        let gate = &m.devices[0].pci_match;
         assert_eq!(gate.len(), 1);
         assert_eq!(gate[0].vendor, Some(0x10DE));
         assert_eq!(gate[0].sub_device, Some(0x88BF));
@@ -1136,8 +1315,7 @@ mod tests {
     #[test]
     fn range_boolean_action_battery_connection_equalizer_sections_parse() {
         let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             range = { ranges = { { key = "hz", label = "Hz", min = 125, max = 1000, default = 500 } } },
             boolean = { booleans = { { key = "sniper", label = "Sniper" } } },
             action = { actions = { { key = "cal", label = "Calibrate" } } },
@@ -1163,8 +1341,7 @@ mod tests {
     #[test]
     fn pairing_onboard_profiles_key_remap_sections_parse() {
         let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             pairing = {},
             onboard_profiles = {},
             key_remap = {
@@ -1188,25 +1365,23 @@ mod tests {
     #[test]
     fn permissions_section_parses_and_defaults_to_empty() {
         let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             permissions = { "network", "os" },
         }"#;
         let m = parse_manifest(src, Path::new("net.lua")).unwrap();
         assert_eq!(m.permissions, vec![Permission::Network, Permission::Os]);
 
         let no_perms = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         }"#;
         let m = parse_manifest(no_perms, Path::new("no_perms.lua")).unwrap();
         assert!(m.permissions.is_empty());
     }
 
     #[test]
-    fn effect_only_plugin_needs_no_match_spec() {
+    fn effect_only_plugin_needs_no_devices() {
         let src = r#"return {
-            identity = { vendor = "x", model = "Effects" },
+            identity = { name = "Effects" },
             type = "effect",
             effects = {
               { kind = "pixmap", id = "plasma", name = "Plasma",
@@ -1217,7 +1392,7 @@ mod tests {
             },
         }"#;
         let m = parse_manifest(src, Path::new("fx.lua")).unwrap();
-        assert!(m.match_specs.is_empty());
+        assert!(m.devices.is_empty());
         assert_eq!(m.plugin_type, PluginKind::Effect);
         assert!(!m.needs_worker(), "effects never need the device worker");
         assert!(
@@ -1235,17 +1410,34 @@ mod tests {
     }
 
     #[test]
-    fn plugin_with_neither_match_nor_effects_is_rejected() {
+    fn effect_plugin_with_devices_is_rejected() {
         let src = r#"return {
-            identity = { vendor = "x", model = "y" },
+            type = "effect",
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+            effects = { { kind = "direct", id = "pulse", name = "Pulse" } },
         }"#;
+        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
+    }
+
+    #[test]
+    fn integration_plugin_with_devices_is_rejected() {
+        let src = r#"return {
+            type = "integration",
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+        }"#;
+        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
+    }
+
+    #[test]
+    fn device_plugin_with_empty_devices_is_rejected() {
+        let src = r#"return { identity = { name = "y" } }"#;
         assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
     }
 
     #[test]
     fn effect_with_empty_id_is_rejected() {
         let src = r#"return {
-            identity = { vendor = "x", model = "y" },
+            type = "effect",
             effects = { { kind = "pixmap", id = "", name = "Nope" } },
         }"#;
         assert!(parse_manifest(src, Path::new("bad2.lua")).is_err());
@@ -1260,20 +1452,18 @@ mod tests {
     #[test]
     fn device_plugin_can_also_bundle_effects() {
         let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             effects = { { kind = "direct", id = "pulse", name = "Pulse" } },
         }"#;
         let m = parse_manifest(src, Path::new("bundled.lua")).unwrap();
-        assert_eq!(m.match_specs.len(), 1);
+        assert_eq!(m.devices.len(), 1);
         assert_eq!(m.effects.len(), 1);
     }
 
     #[test]
     fn config_section_parses_fields_with_defaults() {
         let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             config = { fields = {
               { key = "host", label = "Host", default = "127.0.0.1" },
               { key = "port", label = "Port", kind = "number", default = "6742" },
@@ -1294,8 +1484,7 @@ mod tests {
     #[test]
     fn secure_config_keys_returns_only_secure_fields() {
         let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             config = { fields = {
               { key = "host", label = "Host" },
               { key = "token", label = "Token", secure = true },
@@ -1316,8 +1505,7 @@ mod tests {
     #[test]
     fn config_section_does_not_affect_capability_labels_or_needs_worker() {
         let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             config = { fields = { { key = "host", label = "Host" } } },
         }"#;
         let m = parse_manifest(src, Path::new("cfg3.lua")).unwrap();
@@ -1328,8 +1516,7 @@ mod tests {
     #[test]
     fn tcp_transport_config_parses_with_defaults() {
         let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             transports = { tcp = { host_key = "ip", port_key = "svc_port" } },
         }"#;
         let m = parse_manifest(src, Path::new("tcpcfg.lua")).unwrap();
@@ -1342,8 +1529,7 @@ mod tests {
     #[test]
     fn tcp_transport_config_defaults_keys_when_omitted() {
         let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             transports = { tcp = { timeout_ms = 2000 } },
         }"#;
         let m = parse_manifest(src, Path::new("tcpcfg2.lua")).unwrap();
@@ -1354,9 +1540,9 @@ mod tests {
     }
 
     #[test]
-    fn integration_plugin_parses_with_no_match_spec() {
+    fn integration_plugin_parses_with_no_devices() {
         let src = r#"return {
-            identity = { vendor = "x", model = "y", name = "OpenRGB" },
+            identity = { name = "OpenRGB" },
             type = "integration",
             permissions = { "network" },
             config = { fields = {
@@ -1366,14 +1552,13 @@ mod tests {
             transports = { tcp = {} },
         }"#;
         let m = parse_manifest(src, Path::new("integ.lua")).unwrap();
-        assert!(m.match_specs.is_empty());
+        assert!(m.devices.is_empty());
         assert_eq!(m.plugin_type, PluginKind::Integration);
     }
 
     #[test]
     fn integration_plugin_needs_a_worker_even_with_no_capability_sections() {
         let src = r#"return {
-            identity = { vendor = "x", model = "y" },
             type = "integration",
         }"#;
         let m = parse_manifest(src, Path::new("integ2.lua")).unwrap();
@@ -1385,13 +1570,222 @@ mod tests {
     }
 
     #[test]
-    fn integration_plugin_with_neither_match_nor_config_still_parses() {
-        // Integration only exempts the match-spec guard; it's still a valid,
-        // if minimal, plugin without any config fields declared.
+    fn integration_plugin_with_neither_devices_nor_config_still_parses() {
+        // Integration only exempts the devices guard, not config fields.
         let src = r#"return {
-            identity = { vendor = "x", model = "y" },
             type = "integration",
         }"#;
         assert!(parse_manifest(src, Path::new("integ3.lua")).is_ok());
+    }
+
+    // ── directory plugins (`plugin.yaml` overlay) ───────────────────────
+
+    const ENTRY_LUA: &str = r#"
+        return {
+          rgb = { zones = {} },
+        }
+    "#;
+
+    fn write_plugin_dir(root: &Path, id: &str, yaml_extra: &str, lua: &str) -> PathBuf {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.yaml"), format!("id: {id}\n{yaml_extra}")).unwrap();
+        std::fs::write(dir.join("main.lua"), lua).unwrap();
+        dir
+    }
+
+    #[test]
+    fn directory_plugin_parses_required_fields_and_default_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "dirplug",
+            "devices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            ENTRY_LUA,
+        );
+        let m = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(m.plugin_id, "dirplug");
+        assert_eq!(m.devices.len(), 1);
+        assert_eq!(m.devices[0].vendor, "Acme");
+        assert!(
+            m.rgb.is_some(),
+            "entry Lua's capability sections still apply"
+        );
+    }
+
+    #[test]
+    fn directory_plugin_explicit_entry_and_license_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("dirplug2");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: dirplug2\nentry: driver.lua\nlicense: GPL-3.0-or-later\ndevices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("driver.lua"), ENTRY_LUA).unwrap();
+
+        let m = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(m.license(), "GPL-3.0-or-later");
+        assert_eq!(m.source_path, dir.join("driver.lua"));
+    }
+
+    #[test]
+    fn directory_plugin_yaml_type_overlay_wins_over_lua_declarations() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The entry Lua's devices/identity/type must be discarded in favor of plugin.yaml.
+        let lua = r#"return {
+            type = "integration",
+            devices = { { transport = "hid", vid = 9, pid = 9, vendor = "Lua", model = "Ignored" } },
+            identity = { name = "Ignored Name" },
+            rgb = { zones = {} },
+        }"#;
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "overlaid",
+            "type: device\nname: Real Name\ndevices:\n  - vendor: Real\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            lua,
+        );
+        let m = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(m.plugin_type, PluginKind::Device);
+        assert_eq!(m.devices.len(), 1);
+        assert_eq!(m.devices[0].vendor, "Real");
+        assert_eq!(m.identity.name.as_deref(), Some("Real Name"));
+        assert!(
+            m.rgb.is_some(),
+            "non-overlaid capability sections still come from Lua"
+        );
+    }
+
+    #[test]
+    fn directory_name_mismatch_with_yaml_id_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "actual-dir-name",
+            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            ENTRY_LUA,
+        );
+        // Rewrite plugin.yaml claiming a different id than the directory name.
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: someone-else\ndevices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+        )
+        .unwrap();
+        assert!(parse_manifest_from_dir(&dir).is_err());
+    }
+
+    #[test]
+    fn directory_plugin_missing_yaml_or_entry_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let no_yaml = tmp.path().join("no_yaml");
+        std::fs::create_dir_all(&no_yaml).unwrap();
+        std::fs::write(no_yaml.join("main.lua"), ENTRY_LUA).unwrap();
+        assert!(parse_manifest_from_dir(&no_yaml).is_err());
+
+        let no_entry = write_plugin_dir(
+            tmp.path(),
+            "no_entry",
+            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            ENTRY_LUA,
+        );
+        std::fs::remove_file(no_entry.join("main.lua")).unwrap();
+        assert!(parse_manifest_from_dir(&no_entry).is_err());
+    }
+
+    #[test]
+    fn content_hash_changes_when_plugin_yaml_or_entry_lua_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "hashtest",
+            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            ENTRY_LUA,
+        );
+        let original = parse_manifest_from_dir(&dir).unwrap().content_hash();
+
+        // Entry Lua changes, plugin.yaml unchanged.
+        std::fs::write(
+            dir.join("main.lua"),
+            "return { rgb = { zones = {} }, x = 1 }",
+        )
+        .unwrap();
+        let lua_changed = parse_manifest_from_dir(&dir).unwrap().content_hash();
+        assert_ne!(
+            original, lua_changed,
+            "editing the entry Lua must move the hash"
+        );
+
+        // plugin.yaml changes, entry Lua restored.
+        std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: hashtest\ndevices:\n  - vendor: A\n    model: C\n    transport: hid\n    vid: 1\n    pid: 2\n",
+        )
+        .unwrap();
+        let yaml_changed = parse_manifest_from_dir(&dir).unwrap().content_hash();
+        assert_ne!(
+            original, yaml_changed,
+            "editing plugin.yaml must move the hash"
+        );
+    }
+
+    #[test]
+    fn plugin_meta_devices_round_trip_through_yaml() {
+        // `devices:` accepts a plain YAML list, same as the Lua one-or-many helper.
+        let yaml = "id: rt\ndevices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n  - vendor: Acme\n    model: K2\n    transport: hid\n    vid: 2\n";
+        let parsed: PluginMeta = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.devices.len(), 2);
+        assert_eq!(parsed.devices[0].vendor, "Acme");
+        assert_eq!(parsed.devices[0].model, "K1");
+        assert_eq!(parsed.devices[1].model, "K2");
+    }
+
+    #[test]
+    fn directory_plugin_without_assets_leaves_logo_and_thumbnails_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "noassets",
+            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            ENTRY_LUA,
+        );
+        let m = parse_manifest_from_dir(&dir).unwrap();
+        assert!(m.logo.is_none());
+        assert!(m.effect_thumbnails.is_empty());
+    }
+
+    #[test]
+    fn directory_plugin_surfaces_logo_and_effect_thumbnails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "withassets",
+            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n\
+             logo: logo.png\n\
+             effects:\n  - id: rainbow\n    thumbnail: rainbow.png\n",
+            ENTRY_LUA,
+        );
+        let m = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(m.logo.as_deref(), Some("logo.png"));
+        assert_eq!(m.effect_thumbnails.len(), 1);
+        assert_eq!(m.effect_thumbnails[0].id, "rainbow");
+        assert_eq!(m.effect_thumbnails[0].thumbnail, "rainbow.png");
+    }
+
+    #[test]
+    fn builtin_plugin_never_sets_logo_or_thumbnails() {
+        // No `plugin.yaml` overlay for a built-in, so these stay at their defaults.
+        let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
+        assert!(m.logo.is_none());
+        assert!(m.effect_thumbnails.is_empty());
+    }
+
+    #[test]
+    fn plugin_meta_single_device_may_be_a_bare_table() {
+        let yaml = "id: rt2\ndevices:\n  vendor: Acme\n  model: K1\n  transport: hid\n  vid: 1\n";
+        let parsed: PluginMeta = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.devices.len(), 1);
+        assert_eq!(parsed.devices[0].vendor, "Acme");
     }
 }

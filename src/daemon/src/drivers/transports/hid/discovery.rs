@@ -664,11 +664,20 @@ mod tests {
         let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent-halod-test-dir"));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plugin_only_hid");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: plugin_only_hid\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 0x1E71\n    pid: 0x3012\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+        crate::drivers::plugins::load_all(tmp.path());
 
         let entry = HidDeviceInfo {
             vid: 0x1E71,
-            pid: 0x3012, // Kraken Elite V2 — plugin-only, no native descriptor
+            pid: 0x3012, // plugin-only PID, no native descriptor
             path: "kraken".into(),
             iface: 0,
             serial: "S1".into(),
@@ -682,6 +691,8 @@ mod tests {
             1,
             "a plugin-only HID device must survive the discovery pre-filter"
         );
+
+        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent-halod-test-dir"));
     }
 
     #[test]

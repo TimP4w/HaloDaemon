@@ -1186,11 +1186,17 @@ mod tests {
     /// must hold `crate::drivers::plugins::TEST_GLOBALS_LOCK`.
     fn load_test_sensor_plugin() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("engine_sensor_fx");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
-            tmp.path().join("engine_sensor_fx.lua"),
+            plugin_dir.join("plugin.yaml"),
+            "id: engine_sensor_fx\ntype: effect\n",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_dir.join("main.lua"),
             r#"
                 return {
-                  identity = { vendor = "t", model = "t" },
                   effects = {
                     { kind = "direct", id = "probe", name = "Probe" },
                   },
@@ -1571,11 +1577,17 @@ mod tests {
     /// `crate::drivers::plugins::TEST_GLOBALS_LOCK` for the duration.
     fn load_test_effect_plugin() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("engine_test_fx");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
-            tmp.path().join("engine_test_fx.lua"),
+            plugin_dir.join("plugin.yaml"),
+            "id: engine_test_fx\ntype: effect\n",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_dir.join("main.lua"),
             r#"
                 return {
-                  identity = { vendor = "t", model = "t" },
                   effects = {
                     { kind = "pixmap", id = "solid", name = "Solid" },
                     { kind = "direct", id = "ramp", name = "Ramp" },

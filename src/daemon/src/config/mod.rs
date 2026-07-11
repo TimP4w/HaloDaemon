@@ -53,6 +53,7 @@ pub fn load() -> Result<Config> {
         plugin_config: plugins.config,
         integrations_disabled: plugins.integrations_disabled,
         plugin_acknowledged: plugins.acknowledged,
+        plugin_repos: plugins.repos,
     })
 }
 
@@ -90,6 +91,7 @@ pub fn save(cfg: &Config) -> Result<()> {
             config: cfg.plugin_config.clone(),
             integrations_disabled: cfg.integrations_disabled.clone(),
             acknowledged: cfg.plugin_acknowledged.clone(),
+            repos: cfg.plugin_repos.clone(),
         })?,
     )?;
     save_profiles(&cfg.profiles)?;
@@ -261,6 +263,11 @@ pub fn plugins_dir() -> PathBuf {
     config_dir().join("plugins")
 }
 
+/// Directory holding checked-out git-repo plugin sources, one subdirectory per repo (see `PluginRepoRecord`).
+pub fn plugin_repos_dir() -> PathBuf {
+    config_dir().join("plugin_repos")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MainFile {
     #[serde(default = "default_profile_name")]
@@ -332,6 +339,26 @@ struct PluginsFile {
     /// treated as not-yet-consented and stays inert until re-acknowledged.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     acknowledged: HashMap<String, String>,
+    /// Registered git-repo plugin sources. See `PluginRepoRecord`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    repos: Vec<PluginRepoRecord>,
+}
+
+/// A registered git-repo plugin source, pinned to a commit SHA that only an explicit "update" advances.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginRepoRecord {
+    pub url: String,
+    /// Directory name under `plugin_repos_dir()`, derived from the URL at `add_repo` time
+    /// (fixed to `constants::OFFICIAL_PLUGIN_REPO_SLUG` for the seeded official repo).
+    pub slug: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Commit SHA the checked-out working tree is pinned to.
+    pub locked_sha: String,
+    /// When this repo's clone directory was last cloned/fetched/checked out
+    /// (RFC 3339), for the GUI's repo detail panel. `None` until the first sync.
+    #[serde(default)]
+    pub last_sync: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -382,6 +409,9 @@ pub struct Config {
     /// plugin id. See `PluginsFile::acknowledged`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub plugin_acknowledged: HashMap<String, String>,
+    /// Registered git-repo plugin sources. See `PluginRepoRecord`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_repos: Vec<PluginRepoRecord>,
 }
 
 fn default_profile_name() -> String {
@@ -409,6 +439,7 @@ impl Default for Config {
             plugin_config: HashMap::new(),
             integrations_disabled: Vec::new(),
             plugin_acknowledged: HashMap::new(),
+            plugin_repos: Vec::new(),
         }
     }
 }
@@ -625,5 +656,39 @@ mod tests {
         let yaml = "device_id: d\nzone_id: z\nx: 0.0\ny: 0.0\n";
         let z: PlacedZone = serde_yaml::from_str(yaml).unwrap();
         assert!(z.effect.is_none());
+    }
+
+    #[test]
+    fn plugins_file_without_repos_key_still_loads() {
+        // Old config files predate `repos` — absence must default, not error.
+        let f: PluginsFile = serde_yaml::from_str("disabled: [foo]\n").unwrap();
+        assert!(f.repos.is_empty());
+    }
+
+    #[test]
+    fn plugin_repos_round_trip_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+
+        let mut cfg = Config::default();
+        cfg.plugin_repos.push(PluginRepoRecord {
+            url: "https://example.com/foo.git".into(),
+            slug: "foo".into(),
+            branch: Some("main".into()),
+            locked_sha: "deadbeef".into(),
+            last_sync: None,
+        });
+        save(&cfg).unwrap();
+        let reloaded = load().unwrap();
+
+        assert_eq!(reloaded.plugin_repos.len(), 1);
+        assert_eq!(reloaded.plugin_repos[0].slug, "foo");
+        assert_eq!(reloaded.plugin_repos[0].locked_sha, "deadbeef");
+        assert_eq!(reloaded.plugin_repos[0].branch.as_deref(), Some("main"));
+
+        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 }

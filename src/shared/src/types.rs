@@ -522,6 +522,46 @@ pub struct PluginsState {
     /// user to apply it explicitly rather than rediscovering on every edit.
     #[serde(default)]
     pub rediscover_pending: bool,
+    /// Registered git-repo plugin sources, for the "Plugin Repositories" section of the Plugins screen.
+    #[serde(default)]
+    pub repos: Vec<PluginRepoInfo>,
+}
+
+/// A registered git-repo plugin source, as shown in the GUI. Mirrors the daemon's `PluginRepoRecord`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginRepoInfo {
+    pub url: String,
+    pub slug: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    pub locked_sha: String,
+    /// When this repo was last cloned/fetched/checked out (RFC 3339), if ever.
+    #[serde(default)]
+    pub last_sync: Option<String>,
+    /// True for the seeded official repo — the GUI hides its remove control.
+    #[serde(default)]
+    pub official: bool,
+}
+
+/// One repo's update check result, reported in reply to `DaemonCommand::CheckPluginRepoUpdates`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoUpdateStatus {
+    pub slug: String,
+    pub locked_sha: String,
+    pub remote_sha: String,
+    pub behind: bool,
+}
+
+/// One plugin's update-availability, reported in reply to
+/// `DaemonCommand::CheckPluginUpdates` — finer-grained than [`RepoUpdateStatus`]:
+/// a repo can be behind while a given plugin's own content is unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginUpdateStatus {
+    pub plugin_id: String,
+    pub slug: String,
+    pub update_available: bool,
+    pub current_version: String,
+    pub available_version: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -589,6 +629,25 @@ pub enum PluginKind {
     Integration,
 }
 
+/// One effect's thumbnail; display-only, the GUI fetches the bytes via `GetPluginAsset`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginEffectAsset {
+    pub id: String,
+    /// Asset name to pass as `GetPluginAsset { name, .. }`.
+    pub thumbnail: String,
+}
+
+/// Where a plugin came from: local disk, or a registered git repo.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginSource {
+    #[default]
+    Local,
+    Repo {
+        slug: String,
+    },
+}
+
 /// One plugin as shown in the GUI's Plugins screen.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInfo {
@@ -615,12 +674,24 @@ pub struct PluginInfo {
     /// Free-text description from the manifest (empty when unset).
     #[serde(default)]
     pub description: String,
-    /// Device labels the plugin targets, derived from its match specs.
+    /// Device labels the plugin targets, derived from its declared devices.
     #[serde(default)]
     pub targets: Vec<String>,
-    /// True for plugins compiled into the daemon; these cannot be deleted.
+    /// Declared license, as an SPDX identifier or free-text name (empty when unset).
     #[serde(default)]
-    pub builtin: bool,
+    pub license: String,
+    /// Every device this plugin declares (empty for an `effect`/`integration` plugin).
+    #[serde(default)]
+    pub devices: Vec<PluginDeviceInfo>,
+    /// Display-only logo asset name, if declared. Fetch via `GetPluginAsset`.
+    #[serde(default)]
+    pub logo: Option<String>,
+    /// Per-effect thumbnail asset names, if declared.
+    #[serde(default)]
+    pub effect_thumbnails: Vec<PluginEffectAsset>,
+    /// Where this plugin came from (local disk vs. a registered git repo).
+    #[serde(default)]
+    pub source: PluginSource,
     /// Privileged capabilities the manifest declares.
     #[serde(default)]
     pub declared_permissions: Vec<Permission>,
@@ -662,6 +733,17 @@ pub struct PluginInfo {
 
 fn default_true() -> bool {
     true
+}
+
+/// One device a `device`-type plugin declares (see [`PluginKind`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginDeviceInfo {
+    pub vendor: String,
+    pub model: String,
+    /// Display name (the device's `name` override, or `model`).
+    pub name: String,
+    #[serde(default)]
+    pub device_type: Option<DeviceType>,
 }
 
 /// Interpretation hint for a [`PluginConfigField`] value.
