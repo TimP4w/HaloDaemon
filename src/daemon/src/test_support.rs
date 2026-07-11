@@ -45,6 +45,33 @@ where
     unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
 }
 
+/// RAII form of [`with_tmp_config`] for tests that build their own `AppState`
+/// (custom `Config`): points `HALOD_CONFIG_DIR` at a fresh tempdir under the
+/// shared lock and restores it on drop, so a `request_config_save()` inside the
+/// test never touches the real `~/.config/halod`. Bind it for the whole test.
+pub struct TmpConfigDir {
+    _dir: tempfile::TempDir,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+pub fn tmp_config_dir() -> TmpConfigDir {
+    let guard = HALOD_CONFIG_DIR_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+    TmpConfigDir {
+        _dir: dir,
+        _guard: guard,
+    }
+}
+
+impl Drop for TmpConfigDir {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
+    }
+}
+
 #[derive(Debug)]
 pub enum InitBehavior {
     OkTrue,

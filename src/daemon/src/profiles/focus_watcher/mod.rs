@@ -222,7 +222,11 @@ mod tests {
         }
     }
 
-    fn make_app_with_rule(process: &str, profile: &str) -> Arc<AppState> {
+    fn make_app_with_rule(
+        process: &str,
+        profile: &str,
+    ) -> (Arc<AppState>, crate::test_support::TmpConfigDir) {
+        let guard = crate::test_support::tmp_config_dir();
         let mut cfg = Config::default();
         cfg.profiles.insert(profile.to_string(), Default::default());
         cfg.app_rules.push(AppRule {
@@ -230,12 +234,12 @@ mod tests {
             profile: profile.to_string(),
             enabled: true,
         });
-        Arc::new(AppState::new(cfg))
+        (Arc::new(AppState::new(cfg)), guard)
     }
 
     #[tokio::test]
     async fn rule_match_switches_profile() {
-        let app = make_app_with_rule("firefox", "Web");
+        let (app, _cfg) = make_app_with_rule("firefox", "Web");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
         let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
@@ -256,7 +260,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_rule_match_leaves_baseline() {
-        let app = make_app_with_rule("firefox", "Web");
+        let (app, _cfg) = make_app_with_rule("firefox", "Web");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
         let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
@@ -276,7 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn restore_baseline_when_focus_leaves_rule_app() {
-        let app = make_app_with_rule("firefox", "Web");
+        let (app, _cfg) = make_app_with_rule("firefox", "Web");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
         let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
@@ -297,7 +301,7 @@ mod tests {
 
     #[tokio::test]
     async fn manual_switch_updates_baseline() {
-        let app = make_app_with_rule("firefox", "Web");
+        let (app, _cfg) = make_app_with_rule("firefox", "Web");
         app.config
             .write()
             .await
@@ -337,6 +341,7 @@ mod tests {
             profile: "Web".into(),
             enabled: false,
         });
+        let _cfg = crate::test_support::tmp_config_dir();
         let app = Arc::new(AppState::new(cfg));
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
@@ -357,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_profile_rule_skips_without_panic() {
-        let app = make_app_with_rule("firefox", "Deleted");
+        let (app, _cfg) = make_app_with_rule("firefox", "Deleted");
         app.config.write().await.profiles.remove("Deleted");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
@@ -377,7 +382,7 @@ mod tests {
 
     #[tokio::test]
     async fn rules_updated_with_active_matching_foreground_switches_profile() {
-        let app = make_app_with_rule("firefox", "Web");
+        let (app, _cfg) = make_app_with_rule("firefox", "Web");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
         let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
@@ -397,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn rules_updated_with_non_matching_foreground_leaves_profile_unchanged() {
-        let app = make_app_with_rule("firefox", "Web");
+        let (app, _cfg) = make_app_with_rule("firefox", "Web");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
         let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());

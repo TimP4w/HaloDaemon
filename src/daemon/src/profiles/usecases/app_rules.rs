@@ -84,13 +84,14 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
-    fn make_app() -> Arc<AppState> {
-        Arc::new(AppState::new(Config::default()))
+    fn make_app() -> (Arc<AppState>, crate::test_support::TmpConfigDir) {
+        let guard = crate::test_support::tmp_config_dir();
+        (Arc::new(AppState::new(Config::default())), guard)
     }
 
     #[tokio::test]
     async fn add_appends_rule() {
-        let app = make_app();
+        let (app, _cfg) = make_app();
         add(vec!["firefox".into()], "Web".into(), true, app.clone())
             .await
             .unwrap();
@@ -101,14 +102,14 @@ mod tests {
 
     #[tokio::test]
     async fn add_rejects_empty_process_names() {
-        let app = make_app();
+        let (app, _cfg) = make_app();
         let err = add(vec![], "Web".into(), true, app).await.unwrap_err();
         assert!(err.to_string().contains("process_names"));
     }
 
     #[tokio::test]
     async fn add_normalizes_process_names_to_lowercase() {
-        let app = make_app();
+        let (app, _cfg) = make_app();
         add(
             vec!["Firefox".into(), "Code.exe".into()],
             "Web".into(),
@@ -123,7 +124,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_replaces_rule_at_index() {
-        let app = make_app();
+        let (app, _cfg) = make_app();
         add(vec!["firefox".into()], "Web".into(), true, app.clone())
             .await
             .unwrap();
@@ -138,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_rejects_out_of_range_index() {
-        let app = make_app();
+        let (app, _cfg) = make_app();
         let err = update(5, vec!["x".into()], "X".into(), true, app)
             .await
             .unwrap_err();
@@ -147,7 +148,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_deletes_rule_at_index() {
-        let app = make_app();
+        let (app, _cfg) = make_app();
         add(vec!["firefox".into()], "Web".into(), true, app.clone())
             .await
             .unwrap();
@@ -158,7 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_rejects_out_of_range_index() {
-        let app = make_app();
+        let (app, _cfg) = make_app();
         let err = remove(0, app).await.unwrap_err();
         assert!(err.to_string().contains("index"));
     }

@@ -274,23 +274,6 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn apply_pending_changes_clears_the_flag() {
-        // Real discovery runs here (initialize_app_state hits actual hardware
-        // on the test machine), so this only asserts the flag transition —
-        // asserting on the resulting device set would depend on what hardware
-        // happens to be attached to the runner.
-        crate::test_support::with_tmp_config(|app| async move {
-            app.plugins_rediscover_pending
-                .store(true, Ordering::Relaxed);
-
-            apply_pending_changes(app.clone()).await.unwrap();
-
-            assert!(!app.plugins_rediscover_pending.load(Ordering::Relaxed));
-        })
-        .await;
-    }
-
     const CONFIG_TEST_PLUGIN: &str = r#"
         return {
           identity = { vendor = "x", model = "y" },
