@@ -19,8 +19,8 @@ To add a device, see the [development guide](development.md).
 
 | Vendor | Model | VID:PID | Protocol | Transport | Platform |
 |--------|-------|---------|----------|-----------|----------|
-| NZXT | Control Hub | 1e71:2022 | [NZXT](protocols/nzxt.md) | [HID](transports/hid.md) | 🐧🪟 |
-| NZXT | F120/F140/F240/F360/F420 RGB (via Control Hub) | — | [NZXT](protocols/nzxt.md) | [HID](transports/hid.md) | 🐧🪟 |
+| NZXT | Control Hub | 1e71:2022 | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
+| NZXT | F120/F140/F240/F360/F420 RGB (via Control Hub) | — | [NZXT](protocols/nzxt.md) (built-in [Lua plugin](plugins.md)) | [HID](transports/hid.md) | 🐧🪟 |
 | (All) | Motherboard fan headers | — | sysfs | [hwmon](transports/hwmon.md) | 🐧 |
 | (All) | Motherboard fan headers (NCT677x) | — | [NCT677x SuperIO](protocols/nct677x-superio.md) | [LpcIO](transports/lpcio.md) | 🪟 |
 

@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-FileCopyrightText: Adam Honse (CalcProgrammer1) — OpenRGB project
 //! End-to-end test for the built-in OpenRGB integration plugin: drives the
 //! *actual* Lua plugin through the real worker + TCP transport against an
 //! in-process fake OpenRGB server, and asserts both directions of the wire

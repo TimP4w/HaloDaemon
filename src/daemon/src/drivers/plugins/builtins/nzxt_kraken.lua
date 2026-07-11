@@ -42,7 +42,6 @@ local function lighting_packet(channel_byte, grb)
   b:set_u8(1, 0x14)
   b:set_u8(2, channel_byte)
   b:set_u8(3, channel_byte)
-  -- copy grb bytes in
   for i = 1, #grb do
     b:set_u8(3 + i, grb:byte(i))
   end

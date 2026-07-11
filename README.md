@@ -126,8 +126,8 @@ Both guides cover the runtime dependencies, permissions/PawnIO setup, and the ve
 - [Development guide](docs/development.md) — build, add devices, add protocols
 - [Device plugins](docs/plugins.md) — add a device in Lua without recompiling
 - [Engines](docs/engines.md) — canvas, fan curve, LCD, key remap
-- [Protocols](docs/protocols/) — HID++, NZXT, ENE SMBus, DDC/CI, ASUS Aura USB, Corsair, SteelSeries, NCT677x SuperIO, NVIDIA GPU sensors
-- [Transports](docs/transports/) — HID, SMBus, hwmon, LpcIO, USB control
+- [Protocols](docs/protocols/) — HID++, NZXT, ENE SMBus, DDC/CI, ASUS Aura USB, Corsair, SteelSeries, NCT677x SuperIO, NVIDIA GPU sensors, OpenRGB SDK
+- [Transports](docs/transports/) — HID, SMBus, hwmon, LpcIO, USB control, TCP
 
 ---
 

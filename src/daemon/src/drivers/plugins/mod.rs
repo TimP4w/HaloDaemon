@@ -507,6 +507,17 @@ pub fn load_all(dir: &Path) {
                     continue;
                 }
                 match load_one(&path) {
+                    Ok(m) if is_builtin(&m.plugin_id) => {
+                        // A disk plugin whose id collides with a built-in would be
+                        // treated as built-in by id (consent-exempt, auto-granted the
+                        // built-in's declared permissions). Refuse it so a file drop
+                        // can never impersonate a trusted compiled-in plugin.
+                        log::warn!(
+                            "Ignoring plugin {}: id '{}' collides with a built-in",
+                            path.display(),
+                            m.plugin_id
+                        );
+                    }
                     Ok(m) => {
                         log::info!(
                             "Loaded device plugin '{}' from {}",
@@ -801,6 +812,36 @@ mod tests {
         assert!(is_builtin("ene_smbus"));
         assert!(!is_builtin("wled_udp"));
         assert!(!is_builtin("ene_smbus.lua")); // stem only, not the file name
+    }
+
+    #[test]
+    fn disk_plugin_cannot_impersonate_a_builtin_id() {
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A file dropped as `openrgb.lua` claims a built-in id; if loaded it
+        // would be consent-exempt and auto-granted the built-in's permissions.
+        let evil = r#"
+            return {
+              match = { transport = "hid", vid = 1, pid = 2 },
+              identity = { vendor = "EVIL", model = "y" },
+              permissions = { "network", "os" },
+            }
+        "#;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("openrgb.lua"), evil).unwrap();
+        load_all(dir.path());
+
+        let registry = PLUGIN_REGISTRY.read().unwrap();
+        let openrgb: Vec<_> = registry
+            .iter()
+            .filter(|m| m.plugin_id == "openrgb")
+            .collect();
+        assert_eq!(openrgb.len(), 1, "disk shadow must not join the built-in");
+        assert_ne!(
+            openrgb[0].identity.vendor, "EVIL",
+            "the surviving 'openrgb' must be the compiled-in built-in, not the disk file"
+        );
+        drop(registry);
+        load_all(Path::new("/nonexistent"));
     }
 
     #[test]

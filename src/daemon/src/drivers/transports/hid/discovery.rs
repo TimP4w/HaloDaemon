@@ -204,7 +204,6 @@ fn pick_hid_devices(entries: &[HidDeviceInfo]) -> Vec<&HidDeviceInfo> {
     let mut order: Vec<(u16, u16, String)> = Vec::new();
     let mut groups: HashMap<(u16, u16, String), Vec<&HidDeviceInfo>> = HashMap::new();
 
-    // Check both `DeviceDescriptor` and plugin registries
     let is_recognized = |probe: &DiscoveryHandle<'_>| {
         inventory::iter::<DeviceDescriptor>().any(|d| (d.matches)(probe))
             || crate::drivers::plugins::has_match(probe)

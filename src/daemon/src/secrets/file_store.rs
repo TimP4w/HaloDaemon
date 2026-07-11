@@ -171,11 +171,34 @@ fn load_or_create_key() -> Key {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&path, key.as_slice()) {
+    if let Err(e) = write_owner_only(&path, key.as_slice()) {
         log::error!("[secrets] failed to persist {}: {e}", path.display());
     }
-    restrict_permissions(&path);
     key
+}
+
+/// Write bytes to `path` created with owner-only permissions from the start, so
+/// the key is never briefly world-readable (as a umask-default `fs::write` +
+/// later chmod would be). On non-Unix, falls back to a plain write.
+fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)?;
+        restrict_permissions(path);
+        Ok(())
+    }
 }
 
 #[cfg(unix)]

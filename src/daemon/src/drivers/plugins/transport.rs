@@ -69,10 +69,11 @@ impl BulkEndpoint {
                 let mut guard = inner
                     .lock()
                     .map_err(|_| anyhow::anyhow!("plugin bulk endpoint mutex poisoned"))?;
-                if guard.is_none() {
-                    *guard = Some(UsbBulkTransport::open(*vid, *pid, None)?);
-                }
-                guard.as_ref().unwrap().write(data)?;
+                let transport = match &mut *guard {
+                    Some(t) => t,
+                    none => none.insert(UsbBulkTransport::open(*vid, *pid, None)?),
+                };
+                transport.write(data)?;
                 Ok(())
             }
             #[cfg(test)]

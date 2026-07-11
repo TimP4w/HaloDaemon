@@ -1,4 +1,7 @@
--- SPDX-License-Identifier: GPL-3.0-or-later
+-- SPDX-License-Identifier: GPL-2.0-or-later
+-- SPDX-FileCopyrightText: Adam Honse (CalcProgrammer1) — OpenRGB project
+-- Reference: OpenRGB NetworkServer / RGBController wire protocol
+-- https://gitlab.com/CalcProgrammer1/OpenRGB/-/blob/master/RGBController/RGBController.cpp
 -- OpenRGB SDK network client — an integration plugin (no `match`, no hardware
 -- bus). Connects to an OpenRGB server (default 127.0.0.1:6742) over TCP and
 -- exposes each of its RGB controllers as a top-level HaloDaemon device.
