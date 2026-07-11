@@ -549,6 +549,9 @@ impl Device for LuaDevice {
             caps.push(CapabilityRef::Controller(self));
             caps.push(CapabilityRef::Chain(self));
         }
+        if self.plugin_type == PluginType::Integration {
+            caps.push(CapabilityRef::Controller(self));
+        }
         caps
     }
 }
@@ -2070,11 +2073,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integration_root_advertises_controller_capability() {
+        // Regression: `register_device_and_children` (the real registration
+        // path) finds children via `device.as_controller()`, not by calling
+        // `Controller::discover_children` directly on the concrete type — a
+        // plugin whose `capabilities()` forgets to advertise `Controller`
+        // silently never gets its children discovered at all, even though
+        // the trait impl itself is correct. Guard the capability list, not
+        // just the trait method.
+        let dev = integration_device(Arc::new(MockTransport::empty()));
+        assert!(dev.as_controller().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integration_root_discovers_one_child_per_controller() {
-        use crate::drivers::Controller;
         let dev = integration_device(Arc::new(MockTransport::empty()));
 
-        let children = dev.discover_children().await;
+        let children = dev.as_controller().unwrap().discover_children().await;
         assert_eq!(children.len(), 2);
         assert_eq!(children[0].id(), "integ-0_ctrl_0");
         assert_eq!(children[0].name(), "Keyboard");
@@ -2087,10 +2102,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integration_leaf_write_frame_routes_to_the_parent_with_its_own_index() {
-        use crate::drivers::Controller;
         let mock = Arc::new(MockTransport::empty());
         let dev = integration_device(mock.clone());
-        let children = dev.discover_children().await;
+        let children = dev.as_controller().unwrap().discover_children().await;
 
         let keyboard_rgb = children[0].as_rgb().expect("has rgb");
         keyboard_rgb
@@ -2117,19 +2131,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integration_leaf_write_frame_rejects_an_unknown_zone() {
-        use crate::drivers::Controller;
         let dev = integration_device(Arc::new(MockTransport::empty()));
-        let children = dev.discover_children().await;
+        let children = dev.as_controller().unwrap().discover_children().await;
         let rgb = children[0].as_rgb().expect("has rgb");
         assert!(rgb.write_frame("nope", &[]).await.is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integration_leaf_apply_static_broadcasts_to_every_zone() {
-        use crate::drivers::Controller;
         let mock = Arc::new(MockTransport::empty());
         let dev = integration_device(mock.clone());
-        let children = dev.discover_children().await;
+        let children = dev.as_controller().unwrap().discover_children().await;
         let mobo_rgb = children[1].as_rgb().expect("has rgb");
 
         mobo_rgb

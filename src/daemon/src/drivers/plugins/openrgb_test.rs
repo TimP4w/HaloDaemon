@@ -18,7 +18,7 @@ use super::device::LuaDevice;
 use super::parse_manifest;
 use super::transport::PluginIo;
 use crate::drivers::transports::tcp::TcpTransport;
-use crate::drivers::{Controller, Device};
+use crate::drivers::Device;
 
 const OPENRGB_SRC: &str = include_str!("builtins/openrgb.lua");
 
@@ -57,8 +57,14 @@ async fn read_packet(stream: &mut TcpStream) -> Received {
     }
 }
 
-/// Build one `RequestControllerData` reply payload: a controller named
-/// "Test Controller" with a single 4-LED "Main" linear zone and no modes.
+/// Build one `RequestControllerData` reply payload matching real OpenRGB's
+/// wire format at protocol version 3 (`RGBController::GetDeviceDescriptionData`
+/// et al. in the upstream OpenRGB source): a controller named "Test
+/// Controller", a `vendor` field (present at version >= 1 — the field this
+/// test exists to guard, since it was the actual bug), one mode with all 12
+/// `ModeDescription` uint32 fields (`brightness_min`/`max`/`brightness`
+/// present at version >= 3, `value` present since version < 6 — both true at
+/// version 3), and a single 4-LED "Main" linear zone.
 fn controller_data_payload() -> Vec<u8> {
     fn write_str(out: &mut Vec<u8>, s: &str) {
         out.extend_from_slice(&(s.len() as u16).to_le_bytes());
@@ -68,19 +74,42 @@ fn controller_data_payload() -> Vec<u8> {
     let mut desc = Vec::new();
     desc.extend_from_slice(&0u32.to_le_bytes()); // type
     write_str(&mut desc, "Test Controller"); // name
+    write_str(&mut desc, "Test Vendor"); // vendor (version >= 1)
     write_str(&mut desc, ""); // description
     write_str(&mut desc, ""); // version
     write_str(&mut desc, ""); // serial
     write_str(&mut desc, ""); // location
-    desc.extend_from_slice(&0u16.to_le_bytes()); // num_modes
+    desc.extend_from_slice(&1u16.to_le_bytes()); // num_modes
     desc.extend_from_slice(&0u32.to_le_bytes()); // active_mode
+
+    // One ModeDescription ("Direct"), all 12 uint32 fields present at v3.
+    write_str(&mut desc, "Direct"); // mode name
+    desc.extend_from_slice(&0u32.to_le_bytes()); // value (< v6)
+    desc.extend_from_slice(&0u32.to_le_bytes()); // flags
+    desc.extend_from_slice(&0u32.to_le_bytes()); // speed_min
+    desc.extend_from_slice(&0u32.to_le_bytes()); // speed_max
+    desc.extend_from_slice(&0u32.to_le_bytes()); // brightness_min (>= v3)
+    desc.extend_from_slice(&100u32.to_le_bytes()); // brightness_max (>= v3)
+    desc.extend_from_slice(&0u32.to_le_bytes()); // colors_min
+    desc.extend_from_slice(&0u32.to_le_bytes()); // colors_max
+    desc.extend_from_slice(&0u32.to_le_bytes()); // speed
+    desc.extend_from_slice(&100u32.to_le_bytes()); // brightness (>= v3)
+    desc.extend_from_slice(&0u32.to_le_bytes()); // direction
+    desc.extend_from_slice(&1u32.to_le_bytes()); // color_mode (PerLed)
+    desc.extend_from_slice(&0u16.to_le_bytes()); // mode num_colors (none)
+
     desc.extend_from_slice(&1u16.to_le_bytes()); // num_zones
     write_str(&mut desc, "Main"); // zone name
     desc.extend_from_slice(&1u32.to_le_bytes()); // zone type (Linear)
     desc.extend_from_slice(&0u32.to_le_bytes()); // leds_min
     desc.extend_from_slice(&0u32.to_le_bytes()); // leds_max
     desc.extend_from_slice(&4u32.to_le_bytes()); // leds_count
-    desc.extend_from_slice(&0u16.to_le_bytes()); // matrix_length (no matrix)
+                                                 // Matrix-map block: OpenRGB always writes height+width (8 bytes), even
+                                                 // for a non-matrix zone, so `matrix_length` is never actually 0.
+    desc.extend_from_slice(&8u16.to_le_bytes()); // matrix_length
+    desc.extend_from_slice(&0u32.to_le_bytes()); // matrix_height
+    desc.extend_from_slice(&0u32.to_le_bytes()); // matrix_width
+
     desc.extend_from_slice(&0u16.to_le_bytes()); // num_leds
     desc.extend_from_slice(&0u16.to_le_bytes()); // num_colors
 
@@ -178,9 +207,13 @@ async fn openrgb_plugin_enumerates_and_writes_a_frame_end_to_end() {
     // initialize() drives SetClientName + the protocol-version handshake.
     assert!(dev.initialize().await.unwrap());
 
-    // discover_children() drives RequestControllerCount + RequestControllerData
-    // and must yield one IntegrationLeaf matching our fake controller.
-    let children = dev.discover_children().await;
+    // Go through `as_controller()`, exactly like the real registration path
+    // (`register_device_and_children`) does — not a direct `Controller`
+    // trait call, which would bypass the `capabilities()` advertisement this
+    // depends on. `discover_children()` drives RequestControllerCount +
+    // RequestControllerData and must yield one IntegrationLeaf matching our
+    // fake controller.
+    let children = dev.as_controller().unwrap().discover_children().await;
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].id(), "openrgb-0_ctrl_0");
     assert_eq!(children[0].name(), "Test Controller");

@@ -3,12 +3,18 @@
 -- bus). Connects to an OpenRGB server (default 127.0.0.1:6742) over TCP and
 -- exposes each of its RGB controllers as a top-level HaloDaemon device.
 --
--- Protocol: docs/protocols/openrgb.md, transcribed from the OpenRGB network
--- protocol description (https://github.com/Youda008/OpenRGB-cppSDK,
--- protocol_description.txt, "version 3" schema — the current stable one).
--- `DeviceDescription`/`ModeDescription`/`ZoneDescription` have no
--- version-conditional fields in that schema, so this client doesn't need to
--- branch on the negotiated protocol version to parse them correctly.
+-- Protocol: docs/protocols/openrgb.md, transcribed from OpenRGB's own
+-- RGBController::GetDeviceDescriptionData/GetModeDescriptionData/
+-- GetZoneDescriptionData (RGBController/RGBController.cpp). Several fields
+-- are version-conditional on the *negotiated* protocol version (min of what
+-- the client requests and the server supports) — this client always
+-- requests CLIENT_PROTOCOL_VERSION below, so it only needs to parse the
+-- fields present at *that* version, not branch at runtime:
+--   * `vendor` string — present at version >= 1.
+--   * Mode `brightness_min`/`brightness_max`/`brightness` — present >= 3.
+--   * Zone segments, zone flags, zone modes/display_name — present at >= 4,
+--     >= 5, >= 6 respectively; CLIENT_PROTOCOL_VERSION stays below all of
+--     these so none of them are ever sent.
 --
 -- Scope: enumerates controllers and zones, and drives them via Direct/custom
 -- mode (`SetCustomMode` + `UpdateZoneLEDs`). Mode enumeration/switching beyond
@@ -64,7 +70,9 @@ local function read_u32(data, pos)
   return string.unpack("<I4", data, pos)
 end
 
--- Server strings are length-prefixed but not null-terminated.
+-- Server strings are length-prefixed (the length includes a trailing '\0'
+-- OpenRGB always writes, but that's irrelevant here — exactly `len` bytes are
+-- read regardless of what's inside them).
 local function read_str(data, pos)
   local len, p = read_u16(data, pos)
   if len == 0 then
@@ -73,10 +81,11 @@ local function read_str(data, pos)
   return data:sub(p, p + len - 1), p + len
 end
 
--- Skip one ModeDescription entry. Its 12 uint32 fields (value, flags,
--- speed_min/max, brightness_min/max, colors_min/max, speed, brightness,
--- direction, color_mode) are always present regardless of ModeFlags — only
--- their *meaning* depends on the flags, not their presence on the wire.
+-- Skip one ModeDescription entry. At CLIENT_PROTOCOL_VERSION (3), all 12
+-- uint32 fields are present: `value` is dropped only at version >= 6, and
+-- `brightness_min`/`brightness_max`/`brightness` only appear at version >= 3
+-- — both conditions this client's requested version satisfies. Bump
+-- CLIENT_PROTOCOL_VERSION and this count needs revisiting.
 local function skip_mode(data, pos)
   local _, p = read_str(data, pos)
   p = p + 4 * 12
@@ -96,10 +105,13 @@ local function read_zone(data, pos, zero_based_index)
   p = p + 4 -- leds_max
   local leds_count
   leds_count, p = read_u32(data, p)
+  -- The matrix-map block is unconditional (OpenRGB always writes its
+  -- height+width, even 0x0 for a non-matrix zone), so `matrix_len` is
+  -- effectively always >= 8 — just skip whatever length it reports.
   local matrix_len
   matrix_len, p = read_u16(data, p)
   if matrix_len > 0 then
-    p = p + matrix_len -- byte length of the whole optional matrix block
+    p = p + matrix_len
   end
   local zone = {
     id = tostring(zero_based_index),
@@ -164,6 +176,10 @@ return {
       pos = pos + 4 -- type
       local name
       name, pos = read_str(data, pos)
+      -- `vendor` is only present when the negotiated protocol version is >= 1
+      -- (CLIENT_PROTOCOL_VERSION is 3, so it always is here).
+      local _vendor
+      _vendor, pos = read_str(data, pos)
       local _description
       _description, pos = read_str(data, pos)
       local _version
