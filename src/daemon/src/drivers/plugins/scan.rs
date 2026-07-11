@@ -39,13 +39,10 @@ impl PluginScanEntry {
 /// Build the SMBus scan entries every enabled plugin declares. Called by the
 /// SMBus scanner each discovery pass, so enable/disable and reloads take effect.
 pub fn plugin_smbus_scan_entries() -> Vec<PluginScanEntry> {
-    let registry = match super::PLUGIN_REGISTRY.read() {
-        Ok(g) => g,
-        Err(_) => return Vec::new(),
-    };
+    let state = super::snapshot();
     let mut out = Vec::new();
-    for m in registry.iter() {
-        if super::is_disabled(&m.plugin_id) {
+    for m in state.manifests.iter() {
+        if state.disabled.contains(&m.plugin_id) {
             continue;
         }
         for spec in m.smbus_specs() {

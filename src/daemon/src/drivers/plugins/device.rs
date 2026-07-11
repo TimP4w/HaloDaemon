@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use halod_shared::types::{
     Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, Choice,
     ConnectionStatus, DeviceCapability, DeviceType, DpiMode, DpiStatus, Equalizer, KeyRemapStatus,
-    LcdDescriptor, NativeEffect, Range, RgbColor, RgbDescriptor, RgbState, RgbZone, ScreenRotation,
-    ScreenShape, Sensor, WriteRateStatus,
+    LcdDescriptor, NativeEffect, PluginKind, Range, RgbColor, RgbDescriptor, RgbState, RgbZone,
+    ScreenRotation, ScreenShape, Sensor, WriteRateStatus,
 };
 
 use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor};
@@ -30,7 +30,7 @@ use super::chain_leaf::ChainLeaf;
 use super::integration_leaf::{IntegrationHub, IntegrationLeaf};
 use super::manifest::{
     topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DpiManifest, MatchSpec,
-    PluginManifest, PluginType, RangeDef,
+    PluginManifest, RangeDef,
 };
 use super::transport::PluginIo;
 use super::worker::{DevMatch, InitLcd, InitZone, PluginHandle};
@@ -56,7 +56,7 @@ pub struct LuaDevice {
     vendor: String,
     model: String,
     plugin_id: String,
-    plugin_type: PluginType,
+    plugin_type: PluginKind,
     device_type: DeviceType,
     transport_kind: &'static str,
     dynamic_model: OnceLock<String>,
@@ -444,7 +444,7 @@ impl Device for LuaDevice {
     }
 
     fn integration_id(&self) -> Option<String> {
-        (self.plugin_type == PluginType::Integration).then(|| self.plugin_id.clone())
+        (self.plugin_type == PluginKind::Integration).then(|| self.plugin_id.clone())
     }
 
     async fn initialize(&self) -> Result<bool> {
@@ -537,7 +537,7 @@ impl Device for LuaDevice {
             caps.push(CapabilityRef::Controller(self));
             caps.push(CapabilityRef::Chain(self));
         }
-        if self.plugin_type == PluginType::Integration {
+        if self.plugin_type == PluginKind::Integration {
             caps.push(CapabilityRef::Controller(self));
         }
         caps
@@ -639,7 +639,7 @@ impl SensorCapability for LuaDevice {
 #[async_trait]
 impl Controller for LuaDevice {
     async fn discover_children(&self) -> Vec<Arc<dyn Device>> {
-        if self.plugin_type == PluginType::Integration {
+        if self.plugin_type == PluginKind::Integration {
             return self.discover_controllers().await;
         }
         self.discover_chain_accessories().await

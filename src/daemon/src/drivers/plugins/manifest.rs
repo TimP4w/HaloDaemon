@@ -9,11 +9,11 @@
 use anyhow::{anyhow, bail, Result};
 use halod_shared::types::{
     Animation, ButtonDescriptor, ButtonMapping, ChoiceDisplay, ChoiceOption, DeviceType,
-    EffectParamDescriptor, NativeEffect, Permission, RangeDisplay, RgbDescriptor, RgbZone,
-    ZoneTopology,
+    EffectParamDescriptor, NativeEffect, Permission, PluginConfigFieldKind, PluginKind,
+    RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
 };
 use mlua::{DeserializeOptions, HookTriggers, Lua, LuaSerdeExt, VmState};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
@@ -160,15 +160,6 @@ pub struct ChoiceManifest {
     pub choices: Vec<ChoiceDef>,
 }
 
-/// Interpretation hint for a [`ConfigFieldDef`] value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConfigFieldKind {
-    #[default]
-    Text,
-    Number,
-}
-
 /// One user-editable setting a plugin declares (e.g. a server IP/port). Shown by
 /// the GUI, persisted per-plugin-id, and readable from Lua via `halod.config`
 /// (`sandbox.rs`). Not a capability: it never appears in `capability_labels` and
@@ -178,7 +169,7 @@ pub struct ConfigFieldDef {
     pub key: String,
     pub label: String,
     #[serde(default)]
-    pub kind: ConfigFieldKind,
+    pub kind: PluginConfigFieldKind,
     #[serde(default)]
     pub default: String,
     #[serde(default)]
@@ -344,48 +335,12 @@ impl EffectManifest {
     }
 }
 
-/// Which discovery path a plugin registers into. `Device` (the default)
-/// declares hardware via `match`; `Effect` declares RGB effects and needs no
-/// `match` spec at all — it never opens a transport or a worker. `Integration`
-/// also declares no `match` — it is instantiated from its own `config` values
-/// (e.g. a server host/port) rather than a hardware discovery handle, and its
-/// `discover_children()` enumerates one top-level `Device` per thing the
-/// remote service reports (see `enumerate_controllers`), instead of the
-/// chain-accessory path `Device` plugins use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginType {
-    #[default]
-    Device,
-    Effect,
-    Integration,
-}
-
-impl From<PluginType> for halod_shared::types::PluginKind {
-    fn from(t: PluginType) -> Self {
-        match t {
-            PluginType::Device => halod_shared::types::PluginKind::Device,
-            PluginType::Effect => halod_shared::types::PluginKind::Effect,
-            PluginType::Integration => halod_shared::types::PluginKind::Integration,
-        }
-    }
-}
-
-impl From<ConfigFieldKind> for halod_shared::types::PluginConfigFieldKind {
-    fn from(k: ConfigFieldKind) -> Self {
-        match k {
-            ConfigFieldKind::Text => halod_shared::types::PluginConfigFieldKind::Text,
-            ConfigFieldKind::Number => halod_shared::types::PluginConfigFieldKind::Number,
-        }
-    }
-}
-
 impl From<&ConfigFieldDef> for halod_shared::types::PluginConfigField {
     fn from(f: &ConfigFieldDef) -> Self {
         halod_shared::types::PluginConfigField {
             key: f.key.clone(),
             label: f.label.clone(),
-            kind: f.kind.into(),
+            kind: f.kind,
             category: f.category.clone(),
             secure: f.secure,
         }
@@ -551,21 +506,23 @@ pub struct MatchSpec {
     pub device_type: Option<DeviceType>,
 }
 
-/// Accepts either a single `match` table or an array of them.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum MatchSpecs {
-    One(MatchSpec),
-    Many(Vec<MatchSpec>),
-}
-
-impl MatchSpecs {
-    fn into_vec(self) -> Vec<MatchSpec> {
-        match self {
-            MatchSpecs::One(m) => vec![m],
-            MatchSpecs::Many(v) => v,
-        }
+/// Deserialize the `match` field, which may be a single `match` table or an
+/// array of them, into a flat `Vec`. (Absence is handled by `#[serde(default)]`,
+/// so this is only called when `match` is present.)
+fn de_match_specs<'de, D>(deserializer: D) -> Result<Vec<MatchSpec>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(Box<MatchSpec>),
+        Many(Vec<MatchSpec>),
     }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(m) => vec![*m],
+        OneOrMany::Many(v) => v,
+    })
 }
 
 impl MatchSpec {
@@ -599,89 +556,69 @@ pub struct Identity {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawManifest {
-    #[serde(rename = "match", default)]
-    match_spec: Option<MatchSpecs>,
-    identity: Identity,
-    #[serde(rename = "type", default)]
-    plugin_type: PluginType,
-    #[serde(default)]
-    effects: Vec<EffectManifest>,
-    #[serde(default)]
-    transports: TransportsConfig,
-    #[serde(default)]
-    rgb: Option<RgbManifest>,
-    #[serde(default)]
-    fan: Option<FanManifest>,
-    #[serde(default)]
-    sensor: Option<SensorManifest>,
-    #[serde(default)]
-    lcd: Option<LcdManifest>,
-    #[serde(default)]
-    dpi: Option<DpiManifest>,
-    #[serde(default)]
-    choice: Option<ChoiceManifest>,
-    #[serde(default)]
-    range: Option<RangeManifest>,
-    #[serde(default)]
-    boolean: Option<BooleanManifest>,
-    #[serde(default)]
-    action: Option<ActionManifest>,
-    #[serde(default)]
-    battery: Option<BatteryManifest>,
-    #[serde(default)]
-    connection: Option<ConnectionManifest>,
-    #[serde(default)]
-    equalizer: Option<EqualizerManifest>,
-    #[serde(default)]
-    pairing: Option<PairingManifest>,
-    #[serde(default)]
-    onboard_profiles: Option<OnboardProfilesManifest>,
-    #[serde(default)]
-    key_remap: Option<KeyRemapManifest>,
-    /// Privileged capabilities this plugin needs, gated by user consent.
-    #[serde(default)]
-    permissions: Vec<Permission>,
-    #[serde(default)]
-    poll: Option<PollManifest>,
-    #[serde(default)]
-    chain: Option<ChainManifest>,
-    #[serde(default)]
-    config: Option<ConfigManifest>,
-}
-
 /// A parsed, validated plugin ready to be matched against discovery handles.
-#[derive(Debug, Clone)]
+///
+/// Deserialized straight from the plugin's `return`ed table — callback functions
+/// at sibling keys (`apply`, `write_frame`, …) are ignored as unknown fields.
+/// The three `#[serde(skip)]` fields are computed and filled by
+/// [`parse_manifest`], which also runs the cross-field validation.
+#[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
     /// Unique per plugin (the script file stem).
+    #[serde(skip)]
     pub plugin_id: String,
+    #[serde(skip)]
     pub source_path: std::path::PathBuf,
     /// Full script text, re-executed by the worker to build its own VM.
+    #[serde(skip)]
     pub script_source: String,
+    #[serde(rename = "match", default, deserialize_with = "de_match_specs")]
     pub match_specs: Vec<MatchSpec>,
     pub identity: Identity,
-    pub plugin_type: PluginType,
+    #[serde(rename = "type", default)]
+    pub plugin_type: PluginKind,
+    #[serde(default)]
     pub effects: Vec<EffectManifest>,
+    #[serde(default)]
     pub transports: TransportsConfig,
+    #[serde(default)]
     pub rgb: Option<RgbManifest>,
+    #[serde(default)]
     pub fan: Option<FanManifest>,
+    #[serde(default)]
     pub sensor: Option<SensorManifest>,
+    #[serde(default)]
     pub lcd: Option<LcdManifest>,
+    #[serde(default)]
     pub dpi: Option<DpiManifest>,
+    #[serde(default)]
     pub choice: Option<ChoiceManifest>,
+    #[serde(default)]
     pub range: Option<RangeManifest>,
+    #[serde(default)]
     pub boolean: Option<BooleanManifest>,
+    #[serde(default)]
     pub action: Option<ActionManifest>,
+    #[serde(default)]
     pub battery: Option<BatteryManifest>,
+    #[serde(default)]
     pub connection: Option<ConnectionManifest>,
+    #[serde(default)]
     pub equalizer: Option<EqualizerManifest>,
+    #[serde(default)]
     pub pairing: Option<PairingManifest>,
+    #[serde(default)]
     pub onboard_profiles: Option<OnboardProfilesManifest>,
+    #[serde(default)]
     pub key_remap: Option<KeyRemapManifest>,
+    /// Privileged capabilities this plugin needs, gated by user consent.
+    #[serde(default)]
     pub permissions: Vec<Permission>,
+    #[serde(default)]
     pub poll: Option<PollManifest>,
+    #[serde(default)]
     pub chain: Option<ChainManifest>,
+    #[serde(default)]
     pub config: Option<ConfigManifest>,
 }
 
@@ -773,7 +710,7 @@ impl PluginManifest {
         // An integration plugin declares no capability section (it isn't a
         // capability-bearing device itself), but its root always needs a live
         // transport + Lua worker for `enumerate_controllers`/frame writes.
-        self.plugin_type == PluginType::Integration
+        self.plugin_type == PluginKind::Integration
             || self.rgb.is_some()
             || self.fan.is_some()
             || self.sensor.is_some()
@@ -916,20 +853,22 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
     // unsupported types (functions → nil) so serde ignores them, rather than
     // erroring on the first function it meets.
     let options = DeserializeOptions::new().deny_unsupported_types(false);
-    let raw: RawManifest = lua
+    let mut manifest: PluginManifest = lua
         .from_value_with(value, options)
         .map_err(|e| anyhow!("manifest table is malformed: {e}"))?;
+    manifest.plugin_id = plugin_id;
+    manifest.source_path = path.to_path_buf();
+    manifest.script_source = source.to_owned();
 
-    let match_specs = raw.match_spec.map(MatchSpecs::into_vec).unwrap_or_default();
-    if match_specs.is_empty()
-        && raw.effects.is_empty()
-        && raw.plugin_type != PluginType::Integration
+    if manifest.match_specs.is_empty()
+        && manifest.effects.is_empty()
+        && manifest.plugin_type != PluginKind::Integration
     {
         bail!("plugin declares neither a match spec nor any effects");
     }
     // Validate every spec against its registered transport backend: unknown
     // kinds and missing required fields are rejected here, not at match time.
-    for spec in &match_specs {
+    for spec in &manifest.match_specs {
         match descriptor_for(&spec.transport) {
             Some(desc) => (desc.validate)(spec)?,
             None => bail!(
@@ -939,39 +878,11 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
             ),
         }
     }
-    if raw.effects.iter().any(|e| e.id.is_empty()) {
+    if manifest.effects.iter().any(|e| e.id.is_empty()) {
         bail!("effect declares an empty id");
     }
 
-    Ok(PluginManifest {
-        plugin_id,
-        source_path: path.to_path_buf(),
-        script_source: source.to_owned(),
-        match_specs,
-        identity: raw.identity,
-        plugin_type: raw.plugin_type,
-        effects: raw.effects,
-        transports: raw.transports,
-        rgb: raw.rgb,
-        fan: raw.fan,
-        sensor: raw.sensor,
-        lcd: raw.lcd,
-        dpi: raw.dpi,
-        choice: raw.choice,
-        range: raw.range,
-        boolean: raw.boolean,
-        action: raw.action,
-        battery: raw.battery,
-        connection: raw.connection,
-        equalizer: raw.equalizer,
-        pairing: raw.pairing,
-        onboard_profiles: raw.onboard_profiles,
-        key_remap: raw.key_remap,
-        permissions: raw.permissions,
-        poll: raw.poll,
-        chain: raw.chain,
-        config: raw.config,
-    })
+    Ok(manifest)
 }
 
 #[cfg(test)]
@@ -1281,7 +1192,7 @@ mod tests {
         }"#;
         let m = parse_manifest(src, Path::new("fx.lua")).unwrap();
         assert!(m.match_specs.is_empty());
-        assert_eq!(m.plugin_type, PluginType::Effect);
+        assert_eq!(m.plugin_type, PluginKind::Effect);
         assert!(!m.needs_worker(), "effects never need the device worker");
         assert!(
             m.capability_labels().is_empty(),
@@ -1317,7 +1228,7 @@ mod tests {
     #[test]
     fn plugin_type_defaults_to_device() {
         let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
-        assert_eq!(m.plugin_type, PluginType::Device);
+        assert_eq!(m.plugin_type, PluginKind::Device);
     }
 
     #[test]
@@ -1347,10 +1258,10 @@ mod tests {
         let fields = m.config_fields();
         assert_eq!(fields.len(), 3);
         assert_eq!(fields[0].key, "host");
-        assert_eq!(fields[0].kind, ConfigFieldKind::Text);
+        assert_eq!(fields[0].kind, PluginConfigFieldKind::Text);
         assert_eq!(fields[0].default, "127.0.0.1");
         assert!(!fields[0].secure);
-        assert_eq!(fields[1].kind, ConfigFieldKind::Number);
+        assert_eq!(fields[1].kind, PluginConfigFieldKind::Number);
         assert!(fields[2].secure);
     }
 
@@ -1430,11 +1341,7 @@ mod tests {
         }"#;
         let m = parse_manifest(src, Path::new("integ.lua")).unwrap();
         assert!(m.match_specs.is_empty());
-        assert_eq!(m.plugin_type, PluginType::Integration);
-        assert_eq!(
-            halod_shared::types::PluginKind::from(m.plugin_type),
-            halod_shared::types::PluginKind::Integration
-        );
+        assert_eq!(m.plugin_type, PluginKind::Integration);
     }
 
     #[test]

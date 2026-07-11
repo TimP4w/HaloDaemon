@@ -51,8 +51,9 @@ New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
 
 # --- 1. Executables -----------------------------------------------------------
 # halod-broker.exe is the elevated register-bus broker (see the privilege-
-# separation design): the supervisor spawns it under the user's linked token
-# while halod.exe --worker runs at medium integrity. It must be code-signed
+# separation design): the installed on-demand HalodBroker LocalSystem service
+# that halod.exe starts via the SCM the first time it needs a register bus,
+# while halod.exe itself runs at medium integrity. It must be code-signed
 # alongside the other two exes wherever CI signs the staged binaries.
 $exes = "halod.exe", "halod-gui.exe", "halod-broker.exe"
 foreach ($exe in $exes) {

@@ -7,9 +7,9 @@
 //! only *existing* capability kinds; Halo owns the capability taxonomy.
 //!
 //! Registration is at runtime (not the compile-time `inventory` path native
-//! drivers use): `load_all` reads the plugins directory into `PLUGIN_REGISTRY`,
-//! and `make_device` consults `match_handle` before the native descriptors, so
-//! a plugin shadows a native driver for the same hardware.
+//! drivers use): `load_all` reads the plugins directory into the registry
+//! snapshot, and `make_device` consults `match_handle` before the native
+//! descriptors, so a plugin shadows a native driver for the same hardware.
 
 mod backends;
 mod bytebuf;
@@ -33,9 +33,9 @@ pub use worker::run_pre_scan;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
-use halod_shared::types::{Animation, EffectParamValue, Permission, PluginInfo};
+use halod_shared::types::{Animation, EffectParamValue, Permission, PluginInfo, PluginKind};
 
 use crate::drivers::Device;
 use crate::registry::discovery::DiscoveryHandle;
@@ -51,18 +51,13 @@ mod lcd_test;
 #[cfg(test)]
 mod openrgb_test;
 
-/// `PLUGIN_REGISTRY`/`EFFECT_REGISTRY`/`DISABLED`/`GRANTED` are process-wide
-/// statics; any test (in this module or elsewhere, e.g. the RGB engine's
-/// plugin-effect integration tests) that mutates them via `load_all`/
-/// `set_disabled`/`set_granted` must hold this lock for its duration so it
-/// can't race a sibling test running on another thread.
+/// The whole registry lives in one immutable snapshot (see [`PluginState`]);
+/// any test (in this module or elsewhere, e.g. the RGB engine's plugin-effect
+/// integration tests) that mutates it via `load_all`/`set_disabled`/`set_granted`
+/// must hold this lock for its duration so it can't race a sibling test on
+/// another thread.
 #[cfg(test)]
 pub(crate) static TEST_GLOBALS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-static PLUGIN_REGISTRY: RwLock<Vec<PluginManifest>> = RwLock::new(Vec::new());
-/// Plugin ids the user disabled. `match_handle` skips these, so a disabled
-/// plugin no longer shadows its native driver.
-static DISABLED: RwLock<Option<HashSet<String>>> = RwLock::new(None);
 
 /// One RGB effect a plugin declares, registered under its namespaced catalog
 /// id (`<plugin_id>:<effect.id>`) so it can never collide with a native
@@ -76,7 +71,52 @@ pub struct PluginEffectEntry {
     pub descriptor: Animation,
 }
 
-static EFFECT_REGISTRY: RwLock<Vec<PluginEffectEntry>> = RwLock::new(Vec::new());
+/// Immutable snapshot of every piece of registry state a reader needs. Readers
+/// take a cheap `Arc` clone via [`snapshot`] and traverse it lock-free, so a
+/// re-entrant read (e.g. `build_device` resolving config while matching a
+/// handle) is plain field access — never a recursive lock that could deadlock a
+/// pending write. Mutators build a new snapshot and swap it in under one write
+/// lock via [`update`].
+#[derive(Clone, Default)]
+struct PluginState {
+    manifests: Vec<PluginManifest>,
+    effects: Vec<PluginEffectEntry>,
+    /// Plugin ids the user disabled. `match_handle` skips these, so a disabled
+    /// plugin no longer shadows its native driver.
+    disabled: HashSet<String>,
+    /// Integration ids disabled *as an integration* — independent of `disabled`
+    /// (which governs whether the Lua may run at all). Only meaningful for
+    /// `PluginKind::Integration` plugins.
+    integrations_disabled: HashSet<String>,
+    /// Permissions the user granted per plugin. Built-ins are additionally
+    /// auto-granted their own declared permissions in [`granted_for`].
+    granted: HashMap<String, Vec<Permission>>,
+    /// Content hash (hex SHA-256) the user consented to per plugin. A disk
+    /// plugin is consent-satisfied only when its script still hashes to this.
+    acknowledged: HashMap<String, String>,
+    /// Non-secure config values the user set per plugin. Secure values never
+    /// live here — see the secret store.
+    config_values: HashMap<String, HashMap<String, String>>,
+}
+
+static STATE: LazyLock<RwLock<Arc<PluginState>>> =
+    LazyLock::new(|| RwLock::new(Arc::new(PluginState::default())));
+
+/// The current registry snapshot. The lock is held only for the `Arc` clone,
+/// never across the caller's use of the data — so re-entrant reads can't deadlock.
+fn snapshot() -> Arc<PluginState> {
+    STATE.read().expect("plugin state poisoned").clone()
+}
+
+/// Swap in a new snapshot by applying `f` to a clone of the current one. Held
+/// under the write lock so concurrent mutators can't lose each other's edits;
+/// `f` only mutates fields (never re-locks), so it cannot deadlock.
+fn update(f: impl FnOnce(&mut PluginState)) {
+    let mut guard = STATE.write().expect("plugin state poisoned");
+    let mut next = (**guard).clone();
+    f(&mut next);
+    *guard = Arc::new(next);
+}
 
 fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
     manifest
@@ -95,15 +135,13 @@ fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
 /// Every enabled plugin's declared descriptors of one effect kind, for the
 /// RGB engine's dynamic catalog.
 fn effect_descriptors(kind: EffectKind) -> Vec<Animation> {
-    EFFECT_REGISTRY
-        .read()
-        .map(|reg| {
-            reg.iter()
-                .filter(|e| e.kind == kind && !is_disabled(&e.plugin_id))
-                .map(|e| e.descriptor.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+    let state = snapshot();
+    state
+        .effects
+        .iter()
+        .filter(|e| e.kind == kind && !state.disabled.contains(&e.plugin_id))
+        .map(|e| e.descriptor.clone())
+        .collect()
 }
 
 /// Descriptors for every enabled plugin-declared pixmap effect.
@@ -119,11 +157,11 @@ pub fn direct_effect_descriptors() -> Vec<Animation> {
 /// Look up a registered effect entry by its namespaced catalog id. `None` if
 /// unknown or its plugin is disabled.
 pub fn effect_entry(catalog_id: &str) -> Option<PluginEffectEntry> {
-    EFFECT_REGISTRY
-        .read()
-        .ok()?
+    let state = snapshot();
+    state
+        .effects
         .iter()
-        .find(|e| e.catalog_id == catalog_id && !is_disabled(&e.plugin_id))
+        .find(|e| e.catalog_id == catalog_id && !state.disabled.contains(&e.plugin_id))
         .cloned()
 }
 
@@ -170,64 +208,44 @@ fn build_effect_handle(
 
 /// Replace the disabled-plugin set (from `config.plugins_disabled`).
 pub fn set_disabled(ids: &[String]) {
-    *DISABLED.write().expect("plugin disabled set poisoned") = Some(ids.iter().cloned().collect());
+    update(|s| s.disabled = ids.iter().cloned().collect());
 }
 
 fn is_disabled(plugin_id: &str) -> bool {
-    DISABLED
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().map(|s| s.contains(plugin_id)))
-        .unwrap_or(false)
+    snapshot().disabled.contains(plugin_id)
 }
-
-/// Integration ids the user disabled *as an integration* — independent of
-/// `DISABLED` (which governs whether the Lua may run at all). Only meaningful
-/// for `PluginType::Integration` plugins.
-static INTEGRATIONS_DISABLED: RwLock<Option<HashSet<String>>> = RwLock::new(None);
 
 /// Replace the integration-disabled set (from `config.integrations_disabled`).
 pub fn set_integrations_disabled(ids: &[String]) {
-    *INTEGRATIONS_DISABLED
-        .write()
-        .expect("integration disabled set poisoned") = Some(ids.iter().cloned().collect());
+    update(|s| s.integrations_disabled = ids.iter().cloned().collect());
 }
 
 fn is_integration_disabled(plugin_id: &str) -> bool {
-    INTEGRATIONS_DISABLED
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().map(|s| s.contains(plugin_id)))
-        .unwrap_or(false)
+    snapshot().integrations_disabled.contains(plugin_id)
 }
-
-/// Permissions the user has granted per plugin (from `config.plugin_permissions`).
-/// Built-ins are auto-granted their own declared permissions at load time (see
-/// `builtin_manifests`), since they ship with the daemon and are already trusted.
-static GRANTED: RwLock<Option<HashMap<String, Vec<Permission>>>> = RwLock::new(None);
 
 /// Replace the granted-permissions map (from `config.plugin_permissions`).
 pub fn set_granted(granted: &HashMap<String, Vec<Permission>>) {
-    *GRANTED.write().expect("plugin granted map poisoned") = Some(granted.clone());
+    update(|s| s.granted = granted.clone());
 }
 
 /// Permissions actually granted to `plugin_id`'s Lua sandbox: the user-set
 /// grants, plus — for a built-in — its own declared permissions. Built-ins
-/// ship inside the trusted daemon binary, so (as with `permissions_satisfied`)
+/// ship inside the trusted daemon binary, so (as with `consent_satisfied`)
 /// no separate consent step applies to them; without this, a built-in
 /// declaring e.g. `os` would still run with the sandbox's `os.clock()`
-/// stripped, since nothing else populates `GRANTED` on a built-in's behalf.
+/// stripped, since nothing else populates the granted map on its behalf.
 pub(crate) fn granted_for(plugin_id: &str) -> Vec<Permission> {
-    let mut granted = GRANTED
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|m| m.get(plugin_id).cloned()))
+    let mut granted = snapshot()
+        .granted
+        .get(plugin_id)
+        .cloned()
         .unwrap_or_default();
     if is_builtin(plugin_id) {
-        // Looked up from the built-in sources directly (not `PLUGIN_REGISTRY`,
-        // which may not have been populated yet in this process — e.g. in a
-        // test building a `LuaDevice` straight from a parsed manifest without
-        // going through `load_all`) so a built-in's own permissions are
+        // Looked up from the built-in sources directly (not the snapshot's
+        // manifests, which may not have been populated yet in this process —
+        // e.g. in a test building a `LuaDevice` straight from a parsed manifest
+        // without going through `load_all`) so a built-in's own permissions are
         // reliably granted regardless of registry state.
         if let Some(m) = builtin_manifests()
             .iter()
@@ -243,46 +261,29 @@ pub(crate) fn granted_for(plugin_id: &str) -> Vec<Permission> {
     granted
 }
 
-/// Content hash (hex SHA-256) the user consented to per plugin (from
-/// `config.plugin_acknowledged`). A disk plugin is only consent-satisfied when
-/// its current script hashes to the value here — see `consent_satisfied`.
-static ACKNOWLEDGED: RwLock<Option<HashMap<String, String>>> = RwLock::new(None);
-
 /// Replace the acknowledged-hash map (from `config.plugin_acknowledged`).
 pub fn set_acknowledged(acknowledged: &HashMap<String, String>) {
-    *ACKNOWLEDGED
-        .write()
-        .expect("plugin acknowledged map poisoned") = Some(acknowledged.clone());
+    update(|s| s.acknowledged = acknowledged.clone());
 }
 
 /// The content hash the user acknowledged for `plugin_id`, if any.
 fn acknowledged_hash_for(plugin_id: &str) -> Option<String> {
-    ACKNOWLEDGED
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|m| m.get(plugin_id).cloned()))
+    snapshot().acknowledged.get(plugin_id).cloned()
 }
 
 /// The current on-disk content hash for `plugin_id` from the loaded registry,
 /// for recording an acknowledgment when the user consents. `None` if unknown.
 pub fn content_hash_for(plugin_id: &str) -> Option<String> {
-    PLUGIN_REGISTRY.read().ok().and_then(|reg| {
-        reg.iter()
-            .find(|m| m.plugin_id == plugin_id)
-            .map(|m| m.content_hash())
-    })
+    snapshot()
+        .manifests
+        .iter()
+        .find(|m| m.plugin_id == plugin_id)
+        .map(|m| m.content_hash())
 }
-
-/// Non-secure config values the user has set per plugin (from
-/// `config.plugin_config`). Secure values never live here — see the secret
-/// store.
-static CONFIG_VALUES: RwLock<Option<HashMap<String, HashMap<String, String>>>> = RwLock::new(None);
 
 /// Replace the plugin config-values map (from `config.plugin_config`).
 pub fn set_config_values(values: &HashMap<String, HashMap<String, String>>) {
-    *CONFIG_VALUES
-        .write()
-        .expect("plugin config values poisoned") = Some(values.clone());
+    update(|s| s.config_values = values.clone());
 }
 
 /// A plugin's resolved non-secure config: every declared field defaults to its
@@ -290,32 +291,25 @@ pub fn set_config_values(values: &HashMap<String, HashMap<String, String>>) {
 /// the user may have stored (e.g. after a manifest edit removed a field) are
 /// not included — only keys the manifest still declares.
 pub fn config_for(plugin_id: &str) -> HashMap<String, String> {
-    let registry = match PLUGIN_REGISTRY.read() {
-        Ok(g) => g,
-        Err(_) => return HashMap::new(),
-    };
-    match registry.iter().find(|m| m.plugin_id == plugin_id) {
-        Some(manifest) => config_values_for(manifest),
+    let state = snapshot();
+    match state.manifests.iter().find(|m| m.plugin_id == plugin_id) {
+        Some(manifest) => config_values_for(&state, manifest),
         None => HashMap::new(),
     }
 }
 
-/// Non-secure config for a manifest already in hand. Reads only `CONFIG_VALUES`,
-/// never `PLUGIN_REGISTRY` — so a `PLUGIN_REGISTRY` reader (e.g. `list`) can call
-/// it without a recursive read that would deadlock a pending `load_all` write.
-fn config_values_for(manifest: &PluginManifest) -> HashMap<String, String> {
-    let stored = CONFIG_VALUES
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|m| m.get(&manifest.plugin_id).cloned()))
-        .unwrap_or_default();
+/// Non-secure config for a manifest already in hand, resolved against `state`'s
+/// stored values. Takes the snapshot as a parameter so a caller already holding
+/// one (e.g. `list`) reuses it instead of taking another.
+fn config_values_for(state: &PluginState, manifest: &PluginManifest) -> HashMap<String, String> {
+    let stored = state.config_values.get(&manifest.plugin_id);
     manifest
         .config_fields()
         .iter()
         .filter(|f| !f.secure)
         .map(|f| {
             let value = stored
-                .get(&f.key)
+                .and_then(|m| m.get(&f.key))
                 .cloned()
                 .unwrap_or_else(|| f.default.clone());
             (f.key.clone(), value)
@@ -324,9 +318,10 @@ fn config_values_for(manifest: &PluginManifest) -> HashMap<String, String> {
 }
 
 /// The secret store backing plugin-declared `secure` config fields, shared
-/// process-wide (set once at startup/reload, mirroring `GRANTED`/`CONFIG_VALUES`).
-/// `Arc` so `AppState::secret_store` and this static can point at the same
-/// instance without cloning the store itself.
+/// process-wide (set once at startup/reload). Kept out of [`PluginState`]: it is
+/// a set-once handle, not part of the read-mostly registry snapshot. `Arc` so
+/// `AppState::secret_store` and this static point at the same instance without
+/// cloning the store itself.
 static SECRET_STORE: RwLock<Option<Arc<dyn crate::secrets::SecretStore>>> = RwLock::new(None);
 
 /// Point the process-wide secret-store reference at `store` (from
@@ -363,16 +358,15 @@ pub fn resolved_config_for(plugin_id: &str, granted: &[Permission]) -> HashMap<S
 /// an incoming `SetPluginConfig` (or a plugin delete) between the plaintext
 /// config store and the secret store. Empty for an unknown plugin id.
 pub fn secure_config_keys_for(plugin_id: &str) -> Vec<String> {
-    PLUGIN_REGISTRY
-        .read()
-        .ok()
-        .and_then(|reg| {
-            reg.iter().find(|m| m.plugin_id == plugin_id).map(|m| {
-                m.secure_config_keys()
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect()
-            })
+    snapshot()
+        .manifests
+        .iter()
+        .find(|m| m.plugin_id == plugin_id)
+        .map(|m| {
+            m.secure_config_keys()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
         })
         .unwrap_or_default()
 }
@@ -399,20 +393,18 @@ fn consent_satisfied(manifest: &PluginManifest) -> bool {
 /// `DiscoveryHandle` to match against, so it iterates these directly instead
 /// of going through `match_handle`.
 pub(super) fn integration_manifests() -> Vec<PluginManifest> {
-    PLUGIN_REGISTRY
-        .read()
-        .map(|reg| {
-            reg.iter()
-                .filter(|m| {
-                    m.plugin_type == manifest::PluginType::Integration
-                        && !is_disabled(&m.plugin_id)
-                        && !is_integration_disabled(&m.plugin_id)
-                        && consent_satisfied(m)
-                })
-                .cloned()
-                .collect()
+    let state = snapshot();
+    state
+        .manifests
+        .iter()
+        .filter(|m| {
+            m.plugin_type == PluginKind::Integration
+                && !state.disabled.contains(&m.plugin_id)
+                && !state.integrations_disabled.contains(&m.plugin_id)
+                && consent_satisfied(m)
         })
-        .unwrap_or_default()
+        .cloned()
+        .collect()
 }
 
 /// The single enabled, permission-satisfied `Integration` manifest for
@@ -456,24 +448,19 @@ fn ungranted_in(manifests: &[PluginManifest], notified: &mut HashSet<String>) ->
 /// via [`suppress_permission_notice`] before this is ever called). Marks
 /// every returned plugin as notified so a later rescan won't repeat it.
 pub fn take_newly_ungranted_plugins() -> Vec<String> {
-    let registry = match PLUGIN_REGISTRY.read() {
-        Ok(g) => g,
-        Err(_) => return Vec::new(),
-    };
+    let state = snapshot();
     let mut guard = NOTIFIED.write().expect("plugin notified set poisoned");
     let notified = guard.get_or_insert_with(HashSet::new);
-    ungranted_in(&registry, notified)
+    ungranted_in(&state.manifests, notified)
 }
 
 /// Every loaded plugin with its enable state, for the management UI.
 /// `secrets` resolves whether each declared secure field currently has a
 /// value stored, without ever reading the plaintext (see `PluginInfo::secret_set`).
 pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
-    let registry = match PLUGIN_REGISTRY.read() {
-        Ok(g) => g,
-        Err(_) => return Vec::new(),
-    };
-    registry
+    let state = snapshot();
+    state
+        .manifests
         .iter()
         .map(|m| {
             let secret_set = m
@@ -499,7 +486,7 @@ pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
                 id: m.plugin_id.clone(),
                 name: m.display_name().to_owned(),
                 path: m.source_path.display().to_string(),
-                plugin_type: m.plugin_type.into(),
+                plugin_type: m.plugin_type,
                 capabilities: m.capability_labels(),
                 effect_names: m.effects.iter().map(|e| e.name.clone()).collect(),
                 enabled: !is_disabled(&m.plugin_id),
@@ -511,7 +498,7 @@ pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
                 declared_permissions: m.permissions.clone(),
                 granted_permissions: granted_for(&m.plugin_id),
                 config_fields: m.config_fields().iter().map(Into::into).collect(),
-                config_values: config_values_for(m),
+                config_values: config_values_for(&state, m),
                 secret_set,
                 integration_enabled: !is_integration_disabled(&m.plugin_id),
                 consented: consent_satisfied(m),
@@ -560,10 +547,10 @@ const BUILTIN_PLUGINS: &[(&str, &str)] = &[
     ("openrgb.lua", include_str!("builtins/openrgb.lua")),
 ];
 
-/// Parsed once and cached: `granted_for` is a discovery hot path (called
-/// per-plugin under the `PLUGIN_REGISTRY` read guard), and re-parsing every
-/// built-in Lua script (`Lua::new()` ×N) on each call held that lock long
-/// enough to deadlock against a concurrent `load_all` write.
+/// Parsed once and cached. `granted_for` needs a built-in's declared
+/// permissions even before `load_all` has populated the snapshot (see its
+/// built-in branch), and it is a discovery hot path — so the built-in sources
+/// are parsed a single time here rather than on every call.
 fn builtin_manifests() -> &'static [PluginManifest] {
     static CACHE: std::sync::OnceLock<Vec<PluginManifest>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| {
@@ -622,8 +609,10 @@ pub fn load_all(dir: &Path) {
         Err(e) => log::warn!("Cannot read plugins directory {}: {e}", dir.display()),
     }
     let effects: Vec<PluginEffectEntry> = manifests.iter().flat_map(effect_entries_for).collect();
-    *EFFECT_REGISTRY.write().expect("effect registry poisoned") = effects;
-    *PLUGIN_REGISTRY.write().expect("plugin registry poisoned") = manifests;
+    update(|s| {
+        s.manifests = manifests;
+        s.effects = effects;
+    });
 }
 
 fn load_one(path: &Path) -> anyhow::Result<PluginManifest> {
@@ -726,37 +715,30 @@ pub fn match_in(
 /// Match a discovery handle against every loaded plugin. Consulted by
 /// `make_device` *before* the native descriptors so a plugin shadows native.
 pub fn match_handle(handle: &DiscoveryHandle<'_>) -> Option<Arc<dyn Device>> {
-    // Resolve the match under the read guard, then release it before
-    // `build_device` — which re-reads `PLUGIN_REGISTRY` via `config_for` /
-    // `secure_config_keys_for`. Holding the guard across that recursive read
-    // deadlocks a concurrent `load_all` write (std RwLock is writer-preferring,
-    // so the second read parks behind the queued writer).
-    let (manifest, spec) = {
-        let registry = PLUGIN_REGISTRY.read().ok()?;
-        registry
-            .iter()
-            .filter(|m| !is_disabled(&m.plugin_id) && consent_satisfied(m))
-            .find_map(|m| {
-                m.match_spec_for(handle)
-                    .map(|spec| (m.clone(), spec.clone()))
-            })?
-    };
-    build_device(&manifest, &spec, handle)
+    // The snapshot is a frozen `Arc`, not a lock guard, so `build_device` can
+    // freely take its own snapshots (via `config_for` / `secure_config_keys_for`)
+    // with no risk of a recursive-read deadlock, and no manifest/spec clone is
+    // needed — both borrow from the snapshot that outlives the call.
+    let state = snapshot();
+    let (manifest, spec) = state
+        .manifests
+        .iter()
+        .filter(|m| !state.disabled.contains(&m.plugin_id) && consent_satisfied(m))
+        .find_map(|m| m.match_spec_for(handle).map(|spec| (m, spec)))?;
+    build_device(manifest, spec, handle)
 }
 
 pub fn has_match(handle: &DiscoveryHandle<'_>) -> bool {
-    let Ok(registry) = PLUGIN_REGISTRY.read() else {
-        return false;
-    };
-    registry
+    let state = snapshot();
+    state
+        .manifests
         .iter()
-        .filter(|m| !is_disabled(&m.plugin_id) && consent_satisfied(m))
+        .filter(|m| !state.disabled.contains(&m.plugin_id) && consent_satisfied(m))
         .any(|m| m.match_spec_for(handle).is_some())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::manifest::PluginType;
     use super::*;
     use crate::secrets::SecretStore as _;
     use halod_shared::types::DeviceType;
@@ -785,6 +767,18 @@ mod tests {
             usage: 0,
             interface_number: None,
         }
+    }
+
+    /// Replace the registry snapshot's manifests (and their derived effect
+    /// entries) for a test — the snapshot equivalent of the old direct
+    /// `*PLUGIN_REGISTRY.write()`. Callers hold `GLOBALS_LOCK`.
+    fn set_registry(manifests: Vec<PluginManifest>) {
+        let effects: Vec<PluginEffectEntry> =
+            manifests.iter().flat_map(effect_entries_for).collect();
+        update(|s| {
+            s.manifests = manifests;
+            s.effects = effects;
+        });
     }
 
     /// Acknowledge every manifest's current content, as user consent would, so
@@ -958,11 +952,7 @@ mod tests {
             "a dropped-in script's filesystem write must never execute at load time"
         );
         assert!(
-            !PLUGIN_REGISTRY
-                .read()
-                .unwrap()
-                .iter()
-                .any(|m| m.plugin_id == "evil"),
+            !snapshot().manifests.iter().any(|m| m.plugin_id == "evil"),
             "a script that errors under the sandbox must be skipped, not registered"
         );
         load_all(Path::new("/nonexistent"));
@@ -1028,8 +1018,9 @@ mod tests {
         std::fs::write(dir.path().join("openrgb.lua"), evil).unwrap();
         load_all(dir.path());
 
-        let registry = PLUGIN_REGISTRY.read().unwrap();
-        let openrgb: Vec<_> = registry
+        let state = snapshot();
+        let openrgb: Vec<_> = state
+            .manifests
             .iter()
             .filter(|m| m.plugin_id == "openrgb")
             .collect();
@@ -1038,7 +1029,7 @@ mod tests {
             openrgb[0].identity.vendor, "EVIL",
             "the surviving 'openrgb' must be the compiled-in built-in, not the disk file"
         );
-        drop(registry);
+        drop(state);
         load_all(Path::new("/nonexistent"));
     }
 
@@ -1120,7 +1111,7 @@ mod tests {
             m.match_specs.is_empty(),
             "effect-only plugin needs no match"
         );
-        assert_eq!(m.plugin_type, PluginType::Effect);
+        assert_eq!(m.plugin_type, PluginKind::Effect);
         assert!(!m.needs_worker());
         assert!(
             m.capability_labels().is_empty(),
@@ -1144,7 +1135,7 @@ mod tests {
             m.match_specs.is_empty(),
             "integration plugin needs no match"
         );
-        assert_eq!(m.plugin_type, PluginType::Integration);
+        assert_eq!(m.plugin_type, PluginKind::Integration);
         assert!(m.needs_worker());
         assert_eq!(m.permissions, vec![Permission::Network, Permission::Os]);
         let tcp = m.transports.tcp.as_ref().expect("declares a tcp transport");
@@ -1182,7 +1173,7 @@ mod tests {
         // this must hold even before `load_all` has ever populated it.
         let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_granted(&HashMap::new());
-        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
+        set_registry(Vec::new());
 
         let granted = granted_for("openrgb");
         assert!(granted.contains(&Permission::Network));
@@ -1195,11 +1186,14 @@ mod tests {
             type = "integration",
             permissions = { "network", "os" },
         }"#;
-        *PLUGIN_REGISTRY.write().unwrap() =
-            vec![parse_manifest(src, Path::new("some_other_plugin.lua")).unwrap()];
+        set_registry(vec![parse_manifest(
+            src,
+            Path::new("some_other_plugin.lua"),
+        )
+        .unwrap()]);
         assert!(granted_for("some_other_plugin").is_empty());
 
-        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
+        set_registry(Vec::new());
     }
 
     #[test]
@@ -1316,8 +1310,7 @@ mod tests {
               { key = "token", label = "Token", secure = true, default = "unused" },
             } },
         }"#;
-        *PLUGIN_REGISTRY.write().unwrap() =
-            vec![parse_manifest(src, Path::new("cfgfor.lua")).unwrap()];
+        set_registry(vec![parse_manifest(src, Path::new("cfgfor.lua")).unwrap()]);
         let mut stored = HashMap::new();
         stored.insert(
             "cfgfor".to_string(),
@@ -1334,7 +1327,7 @@ mod tests {
         );
 
         set_config_values(&HashMap::new());
-        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
+        set_registry(Vec::new());
     }
 
     #[test]
@@ -1358,11 +1351,11 @@ mod tests {
             type = "integration",
             permissions = { "network" },
         }"#;
-        *PLUGIN_REGISTRY.write().unwrap() = vec![
+        set_registry(vec![
             parse_manifest(integ_src, Path::new("integ_ok.lua")).unwrap(),
             parse_manifest(device_src, Path::new("device_only.lua")).unwrap(),
             parse_manifest(needs_perm_src, Path::new("integ_needs_perm.lua")).unwrap(),
-        ];
+        ]);
         set_disabled(&[]);
         set_granted(&HashMap::new());
 
@@ -1388,7 +1381,7 @@ mod tests {
             Some("integ_ok".to_string())
         );
 
-        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
+        set_registry(Vec::new());
     }
 
     #[test]
@@ -1402,13 +1395,14 @@ mod tests {
               { key = "token", label = "Token", secure = true },
             } },
         }"#;
-        *PLUGIN_REGISTRY.write().unwrap() =
-            vec![parse_manifest(src, Path::new("securekeys.lua")).unwrap()];
+        set_registry(vec![
+            parse_manifest(src, Path::new("securekeys.lua")).unwrap()
+        ]);
 
         assert_eq!(secure_config_keys_for("securekeys"), vec!["token"]);
         assert!(secure_config_keys_for("does-not-exist").is_empty());
 
-        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
+        set_registry(Vec::new());
     }
 
     #[test]
@@ -1422,8 +1416,7 @@ mod tests {
               { key = "token", label = "Token", secure = true },
             } },
         }"#;
-        *PLUGIN_REGISTRY.write().unwrap() =
-            vec![parse_manifest(src, Path::new("listcfg.lua")).unwrap()];
+        set_registry(vec![parse_manifest(src, Path::new("listcfg.lua")).unwrap()]);
 
         let secrets = FakeSecretStore::default();
         secrets.set("listcfg", "token", "s3cr3t").unwrap();
@@ -1441,6 +1434,6 @@ mod tests {
         );
         assert_eq!(info.secret_set.get("token"), Some(&true));
 
-        *PLUGIN_REGISTRY.write().unwrap() = Vec::new();
+        set_registry(Vec::new());
     }
 }

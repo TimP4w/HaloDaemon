@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Per-device worker thread. It owns the Lua VM + transport (both `!Send`), so
-//! the `Send + Sync` `LuaDevice` talks to it over a channel. Capability calls
-//! arrive as [`Call`]s and are answered on a `oneshot`. Transport I/O the script
-//! triggers is synchronous from Lua's view; the worker drives the async
-//! transport via a captured runtime handle.
+//! the `Send + Sync` `LuaDevice` talks to it over a channel. Each capability call
+//! is a boxed *job* the device side builds and the worker runs against the VM,
+//! answering on a `oneshot`. Transport I/O the script triggers is synchronous
+//! from Lua's view; the worker drives the async transport via a captured runtime
+//! handle.
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -179,165 +181,60 @@ fn default_true() -> bool {
     true
 }
 
-/// A request to the worker. Each carries its own reply channel.
-pub enum Call {
-    Initialize(oneshot::Sender<Result<InitOutcome>>),
-    Close(oneshot::Sender<()>),
-    RgbApply(RgbState, oneshot::Sender<Result<()>>),
-    RgbWriteFrame {
-        zone: String,
-        colors: Vec<RgbColor>,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    FanGetDuty(oneshot::Sender<Result<u8>>),
-    FanSetDuty {
-        duty: u8,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    FanGetRpm(oneshot::Sender<Option<u32>>),
-    GetSensors(oneshot::Sender<Result<Vec<Sensor>>>),
-    /// Run the `read_status` callback and cache the result as `dev.status`.
-    Poll(oneshot::Sender<()>),
-    // ── chain / children ────────────────────────────────────────────────
-    DetectAccessories(oneshot::Sender<Result<Vec<DetectedAccessory>>>),
-    WriteExtFrame {
-        channel: String,
-        colors: Vec<RgbColor>,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    // ── integration children ─────────────────────────────────────────────
-    EnumerateControllers(oneshot::Sender<Result<Vec<DetectedController>>>),
-    WriteControllerFrame {
-        index: u32,
-        zone: String,
-        colors: Vec<RgbColor>,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    HubFanRpm {
-        channel: u8,
-        reply: oneshot::Sender<Result<u32>>,
-    },
-    HubFanDuty {
-        channel: u8,
-        reply: oneshot::Sender<Result<u8>>,
-    },
-    HubFanControllable {
-        channel: u8,
-        reply: oneshot::Sender<Result<bool>>,
-    },
-    HubSetFanDuty {
-        channel: u8,
-        duty: u8,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    // ── LCD ──────────────────────────────────────────────────────────────
-    LcdStreamFrame {
-        rgba: Vec<u8>,
-        width: u32,
-        height: u32,
-        rotation: u32,
-        raw: bool,
-        brightness: u8,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    LcdSetImage {
-        data: Vec<u8>,
-        rotation: u32,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    LcdSetBrightness {
-        brightness: u8,
-        rotation: u32,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    LcdSetRotation {
-        brightness: u8,
-        degrees: u32,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    LcdReset(oneshot::Sender<Result<()>>),
-    // ── DPI / choice ─────────────────────────────────────────────────────
-    DpiSet {
-        dpi: u16,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    ChoiceSet {
-        key: String,
-        selected: usize,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    // ── Range / Boolean / Action ───────────────────────────────────────────
-    RangeSet {
-        key: String,
-        value: i32,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    BooleanGet(oneshot::Sender<Result<Vec<Boolean>>>),
-    BooleanSet {
-        key: String,
-        value: bool,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    ActionTrigger {
-        key: String,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    // ── Battery / Connection / Equalizer ────────────────────────────────────
-    BatteryGet(oneshot::Sender<Result<Vec<Battery>>>),
-    ConnectionGet(oneshot::Sender<Result<Option<ConnectionStatus>>>),
-    EqualizerGet(oneshot::Sender<Result<Equalizer>>),
-    EqualizerSetPreset {
-        preset: usize,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    EqualizerSetBands {
-        values: Vec<f32>,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    // ── Pairing ──────────────────────────────────────────────────────────
-    PairingStart {
-        timeout_secs: u8,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    PairingStop(oneshot::Sender<Result<()>>),
-    PairingUnpair {
-        slot: u8,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    PairingStatusGet(oneshot::Sender<Result<PairingStatus>>),
-    // ── Onboard profiles ─────────────────────────────────────────────────
-    OnboardSwitchProfile {
-        slot: u8,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    OnboardRestoreProfile {
-        slot: u8,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    OnboardSetProfileEnabled {
-        slot: u8,
-        enabled: bool,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    OnboardProfilesGet(oneshot::Sender<Result<OnboardProfiles>>),
-    // ── Key remap ────────────────────────────────────────────────────────
-    KeyRemapSetMapping {
-        mapping: ButtonMapping,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    KeyRemapReset {
-        cid: u16,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    KeyRemapResetAll(oneshot::Sender<Result<()>>),
-    KeyRemapHostModeActive(oneshot::Sender<bool>),
+/// What `get_booleans` returns per entry: only `key`/`value` are required, since
+/// label/category/read_only are typically manifest-declared and backfilled by
+/// the device layer.
+#[derive(Debug, Deserialize)]
+struct PluginBoolean {
+    key: String,
+    value: bool,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default)]
+    category: String,
+}
+
+/// The Lua VM plus the two tables every job operates on, owned by the worker
+/// thread. Jobs borrow it on that thread; it never crosses the channel — only
+/// the boxed [`Job`] (which is `Send`) does, so the `!Send` VM stays put.
+struct WorkerCtx {
+    lua: Lua,
+    /// The `dev` argument every callback receives: exposes the transport and the
+    /// matched-spec identity (`dev.match`), and caches `read_status` as `dev.status`.
+    dev: Table,
+    /// The plugin's returned table, holding its callback functions.
+    manifest: Table,
+}
+
+/// A unit of work the device side sends to the worker thread. It runs against
+/// the [`WorkerCtx`], sends its own reply, and tells the loop whether to keep
+/// going (`close` returns `Break`).
+type Job = Box<dyn FnOnce(&WorkerCtx) -> ControlFlow<()> + Send>;
+
+/// Look up a plugin callback by name, or `None` if the plugin didn't declare it.
+fn func(manifest: &Table, name: &str) -> Option<Function> {
+    match manifest.get::<Value>(name) {
+        Ok(Value::Function(f)) => Some(f),
+        _ => None,
+    }
+}
+
+/// A callback the operation requires; errors with a uniform message if absent.
+fn required(manifest: &Table, name: &str) -> Result<Function> {
+    func(manifest, name).ok_or_else(|| anyhow!("plugin has no {name}()"))
+}
+
+fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
+    anyhow!("plugin {context}: {e}")
 }
 
 /// Handle the `LuaDevice` holds. `UnboundedSender` is `Send + Sync`, so the
 /// device stays `Send + Sync`. Dropping it ends the worker (channel closes).
 #[derive(Clone)]
 pub struct PluginHandle {
-    tx: mpsc::UnboundedSender<Call>,
+    tx: mpsc::UnboundedSender<Job>,
 }
 
 impl PluginHandle {
@@ -368,76 +265,222 @@ impl PluginHandle {
         Self { tx }
     }
 
-    async fn request<T>(&self, make: impl FnOnce(oneshot::Sender<T>) -> Call) -> Result<T> {
+    /// Run `f` on the worker thread and await its result. `f` gets the VM, the
+    /// `dev` table and the manifest table; only its owned captures + reply
+    /// sender cross the channel, so `f` must be `Send`.
+    async fn run<R, F>(&self, f: F) -> Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&WorkerCtx) -> Result<R> + Send + 'static,
+    {
         let (reply, rx) = oneshot::channel();
+        let job: Job = Box::new(move |ctx| {
+            let _ = reply.send(f(ctx));
+            ControlFlow::Continue(())
+        });
         self.tx
-            .send(make(reply))
+            .send(job)
             .map_err(|_| anyhow!("plugin worker is gone"))?;
         rx.await
-            .map_err(|_| anyhow!("plugin worker dropped the reply"))
+            .map_err(|_| anyhow!("plugin worker dropped the reply"))?
     }
 
+    /// Run `initialize`, accepting either a bare bool or a table with dynamic
+    /// device info (`{ ok, model, zones, lcd }`). A missing callback means
+    /// "present, no info".
     pub async fn initialize(&self) -> Result<InitOutcome> {
-        self.request(Call::Initialize).await?
+        self.run(|ctx| {
+            let Some(f) = func(&ctx.manifest, "initialize") else {
+                return Ok(InitOutcome {
+                    ok: true,
+                    ..Default::default()
+                });
+            };
+            let value: Value = f
+                .call(ctx.dev.clone())
+                .map_err(|e| lua_err("initialize", e))?;
+            match value {
+                Value::Boolean(ok) => Ok(InitOutcome {
+                    ok,
+                    ..Default::default()
+                }),
+                Value::Nil => Ok(InitOutcome {
+                    ok: true,
+                    ..Default::default()
+                }),
+                other => {
+                    let t: InitTable = ctx
+                        .lua
+                        .from_value(other)
+                        .map_err(|e| lua_err("initialize result", e))?;
+                    Ok(InitOutcome {
+                        ok: t.ok,
+                        model: t.model,
+                        zones: t.zones,
+                        lcd: t.lcd,
+                    })
+                }
+            }
+        })
+        .await
     }
 
     pub async fn close(&self) {
-        self.request(Call::Close).await.ok();
+        let (reply, rx) = oneshot::channel::<()>();
+        let job: Job = Box::new(move |ctx| {
+            if let Some(f) = func(&ctx.manifest, "close") {
+                if let Err(e) = f.call::<()>(ctx.dev.clone()) {
+                    log::debug!("plugin close: {e}");
+                }
+            }
+            let _ = reply.send(());
+            ControlFlow::Break(())
+        });
+        if self.tx.send(job).is_ok() {
+            let _ = rx.await;
+        }
     }
 
     pub async fn rgb_apply(&self, state: RgbState) -> Result<()> {
-        self.request(|r| Call::RgbApply(state, r)).await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "apply")?;
+            let state_v = ctx
+                .lua
+                .to_value(&state)
+                .map_err(|e| lua_err("apply arg", e))?;
+            f.call::<()>((ctx.dev.clone(), state_v))
+                .map_err(|e| lua_err("apply", e))
+        })
+        .await
     }
 
     pub async fn rgb_write_frame(&self, zone: &str, colors: &[RgbColor]) -> Result<()> {
         let zone = zone.to_owned();
         let colors = colors.to_vec();
-        self.request(|reply| Call::RgbWriteFrame {
-            zone,
-            colors,
-            reply,
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "write_frame")?;
+            let colors_v = ctx
+                .lua
+                .to_value(&colors)
+                .map_err(|e| lua_err("write_frame arg", e))?;
+            f.call::<()>((ctx.dev.clone(), zone, colors_v))
+                .map_err(|e| lua_err("write_frame", e))
         })
-        .await?
+        .await
     }
 
     pub async fn fan_get_duty(&self) -> Result<u8> {
-        self.request(Call::FanGetDuty).await?
+        self.run(|ctx| {
+            let f = required(&ctx.manifest, "get_duty")?;
+            f.call::<u8>(ctx.dev.clone())
+                .map_err(|e| lua_err("get_duty", e))
+        })
+        .await
     }
 
     pub async fn fan_set_duty(&self, duty: u8) -> Result<()> {
-        self.request(|reply| Call::FanSetDuty { duty, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "set_duty")?;
+            f.call::<()>((ctx.dev.clone(), duty))
+                .map_err(|e| lua_err("set_duty", e))
+        })
+        .await
     }
 
     pub async fn fan_get_rpm(&self) -> Option<u32> {
-        self.request(Call::FanGetRpm).await.ok().flatten()
+        self.run(|ctx| {
+            let Some(f) = func(&ctx.manifest, "get_rpm") else {
+                return Ok(None);
+            };
+            Ok(match f.call::<Option<u32>>(ctx.dev.clone()) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::debug!("plugin get_rpm: {e}");
+                    None
+                }
+            })
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     pub async fn get_sensors(&self) -> Result<Vec<Sensor>> {
-        self.request(Call::GetSensors).await?
+        self.run(|ctx| {
+            let f = required(&ctx.manifest, "get_sensors")?;
+            let value: Value = f
+                .call(ctx.dev.clone())
+                .map_err(|e| lua_err("get_sensors", e))?;
+            ctx.lua
+                .from_value(value)
+                .map_err(|e| lua_err("get_sensors result", e))
+        })
+        .await
     }
 
+    /// Run `read_status(dev)` and cache the returned table as `dev.status`.
+    /// Errors (e.g. a non-blocking read with nothing pending) are logged, not
+    /// fatal — the loop keeps ticking.
     pub async fn poll(&self) -> Result<()> {
-        self.request(Call::Poll).await
+        self.run(|ctx| {
+            if let Some(f) = func(&ctx.manifest, "read_status") {
+                match f.call::<Value>(ctx.dev.clone()) {
+                    Ok(status) => {
+                        if let Err(e) = ctx.dev.set("status", status) {
+                            log::debug!("plugin poll: caching status failed: {e}");
+                        }
+                    }
+                    Err(e) => log::debug!("plugin read_status: {e}"),
+                }
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn detect_accessories(&self) -> Result<Vec<DetectedAccessory>> {
-        self.request(Call::DetectAccessories).await?
+        self.run(|ctx| {
+            let Some(f) = func(&ctx.manifest, "detect_accessories") else {
+                return Ok(Vec::new());
+            };
+            let value: Value = f
+                .call(ctx.dev.clone())
+                .map_err(|e| lua_err("detect_accessories", e))?;
+            ctx.lua
+                .from_value(value)
+                .map_err(|e| lua_err("detect_accessories result", e))
+        })
+        .await
     }
 
     pub async fn write_ext_frame(&self, channel: &str, colors: &[RgbColor]) -> Result<()> {
         let channel = channel.to_owned();
         let colors = colors.to_vec();
-        self.request(|reply| Call::WriteExtFrame {
-            channel,
-            colors,
-            reply,
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "write_ext_frame")?;
+            let colors_v = ctx
+                .lua
+                .to_value(&colors)
+                .map_err(|e| lua_err("write_ext_frame arg", e))?;
+            f.call::<()>((ctx.dev.clone(), channel, colors_v))
+                .map_err(|e| lua_err("write_ext_frame", e))
         })
-        .await?
+        .await
     }
 
     pub async fn enumerate_controllers(&self) -> Result<Vec<DetectedController>> {
-        self.request(Call::EnumerateControllers).await?
+        self.run(|ctx| {
+            let Some(f) = func(&ctx.manifest, "enumerate_controllers") else {
+                return Ok(Vec::new());
+            };
+            let value: Value = f
+                .call(ctx.dev.clone())
+                .map_err(|e| lua_err("enumerate_controllers", e))?;
+            ctx.lua
+                .from_value(value)
+                .map_err(|e| lua_err("enumerate_controllers result", e))
+        })
+        .await
     }
 
     pub async fn write_controller_frame(
@@ -448,37 +491,52 @@ impl PluginHandle {
     ) -> Result<()> {
         let zone = zone.to_owned();
         let colors = colors.to_vec();
-        self.request(|reply| Call::WriteControllerFrame {
-            index,
-            zone,
-            colors,
-            reply,
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "write_controller_frame")?;
+            let colors_v = ctx
+                .lua
+                .to_value(&colors)
+                .map_err(|e| lua_err("write_controller_frame arg", e))?;
+            f.call::<()>((ctx.dev.clone(), index, zone, colors_v))
+                .map_err(|e| lua_err("write_controller_frame", e))
         })
-        .await?
+        .await
     }
 
     pub async fn hub_fan_rpm(&self, channel: u8) -> Result<u32> {
-        self.request(|reply| Call::HubFanRpm { channel, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "fan_rpm")?;
+            f.call::<u32>((ctx.dev.clone(), channel))
+                .map_err(|e| lua_err("fan_rpm", e))
+        })
+        .await
     }
 
     pub async fn hub_fan_duty(&self, channel: u8) -> Result<u8> {
-        self.request(|reply| Call::HubFanDuty { channel, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "fan_duty")?;
+            f.call::<u8>((ctx.dev.clone(), channel))
+                .map_err(|e| lua_err("fan_duty", e))
+        })
+        .await
     }
 
     pub async fn hub_fan_controllable(&self, channel: u8) -> Result<bool> {
-        self.request(|reply| Call::HubFanControllable { channel, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "fan_controllable")?;
+            f.call::<bool>((ctx.dev.clone(), channel))
+                .map_err(|e| lua_err("fan_controllable", e))
+        })
+        .await
     }
 
     pub async fn hub_set_fan_duty(&self, channel: u8, duty: u8) -> Result<()> {
-        self.request(|reply| Call::HubSetFanDuty {
-            channel,
-            duty,
-            reply,
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "set_fan_duty")?;
+            f.call::<()>((ctx.dev.clone(), channel, duty))
+                .map_err(|e| lua_err("set_fan_duty", e))
         })
-        .await?
+        .await
     }
 
     pub async fn lcd_stream_frame(
@@ -490,280 +548,337 @@ impl PluginHandle {
         raw: bool,
         brightness: u8,
     ) -> Result<()> {
-        self.request(|reply| Call::LcdStreamFrame {
-            rgba,
-            width,
-            height,
-            rotation,
-            raw,
-            brightness,
-            reply,
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "lcd_stream_frame")?;
+            let buf = ctx
+                .lua
+                .create_userdata(ByteBuf::from_bytes(rgba))
+                .map_err(|e| lua_err("lcd_stream_frame arg", e))?;
+            f.call::<()>((
+                ctx.dev.clone(),
+                buf,
+                width,
+                height,
+                rotation,
+                raw,
+                brightness,
+            ))
+            .map_err(|e| lua_err("lcd_stream_frame", e))
         })
-        .await?
+        .await
     }
 
     pub async fn lcd_set_image(&self, data: Vec<u8>, rotation: u32) -> Result<()> {
-        self.request(|reply| Call::LcdSetImage {
-            data,
-            rotation,
-            reply,
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "set_image")?;
+            let buf = ctx
+                .lua
+                .create_userdata(ByteBuf::from_bytes(data))
+                .map_err(|e| lua_err("set_image arg", e))?;
+            f.call::<()>((ctx.dev.clone(), buf, rotation))
+                .map_err(|e| lua_err("set_image", e))
         })
-        .await?
+        .await
     }
 
     pub async fn lcd_set_brightness(&self, brightness: u8, rotation: u32) -> Result<()> {
-        self.request(|reply| Call::LcdSetBrightness {
-            brightness,
-            rotation,
-            reply,
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "lcd_set_brightness")?;
+            f.call::<()>((ctx.dev.clone(), brightness, rotation))
+                .map_err(|e| lua_err("lcd_set_brightness", e))
         })
-        .await?
+        .await
     }
 
     pub async fn lcd_set_rotation(&self, brightness: u8, degrees: u32) -> Result<()> {
-        self.request(|reply| Call::LcdSetRotation {
-            brightness,
-            degrees,
-            reply,
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "lcd_set_rotation")?;
+            f.call::<()>((ctx.dev.clone(), brightness, degrees))
+                .map_err(|e| lua_err("lcd_set_rotation", e))
         })
-        .await?
+        .await
     }
 
     pub async fn lcd_reset(&self) -> Result<()> {
-        self.request(Call::LcdReset).await?
+        self.run(|ctx| {
+            let f = required(&ctx.manifest, "lcd_reset")?;
+            f.call::<()>(ctx.dev.clone())
+                .map_err(|e| lua_err("lcd_reset", e))
+        })
+        .await
     }
 
     pub async fn dpi_set(&self, dpi: u16) -> Result<()> {
-        self.request(|reply| Call::DpiSet { dpi, reply }).await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "set_dpi")?;
+            f.call::<()>((ctx.dev.clone(), dpi))
+                .map_err(|e| lua_err("set_dpi", e))
+        })
+        .await
     }
 
     pub async fn choice_set(&self, key: &str, selected: usize) -> Result<()> {
         let key = key.to_owned();
-        self.request(|reply| Call::ChoiceSet {
-            key,
-            selected,
-            reply,
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "set_choice")?;
+            f.call::<()>((ctx.dev.clone(), key, selected))
+                .map_err(|e| lua_err("set_choice", e))
         })
-        .await?
+        .await
     }
 
     pub async fn range_set(&self, key: &str, value: i32) -> Result<()> {
         let key = key.to_owned();
-        self.request(|reply| Call::RangeSet { key, value, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "set_range")?;
+            f.call::<()>((ctx.dev.clone(), key, value))
+                .map_err(|e| lua_err("set_range", e))
+        })
+        .await
     }
 
     pub async fn boolean_get(&self) -> Result<Vec<Boolean>> {
-        self.request(Call::BooleanGet).await?
+        self.run(|ctx| {
+            let Some(f) = func(&ctx.manifest, "get_booleans") else {
+                return Ok(Vec::new());
+            };
+            let value: Value = f
+                .call(ctx.dev.clone())
+                .map_err(|e| lua_err("get_booleans", e))?;
+            let raw: Vec<PluginBoolean> = ctx
+                .lua
+                .from_value(value)
+                .map_err(|e| lua_err("get_booleans result", e))?;
+            Ok(raw
+                .into_iter()
+                .map(|b| Boolean {
+                    key: b.key,
+                    label: b.label,
+                    value: b.value,
+                    read_only: b.read_only,
+                    category: b.category,
+                    visible_when: None,
+                })
+                .collect())
+        })
+        .await
     }
 
     pub async fn boolean_set(&self, key: &str, value: bool) -> Result<()> {
         let key = key.to_owned();
-        self.request(|reply| Call::BooleanSet { key, value, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "set_boolean")?;
+            f.call::<()>((ctx.dev.clone(), key, value))
+                .map_err(|e| lua_err("set_boolean", e))
+        })
+        .await
     }
 
     pub async fn action_trigger(&self, key: &str) -> Result<()> {
         let key = key.to_owned();
-        self.request(|reply| Call::ActionTrigger { key, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "trigger_action")?;
+            f.call::<()>((ctx.dev.clone(), key))
+                .map_err(|e| lua_err("trigger_action", e))
+        })
+        .await
     }
 
     pub async fn battery_get(&self) -> Result<Vec<Battery>> {
-        self.request(Call::BatteryGet).await?
+        self.run(|ctx| {
+            let Some(f) = func(&ctx.manifest, "get_batteries") else {
+                return Ok(Vec::new());
+            };
+            let value: Value = f
+                .call(ctx.dev.clone())
+                .map_err(|e| lua_err("get_batteries", e))?;
+            ctx.lua
+                .from_value(value)
+                .map_err(|e| lua_err("get_batteries result", e))
+        })
+        .await
     }
 
     pub async fn connection_get(&self) -> Result<Option<ConnectionStatus>> {
-        self.request(Call::ConnectionGet).await?
+        self.run(|ctx| {
+            let Some(f) = func(&ctx.manifest, "connection_status") else {
+                return Ok(None);
+            };
+            let value: Value = f
+                .call(ctx.dev.clone())
+                .map_err(|e| lua_err("connection_status", e))?;
+            if matches!(value, Value::Nil) {
+                return Ok(None);
+            }
+            ctx.lua
+                .from_value(value)
+                .map_err(|e| lua_err("connection_status result", e))
+        })
+        .await
     }
 
     pub async fn equalizer_get(&self) -> Result<Equalizer> {
-        self.request(Call::EqualizerGet).await?
+        self.run(|ctx| {
+            let f = required(&ctx.manifest, "get_equalizer")?;
+            let value: Value = f
+                .call(ctx.dev.clone())
+                .map_err(|e| lua_err("get_equalizer", e))?;
+            ctx.lua
+                .from_value(value)
+                .map_err(|e| lua_err("get_equalizer result", e))
+        })
+        .await
     }
 
     pub async fn equalizer_set_preset(&self, preset: usize) -> Result<()> {
-        self.request(|reply| Call::EqualizerSetPreset { preset, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "set_eq_preset")?;
+            f.call::<()>((ctx.dev.clone(), preset))
+                .map_err(|e| lua_err("set_eq_preset", e))
+        })
+        .await
     }
 
     pub async fn equalizer_set_bands(&self, values: &[f32]) -> Result<()> {
         let values = values.to_vec();
-        self.request(|reply| Call::EqualizerSetBands { values, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "set_eq_bands")?;
+            f.call::<()>((ctx.dev.clone(), values))
+                .map_err(|e| lua_err("set_eq_bands", e))
+        })
+        .await
     }
 
     pub async fn pairing_start(&self, timeout_secs: u8) -> Result<()> {
-        self.request(|reply| Call::PairingStart {
-            timeout_secs,
-            reply,
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "start_pairing")?;
+            f.call::<()>((ctx.dev.clone(), timeout_secs))
+                .map_err(|e| lua_err("start_pairing", e))
         })
-        .await?
+        .await
     }
 
     pub async fn pairing_stop(&self) -> Result<()> {
-        self.request(Call::PairingStop).await?
+        self.run(|ctx| {
+            let f = required(&ctx.manifest, "stop_pairing")?;
+            f.call::<()>(ctx.dev.clone())
+                .map_err(|e| lua_err("stop_pairing", e))
+        })
+        .await
     }
 
     pub async fn pairing_unpair(&self, slot: u8) -> Result<()> {
-        self.request(|reply| Call::PairingUnpair { slot, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "unpair")?;
+            f.call::<()>((ctx.dev.clone(), slot))
+                .map_err(|e| lua_err("unpair", e))
+        })
+        .await
     }
 
     pub async fn pairing_status(&self) -> Result<PairingStatus> {
-        self.request(Call::PairingStatusGet).await?
+        self.run(|ctx| {
+            let f = required(&ctx.manifest, "pairing_status")?;
+            let value: Value = f
+                .call(ctx.dev.clone())
+                .map_err(|e| lua_err("pairing_status", e))?;
+            ctx.lua
+                .from_value(value)
+                .map_err(|e| lua_err("pairing_status result", e))
+        })
+        .await
     }
 
     pub async fn onboard_switch_profile(&self, slot: u8) -> Result<()> {
-        self.request(|reply| Call::OnboardSwitchProfile { slot, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "switch_profile")?;
+            f.call::<()>((ctx.dev.clone(), slot))
+                .map_err(|e| lua_err("switch_profile", e))
+        })
+        .await
     }
 
     pub async fn onboard_restore_profile(&self, slot: u8) -> Result<()> {
-        self.request(|reply| Call::OnboardRestoreProfile { slot, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "restore_profile")?;
+            f.call::<()>((ctx.dev.clone(), slot))
+                .map_err(|e| lua_err("restore_profile", e))
+        })
+        .await
     }
 
     pub async fn onboard_set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()> {
-        self.request(|reply| Call::OnboardSetProfileEnabled {
-            slot,
-            enabled,
-            reply,
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "set_profile_enabled")?;
+            f.call::<()>((ctx.dev.clone(), slot, enabled))
+                .map_err(|e| lua_err("set_profile_enabled", e))
         })
-        .await?
+        .await
     }
 
     pub async fn onboard_profiles_get(&self) -> Result<OnboardProfiles> {
-        self.request(Call::OnboardProfilesGet).await?
+        self.run(|ctx| {
+            let f = required(&ctx.manifest, "onboard_profiles_status")?;
+            let value: Value = f
+                .call(ctx.dev.clone())
+                .map_err(|e| lua_err("onboard_profiles_status", e))?;
+            ctx.lua
+                .from_value(value)
+                .map_err(|e| lua_err("onboard_profiles_status result", e))
+        })
+        .await
     }
 
     pub async fn key_remap_set_mapping(&self, mapping: ButtonMapping) -> Result<()> {
-        self.request(|reply| Call::KeyRemapSetMapping { mapping, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "set_button_mapping")?;
+            let mapping_v = ctx
+                .lua
+                .to_value(&mapping)
+                .map_err(|e| lua_err("set_button_mapping arg", e))?;
+            f.call::<()>((ctx.dev.clone(), mapping_v))
+                .map_err(|e| lua_err("set_button_mapping", e))
+        })
+        .await
     }
 
     pub async fn key_remap_reset(&self, cid: u16) -> Result<()> {
-        self.request(|reply| Call::KeyRemapReset { cid, reply })
-            .await?
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, "reset_button_mapping")?;
+            f.call::<()>((ctx.dev.clone(), cid))
+                .map_err(|e| lua_err("reset_button_mapping", e))
+        })
+        .await
     }
 
     pub async fn key_remap_reset_all(&self) -> Result<()> {
-        self.request(Call::KeyRemapResetAll).await?
+        self.run(|ctx| {
+            let f = required(&ctx.manifest, "reset_all_button_mappings")?;
+            f.call::<()>(ctx.dev.clone())
+                .map_err(|e| lua_err("reset_all_button_mappings", e))
+        })
+        .await
     }
 
+    /// Whether the device is currently in the host mode remapping requires.
+    /// Devices that don't declare `key_remap_host_mode` are assumed always active
+    /// (the common case: remapping doesn't depend on a device-side mode toggle).
     pub async fn key_remap_host_mode_active(&self) -> bool {
-        self.request(Call::KeyRemapHostModeActive)
-            .await
-            .unwrap_or(false)
+        self.run(|ctx| {
+            let Some(f) = func(&ctx.manifest, "key_remap_host_mode") else {
+                return Ok(true);
+            };
+            Ok(match f.call::<bool>(ctx.dev.clone()) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::debug!("plugin key_remap_host_mode: {e}");
+                    true
+                }
+            })
+        })
+        .await
+        .unwrap_or(false)
     }
-}
-
-/// The plugin's callback functions, looked up once by name.
-struct Callbacks {
-    initialize: Option<Function>,
-    close: Option<Function>,
-    apply: Option<Function>,
-    write_frame: Option<Function>,
-    get_duty: Option<Function>,
-    set_duty: Option<Function>,
-    get_rpm: Option<Function>,
-    get_sensors: Option<Function>,
-    read_status: Option<Function>,
-    detect_accessories: Option<Function>,
-    write_ext_frame: Option<Function>,
-    enumerate_controllers: Option<Function>,
-    write_controller_frame: Option<Function>,
-    fan_rpm: Option<Function>,
-    fan_duty: Option<Function>,
-    fan_controllable: Option<Function>,
-    set_fan_duty: Option<Function>,
-    lcd_stream_frame: Option<Function>,
-    lcd_set_image: Option<Function>,
-    lcd_set_brightness: Option<Function>,
-    lcd_set_rotation: Option<Function>,
-    lcd_reset: Option<Function>,
-    set_dpi: Option<Function>,
-    set_choice: Option<Function>,
-    set_range: Option<Function>,
-    get_booleans: Option<Function>,
-    set_boolean: Option<Function>,
-    trigger_action: Option<Function>,
-    get_batteries: Option<Function>,
-    connection_status: Option<Function>,
-    get_equalizer: Option<Function>,
-    set_eq_preset: Option<Function>,
-    set_eq_bands: Option<Function>,
-    start_pairing: Option<Function>,
-    stop_pairing: Option<Function>,
-    unpair: Option<Function>,
-    pairing_status: Option<Function>,
-    switch_profile: Option<Function>,
-    restore_profile: Option<Function>,
-    set_profile_enabled: Option<Function>,
-    onboard_profiles_status: Option<Function>,
-    set_button_mapping: Option<Function>,
-    reset_button_mapping: Option<Function>,
-    reset_all_button_mappings: Option<Function>,
-    key_remap_host_mode: Option<Function>,
-}
-
-impl Callbacks {
-    fn load(table: &Table) -> Self {
-        let f = |key: &str| match table.get::<Value>(key) {
-            Ok(Value::Function(func)) => Some(func),
-            _ => None,
-        };
-        Self {
-            initialize: f("initialize"),
-            close: f("close"),
-            apply: f("apply"),
-            write_frame: f("write_frame"),
-            get_duty: f("get_duty"),
-            set_duty: f("set_duty"),
-            get_rpm: f("get_rpm"),
-            get_sensors: f("get_sensors"),
-            read_status: f("read_status"),
-            detect_accessories: f("detect_accessories"),
-            write_ext_frame: f("write_ext_frame"),
-            enumerate_controllers: f("enumerate_controllers"),
-            write_controller_frame: f("write_controller_frame"),
-            fan_rpm: f("fan_rpm"),
-            fan_duty: f("fan_duty"),
-            fan_controllable: f("fan_controllable"),
-            set_fan_duty: f("set_fan_duty"),
-            lcd_stream_frame: f("lcd_stream_frame"),
-            lcd_set_image: f("set_image"),
-            lcd_set_brightness: f("lcd_set_brightness"),
-            lcd_set_rotation: f("lcd_set_rotation"),
-            lcd_reset: f("lcd_reset"),
-            set_dpi: f("set_dpi"),
-            set_choice: f("set_choice"),
-            set_range: f("set_range"),
-            get_booleans: f("get_booleans"),
-            set_boolean: f("set_boolean"),
-            trigger_action: f("trigger_action"),
-            get_batteries: f("get_batteries"),
-            connection_status: f("connection_status"),
-            get_equalizer: f("get_equalizer"),
-            set_eq_preset: f("set_eq_preset"),
-            set_eq_bands: f("set_eq_bands"),
-            start_pairing: f("start_pairing"),
-            stop_pairing: f("stop_pairing"),
-            unpair: f("unpair"),
-            pairing_status: f("pairing_status"),
-            switch_profile: f("switch_profile"),
-            restore_profile: f("restore_profile"),
-            set_profile_enabled: f("set_profile_enabled"),
-            onboard_profiles_status: f("onboard_profiles_status"),
-            set_button_mapping: f("set_button_mapping"),
-            reset_button_mapping: f("reset_button_mapping"),
-            reset_all_button_mappings: f("reset_all_button_mappings"),
-            key_remap_host_mode: f("key_remap_host_mode"),
-        }
-    }
-}
-
-fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
-    anyhow!("plugin {context}: {e}")
 }
 
 fn worker_main(
@@ -773,7 +888,7 @@ fn worker_main(
     granted: &[Permission],
     config: &HashMap<String, String>,
     handle: Handle,
-    mut rx: mpsc::UnboundedReceiver<Call>,
+    mut rx: mpsc::UnboundedReceiver<Job>,
 ) -> Result<()> {
     let lua = Lua::new();
     sandbox::apply(&lua, granted, config).map_err(|e| lua_err("sandbox setup", e))?;
@@ -782,7 +897,6 @@ fn worker_main(
         .load(source)
         .eval()
         .map_err(|e| lua_err("script evaluation", e))?;
-    let cb = Callbacks::load(&manifest);
 
     // The `dev` argument every callback receives: exposes the transport and the
     // matched-spec identity (`dev.match`).
@@ -796,669 +910,13 @@ fn worker_main(
     dev.set("match", build_match_table(&lua, &dev_match)?)
         .map_err(|e| lua_err("dev.match", e))?;
 
-    while let Some(call) = rx.blocking_recv() {
-        match call {
-            Call::Initialize(reply) => {
-                let _ = reply.send(run_initialize(&lua, &cb, &dev));
-            }
-            Call::Close(reply) => {
-                if let Some(f) = &cb.close {
-                    if let Err(e) = f.call::<()>(dev.clone()) {
-                        log::debug!("plugin close: {e}");
-                    }
-                }
-                let _ = reply.send(());
-                break;
-            }
-            Call::RgbApply(state, reply) => {
-                let _ = reply.send(run_apply(&lua, &cb, &dev, &state));
-            }
-            Call::RgbWriteFrame {
-                zone,
-                colors,
-                reply,
-            } => {
-                let _ = reply.send(run_write_frame(&lua, &cb, &dev, &zone, &colors));
-            }
-            Call::FanGetDuty(reply) => {
-                let _ = reply.send(run_get_duty(&cb, &dev));
-            }
-            Call::FanSetDuty { duty, reply } => {
-                let _ = reply.send(run_set_duty(&cb, &dev, duty));
-            }
-            Call::FanGetRpm(reply) => {
-                let _ = reply.send(run_get_rpm(&cb, &dev));
-            }
-            Call::GetSensors(reply) => {
-                let _ = reply.send(run_get_sensors(&lua, &cb, &dev));
-            }
-            Call::Poll(reply) => {
-                run_poll(&cb, &dev);
-                let _ = reply.send(());
-            }
-            Call::DetectAccessories(reply) => {
-                let _ = reply.send(run_detect(&lua, &cb, &dev));
-            }
-            Call::WriteExtFrame {
-                channel,
-                colors,
-                reply,
-            } => {
-                let _ = reply.send(run_write_ext_frame(&lua, &cb, &dev, &channel, &colors));
-            }
-            Call::EnumerateControllers(reply) => {
-                let _ = reply.send(run_enumerate_controllers(&lua, &cb, &dev));
-            }
-            Call::WriteControllerFrame {
-                index,
-                zone,
-                colors,
-                reply,
-            } => {
-                let _ = reply.send(run_write_controller_frame(
-                    &lua, &cb, &dev, index, &zone, &colors,
-                ));
-            }
-            Call::HubFanRpm { channel, reply } => {
-                let _ = reply.send(call_u32(&cb.fan_rpm, "fan_rpm", &dev, channel));
-            }
-            Call::HubFanDuty { channel, reply } => {
-                let _ = reply.send(call_u8(&cb.fan_duty, "fan_duty", &dev, channel));
-            }
-            Call::HubFanControllable { channel, reply } => {
-                let _ = reply.send(call_bool(
-                    &cb.fan_controllable,
-                    "fan_controllable",
-                    &dev,
-                    channel,
-                ));
-            }
-            Call::HubSetFanDuty {
-                channel,
-                duty,
-                reply,
-            } => {
-                let _ = reply.send(run_set_fan_duty(&cb, &dev, channel, duty));
-            }
-            Call::LcdStreamFrame {
-                rgba,
-                width,
-                height,
-                rotation,
-                raw,
-                brightness,
-                reply,
-            } => {
-                let _ = reply.send(run_lcd_stream_frame(
-                    &lua, &cb, &dev, rgba, width, height, rotation, raw, brightness,
-                ));
-            }
-            Call::LcdSetImage {
-                data,
-                rotation,
-                reply,
-            } => {
-                let _ = reply.send(run_lcd_set_image(&lua, &cb, &dev, data, rotation));
-            }
-            Call::LcdSetBrightness {
-                brightness,
-                rotation,
-                reply,
-            } => {
-                let _ = reply.send(call_lcd_config(
-                    &cb.lcd_set_brightness,
-                    "lcd_set_brightness",
-                    &dev,
-                    brightness,
-                    rotation,
-                ));
-            }
-            Call::LcdSetRotation {
-                brightness,
-                degrees,
-                reply,
-            } => {
-                let _ = reply.send(call_lcd_config(
-                    &cb.lcd_set_rotation,
-                    "lcd_set_rotation",
-                    &dev,
-                    brightness,
-                    degrees,
-                ));
-            }
-            Call::LcdReset(reply) => {
-                let _ = reply.send(run_lcd_reset(&cb, &dev));
-            }
-            Call::DpiSet { dpi, reply } => {
-                let _ = reply.send(run_dpi_set(&cb, &dev, dpi));
-            }
-            Call::ChoiceSet {
-                key,
-                selected,
-                reply,
-            } => {
-                let _ = reply.send(run_choice_set(&cb, &dev, &key, selected));
-            }
-            Call::RangeSet { key, value, reply } => {
-                let _ = reply.send(run_range_set(&cb, &dev, &key, value));
-            }
-            Call::BooleanGet(reply) => {
-                let _ = reply.send(run_get_booleans(&lua, &cb, &dev));
-            }
-            Call::BooleanSet { key, value, reply } => {
-                let _ = reply.send(run_boolean_set(&cb, &dev, &key, value));
-            }
-            Call::ActionTrigger { key, reply } => {
-                let _ = reply.send(run_trigger_action(&cb, &dev, &key));
-            }
-            Call::BatteryGet(reply) => {
-                let _ = reply.send(run_get_batteries(&lua, &cb, &dev));
-            }
-            Call::ConnectionGet(reply) => {
-                let _ = reply.send(run_connection_status(&lua, &cb, &dev));
-            }
-            Call::EqualizerGet(reply) => {
-                let _ = reply.send(run_get_equalizer(&lua, &cb, &dev));
-            }
-            Call::EqualizerSetPreset { preset, reply } => {
-                let _ = reply.send(run_eq_set_preset(&cb, &dev, preset));
-            }
-            Call::EqualizerSetBands { values, reply } => {
-                let _ = reply.send(run_eq_set_bands(&cb, &dev, &values));
-            }
-            Call::PairingStart {
-                timeout_secs,
-                reply,
-            } => {
-                let _ = reply.send(run_pairing_start(&cb, &dev, timeout_secs));
-            }
-            Call::PairingStop(reply) => {
-                let _ = reply.send(run_pairing_stop(&cb, &dev));
-            }
-            Call::PairingUnpair { slot, reply } => {
-                let _ = reply.send(run_pairing_unpair(&cb, &dev, slot));
-            }
-            Call::PairingStatusGet(reply) => {
-                let _ = reply.send(run_pairing_status(&lua, &cb, &dev));
-            }
-            Call::OnboardSwitchProfile { slot, reply } => {
-                let _ = reply.send(run_switch_profile(&cb, &dev, slot));
-            }
-            Call::OnboardRestoreProfile { slot, reply } => {
-                let _ = reply.send(run_restore_profile(&cb, &dev, slot));
-            }
-            Call::OnboardSetProfileEnabled {
-                slot,
-                enabled,
-                reply,
-            } => {
-                let _ = reply.send(run_set_profile_enabled(&cb, &dev, slot, enabled));
-            }
-            Call::OnboardProfilesGet(reply) => {
-                let _ = reply.send(run_onboard_profiles_status(&lua, &cb, &dev));
-            }
-            Call::KeyRemapSetMapping { mapping, reply } => {
-                let _ = reply.send(run_set_button_mapping(&lua, &cb, &dev, &mapping));
-            }
-            Call::KeyRemapReset { cid, reply } => {
-                let _ = reply.send(run_reset_button_mapping(&cb, &dev, cid));
-            }
-            Call::KeyRemapResetAll(reply) => {
-                let _ = reply.send(run_reset_all_button_mappings(&cb, &dev));
-            }
-            Call::KeyRemapHostModeActive(reply) => {
-                let _ = reply.send(run_key_remap_host_mode(&cb, &dev));
-            }
+    let ctx = WorkerCtx { lua, dev, manifest };
+    while let Some(job) = rx.blocking_recv() {
+        if job(&ctx).is_break() {
+            break;
         }
     }
     Ok(())
-}
-
-fn run_dpi_set(cb: &Callbacks, dev: &Table, dpi: u16) -> Result<()> {
-    let f = cb
-        .set_dpi
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no set_dpi()"))?;
-    f.call::<()>((dev.clone(), dpi))
-        .map_err(|e| lua_err("set_dpi", e))
-}
-
-fn run_choice_set(cb: &Callbacks, dev: &Table, key: &str, selected: usize) -> Result<()> {
-    let f = cb
-        .set_choice
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no set_choice()"))?;
-    f.call::<()>((dev.clone(), key.to_owned(), selected))
-        .map_err(|e| lua_err("set_choice", e))
-}
-
-fn run_pairing_start(cb: &Callbacks, dev: &Table, timeout_secs: u8) -> Result<()> {
-    let f = cb
-        .start_pairing
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no start_pairing()"))?;
-    f.call::<()>((dev.clone(), timeout_secs))
-        .map_err(|e| lua_err("start_pairing", e))
-}
-
-fn run_pairing_stop(cb: &Callbacks, dev: &Table) -> Result<()> {
-    let f = cb
-        .stop_pairing
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no stop_pairing()"))?;
-    f.call::<()>(dev.clone())
-        .map_err(|e| lua_err("stop_pairing", e))
-}
-
-fn run_pairing_unpair(cb: &Callbacks, dev: &Table, slot: u8) -> Result<()> {
-    let f = cb
-        .unpair
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no unpair()"))?;
-    f.call::<()>((dev.clone(), slot))
-        .map_err(|e| lua_err("unpair", e))
-}
-
-fn run_pairing_status(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<PairingStatus> {
-    let f = cb
-        .pairing_status
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no pairing_status()"))?;
-    let value: Value = f
-        .call(dev.clone())
-        .map_err(|e| lua_err("pairing_status", e))?;
-    lua.from_value(value)
-        .map_err(|e| lua_err("pairing_status result", e))
-}
-
-fn run_switch_profile(cb: &Callbacks, dev: &Table, slot: u8) -> Result<()> {
-    let f = cb
-        .switch_profile
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no switch_profile()"))?;
-    f.call::<()>((dev.clone(), slot))
-        .map_err(|e| lua_err("switch_profile", e))
-}
-
-fn run_restore_profile(cb: &Callbacks, dev: &Table, slot: u8) -> Result<()> {
-    let f = cb
-        .restore_profile
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no restore_profile()"))?;
-    f.call::<()>((dev.clone(), slot))
-        .map_err(|e| lua_err("restore_profile", e))
-}
-
-fn run_set_profile_enabled(cb: &Callbacks, dev: &Table, slot: u8, enabled: bool) -> Result<()> {
-    let f = cb
-        .set_profile_enabled
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no set_profile_enabled()"))?;
-    f.call::<()>((dev.clone(), slot, enabled))
-        .map_err(|e| lua_err("set_profile_enabled", e))
-}
-
-fn run_onboard_profiles_status(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<OnboardProfiles> {
-    let f = cb
-        .onboard_profiles_status
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no onboard_profiles_status()"))?;
-    let value: Value = f
-        .call(dev.clone())
-        .map_err(|e| lua_err("onboard_profiles_status", e))?;
-    lua.from_value(value)
-        .map_err(|e| lua_err("onboard_profiles_status result", e))
-}
-
-fn run_set_button_mapping(
-    lua: &Lua,
-    cb: &Callbacks,
-    dev: &Table,
-    mapping: &ButtonMapping,
-) -> Result<()> {
-    let f = cb
-        .set_button_mapping
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no set_button_mapping()"))?;
-    let mapping_v = lua
-        .to_value(mapping)
-        .map_err(|e| lua_err("set_button_mapping arg", e))?;
-    f.call::<()>((dev.clone(), mapping_v))
-        .map_err(|e| lua_err("set_button_mapping", e))
-}
-
-fn run_reset_button_mapping(cb: &Callbacks, dev: &Table, cid: u16) -> Result<()> {
-    let f = cb
-        .reset_button_mapping
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no reset_button_mapping()"))?;
-    f.call::<()>((dev.clone(), cid))
-        .map_err(|e| lua_err("reset_button_mapping", e))
-}
-
-fn run_reset_all_button_mappings(cb: &Callbacks, dev: &Table) -> Result<()> {
-    let f = cb
-        .reset_all_button_mappings
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no reset_all_button_mappings()"))?;
-    f.call::<()>(dev.clone())
-        .map_err(|e| lua_err("reset_all_button_mappings", e))
-}
-
-/// Whether the device is currently in the host mode remapping requires.
-/// Devices that don't declare `key_remap_host_mode` are assumed always active
-/// (the common case: remapping doesn't depend on a device-side mode toggle).
-fn run_key_remap_host_mode(cb: &Callbacks, dev: &Table) -> bool {
-    let Some(f) = &cb.key_remap_host_mode else {
-        return true;
-    };
-    match f.call::<bool>(dev.clone()) {
-        Ok(v) => v,
-        Err(e) => {
-            log::debug!("plugin key_remap_host_mode: {e}");
-            true
-        }
-    }
-}
-
-fn run_range_set(cb: &Callbacks, dev: &Table, key: &str, value: i32) -> Result<()> {
-    let f = cb
-        .set_range
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no set_range()"))?;
-    f.call::<()>((dev.clone(), key.to_owned(), value))
-        .map_err(|e| lua_err("set_range", e))
-}
-
-/// What `get_booleans` returns per entry: only `key`/`value` are required, since
-/// label/category/read_only are typically manifest-declared and backfilled by
-/// the device layer.
-#[derive(Debug, Deserialize)]
-struct PluginBoolean {
-    key: String,
-    value: bool,
-    #[serde(default)]
-    label: String,
-    #[serde(default)]
-    read_only: bool,
-    #[serde(default)]
-    category: String,
-}
-
-fn run_get_booleans(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<Vec<Boolean>> {
-    let Some(f) = &cb.get_booleans else {
-        return Ok(Vec::new());
-    };
-    let value: Value = f
-        .call(dev.clone())
-        .map_err(|e| lua_err("get_booleans", e))?;
-    let raw: Vec<PluginBoolean> = lua
-        .from_value(value)
-        .map_err(|e| lua_err("get_booleans result", e))?;
-    Ok(raw
-        .into_iter()
-        .map(|b| Boolean {
-            key: b.key,
-            label: b.label,
-            value: b.value,
-            read_only: b.read_only,
-            category: b.category,
-            visible_when: None,
-        })
-        .collect())
-}
-
-fn run_boolean_set(cb: &Callbacks, dev: &Table, key: &str, value: bool) -> Result<()> {
-    let f = cb
-        .set_boolean
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no set_boolean()"))?;
-    f.call::<()>((dev.clone(), key.to_owned(), value))
-        .map_err(|e| lua_err("set_boolean", e))
-}
-
-fn run_trigger_action(cb: &Callbacks, dev: &Table, key: &str) -> Result<()> {
-    let f = cb
-        .trigger_action
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no trigger_action()"))?;
-    f.call::<()>((dev.clone(), key.to_owned()))
-        .map_err(|e| lua_err("trigger_action", e))
-}
-
-fn run_get_batteries(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<Vec<Battery>> {
-    let Some(f) = &cb.get_batteries else {
-        return Ok(Vec::new());
-    };
-    let value: Value = f
-        .call(dev.clone())
-        .map_err(|e| lua_err("get_batteries", e))?;
-    lua.from_value(value)
-        .map_err(|e| lua_err("get_batteries result", e))
-}
-
-fn run_connection_status(
-    lua: &Lua,
-    cb: &Callbacks,
-    dev: &Table,
-) -> Result<Option<ConnectionStatus>> {
-    let Some(f) = &cb.connection_status else {
-        return Ok(None);
-    };
-    let value: Value = f
-        .call(dev.clone())
-        .map_err(|e| lua_err("connection_status", e))?;
-    if matches!(value, Value::Nil) {
-        return Ok(None);
-    }
-    lua.from_value(value)
-        .map_err(|e| lua_err("connection_status result", e))
-}
-
-fn run_get_equalizer(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<Equalizer> {
-    let f = cb
-        .get_equalizer
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no get_equalizer()"))?;
-    let value: Value = f
-        .call(dev.clone())
-        .map_err(|e| lua_err("get_equalizer", e))?;
-    lua.from_value(value)
-        .map_err(|e| lua_err("get_equalizer result", e))
-}
-
-fn run_eq_set_preset(cb: &Callbacks, dev: &Table, preset: usize) -> Result<()> {
-    let f = cb
-        .set_eq_preset
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no set_eq_preset()"))?;
-    f.call::<()>((dev.clone(), preset))
-        .map_err(|e| lua_err("set_eq_preset", e))
-}
-
-fn run_eq_set_bands(cb: &Callbacks, dev: &Table, values: &[f32]) -> Result<()> {
-    let f = cb
-        .set_eq_bands
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no set_eq_bands()"))?;
-    f.call::<()>((dev.clone(), values.to_vec()))
-        .map_err(|e| lua_err("set_eq_bands", e))
-}
-
-fn run_lcd_stream_frame(
-    lua: &Lua,
-    cb: &Callbacks,
-    dev: &Table,
-    rgba: Vec<u8>,
-    width: u32,
-    height: u32,
-    rotation: u32,
-    raw: bool,
-    brightness: u8,
-) -> Result<()> {
-    let f = cb
-        .lcd_stream_frame
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no lcd_stream_frame()"))?;
-    let buf = lua
-        .create_userdata(ByteBuf::from_bytes(rgba))
-        .map_err(|e| lua_err("lcd_stream_frame arg", e))?;
-    f.call::<()>((dev.clone(), buf, width, height, rotation, raw, brightness))
-        .map_err(|e| lua_err("lcd_stream_frame", e))
-}
-
-fn run_lcd_set_image(
-    lua: &Lua,
-    cb: &Callbacks,
-    dev: &Table,
-    data: Vec<u8>,
-    rotation: u32,
-) -> Result<()> {
-    let f = cb
-        .lcd_set_image
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no set_image()"))?;
-    let buf = lua
-        .create_userdata(ByteBuf::from_bytes(data))
-        .map_err(|e| lua_err("set_image arg", e))?;
-    f.call::<()>((dev.clone(), buf, rotation))
-        .map_err(|e| lua_err("set_image", e))
-}
-
-/// Drives `lcd_set_brightness`/`lcd_set_rotation`, which both take
-/// `(dev, brightness, rotation_degrees)` since the panel config carries both.
-fn call_lcd_config(
-    f: &Option<Function>,
-    name: &str,
-    dev: &Table,
-    brightness: u8,
-    rotation: u32,
-) -> Result<()> {
-    let f = f
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no {name}()"))?;
-    f.call::<()>((dev.clone(), brightness, rotation))
-        .map_err(|e| lua_err(name, e))
-}
-
-fn run_lcd_reset(cb: &Callbacks, dev: &Table) -> Result<()> {
-    let f = cb
-        .lcd_reset
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no lcd_reset()"))?;
-    f.call::<()>(dev.clone())
-        .map_err(|e| lua_err("lcd_reset", e))
-}
-
-fn run_detect(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<Vec<DetectedAccessory>> {
-    let Some(f) = &cb.detect_accessories else {
-        return Ok(Vec::new());
-    };
-    let value: Value = f
-        .call(dev.clone())
-        .map_err(|e| lua_err("detect_accessories", e))?;
-    lua.from_value(value)
-        .map_err(|e| lua_err("detect_accessories result", e))
-}
-
-fn run_write_ext_frame(
-    lua: &Lua,
-    cb: &Callbacks,
-    dev: &Table,
-    channel: &str,
-    colors: &[RgbColor],
-) -> Result<()> {
-    let f = cb
-        .write_ext_frame
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no write_ext_frame()"))?;
-    let colors_v = lua
-        .to_value(colors)
-        .map_err(|e| lua_err("write_ext_frame arg", e))?;
-    f.call::<()>((dev.clone(), channel.to_owned(), colors_v))
-        .map_err(|e| lua_err("write_ext_frame", e))
-}
-
-fn run_enumerate_controllers(
-    lua: &Lua,
-    cb: &Callbacks,
-    dev: &Table,
-) -> Result<Vec<DetectedController>> {
-    let Some(f) = &cb.enumerate_controllers else {
-        return Ok(Vec::new());
-    };
-    let value: Value = f
-        .call(dev.clone())
-        .map_err(|e| lua_err("enumerate_controllers", e))?;
-    lua.from_value(value)
-        .map_err(|e| lua_err("enumerate_controllers result", e))
-}
-
-fn run_write_controller_frame(
-    lua: &Lua,
-    cb: &Callbacks,
-    dev: &Table,
-    index: u32,
-    zone: &str,
-    colors: &[RgbColor],
-) -> Result<()> {
-    let f = cb
-        .write_controller_frame
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no write_controller_frame()"))?;
-    let colors_v = lua
-        .to_value(colors)
-        .map_err(|e| lua_err("write_controller_frame arg", e))?;
-    f.call::<()>((dev.clone(), index, zone.to_owned(), colors_v))
-        .map_err(|e| lua_err("write_controller_frame", e))
-}
-
-fn call_u32(f: &Option<Function>, name: &str, dev: &Table, channel: u8) -> Result<u32> {
-    let f = f
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no {name}()"))?;
-    f.call::<u32>((dev.clone(), channel))
-        .map_err(|e| lua_err(name, e))
-}
-
-fn call_u8(f: &Option<Function>, name: &str, dev: &Table, channel: u8) -> Result<u8> {
-    let f = f
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no {name}()"))?;
-    f.call::<u8>((dev.clone(), channel))
-        .map_err(|e| lua_err(name, e))
-}
-
-fn call_bool(f: &Option<Function>, name: &str, dev: &Table, channel: u8) -> Result<bool> {
-    let f = f
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no {name}()"))?;
-    f.call::<bool>((dev.clone(), channel))
-        .map_err(|e| lua_err(name, e))
-}
-
-fn run_set_fan_duty(cb: &Callbacks, dev: &Table, channel: u8, duty: u8) -> Result<()> {
-    let f = cb
-        .set_fan_duty
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no set_fan_duty()"))?;
-    f.call::<()>((dev.clone(), channel, duty))
-        .map_err(|e| lua_err("set_fan_duty", e))
-}
-
-/// Run `read_status(dev)` and cache the returned table as `dev.status`. Errors
-/// (e.g. a non-blocking read with nothing pending) are logged, not fatal — the
-/// loop keeps ticking.
-fn run_poll(cb: &Callbacks, dev: &Table) {
-    let Some(f) = &cb.read_status else { return };
-    match f.call::<Value>(dev.clone()) {
-        Ok(status) => {
-            if let Err(e) = dev.set("status", status) {
-                log::debug!("plugin poll: caching status failed: {e}");
-            }
-        }
-        Err(e) => log::debug!("plugin read_status: {e}"),
-    }
 }
 
 /// Run a plugin's `pre_scan(dev)` callback against a freshly opened SMBus bus,
@@ -1511,104 +969,4 @@ fn build_match_table(lua: &Lua, m: &DevMatch) -> Result<Table> {
         t.set("pid", pid).map_err(|e| lua_err("match.pid", e))?;
     }
     Ok(t)
-}
-
-/// Run `initialize`, accepting either a bare bool or a table with dynamic device
-/// info (`{ ok, model, zones }`). A missing callback means "present, no info".
-fn run_initialize(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<InitOutcome> {
-    let Some(f) = &cb.initialize else {
-        return Ok(InitOutcome {
-            ok: true,
-            ..Default::default()
-        });
-    };
-    let value: Value = f.call(dev.clone()).map_err(|e| lua_err("initialize", e))?;
-    match value {
-        Value::Boolean(ok) => Ok(InitOutcome {
-            ok,
-            ..Default::default()
-        }),
-        Value::Nil => Ok(InitOutcome {
-            ok: true,
-            ..Default::default()
-        }),
-        other => {
-            let t: InitTable = lua
-                .from_value(other)
-                .map_err(|e| lua_err("initialize result", e))?;
-            Ok(InitOutcome {
-                ok: t.ok,
-                model: t.model,
-                zones: t.zones,
-                lcd: t.lcd,
-            })
-        }
-    }
-}
-
-fn run_apply(lua: &Lua, cb: &Callbacks, dev: &Table, state: &RgbState) -> Result<()> {
-    let f = cb
-        .apply
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no apply()"))?;
-    let state_v = lua.to_value(state).map_err(|e| lua_err("apply arg", e))?;
-    f.call::<()>((dev.clone(), state_v))
-        .map_err(|e| lua_err("apply", e))
-}
-
-fn run_write_frame(
-    lua: &Lua,
-    cb: &Callbacks,
-    dev: &Table,
-    zone: &str,
-    colors: &[RgbColor],
-) -> Result<()> {
-    let f = cb
-        .write_frame
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no write_frame()"))?;
-    let colors_v = lua
-        .to_value(colors)
-        .map_err(|e| lua_err("write_frame arg", e))?;
-    f.call::<()>((dev.clone(), zone.to_owned(), colors_v))
-        .map_err(|e| lua_err("write_frame", e))
-}
-
-fn run_get_duty(cb: &Callbacks, dev: &Table) -> Result<u8> {
-    let f = cb
-        .get_duty
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no get_duty()"))?;
-    f.call::<u8>(dev.clone())
-        .map_err(|e| lua_err("get_duty", e))
-}
-
-fn run_set_duty(cb: &Callbacks, dev: &Table, duty: u8) -> Result<()> {
-    let f = cb
-        .set_duty
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no set_duty()"))?;
-    f.call::<()>((dev.clone(), duty))
-        .map_err(|e| lua_err("set_duty", e))
-}
-
-fn run_get_rpm(cb: &Callbacks, dev: &Table) -> Option<u32> {
-    let f = cb.get_rpm.as_ref()?;
-    match f.call::<Option<u32>>(dev.clone()) {
-        Ok(v) => v,
-        Err(e) => {
-            log::debug!("plugin get_rpm: {e}");
-            None
-        }
-    }
-}
-
-fn run_get_sensors(lua: &Lua, cb: &Callbacks, dev: &Table) -> Result<Vec<Sensor>> {
-    let f = cb
-        .get_sensors
-        .as_ref()
-        .ok_or_else(|| anyhow!("plugin has no get_sensors()"))?;
-    let value: Value = f.call(dev.clone()).map_err(|e| lua_err("get_sensors", e))?;
-    lua.from_value(value)
-        .map_err(|e| lua_err("get_sensors result", e))
 }
