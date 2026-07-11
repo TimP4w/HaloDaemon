@@ -244,13 +244,20 @@ pub fn config_for(plugin_id: &str) -> HashMap<String, String> {
         Ok(g) => g,
         Err(_) => return HashMap::new(),
     };
-    let Some(manifest) = registry.iter().find(|m| m.plugin_id == plugin_id) else {
-        return HashMap::new();
-    };
+    match registry.iter().find(|m| m.plugin_id == plugin_id) {
+        Some(manifest) => config_values_for(manifest),
+        None => HashMap::new(),
+    }
+}
+
+/// Non-secure config for a manifest already in hand. Reads only `CONFIG_VALUES`,
+/// never `PLUGIN_REGISTRY` — so a `PLUGIN_REGISTRY` reader (e.g. `list`) can call
+/// it without a recursive read that would deadlock a pending `load_all` write.
+fn config_values_for(manifest: &PluginManifest) -> HashMap<String, String> {
     let stored = CONFIG_VALUES
         .read()
         .ok()
-        .and_then(|g| g.as_ref().and_then(|m| m.get(plugin_id).cloned()))
+        .and_then(|g| g.as_ref().and_then(|m| m.get(&manifest.plugin_id).cloned()))
         .unwrap_or_default();
     manifest
         .config_fields()
@@ -436,7 +443,7 @@ pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
                 declared_permissions: m.permissions.clone(),
                 granted_permissions: granted_for(&m.plugin_id),
                 config_fields: m.config_fields().iter().map(Into::into).collect(),
-                config_values: config_for(&m.plugin_id),
+                config_values: config_values_for(m),
                 secret_set,
             }
         })
