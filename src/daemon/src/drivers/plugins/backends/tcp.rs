@@ -56,7 +56,7 @@ fn open(
 
 fn id_suffix(_handle: &DiscoveryHandle<'_>) -> String {
     // Never invoked: an integration root's id is built from its config
-    // (host/port), not a discovery handle — see `mod::integration_device_id`.
+    // (host/port), not a discovery handle — see `integration_scan::root_device_id`.
     "0".to_owned()
 }
 

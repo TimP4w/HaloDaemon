@@ -82,8 +82,14 @@ impl FileKeyStore {
     fn persist(&self, state: &SecretsFile) -> Result<()> {
         let yaml = serde_yaml::to_string(state)?;
         let path = secrets_file_path();
-        crate::config::atomic_write(&path, &yaml)?;
-        restrict_permissions(&path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Owner-only tmp then rename: the ciphertext file is never briefly
+        // world-readable, and rename preserves the mode.
+        let tmp = path.with_extension("yaml.tmp");
+        write_owner_only(&tmp, yaml.as_bytes())?;
+        std::fs::rename(&tmp, &path)?;
         Ok(())
     }
 }
@@ -177,9 +183,8 @@ fn load_or_create_key() -> Key {
     key
 }
 
-/// Write bytes to `path` created with owner-only permissions from the start, so
-/// the key is never briefly world-readable (as a umask-default `fs::write` +
-/// later chmod would be). On non-Unix, falls back to a plain write.
+/// The mode is set at create time, not via a later chmod, so the file is never
+/// briefly world-readable.
 fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -198,17 +203,6 @@ fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
         std::fs::write(path, bytes)?;
         restrict_permissions(path);
         Ok(())
-    }
-}
-
-#[cfg(unix)]
-fn restrict_permissions(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-        log::warn!(
-            "[secrets] could not restrict permissions on {}: {e}",
-            path.display()
-        );
     }
 }
 

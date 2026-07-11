@@ -94,19 +94,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn removes_escape_hatches_and_keeps_string_lib() {
+    fn removes_every_escape_hatch_and_keeps_string_lib() {
         let lua = Lua::new();
         apply(&lua, &[], &HashMap::new()).unwrap();
-        assert!(lua
-            .load("return os")
-            .eval::<mlua::Value>()
-            .unwrap()
-            .is_nil());
-        assert!(lua
-            .load("return io")
-            .eval::<mlua::Value>()
-            .unwrap()
-            .is_nil());
+        for name in REMOVED {
+            let v: mlua::Value = lua.load(format!("return {name}")).eval().unwrap();
+            assert!(v.is_nil(), "escape hatch '{name}' was not stripped");
+        }
         // Encoding primitives survive.
         let out: String = lua.load(r#"return string.char(65, 66)"#).eval().unwrap();
         assert_eq!(out, "AB");
@@ -119,17 +113,6 @@ mod tests {
         lua.load(r#"log("hello from a test plugin")"#)
             .exec()
             .unwrap();
-    }
-
-    #[test]
-    fn ungranted_os_permission_leaves_os_nil() {
-        let lua = Lua::new();
-        apply(&lua, &[], &HashMap::new()).unwrap();
-        assert!(lua
-            .load("return os")
-            .eval::<mlua::Value>()
-            .unwrap()
-            .is_nil());
     }
 
     #[test]

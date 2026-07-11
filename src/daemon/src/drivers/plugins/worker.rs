@@ -382,7 +382,7 @@ impl PluginHandle {
     }
 
     pub async fn close(&self) {
-        let _ = self.request(Call::Close).await;
+        self.request(Call::Close).await.ok();
     }
 
     pub async fn rgb_apply(&self, state: RgbState) -> Result<()> {

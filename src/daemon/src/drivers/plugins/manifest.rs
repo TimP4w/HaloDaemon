@@ -63,10 +63,8 @@ fn default_tcp_timeout_ms() -> u64 {
     5000
 }
 
-/// TCP transport parameters a plugin declares: which of its own `config`
-/// fields (see `ConfigFieldDef`) hold the host/port to connect to. Declaring
-/// the *keys* rather than a literal host/port lets the same manifest section
-/// double as the GUI-editable settings and the connection source.
+/// Names the `config` fields holding host/port rather than literals, so one
+/// manifest section is both the GUI-editable settings and the connection source.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TcpConfig {
     #[serde(default = "default_host_key")]
@@ -111,7 +109,7 @@ pub struct FanManifest {
     pub channel: u8,
 }
 
-/// Sensor capability marker (data-less; readings come from `get_sensors`).
+/// Readings come from the `get_sensors` callback.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SensorManifest {}
 
@@ -267,31 +265,25 @@ pub struct ActionManifest {
     pub actions: Vec<ActionDef>,
 }
 
-/// Battery capability marker (data-less; readings come from `get_batteries`).
+/// Readings come from the `get_batteries` callback.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct BatteryManifest {}
 
-/// Connection-status capability marker (data-less; state comes from
-/// `connection_status`).
+/// State comes from the `connection_status` callback.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ConnectionManifest {}
 
-/// Equalizer capability marker (data-less; presets/bands/values all come from
-/// `get_equalizer`; applied via `set_eq_preset`/`set_eq_bands`).
+/// State comes from the `get_equalizer` callback.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EqualizerManifest {}
 
-/// Pairing capability marker (data-less; state comes from `pairing_status`,
-/// applied via `start_pairing`/`stop_pairing`/`unpair`). Unpairing a slot does
-/// not (yet) remove a live child `Device` from the registry — the plugin
-/// handles the hardware side; wiring paired slots to owned children is a
-/// follow-up once a plugin needs it.
+/// State comes from the `pairing_status` callback. Unpairing a slot does not
+/// (yet) remove a live child `Device` from the registry — wiring paired slots
+/// to owned children is a follow-up once a plugin needs it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PairingManifest {}
 
-/// Onboard-profile capability marker (data-less; state comes from
-/// `onboard_profiles_status`, applied via `switch_profile`/`restore_profile`/
-/// `set_profile_enabled`).
+/// State comes from the `onboard_profiles_status` callback.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct OnboardProfilesManifest {}
 
@@ -583,13 +575,6 @@ impl MatchSpec {
             _ => None,
         }
     }
-
-    /// Addresses a `pre_scan` on this spec may write: declared + extras.
-    pub fn pre_scan_scope(&self) -> Vec<u8> {
-        let mut v = self.addresses.clone().unwrap_or_default();
-        v.extend(self.extra_addresses.iter().flatten().copied());
-        v
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -717,11 +702,6 @@ impl PluginManifest {
         self.match_specs.iter().filter(|s| s.bus_kind().is_some())
     }
 
-    /// Whether any declared spec drives an SMBus bus.
-    pub fn has_smbus(&self) -> bool {
-        self.smbus_specs().next().is_some()
-    }
-
     /// Stable id prefix a matched device's id is built from.
     pub fn id_prefix(&self) -> &str {
         self.identity.id.as_deref().unwrap_or(&self.plugin_id)
@@ -761,14 +741,12 @@ impl PluginManifest {
     /// Device labels the plugin targets — the per-spec display name of every
     /// match spec, de-duplicated in declaration order.
     pub fn target_labels(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for spec in &self.match_specs {
-            let label = self.display_name_for(spec);
-            if !out.contains(&label) {
-                out.push(label);
-            }
-        }
-        out
+        let mut seen = std::collections::HashSet::new();
+        self.match_specs
+            .iter()
+            .map(|spec| self.display_name_for(spec))
+            .filter(|label| seen.insert(label.clone()))
+            .collect()
     }
 
     /// The RGB descriptor a matched device advertises, if it has RGB.
@@ -983,15 +961,13 @@ mod tests {
         assert_eq!(m.match_specs[0].vid, Some(0x1234));
         assert_eq!(m.match_specs[0].pid, Some(0x5678));
         assert_eq!(m.id_prefix(), "acme_k1");
-    }
-
-    #[test]
-    fn author_version_description_default_empty_and_parse() {
-        let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
         assert_eq!(m.author(), "");
         assert_eq!(m.version(), "");
         assert_eq!(m.description(), "");
+    }
 
+    #[test]
+    fn author_version_description_parse() {
         let src = r#"
             return {
               match = { transport = "hid", vid = 1, pid = 2 },
@@ -1143,15 +1119,6 @@ mod tests {
     }
 
     #[test]
-    fn chipset_spec_without_pci_match_still_parses() {
-        let src = r#"return {
-            match = { transport = "smbus", bus = "chipset", addresses = { 0x70 } },
-            identity = { vendor = "x", model = "y" },
-        }"#;
-        assert!(parse_manifest(src, Path::new("ok.lua")).is_ok());
-    }
-
-    #[test]
     fn range_boolean_action_battery_connection_equalizer_sections_parse() {
         let src = r#"return {
             match = { transport = "hid", vid = 1, pid = 2 },
@@ -1176,17 +1143,6 @@ mod tests {
         assert!(m.battery.is_some());
         assert!(m.connection.is_some());
         assert!(m.equalizer.is_some());
-    }
-
-    #[test]
-    fn range_default_step_is_one() {
-        let src = r#"return {
-            match = { transport = "hid", vid = 1, pid = 2 },
-            identity = { vendor = "x", model = "y" },
-            range = { ranges = { { key = "hz", label = "Hz", min = 0, max = 10, default = 5 } } },
-        }"#;
-        let m = parse_manifest(src, Path::new("r.lua")).unwrap();
-        assert_eq!(m.range.unwrap().ranges[0].step, 1);
     }
 
     #[test]

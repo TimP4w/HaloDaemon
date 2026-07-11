@@ -121,7 +121,6 @@ impl UserData for ByteBuf {
             Ok(())
         });
 
-        // slice(start, len) -> a new ByteBuf copy.
         methods.add_method("slice", |_, this, (start, len): (usize, usize)| {
             this.check(start, len)?;
             Ok(ByteBuf::from_bytes(this.data[start..start + len].to_vec()))
@@ -180,7 +179,7 @@ mod tests {
             )
             .eval()
             .unwrap();
-        assert_eq!(out.as_bytes().to_vec(), vec![0x07, 0x34, 0x12, 0xEE]);
+        assert_eq!(out.as_bytes(), &[0x07, 0x34, 0x12, 0xEE]);
     }
 
     #[test]
@@ -198,7 +197,7 @@ mod tests {
             )
             .eval()
             .unwrap();
-        assert_eq!(out.as_bytes().to_vec(), vec![0xFF, 1, 2, 3, 4, 0xEE]);
+        assert_eq!(out.as_bytes(), &[0xFF, 1, 2, 3, 4, 0xEE]);
     }
 
     #[test]
@@ -215,17 +214,28 @@ mod tests {
             )
             .eval()
             .unwrap();
-        assert_eq!(out.as_bytes().to_vec(), vec![0, 9, 8, 7, 0]);
+        assert_eq!(out.as_bytes(), &[0, 9, 8, 7, 0]);
     }
 
     #[test]
     fn set_bytes_out_of_range_errors_without_partial_write() {
         let lua = lua();
-        let err = lua
-            .load(r#"halod.buffer(4):set_bytes(2, string.char(1, 2, 3))"#)
-            .exec()
-            .unwrap_err();
-        assert!(err.to_string().contains("out of range"), "{err}");
+        let out: mlua::String = lua
+            .load(
+                r#"
+                local b = halod.buffer(4)
+                local ok, err = pcall(function() b:set_bytes(2, string.char(1, 2, 3)) end)
+                assert(not ok and tostring(err):find("out of range"), "expected out-of-range error")
+                return b:tostring()
+            "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(
+            out.as_bytes(),
+            &[0, 0, 0, 0],
+            "a rejected set_bytes must leave the buffer untouched"
+        );
     }
 
     #[test]
@@ -240,7 +250,7 @@ mod tests {
             )
             .eval()
             .unwrap();
-        assert_eq!(out.as_bytes().to_vec(), vec![0x02, 0x03]);
+        assert_eq!(out.as_bytes(), &[0x02, 0x03]);
     }
 
     #[test]

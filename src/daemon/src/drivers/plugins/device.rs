@@ -58,18 +58,9 @@ pub struct LuaDevice {
     plugin_id: String,
     plugin_type: PluginType,
     device_type: DeviceType,
-    /// A short label for the Info UI's transport line ("hid", "smbus", …).
     transport_kind: &'static str,
-
-    /// Firmware/model discovered at `initialize()` time, overriding the static
-    /// manifest `model` when present (e.g. an SMBus controller's version string).
     dynamic_model: OnceLock<String>,
-
-    /// Present when the plugin declares a capability (RGB/fan/sensor). Absent
-    /// for a device-only plugin.
     worker: Option<PluginHandle>,
-    /// Clone of the (metered) transport, kept so the device can report
-    /// write-rate/throughput to the Info UI. `None` for device-only plugins.
     transport: Option<PluginIo>,
 
     has_rgb: bool,
@@ -88,13 +79,11 @@ pub struct LuaDevice {
     has_onboard_profiles: bool,
     has_key_remap: bool,
 
-    /// Host-owned DPI step-cycle state + bounds/mode (present iff `has_dpi`).
     dpi_state: Mutex<DpiState>,
     dpi_min: u16,
     dpi_max: u16,
     dpi_mode: DpiMode,
 
-    /// Declared choice controls + the current selection cache.
     choices: Vec<ChoiceDef>,
     choice_cache: ChoiceStateCache,
 
@@ -112,7 +101,6 @@ pub struct LuaDevice {
     /// (and therefore save/restore) between explicit `get_equalizer` calls.
     eq_cache: Mutex<Option<Equalizer>>,
 
-    /// Declared remappable buttons + policy (present iff `has_key_remap`).
     key_remap_buttons: Vec<ButtonDescriptor>,
     key_remap_requires_host_mode: bool,
     key_remap_default_mappings: Vec<ButtonMapping>,
@@ -393,10 +381,6 @@ impl LuaDevice {
     #[cfg(test)]
     pub async fn poll_once(&self) -> Result<()> {
         self.worker()?.poll().await
-    }
-
-    pub fn plugin_id(&self) -> &str {
-        &self.plugin_id
     }
 
     fn worker(&self) -> Result<&PluginHandle> {

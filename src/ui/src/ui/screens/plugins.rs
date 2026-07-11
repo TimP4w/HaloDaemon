@@ -76,9 +76,9 @@ impl PluginsUi {
     fn detect_new_plugin_needing_consent(&mut self, plugins: &[PluginInfo]) {
         let ids: std::collections::HashSet<String> = plugins.iter().map(|p| p.id.clone()).collect();
         if let Some(known) = &self.known_ids {
-            let mut new_ids = plugins.iter().filter(|p| !known.contains(&p.id)).peekable();
-            if self.awaiting_import && new_ids.peek().is_some() {
-                if let Some(p) = new_ids.find(|p| plugin_needs_permission(p)) {
+            let new: Vec<&PluginInfo> = plugins.iter().filter(|p| !known.contains(&p.id)).collect();
+            if self.awaiting_import && !new.is_empty() {
+                if let Some(p) = new.iter().find(|p| plugin_needs_permission(p)) {
                     self.pending_consent = Some(p.id.clone());
                 }
                 self.awaiting_import = false;

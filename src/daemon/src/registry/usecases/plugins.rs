@@ -58,12 +58,15 @@ pub async fn set_config(
     values: std::collections::HashMap<String, String>,
     app: Arc<AppState>,
 ) -> Result<()> {
-    let secure_keys = crate::drivers::plugins::secure_config_keys_for(&id);
+    let secure_keys: std::collections::HashSet<String> =
+        crate::drivers::plugins::secure_config_keys_for(&id)
+            .into_iter()
+            .collect();
     {
         let mut cfg = app.config.write().await;
         let plaintext = cfg.plugin_config.entry(id.clone()).or_default();
         for (key, value) in &values {
-            if secure_keys.iter().any(|k| k == key) {
+            if secure_keys.contains(key) {
                 if !value.is_empty() {
                     app.secret_store
                         .set(&id, key, value)

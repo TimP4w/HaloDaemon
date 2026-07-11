@@ -83,8 +83,6 @@ fn ack(sub: u8) -> Vec<u8> {
     vec![0x37, sub, 0x00]
 }
 
-/// Build a Kraken LuaDevice (pid 0x300E → 240×240 LCD) over the recording HID +
-/// bulk. Returns the device plus handles to inspect the recorded traffic.
 fn kraken_lcd(responses: Vec<Vec<u8>>) -> (LuaDevice, Arc<RecordingHid>, Arc<BulkEndpoint>) {
     let manifest = parse_manifest(KRAKEN_SRC, Path::new("nzxt_kraken.lua")).unwrap();
     let spec = manifest.match_specs[0].clone();
