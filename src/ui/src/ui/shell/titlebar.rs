@@ -390,13 +390,7 @@ fn paint_windows(p: &egui::Painter, rect: Rect, ctl: WinCtl, hovered: bool, maxi
     }
 }
 
-pub fn title_bar(
-    ui: &mut egui::Ui,
-    state: &AppState,
-    cmd: &CommandTx,
-    profile_ui: &mut profile::ProfileUi,
-    page: &mut Page,
-) {
+fn title_bar_chrome(ui: &mut egui::Ui, state: &AppState) -> (ChromeConfig, Option<(f32, f32)>) {
     let rect = ui.max_rect();
 
     // Drag the whole bar to move the window; double-click toggles maximize.
@@ -465,6 +459,26 @@ pub fn title_bar(
         theme::bold(14.0),
         theme::hex(0x9b7fe0),
     );
+
+    (cfg, ctl_span)
+}
+
+/// The title bar without the profile button — window controls and logo only.
+/// Used by the discovery radar overlay, which has no active profile to show.
+pub fn title_bar_plain(ui: &mut egui::Ui, state: &AppState) {
+    title_bar_chrome(ui, state);
+}
+
+pub fn title_bar(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    cmd: &CommandTx,
+    profile_ui: &mut profile::ProfileUi,
+    page: &mut Page,
+) {
+    let rect = ui.max_rect();
+    let cy = rect.center().y;
+    let (cfg, ctl_span) = title_bar_chrome(ui, state);
 
     // Profile button — right edge sits clear of any right-side window controls,
     // otherwise it hugs the right edge.

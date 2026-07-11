@@ -56,8 +56,6 @@ misc:
   radar_devices_ready: "%{found} devices ready"
   radar_all_connected: All peripherals connected to the engine
   radar_scanning: "Scanning for devices…"
-  radar_start_discovery: Start discovery
-  radar_quit: Quit
   radar_scan_fallback: "%{found} found · scanning…"
   radar_scan_detail: "%{found} found · Scanning %{detail}"
   # device/macro_editor.rs
