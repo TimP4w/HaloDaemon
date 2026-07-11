@@ -20,7 +20,7 @@ use tokio::runtime::Handle;
 use crate::drivers::transports::smbus::SmBusSyncOps;
 use crate::drivers::transports::Transport;
 
-use super::bytebuf::ByteBuf;
+use super::ffi::{bytes_from, to_lua_err};
 use super::transport::{AddrScope, BulkEndpoint, PluginIo, RegisterBus};
 
 /// Lua userdata wrapping one transport. Rate limiting is inherited: this holds
@@ -65,71 +65,46 @@ impl TransportApi {
     }
 }
 
-fn to_lua_err(e: anyhow::Error) -> mlua::Error {
-    mlua::Error::RuntimeError(format!("{e:#}"))
-}
-
-/// Accept either a Lua string or a `halod.buffer` as outbound bytes.
-fn bytes_from(value: &Value) -> mlua::Result<Vec<u8>> {
-    match value {
-        Value::String(s) => Ok(s.as_bytes().to_vec()),
-        Value::UserData(ud) => Ok(ud.borrow::<ByteBuf>()?.as_slice().to_vec()),
-        other => Err(mlua::Error::RuntimeError(format!(
-            "transport data must be a string or halod.buffer, got {}",
-            other.type_name()
-        ))),
-    }
-}
-
 impl UserData for TransportApi {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // ── Stream (HID) ─────────────────────────────────────────────────
-        methods.add_method("write", |_, this, data: Value| {
-            let bytes = bytes_from(&data)?;
-            this.handle
-                .block_on(this.stream()?.write(&bytes))
-                .map_err(to_lua_err)
-        });
-
-        methods.add_method("read", |lua, this, size: usize| {
-            let data = this
-                .handle
-                .block_on(this.stream()?.read(size))
-                .map_err(to_lua_err)?;
-            lua.create_string(&data)
-        });
-
-        methods.add_method("read_nonblocking", |lua, this, size: usize| {
-            let data = this
-                .handle
-                .block_on(this.stream()?.read_nonblocking(size))
-                .map_err(to_lua_err)?;
-            lua.create_string(&data)
-        });
-
-        methods.add_method(
-            "write_then_read",
-            |lua, this, (data, size): (Value, usize)| {
-                let bytes = bytes_from(&data)?;
-                let reply = this
-                    .handle
-                    .block_on(this.stream()?.write_then_read(&bytes, size))
-                    .map_err(to_lua_err)?;
-                lua.create_string(&reply)
-            },
-        );
-
-        methods.add_method(
-            "feature_exchange",
-            |lua, this, (data, size): (Value, usize)| {
-                let bytes = bytes_from(&data)?;
-                let reply = this
-                    .handle
-                    .block_on(this.stream()?.feature_exchange(&bytes, size))
-                    .map_err(to_lua_err)?;
-                lua.create_string(&reply)
-            },
-        );
+        // The common shapes: `write` (bytes → unit), `read`/`read_nonblocking`
+        // (size → string), and `write_then_read`/`feature_exchange`
+        // (bytes+size → string). Each drives the async transport via `block_on`.
+        macro_rules! stream_method {
+            (bytes_unit $name:literal, $m:ident) => {
+                methods.add_method($name, |_, this, data: Value| {
+                    let bytes = bytes_from(&data)?;
+                    this.handle
+                        .block_on(this.stream()?.$m(&bytes))
+                        .map_err(to_lua_err)
+                });
+            };
+            (size_str $name:literal, $m:ident) => {
+                methods.add_method($name, |lua, this, size: usize| {
+                    let data = this
+                        .handle
+                        .block_on(this.stream()?.$m(size))
+                        .map_err(to_lua_err)?;
+                    lua.create_string(&data)
+                });
+            };
+            (bytes_size_str $name:literal, $m:ident) => {
+                methods.add_method($name, |lua, this, (data, size): (Value, usize)| {
+                    let bytes = bytes_from(&data)?;
+                    let reply = this
+                        .handle
+                        .block_on(this.stream()?.$m(&bytes, size))
+                        .map_err(to_lua_err)?;
+                    lua.create_string(&reply)
+                });
+            };
+        }
+        stream_method!(bytes_unit "write", write);
+        stream_method!(size_str "read", read);
+        stream_method!(size_str "read_nonblocking", read_nonblocking);
+        stream_method!(bytes_size_str "write_then_read", write_then_read);
+        stream_method!(bytes_size_str "feature_exchange", feature_exchange);
 
         methods.add_method("write_many", |_, this, packets: Vec<Value>| {
             let owned: Vec<Vec<u8>> = packets

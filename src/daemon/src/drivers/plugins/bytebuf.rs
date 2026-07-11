@@ -73,53 +73,53 @@ impl UserData for ByteBuf {
             Ok(())
         });
 
-        methods.add_method("get_u16_le", |_, this, i: usize| {
-            this.check(i, 2)?;
-            Ok(u16::from_le_bytes([this.data[i], this.data[i + 1]]))
-        });
-        methods.add_method("get_u16_be", |_, this, i: usize| {
-            this.check(i, 2)?;
-            Ok(u16::from_be_bytes([this.data[i], this.data[i + 1]]))
-        });
-        methods.add_method_mut("set_u16_le", |_, this, (i, v): (usize, u16)| {
-            this.check(i, 2)?;
-            this.data[i..i + 2].copy_from_slice(&v.to_le_bytes());
-            Ok(())
-        });
-        methods.add_method_mut("set_u16_be", |_, this, (i, v): (usize, u16)| {
-            this.check(i, 2)?;
-            this.data[i..i + 2].copy_from_slice(&v.to_be_bytes());
-            Ok(())
-        });
-
-        methods.add_method("get_u32_le", |_, this, i: usize| {
-            this.check(i, 4)?;
-            Ok(u32::from_le_bytes([
-                this.data[i],
-                this.data[i + 1],
-                this.data[i + 2],
-                this.data[i + 3],
-            ]))
-        });
-        methods.add_method("get_u32_be", |_, this, i: usize| {
-            this.check(i, 4)?;
-            Ok(u32::from_be_bytes([
-                this.data[i],
-                this.data[i + 1],
-                this.data[i + 2],
-                this.data[i + 3],
-            ]))
-        });
-        methods.add_method_mut("set_u32_le", |_, this, (i, v): (usize, u32)| {
-            this.check(i, 4)?;
-            this.data[i..i + 4].copy_from_slice(&v.to_le_bytes());
-            Ok(())
-        });
-        methods.add_method_mut("set_u32_be", |_, this, (i, v): (usize, u32)| {
-            this.check(i, 4)?;
-            this.data[i..i + 4].copy_from_slice(&v.to_be_bytes());
-            Ok(())
-        });
+        // One get/set pair per (width, endianness). The getter slices `$w` bytes
+        // (bounds already checked) into the fixed array `from_*_bytes` wants.
+        macro_rules! int_accessors {
+            ($ty:ty, $w:expr, $get:literal, $from:ident, $set:literal, $to:ident) => {
+                methods.add_method($get, |_, this, i: usize| {
+                    this.check(i, $w)?;
+                    Ok(<$ty>::$from(this.data[i..i + $w].try_into().unwrap()))
+                });
+                methods.add_method_mut($set, |_, this, (i, v): (usize, $ty)| {
+                    this.check(i, $w)?;
+                    this.data[i..i + $w].copy_from_slice(&v.$to());
+                    Ok(())
+                });
+            };
+        }
+        int_accessors!(
+            u16,
+            2,
+            "get_u16_le",
+            from_le_bytes,
+            "set_u16_le",
+            to_le_bytes
+        );
+        int_accessors!(
+            u16,
+            2,
+            "get_u16_be",
+            from_be_bytes,
+            "set_u16_be",
+            to_be_bytes
+        );
+        int_accessors!(
+            u32,
+            4,
+            "get_u32_le",
+            from_le_bytes,
+            "set_u32_le",
+            to_le_bytes
+        );
+        int_accessors!(
+            u32,
+            4,
+            "get_u32_be",
+            from_be_bytes,
+            "set_u32_be",
+            to_be_bytes
+        );
 
         methods.add_method("slice", |_, this, (start, len): (usize, usize)| {
             this.check(start, len)?;

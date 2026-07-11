@@ -27,7 +27,7 @@ use crate::drivers::{
 };
 
 use super::chain_leaf::ChainLeaf;
-use super::integration_leaf::{IntegrationHub, IntegrationLeaf};
+use super::integration_leaf::IntegrationLeaf;
 use super::manifest::{
     topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DpiManifest, MatchSpec,
     PluginManifest, RangeDef,
@@ -43,10 +43,9 @@ struct DpiState {
     current: u16,
 }
 use crate::drivers::vendors::generic::devices::common::{
-    linear_rgb_zone, per_led_frame, ring_led_positions,
+    linear_rgb_zone, ring_led_positions, transformed_zone_frame,
 };
 use halod_shared::types::ZoneTopology;
-use halod_shared::zone_transform::transform_colors;
 
 /// A device whose behaviour is defined by a plugin script rather than native
 /// Rust.
@@ -583,9 +582,7 @@ fn apply_per_led_transforms(
             transformed.insert(zone_id.clone(), led_map.clone());
             continue;
         };
-        let colors = per_led_frame(led_map, zone.leds.len());
-        let tx = slot.transform_for(zone_id);
-        let colors = transform_colors(&colors, zone, &tx);
+        let colors = transformed_zone_frame(zone, slot, led_map);
         let new_map: HashMap<String, RgbColor> = colors
             .iter()
             .enumerate()
@@ -717,7 +714,6 @@ impl LuaDevice {
         let Some(parent) = self.self_ref.upgrade() else {
             return Vec::new();
         };
-        let hub: Arc<dyn IntegrationHub> = parent;
 
         let mut out = Vec::new();
         for controller in detected {
@@ -727,7 +723,7 @@ impl LuaDevice {
                 self.vendor.clone(),
                 controller.index,
                 controller.rgb_descriptor(),
-                hub.clone(),
+                parent.clone(),
             ));
             if let Err(e) = leaf.initialize().await {
                 log::warn!(
@@ -742,9 +738,11 @@ impl LuaDevice {
     }
 }
 
-#[async_trait]
-impl IntegrationHub for LuaDevice {
-    async fn write_controller_frame(
+impl LuaDevice {
+    /// Route an integration child's RGB frame through the shared worker. Called
+    /// by [`IntegrationLeaf`] — the root's controller children share its
+    /// connection rather than holding transports of their own.
+    pub(super) async fn write_controller_frame(
         &self,
         index: u32,
         zone: &str,
@@ -1175,7 +1173,7 @@ impl KeyRemapCapability for LuaDevice {
             .cloned()
             .collect();
         let host_mode_active = match &self.worker {
-            Some(_) => self.worker().unwrap().key_remap_host_mode_active().await,
+            Some(w) => w.key_remap_host_mode_active().await,
             None => false,
         };
         KeyRemapStatus {

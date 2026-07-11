@@ -10,8 +10,9 @@ use halod_shared::types::{
     CategoryLayout, ConnectionType, DeviceCapability, DeviceType, EffectParamValue, KeyboardLayout,
     LedPosition, RgbColor, RgbZone, WireDevice, ZoneTopology,
 };
+use halod_shared::zone_transform::transform_colors;
 
-use crate::drivers::Device;
+use crate::drivers::{Device, RgbStateSlot};
 
 /// Build a stable device ID of the form `<prefix>_<serial>`, falling back to `<prefix>_<index>` when no usable serial is available.
 pub fn build_device_id(prefix: &str, serial: Option<&str>, index: usize) -> String {
@@ -85,6 +86,20 @@ pub fn per_led_frame(led_map: &HashMap<String, RgbColor>, count: usize) -> Vec<R
                 .unwrap_or(RgbColor { r: 0, g: 0, b: 0 })
         })
         .collect()
+}
+
+/// Build one zone's transformed per-LED frame: assemble the sparse
+/// `RgbState::PerLed` map into a contiguous frame ([`per_led_frame`]), then apply
+/// the zone's saved content transform. One source of truth for the LED-frame path
+/// shared by every RGB device and child leaf.
+pub fn transformed_zone_frame(
+    zone: &RgbZone,
+    slot: &RgbStateSlot,
+    led_map: &HashMap<String, RgbColor>,
+) -> Vec<RgbColor> {
+    let colors = per_led_frame(led_map, zone.leds.len());
+    let transform = slot.transform_for(&zone.id);
+    transform_colors(&colors, zone, &transform)
 }
 
 /// Extract a color value from a native-effect param map.

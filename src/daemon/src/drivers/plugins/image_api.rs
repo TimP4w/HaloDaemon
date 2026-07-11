@@ -7,21 +7,8 @@
 use mlua::{Lua, Value};
 
 use super::bytebuf::ByteBuf;
+use super::ffi::{bytes_from as bytes_of, to_lua_err};
 use crate::util::image;
-
-fn bytes_of(v: &Value) -> mlua::Result<Vec<u8>> {
-    match v {
-        Value::String(s) => Ok(s.as_bytes().to_vec()),
-        Value::UserData(ud) => Ok(ud.borrow::<ByteBuf>()?.as_slice().to_vec()),
-        _ => Err(mlua::Error::RuntimeError(
-            "expected bytes (a string or halod.buffer)".into(),
-        )),
-    }
-}
-
-fn to_lua_err(e: anyhow::Error) -> mlua::Error {
-    mlua::Error::RuntimeError(e.to_string())
-}
 
 /// Add the image codecs to the (already-created) `halod` global table.
 pub fn register(lua: &Lua) -> mlua::Result<()> {

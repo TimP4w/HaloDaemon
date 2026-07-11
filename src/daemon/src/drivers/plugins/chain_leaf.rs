@@ -10,10 +10,9 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use halod_shared::types::{DeviceType, RgbColor, RgbDescriptor, RgbState};
-use halod_shared::zone_transform::transform_colors;
 
 use crate::drivers::chain::ChainHub;
-use crate::drivers::vendors::generic::devices::common::per_led_frame;
+use crate::drivers::vendors::generic::devices::common::transformed_zone_frame;
 use crate::drivers::{
     CapabilityRef, Device, FanCapability, FanHub, FanStateSlot, RgbCapability, RgbStateSlot,
     VisibilitySlot,
@@ -76,10 +75,8 @@ impl ChainLeaf {
             }
             RgbState::PerLed { zones } => {
                 if let Some(leds) = zones.get("ring") {
-                    let colors = per_led_frame(leds, led_count);
                     let zone = &self.rgb_descriptor.zones[0];
-                    let transform = self.rgb.transform_for(&zone.id);
-                    let colors = transform_colors(&colors, zone, &transform);
+                    let colors = transformed_zone_frame(zone, &self.rgb, leds);
                     self.chain_hub
                         .write_chain_slice(&self.channel_id, &dev_id, &colors)
                         .await?;

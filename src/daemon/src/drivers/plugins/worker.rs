@@ -181,21 +181,6 @@ fn default_true() -> bool {
     true
 }
 
-/// What `get_booleans` returns per entry: only `key`/`value` are required, since
-/// label/category/read_only are typically manifest-declared and backfilled by
-/// the device layer.
-#[derive(Debug, Deserialize)]
-struct PluginBoolean {
-    key: String,
-    value: bool,
-    #[serde(default)]
-    label: String,
-    #[serde(default)]
-    read_only: bool,
-    #[serde(default)]
-    category: String,
-}
-
 /// The Lua VM plus the two tables every job operates on, owned by the worker
 /// thread. Jobs borrow it on that thread; it never crosses the channel — only
 /// the boxed [`Job`] (which is `Send`) does, so the `!Send` VM stays put.
@@ -645,21 +630,9 @@ impl PluginHandle {
             let value: Value = f
                 .call(ctx.dev.clone())
                 .map_err(|e| lua_err("get_booleans", e))?;
-            let raw: Vec<PluginBoolean> = ctx
-                .lua
+            ctx.lua
                 .from_value(value)
-                .map_err(|e| lua_err("get_booleans result", e))?;
-            Ok(raw
-                .into_iter()
-                .map(|b| Boolean {
-                    key: b.key,
-                    label: b.label,
-                    value: b.value,
-                    read_only: b.read_only,
-                    category: b.category,
-                    visible_when: None,
-                })
-                .collect())
+                .map_err(|e| lua_err("get_booleans result", e))
         })
         .await
     }

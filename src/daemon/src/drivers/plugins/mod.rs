@@ -16,6 +16,7 @@ mod bytebuf;
 mod chain_leaf;
 mod device;
 mod effect_worker;
+mod ffi;
 mod image_api;
 mod integration_leaf;
 pub(crate) mod integration_scan;

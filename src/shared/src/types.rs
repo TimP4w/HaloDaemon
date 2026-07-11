@@ -1214,8 +1214,13 @@ pub struct ChoiceOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Boolean {
     pub key: String,
-    pub label: String,
     pub value: bool,
+    // `label`/`read_only`/`category` default so a plugin's `get_booleans`
+    // callback can return just `{ key, value }`; the device layer backfills the
+    // rest from the manifest's `BooleanDef`.
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
     pub category: String,

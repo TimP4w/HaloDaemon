@@ -11,22 +11,10 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use halod_shared::types::{DeviceType, RgbColor, RgbDescriptor, RgbState};
-use halod_shared::zone_transform::transform_colors;
 
-use crate::drivers::vendors::generic::devices::common::per_led_frame;
+use super::device::LuaDevice;
+use crate::drivers::vendors::generic::devices::common::transformed_zone_frame;
 use crate::drivers::{CapabilityRef, Device, RgbCapability, RgbStateSlot, VisibilitySlot};
-
-/// The parent's routing surface for an `IntegrationLeaf`'s writes. Implemented
-/// by `LuaDevice` (the integration root), delegating to its shared worker.
-#[async_trait]
-pub trait IntegrationHub: Send + Sync {
-    async fn write_controller_frame(
-        &self,
-        index: u32,
-        zone: &str,
-        colors: &[RgbColor],
-    ) -> Result<()>;
-}
 
 pub struct IntegrationLeaf {
     id: String,
@@ -36,7 +24,9 @@ pub struct IntegrationLeaf {
     rgb_descriptor: RgbDescriptor,
     rgb: RgbStateSlot,
     visibility: VisibilitySlot,
-    hub: Arc<dyn IntegrationHub>,
+    /// The integration root; controller children share its worker/connection
+    /// rather than holding a transport of their own.
+    hub: Arc<LuaDevice>,
 }
 
 impl IntegrationLeaf {
@@ -46,7 +36,7 @@ impl IntegrationLeaf {
         vendor: String,
         index: u32,
         rgb_descriptor: RgbDescriptor,
-        hub: Arc<dyn IntegrationHub>,
+        hub: Arc<LuaDevice>,
     ) -> Self {
         Self {
             id,
@@ -75,9 +65,7 @@ impl IntegrationLeaf {
                     let Some(leds) = zones.get(&zone.id) else {
                         continue;
                     };
-                    let colors = per_led_frame(leds, zone.leds.len());
-                    let transform = self.rgb.transform_for(&zone.id);
-                    let colors = transform_colors(&colors, zone, &transform);
+                    let colors = transformed_zone_frame(zone, &self.rgb, leds);
                     self.hub
                         .write_controller_frame(self.index, &zone.id, &colors)
                         .await?;
