@@ -48,6 +48,8 @@ mod corsair_test;
 mod ene_test;
 #[cfg(test)]
 mod lcd_test;
+#[cfg(test)]
+mod openrgb_test;
 
 /// `PLUGIN_REGISTRY`/`EFFECT_REGISTRY`/`DISABLED`/`GRANTED` are process-wide
 /// statics; any test (in this module or elsewhere, e.g. the RGB engine's
@@ -297,7 +299,7 @@ pub fn secure_config_keys_for(plugin_id: &str) -> Vec<String> {
 /// True when every permission `manifest` declares has been granted. A plugin
 /// declaring no permissions is always satisfied (the common case).
 fn permissions_satisfied(manifest: &PluginManifest) -> bool {
-    if manifest.permissions.is_empty() {
+    if manifest.permissions.is_empty() || is_builtin(&manifest.plugin_id) {
         return true;
     }
     let granted = granted_for(&manifest.plugin_id);
@@ -452,6 +454,7 @@ const BUILTIN_PLUGINS: &[(&str, &str)] = &[
         "halo_effects.lua",
         include_str!("builtins/halo_effects.lua"),
     ),
+    ("openrgb.lua", include_str!("builtins/openrgb.lua")),
 ];
 
 fn builtin_manifests() -> Vec<PluginManifest> {
@@ -867,6 +870,40 @@ mod tests {
         assert!(entries
             .iter()
             .any(|e| e.catalog_id == "halo_effects:comet" && e.kind == EffectKind::Direct));
+    }
+
+    #[test]
+    fn shipped_openrgb_plugin_parses() {
+        // Guards the built-in OpenRGB integration against drift with the schema.
+        let src = include_str!("builtins/openrgb.lua");
+        let m = parse_manifest(src, Path::new("openrgb.lua")).unwrap();
+        assert!(
+            m.match_specs.is_empty(),
+            "integration plugin needs no match"
+        );
+        assert_eq!(m.plugin_type, PluginType::Integration);
+        assert!(m.needs_worker());
+        assert_eq!(m.permissions, vec![Permission::Network]);
+        let tcp = m.transports.tcp.as_ref().expect("declares a tcp transport");
+        assert_eq!(tcp.host_key, "host");
+        assert_eq!(tcp.port_key, "port");
+        let fields = m.config_fields();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].key, "host");
+        assert_eq!(fields[0].default, "127.0.0.1");
+        assert_eq!(fields[1].key, "port");
+        assert_eq!(fields[1].default, "6742");
+    }
+
+    #[test]
+    fn builtin_plugins_are_permission_satisfied_without_a_grant() {
+        // openrgb.lua declares `network`; being built-in (shipped with the
+        // trusted daemon binary) must be enough — no manual consent step.
+        let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_granted(&HashMap::new());
+        let src = include_str!("builtins/openrgb.lua");
+        let m = parse_manifest(src, Path::new("openrgb.lua")).unwrap();
+        assert!(permissions_satisfied(&m));
     }
 
     #[test]

@@ -74,6 +74,12 @@ To add a device, see the [development guide](development.md).
 | ASUS/ENE | SMBus RGB (DRAM, GPU) | — | [ENE SMBus](protocols/ene-smbus.md) (built-in [Lua plugin](plugins.md)) | [SMBus](transports/smbus.md) | 🐧🪟 |
 | Corsair | Vengeance / Dominator DDR4/DDR5 DRAM RGB | — | [Corsair DRAM](protocols/corsair-dram.md) (built-in [Lua plugin](plugins.md)) | [SMBus](transports/smbus.md) | 🐧🪟 |
 
+## Integrations (network)
+
+| Vendor | Model | Protocol | Transport | Platform |
+|--------|-------|----------|-----------|----------|
+| OpenRGB | Any device OpenRGB itself supports, via its SDK server | [OpenRGB SDK](protocols/openrgb.md) (built-in [Lua plugin](plugins.md)) | [TCP](transports/tcp.md) | 🐧🪟 |
+
 ## Sensors
 
 | Source | VID:PID | Transport | Platform |
