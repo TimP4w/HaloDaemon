@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 
 use anyhow::{anyhow, Context, Result};
 use chacha20poly1305::aead::{Aead, Generate, KeyInit};
@@ -30,7 +30,11 @@ struct SecretsFile {
 }
 
 pub struct FileKeyStore {
-    cipher: XChaCha20Poly1305,
+    /// Lazily initialized so merely constructing the store never touches disk:
+    /// the throwaway default in `AppState::new` (replaced by the keyring at real
+    /// startup) must not create `secret.key`. The key is generated only when a
+    /// secret is first read or written.
+    cipher: OnceLock<XChaCha20Poly1305>,
     /// Cached in-memory mirror of the on-disk file; guarded so `set`/`delete`
     /// read-modify-write atomically within this process.
     state: RwLock<SecretsFile>,
@@ -38,21 +42,25 @@ pub struct FileKeyStore {
 
 impl FileKeyStore {
     pub fn new() -> Self {
-        let key = load_or_create_key();
         let state = load_secrets_file().unwrap_or_else(|e| {
             log::warn!("[secrets] failed to read {SECRETS_FILE}, starting empty: {e:#}");
             SecretsFile::default()
         });
         Self {
-            cipher: XChaCha20Poly1305::new(&key),
+            cipher: OnceLock::new(),
             state: RwLock::new(state),
         }
+    }
+
+    fn cipher(&self) -> &XChaCha20Poly1305 {
+        self.cipher
+            .get_or_init(|| XChaCha20Poly1305::new(&load_or_create_key()))
     }
 
     fn encrypt(&self, plaintext: &str) -> Result<String> {
         let nonce = XNonce::generate();
         let ct = self
-            .cipher
+            .cipher()
             .encrypt(&nonce, plaintext.as_bytes())
             .map_err(|_| anyhow!("encryption failed"))?;
         let mut blob = Vec::with_capacity(nonce.len() + ct.len());
@@ -73,7 +81,7 @@ impl FileKeyStore {
         let (nonce_bytes, ct) = blob.split_at(24);
         let nonce = XNonce::try_from(nonce_bytes).map_err(|_| anyhow!("malformed nonce"))?;
         let pt = self
-            .cipher
+            .cipher()
             .decrypt(&nonce, ct)
             .map_err(|_| anyhow!("decryption failed (wrong key or corrupted token)"))?;
         String::from_utf8(pt).context("decrypted secret is not valid UTF-8")
@@ -279,12 +287,21 @@ mod tests {
         });
     }
 
+    #[test]
+    fn constructing_does_not_create_the_key_file() {
+        with_tmp_config(|| {
+            let _store = FileKeyStore::new();
+            assert!(!key_file_path().exists());
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     fn key_file_has_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
         with_tmp_config(|| {
-            let _store = FileKeyStore::new();
+            let store = FileKeyStore::new();
+            store.set("openrgb", "token", "s3cr3t").unwrap();
             let meta = std::fs::metadata(key_file_path()).unwrap();
             assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         });
