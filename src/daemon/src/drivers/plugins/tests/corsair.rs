@@ -8,10 +8,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::device::LuaDevice;
-use super::parse_manifest;
-use super::transport::{AddrScope, PluginIo, RegisterBus};
-use super::worker::DevMatch;
+use super::super::device::LuaDevice;
+use super::super::parse_manifest;
+use super::super::transport::{AddrScope, PluginIo, RegisterBus};
+use super::super::worker::DevMatch;
 use crate::drivers::transports::smbus::{SmBusDevice, SmBusSyncOps};
 use crate::drivers::{Device, RgbCapability};
 use anyhow::{bail, Result};
@@ -19,7 +19,7 @@ use halod_shared::types::{RgbColor, RgbState};
 use std::collections::HashSet;
 use std::path::Path;
 
-const CORSAIR_SRC: &str = include_str!("builtins/corsair_dram.lua");
+const CORSAIR_SRC: &str = include_str!("../builtins/corsair_dram.lua");
 
 const REG_RESET_BUFFER: u8 = 0x0B;
 const REG_SET_BINARY_DATA: u8 = 0x20;

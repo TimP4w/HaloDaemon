@@ -10,16 +10,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use super::device::LuaDevice;
-use super::parse_manifest;
-use super::transport::{AddrScope, PluginIo, RegisterBus};
-use super::worker::DevMatch;
+use super::super::device::LuaDevice;
+use super::super::parse_manifest;
+use super::super::transport::{AddrScope, PluginIo, RegisterBus};
+use super::super::worker::DevMatch;
 use crate::drivers::transports::smbus::{SmBusDevice, SmBusSyncOps};
 use crate::drivers::{Device, RgbCapability, SensorCapability};
 use anyhow::{bail, Result};
 use halod_shared::types::{RgbColor, RgbState};
 
-const ENE_SRC: &str = include_str!("builtins/ene_smbus.lua");
+const ENE_SRC: &str = include_str!("../builtins/ene_smbus.lua");
 
 // Registers mirrored from the plugin/native protocol.
 const REG_DEVICE_NAME: u16 = 0x1000;

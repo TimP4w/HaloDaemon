@@ -13,14 +13,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 
-use super::device::LuaDevice;
-use super::parse_manifest;
-use super::transport::{BulkEndpoint, PluginIo};
-use super::worker::DevMatch;
+use super::super::device::LuaDevice;
+use super::super::parse_manifest;
+use super::super::transport::{BulkEndpoint, PluginIo};
+use super::super::worker::DevMatch;
 use crate::drivers::transports::Transport;
 use crate::drivers::{Device, LcdCapability};
 
-const KRAKEN_SRC: &str = include_str!("builtins/nzxt_kraken.lua");
+const KRAKEN_SRC: &str = include_str!("../builtins/nzxt_kraken.lua");
 const REPORT: usize = 64;
 
 /// A HID transport that records writes and serves queued read replies.

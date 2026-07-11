@@ -15,13 +15,13 @@ use tokio::sync::Mutex;
 
 use halod_shared::types::RgbColor;
 
-use super::device::LuaDevice;
-use super::parse_manifest;
-use super::transport::PluginIo;
+use super::super::device::LuaDevice;
+use super::super::parse_manifest;
+use super::super::transport::PluginIo;
 use crate::drivers::transports::tcp::TcpTransport;
 use crate::drivers::Device;
 
-const OPENRGB_SRC: &str = include_str!("builtins/openrgb.lua");
+const OPENRGB_SRC: &str = include_str!("../builtins/openrgb.lua");
 
 /// One packet the fake server received, for post-hoc assertions.
 #[derive(Debug, Clone)]

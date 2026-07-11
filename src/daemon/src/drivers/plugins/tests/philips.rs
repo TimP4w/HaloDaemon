@@ -11,17 +11,17 @@ use std::sync::Arc;
 
 use std::path::Path;
 
-use super::device::LuaDevice;
-use super::parse_manifest;
-use super::transport::{ControlEndpoints, PluginIo, RecordingControl};
-use super::worker::DevMatch;
+use super::super::device::LuaDevice;
+use super::super::parse_manifest;
+use super::super::transport::{ControlEndpoints, PluginIo, RecordingControl};
+use super::super::worker::DevMatch;
 use crate::drivers::transports::ControlTransport;
 use crate::drivers::{
     ActionCapability, BooleanCapability, ChoiceCapability, RangeCapability, RgbCapability,
 };
 use halod_shared::types::{RgbColor, RgbState};
 
-const PHILIPS_SRC: &str = include_str!("builtins/philips_evnia.lua");
+const PHILIPS_SRC: &str = include_str!("../builtins/philips_evnia.lua");
 
 /// DDC/CI XOR-fold checksum (mirrors the plugin), for building expected packets.
 fn ddcci_xor(bytes: &[u8]) -> u8 {
