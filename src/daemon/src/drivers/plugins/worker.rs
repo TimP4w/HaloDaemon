@@ -212,6 +212,16 @@ fn default_lcd_brightness() -> u8 {
     80
 }
 
+/// One chainable output channel a plugin's `initialize` reports for dynamic chain
+/// discovery (e.g. an ARGB header whose count/capacity is only known after reading
+/// the device's config table). Mirrors the static `manifest::ChannelManifest`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InitChainChannel {
+    pub id: String,
+    pub name: String,
+    pub max_leds: u32,
+}
+
 /// What `initialize` returns: a bare bool, or a table with dynamic device info
 /// discovered from the hardware (firmware/model, RGB zones, LCD panel, and the
 /// live range/choice values read back from the device to seed the host caches).
@@ -221,6 +231,10 @@ pub struct InitOutcome {
     pub model: Option<String>,
     pub zones: Option<Vec<InitZone>>,
     pub lcd: Option<InitLcd>,
+    /// Chainable channels discovered at runtime (e.g. ARGB headers whose capacity
+    /// is read from the device's config table), for a plugin that declares a
+    /// `chain` capability but reports its channels dynamically rather than statically.
+    pub chain: Option<Vec<InitChainChannel>>,
     /// Current range-control values keyed by control key, seeding the host's
     /// range cache so the UI reflects the device instead of manifest defaults.
     pub ranges: Option<HashMap<String, i32>>,
@@ -239,6 +253,8 @@ struct InitTable {
     zones: Option<Vec<InitZone>>,
     #[serde(default)]
     lcd: Option<InitLcd>,
+    #[serde(default)]
+    chain: Option<Vec<InitChainChannel>>,
     #[serde(default)]
     ranges: Option<HashMap<String, i32>>,
     #[serde(default)]
@@ -435,11 +451,18 @@ impl PluginHandle {
                     if let Some(lcd) = &t.lcd {
                         check_lcd_dims(lcd.width, lcd.height)?;
                     }
+                    if let Some(chain) = &t.chain {
+                        check_zone_count(chain.len())?;
+                        for c in chain {
+                            check_led_count(&c.id, c.max_leds)?;
+                        }
+                    }
                     Ok(InitOutcome {
                         ok: t.ok,
                         model: t.model,
                         zones: t.zones,
                         lcd: t.lcd,
+                        chain: t.chain,
                         ranges: t.ranges,
                         choices: t.choices,
                     })

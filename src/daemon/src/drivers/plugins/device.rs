@@ -322,7 +322,12 @@ pub struct LuaDevice {
     chain_host: OnceLock<Arc<ChainHost>>,
     /// Weak back-reference so `discover_children` can hand children a `FanHub`.
     self_ref: Weak<LuaDevice>,
+    /// Statically-declared chain channels from the manifest.
     chain_channels: Vec<ChannelDescriptor>,
+    /// Channels reported dynamically by `initialize` (capacity known only at
+    /// runtime, e.g. ARGB headers read from a config table). Takes precedence
+    /// over `chain_channels` once set.
+    dynamic_chain_channels: OnceLock<Vec<ChannelDescriptor>>,
     accessories: Vec<AccessoryManifest>,
 
     /// Weak handle to `AppState` so a failed runtime callback can push a toast
@@ -575,6 +580,7 @@ impl LuaDevice {
                         .collect()
                 })
                 .unwrap_or_default(),
+            dynamic_chain_channels: OnceLock::new(),
             accessories: manifest
                 .chain
                 .as_ref()
@@ -716,6 +722,17 @@ impl Device for LuaDevice {
             self.lcd_slot.set_raw_streaming(lcd.raw_streaming);
             self.lcd_slot.set_latches_last_frame(lcd.latches);
             let _ = self.lcd_descriptor.set(build_lcd_descriptor(&lcd));
+        }
+        if let Some(channels) = outcome.chain {
+            let descriptors = channels
+                .into_iter()
+                .map(|c| ChannelDescriptor {
+                    channel_id: c.id,
+                    display_name: c.name,
+                    max_leds: c.max_leds,
+                })
+                .collect();
+            let _ = self.dynamic_chain_channels.set(descriptors);
         }
         // Seed the host range/choice caches with the values the device reported,
         // so the UI shows live hardware state rather than manifest defaults.
@@ -1467,7 +1484,13 @@ impl ChainAdapter for LuaDevice {
         self.id.clone()
     }
     fn channels(&self) -> Vec<ChannelDescriptor> {
-        self.chain_channels.clone()
+        // Runtime-reported channels (from `initialize`) win over the static
+        // manifest ones. `ChainHost` reads this live, so channels discovered
+        // during init appear even though the host was built before it.
+        self.dynamic_chain_channels
+            .get()
+            .cloned()
+            .unwrap_or_else(|| self.chain_channels.clone())
     }
     async fn write_composed_frame(&self, channel_id: &str, composed: &[RgbColor]) -> Result<()> {
         self.worker()?.write_ext_frame(channel_id, composed).await

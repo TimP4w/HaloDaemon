@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mlua::{Function, Lua, Table, Value};
 
+use crate::drivers::chain::ChainAdapter;
 use crate::drivers::transports::Transport;
 use crate::drivers::{Metered, RgbCapability};
 use std::collections::HashMap;
@@ -318,6 +319,26 @@ fn open_device(
                         out.set(i + 1, entry)?;
                     }
                     Ok(out)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "write_ext_frame",
+                lua.create_function(move |_, (_self, channel, colors): (Table, String, Table)| {
+                    let composed: Vec<RgbColor> = colors
+                        .sequence_values::<Table>()
+                        .filter_map(|c| c.ok().map(|t| table_to_color(&t)))
+                        .collect();
+                    handle
+                        .block_on(device.write_composed_frame(&channel, &composed))
+                        .map_err(mlua_err)
                 })
                 .anyhow()?,
             )
