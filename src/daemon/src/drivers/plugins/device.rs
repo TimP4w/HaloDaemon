@@ -54,6 +54,218 @@ use halod_shared::types::ZoneTopology;
 /// shared connection.
 pub(super) type ChildWorkerFactory = Arc<dyn Fn() -> Result<PluginHandle> + Send + Sync>;
 
+/// The capability sections a manifest can declare. Stored as `caps` on the
+/// device so `capabilities()` reads a single list instead of one boolean per
+/// kind; the mapping to `CapabilityRef` lives in `capabilities()`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cap {
+    Rgb,
+    Fan,
+    Sensor,
+    Lcd,
+    Dpi,
+    Choice,
+    Range,
+    Boolean,
+    Action,
+    Battery,
+    Connection,
+    Equalizer,
+    Pairing,
+    OnboardProfiles,
+    KeyRemap,
+    Chain,
+}
+
+/// Which capability sections the manifest declares, in advertised order. Mirrors
+/// `PluginManifest::needs_worker` / `capability_labels`, but yields the typed
+/// `Cap` list the device stores.
+fn declared_caps(manifest: &PluginManifest) -> Vec<Cap> {
+    let mut caps = Vec::new();
+    let mut push = |present: bool, cap: Cap| {
+        if present {
+            caps.push(cap);
+        }
+    };
+    push(manifest.rgb.is_some(), Cap::Rgb);
+    push(manifest.fan.is_some(), Cap::Fan);
+    push(manifest.sensor.is_some(), Cap::Sensor);
+    push(manifest.lcd.is_some(), Cap::Lcd);
+    push(manifest.dpi.is_some(), Cap::Dpi);
+    push(manifest.choice.is_some(), Cap::Choice);
+    push(manifest.range.is_some(), Cap::Range);
+    push(manifest.boolean.is_some(), Cap::Boolean);
+    push(manifest.action.is_some(), Cap::Action);
+    push(manifest.battery.is_some(), Cap::Battery);
+    push(manifest.connection.is_some(), Cap::Connection);
+    push(manifest.equalizer.is_some(), Cap::Equalizer);
+    push(manifest.pairing.is_some(), Cap::Pairing);
+    push(manifest.onboard_profiles.is_some(), Cap::OnboardProfiles);
+    push(manifest.key_remap.is_some(), Cap::KeyRemap);
+    push(manifest.chain.is_some(), Cap::Chain);
+    caps
+}
+
+/// The four "control" capability groups (choice/range/boolean/action) share the
+/// same shape — a `Vec<Def>` of declared controls plus a value cache. Grouping
+/// them slims `LuaDevice` and hosts the repeated wire/lookup logic in one place.
+#[derive(Default)]
+struct Controls {
+    choices: Vec<ChoiceDef>,
+    choice_cache: ChoiceStateCache,
+    ranges: Vec<RangeDef>,
+    range_cache: RangeStateCache,
+    /// Boolean values are read live from `get_booleans`; the cache only backs
+    /// save/restore of the last-known write.
+    booleans: Vec<BooleanDef>,
+    bool_cache: BoolStateCache,
+    /// Fire-and-forget; no cached state.
+    actions: Vec<ActionDef>,
+}
+
+impl Controls {
+    fn from_manifest(manifest: &PluginManifest) -> Self {
+        Self {
+            choices: manifest
+                .choice
+                .as_ref()
+                .map(|c| c.choices.clone())
+                .unwrap_or_default(),
+            ranges: manifest
+                .range
+                .as_ref()
+                .map(|r| r.ranges.clone())
+                .unwrap_or_default(),
+            booleans: manifest
+                .boolean
+                .as_ref()
+                .map(|b| b.booleans.clone())
+                .unwrap_or_default(),
+            actions: manifest
+                .action
+                .as_ref()
+                .map(|a| a.actions.clone())
+                .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    /// Wire snapshot of the choice controls (cache overrides each default), or
+    /// `None` when none are declared.
+    fn choices_wire(&self) -> Option<DeviceCapability> {
+        if self.choices.is_empty() {
+            return None;
+        }
+        let choices = self
+            .choices
+            .iter()
+            .map(|c| Choice {
+                key: c.key.clone(),
+                label: c.label.clone(),
+                options: c.options.clone(),
+                selected: self.choice_cache.get(&c.key).unwrap_or(c.default),
+                category: c.category.clone(),
+                display: c.display.clone(),
+                visible_when: None,
+            })
+            .collect();
+        Some(DeviceCapability::Choice(choices))
+    }
+
+    /// Wire snapshot of the range controls (cache overrides each default), or
+    /// `None` when none are declared.
+    fn ranges_wire(&self) -> Option<DeviceCapability> {
+        if self.ranges.is_empty() {
+            return None;
+        }
+        let ranges = self
+            .ranges
+            .iter()
+            .map(|r| Range {
+                key: r.key.clone(),
+                label: r.label.clone(),
+                min: r.min,
+                max: r.max,
+                step: r.step,
+                value: self.range_cache.get(&r.key).unwrap_or(r.default),
+                read_only: r.read_only,
+                category: r.category.clone(),
+                start_label: r.start_label.clone(),
+                end_label: r.end_label.clone(),
+                display: r.display.clone(),
+                visible_when: None,
+            })
+            .collect();
+        Some(DeviceCapability::Range(ranges))
+    }
+
+    /// Wire snapshot of the action controls, or `None` when none are declared.
+    fn actions_wire(&self) -> Option<DeviceCapability> {
+        if self.actions.is_empty() {
+            return None;
+        }
+        let actions = self
+            .actions
+            .iter()
+            .map(|a| Action {
+                key: a.key.clone(),
+                label: a.label.clone(),
+                category: a.category.clone(),
+                visible_when: None,
+            })
+            .collect();
+        Some(DeviceCapability::Action(actions))
+    }
+
+    /// Validate a choice selection against the declared options and cache it.
+    /// Errors if the key is unknown or the index is out of range.
+    fn record_choice(&self, key: &str, selected: usize) -> Result<()> {
+        let choice = self
+            .choices
+            .iter()
+            .find(|c| c.key == key)
+            .ok_or_else(|| anyhow::anyhow!("unknown choice key: {key}"))?;
+        if selected >= choice.options.len() {
+            anyhow::bail!("choice '{key}' selection {selected} out of range");
+        }
+        self.choice_cache.record(key, selected);
+        Ok(())
+    }
+
+    /// Clamp a range value to its declared bounds and cache it, returning the
+    /// clamped value to forward to the worker. Errors if the key is unknown.
+    fn record_range(&self, key: &str, value: i32) -> Result<i32> {
+        let range = self
+            .ranges
+            .iter()
+            .find(|r| r.key == key)
+            .ok_or_else(|| anyhow::anyhow!("unknown range key: {key}"))?;
+        let value = value.clamp(range.min, range.max);
+        self.range_cache.record(key, value);
+        Ok(value)
+    }
+
+    /// Backfill empty `label`/`category` on live boolean reads from the manifest
+    /// decls (scripts may report only `{key, value}` pairs).
+    fn backfill_booleans(&self, live: &mut [Boolean]) {
+        for b in live {
+            if let Some(decl) = self.booleans.iter().find(|d| d.key == b.key) {
+                if b.label.is_empty() {
+                    b.label = decl.label.clone();
+                }
+                if b.category.is_empty() {
+                    b.category = decl.category.clone();
+                }
+            }
+        }
+    }
+
+    /// True if an action with `key` is declared.
+    fn has_action(&self, key: &str) -> bool {
+        self.actions.iter().any(|a| a.key == key)
+    }
+}
+
 /// A device whose behaviour is defined by a plugin script rather than native
 /// Rust.
 pub struct LuaDevice {
@@ -71,39 +283,17 @@ pub struct LuaDevice {
     /// For integration roots only: spawns a per-controller child worker.
     integration_child_worker: Option<ChildWorkerFactory>,
 
-    has_rgb: bool,
-    has_fan: bool,
-    has_sensor: bool,
-    has_lcd: bool,
-    has_dpi: bool,
-    has_choice: bool,
-    has_range: bool,
-    has_boolean: bool,
-    has_action: bool,
-    has_battery: bool,
-    has_connection: bool,
-    has_equalizer: bool,
-    has_pairing: bool,
-    has_onboard_profiles: bool,
-    has_key_remap: bool,
+    /// Capability sections the manifest declared, in advertised order. Drives
+    /// `capabilities()` (chain also implies `Controller`; integration adds one).
+    caps: Vec<Cap>,
 
     dpi_state: Mutex<DpiState>,
     dpi_min: u16,
     dpi_max: u16,
     dpi_mode: DpiMode,
 
-    choices: Vec<ChoiceDef>,
-    choice_cache: ChoiceStateCache,
-
-    /// Declared range controls + the current value cache.
-    ranges: Vec<RangeDef>,
-    range_cache: RangeStateCache,
-    /// Declared boolean controls (values are read live from `get_booleans`;
-    /// the cache only backs save/restore of the last-known write).
-    booleans: Vec<BooleanDef>,
-    bool_cache: BoolStateCache,
-    /// Declared actions (fire-and-forget, no cached state).
-    actions: Vec<ActionDef>,
+    /// Declared choice/range/boolean/action controls + their value caches.
+    controls: Controls,
 
     /// Last equalizer snapshot read, backing `EqualizerCapability::current_state`
     /// (and therefore save/restore) between explicit `get_equalizer` calls.
@@ -136,7 +326,6 @@ pub struct LuaDevice {
     poll_paused: Arc<AtomicBool>,
 
     // ── chain / children (present only when the manifest declares `chain`) ──
-    has_chain: bool,
     /// Set after construction (needs the `Arc<Self>`); `None` for non-chain devices.
     chain_host: OnceLock<Arc<ChainHost>>,
     /// Weak back-reference so `discover_children` can hand children a `FanHub`.
@@ -267,10 +456,7 @@ impl LuaDevice {
             worker,
             transport,
             integration_child_worker: None,
-            has_rgb: manifest.rgb.is_some(),
-            has_fan: manifest.fan.is_some(),
-            has_sensor: manifest.sensor.is_some(),
-            has_lcd: manifest.lcd.is_some(),
+            caps: declared_caps(manifest),
             lcd_descriptor: OnceLock::new(),
             lcd_slot: LcdStateSlot::default(),
             lcd_needs_rgb_restore: manifest
@@ -278,17 +464,6 @@ impl LuaDevice {
                 .as_ref()
                 .map(|l| l.needs_rgb_restore)
                 .unwrap_or(false),
-            has_dpi: manifest.dpi.is_some(),
-            has_choice: manifest.choice.is_some(),
-            has_range: manifest.range.is_some(),
-            has_boolean: manifest.boolean.is_some(),
-            has_action: manifest.action.is_some(),
-            has_battery: manifest.battery.is_some(),
-            has_connection: manifest.connection.is_some(),
-            has_equalizer: manifest.equalizer.is_some(),
-            has_pairing: manifest.pairing.is_some(),
-            has_onboard_profiles: manifest.onboard_profiles.is_some(),
-            has_key_remap: manifest.key_remap.is_some(),
             dpi_state: Mutex::new(build_dpi_state(manifest.dpi.as_ref())),
             dpi_min: manifest.dpi.as_ref().map(|d| d.min).unwrap_or(0),
             dpi_max: manifest.dpi.as_ref().map(|d| d.max).unwrap_or(0),
@@ -296,29 +471,7 @@ impl LuaDevice {
                 Some(true) => DpiMode::Onboard,
                 _ => DpiMode::Host,
             },
-            choices: manifest
-                .choice
-                .as_ref()
-                .map(|c| c.choices.clone())
-                .unwrap_or_default(),
-            choice_cache: ChoiceStateCache::default(),
-            ranges: manifest
-                .range
-                .as_ref()
-                .map(|r| r.ranges.clone())
-                .unwrap_or_default(),
-            range_cache: RangeStateCache::default(),
-            booleans: manifest
-                .boolean
-                .as_ref()
-                .map(|b| b.booleans.clone())
-                .unwrap_or_default(),
-            bool_cache: BoolStateCache::default(),
-            actions: manifest
-                .action
-                .as_ref()
-                .map(|a| a.actions.clone())
-                .unwrap_or_default(),
+            controls: Controls::from_manifest(manifest),
             eq_cache: Mutex::new(None),
             key_remap_buttons: manifest
                 .key_remap
@@ -346,7 +499,6 @@ impl LuaDevice {
             fan_channel: manifest.fan.as_ref().map(|f| f.channel).unwrap_or(0),
             poll_task: None,
             poll_paused: Arc::new(AtomicBool::new(false)),
-            has_chain: manifest.chain.is_some(),
             chain_host: OnceLock::new(),
             self_ref: Weak::new(),
             chain_channels: manifest
@@ -485,12 +637,12 @@ impl Device for LuaDevice {
         // so the UI shows live hardware state rather than manifest defaults.
         if let Some(ranges) = outcome.ranges {
             for (key, value) in ranges {
-                self.range_cache.record(&key, value);
+                self.controls.range_cache.record(&key, value);
             }
         }
         if let Some(choices) = outcome.choices {
             for (key, selected) in choices {
-                self.choice_cache.record(&key, selected);
+                self.controls.choice_cache.record(&key, selected);
             }
         }
         Ok(outcome.ok)
@@ -512,54 +664,28 @@ impl Device for LuaDevice {
 
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
         let mut caps = Vec::new();
-        if self.has_rgb {
-            caps.push(CapabilityRef::Rgb(self));
-        }
-        if self.has_fan {
-            caps.push(CapabilityRef::Fan(self));
-        }
-        if self.has_sensor {
-            caps.push(CapabilityRef::Sensor(self));
-        }
-        if self.has_lcd {
-            caps.push(CapabilityRef::Lcd(self));
-        }
-        if self.has_dpi {
-            caps.push(CapabilityRef::Dpi(self));
-        }
-        if self.has_choice {
-            caps.push(CapabilityRef::Choice(self));
-        }
-        if self.has_range {
-            caps.push(CapabilityRef::Range(self));
-        }
-        if self.has_boolean {
-            caps.push(CapabilityRef::Boolean(self));
-        }
-        if self.has_action {
-            caps.push(CapabilityRef::Action(self));
-        }
-        if self.has_battery {
-            caps.push(CapabilityRef::Battery(self));
-        }
-        if self.has_connection {
-            caps.push(CapabilityRef::Connection(self));
-        }
-        if self.has_equalizer {
-            caps.push(CapabilityRef::Equalizer(self));
-        }
-        if self.has_pairing {
-            caps.push(CapabilityRef::Pairing(self));
-        }
-        if self.has_onboard_profiles {
-            caps.push(CapabilityRef::OnboardProfiles(self));
-        }
-        if self.has_key_remap {
-            caps.push(CapabilityRef::KeyRemap(self));
-        }
-        if self.has_chain {
-            caps.push(CapabilityRef::Controller(self));
-            caps.push(CapabilityRef::Chain(self));
+        for cap in &self.caps {
+            match cap {
+                Cap::Rgb => caps.push(CapabilityRef::Rgb(self)),
+                Cap::Fan => caps.push(CapabilityRef::Fan(self)),
+                Cap::Sensor => caps.push(CapabilityRef::Sensor(self)),
+                Cap::Lcd => caps.push(CapabilityRef::Lcd(self)),
+                Cap::Dpi => caps.push(CapabilityRef::Dpi(self)),
+                Cap::Choice => caps.push(CapabilityRef::Choice(self)),
+                Cap::Range => caps.push(CapabilityRef::Range(self)),
+                Cap::Boolean => caps.push(CapabilityRef::Boolean(self)),
+                Cap::Action => caps.push(CapabilityRef::Action(self)),
+                Cap::Battery => caps.push(CapabilityRef::Battery(self)),
+                Cap::Connection => caps.push(CapabilityRef::Connection(self)),
+                Cap::Equalizer => caps.push(CapabilityRef::Equalizer(self)),
+                Cap::Pairing => caps.push(CapabilityRef::Pairing(self)),
+                Cap::OnboardProfiles => caps.push(CapabilityRef::OnboardProfiles(self)),
+                Cap::KeyRemap => caps.push(CapabilityRef::KeyRemap(self)),
+                Cap::Chain => {
+                    caps.push(CapabilityRef::Controller(self));
+                    caps.push(CapabilityRef::Chain(self));
+                }
+            }
         }
         if self.plugin_type == PluginKind::Integration {
             caps.push(CapabilityRef::Controller(self));
@@ -981,39 +1107,15 @@ impl DpiCapability for LuaDevice {
 #[async_trait]
 impl ChoiceCapability for LuaDevice {
     fn choice_cache(&self) -> &ChoiceStateCache {
-        &self.choice_cache
+        &self.controls.choice_cache
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
-        if self.choices.is_empty() {
-            return None;
-        }
-        let choices = self
-            .choices
-            .iter()
-            .map(|c| Choice {
-                key: c.key.clone(),
-                label: c.label.clone(),
-                options: c.options.clone(),
-                selected: self.choice_cache.get(&c.key).unwrap_or(c.default),
-                category: c.category.clone(),
-                display: c.display.clone(),
-                visible_when: None,
-            })
-            .collect();
-        Some(DeviceCapability::Choice(choices))
+        self.controls.choices_wire()
     }
 
     async fn set_choice(&self, key: &str, selected: usize) -> Result<()> {
-        let choice = self
-            .choices
-            .iter()
-            .find(|c| c.key == key)
-            .ok_or_else(|| anyhow::anyhow!("unknown choice key: {key}"))?;
-        if selected >= choice.options.len() {
-            anyhow::bail!("choice '{key}' selection {selected} out of range");
-        }
-        self.choice_cache.record(key, selected);
+        self.controls.record_choice(key, selected)?;
         self.worker()?.choice_set(key, selected).await
     }
 }
@@ -1021,42 +1123,15 @@ impl ChoiceCapability for LuaDevice {
 #[async_trait]
 impl RangeCapability for LuaDevice {
     fn range_cache(&self) -> &RangeStateCache {
-        &self.range_cache
+        &self.controls.range_cache
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
-        if self.ranges.is_empty() {
-            return None;
-        }
-        let ranges = self
-            .ranges
-            .iter()
-            .map(|r| Range {
-                key: r.key.clone(),
-                label: r.label.clone(),
-                min: r.min,
-                max: r.max,
-                step: r.step,
-                value: self.range_cache.get(&r.key).unwrap_or(r.default),
-                read_only: r.read_only,
-                category: r.category.clone(),
-                start_label: r.start_label.clone(),
-                end_label: r.end_label.clone(),
-                display: r.display.clone(),
-                visible_when: None,
-            })
-            .collect();
-        Some(DeviceCapability::Range(ranges))
+        self.controls.ranges_wire()
     }
 
     async fn set_range(&self, key: &str, value: i32) -> Result<()> {
-        let range = self
-            .ranges
-            .iter()
-            .find(|r| r.key == key)
-            .ok_or_else(|| anyhow::anyhow!("unknown range key: {key}"))?;
-        let value = value.clamp(range.min, range.max);
-        self.range_cache.record(key, value);
+        let value = self.controls.record_range(key, value)?;
         self.worker()?.range_set(key, value).await
     }
 }
@@ -1065,55 +1140,31 @@ impl RangeCapability for LuaDevice {
 impl BooleanCapability for LuaDevice {
     async fn get_booleans(&self) -> Result<Vec<Boolean>> {
         let mut live = self.worker()?.boolean_get().await?;
-        // Backfill labels/category/read_only from the manifest when the
-        // script's `get_booleans` only reports `{key, value}` pairs.
-        for b in &mut live {
-            if let Some(decl) = self.booleans.iter().find(|d| d.key == b.key) {
-                if b.label.is_empty() {
-                    b.label = decl.label.clone();
-                }
-                if b.category.is_empty() {
-                    b.category = decl.category.clone();
-                }
-            }
-        }
+        self.controls.backfill_booleans(&mut live);
         Ok(live)
     }
 
     async fn set_boolean(&self, key: &str, value: bool) -> Result<()> {
-        self.bool_cache.record(key, value);
+        self.controls.bool_cache.record(key, value);
         self.worker()?.boolean_set(key, value).await
     }
 
     fn bool_cache(&self) -> Option<&BoolStateCache> {
-        Some(&self.bool_cache)
+        Some(&self.controls.bool_cache)
     }
 }
 
 #[async_trait]
 impl ActionCapability for LuaDevice {
     async fn trigger_action(&self, key: &str) -> Result<()> {
-        if !self.actions.iter().any(|a| a.key == key) {
+        if !self.controls.has_action(key) {
             anyhow::bail!("unknown action key: {key}");
         }
         self.worker()?.action_trigger(key).await
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
-        if self.actions.is_empty() {
-            return None;
-        }
-        let actions = self
-            .actions
-            .iter()
-            .map(|a| Action {
-                key: a.key.clone(),
-                label: a.label.clone(),
-                category: a.category.clone(),
-                visible_when: None,
-            })
-            .collect();
-        Some(DeviceCapability::Action(actions))
+        self.controls.actions_wire()
     }
 }
 
@@ -1366,6 +1417,86 @@ mod tests {
             .collect();
         assert_eq!(kinds.len(), 3, "rgb + fan + sensor");
         assert_eq!(dev.fan_channel_id(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chain_advertises_controller_and_chain() {
+        let src = r#"return {
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+            transports = { hid = { report_size = 8 } },
+            chain = { channels = { { id = "c1", name = "Port 1", max_leds = 30 } } },
+        }"#;
+        let manifest = super::super::parse_manifest(src, Path::new("chain.lua")).unwrap();
+        let dev = hid_device("c-0", &manifest, Arc::new(MockTransport::empty()));
+        let caps = dev.capabilities();
+        assert!(caps
+            .iter()
+            .any(|c| matches!(c, CapabilityRef::Controller(_))));
+        assert!(caps.iter().any(|c| matches!(c, CapabilityRef::Chain(_))));
+    }
+
+    #[test]
+    fn device_only_advertises_no_capabilities() {
+        let src = r#"return {
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+        }"#;
+        let manifest = super::super::parse_manifest(src, Path::new("bare.lua")).unwrap();
+        let dev = LuaDevice::device_only("d-0".into(), &manifest, &manifest.devices[0]);
+        assert!(dev.capabilities().is_empty());
+    }
+
+    #[test]
+    fn controls_wire_and_validate_round_trip() {
+        let src = r#"return {
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+            choice = { choices = { { key = "mode", label = "Mode",
+                options = { { id = "a", label = "A" }, { id = "b", label = "B" } }, default = 0 } } },
+            range = { ranges = { { key = "hz", label = "Hz", min = 100, max = 1000, default = 500 } } },
+            boolean = { booleans = { { key = "snap", label = "Angle Snap", category = "Mouse" } } },
+            action = { actions = { { key = "cal", label = "Calibrate" } } },
+        }"#;
+        let m = super::super::parse_manifest(src, Path::new("controls.lua")).unwrap();
+        let controls = Controls::from_manifest(&m);
+
+        // Empty groups yield no wire capability.
+        assert!(Controls::default().choices_wire().is_none());
+        assert!(Controls::default().ranges_wire().is_none());
+        assert!(Controls::default().actions_wire().is_none());
+
+        // Choice: cache override shows through; bad key/index rejected.
+        controls.record_choice("mode", 1).unwrap();
+        let Some(DeviceCapability::Choice(choices)) = controls.choices_wire() else {
+            panic!("expected choice capability");
+        };
+        assert_eq!(choices[0].selected, 1);
+        assert!(controls.record_choice("mode", 2).is_err());
+        assert!(controls.record_choice("nope", 0).is_err());
+
+        // Range: value clamps to declared bounds; bad key rejected.
+        assert_eq!(controls.record_range("hz", 5000).unwrap(), 1000);
+        assert_eq!(controls.record_range("hz", 0).unwrap(), 100);
+        assert!(controls.record_range("nope", 0).is_err());
+        let Some(DeviceCapability::Range(ranges)) = controls.ranges_wire() else {
+            panic!("expected range capability");
+        };
+        assert_eq!(ranges[0].value, 100, "last recorded value wins");
+
+        // Boolean backfill fills empty label/category from the manifest decl.
+        let mut live = vec![Boolean {
+            key: "snap".into(),
+            value: true,
+            label: String::new(),
+            read_only: false,
+            category: String::new(),
+            visible_when: None,
+        }];
+        controls.backfill_booleans(&mut live);
+        assert_eq!(live[0].label, "Angle Snap");
+        assert_eq!(live[0].category, "Mouse");
+
+        // Action existence gate.
+        assert!(controls.has_action("cal"));
+        assert!(!controls.has_action("nope"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
