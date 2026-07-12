@@ -27,6 +27,20 @@ pub trait Controller: Send + Sync {
         vec![]
     }
 
+    /// Re-enumerate a live controller's children and diff against the ids in
+    /// `existing`: returns `(added, gone)` where `added` are freshly-built child
+    /// devices for controllers not already registered, and `gone` are ids in
+    /// `existing` the controller no longer reports. Survivors are left untouched
+    /// so engines keep stable id lookups (no flicker). `Err` means the backing
+    /// connection dropped mid-enumerate — the caller should mark the device
+    /// offline. Default no-op for controllers without a re-enumerable backend.
+    async fn resync_children(
+        &self,
+        _existing: &std::collections::HashSet<String>,
+    ) -> Result<(Vec<Arc<dyn Device>>, Vec<String>)> {
+        Ok((vec![], vec![]))
+    }
+
     async fn to_wire(&self) -> Option<DeviceCapability> {
         None
     }

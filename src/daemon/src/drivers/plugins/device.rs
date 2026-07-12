@@ -33,7 +33,7 @@ use super::manifest::{
 };
 use super::transport::PluginIo;
 use super::worker::{DetectedController, DevMatch, InitLcd, InitZone, PluginHandle};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Host-side DPI step-cycle state (the plugin only writes the chosen value).
 struct DpiState {
@@ -274,6 +274,11 @@ pub struct LuaDevice {
     /// For integration roots only: the manifest each controller child is
     /// synthesized from (`child_manifest_for`).
     root_manifest: Option<Arc<PluginManifest>>,
+    /// Integration liveness, shared by a root and all its children (one socket
+    /// pool → one flag). `None` for every non-integration device (always live).
+    /// Flipped in `track()` on each apply/write/set_duty/sensor result: a failing
+    /// call greys the whole integration, a success self-heals a transient blip.
+    liveness: Option<Arc<AtomicBool>>,
 
     /// Capability sections the manifest declared, in advertised order. Drives
     /// `capabilities()` (chain also implies `Controller`; integration adds one).
@@ -401,6 +406,7 @@ impl LuaDevice {
         );
         dev.integration_child_worker = Some(child_worker);
         dev.root_manifest = Some(Arc::new(manifest.clone()));
+        dev.liveness = Some(Arc::new(AtomicBool::new(true)));
         dev
     }
 
@@ -421,6 +427,7 @@ impl LuaDevice {
         granted: Vec<Permission>,
         config: HashMap<String, String>,
         notify: Weak<crate::state::AppState>,
+        liveness: Option<Arc<AtomicBool>>,
     ) -> Self {
         let dev_match = DevMatch {
             transport: "tcp".to_owned(),
@@ -432,6 +439,7 @@ impl LuaDevice {
         );
         dev.name = name;
         dev.vendor = vendor;
+        dev.liveness = liveness;
         dev
     }
 
@@ -521,6 +529,7 @@ impl LuaDevice {
             transport,
             integration_child_worker: None,
             root_manifest: None,
+            liveness: None,
             caps: declared_caps(manifest),
             lcd_descriptor: OnceLock::new(),
             lcd_slot: LcdStateSlot::default(),
@@ -612,6 +621,13 @@ impl LuaDevice {
     /// fan duty, sensor poll) otherwise only log the failure, so a broken plugin
     /// is invisible — this turns the first failure of an episode into one toast.
     async fn track<T>(&self, result: Result<T>) -> Result<T> {
+        // Flip integration liveness on every tracked call (shared root/child
+        // flag): a failing write greys the whole integration so engines stop
+        // hammering the dead socket; a success self-heals a transient blip. Done
+        // before the notify upgrade so it stands even when `AppState` is gone.
+        if let Some(l) = &self.liveness {
+            l.store(result.is_ok(), Ordering::Relaxed);
+        }
         let Some(app) = self.notify.upgrade() else {
             return result;
         };
@@ -699,6 +715,16 @@ impl Device for LuaDevice {
 
     fn owning_plugin_id(&self) -> Option<String> {
         Some(self.plugin_id.clone())
+    }
+
+    fn is_live(&self) -> bool {
+        self.liveness
+            .as_ref()
+            .map_or(true, |l| l.load(Ordering::Relaxed))
+    }
+
+    async fn wire_device_connected(&self) -> bool {
+        self.is_live()
     }
 
     async fn initialize(&self) -> Result<bool> {
@@ -900,6 +926,64 @@ impl Controller for LuaDevice {
         }
         self.discover_chain_accessories().await
     }
+
+    /// Re-enumerate the integration's controllers on the live root worker and
+    /// diff against `existing`: build only controllers whose child id isn't
+    /// already registered, and report ids in `existing` the server no longer
+    /// reports. Survivors are untouched → engines keep stable id lookups (no
+    /// flicker). `Err` (enumerate failed) greys this integration and is
+    /// surfaced so the monitor can broadcast the drop.
+    async fn resync_children(
+        &self,
+        existing: &HashSet<String>,
+    ) -> Result<(Vec<Arc<dyn Device>>, Vec<String>)> {
+        if self.plugin_type != PluginKind::Integration {
+            return Ok((vec![], vec![]));
+        }
+        let detected = match self.worker()?.enumerate_controllers().await {
+            Ok(d) => d,
+            Err(e) => {
+                if let Some(l) = &self.liveness {
+                    l.store(false, Ordering::Relaxed);
+                }
+                return Err(e);
+            }
+        };
+        let Some(ctx) = self.child_build_ctx() else {
+            anyhow::bail!("integration root missing child-build context");
+        };
+        let live_ids: HashSet<String> = detected
+            .iter()
+            .map(|c| format!("{}_ctrl_{}", self.id, c.index))
+            .collect();
+        let mut added = Vec::new();
+        for controller in &detected {
+            let child_id = format!("{}_ctrl_{}", self.id, controller.index);
+            if existing.contains(&child_id) {
+                continue;
+            }
+            if let Some(child) = self.build_child(controller, &ctx).await {
+                added.push(child);
+            }
+        }
+        let gone: Vec<String> = existing
+            .iter()
+            .filter(|id| !live_ids.contains(*id))
+            .cloned()
+            .collect();
+        Ok((added, gone))
+    }
+}
+
+/// Shared inputs every integration child build needs. Gathered once from the
+/// root (granted permissions + resolved config looked up on the root's plugin)
+/// and reused for each controller by `build_child`.
+struct ChildBuildCtx {
+    factory: ChildWorkerFactory,
+    root_manifest: Arc<PluginManifest>,
+    handle: tokio::runtime::Handle,
+    granted: Vec<Permission>,
+    config: HashMap<String, String>,
 }
 
 impl LuaDevice {
@@ -973,6 +1057,22 @@ impl LuaDevice {
                 return Vec::new();
             }
         };
+        let Some(ctx) = self.child_build_ctx() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for controller in &detected {
+            if let Some(child) = self.build_child(controller, &ctx).await {
+                out.push(child);
+            }
+        }
+        out
+    }
+
+    /// Gather the shared inputs `build_child` needs (child-worker factory, root
+    /// manifest, runtime handle, granted permissions + resolved config). `None`
+    /// when the integration root is missing its factory/manifest — a daemon bug.
+    fn child_build_ctx(&self) -> Option<ChildBuildCtx> {
         let (Some(factory), Some(root_manifest)) = (
             self.integration_child_worker.clone(),
             self.root_manifest.clone(),
@@ -981,7 +1081,7 @@ impl LuaDevice {
                 "plugin '{}': integration root missing child-worker factory or manifest — this is a daemon bug",
                 self.plugin_id
             );
-            return Vec::new();
+            return None;
         };
         let handle = tokio::runtime::Handle::current();
         let (granted, config) = match self.notify.upgrade() {
@@ -996,68 +1096,83 @@ impl LuaDevice {
             }
             None => (Vec::new(), HashMap::new()),
         };
+        Some(ChildBuildCtx {
+            factory,
+            root_manifest,
+            handle,
+            granted,
+            config,
+        })
+    }
 
-        let mut out = Vec::new();
-        for controller in detected {
-            // Open a fresh connection for this controller. The connect can block
-            // for the transport's timeout, so run it off the runtime.
-            let factory = factory.clone();
-            let index = controller.index;
-            let transport = match tokio::task::spawn_blocking(move || factory(index)).await {
-                Ok(Ok(t)) => t,
-                Ok(Err(e)) => {
-                    log::warn!(
-                        "plugin '{}' controller {} connect failed: {e:#}",
-                        self.plugin_id,
-                        controller.index
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    log::warn!(
-                        "plugin '{}' controller {} connect task panicked: {e}",
-                        self.plugin_id,
-                        controller.index
-                    );
-                    continue;
-                }
-            };
-            let child_manifest = child_manifest_for(&root_manifest, &controller);
-            // `new_cyclic` so a controller that itself declares `chain` can hand
-            // its accessories a `FanHub` back-reference (nested chain).
-            let child = Arc::new_cyclic(|weak| {
-                let mut d = LuaDevice::integration_child(
-                    format!("{}_ctrl_{}", self.id, controller.index),
-                    controller.name.clone(),
-                    self.vendor.clone(),
-                    &child_manifest,
-                    controller.index,
-                    transport,
-                    handle.clone(),
-                    granted.clone(),
-                    config.clone(),
-                    self.notify.clone(),
-                );
-                d.set_self_ref(weak.clone());
-                d
-            });
-            if child_manifest.chain.is_some() {
-                let adapter: Arc<dyn ChainAdapter> = child.clone();
-                let host = ChainHost::new(adapter);
-                child.install_chain_host(host);
-            }
-            if let Err(e) = child.initialize().await {
+    /// Build one integration controller as a full `LuaDevice` child: open a
+    /// fresh pool slot, synthesize the child manifest from the enumerated
+    /// controller, install a chain host if it declares `chain`, and initialize
+    /// it. The child shares the root's liveness flag. `None` on connect/init
+    /// failure (logged). Shared by first-time discovery and `resync_children`.
+    async fn build_child(
+        &self,
+        controller: &DetectedController,
+        ctx: &ChildBuildCtx,
+    ) -> Option<Arc<dyn Device>> {
+        // Open a fresh connection for this controller. The connect can block for
+        // the transport's timeout, so run it off the runtime.
+        let factory = ctx.factory.clone();
+        let index = controller.index;
+        let transport = match tokio::task::spawn_blocking(move || factory(index)).await {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
                 log::warn!(
-                    "plugin '{}' controller {} init failed: {e:#}",
+                    "plugin '{}' controller {} connect failed: {e:#}",
                     self.plugin_id,
                     controller.index
                 );
-                child.close().await;
-                continue;
+                return None;
             }
-            out.push(child as Arc<dyn Device>);
+            Err(e) => {
+                log::warn!(
+                    "plugin '{}' controller {} connect task panicked: {e}",
+                    self.plugin_id,
+                    controller.index
+                );
+                return None;
+            }
+        };
+        let child_manifest = child_manifest_for(&ctx.root_manifest, controller);
+        // `new_cyclic` so a controller that itself declares `chain` can hand its
+        // accessories a `FanHub` back-reference (nested chain).
+        let child = Arc::new_cyclic(|weak| {
+            let mut d = LuaDevice::integration_child(
+                format!("{}_ctrl_{}", self.id, controller.index),
+                controller.name.clone(),
+                self.vendor.clone(),
+                &child_manifest,
+                controller.index,
+                transport,
+                ctx.handle.clone(),
+                ctx.granted.clone(),
+                ctx.config.clone(),
+                self.notify.clone(),
+                self.liveness.clone(),
+            );
+            d.set_self_ref(weak.clone());
+            d
+        });
+        if child_manifest.chain.is_some() {
+            let adapter: Arc<dyn ChainAdapter> = child.clone();
+            let host = ChainHost::new(adapter);
+            child.install_chain_host(host);
         }
-        out
+        if let Err(e) = child.initialize().await {
+            log::warn!(
+                "plugin '{}' controller {} init failed: {e:#}",
+                self.plugin_id,
+                controller.index
+            );
+            child.close().await;
+            return None;
+        }
+        Some(child as Arc<dyn Device>)
     }
 }
 

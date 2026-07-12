@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use halod_shared::types::Permission;
 
 use crate::registry::discovery::{DiscoveryHandle, TransportScanner};
 use crate::registry::usecases::registration::register_device_and_children;
@@ -62,6 +63,21 @@ fn placeholder_handle<'a>() -> DiscoveryHandle<'a> {
     }
 }
 
+/// Open one fresh `tcp` connection to the server this integration's config
+/// declares. A real connect blocks for the transport's timeout, so callers run
+/// it off the async runtime (`spawn_blocking`). Shared by first-time discovery
+/// (`build_and_register`) and the reconnect watcher's liveness probe.
+pub(super) fn open_probe(
+    manifest: &PluginManifest,
+    config: &std::collections::HashMap<String, String>,
+    granted: &[Permission],
+) -> Result<PluginIo> {
+    match super::transport::descriptor_for("tcp") {
+        Some(d) => (d.open)(manifest, &placeholder_handle(), config, granted),
+        None => anyhow::bail!("integration plugin: no 'tcp' transport backend registered"),
+    }
+}
+
 async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         log::warn!(
@@ -86,15 +102,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
     let open_config = config.clone();
     let open_granted = granted.clone();
     let open_transport: Arc<dyn Fn() -> Result<PluginIo> + Send + Sync> =
-        Arc::new(move || match super::transport::descriptor_for("tcp") {
-            Some(d) => (d.open)(
-                &open_manifest,
-                &placeholder_handle(),
-                &open_config,
-                &open_granted,
-            ),
-            None => anyhow::bail!("integration plugin: no 'tcp' transport backend registered"),
-        });
+        Arc::new(move || open_probe(&open_manifest, &open_config, &open_granted));
 
     // Drive every controller over the *one* root connection: a slot-shared
     // `Transport` serialises each controller's frame write behind the same
