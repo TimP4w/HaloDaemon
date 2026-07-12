@@ -91,8 +91,9 @@ impl PluginEffectHandle {
         granted: Vec<Permission>,
         config: HashMap<String, String>,
     ) -> Self {
+        // Unbounded: request() awaits each reply before re-sending, so the queue is self-bounded.
         let (tx, rx) = mpsc::unbounded_channel();
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("halod-effect".into())
             .spawn(move || {
                 if let Err(e) =
@@ -101,7 +102,10 @@ impl PluginEffectHandle {
                     log::error!("effect worker stopped: {e:#}");
                 }
             })
-            .expect("spawn effect worker thread");
+        {
+            // Dropping rx here makes the handle's sends fail gracefully instead of crashing.
+            log::error!("failed to spawn effect worker thread: {e}");
+        }
         Self { tx }
     }
 

@@ -39,7 +39,7 @@ pub use worker::run_pre_scan;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use halod_shared::types::{Animation, EffectParamValue, Permission, PluginInfo, PluginKind};
 
@@ -102,17 +102,34 @@ struct PluginState {
 static STATE: LazyLock<RwLock<Arc<PluginState>>> =
     LazyLock::new(|| RwLock::new(Arc::new(PluginState::default())));
 
+/// Recover the guard if a panicked plugin poisoned the lock, so one bad plugin
+/// can't cascade into a daemon crash. Safe here: the guarded data stays
+/// structurally consistent even if a mutator panicked mid-update.
+fn read_recover<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|e| {
+        log::warn!("recovered poisoned plugin lock");
+        e.into_inner()
+    })
+}
+
+fn write_recover<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|e| {
+        log::warn!("recovered poisoned plugin lock");
+        e.into_inner()
+    })
+}
+
 /// The current registry snapshot. The lock is held only for the `Arc` clone,
 /// never across the caller's use of the data — so re-entrant reads can't deadlock.
 fn snapshot() -> Arc<PluginState> {
-    STATE.read().expect("plugin state poisoned").clone()
+    read_recover(&STATE).clone()
 }
 
 /// Swap in a new snapshot by applying `f` to a clone of the current one. Held
 /// under the write lock so concurrent mutators can't lose each other's edits;
 /// `f` only mutates fields (never re-locks), so it cannot deadlock.
 fn update(f: impl FnOnce(&mut PluginState)) {
-    let mut guard = STATE.write().expect("plugin state poisoned");
+    let mut guard = write_recover(&STATE);
     let mut next = (**guard).clone();
     f(&mut next);
     *guard = Arc::new(next);
@@ -304,7 +321,7 @@ static SECRET_STORE: RwLock<Option<Arc<dyn crate::secrets::SecretStore>>> = RwLo
 /// Point the process-wide secret-store reference at `store` (from
 /// `AppState::secret_store`).
 pub fn set_secret_store(store: Arc<dyn crate::secrets::SecretStore>) {
-    *SECRET_STORE.write().expect("secret store poisoned") = Some(store);
+    *write_recover(&SECRET_STORE) = Some(store);
 }
 
 /// A plugin's full resolved config for its Lua VM: `config_for` plus, only
@@ -316,7 +333,7 @@ pub fn resolved_config_for(plugin_id: &str, granted: &[Permission]) -> HashMap<S
     if !granted.contains(&Permission::SecureStorage) {
         return config;
     }
-    let Some(store) = SECRET_STORE.read().ok().and_then(|g| g.clone()) else {
+    let Some(store) = read_recover(&SECRET_STORE).clone() else {
         return config;
     };
     for key in secure_config_keys_for(plugin_id) {
@@ -398,9 +415,7 @@ static NOTIFIED: RwLock<Option<HashSet<String>>> = RwLock::new(None);
 /// GUI is already showing its own consent modal (a manual "Add plugin"
 /// import), so the user isn't told about it twice.
 pub fn suppress_permission_notice(plugin_id: &str) {
-    NOTIFIED
-        .write()
-        .expect("plugin notified set poisoned")
+    write_recover(&NOTIFIED)
         .get_or_insert_with(HashSet::new)
         .insert(plugin_id.to_owned());
 }
@@ -446,7 +461,7 @@ fn ungranted_in(
 /// every returned plugin as notified so a later rescan won't repeat it.
 pub fn take_newly_ungranted_plugins() -> Vec<(String, UngrantedReason)> {
     let state = snapshot();
-    let mut guard = NOTIFIED.write().expect("plugin notified set poisoned");
+    let mut guard = write_recover(&NOTIFIED);
     let notified = guard.get_or_insert_with(HashSet::new);
     ungranted_in(&state.manifests, notified)
 }
@@ -594,11 +609,7 @@ pub struct PluginLoadWarning {
 /// Every load warning recorded during the most recent [`load_all_with_repos`],
 /// draining the set so a later poll doesn't repeat it.
 pub fn take_plugin_load_warnings() -> Vec<PluginLoadWarning> {
-    std::mem::take(
-        &mut LOAD_WARNINGS
-            .write()
-            .expect("plugin load warnings poisoned"),
-    )
+    std::mem::take(&mut write_recover(&LOAD_WARNINGS))
 }
 
 /// Parse `dir` as one plugin directory and push it into `out`, skipping (never failing) a bad manifest.
@@ -610,14 +621,11 @@ fn try_load_plugin_dir(dir: &Path, out: &mut Vec<PluginManifest>) {
         Ok(m) if out.iter().any(|e| e.plugin_id == m.plugin_id) => {
             let reason = format!("id '{}' is already claimed by another source", m.plugin_id);
             log::warn!("Ignoring plugin {}: {reason}", dir.display());
-            LOAD_WARNINGS
-                .write()
-                .expect("plugin load warnings poisoned")
-                .push(PluginLoadWarning {
-                    plugin_id: m.plugin_id,
-                    path: dir.display().to_string(),
-                    reason,
-                });
+            write_recover(&LOAD_WARNINGS).push(PluginLoadWarning {
+                plugin_id: m.plugin_id,
+                path: dir.display().to_string(),
+                reason,
+            });
         }
         Ok(m) => {
             log::info!(
@@ -684,10 +692,7 @@ pub fn load_all(dir: &Path) {
 /// whichever source provides it first and no later source can shadow it (see
 /// [`try_load_plugin_dir`]'s collision handling).
 pub fn load_all_with_repos(dir: &Path, repo_dirs: &[std::path::PathBuf]) {
-    LOAD_WARNINGS
-        .write()
-        .expect("plugin load warnings poisoned")
-        .clear();
+    write_recover(&LOAD_WARNINGS).clear();
     let mut manifests = Vec::new();
     let is_official = |d: &std::path::PathBuf| {
         d.file_name().and_then(|n| n.to_str()) == Some(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)

@@ -79,7 +79,12 @@ impl UserData for ByteBuf {
             ($ty:ty, $w:expr, $get:literal, $from:ident, $set:literal, $to:ident) => {
                 methods.add_method($get, |_, this, i: usize| {
                     this.check(i, $w)?;
-                    Ok(<$ty>::$from(this.data[i..i + $w].try_into().unwrap()))
+                    // check() above guarantees the slice is exactly $w bytes.
+                    Ok(<$ty>::$from(
+                        this.data[i..i + $w]
+                            .try_into()
+                            .expect("checked slice is exactly the accessor width"),
+                    ))
                 });
                 methods.add_method_mut($set, |_, this, (i, v): (usize, $ty)| {
                     this.check(i, $w)?;
@@ -296,6 +301,37 @@ mod tests {
             );
             let got: u32 = lua().load(&script).eval().unwrap();
             prop_assert_eq!(got, value);
+        }
+
+        #[test]
+        fn u16_be_round_trip(value: u16, pad in 0usize..8) {
+            let script = format!(
+                "local b = halod.buffer({}); b:set_u16_be(0, {value}); return b:get_u16_be(0)",
+                2 + pad
+            );
+            let got: u16 = lua().load(&script).eval().unwrap();
+            prop_assert_eq!(got, value);
+        }
+
+        #[test]
+        fn u32_le_round_trip(value: u32, pad in 0usize..8) {
+            let script = format!(
+                "local b = halod.buffer({}); b:set_u32_le(0, {value}); return b:get_u32_le(0)",
+                4 + pad
+            );
+            let got: u32 = lua().load(&script).eval().unwrap();
+            prop_assert_eq!(got, value);
+        }
+
+        // A read at any offset succeeds iff it fits, and never panics — the
+        // regression guard for the width-conversion `expect` in `int_accessors!`.
+        #[test]
+        fn read_at_any_offset_matches_bounds(len in 0usize..16, i in 0usize..64) {
+            for (getter, w) in [("get_u16_le", 2usize), ("get_u16_be", 2), ("get_u32_le", 4), ("get_u32_be", 4)] {
+                let script = format!("return halod.buffer({len}):{getter}({i})");
+                let got = lua().load(&script).eval::<u32>();
+                prop_assert_eq!(got.is_ok(), i + w <= len, "{} at {} in {}", getter, i, len);
+            }
         }
     }
 }

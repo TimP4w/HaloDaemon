@@ -256,8 +256,9 @@ impl PluginHandle {
         config: HashMap<String, String>,
         handle: Handle,
     ) -> Self {
+        // Unbounded: run() awaits each reply before re-sending, so the queue is self-bounded.
         let (tx, rx) = mpsc::unbounded_channel();
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("halod-plugin".into())
             .spawn(move || {
                 if let Err(e) =
@@ -266,7 +267,10 @@ impl PluginHandle {
                     log::error!("plugin worker stopped: {e:#}");
                 }
             })
-            .expect("spawn plugin worker thread");
+        {
+            // Dropping rx here makes the handle's sends fail gracefully instead of crashing.
+            log::error!("failed to spawn plugin worker thread: {e}");
+        }
         Self { tx }
     }
 
