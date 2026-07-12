@@ -86,6 +86,47 @@ fn device_id_falls_back_to_index_without_serial() {
 }
 
 #[test]
+fn activation_status_reports_disabled_needs_consent_and_ready() {
+    // The single activation gate distinguishes the three states, and only yields a
+    // `ReadyPlugin` once the plugin is enabled, granted, and content-acknowledged.
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+    let secrets = FakeSecretStore::default();
+    let src = r#"
+        return {
+          devices = { { transport = "hid", vid = 0xCCCC, pid = 0xDDDD, vendor = "Acme", model = "K2" } },
+          permissions = { "network" },
+        }
+    "#;
+    let m = parse_manifest(src, Path::new("needs_network.lua")).unwrap();
+
+    app.registry.set_disabled(&["needs_network".to_string()]);
+    assert!(matches!(
+        app.registry.activation_status(&secrets, &m),
+        Activation::Disabled
+    ));
+
+    app.registry.set_disabled(&[]);
+    app.registry.set_granted(&HashMap::new());
+    assert!(matches!(
+        app.registry.activation_status(&secrets, &m),
+        Activation::NeedsConsent
+    ));
+
+    app.registry.set_granted(&HashMap::from([(
+        "needs_network".to_string(),
+        vec![Permission::Network],
+    )]));
+    acknowledge(&app.registry, std::slice::from_ref(&m));
+    assert!(matches!(
+        app.registry.activation_status(&secrets, &m),
+        Activation::Ready(_)
+    ));
+
+    app.registry.set_granted(&HashMap::new());
+    app.registry.set_acknowledged(&HashMap::new());
+}
+
+#[test]
 fn granted_permission_is_pinned_to_script_content() {
     // A permissioned plugin activates only while its granted content pin
     // matches the current script; editing the script revokes consent.
@@ -569,6 +610,57 @@ fn effect_entries_for_namespaces_ids_and_carries_kind() {
 #[test]
 fn effect_entries_for_empty_for_a_device_only_plugin() {
     assert!(effect_entries_for(&manifest()).is_empty());
+}
+
+#[test]
+fn logo_rejection_blocks_traversal_names_before_any_read() {
+    // A `logo:` that escapes the assets dir is rejected on the name alone, so it
+    // never reads (and leaks the size/existence of) an arbitrary root-readable file.
+    let dir = Path::new("/nonexistent/plugin/dir");
+    assert!(super::super::logo_rejection(dir, "../../../../etc/shadow").is_some());
+    assert!(super::super::logo_rejection(dir, "/etc/shadow").is_some());
+    assert!(super::super::logo_rejection(dir, "a/b.png").is_some());
+    // A well-formed name whose file is simply absent is not a rejection.
+    assert!(super::super::logo_rejection(dir, "logo.png").is_none());
+}
+
+#[test]
+fn effect_activation_honours_the_consent_gate() {
+    // An effect plugin with a permission must clear the same consent gate as a
+    // device: granted *and* content-acknowledged. Editing the script (a stale
+    // pin) hides its effects until re-acknowledged — matching the device path,
+    // so effects can't spawn new code under an old grant.
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+    let src = r#"return {
+        type = "effect",
+        identity = { name = "FX" },
+        permissions = { "network" },
+        effects = { { kind = "pixmap", id = "plasma", name = "Plasma" } },
+    }"#;
+    let manifests = vec![parse_manifest(src, Path::new("fx.lua")).unwrap()];
+    set_registry(&app.registry, manifests.clone());
+    app.registry.set_disabled(&[]);
+    app.registry.set_granted(&HashMap::from([(
+        "fx".to_string(),
+        vec![Permission::Network],
+    )]));
+
+    // Granted but not acknowledged → effect hidden.
+    app.registry.set_acknowledged(&HashMap::new());
+    assert!(app.registry.effect_entry("fx:plasma").is_none());
+    assert!(app.registry.pixmap_effect_descriptors().is_empty());
+
+    // Acknowledged current content → visible.
+    acknowledge(&app.registry, &manifests);
+    assert!(app.registry.effect_entry("fx:plasma").is_some());
+    assert_eq!(app.registry.pixmap_effect_descriptors().len(), 1);
+
+    // Since-edited script (stale pin) → hidden again.
+    app.registry
+        .set_acknowledged(&HashMap::from([("fx".to_string(), "deadbeef".to_string())]));
+    assert!(app.registry.effect_entry("fx:plasma").is_none());
+
+    set_registry(&app.registry, Vec::new());
 }
 
 #[test]

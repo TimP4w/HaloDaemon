@@ -66,14 +66,23 @@ impl TcpTransport {
     pub fn connect_blocking(host: &str, port: u16, timeout_ms: u64) -> Result<Self> {
         use std::net::ToSocketAddrs;
 
-        let timeout = resolve_timeout(timeout_ms);
         let addr = (host, port)
             .to_socket_addrs()
             .with_context(|| format!("resolving {host}:{port}"))?
             .next()
             .ok_or_else(|| anyhow::anyhow!("{host}:{port} resolved to no addresses"))?;
+        Self::connect_addr_blocking(addr, timeout_ms)
+    }
+
+    /// Blocking connect to an already-resolved [`SocketAddr`]. Callers that must
+    /// vet the destination IP (the plugin SSRF guard) resolve the hostname once,
+    /// check the address, and connect here — so the socket lands on exactly the
+    /// address that was vetted, with no second name resolution a DNS rebind could
+    /// redirect. Same runtime-registration contract as [`Self::connect_blocking`].
+    pub fn connect_addr_blocking(addr: std::net::SocketAddr, timeout_ms: u64) -> Result<Self> {
+        let timeout = resolve_timeout(timeout_ms);
         let std_stream = std::net::TcpStream::connect_timeout(&addr, timeout)
-            .with_context(|| format!("connecting to {host}:{port}"))?;
+            .with_context(|| format!("connecting to {addr}"))?;
         std_stream.set_nodelay(true).ok();
         std_stream
             .set_nonblocking(true)

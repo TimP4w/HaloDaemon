@@ -7,7 +7,7 @@ use halod_shared::types::{
     EffectParamDescriptor, NativeEffect, Permission, PluginConfigFieldKind, PluginKind,
     RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
 };
-use mlua::{DeserializeOptions, Lua, LuaSerdeExt};
+use mlua::{DeserializeOptions, LuaSerdeExt};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -560,7 +560,9 @@ where
 impl DeviceSpec {
     /// Delegates to `self.transport`'s registered backend (unknown kind → never).
     pub fn matches(&self, handle: &DiscoveryHandle<'_>) -> bool {
-        descriptor_for(&self.transport).is_some_and(|d| (d.matches)(self, handle))
+        descriptor_for(&self.transport)
+            .and_then(|d| d.matches)
+            .is_some_and(|m| m(self, handle))
     }
 
     /// The SMBus bus family this spec targets, if it is an SMBus spec.
@@ -875,11 +877,6 @@ impl PluginManifest {
         labels
     }
 
-    /// Look up a declared accessory by id (for `discover_children`).
-    pub fn accessory(&self, id: u8) -> Option<&AccessoryManifest> {
-        self.chain.as_ref()?.accessories.iter().find(|a| a.id == id)
-    }
-
     /// Every user-editable config field this plugin declares (empty if none).
     pub fn config_fields(&self) -> &[ConfigFieldDef] {
         self.config
@@ -940,13 +937,16 @@ fn eval_manifest_table(source: &str) -> Result<PluginManifest> {
 }
 
 fn eval_manifest_table_inner(source: &str) -> Result<PluginManifest> {
-    let lua = Lua::new();
-    // Reading the manifest evaluates the whole script, so strip the same escape
-    // hatches the runtime sandbox does and bound its work — a dropped-in file
-    // must not run `os`/`io`/`require` or hang the daemon before consent.
-    super::sandbox::strip_escape_hatches(&lua).map_err(|e| anyhow!("sandbox setup failed: {e}"))?;
-    let _ = lua.set_memory_limit(MANIFEST_MEMORY_LIMIT);
-    super::sandbox::install_instruction_budget_hook(&lua, MANIFEST_INSTRUCTION_BUDGET);
+    // Reading the manifest evaluates the whole script, so go through the shared VM
+    // chokepoint with `StripOnly` — same escape-hatch stripping, memory cap, and
+    // instruction budget as the runtime sandbox, but no `halod` runtime surface: a
+    // dropped-in file must not run `os`/`io`/`require` or hang the daemon before consent.
+    let (lua, _budget) = super::sandbox::bootstrap_vm(
+        super::sandbox::InjectSurface::StripOnly,
+        MANIFEST_MEMORY_LIMIT,
+        MANIFEST_INSTRUCTION_BUDGET,
+    )
+    .map_err(|e| anyhow!("sandbox setup failed: {e}"))?;
     let value: mlua::Value = lua
         .load(source)
         .eval()
@@ -959,8 +959,116 @@ fn eval_manifest_table_inner(source: &str) -> Result<PluginManifest> {
         .map_err(|e| anyhow!("manifest table is malformed: {e}"))
 }
 
+/// Upper bound on a plugin-declared LED count for one zone/accessory/channel.
+/// Plugins return these as `u32`; the daemon turns each into a native LED-position
+/// table and per-frame color buffer, so an unbounded value like `u32::MAX` drives a
+/// multi-gigabyte allocation in the root daemon. Rejected (not clamped) so a
+/// misdeclaring plugin fails loudly instead of silently truncating.
+pub const MAX_PLUGIN_LEDS: u32 = 4_096;
+
+/// Upper bound on a plugin-declared LCD panel dimension. Matches the image-decoder
+/// limit in [`crate::util::image`]; bounds the `width * height * 4` host buffers the
+/// LCD path allocates from a dynamically-reported panel size.
+pub const MAX_PLUGIN_LCD_DIM: u32 = 8_192;
+
+/// Upper bound on the number of RGB zones one device/controller may declare. Each
+/// zone's `led_count` is capped, but the daemon builds one native LED-position table
+/// *per zone* **after** the plugin VM's memory cap no longer applies, so an unbounded
+/// zone count multiplies `MAX_PLUGIN_LEDS` into a multi-gigabyte host allocation.
+pub const MAX_PLUGIN_ZONES: usize = 256;
+
+/// Upper bound on the number of controllers one integration may enumerate. Each
+/// controller becomes a child device with its own transport connection, VM, and
+/// worker thread, so an unbounded count is a memory/connection/thread-exhaustion
+/// vector (the deeper thread-ceiling / process-isolation fix is tracked as ARCH-R1).
+pub const MAX_PLUGIN_CONTROLLERS: usize = 256;
+
+/// Reject a plugin-declared LED count above [`MAX_PLUGIN_LEDS`]. `what` names the
+/// offending zone/accessory for the error.
+pub fn check_led_count(what: &str, led_count: u32) -> Result<()> {
+    if led_count > MAX_PLUGIN_LEDS {
+        bail!("'{what}' declares {led_count} LEDs, exceeding the {MAX_PLUGIN_LEDS} limit");
+    }
+    Ok(())
+}
+
+/// Reject a zone count above [`MAX_PLUGIN_ZONES`] — bounds the native LED-position
+/// tables the daemon builds per zone outside the plugin VM's memory cap.
+pub fn check_zone_count(n: usize) -> Result<()> {
+    if n > MAX_PLUGIN_ZONES {
+        bail!("declares {n} RGB zones, exceeding the {MAX_PLUGIN_ZONES} limit");
+    }
+    Ok(())
+}
+
+/// Reject plugin-declared LCD dimensions above [`MAX_PLUGIN_LCD_DIM`].
+pub fn check_lcd_dims(width: u32, height: u32) -> Result<()> {
+    if width > MAX_PLUGIN_LCD_DIM || height > MAX_PLUGIN_LCD_DIM {
+        bail!("LCD panel {width}x{height} exceeds the {MAX_PLUGIN_LCD_DIM} per-side limit");
+    }
+    Ok(())
+}
+
+/// Upper bound on the entry Lua source read from disk. The script is a manifest,
+/// not a data file; without a cap a symlinked/pathological `entry` (e.g.
+/// `/dev/zero`) would drive an unbounded `read_to_string`.
+const MAX_ENTRY_BYTES: u64 = 1024 * 1024;
+
+/// A plugin-package file (`plugin.yaml` / the entry Lua) must be a regular file no
+/// larger than `max`. Rejects a symlink (a manually-placed local plugin could point
+/// it at `/dev/zero` to hang the read or at a secret to leak its content via parse
+/// errors / the content hash — git/imported plugins are already symlink-rejected on
+/// copy) and caps the size before the read, all from one no-follow `stat`.
+fn check_package_file(path: &Path, max: u64) -> Result<()> {
+    let stat =
+        std::fs::symlink_metadata(path).with_context(|| format!("reading {}", path.display()))?;
+    if stat.file_type().is_symlink() {
+        bail!("{} must be a regular file, not a symlink", path.display());
+    }
+    if stat.len() > max {
+        bail!(
+            "{} is {} bytes, over the {max} byte limit",
+            path.display(),
+            stat.len()
+        );
+    }
+    Ok(())
+}
+
+/// The `entry` is joined onto the plugin dir and read, so it must be a relative
+/// path that stays inside it — reject an absolute path or any `..`/root component
+/// that `dir.join` would let escape to arbitrary files (`/etc/shadow`, `../../x`).
+fn validate_entry_path(entry: &str) -> Result<()> {
+    use std::path::Component;
+    let mut saw_normal = false;
+    for c in Path::new(entry).components() {
+        match c {
+            Component::Normal(_) => saw_normal = true,
+            Component::CurDir => {}
+            _ => {
+                bail!("plugin entry '{entry}' must be a relative path inside the plugin directory")
+            }
+        }
+    }
+    if !saw_normal {
+        bail!("plugin entry '{entry}' is empty");
+    }
+    Ok(())
+}
+
 /// Cross-field validation, gated by `plugin_type`.
 fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
+    if let Some(rgb) = &manifest.rgb {
+        check_zone_count(rgb.zones.len())?;
+    }
+    if let Some(chain) = &manifest.chain {
+        for ch in &chain.channels {
+            check_led_count(&ch.id, ch.max_leds)?;
+        }
+        for acc in &chain.accessories {
+            check_led_count(&acc.name, acc.led_count)?;
+        }
+    }
     match manifest.plugin_type {
         PluginKind::Device => {
             if manifest.devices.is_empty() {
@@ -971,7 +1079,11 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                     bail!("every device must declare a non-empty vendor and model");
                 }
                 match descriptor_for(&spec.transport) {
-                    Some(desc) => (desc.validate)(spec)?,
+                    Some(desc) => {
+                        if let Some(validate) = desc.validate {
+                            validate(spec)?;
+                        }
+                    }
                     None => bail!(
                         "unsupported device transport '{}' (known: {})",
                         spec.transport,
@@ -1004,8 +1116,30 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         }
     }
     // Only a `device` plugin may hold a usb_control endpoint open.
-    if manifest.transports.usb_control.is_some() && manifest.plugin_type != PluginKind::Device {
-        bail!("usb_control transport is only valid for a device plugin");
+    if let Some(usb) = &manifest.transports.usb_control {
+        if manifest.plugin_type != PluginKind::Device {
+            bail!("usb_control transport is only valid for a device plugin");
+        }
+        // The primary endpoint is the matched (consented) device; each *secondary*
+        // endpoint opens an arbitrary VID/PID off that device. `matches`/consent
+        // only gate the primary, so at least hold the secondaries to a validated,
+        // non-colliding, non-wildcard shape rather than opening them unchecked.
+        let mut seen = std::collections::HashSet::new();
+        for ep in &usb.endpoints {
+            validate_component("usb_control endpoint id", &ep.id)?;
+            if !seen.insert(&ep.id) {
+                bail!(
+                    "usb_control endpoint id '{}' is declared more than once",
+                    ep.id
+                );
+            }
+            if ep.vid == 0 || ep.pid == 0 {
+                bail!(
+                    "usb_control endpoint '{}' must declare a non-zero vid and pid",
+                    ep.id
+                );
+            }
+        }
     }
     // A tcp transport reaches the network, so the manifest must declare the
     // `network` permission — that's what drives the consent prompt and what the
@@ -1014,8 +1148,31 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     if manifest.transports.tcp.is_some() && !manifest.permissions.contains(&Permission::Network) {
         bail!("a tcp transport requires the 'network' permission to be declared");
     }
-    if manifest.effects.iter().any(|e| e.id.is_empty()) {
-        bail!("effect declares an empty id");
+    validate_component("plugin id", &manifest.plugin_id)?;
+    for e in &manifest.effects {
+        validate_component("effect id", &e.id)?;
+    }
+    for f in manifest.config_fields() {
+        validate_component("config field key", &f.key)?;
+    }
+    Ok(())
+}
+
+/// Charset an id/key must satisfy before it is concatenated into a namespaced
+/// identifier — the keyring account `{plugin_id}/{key}` and the effect catalog id
+/// `{plugin_id}:{effect_id}` (reparsed by stripping the `{plugin_id}:` prefix). A
+/// stray `:`/`/` could otherwise forge another plugin's namespace or make the
+/// catalog id ambiguous, so every component is pinned to `[A-Za-z0-9._-]` at the
+/// manifest — the point where each value is born.
+fn validate_component(what: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{what} is empty");
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        bail!("{what} '{value}' contains characters outside [A-Za-z0-9._-]");
     }
     Ok(())
 }
@@ -1049,6 +1206,7 @@ pub fn parse_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         .ok_or_else(|| anyhow!("plugin directory has no name: {}", dir.display()))?;
 
     let meta_path = dir.join("plugin.yaml");
+    check_package_file(&meta_path, MAX_ENTRY_BYTES)?;
     let manifest_bytes =
         std::fs::read(&meta_path).with_context(|| format!("reading {}", meta_path.display()))?;
     let meta: PluginMeta = serde_yaml::from_slice(&manifest_bytes)
@@ -1065,7 +1223,9 @@ pub fn parse_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         );
     }
 
+    validate_entry_path(&meta.entry)?;
     let entry_path = dir.join(&meta.entry);
+    check_package_file(&entry_path, MAX_ENTRY_BYTES)?;
     let source = std::fs::read_to_string(&entry_path)
         .with_context(|| format!("reading {}", entry_path.display()))?;
 
@@ -1141,6 +1301,88 @@ mod tests {
         assert_eq!(m.version(), "");
         assert_eq!(m.license(), "");
         assert_eq!(m.description(), "");
+    }
+
+    #[test]
+    fn led_and_lcd_caps_reject_oversize_declarations() {
+        assert!(check_led_count("z", MAX_PLUGIN_LEDS).is_ok());
+        assert!(check_led_count("z", MAX_PLUGIN_LEDS + 1).is_err());
+        assert!(check_led_count("z", u32::MAX).is_err());
+        assert!(check_lcd_dims(MAX_PLUGIN_LCD_DIM, MAX_PLUGIN_LCD_DIM).is_ok());
+        assert!(check_lcd_dims(MAX_PLUGIN_LCD_DIM + 1, 1).is_err());
+        assert!(check_lcd_dims(1, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn zone_count_cap_rejects_oversize_and_allows_boundary() {
+        assert!(check_zone_count(MAX_PLUGIN_ZONES).is_ok());
+        assert!(check_zone_count(MAX_PLUGIN_ZONES + 1).is_err());
+    }
+
+    #[test]
+    fn validate_manifest_rejects_too_many_static_rgb_zones() {
+        let zones = (0..MAX_PLUGIN_ZONES + 1)
+            .map(|i| format!(r#"{{ id = "z{i}", name = "Z{i}", topology = "ring", leds = {{}} }}"#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let src = format!(
+            r#"return {{
+              devices = {{ {{ transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" }} }},
+              rgb = {{ zones = {{ {zones} }} }},
+            }}"#
+        );
+        assert!(parse_manifest(&src, Path::new("zones.lua")).is_err());
+    }
+
+    #[test]
+    fn validate_manifest_rejects_oversize_chain_accessory() {
+        let src = format!(
+            r#"return {{
+              devices = {{ {{ transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" }} }},
+              chain = {{
+                channels = {{ {{ id = "c0", name = "C0", max_leds = 8 }} }},
+                accessories = {{ {{ id = 1, name = "Strip", led_count = {} }} }},
+              }},
+            }}"#,
+            u32::MAX
+        );
+        assert!(parse_manifest(&src, Path::new("chain.lua")).is_err());
+    }
+
+    #[test]
+    fn validate_entry_path_rejects_traversal_and_absolute() {
+        assert!(validate_entry_path("main.lua").is_ok());
+        assert!(validate_entry_path("sub/main.lua").is_ok());
+        assert!(validate_entry_path("./main.lua").is_ok());
+        assert!(validate_entry_path("../main.lua").is_err());
+        assert!(validate_entry_path("a/../../etc/passwd").is_err());
+        assert!(validate_entry_path("/etc/shadow").is_err());
+        assert!(validate_entry_path("").is_err());
+    }
+
+    #[test]
+    fn validate_component_pins_charset() {
+        assert!(validate_component("id", "abc_1.2-x").is_ok());
+        assert!(validate_component("id", "a:b").is_err());
+        assert!(validate_component("id", "a/b").is_err());
+        assert!(validate_component("id", "a b").is_err());
+        assert!(validate_component("id", "").is_err());
+    }
+
+    #[test]
+    fn validate_manifest_rejects_bad_usb_endpoints() {
+        let dup = r#"return {
+            devices = { { transport = "usb_control", vid = 1, pid = 2, vendor = "V", model = "M" } },
+            transports = { usb_control = { endpoints = {
+              { id = "e", vid = 3, pid = 4 }, { id = "e", vid = 5, pid = 6 } } } },
+        }"#;
+        assert!(parse_manifest(dup, Path::new("usb.lua")).is_err());
+
+        let zero = r#"return {
+            devices = { { transport = "usb_control", vid = 1, pid = 2, vendor = "V", model = "M" } },
+            transports = { usb_control = { endpoints = { { id = "e", vid = 0, pid = 4 } } } },
+        }"#;
+        assert!(parse_manifest(zero, Path::new("usb.lua")).is_err());
     }
 
     #[test]

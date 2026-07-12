@@ -19,7 +19,9 @@ use mlua::{Function, Lua, Table, Value};
 
 use crate::drivers::transports::Transport;
 use crate::drivers::{Metered, RgbCapability};
-use halod_shared::types::{RgbColor, RgbState, WriteRateLimit, WriteRateStatus};
+use std::collections::HashMap;
+
+use halod_shared::types::{EffectParamValue, RgbColor, RgbState, WriteRateLimit, WriteRateStatus};
 
 use super::device::LuaDevice;
 use super::manifest::{parse_manifest_from_dir, PluginManifest};
@@ -250,6 +252,7 @@ fn open_device(
         bus: spec.bus.clone(),
         addr: None,
         pid: spec.pid,
+        index: None,
     };
     let device = Arc::new(LuaDevice::with_transport(
         "plugin-test".to_owned(),
@@ -261,6 +264,11 @@ fn open_device(
             bulk: None,
         },
         handle.clone(),
+        // The harness grants every declared permission (so gated transports
+        // open), uses no config, and has no `AppState` to notify.
+        manifest.permissions.clone(),
+        std::collections::HashMap::new(),
+        std::sync::Weak::new(),
     ));
 
     let dev_table = lua.create_table().anyhow()?;
@@ -337,8 +345,30 @@ fn open_device(
     Ok(dev_table)
 }
 
-/// The only `RgbState` shape the harness builds today: `{ mode = "static",
-/// color = { r=.., g=.., b=.. } }`. Extend here as packages need more shapes.
+fn table_to_color(t: &Table) -> RgbColor {
+    RgbColor {
+        r: t.get("r").unwrap_or(0),
+        g: t.get("g").unwrap_or(0),
+        b: t.get("b").unwrap_or(0),
+    }
+}
+
+/// Map one Lua param value to an `EffectParamValue` (mirrors the untagged serde
+/// shape a native effect param uses): a `{r,g,b}` table is a color, otherwise a
+/// number/string/bool maps to the matching scalar.
+fn value_to_param(v: &Value) -> Option<EffectParamValue> {
+    match v {
+        Value::Table(t) => Some(EffectParamValue::Color(table_to_color(t))),
+        Value::Integer(i) => Some(EffectParamValue::Float(*i as f64)),
+        Value::Number(n) => Some(EffectParamValue::Float(*n)),
+        Value::String(s) => Some(EffectParamValue::Str(s.to_string_lossy().to_string())),
+        Value::Boolean(b) => Some(EffectParamValue::Bool(*b)),
+        _ => None,
+    }
+}
+
+/// The `RgbState` shapes the harness builds: `static`, `per_led`, and
+/// `native_effect`. Extend here as packages need more shapes.
 fn table_to_rgb_state(state: &Table) -> Result<RgbState> {
     let mode: String = state
         .get("mode")
@@ -351,12 +381,41 @@ fn table_to_rgb_state(state: &Table) -> Result<RgbState> {
                 .anyhow()
                 .context("static state needs a color")?;
             Ok(RgbState::Static {
-                color: RgbColor {
-                    r: color.get("r").unwrap_or(0),
-                    g: color.get("g").unwrap_or(0),
-                    b: color.get("b").unwrap_or(0),
-                },
+                color: table_to_color(&color),
             })
+        }
+        "per_led" => {
+            let zones_t: Table = state
+                .get("zones")
+                .anyhow()
+                .context("per_led state needs a zones table")?;
+            let mut zones = HashMap::new();
+            for pair in zones_t.pairs::<String, Table>() {
+                let (zone_id, leds_t) = pair.anyhow()?;
+                let mut leds = HashMap::new();
+                for led in leds_t.pairs::<String, Table>() {
+                    let (led_id, c) = led.anyhow()?;
+                    leds.insert(led_id, table_to_color(&c));
+                }
+                zones.insert(zone_id, leds);
+            }
+            Ok(RgbState::PerLed { zones })
+        }
+        "native_effect" => {
+            let id: String = state
+                .get("id")
+                .anyhow()
+                .context("native_effect state needs an id")?;
+            let mut params = HashMap::new();
+            if let Ok(params_t) = state.get::<Table>("params") {
+                for pair in params_t.pairs::<String, Value>() {
+                    let (key, v) = pair.anyhow()?;
+                    if let Some(pv) = value_to_param(&v) {
+                        params.insert(key, pv);
+                    }
+                }
+            }
+            Ok(RgbState::NativeEffect { id, params })
         }
         other => anyhow::bail!("plugin-test harness does not support state.mode = '{other}' yet"),
     }

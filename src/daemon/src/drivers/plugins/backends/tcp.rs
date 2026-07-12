@@ -7,36 +7,36 @@
 //! "tcp" }` spec (unsupported) simply never triggers rather than erroring.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
 use anyhow::{bail, Context, Result};
 use halod_shared::types::Permission;
 
-use crate::drivers::plugins::manifest::{DeviceSpec, PluginManifest};
+use crate::drivers::plugins::manifest::PluginManifest;
 use crate::drivers::plugins::transport::{PluginIo, PluginTransportDescriptor};
 use crate::drivers::transports::tcp::TcpTransport;
 use crate::registry::discovery::DiscoveryHandle;
 
-fn matches(_spec: &DeviceSpec, _handle: &DiscoveryHandle<'_>) -> bool {
-    false
-}
-
-/// Reject a host that resolves to a loopback/private/link-local/unspecified
-/// address unless the manifest opted in via `allow_private` — the SSRF guard
-/// keeping an integration off localhost admin services and the cloud metadata
-/// endpoint (`169.254.169.254`). Resolution failures fall through to the connect
-/// call, which will report them.
-fn reject_ssrf_host(host: &str, allow_private: bool) -> Result<()> {
+/// Resolve `host:port` **once** and return a single vetted [`SocketAddr`] to
+/// connect to — the caller connects to this exact address rather than re-passing
+/// the hostname, so a DNS rebind between check and connect can't redirect the
+/// socket (resolving twice is the classic SSRF TOCTOU). Unless the manifest opted
+/// in via `allow_private`, every resolved address must be routable: a name that
+/// resolves to *any* loopback/private/link-local address is rejected, keeping an
+/// integration off localhost admin services and the cloud metadata endpoint
+/// (`169.254.169.254`).
+fn resolve_vetted_addr(host: &str, port: u16, allow_private: bool) -> Result<SocketAddr> {
+    let addrs: Vec<SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("resolving tcp host '{host}'"))?
+        .collect();
+    let first = *addrs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("tcp host '{host}' resolved to no addresses"))?;
     if allow_private {
-        return Ok(());
+        return Ok(first);
     }
-    // Resolve every address the host maps to; a name that resolves to *any*
-    // blocked address is rejected (defeats DNS-rebinding to a public name).
-    let addrs = match (host, 0u16).to_socket_addrs() {
-        Ok(a) => a,
-        Err(_) => return Ok(()),
-    };
-    for sa in addrs {
+    for sa in &addrs {
         if is_blocked_ip(&sa.ip()) {
             bail!(
                 "tcp host '{host}' resolves to a non-routable address {} (set transports.tcp.allow_private to permit LAN/localhost targets)",
@@ -44,7 +44,7 @@ fn reject_ssrf_host(host: &str, allow_private: bool) -> Result<()> {
             );
         }
     }
-    Ok(())
+    Ok(first)
 }
 
 /// Address ranges an untrusted integration must not reach by default.
@@ -98,7 +98,6 @@ fn open(
             tcp.host_key
         );
     }
-    reject_ssrf_host(&host, tcp.allow_private)?;
     let port_str = config.get(&tcp.port_key).cloned().unwrap_or_default();
     let port: u16 = port_str.parse().with_context(|| {
         format!(
@@ -106,11 +105,12 @@ fn open(
             manifest.plugin_id, tcp.port_key
         )
     })?;
+    let addr = resolve_vetted_addr(&host, port, tcp.allow_private)?;
 
     let transport =
-        TcpTransport::connect_blocking(&host, port, tcp.timeout_ms).with_context(|| {
+        TcpTransport::connect_addr_blocking(addr, tcp.timeout_ms).with_context(|| {
             format!(
-                "plugin '{}': connecting to {host}:{port}",
+                "plugin '{}': connecting to {host}:{port} ({addr})",
                 manifest.plugin_id
             )
         })?;
@@ -120,22 +120,15 @@ fn open(
     })
 }
 
-fn id_suffix(_handle: &DiscoveryHandle<'_>) -> String {
-    // Never invoked: an integration root's id is built from its config
-    // (host/port), not a discovery handle — see `integration_scan::root_device_id`.
-    "0".to_owned()
-}
-
-fn validate(_spec: &DeviceSpec) -> Result<()> {
-    Ok(())
-}
-
+// `tcp` is config-instantiated (an integration reads its host/port from config),
+// never discovery-matched, so it carries only `open` — `matches`/`id_suffix`/
+// `validate` are `None`. See `integration_scan`, which calls `open` directly.
 inventory::submit!(PluginTransportDescriptor {
     kind: "tcp",
-    matches,
+    matches: None,
     open,
-    id_suffix,
-    validate,
+    id_suffix: None,
+    validate: None,
 });
 
 #[cfg(test)]
@@ -182,31 +175,6 @@ mod tests {
             usage: 0,
             interface_number: None,
         }
-    }
-
-    #[test]
-    fn matches_is_always_false() {
-        let spec = DeviceSpec {
-            vendor: "x".to_string(),
-            model: "y".to_string(),
-            transport: "tcp".to_string(),
-            vid: None,
-            pid: None,
-            pids: vec![],
-            usage_page: None,
-            usage: None,
-            interface: None,
-            bus: None,
-            addresses: None,
-            extra_addresses: None,
-            max_bytes_per_sec: None,
-            pre_scan: false,
-            probe: Default::default(),
-            pci_match: vec![],
-            name: None,
-            device_type: None,
-        };
-        assert!(!matches(&spec, &hid()));
     }
 
     #[test]
@@ -279,6 +247,22 @@ mod tests {
                 "host {host} should be blocked: {err}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_vetted_addr_returns_one_checked_address() {
+        // A public literal resolves to exactly itself and is returned, so the
+        // caller connects to the vetted address (no second resolution a rebind
+        // could redirect). A blocked literal is rejected unless private is allowed.
+        let addr = resolve_vetted_addr("1.1.1.1", 443, false).unwrap();
+        assert_eq!(addr.to_string(), "1.1.1.1:443");
+        assert!(resolve_vetted_addr("127.0.0.1", 80, false).is_err());
+        assert_eq!(
+            resolve_vetted_addr("127.0.0.1", 80, true)
+                .unwrap()
+                .to_string(),
+            "127.0.0.1:80"
+        );
     }
 
     #[test]

@@ -122,6 +122,20 @@ struct Controls {
     actions: Vec<ActionDef>,
 }
 
+/// Shared shape of the `*_wire` snapshots: `None` when no controls are declared,
+/// else map each declared control to its wire type and wrap the batch in the
+/// matching [`DeviceCapability`] variant.
+fn wire_group<T, U>(
+    items: &[T],
+    wrap: impl Fn(Vec<U>) -> DeviceCapability,
+    f: impl Fn(&T) -> U,
+) -> Option<DeviceCapability> {
+    if items.is_empty() {
+        return None;
+    }
+    Some(wrap(items.iter().map(f).collect()))
+}
+
 impl Controls {
     fn from_manifest(manifest: &PluginManifest) -> Self {
         Self {
@@ -152,68 +166,44 @@ impl Controls {
     /// Wire snapshot of the choice controls (cache overrides each default), or
     /// `None` when none are declared.
     fn choices_wire(&self) -> Option<DeviceCapability> {
-        if self.choices.is_empty() {
-            return None;
-        }
-        let choices = self
-            .choices
-            .iter()
-            .map(|c| Choice {
-                key: c.key.clone(),
-                label: c.label.clone(),
-                options: c.options.clone(),
-                selected: self.choice_cache.get(&c.key).unwrap_or(c.default),
-                category: c.category.clone(),
-                display: c.display.clone(),
-                visible_when: None,
-            })
-            .collect();
-        Some(DeviceCapability::Choice(choices))
+        wire_group(&self.choices, DeviceCapability::Choice, |c| Choice {
+            key: c.key.clone(),
+            label: c.label.clone(),
+            options: c.options.clone(),
+            selected: self.choice_cache.get(&c.key).unwrap_or(c.default),
+            category: c.category.clone(),
+            display: c.display.clone(),
+            visible_when: None,
+        })
     }
 
     /// Wire snapshot of the range controls (cache overrides each default), or
     /// `None` when none are declared.
     fn ranges_wire(&self) -> Option<DeviceCapability> {
-        if self.ranges.is_empty() {
-            return None;
-        }
-        let ranges = self
-            .ranges
-            .iter()
-            .map(|r| Range {
-                key: r.key.clone(),
-                label: r.label.clone(),
-                min: r.min,
-                max: r.max,
-                step: r.step,
-                value: self.range_cache.get(&r.key).unwrap_or(r.default),
-                read_only: r.read_only,
-                category: r.category.clone(),
-                start_label: r.start_label.clone(),
-                end_label: r.end_label.clone(),
-                display: r.display.clone(),
-                visible_when: None,
-            })
-            .collect();
-        Some(DeviceCapability::Range(ranges))
+        wire_group(&self.ranges, DeviceCapability::Range, |r| Range {
+            key: r.key.clone(),
+            label: r.label.clone(),
+            min: r.min,
+            max: r.max,
+            step: r.step,
+            value: self.range_cache.get(&r.key).unwrap_or(r.default),
+            read_only: r.read_only,
+            category: r.category.clone(),
+            start_label: r.start_label.clone(),
+            end_label: r.end_label.clone(),
+            display: r.display.clone(),
+            visible_when: None,
+        })
     }
 
     /// Wire snapshot of the action controls, or `None` when none are declared.
     fn actions_wire(&self) -> Option<DeviceCapability> {
-        if self.actions.is_empty() {
-            return None;
-        }
-        let actions = self
-            .actions
-            .iter()
-            .map(|a| Action {
-                key: a.key.clone(),
-                label: a.label.clone(),
-                category: a.category.clone(),
-                visible_when: None,
-            })
-            .collect();
-        Some(DeviceCapability::Action(actions))
+        wire_group(&self.actions, DeviceCapability::Action, |a| Action {
+            key: a.key.clone(),
+            label: a.label.clone(),
+            category: a.category.clone(),
+            visible_when: None,
+        })
     }
 
     /// Validate a choice selection against the declared options and cache it.

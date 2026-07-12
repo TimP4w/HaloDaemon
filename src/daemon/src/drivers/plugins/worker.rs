@@ -12,7 +12,7 @@ use std::ops::ControlFlow;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
 use tokio::runtime::Handle;
@@ -26,8 +26,9 @@ use halod_shared::types::{
 
 use super::bytebuf::ByteBuf;
 use super::manifest::{
-    topology_from, ActionManifest, BatteryManifest, BooleanManifest, ChainManifest, ChoiceManifest,
-    ConnectionManifest, DpiManifest, EqualizerManifest, FanManifest, KeyRemapManifest, LcdManifest,
+    check_lcd_dims, check_led_count, check_zone_count, topology_from, ActionManifest,
+    BatteryManifest, BooleanManifest, ChainManifest, ChoiceManifest, ConnectionManifest,
+    DpiManifest, EqualizerManifest, FanManifest, KeyRemapManifest, LcdManifest,
     OnboardProfilesManifest, PairingManifest, RangeManifest, RgbManifest, SensorManifest,
 };
 use super::sandbox;
@@ -425,6 +426,15 @@ impl PluginHandle {
                         .lua
                         .from_value(other)
                         .map_err(|e| lua_err("initialize result", e))?;
+                    if let Some(zones) = &t.zones {
+                        check_zone_count(zones.len())?;
+                        for z in zones {
+                            check_led_count(&z.id, z.led_count)?;
+                        }
+                    }
+                    if let Some(lcd) = &t.lcd {
+                        check_lcd_dims(lcd.width, lcd.height)?;
+                    }
                     Ok(InitOutcome {
                         ok: t.ok,
                         model: t.model,
@@ -556,7 +566,21 @@ impl PluginHandle {
     }
 
     pub async fn enumerate_controllers(&self) -> Result<Vec<DetectedController>> {
-        self.call_opt("enumerate_controllers").await
+        let controllers: Vec<DetectedController> = self.call_opt("enumerate_controllers").await?;
+        if controllers.len() > super::manifest::MAX_PLUGIN_CONTROLLERS {
+            return Err(anyhow!(
+                "plugin enumerated {} controllers, exceeding the {} limit",
+                controllers.len(),
+                super::manifest::MAX_PLUGIN_CONTROLLERS
+            ));
+        }
+        for c in &controllers {
+            check_zone_count(c.zones.len())?;
+            for z in &c.zones {
+                check_led_count(&z.id, z.led_count)?;
+            }
+        }
+        Ok(controllers)
     }
 
     pub async fn write_controller_frame(
@@ -781,8 +805,7 @@ fn build_ctx(
     zones: &[RgbZone],
 ) -> Result<WorkerCtx> {
     let (lua, budget) = sandbox::bootstrap_vm(
-        granted,
-        config,
+        sandbox::InjectSurface::FullRuntime { granted, config },
         WORKER_MEMORY_LIMIT,
         WORKER_INSTRUCTION_BUDGET,
     )
@@ -824,7 +847,45 @@ fn build_ctx(
 /// transport is a register bus scoped to `scope_addrs` (declared + extras), so
 /// pre_scan can never reach an address the plugin didn't declare. Runs on the
 /// calling thread (a `spawn_blocking` worker), so register batches block inline.
+/// Wall-clock ceiling on one `pre_scan` run. The instruction budget catches an
+/// *uncaught* runaway, but a `pcall`-catching loop stays on the thread; since
+/// `pre_scan` runs during SMBus discovery *before* any device is matched or
+/// consented, a wedged one would otherwise hang the scanner. On timeout the eval
+/// thread is abandoned (memory-capped, so bounded) — mirrors the manifest parser.
+const PRE_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub fn run_pre_scan(
+    source: &str,
+    bus: Arc<SmBusDevice>,
+    scope_addrs: Vec<u8>,
+    granted: &[Permission],
+    handle: Handle,
+) -> Result<()> {
+    let source = source.to_owned();
+    let granted = granted.to_vec();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("halod-pre-scan".into())
+        .spawn(move || {
+            let _ = tx.send(run_pre_scan_inner(
+                &source,
+                bus,
+                scope_addrs,
+                &granted,
+                handle,
+            ));
+        })
+        .map_err(|e| anyhow!("spawning pre_scan thread failed: {e}"))?;
+    match rx.recv_timeout(PRE_SCAN_TIMEOUT) {
+        Ok(res) => res,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            bail!("pre_scan exceeded its {PRE_SCAN_TIMEOUT:?} deadline")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("pre_scan thread died"),
+    }
+}
+
+fn run_pre_scan_inner(
     source: &str,
     bus: Arc<SmBusDevice>,
     scope_addrs: Vec<u8>,
@@ -834,8 +895,10 @@ pub fn run_pre_scan(
     // `pre_scan` is one-time bus preparation before a device is even matched,
     // not general plugin logic — it gets no `halod.config` (an empty map).
     let (lua, _budget) = sandbox::bootstrap_vm(
-        granted,
-        &HashMap::new(),
+        sandbox::InjectSurface::FullRuntime {
+            granted,
+            config: &HashMap::new(),
+        },
         WORKER_MEMORY_LIMIT,
         WORKER_INSTRUCTION_BUDGET,
     )

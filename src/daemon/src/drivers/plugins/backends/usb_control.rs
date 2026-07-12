@@ -78,8 +78,8 @@ fn validate(spec: &DeviceSpec) -> Result<()> {
 
 inventory::submit!(PluginTransportDescriptor {
     kind: "usb_control",
-    matches,
+    matches: Some(matches),
     open,
-    id_suffix,
-    validate,
+    id_suffix: Some(id_suffix),
+    validate: Some(validate),
 });

@@ -62,6 +62,25 @@ pub struct PluginEffectEntry {
     pub descriptor: Animation,
 }
 
+/// The validated inputs a device spawn needs, produced by
+/// [`Registry::activation_status`] only after the consent gate passes.
+/// [`Registry::build_device`] accepts one of these, so it is unreachable without
+/// consent.
+struct ReadyPlugin {
+    granted: Vec<Permission>,
+    config: HashMap<String, String>,
+}
+
+/// Whether a plugin may activate, from [`Registry::activation_status`].
+enum Activation {
+    /// The user disabled the plugin.
+    Disabled,
+    /// Permissions ungranted, or the script changed since it was acknowledged.
+    NeedsConsent,
+    /// Cleared to spawn, carrying its resolved grants + config.
+    Ready(ReadyPlugin),
+}
+
 /// Immutable snapshot of every piece of registry state a reader needs. Readers
 /// take a cheap `Arc` clone via [`snapshot`] and traverse it lock-free, so a
 /// re-entrant read (e.g. `build_device` resolving config while matching a
@@ -162,14 +181,28 @@ fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
 }
 
 impl Registry {
-    /// Every enabled plugin's declared descriptors of one effect kind, for the
-    /// RGB engine's dynamic catalog.
+    /// Whether the plugin owning an effect has satisfied consent (permissions
+    /// granted *and* the acknowledged content-hash still matches). The
+    /// device/integration paths gate on [`consent_satisfied`]; effects must too,
+    /// or an edited-but-previously-granted plugin would spawn its *new* effect code
+    /// under the *old* grant without re-acknowledgement.
+    fn effect_consent_ok(&self, state: &PluginState, plugin_id: &str) -> bool {
+        state
+            .manifests
+            .iter()
+            .find(|m| m.plugin_id == plugin_id)
+            .is_some_and(|m| self.consent_satisfied(m))
+    }
+
+    /// Every enabled, consent-satisfied plugin's declared descriptors of one effect
+    /// kind, for the RGB engine's dynamic catalog.
     fn effect_descriptors(&self, kind: EffectKind) -> Vec<Animation> {
         let state = self.snapshot();
         state
             .effects
             .iter()
             .filter(|e| e.kind == kind && !state.disabled.contains(&e.plugin_id))
+            .filter(|e| self.effect_consent_ok(&state, &e.plugin_id))
             .map(|e| e.descriptor.clone())
             .collect()
     }
@@ -185,13 +218,17 @@ impl Registry {
     }
 
     /// Look up a registered effect entry by its namespaced catalog id. `None` if
-    /// unknown or its plugin is disabled.
+    /// unknown, disabled, or its plugin's consent is no longer satisfied.
     pub fn effect_entry(&self, catalog_id: &str) -> Option<PluginEffectEntry> {
         let state = self.snapshot();
         state
             .effects
             .iter()
-            .find(|e| e.catalog_id == catalog_id && !state.disabled.contains(&e.plugin_id))
+            .find(|e| {
+                e.catalog_id == catalog_id
+                    && !state.disabled.contains(&e.plugin_id)
+                    && self.effect_consent_ok(&state, &e.plugin_id)
+            })
             .cloned()
     }
 
@@ -401,7 +438,10 @@ impl Registry {
             .unwrap_or_default()
     }
 
-    /// True when the plugin may activate.
+    /// True when the plugin's consent gate is satisfied (permissions granted and
+    /// the acknowledged content-hash still matches). Being consent-satisfied is
+    /// necessary but not sufficient to activate — see [`Registry::activation_status`],
+    /// which also accounts for the disabled set.
     fn consent_satisfied(&self, manifest: &PluginManifest) -> bool {
         if manifest.permissions.is_empty() {
             return true;
@@ -411,6 +451,28 @@ impl Registry {
             return false;
         }
         self.acknowledged_hash_for(&manifest.plugin_id).as_deref() == Some(&manifest.content_hash())
+    }
+
+    /// The single gate for "may this plugin activate, and with what?": disabled,
+    /// awaiting consent, or [`Ready`](Activation::Ready) with the resolved grants +
+    /// config a spawn needs. Every device spawn resolves through here and
+    /// [`build_device`](Registry::build_device) accepts only a [`ReadyPlugin`], so a
+    /// device can't be built without passing the consent gate (the ARCH-N1 class of
+    /// bug becomes unrepresentable rather than checked by convention).
+    fn activation_status(
+        &self,
+        secrets: &dyn crate::secrets::SecretStore,
+        manifest: &PluginManifest,
+    ) -> Activation {
+        if self.is_disabled(&manifest.plugin_id) {
+            return Activation::Disabled;
+        }
+        if !self.consent_satisfied(manifest) {
+            return Activation::NeedsConsent;
+        }
+        let granted = self.granted_for(&manifest.plugin_id);
+        let config = self.resolved_config_for(secrets, &manifest.plugin_id, &granted);
+        Activation::Ready(ReadyPlugin { granted, config })
     }
 }
 
@@ -650,6 +712,13 @@ pub struct PluginLoadWarning {
 /// A logo whose file is absent isn't rejected here — it's left for the GUI's
 /// initials fallback; only a *present* logo is held to the size/shape bounds.
 fn logo_rejection(dir: &Path, name: &str) -> Option<String> {
+    // Validate the name before touching the filesystem: an unchecked `logo:` like
+    // `../../../etc/shadow` would otherwise read an arbitrary root-readable file and
+    // leak its size/existence/decodability back through the load warning surfaced to
+    // the GUI. `read_asset` already guards its fetch this way.
+    if let Err(e) = halod_shared::types::validate_image_filename(name) {
+        return Some(format!("logo name is invalid: {e}"));
+    }
     let path = dir.join("assets").join(name);
     let bytes = std::fs::read(&path).ok()?;
     if bytes.len() as u64 > halod_shared::types::MAX_PLUGIN_ASSET_BYTES {
@@ -659,7 +728,7 @@ fn logo_rejection(dir: &Path, name: &str) -> Option<String> {
             halod_shared::types::MAX_PLUGIN_ASSET_BYTES
         ));
     }
-    match image::load_from_memory(&bytes) {
+    match crate::util::image::decode_limited(&bytes) {
         Ok(img) => halod_shared::types::validate_logo_dimensions(img.width(), img.height()).err(),
         Err(e) => Some(format!("logo is not a decodable image: {e}")),
     }
@@ -816,7 +885,8 @@ fn device_id(
     handle: &DiscoveryHandle<'_>,
 ) -> String {
     let suffix = transport::descriptor_for(&spec.transport)
-        .map(|d| (d.id_suffix)(handle))
+        .and_then(|d| d.id_suffix)
+        .map(|f| f(handle))
         .unwrap_or_else(|| "0".to_owned());
     format!("{}-{}", manifest.id_prefix(), suffix)
 }
@@ -844,6 +914,7 @@ impl Registry {
         manifest: &PluginManifest,
         spec: &manifest::DeviceSpec,
         handle: &DiscoveryHandle<'_>,
+        ready: ReadyPlugin,
     ) -> Option<Arc<dyn Device>> {
         let id = device_id(manifest, spec, handle);
         let notify = Arc::downgrade(app);
@@ -857,9 +928,9 @@ impl Registry {
             );
             return None;
         };
-        let granted = self.granted_for(&manifest.plugin_id);
-        let config =
-            self.resolved_config_for(app.secret_store.as_ref(), &manifest.plugin_id, &granted);
+        // The grants + resolved config were validated by `activation_status` when it
+        // produced this `ReadyPlugin` — reuse them rather than re-resolving.
+        let ReadyPlugin { granted, config } = ready;
         let transport = match transport::descriptor_for(&spec.transport)
             .map(|d| (d.open)(manifest, handle, &config, &granted))
         {
@@ -914,11 +985,17 @@ impl Registry {
         manifests: &[PluginManifest],
         handle: &DiscoveryHandle<'_>,
     ) -> Option<Arc<dyn Device>> {
-        manifests
-            .iter()
-            .filter(|m| !self.is_disabled(&m.plugin_id) && self.consent_satisfied(m))
-            .find_map(|m| m.device_for(handle).map(|spec| (m, spec)))
-            .and_then(|(m, spec)| self.build_device(app, m, spec, handle))
+        for manifest in manifests {
+            let Some(spec) = manifest.device_for(handle) else {
+                continue;
+            };
+            if let Activation::Ready(ready) =
+                self.activation_status(app.secret_store.as_ref(), manifest)
+            {
+                return self.build_device(app, manifest, spec, handle, ready);
+            }
+        }
+        None
     }
 
     /// Match a discovery handle against every loaded plugin. Consulted by
@@ -931,12 +1008,19 @@ impl Registry {
         // The snapshot is a frozen `Arc`, not a lock guard, so `build_device` can
         // freely take its own snapshots with no risk of a recursive-read deadlock.
         let state = self.snapshot();
-        let (manifest, spec) = state
-            .manifests
-            .iter()
-            .filter(|m| !state.disabled.contains(&m.plugin_id) && self.consent_satisfied(m))
-            .find_map(|m| m.device_for(handle).map(|spec| (m, spec)))?;
-        self.build_device(app, manifest, spec, handle)
+        for manifest in state.manifests.iter() {
+            let Some(spec) = manifest.device_for(handle) else {
+                continue;
+            };
+            // Only a `Ready` plugin (enabled + consent-satisfied) shadows a native
+            // driver; a disabled/ungranted one falls through to the native path.
+            if let Activation::Ready(ready) =
+                self.activation_status(app.secret_store.as_ref(), manifest)
+            {
+                return self.build_device(app, manifest, spec, handle, ready);
+            }
+        }
+        None
     }
 
     pub fn has_match(&self, handle: &DiscoveryHandle<'_>) -> bool {

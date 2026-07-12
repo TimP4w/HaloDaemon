@@ -180,7 +180,9 @@ impl UserData for TransportApi {
                 let n = t
                     .read_control(bm_request_type, b_request, w_value, w_index, &mut buf)
                     .map_err(to_lua_err)?;
-                lua.create_string(&buf[..n])
+                // Clamp to the buffer: a misbehaving backend returning `n > len`
+                // would otherwise panic on the slice below.
+                lua.create_string(&buf[..n.min(buf.len())])
             },
         );
 

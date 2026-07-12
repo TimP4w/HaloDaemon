@@ -5,6 +5,15 @@
 //! type `Cmd` and the per-thread context `Ctx` are chosen by each caller, so the
 //! device worker (boxed-closure jobs) and the effect worker (typed enum) share
 //! the thread/channel/reply wiring while keeping their own dispatch style.
+//!
+//! Known bound (ARCH-R1): a [`request`](LuaWorker::request) timeout *abandons* the
+//! worker (poisons the handle so later requests fail fast) but cannot *terminate*
+//! its OS thread — mlua exposes no safe preemptive kill, so a `pcall`-catching
+//! pure-compute runaway keeps one CPU-burning zombie thread alive per malicious
+//! plugin. There is also no ceiling on concurrent worker threads. Bounding this
+//! honestly is architectural, not in-VM: run plugins in a separate process that
+//! can be `SIGKILL`'d (the existing broker/hwaccess privilege split is the natural
+//! seam), and/or cap concurrent spawns. Tracked as a deliberate follow-up.
 
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};

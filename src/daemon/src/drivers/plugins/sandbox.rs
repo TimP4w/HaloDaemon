@@ -69,21 +69,35 @@ pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Build a fresh sandboxed plugin VM: strip escape hatches, re-inject the
-/// `halod` surface for `granted`/`config`, cap the Lua allocator at
-/// `memory_limit`, and install the `instruction_budget` hook. Returns the VM and
-/// the budget counter (reset per call to make the budget per-callback). Every
-/// plugin VM — device worker, effect worker, `pre_scan`, manifest parse — goes
-/// through here so none can silently skip a limit (an earlier drift left the
-/// effect VM with no memory cap).
+/// What surface a bootstrapped VM exposes. The device/effect workers get the
+/// full `halod` runtime API; the manifest parser only evaluates the script to
+/// read its table, so it strips the escape hatches but injects no runtime API.
+pub(super) enum InjectSurface<'a> {
+    FullRuntime {
+        granted: &'a [Permission],
+        config: &'a HashMap<String, String>,
+    },
+    StripOnly,
+}
+
+/// Build a fresh sandboxed plugin VM: strip escape hatches (and, for a full
+/// runtime, re-inject the `halod` surface for `granted`/`config`), cap the Lua
+/// allocator at `memory_limit`, and install the `instruction_budget` hook.
+/// Returns the VM and the budget counter (reset per call to make the budget
+/// per-callback). Every plugin VM — device worker, effect worker, `pre_scan`,
+/// manifest parse — goes through here so none can silently skip a limit (an
+/// earlier drift left the effect VM with no memory cap; another the manifest
+/// parser hand-rolling the trio outside this chokepoint).
 pub(super) fn bootstrap_vm(
-    granted: &[Permission],
-    config: &HashMap<String, String>,
+    surface: InjectSurface<'_>,
     memory_limit: usize,
     instruction_budget: u64,
 ) -> mlua::Result<(Lua, Rc<Cell<u64>>)> {
     let lua = Lua::new();
-    apply(&lua, granted, config)?;
+    match surface {
+        InjectSurface::FullRuntime { granted, config } => apply(&lua, granted, config)?,
+        InjectSurface::StripOnly => strip_escape_hatches(&lua)?,
+    }
     let _ = lua.set_memory_limit(memory_limit);
     let budget = install_instruction_budget_hook(&lua, instruction_budget);
     Ok((lua, budget))

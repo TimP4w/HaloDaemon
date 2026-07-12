@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use halod_shared::types::{Permission, WriteRateLimit, WriteRateStatus};
+use halod_shared::types::{Permission, WriteRateStatus};
 
 use crate::drivers::transports::smbus::{SmBusDevice, SmBusSyncOps};
 use crate::drivers::transports::usb_bulk::UsbBulkTransport;
@@ -113,14 +113,6 @@ impl PluginIo {
             PluginIo::Control(c) => c.rate_status(),
         }
     }
-
-    pub fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
-        match self {
-            PluginIo::Stream { transport, .. } => transport.set_write_rate_limit(limit),
-            PluginIo::Register(r) => r.set_write_rate_limit(limit),
-            PluginIo::Control(c) => c.set_write_rate_limit(limit),
-        }
-    }
 }
 
 /// A set of named USB vendor-control endpoints. The device the discovery handle
@@ -153,12 +145,6 @@ impl ControlEndpoints {
         self.get(Self::PRIMARY)
             .map(|t| t.rate_status())
             .unwrap_or_default()
-    }
-
-    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
-        for t in self.endpoints.values() {
-            t.set_write_rate_limit(limit);
-        }
     }
 }
 
@@ -215,10 +201,6 @@ impl RegisterBus {
         self.bus.rate_status().unwrap_or_default()
     }
 
-    pub fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
-        self.bus.set_write_rate_limit(limit);
-    }
-
     /// Run `f` against the raw ops and the address scope in one atomic bus-lock
     /// hold, on the calling thread. `f` typically drives a plugin's Lua batch
     /// callback — hence the inline (non-`spawn_blocking`) primitive. The caller
@@ -238,8 +220,11 @@ impl RegisterBus {
 pub struct PluginTransportDescriptor {
     /// The `match.transport` discriminator (e.g. "hid", "smbus").
     pub kind: &'static str,
-    /// Does this spec (of this kind) accept the discovered handle?
-    pub matches: fn(&DeviceSpec, &DiscoveryHandle<'_>) -> bool,
+    /// Does this spec (of this kind) accept the discovered handle? `None` for a
+    /// backend that is config-instantiated rather than discovery-matched (the
+    /// `tcp` integration transport), which is reached via `open` directly and
+    /// never through handle matching.
+    pub matches: Option<fn(&DeviceSpec, &DiscoveryHandle<'_>) -> bool>,
     /// Open the live transport for a matched handle. `config` is the plugin's
     /// resolved non-secure config values (see `plugins::config_for`) — HID/
     /// SMBus ignore it; the `tcp` backend reads its host/port keys from it,
@@ -252,10 +237,12 @@ pub struct PluginTransportDescriptor {
         &HashMap<String, String>,
         &[Permission],
     ) -> Result<PluginIo>,
-    /// Stable per-device id suffix from the matched handle.
-    pub id_suffix: fn(&DiscoveryHandle<'_>) -> String,
-    /// Reject a manifest whose match spec omits a field this kind requires.
-    pub validate: fn(&DeviceSpec) -> Result<()>,
+    /// Stable per-device id suffix from the matched handle. `None` for a
+    /// config-instantiated backend, whose id is built from its config, not a handle.
+    pub id_suffix: Option<fn(&DiscoveryHandle<'_>) -> String>,
+    /// Reject a manifest whose match spec omits a field this kind requires. `None`
+    /// for a config-instantiated backend (an integration declares no device specs).
+    pub validate: Option<fn(&DeviceSpec) -> Result<()>>,
 }
 inventory::collect!(PluginTransportDescriptor);
 
@@ -350,5 +337,5 @@ impl ControlTransport for RecordingControl {
         WriteRateStatus::default()
     }
 
-    fn set_write_rate_limit(&self, _limit: Option<WriteRateLimit>) {}
+    fn set_write_rate_limit(&self, _limit: Option<halod_shared::types::WriteRateLimit>) {}
 }

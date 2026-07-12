@@ -247,9 +247,12 @@ fn build_ctx(
     granted: &[Permission],
     config: &HashMap<String, String>,
 ) -> Result<EffectCtx> {
-    let (lua, budget) =
-        sandbox::bootstrap_vm(granted, config, EFFECT_MEMORY_LIMIT, INSTRUCTION_BUDGET)
-            .map_err(|e| lua_err("sandbox setup", e))?;
+    let (lua, budget) = sandbox::bootstrap_vm(
+        sandbox::InjectSurface::FullRuntime { granted, config },
+        EFFECT_MEMORY_LIMIT,
+        INSTRUCTION_BUDGET,
+    )
+    .map_err(|e| lua_err("sandbox setup", e))?;
     register_effect_helpers(&lua).map_err(|e| lua_err("effect helpers", e))?;
 
     let manifest: Table = lua

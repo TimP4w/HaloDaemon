@@ -8,6 +8,25 @@
 use anyhow::Result;
 use halod_shared::types::sniff_ext;
 
+/// Cap on the source dimensions the image decoder may allocate for. A valid
+/// header can declare enormous width/height that balloon allocation *before* any
+/// resize, and `data` is attacker-controlled (uploaded over IPC or shipped by a
+/// plugin), so every in-memory decode goes through [`decode_limited`]. Far above
+/// any real LCD panel.
+pub const MAX_DECODE_DIM: u32 = 8192;
+
+/// Decode an image from memory under [`MAX_DECODE_DIM`] source-dimension limits.
+/// Bounds decompression-bomb allocation that `image::load_from_memory` (which
+/// applies no limits) would otherwise incur before a resize can shrink it.
+pub fn decode_limited(data: &[u8]) -> Result<image::DynamicImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_DIM);
+    limits.max_image_height = Some(MAX_DECODE_DIM);
+    reader.limits(limits);
+    Ok(reader.decode()?)
+}
+
 /// Count the frames of a GIF without compositing them: the LZW data is decoded
 /// into a discarded buffer, which is far cheaper than the RGBA resize pass and
 /// lets `resize_gif` report a real percentage.
@@ -117,15 +136,7 @@ pub fn compress_for_storage(
         return Ok((resized, "gif"));
     }
 
-    // Decode under explicit dimension limits: `data` is attacker-controlled
-    // (uploaded over IPC), and a valid header can declare enormous dimensions
-    // that balloon allocation. 8192² is far above any LCD panel.
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    reader.limits(limits);
-    let img = reader.decode()?;
+    let img = decode_limited(data)?;
     if img.width() <= width && img.height() <= height {
         return Ok((data.to_vec(), sniff_ext(data)));
     }
@@ -143,7 +154,7 @@ pub fn compress_for_storage(
 /// returning a raw `width*height*4` RGBA8 buffer. CPU-heavy (Lanczos3) — call
 /// off the async runtime.
 pub fn decode_static_image_rgba(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
-    let img = image::load_from_memory(data)?;
+    let img = decode_limited(data)?;
     let img = if img.width() == width && img.height() == height {
         img
     } else {
@@ -280,6 +291,27 @@ mod tests {
         assert_eq!(reported.len(), 2, "one report per frame");
         assert!(reported.windows(2).all(|w| w[0] <= w[1]), "{reported:?}");
         assert_eq!(reported.last(), Some(&100));
+    }
+
+    #[test]
+    fn decode_limited_rejects_oversized_source_dimensions() {
+        // A header declaring dimensions above MAX_DECODE_DIM is refused before the
+        // decoder allocates, even though the encoded bytes stay tiny; a small image
+        // still decodes fine.
+        let mut big = Vec::new();
+        image::GrayImage::new(MAX_DECODE_DIM + 1, 1)
+            .write_to(&mut std::io::Cursor::new(&mut big), image::ImageFormat::Png)
+            .unwrap();
+        assert!(decode_limited(&big).is_err());
+
+        let mut small = Vec::new();
+        image::GrayImage::new(8, 8)
+            .write_to(
+                &mut std::io::Cursor::new(&mut small),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        assert!(decode_limited(&small).is_ok());
     }
 
     #[test]

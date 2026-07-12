@@ -104,15 +104,22 @@ struct GifFrame {
 /// Decode image bytes into `(frame, delay_ms)` pairs — one infinitely-held
 /// frame for a static image, one per frame for an animated GIF.
 pub(super) fn decode_image_frames(data: &[u8]) -> Result<Vec<(RgbaImage, f64)>, String> {
-    use image::{codecs::gif::GifDecoder, AnimationDecoder};
+    use image::{codecs::gif::GifDecoder, AnimationDecoder, ImageDecoder};
     use std::io::Cursor;
     if !(data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")) {
-        let img = image::load_from_memory(data)
+        // Decode under dimension limits: `data` is an uploaded LCD background,
+        // attacker-controlled, and a valid header can declare enormous dimensions
+        // that balloon allocation before any downscale (decompression bomb).
+        let img = crate::util::image::decode_limited(data)
             .map_err(|e| e.to_string())?
             .to_rgba8();
         return Ok(vec![(img, f64::INFINITY)]);
     }
-    let decoder = GifDecoder::new(Cursor::new(data)).map_err(|e| e.to_string())?;
+    let mut decoder = GifDecoder::new(Cursor::new(data)).map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(crate::util::image::MAX_DECODE_DIM);
+    limits.max_image_height = Some(crate::util::image::MAX_DECODE_DIM);
+    decoder.set_limits(limits).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for frame in decoder.into_frames() {
         let frame = frame.map_err(|e| e.to_string())?;
