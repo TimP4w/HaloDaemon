@@ -17,8 +17,8 @@ use crate::state::AppState;
 use super::device::{ChildWorkerFactory, LuaDevice};
 use super::manifest::PluginManifest;
 use super::transport::PluginIo;
-use super::worker::{DevMatch, PluginHandle};
 use super::{granted_for, resolved_config_for};
+use crate::drivers::transports::Transport;
 
 /// Sanitize a config value for use in a device id: keep it stable and
 /// collision-resistant without leaking odd characters into the id.
@@ -89,9 +89,13 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
             None => anyhow::bail!("integration plugin: no 'tcp' transport backend registered"),
         });
 
-    // The root connection is used only to enumerate controllers; each controller
-    // then gets its own connection + worker (see `discover_controllers`), so a
-    // slow controller can't head-of-line-block the others.
+    // Open a small pool of connections so writes to different controllers can
+    // flow in parallel without overwhelming the server (one-per-controller
+    // crashes some SDK servers — e.g. OpenRGB).  Round-robin controllers across
+    // the pool by index.
+    const POOL_SIZE: u32 = 4;
+    let mut pool: Vec<Arc<dyn Transport>> = Vec::with_capacity(POOL_SIZE as usize);
+    // Reuse the root's connection as pool[0].
     let root_open = open_transport.clone();
     let transport: PluginIo = match tokio::task::spawn_blocking(move || root_open()).await {
         Ok(Ok(t)) => t,
@@ -110,25 +114,55 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
             return;
         }
     };
+    let first: Arc<dyn Transport> = match &transport {
+        PluginIo::Stream { transport, .. } => transport.clone(),
+        _ => {
+            log::error!(
+                "integration plugin '{}': root transport is not a stream",
+                manifest.plugin_id
+            );
+            return;
+        }
+    };
+    pool.push(first.clone());
 
-    let child_source = manifest.script_source.clone();
-    let child_granted = granted.clone();
-    let child_config = config.clone();
-    let child_runtime = runtime.clone();
-    let child_worker: ChildWorkerFactory = Arc::new(move || {
-        let transport = open_transport()?;
-        Ok(PluginHandle::spawn(
-            child_source.clone(),
-            transport,
-            DevMatch {
-                transport: "tcp".to_owned(),
-                ..Default::default()
-            },
-            child_granted.clone(),
-            child_config.clone(),
-            child_runtime.clone(),
-        ))
-    });
+    // Open remaining pool connections with a small stagger to avoid racing the
+    // server's accept loop.
+    for slot in 1..POOL_SIZE {
+        let open = open_transport.clone();
+        match tokio::task::spawn_blocking(move || open()).await {
+            Ok(Ok(PluginIo::Stream { transport, .. })) => {
+                log::info!(
+                    "integration '{}': pool slot {}/{} connected",
+                    manifest.plugin_id,
+                    slot,
+                    POOL_SIZE
+                );
+                pool.push(transport);
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => log::warn!(
+                "integration plugin '{}' pool connect failed: {e:#}",
+                manifest.plugin_id
+            ),
+            Err(e) => log::warn!(
+                "integration plugin '{}' pool connect task panicked: {e}",
+                manifest.plugin_id
+            ),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let child_worker: ChildWorkerFactory = {
+        let pool = Arc::new(pool);
+        Arc::new(move |index| {
+            let slot = &pool[(index % pool.len() as u32) as usize];
+            Ok(PluginIo::Stream {
+                transport: slot.clone(),
+                bulk: None,
+            })
+        })
+    };
 
     let device = Arc::new_cyclic(move |weak| {
         let mut dev = LuaDevice::integration_root(id, &manifest, transport, child_worker, runtime);

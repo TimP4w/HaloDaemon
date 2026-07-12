@@ -680,31 +680,39 @@ enumerate_controllers = function(dev)
   }
 end,
 
-write_controller_frame = function(dev, index, zone, colors)
-  -- `zone` is the zone's `id` string as declared above.
+-- Each enumerated controller becomes a full LuaDevice child that shares
+-- this same script source.  The controller index is in dev.match.index so
+-- a single set of callbacks can route to the right remote controller.
+write_frame = function(dev, zone_id, colors)
+  -- dev.match.index identifies the controller; zone_id is the zone's id
+  -- string as declared above; colors is an array of {r, g, b}.
 end,
 ```
 
-Two callbacks replace the device capability sections a `Device`-type plugin
-would use:
+Integration children are full `LuaDevice` instances — they use the **same
+callbacks** as a `Device`-type plugin ([Capability callbacks](#capability-callbacks)):
+`write_frame`, `apply`, `set_duty`, `get_duty`, `get_sensors`, `set_dpi`,
+`get_dpi`, `get_batteries`, and so on.  The controller `index` from
+`enumerate_controllers` is injected as `dev.match.index` so a single shared
+script can route each call to the right remote controller.
 
 - **`enumerate_controllers(dev) -> controllers`** — called once per
-  discovery pass. Returns an array of `{ index, name, zones }`; each becomes
+  discovery pass. Returns an array of controller tables; each becomes
   a separate top-level device (not nested under the integration plugin), so
-  they show up in the device list exactly like any native device. Each zone
-  needs `id`, `name`, `topology` (`"ring"`/`"linear"`/`"grid"`/`"rings"`), and
-  `led_count` — the same shape [chained accessories](#chained-accessories)
-  use, since both build an `RgbDescriptor` the same way. **`zone.id` should
-  be whatever value `write_controller_frame` needs to address that zone** —
-  for OpenRGB that's the zone's ordinal index as a string, since the wire
-  protocol addresses zones by position, not name.
-- **`write_controller_frame(dev, index, zone, colors)`** — an RGB frame for
-  one controller's zone. `index` is the controller's index from
-  `enumerate_controllers`; `zone` is that zone's `id`; `colors` is an array of
-  `{r, g, b}`. There is one shared `dev.transport` for the whole integration
-  (one connection), addressed per-call by `index`/`zone` — unlike a `Device`
-  plugin's `write_frame`, which is called on a transport already scoped to
-  one physical device.
+  they show up in the device list exactly like any native device.
+
+  Each controller table has:
+
+  | Field | Type | Required | Description |
+  |-------|------|----------|-------------|
+  | `index` | integer | yes | Controller index (becomes `dev.match.index`). |
+  | `name` | string | yes | Display name for the child device. |
+  | `zones` | array | see below | RGB-zone topology shorthand (promoted to an `rgb` section when no explicit one is given). |
+  | `rgb`, `fan`, `sensor`, `lcd`, `dpi`, `choice`, `range`, `boolean`, `action`, `battery`, `connection`, `equalizer`, `pairing`, `onboard_profiles`, `key_remap`, `chain` | table | no | Per-controller capability sections.  Each mirrors the same shape as a static manifest capability section (e.g. `fan = { channel = 0 }`, `sensor = {}`, `lcd = {}`).  A controller that declares none of these still gets RGB from the `zones` shorthand. |
+
+  Each zone entry needs `id`, `name`, `topology`
+  (`"ring"`/`"linear"`/`"grid"`/`"rings"`), and `led_count` — the same shape
+  [chained accessories](#chained-accessories) use.
 
 There's no reconnect/hotplug monitor for a dropped network connection today —
 if the server restarts, use the Integrations screen's enable toggle (off then
@@ -714,7 +722,7 @@ The wire protocol itself typically gives no acknowledgement of when a sent
 frame is actually applied — the server may queue and process frames on its
 own schedule, so pushing them faster than it can drain that queue makes the
 visible output lag further and further behind. If that's the case for your
-target service, throttle `write_controller_frame` client-side (drop a send
+target service, throttle `write_frame` client-side (drop a send
 if too little time has passed since the last one actually sent for that
 zone, using `os.clock()` — needs the `os` permission) rather than trying to
 "cancel" frames already written to the socket, which isn't possible.

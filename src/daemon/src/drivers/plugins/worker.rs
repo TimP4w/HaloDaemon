@@ -25,7 +25,11 @@ use halod_shared::types::{
 };
 
 use super::bytebuf::ByteBuf;
-use super::manifest::topology_from;
+use super::manifest::{
+    topology_from, ActionManifest, BatteryManifest, BooleanManifest, ChainManifest, ChoiceManifest,
+    ConnectionManifest, DpiManifest, EqualizerManifest, FanManifest, KeyRemapManifest, LcdManifest,
+    OnboardProfilesManifest, PairingManifest, RangeManifest, RgbManifest, SensorManifest,
+};
 use super::sandbox;
 use super::transport::{AddrScope, PluginIo, RegisterBus};
 use super::transport_api::TransportApi;
@@ -67,17 +71,53 @@ pub struct DetectedControllerZone {
 }
 
 /// One controller the plugin's `enumerate_controllers` reports — becomes one
-/// top-level `IntegrationLeaf` device (see `mod::integration_leaf`).
+/// top-level `LuaDevice` child. Each optional capability section mirrors the
+/// static manifest's (`RgbManifest`, `FanManifest`, …) but is reported live per
+/// controller, so a single integration can bridge RGB *and* fans/sensors/etc.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DetectedController {
     pub index: u32,
     pub name: String,
+    /// RGB-topology shorthand: computed into an `RgbManifest` when no explicit
+    /// `rgb` section is given (see `child_manifest_for`).
     #[serde(default)]
     pub zones: Vec<DetectedControllerZone>,
+    #[serde(default)]
+    pub rgb: Option<RgbManifest>,
+    #[serde(default)]
+    pub fan: Option<FanManifest>,
+    #[serde(default)]
+    pub sensor: Option<SensorManifest>,
+    #[serde(default)]
+    pub lcd: Option<LcdManifest>,
+    #[serde(default)]
+    pub dpi: Option<DpiManifest>,
+    #[serde(default)]
+    pub choice: Option<ChoiceManifest>,
+    #[serde(default)]
+    pub range: Option<RangeManifest>,
+    #[serde(default)]
+    pub boolean: Option<BooleanManifest>,
+    #[serde(default)]
+    pub action: Option<ActionManifest>,
+    #[serde(default)]
+    pub battery: Option<BatteryManifest>,
+    #[serde(default)]
+    pub connection: Option<ConnectionManifest>,
+    #[serde(default)]
+    pub equalizer: Option<EqualizerManifest>,
+    #[serde(default)]
+    pub pairing: Option<PairingManifest>,
+    #[serde(default)]
+    pub onboard_profiles: Option<OnboardProfilesManifest>,
+    #[serde(default)]
+    pub key_remap: Option<KeyRemapManifest>,
+    #[serde(default)]
+    pub chain: Option<ChainManifest>,
 }
 
 impl DetectedController {
-    /// Build the `RgbDescriptor` an `IntegrationLeaf` advertises, computing LED
+    /// Build the `RgbDescriptor` for the `zones` shorthand, computing LED
     /// positions from each zone's declared topology + count — the same
     /// approach `initialize`-reported dynamic zones use (`build_dynamic_descriptor`).
     pub fn rgb_descriptor(&self) -> RgbDescriptor {
@@ -116,6 +156,10 @@ pub struct DevMatch {
     /// HID product id, so a callback can branch on device variant (e.g. an LCD
     /// panel picking its native resolution). `None` for non-HID transports.
     pub pid: Option<u16>,
+    /// The controller index for an integration child, so the shared script can
+    /// route a capability call to the right remote controller. `None` for a
+    /// directly-matched device (there's only one).
+    pub index: Option<u32>,
 }
 
 /// One RGB zone a plugin's `initialize` reports for dynamic LED counts.
@@ -258,11 +302,16 @@ impl PluginHandle {
         granted: Vec<Permission>,
         config: HashMap<String, String>,
         handle: Handle,
+        zones: Vec<RgbZone>,
     ) -> Self {
         Self(LuaWorker::spawn(
             "halod-plugin",
             "plugin",
-            move || build_ctx(&source, transport, dev_match, &granted, &config, handle),
+            move || {
+                build_ctx(
+                    &source, transport, dev_match, &granted, &config, handle, &zones,
+                )
+            },
             |job: Job, ctx: &WorkerCtx| {
                 ctx.budget.set(0);
                 job(ctx)
@@ -886,6 +935,7 @@ fn build_ctx(
     granted: &[Permission],
     config: &HashMap<String, String>,
     handle: Handle,
+    zones: &[RgbZone],
 ) -> Result<WorkerCtx> {
     let lua = Lua::new();
     sandbox::apply(&lua, granted, config).map_err(|e| lua_err("sandbox setup", e))?;
@@ -908,6 +958,11 @@ fn build_ctx(
         .map_err(|e| lua_err("dev.transport", e))?;
     dev.set("match", build_match_table(&lua, &dev_match)?)
         .map_err(|e| lua_err("dev.match", e))?;
+    if !zones.is_empty() {
+        let zones_v = lua.to_value(zones).map_err(|e| lua_err("dev.zones", e))?;
+        dev.set("zones", zones_v)
+            .map_err(|e| lua_err("dev.zones", e))?;
+    }
 
     Ok(WorkerCtx {
         lua,
@@ -968,6 +1023,10 @@ fn build_match_table(lua: &Lua, m: &DevMatch) -> Result<Table> {
     if let Some(pid) = m.pid {
         t.set("pid", pid).map_err(|e| lua_err("match.pid", e))?;
     }
+    if let Some(index) = m.index {
+        t.set("index", index)
+            .map_err(|e| lua_err("match.index", e))?;
+    }
     Ok(t)
 }
 
@@ -996,6 +1055,7 @@ mod tests {
             granted,
             HashMap::new(),
             Handle::current(),
+            Vec::new(),
         )
     }
 

@@ -956,6 +956,12 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
             if !manifest.devices.is_empty() {
                 bail!("integration plugin must not declare devices");
             }
+            if !manifest.capability_labels().is_empty() {
+                bail!(
+                    "integration plugin must not declare capability sections; capabilities are \
+                     reported per controller by enumerate_controllers"
+                );
+            }
         }
     }
     // Only a `device` plugin may hold a usb_control endpoint open.
@@ -1404,6 +1410,23 @@ mod tests {
             devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         }"#;
         assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
+    }
+
+    #[test]
+    fn integration_plugin_with_static_capability_section_is_rejected() {
+        // Use a simple capability section (fan) that deserialises cleanly
+        // without needing complex sub-types, so the error comes from the
+        // integration validation rule, not from field-level parsing.
+        let src = r#"return {
+            type = "integration",
+            fan = { channels = 1 },
+        }"#;
+        let err = parse_manifest(src, Path::new("bad.lua")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("integration plugin must not declare capability sections"),
+            "expected capability-section rejection, got: {err}"
+        );
     }
 
     #[test]

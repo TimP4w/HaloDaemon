@@ -18,7 +18,6 @@ mod device;
 mod effect_worker;
 mod ffi;
 mod image_api;
-mod integration_leaf;
 pub(crate) mod integration_scan;
 mod lua_worker;
 mod manifest;
@@ -826,6 +825,7 @@ fn build_device(
             DiscoveryHandle::UsbNonHid { pid, .. } => Some(*pid),
             _ => None,
         },
+        index: None,
     };
 
     // `new_cyclic` so the device can hand its children a `FanHub` back-reference

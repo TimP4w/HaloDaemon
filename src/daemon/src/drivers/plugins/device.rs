@@ -27,13 +27,12 @@ use crate::drivers::{
 };
 
 use super::chain_leaf::ChainLeaf;
-use super::integration_leaf::IntegrationLeaf;
 use super::manifest::{
     topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DeviceSpec, DpiManifest,
-    PluginManifest, RangeDef,
+    PluginManifest, RangeDef, RgbManifest,
 };
 use super::transport::PluginIo;
-use super::worker::{DevMatch, InitLcd, InitZone, PluginHandle};
+use super::worker::{DetectedController, DevMatch, InitLcd, InitZone, PluginHandle};
 use std::collections::HashMap;
 
 /// Host-side DPI step-cycle state (the plugin only writes the chosen value).
@@ -47,12 +46,12 @@ use crate::drivers::vendors::generic::devices::common::{
 };
 use halod_shared::types::ZoneTopology;
 
-/// Spawns a fresh worker (its own connection + Lua VM) for one integration
-/// child. Injectable so tests can back it with a mock transport instead of a
-/// real socket. Each OpenRGB controller gets its own worker, so writes to
-/// different controllers run in parallel rather than serializing behind one
-/// shared connection.
-pub(super) type ChildWorkerFactory = Arc<dyn Fn() -> Result<PluginHandle> + Send + Sync>;
+/// Opens a fresh transport (its own connection) for one integration child.
+/// Injectable so tests can back it with a mock transport instead of a real
+/// socket. Each controller gets its own connection + worker (spawned by
+/// [`LuaDevice::integration_child`]), so writes to different controllers run in
+/// parallel rather than serializing behind one shared connection.
+pub(super) type ChildWorkerFactory = Arc<dyn Fn(u32) -> Result<PluginIo> + Send + Sync>;
 
 /// The capability sections a manifest can declare. Stored as `caps` on the
 /// device so `capabilities()` reads a single list instead of one boolean per
@@ -280,8 +279,11 @@ pub struct LuaDevice {
     dynamic_model: OnceLock<String>,
     worker: Option<PluginHandle>,
     transport: Option<PluginIo>,
-    /// For integration roots only: spawns a per-controller child worker.
+    /// For integration roots only: opens a fresh transport per controller.
     integration_child_worker: Option<ChildWorkerFactory>,
+    /// For integration roots only: the manifest each controller child is
+    /// synthesized from (`child_manifest_for`).
+    root_manifest: Option<Arc<PluginManifest>>,
 
     /// Capability sections the manifest declared, in advertised order. Drives
     /// `capabilities()` (chain also implies `Controller`; integration adds one).
@@ -360,11 +362,7 @@ impl LuaDevice {
         Self::with_worker(id, manifest, Some(spec), dev_match, transport, handle)
     }
 
-    /// The headless root of a config-instantiated integration plugin (e.g. an
-    /// OpenRGB SDK client): no `DeviceSpec` (it wasn't found by a bus scan), no
-    /// capabilities of its own — `discover_children()` is its only job,
-    /// enumerating one top-level `Device` per thing the remote service
-    /// reports (see `Controller` impl below).
+    /// The headless root of a config-instantiated integration plugin
     pub fn integration_root(
         id: String,
         manifest: &PluginManifest,
@@ -378,6 +376,32 @@ impl LuaDevice {
         };
         let mut dev = Self::with_worker(id, manifest, None, dev_match, transport, handle);
         dev.integration_child_worker = Some(child_worker);
+        dev.root_manifest = Some(Arc::new(manifest.clone()));
+        dev
+    }
+
+    /// One integration controller as a full `LuaDevice`: its capability set
+    /// comes from the enumerated controller (`child_manifest_for`), and its
+    /// worker VM is seeded with the controller `index` in `dev.match.index`, so
+    /// the shared script routes each capability call to the right remote
+    /// controller.
+    pub fn integration_child(
+        id: String,
+        name: String,
+        vendor: String,
+        manifest: &PluginManifest,
+        controller_index: u32,
+        transport: PluginIo,
+        handle: tokio::runtime::Handle,
+    ) -> Self {
+        let dev_match = DevMatch {
+            transport: "tcp".to_owned(),
+            index: Some(controller_index),
+            ..Default::default()
+        };
+        let mut dev = Self::with_worker(id, manifest, None, dev_match, transport, handle);
+        dev.name = name;
+        dev.vendor = vendor;
         dev
     }
 
@@ -394,6 +418,11 @@ impl LuaDevice {
         let rate_transport = transport.clone();
         let granted = super::granted_for(&manifest.plugin_id);
         let config = super::resolved_config_for(&manifest.plugin_id, &granted);
+        let zones: Vec<RgbZone> = manifest
+            .rgb
+            .as_ref()
+            .map(|r| r.zones.clone())
+            .unwrap_or_default();
         let worker = PluginHandle::spawn(
             manifest.script_source.clone(),
             transport,
@@ -401,6 +430,7 @@ impl LuaDevice {
             granted,
             config,
             handle.clone(),
+            zones,
         );
         let mut dev = Self::build(
             id,
@@ -456,6 +486,7 @@ impl LuaDevice {
             worker,
             transport,
             integration_child_worker: None,
+            root_manifest: None,
             caps: declared_caps(manifest),
             lcd_descriptor: OnceLock::new(),
             lcd_slot: LcdStateSlot::default(),
@@ -722,6 +753,9 @@ impl RgbCapability for LuaDevice {
     }
 
     async fn write_frame(&self, zone_id: &str, colors: &[RgbColor]) -> Result<()> {
+        if !self.descriptor().zones.iter().any(|z| z.id == zone_id) {
+            anyhow::bail!("unknown zone: {zone_id}");
+        }
         let r = self.worker()?.rgb_write_frame(zone_id, colors).await;
         self.track(r).await
     }
@@ -863,11 +897,13 @@ impl LuaDevice {
         out
     }
 
-    /// Integration path: one `IntegrationLeaf` per controller the plugin's
-    /// `enumerate_controllers` reports. Each controller gets its own worker
-    /// (connection + Lua VM) via the injected child-worker factory, so writes
-    /// to different controllers run in parallel instead of serializing behind
-    /// one shared connection.
+    /// Integration path: one full `LuaDevice` per controller the plugin's
+    /// `enumerate_controllers` reports. Each controller advertises its own
+    /// capabilities (synthesized into a child manifest) and gets its own worker
+    /// (connection + Lua VM), seeded with the controller index so the shared
+    /// script routes each call to the right remote controller — so writes to
+    /// different controllers run in parallel instead of serializing behind one
+    /// shared connection.
     async fn discover_controllers(&self) -> Vec<Arc<dyn Device>> {
         let Some(worker) = &self.worker else {
             return Vec::new();
@@ -879,21 +915,26 @@ impl LuaDevice {
                 return Vec::new();
             }
         };
-        let Some(factory) = self.integration_child_worker.clone() else {
+        let (Some(factory), Some(root_manifest)) = (
+            self.integration_child_worker.clone(),
+            self.root_manifest.clone(),
+        ) else {
             log::error!(
-                "plugin '{}': integration root has no child-worker factory — this is a daemon bug",
+                "plugin '{}': integration root missing child-worker factory or manifest — this is a daemon bug",
                 self.plugin_id
             );
             return Vec::new();
         };
+        let handle = tokio::runtime::Handle::current();
 
         let mut out = Vec::new();
         for controller in detected {
-            // Open a fresh connection + worker for this controller. The connect
-            // can block for the transport's timeout, so run it off the runtime.
+            // Open a fresh connection for this controller. The connect can block
+            // for the transport's timeout, so run it off the runtime.
             let factory = factory.clone();
-            let child = match tokio::task::spawn_blocking(move || factory()).await {
-                Ok(Ok(w)) => w,
+            let index = controller.index;
+            let transport = match tokio::task::spawn_blocking(move || factory(index)).await {
+                Ok(Ok(t)) => t,
                 Ok(Err(e)) => {
                     log::warn!(
                         "plugin '{}' controller {} connect failed: {e:#}",
@@ -911,6 +952,27 @@ impl LuaDevice {
                     continue;
                 }
             };
+            let child_manifest = child_manifest_for(&root_manifest, &controller);
+            // `new_cyclic` so a controller that itself declares `chain` can hand
+            // its accessories a `FanHub` back-reference (nested chain).
+            let child = Arc::new_cyclic(|weak| {
+                let mut d = LuaDevice::integration_child(
+                    format!("{}_ctrl_{}", self.id, controller.index),
+                    controller.name.clone(),
+                    self.vendor.clone(),
+                    &child_manifest,
+                    controller.index,
+                    transport,
+                    handle.clone(),
+                );
+                d.set_self_ref(weak.clone());
+                d
+            });
+            if child_manifest.chain.is_some() {
+                let adapter: Arc<dyn ChainAdapter> = child.clone();
+                let host = ChainHost::new(adapter, crate::drivers::CHAIN_LINK_KIND_NZXT_ARGB);
+                child.install_chain_host(host);
+            }
             if let Err(e) = child.initialize().await {
                 log::warn!(
                     "plugin '{}' controller {} init failed: {e:#}",
@@ -920,18 +982,42 @@ impl LuaDevice {
                 child.close().await;
                 continue;
             }
-            let leaf: Arc<dyn Device> = Arc::new(IntegrationLeaf::new(
-                format!("{}_ctrl_{}", self.id, controller.index),
-                controller.name.clone(),
-                self.vendor.clone(),
-                controller.index,
-                controller.rgb_descriptor(),
-                child,
-            ));
-            out.push(leaf);
+            out.push(child as Arc<dyn Device>);
         }
         out
     }
+}
+
+/// Synthesize the per-controller manifest an integration builds one child
+/// `LuaDevice` from: a `Device`-kind clone of the (headless, capability-less)
+/// root whose capability sections come from the enumerated controller. The
+/// `zones` shorthand is promoted to an `rgb` section when no explicit one is
+/// given.
+fn child_manifest_for(root: &PluginManifest, ctrl: &DetectedController) -> PluginManifest {
+    let mut m = root.clone();
+    m.plugin_type = PluginKind::Device;
+    m.rgb = ctrl.rgb.clone().or_else(|| {
+        (!ctrl.zones.is_empty()).then(|| RgbManifest {
+            zones: ctrl.rgb_descriptor().zones,
+            native_effects: Vec::new(),
+        })
+    });
+    m.fan = ctrl.fan.clone();
+    m.sensor = ctrl.sensor.clone();
+    m.lcd = ctrl.lcd.clone();
+    m.dpi = ctrl.dpi.clone();
+    m.choice = ctrl.choice.clone();
+    m.range = ctrl.range.clone();
+    m.boolean = ctrl.boolean.clone();
+    m.action = ctrl.action.clone();
+    m.battery = ctrl.battery.clone();
+    m.connection = ctrl.connection.clone();
+    m.equalizer = ctrl.equalizer.clone();
+    m.pairing = ctrl.pairing.clone();
+    m.onboard_profiles = ctrl.onboard_profiles.clone();
+    m.key_remap = ctrl.key_remap.clone();
+    m.chain = ctrl.chain.clone();
+    m
 }
 
 impl ChainCapability for LuaDevice {
@@ -1365,6 +1451,7 @@ mod tests {
             bus: None,
             addr: None,
             pid: Some(0x300E), // Kraken Z (320x320 LCD) for LCD-capable tests
+            index: None,
         }
     }
 
@@ -2035,14 +2122,43 @@ mod tests {
             }
           end,
 
-          write_controller_frame = function(dev, index, zone, colors)
-            local bytes = { index, string.byte(zone, 1) }
+          -------------------------------
+          -- Per-controller callbacks; dev.match.index routes to the right
+          -- controller. The same script source is shared by every child worker.
+
+          write_frame = function(dev, zone_id, colors)
+            local bytes = { dev.match.index, string.byte(zone_id, 1) }
             for _, c in ipairs(colors) do
               bytes[#bytes+1] = c.r
               bytes[#bytes+1] = c.g
               bytes[#bytes+1] = c.b
             end
             dev.transport:write(string.char(table.unpack(bytes)))
+          end,
+
+          apply = function(dev, state)
+            local color = (state.mode == "static") and state.color
+            if not color then return end
+            local idx = dev.match.index
+            -- Zone layout per controller (mirrors enumerate_controllers).
+            local zones = idx == 0 and {
+              { id = "main", n = 4 },
+            } or {
+              { id = "aux", n = 2 },
+              { id = "z2", n = 3 },
+            }
+            for _, z in ipairs(zones) do
+              local cs = {}
+              for i = 1, z.n do cs[i] = color end
+              -- Reuse the write_frame wire format so tests see the same bytes.
+              local bytes = { idx, string.byte(z.id, 1) }
+              for _, c in ipairs(cs) do
+                bytes[#bytes+1] = c.r
+                bytes[#bytes+1] = c.g
+                bytes[#bytes+1] = c.b
+              end
+              dev.transport:write(string.char(table.unpack(bytes)))
+            end
           end,
         }
     "#;
@@ -2052,24 +2168,12 @@ mod tests {
             super::super::parse_manifest(INTEGRATION_SCRIPT, Path::new("integ.lua")).unwrap();
         // Every controller child spawns its own worker over the same mock
         // transport (a real integration opens a fresh socket per controller).
-        let child_source = manifest.script_source.clone();
         let child_transport = transport.clone();
-        let child_handle = tokio::runtime::Handle::current();
-        let child_worker: ChildWorkerFactory = Arc::new(move || {
-            Ok(PluginHandle::spawn(
-                child_source.clone(),
-                PluginIo::Stream {
-                    transport: child_transport.clone(),
-                    bulk: None,
-                },
-                DevMatch {
-                    transport: "tcp".to_owned(),
-                    ..Default::default()
-                },
-                Vec::new(),
-                HashMap::new(),
-                child_handle.clone(),
-            ))
+        let child_worker: ChildWorkerFactory = Arc::new(move |_index| {
+            Ok(PluginIo::Stream {
+                transport: child_transport.clone(),
+                bulk: None,
+            })
         });
         Arc::new_cyclic(|weak| {
             let mut d = LuaDevice::integration_root(
@@ -2216,6 +2320,156 @@ mod tests {
             .is_ok());
     }
 
+    // ---- multi-capability integration fixture ----------------------------------------
+
+    const INTEGRATION_MULTI_SCRIPT: &str = r#"
+        return {
+          type = "integration",
+          identity = { name = "Multi Hub" },
+          config = { fields = { { key = "host", label = "Host" } } },
+          transports = { tcp = {} },
+
+          enumerate_controllers = function(dev)
+            return {
+              { index = 0, name = "Ctrl0",
+                zones = { { id = "leds", name = "LEDs", topology = "linear", led_count = 2 } },
+                fan = { channel = 0 },
+                sensor = {},
+              },
+              { index = 1, name = "Ctrl1",
+                zones = { { id = "ring", name = "Ring", topology = "linear", led_count = 4 } },
+                battery = {},
+              },
+            }
+          end,
+
+          write_frame = function(dev, zone_id, colors)
+            local bytes = { dev.match.index, string.byte(zone_id, 1) }
+            for _, c in ipairs(colors) do
+              bytes[#bytes+1] = c.r; bytes[#bytes+1] = c.g; bytes[#bytes+1] = c.b
+            end
+            dev.transport:write(string.char(table.unpack(bytes)))
+          end,
+
+          set_duty = function(dev, duty)
+            dev.transport:write(string.char(dev.match.index, duty))
+          end,
+
+          get_duty = function(dev)
+            return dev.match.index == 0 and 60 or 0
+          end,
+
+          get_sensors = function(dev)
+            return { { id = "temp", name = "Temperature", value = 42 + dev.match.index, unit = "celsius" } }
+          end,
+
+          get_batteries = function(dev)
+            return { { id = "bat0", level = 80 } }
+          end,
+        }
+    "#;
+
+    fn integration_multi_device() -> Arc<LuaDevice> {
+        let manifest =
+            super::super::parse_manifest(INTEGRATION_MULTI_SCRIPT, Path::new("multi.lua")).unwrap();
+        let transport = Arc::new(MockTransport::empty());
+        let child_transport = transport.clone();
+        let child_worker: ChildWorkerFactory = Arc::new(move |_index| {
+            Ok(PluginIo::Stream {
+                transport: child_transport.clone(),
+                bulk: None,
+            })
+        });
+        Arc::new_cyclic(|weak| {
+            let mut d = LuaDevice::integration_root(
+                "multi-0".into(),
+                &manifest,
+                PluginIo::Stream {
+                    transport,
+                    bulk: None,
+                },
+                child_worker,
+                tokio::runtime::Handle::current(),
+            );
+            d.set_self_ref(weak.clone());
+            d
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integration_child_reports_all_declared_capabilities() {
+        let dev = integration_multi_device();
+        let children = dev.as_controller().unwrap().discover_children().await;
+        assert_eq!(children.len(), 2);
+
+        // Ctrl0: rgb (zones shorthand), fan, sensor
+        let c0 = &children[0];
+        assert!(c0.as_rgb().is_some());
+        assert!(c0.as_fan().is_some());
+        assert!(c0.as_sensor_capability().is_some());
+        assert!(c0.as_battery().is_none());
+        assert_eq!(c0.integration_id(), None);
+
+        // Ctrl1: rgb (zones shorthand), battery
+        let c1 = &children[1];
+        assert!(c1.as_rgb().is_some());
+        assert!(c1.as_battery().is_some());
+        assert!(c1.as_fan().is_none());
+        assert!(c1.as_sensor_capability().is_none());
+        assert_eq!(c1.integration_id(), None);
+
+        // Root stays hidden.
+        assert_eq!(dev.integration_id(), Some("multi".to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integration_child_fan_and_sensor_route_with_correct_index() {
+        let mock = Arc::new(MockTransport::empty());
+        let transport = mock.clone();
+        let manifest =
+            super::super::parse_manifest(INTEGRATION_MULTI_SCRIPT, Path::new("multi.lua")).unwrap();
+        let child_transport = transport.clone();
+        let child_worker: ChildWorkerFactory = Arc::new(move |_index| {
+            Ok(PluginIo::Stream {
+                transport: child_transport.clone(),
+                bulk: None,
+            })
+        });
+        let dev = Arc::new_cyclic(|weak| {
+            let mut d = LuaDevice::integration_root(
+                "multi-0".into(),
+                &manifest,
+                PluginIo::Stream {
+                    transport,
+                    bulk: None,
+                },
+                child_worker,
+                tokio::runtime::Handle::current(),
+            );
+            d.set_self_ref(weak.clone());
+            d
+        });
+        let children = dev.as_controller().unwrap().discover_children().await;
+
+        // Ctrl0 (index 0) has a fan: set_duty writes [0, duty].
+        let fan = children[0].as_fan().expect("ctrl0 has fan");
+        fan.set_duty(60).await.unwrap();
+        assert_eq!(*mock.written.lock().await.last().unwrap(), vec![0, 60]);
+        assert_eq!(fan.get_duty().await.unwrap(), 60);
+
+        // Ctrl1 (index 1) sensors return 42 + 1 = 43.
+        let sensor = children[0]
+            .as_sensor_capability()
+            .expect("ctrl0 has sensor");
+        let sensors: Vec<Sensor> = sensor.get_sensors().await.unwrap();
+        assert_eq!(sensors.len(), 1);
+        assert_eq!(sensors[0].value, 42.0);
+    }
+
+    // Holds the process-wide test lock across `.await` to serialize the shared
+    // notification sink against other plugin-device tests; nothing awaited here
+    // re-takes that lock, so it can't deadlock.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn runtime_errors_surface_once_per_failure_episode() {
         use crate::config::Config;
@@ -2223,7 +2477,9 @@ mod tests {
         use crate::state::AppState;
 
         // The runtime-error sink and dedup set are process-wide globals.
-        let _guard = super::super::TEST_GLOBALS_LOCK.lock().unwrap();
+        let _guard = super::super::TEST_GLOBALS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         // `apply` fails unless the requested colour is black — a per-call toggle
         // so one device can walk fail → fail → recover → fail.
