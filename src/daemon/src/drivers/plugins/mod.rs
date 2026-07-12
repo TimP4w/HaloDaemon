@@ -88,8 +88,9 @@ struct PluginState {
     /// (which governs whether the Lua may run at all). Only meaningful for
     /// `PluginKind::Integration` plugins.
     integrations_disabled: HashSet<String>,
-    /// Permissions the user granted per plugin. Built-ins are additionally
-    /// auto-granted their own declared permissions in [`granted_for`].
+    /// Permissions the user granted per plugin (see [`granted_for`]). Every
+    /// plugin — built-in or not — must be granted its permissions through
+    /// consent; nothing is auto-granted.
     granted: HashMap<String, Vec<Permission>>,
     /// Content hash (hex SHA-256) the user consented to per plugin. A disk
     /// plugin is consent-satisfied only when its script still hashes to this.
