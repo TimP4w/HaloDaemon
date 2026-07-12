@@ -18,6 +18,7 @@ mod device;
 mod effect_worker;
 mod ffi;
 mod image_api;
+pub(crate) mod integration_monitor;
 pub(crate) mod integration_scan;
 mod lua_worker;
 mod manifest;

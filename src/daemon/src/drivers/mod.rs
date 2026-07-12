@@ -171,11 +171,8 @@ pub trait Device: Send + Sync {
         true
     }
 
-    /// Cheap synchronous liveness probe. `false` marks the device present-but-
-    /// offline (e.g. an integration whose remote server dropped): engines skip
-    /// it so they stop hammering a dead transport, and the GUI greys it via
-    /// `wire_device_connected`. Defaults to `true` — a device with no remote
-    /// backend is always live.
+    /// `false` marks the device present-but-offline (e.g. an integration whose
+    /// server dropped): engines skip it and the GUI greys it. Default `true`.
     fn is_live(&self) -> bool {
         true
     }

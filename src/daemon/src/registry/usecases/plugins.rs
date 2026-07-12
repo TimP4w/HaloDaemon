@@ -351,6 +351,12 @@ async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
     for id in &owned_ids {
         super::registration::unregister_device_and_children(app, id).await;
     }
+    // Prune HID tracking for the torn-down hardware. The full path clears all
+    // HID tracking (`rediscover_devices`); the scoped path must clear just these
+    // keys, or the HID rescan skips the still-tracked key and the device never
+    // comes back on re-enable/config-change.
+    let owned: std::collections::HashSet<String> = owned_ids.into_iter().collect();
+    app.hid.untrack_devices(&owned).await;
 }
 
 /// Scoped teardown + reprobe for `plugins`: only devices owned by one of
@@ -498,6 +504,47 @@ mod tests {
                 .await
                 .plugins_disabled
                 .contains(&"some_plugin".to_string()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn scoped_teardown_prunes_hid_tracking_so_reprobe_can_readd() {
+        // Regression: the scoped teardown must drop the torn-down device's HID
+        // key, or the HID rescan skips the still-tracked key and the device never
+        // comes back on re-enable/config-change (the full path clears all HID
+        // tracking; the scoped path must clear just these keys).
+        use crate::registry::HidTrackingEntry;
+        use crate::test_support::MockDevice;
+        use std::sync::Arc;
+
+        crate::test_support::with_tmp_config(|app| async move {
+            let owned: Arc<dyn crate::drivers::Device> =
+                Arc::new(MockDevice::new("P-dev").with_owning_plugin_id("P"));
+            let other: Arc<dyn crate::drivers::Device> =
+                Arc::new(MockDevice::new("Q-dev").with_owning_plugin_id("Q"));
+            app.devices.write().await.push(owned.clone());
+            app.devices.write().await.push(other.clone());
+            app.hid
+                .track("1234:5678:P".into(), HidTrackingEntry::Primary(vec![owned]))
+                .await;
+            app.hid
+                .track("9abc:def0:Q".into(), HidTrackingEntry::Primary(vec![other]))
+                .await;
+
+            teardown_owned_devices(&app, &["P".to_string()]).await;
+
+            let keys = app.hid.keys().await;
+            assert!(
+                !keys.contains("1234:5678:P"),
+                "torn-down plugin's HID key must be untracked so a re-probe re-adds it"
+            );
+            assert!(
+                keys.contains("9abc:def0:Q"),
+                "an untouched plugin's HID key must survive the scoped teardown"
+            );
+            assert!(app.find_device_by_id("P-dev").await.is_none());
+            assert!(app.find_device_by_id("Q-dev").await.is_some());
         })
         .await;
     }

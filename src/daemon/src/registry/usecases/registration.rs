@@ -174,18 +174,29 @@ pub async fn register_device_and_children(app: &Arc<AppState>, device: Arc<dyn D
     true
 }
 
-/// The mirror of [`register_device_and_children`]: close and drop `root_id`
-/// plus every child registered alongside it (ids prefixed `{root_id}_ctrl_`,
-/// the scheme `LuaDevice::discover_controllers` uses for `IntegrationLeaf`
-/// children) from `app.devices`. Used for a scoped reload of a single
-/// integration without touching any other device.
+/// True if `id` is a child registered alongside root `root_id`: `_ctrl_`
+/// (integration controllers), `_acc_` (chain accessories), or `_chain_` (chain
+/// links). Matching the markers rather than a bare `{root_id}_` prefix stops two
+/// roots differing only by a trailing `_<suffix>` from tearing each other down.
+fn is_registered_child(id: &str, root_id: &str) -> bool {
+    id.strip_prefix(root_id)
+        .and_then(|rest| rest.strip_prefix('_'))
+        .is_some_and(|marker| {
+            marker.starts_with("ctrl_")
+                || marker.starts_with("acc_")
+                || marker.starts_with("chain_")
+        })
+}
+
+/// The mirror of [`register_device_and_children`]: close and drop `root_id` plus
+/// every child registered alongside it (see [`is_registered_child`]). Used for a
+/// scoped reload of one integration or plugin.
 pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) {
-    let prefix = format!("{root_id}_ctrl_");
     let removed: Vec<Arc<dyn Device>> = {
         let mut devices = app.devices.write().await;
         let mut removed = Vec::new();
         devices.retain(|d| {
-            if d.id() == root_id || d.id().starts_with(&prefix) {
+            if d.id() == root_id || is_registered_child(d.id(), root_id) {
                 removed.push(d.clone());
                 false
             } else {
@@ -568,5 +579,57 @@ mod tests {
         assert!(child1.closed.load(Ordering::SeqCst));
         assert!(child2.closed.load(Ordering::SeqCst));
         assert!(!unrelated.closed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn unregister_device_and_children_removes_chain_accessory_and_link_children() {
+        // A device plugin's chain children (auto-detected `_acc_` accessories and
+        // manually-added `_chain_` links) must be torn down with the parent —
+        // otherwise they linger after a disable and collide with freshly-built
+        // children on re-enable, leaving the plugin in a broken state.
+        let app = make_app();
+        let root = Arc::new(MockDevice::new("kraken-0"));
+        let accessory = Arc::new(MockDevice::new("kraken-0_acc_0_19"));
+        let link = Arc::new(MockDevice::new("kraken-0_chain_0_abcd"));
+        // A sibling whose id merely shares a leading substring must survive.
+        let sibling = Arc::new(MockDevice::new("kraken-0b"));
+        {
+            let mut devices = app.devices.write().await;
+            devices.push(root.clone());
+            devices.push(accessory.clone());
+            devices.push(link.clone());
+            devices.push(sibling.clone());
+        }
+
+        unregister_device_and_children(&app, "kraken-0").await;
+
+        let remaining = app.devices.read().await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id(), "kraken-0b");
+        drop(remaining);
+
+        assert!(root.closed.load(Ordering::SeqCst));
+        assert!(
+            accessory.closed.load(Ordering::SeqCst),
+            "_acc_ child removed"
+        );
+        assert!(link.closed.load(Ordering::SeqCst), "_chain_ child removed");
+        assert!(!sibling.closed.load(Ordering::SeqCst), "sibling survives");
+    }
+
+    #[test]
+    fn is_registered_child_matches_only_known_markers() {
+        let root = "openrgb-a_1";
+        assert!(is_registered_child("openrgb-a_1_ctrl_0", root));
+        assert!(is_registered_child("openrgb-a_1_acc_0_19", root));
+        assert!(is_registered_child("openrgb-a_1_chain_0_uuid", root));
+        assert!(
+            is_registered_child("openrgb-a_1_ctrl_0_acc_0_19", root),
+            "nested"
+        );
+        // Another root that differs only by a trailing `_<suffix>` is NOT a child.
+        assert!(!is_registered_child("openrgb-a_1_2", root));
+        assert!(!is_registered_child("openrgb-a_1", root), "the root itself");
+        assert!(!is_registered_child("openrgb-a_1b", root));
     }
 }

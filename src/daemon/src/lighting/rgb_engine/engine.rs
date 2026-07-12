@@ -621,8 +621,10 @@ impl RgbEngine {
         };
 
         let devices_guard = self.app_state.devices.read().await;
+        // Skip offline devices so the engine never queues a frame for a dead socket.
         let placed_zones: Vec<PlacedZone> = devices_guard
             .iter()
+            .filter(|d| d.is_live())
             .filter_map(|d| d.as_rgb())
             .flat_map(|s| s.canvas_zones())
             .collect();
@@ -632,7 +634,7 @@ impl RgbEngine {
             .filter_map(|p| {
                 devices_guard
                     .iter()
-                    .find(|d| d.id() == p.device_id && d.as_rgb().is_some())
+                    .find(|d| d.id() == p.device_id && d.is_live() && d.as_rgb().is_some())
                     .cloned()
                     .map(|dev| (p.device_id.clone(), dev))
             })
@@ -640,6 +642,7 @@ impl RgbEngine {
 
         let direct_devices: Vec<DirectDevice> = devices_guard
             .iter()
+            .filter(|d| d.is_live())
             .filter_map(|d| match d.as_rgb()?.current_state() {
                 Some(RgbState::DirectEffect { id, params }) => Some((Arc::clone(d), id, params)),
                 _ => None,
@@ -710,6 +713,10 @@ impl RgbEngine {
     fn dispatch_writes(&self, pending: PendingWrites) {
         let mut slots = self.write_slots.lock().expect("write slots poisoned");
         for (id, (dev, zones)) in pending {
+            // Skip a device that went offline between state sync and dispatch.
+            if !dev.is_live() {
+                continue;
+            }
             if slots.get(&id).is_some_and(|h| !h.is_finished()) {
                 continue;
             }
@@ -777,6 +784,7 @@ mod tests {
         fail_static_apply: AtomicBool,
         skip_record_on_fail: AtomicBool,
         last_colors: StdMutex<Option<Vec<RgbColor>>>,
+        live: AtomicBool,
     }
 
     impl MockRgbDevice {
@@ -808,6 +816,7 @@ mod tests {
                 fail_static_apply: AtomicBool::new(false),
                 skip_record_on_fail: AtomicBool::new(false),
                 last_colors: StdMutex::new(None),
+                live: AtomicBool::new(true),
             })
         }
 
@@ -849,6 +858,9 @@ mod tests {
             Ok(true)
         }
         async fn close(&self) {}
+        fn is_live(&self) -> bool {
+            self.live.load(Ordering::SeqCst)
+        }
         fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
             vec![CapabilityRef::Rgb(self)]
         }
@@ -1152,6 +1164,71 @@ mod tests {
         assert_eq!(canvas_state.placed_zones.len(), 1);
         assert!(rgb_devices.contains_key("dev0"));
         assert!(direct.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_tick_state_excludes_offline_devices() {
+        // An offline device (integration whose server dropped) must be dropped
+        // from both the canvas and direct-effect sets so the engine never queues
+        // a frame for its dead socket.
+        let app = make_app();
+        let canvas = MockRgbDevice::new_with_zones(
+            "dead0",
+            "ring",
+            3,
+            false,
+            vec![make_zone("dead0", "ring")],
+        );
+        canvas.live.store(false, Ordering::SeqCst);
+        let direct_dev = MockRgbDevice::new("dead1", "ring", 3, false);
+        *direct_dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+            id: "breathing".into(),
+            params: HashMap::new(),
+        });
+        direct_dev.live.store(false, Ordering::SeqCst);
+        {
+            let mut devices = app.devices.write().await;
+            devices.push(canvas as Arc<dyn Device>);
+            devices.push(direct_dev as Arc<dyn Device>);
+        }
+
+        let engine = RgbEngine::new(app).await;
+        let (canvas_state, rgb_devices, direct) = engine.sync_tick_state().await;
+
+        assert!(
+            canvas_state.placed_zones.is_empty(),
+            "offline canvas zone dropped"
+        );
+        assert!(
+            !rgb_devices.contains_key("dead0"),
+            "offline device not mapped"
+        );
+        assert!(direct.is_empty(), "offline direct-effect device dropped");
+    }
+
+    #[tokio::test]
+    async fn dispatch_writes_skips_an_offline_device() {
+        let engine = RgbEngine::new(make_app()).await;
+        let dev = MockRgbDevice::new("dev0", "ring", 3, false);
+        dev.live.store(false, Ordering::SeqCst);
+        let dev_arc: Arc<dyn Device> = dev.clone();
+        let mut pending: PendingWrites = HashMap::new();
+        pending.insert(
+            "dev0".to_string(),
+            (
+                dev_arc,
+                vec![("ring".to_string(), vec![RgbColor::default(); 3])],
+            ),
+        );
+
+        engine.dispatch_writes(pending);
+        engine.drain_writes().await;
+
+        assert_eq!(
+            dev.write_count.load(Ordering::SeqCst),
+            0,
+            "an offline device must not be written to"
+        );
     }
 
     #[tokio::test]

@@ -77,6 +77,9 @@ pub struct PluginsUi {
     checking_repo: Option<RepoCheck>,
     /// Id pending a permission consent decision, when the dialog is open.
     pending_consent: Option<String>,
+    /// Plugin ids whose enable/disable is applying → target state; the toggle is
+    /// locked at the target until the daemon confirms.
+    in_flight: HashMap<String, bool>,
     /// Plugin ids seen as of the previous frame, used only to spot a
     /// freshly-imported plugin. `None` until the first frame, so pre-existing
     /// plugins at startup never spuriously pop the dialog.
@@ -202,7 +205,14 @@ impl PluginsUi {
         );
         ui.add_space(18.0);
 
-        if state.plugins.rediscover_pending {
+        reconcile_in_flight(
+            &mut self.in_flight,
+            &state.plugins.plugins,
+            state.plugins.rediscover_pending,
+        );
+
+        // Banner is only for repo changes now; suppress it while a toggle applies.
+        if state.plugins.rediscover_pending && self.in_flight.is_empty() {
             pending_changes_banner(ui, cmd);
             ui.add_space(18.0);
         }
@@ -306,13 +316,17 @@ impl PluginsUi {
                                 .as_deref()
                                 .map(|name| ipc::plugin_asset_cache_key(&p.id, name))
                                 .and_then(|key| self.asset_textures.get(&key));
-                            match list_row(ui, p, selected, has_update, logo_tex) {
+                            let locked = self.in_flight.get(&p.id).copied();
+                            match list_row(ui, p, selected, has_update, logo_tex, locked) {
                                 RowAction::Select => {
                                     self.selection = Selection::Plugin(p.id.clone())
                                 }
                                 RowAction::Toggle => {
-                                    self.pending_consent =
-                                        request_toggle(cmd, p, self.pending_consent.take())
+                                    let out = request_toggle(cmd, p, self.pending_consent.take());
+                                    self.pending_consent = out.pending_consent;
+                                    if let Some(target) = out.dispatched {
+                                        apply_and_lock(cmd, &mut self.in_flight, &p.id, target);
+                                    }
                                 }
                                 RowAction::None => {}
                             }
@@ -392,6 +406,7 @@ impl PluginsUi {
                                 update,
                                 &mut self.pending_delete,
                                 &mut self.pending_consent,
+                                &mut self.in_flight,
                                 &mut self.updating,
                                 now,
                             )
@@ -815,9 +830,11 @@ impl PluginsUi {
         if grant {
             crate::domain::actions::plugins::grant_and_enable(
                 cmd,
-                id,
+                id.clone(),
                 p.declared_permissions.clone(),
             );
+            // Granting enables the plugin — apply and lock like a direct enable.
+            apply_and_lock(cmd, &mut self.in_flight, &id, true);
             self.pending_consent = None;
         } else if cancel || dismissed {
             self.pending_consent = None;
@@ -1246,23 +1263,62 @@ fn toggle_decision(p: &PluginInfo) -> ToggleDecision {
     }
 }
 
+/// Outcome of an enable/disable toggle click.
+struct ToggleOutcome {
+    /// The `pending_consent` to keep (this plugin's id when a grant modal opens).
+    pending_consent: Option<String>,
+    /// `Some(target)` when a `SetPluginEnabled` was dispatched.
+    dispatched: Option<bool>,
+}
+
 /// Apply a toggle click through the consent gate. Enabling/disabling dispatches
-/// immediately; a plugin needing permission returns its id as the new
-/// `pending_consent` so the grant modal opens instead. Returns the
-/// `pending_consent` to keep.
-fn request_toggle(cmd: &CommandTx, p: &PluginInfo, pending: Option<String>) -> Option<String> {
+/// immediately; a plugin needing permission opens the grant modal instead (by
+/// returning its id as the new `pending_consent`).
+fn request_toggle(cmd: &CommandTx, p: &PluginInfo, pending: Option<String>) -> ToggleOutcome {
     use crate::domain::actions::plugins::set_plugin_enabled;
     match toggle_decision(p) {
         ToggleDecision::Disable => {
             set_plugin_enabled(cmd, p.id.clone(), false);
-            pending
+            ToggleOutcome {
+                pending_consent: pending,
+                dispatched: Some(false),
+            }
         }
         ToggleDecision::Enable => {
             set_plugin_enabled(cmd, p.id.clone(), true);
-            pending
+            ToggleOutcome {
+                pending_consent: pending,
+                dispatched: Some(true),
+            }
         }
-        ToggleDecision::NeedsConsent => Some(p.id.clone()),
+        ToggleDecision::NeedsConsent => ToggleOutcome {
+            pending_consent: Some(p.id.clone()),
+            dispatched: None,
+        },
     }
+}
+
+/// Apply a just-dispatched toggle immediately and lock it at `target`.
+fn apply_and_lock(cmd: &CommandTx, in_flight: &mut HashMap<String, bool>, id: &str, target: bool) {
+    crate::domain::actions::plugins::apply_pending_plugin_changes(cmd);
+    in_flight.insert(id.to_owned(), target);
+}
+
+/// A toggle has landed once the plugin is at the target and nothing is pending.
+fn plugin_toggle_landed(p: &PluginInfo, target: bool, rediscover_pending: bool) -> bool {
+    plugin_active(p) == target && !rediscover_pending
+}
+
+/// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
+fn reconcile_in_flight(
+    in_flight: &mut HashMap<String, bool>,
+    plugins: &[PluginInfo],
+    rediscover_pending: bool,
+) {
+    in_flight.retain(|id, target| match plugins.iter().find(|p| &p.id == id) {
+        Some(p) => !plugin_toggle_landed(p, *target, rediscover_pending),
+        None => false,
+    });
 }
 
 fn status_dot(p: &PluginInfo) -> egui::Color32 {
@@ -1279,6 +1335,8 @@ fn list_row(
     selected: bool,
     has_update: bool,
     logo_tex: Option<&egui::TextureHandle>,
+    // `Some(target)` while applying: toggle shown at `target`, dimmed, click-blocked.
+    locked_target: Option<bool>,
 ) -> RowAction {
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::click());
@@ -1328,20 +1386,32 @@ fn list_row(
         Pos2::new(rect.right() - 42.0, center_y - 9.0),
         Vec2::new(34.0, 18.0),
     );
+    let locked = locked_target.is_some();
+    let toggle_sense = if locked {
+        Sense::hover()
+    } else {
+        Sense::click()
+    };
     let tresp = ui.interact(
         toggle_rect,
         ui.id().with(("plugin_toggle", &p.id)),
-        Sense::click(),
+        toggle_sense,
     );
-    let t = ui
-        .ctx()
-        .animate_bool_with_time(tresp.id, plugin_active(p), 0.15);
+    let toggle_on = locked_target.unwrap_or_else(|| plugin_active(p));
+    let t = ui.ctx().animate_bool_with_time(tresp.id, toggle_on, 0.15);
     widgets::paint_toggle(ui.painter(), toggle_rect, t);
-    if tresp.hovered() || resp.hovered() {
+    if locked {
+        // Wash out to read as disabled.
+        ui.painter()
+            .rect_filled(toggle_rect, 9.0, theme::a(theme::CARD_BG, 0.55));
+        if tresp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
+        }
+    } else if tresp.hovered() || resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
-    if tresp.clicked() {
+    if !locked && tresp.clicked() {
         RowAction::Toggle
     } else if resp.clicked() {
         RowAction::Select
@@ -1419,6 +1489,7 @@ fn detail_body(
     update: Option<&PluginUpdateStatus>,
     pending_delete: &mut Option<String>,
     pending_consent: &mut Option<String>,
+    in_flight: &mut HashMap<String, bool>,
     updating: &mut HashMap<String, f64>,
     now: f64,
 ) {
@@ -1551,6 +1622,7 @@ fn detail_body(
     ui.add_space(14.0);
     ui.horizontal(|ui| {
         let active = plugin_active(p);
+        let locked = in_flight.contains_key(&p.id);
         let label = if active {
             t!("plugins.disable")
         } else {
@@ -1561,8 +1633,17 @@ fn detail_body(
         } else {
             ButtonKind::Primary
         };
-        if widgets::button(ui, &label, kind, Vec2::new(120.0, 34.0)).clicked() {
-            *pending_consent = request_toggle(cmd, p, pending_consent.take());
+        let clicked = ui
+            .add_enabled_ui(!locked, |ui| {
+                widgets::button(ui, &label, kind, Vec2::new(120.0, 34.0)).clicked()
+            })
+            .inner;
+        if clicked {
+            let out = request_toggle(cmd, p, pending_consent.take());
+            *pending_consent = out.pending_consent;
+            if let Some(target) = out.dispatched {
+                apply_and_lock(cmd, in_flight, &p.id, target);
+            }
         }
         if matches!(p.source, halod_shared::types::PluginSource::Local) {
             if widgets::button(
@@ -2364,6 +2445,48 @@ mod tests {
             consented: true,
             content_changed: false,
         }
+    }
+
+    #[test]
+    fn toggle_lands_only_when_state_matches_and_nothing_pending() {
+        let on = info("p", true);
+        let off = info("p", false);
+        // Disable target (false): landed when inactive and not pending.
+        assert!(plugin_toggle_landed(&off, false, false));
+        assert!(!plugin_toggle_landed(&on, false, false), "still active");
+        assert!(
+            !plugin_toggle_landed(&off, false, true),
+            "still applying (pending)"
+        );
+        // Enable target (true): landed when active and not pending.
+        assert!(plugin_toggle_landed(&on, true, false));
+    }
+
+    #[test]
+    fn reconcile_unlocks_landed_and_vanished_toggles() {
+        let mut in_flight = HashMap::from([
+            ("keep".to_string(), false), // still applying
+            ("done".to_string(), true),  // landed
+            ("gone".to_string(), true),  // plugin disappeared
+        ]);
+        let plugins = vec![info("keep", true), info("done", true)];
+
+        reconcile_in_flight(&mut in_flight, &plugins, false);
+
+        assert!(in_flight.contains_key("keep"), "disable not applied yet");
+        assert!(!in_flight.contains_key("done"), "enable landed → unlocked");
+        assert!(!in_flight.contains_key("gone"), "vanished → unlocked");
+    }
+
+    #[test]
+    fn reconcile_keeps_all_locked_while_a_rediscovery_is_pending() {
+        let mut in_flight = HashMap::from([("done".to_string(), true)]);
+        let plugins = vec![info("done", true)];
+        reconcile_in_flight(&mut in_flight, &plugins, true);
+        assert!(
+            in_flight.contains_key("done"),
+            "target matches but apply not finished"
+        );
     }
 
     #[test]

@@ -93,6 +93,9 @@ pub struct MockDevice {
     pub load_called: Arc<AtomicBool>,
     /// Set to `true` by `close()`, for tests asserting a device was torn down.
     pub closed: Arc<AtomicBool>,
+    /// Backs `Device::is_live`. Defaults to live; flip via `.offline()` or the
+    /// shared `Arc` to exercise engine liveness gating.
+    pub live: Arc<AtomicBool>,
     /// Owning plugin id when this device stands in for an integration root
     /// (see `Device::integration_id`). `None` for a normal device.
     pub integration_id: Option<String>,
@@ -147,6 +150,7 @@ impl MockDevice {
             init_behavior: InitBehavior::OkTrue,
             load_called: Arc::new(AtomicBool::new(false)),
             closed: Arc::new(AtomicBool::new(false)),
+            live: Arc::new(AtomicBool::new(true)),
             integration_id: None,
             owning_plugin_id: None,
             fan: None,
@@ -216,6 +220,12 @@ impl MockDevice {
     /// (see `Device::owning_plugin_id`).
     pub fn with_owning_plugin_id(mut self, id: &str) -> Self {
         self.owning_plugin_id = Some(id.to_string());
+        self
+    }
+
+    /// Start the device offline (`is_live() == false`), for engine liveness-gating tests.
+    pub fn offline(self) -> Self {
+        self.live.store(false, Ordering::SeqCst);
         self
     }
 
@@ -351,6 +361,10 @@ impl Device for MockDevice {
 
     fn owning_plugin_id(&self) -> Option<String> {
         self.owning_plugin_id.clone()
+    }
+
+    fn is_live(&self) -> bool {
+        self.live.load(Ordering::SeqCst)
     }
 
     async fn load_state(&self, state: &serde_json::Value) {

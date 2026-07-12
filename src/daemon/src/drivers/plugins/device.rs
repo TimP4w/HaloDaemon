@@ -275,9 +275,7 @@ pub struct LuaDevice {
     /// synthesized from (`child_manifest_for`).
     root_manifest: Option<Arc<PluginManifest>>,
     /// Integration liveness, shared by a root and all its children (one socket
-    /// pool → one flag). `None` for every non-integration device (always live).
-    /// Flipped in `track()` on each apply/write/set_duty/sensor result: a failing
-    /// call greys the whole integration, a success self-heals a transient blip.
+    /// pool → one flag). `None` for non-integration devices (always live).
     liveness: Option<Arc<AtomicBool>>,
 
     /// Capability sections the manifest declared, in advertised order. Drives
@@ -621,10 +619,7 @@ impl LuaDevice {
     /// fan duty, sensor poll) otherwise only log the failure, so a broken plugin
     /// is invisible — this turns the first failure of an episode into one toast.
     async fn track<T>(&self, result: Result<T>) -> Result<T> {
-        // Flip integration liveness on every tracked call (shared root/child
-        // flag): a failing write greys the whole integration so engines stop
-        // hammering the dead socket; a success self-heals a transient blip. Done
-        // before the notify upgrade so it stands even when `AppState` is gone.
+        // A failing call greys the integration; a success self-heals it.
         if let Some(l) = &self.liveness {
             l.store(result.is_ok(), Ordering::Relaxed);
         }
@@ -927,12 +922,9 @@ impl Controller for LuaDevice {
         self.discover_chain_accessories().await
     }
 
-    /// Re-enumerate the integration's controllers on the live root worker and
-    /// diff against `existing`: build only controllers whose child id isn't
-    /// already registered, and report ids in `existing` the server no longer
-    /// reports. Survivors are untouched → engines keep stable id lookups (no
-    /// flicker). `Err` (enumerate failed) greys this integration and is
-    /// surfaced so the monitor can broadcast the drop.
+    /// Diff the live server's controllers against `existing`: build only new
+    /// ones, report departed ids, leave survivors untouched. `Err` greys the
+    /// integration (server dropped mid-enumerate).
     async fn resync_children(
         &self,
         existing: &HashSet<String>,
@@ -975,9 +967,7 @@ impl Controller for LuaDevice {
     }
 }
 
-/// Shared inputs every integration child build needs. Gathered once from the
-/// root (granted permissions + resolved config looked up on the root's plugin)
-/// and reused for each controller by `build_child`.
+/// Shared inputs `build_child` needs, gathered once from the root.
 struct ChildBuildCtx {
     factory: ChildWorkerFactory,
     root_manifest: Arc<PluginManifest>,
@@ -1069,9 +1059,7 @@ impl LuaDevice {
         out
     }
 
-    /// Gather the shared inputs `build_child` needs (child-worker factory, root
-    /// manifest, runtime handle, granted permissions + resolved config). `None`
-    /// when the integration root is missing its factory/manifest — a daemon bug.
+    /// `None` when the integration root is missing its factory/manifest (a bug).
     fn child_build_ctx(&self) -> Option<ChildBuildCtx> {
         let (Some(factory), Some(root_manifest)) = (
             self.integration_child_worker.clone(),
@@ -1105,11 +1093,9 @@ impl LuaDevice {
         })
     }
 
-    /// Build one integration controller as a full `LuaDevice` child: open a
-    /// fresh pool slot, synthesize the child manifest from the enumerated
-    /// controller, install a chain host if it declares `chain`, and initialize
-    /// it. The child shares the root's liveness flag. `None` on connect/init
-    /// failure (logged). Shared by first-time discovery and `resync_children`.
+    /// Build one integration controller as a child `LuaDevice` sharing the
+    /// root's liveness flag. `None` on connect/init failure. Shared by first-time
+    /// discovery and `resync_children`.
     async fn build_child(
         &self,
         controller: &DetectedController,
@@ -2413,6 +2399,51 @@ mod tests {
         // just the trait method.
         let dev = integration_device(Arc::new(MockTransport::empty()));
         assert!(dev.as_controller().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn track_flips_integration_liveness_to_last_result() {
+        // The shared root/child flag greys the integration on a failed call and
+        // self-heals on a success — `is_live()` always mirrors the last result.
+        let dev = integration_device(Arc::new(MockTransport::empty()));
+        assert!(dev.is_live(), "starts live");
+        let _ = dev.track::<()>(Err(anyhow::anyhow!("boom"))).await;
+        assert!(!dev.is_live(), "an error greys the integration");
+        let _ = dev.track::<()>(Ok(())).await;
+        assert!(dev.is_live(), "a success self-heals a transient blip");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_integration_device_is_always_live() {
+        // A device with no remote backend has no liveness flag; `track` never
+        // greys it, so engines always drive it.
+        let dev = device(Arc::new(MockTransport::empty()));
+        assert!(dev.is_live());
+        let _ = dev.track::<()>(Err(anyhow::anyhow!("boom"))).await;
+        assert!(dev.is_live(), "a backing-less device stays live");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resync_children_builds_only_new_and_reports_gone() {
+        // enumerate_controllers reports ctrl_0 and ctrl_1. With ctrl_0 already
+        // registered and a stale ctrl_9 in `existing`, resync builds only the
+        // new ctrl_1 and reports ctrl_9 gone — the survivor is left untouched.
+        let dev = integration_device(Arc::new(MockTransport::empty()));
+        let existing: std::collections::HashSet<String> = ["integ-0_ctrl_0", "integ-0_ctrl_9"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let (added, gone) = dev
+            .as_controller()
+            .unwrap()
+            .resync_children(&existing)
+            .await
+            .unwrap();
+
+        assert_eq!(added.len(), 1, "only the un-registered controller is built");
+        assert_eq!(added[0].id(), "integ-0_ctrl_1");
+        assert_eq!(gone, vec!["integ-0_ctrl_9".to_string()]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

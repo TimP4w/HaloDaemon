@@ -63,10 +63,9 @@ fn placeholder_handle<'a>() -> DiscoveryHandle<'a> {
     }
 }
 
-/// Open one fresh `tcp` connection to the server this integration's config
-/// declares. A real connect blocks for the transport's timeout, so callers run
-/// it off the async runtime (`spawn_blocking`). Shared by first-time discovery
-/// (`build_and_register`) and the reconnect watcher's liveness probe.
+/// Open one fresh `tcp` connection to the configured server. Blocks for the
+/// transport timeout, so callers run it off-runtime. Shared by discovery and the
+/// reconnect watcher's probe.
 pub(super) fn open_probe(
     manifest: &PluginManifest,
     config: &std::collections::HashMap<String, String>,

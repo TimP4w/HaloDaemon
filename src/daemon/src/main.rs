@@ -207,6 +207,23 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
         });
     }
 
+    // Reconnect/liveness watcher for config-instantiated integration plugins
+    // (offline-at-startup, mid-run drops, controller add/remove). Runs beside
+    // the HID hotplug monitor.
+    {
+        let app2 = app.clone();
+        let monitor_handle = tokio::spawn(
+            drivers::plugins::integration_monitor::integration_monitor(app2),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = monitor_handle.await {
+                if !e.is_cancelled() {
+                    log::warn!("integration monitor exited unexpectedly: {e}");
+                }
+            }
+        });
+    }
+
     let (cooling_cfg, rgb_cfg, lcd_cfg) = {
         let cfg = app.config.read().await;
         (cfg.cooling.clone(), cfg.rgb.clone(), cfg.lcd.clone())

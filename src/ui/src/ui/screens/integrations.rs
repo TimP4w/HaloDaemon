@@ -38,6 +38,8 @@ fn is_visible_integration(p: &PluginInfo) -> bool {
 pub struct IntegrationsUi {
     expanded: Option<String>,
     config_edit: Option<(String, HashMap<String, String>)>,
+    /// Integrations whose enable/disable is applying → target state; toggle locked.
+    in_flight: HashMap<String, bool>,
     /// Decoded logo textures, keyed like `ipc::plugin_asset_cache_key`.
     logo_textures: HashMap<String, egui::TextureHandle>,
     /// Cache keys already requested from the daemon, so a missing logo isn't
@@ -138,6 +140,7 @@ impl IntegrationsUi {
     }
 
     fn body(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+        reconcile_in_flight(&mut self.in_flight, &state.plugins.plugins);
         ui.label(
             egui::RichText::new(t!("integrations.title"))
                 .font(theme::bold(22.0))
@@ -178,6 +181,8 @@ impl IntegrationsUi {
     }
 
     fn card(&mut self, ui: &mut egui::Ui, state: &AppState, p: &PluginInfo, cmd: &CommandTx) {
+        let locked = self.in_flight.get(&p.id).copied();
+        let mut toggled: Option<bool> = None;
         widgets::card(ui, |ui| {
             egui::Sides::new().show(
                 ui,
@@ -216,13 +221,15 @@ impl IntegrationsUi {
                     });
                 },
                 |ui| {
-                    let target = widgets::toggle(ui, p.integration_enabled);
-                    if target != p.integration_enabled {
-                        crate::domain::actions::integrations::set_integration_enabled(
-                            cmd,
-                            p.id.clone(),
-                            target,
-                        );
+                    if let Some(target) = locked {
+                        ui.add_enabled_ui(false, |ui| {
+                            widgets::toggle(ui, target);
+                        });
+                    } else {
+                        let target = widgets::toggle(ui, p.integration_enabled);
+                        if target != p.integration_enabled {
+                            toggled = Some(target);
+                        }
                     }
                 },
             );
@@ -270,7 +277,24 @@ impl IntegrationsUi {
                 });
             }
         });
+
+        if let Some(target) = toggled {
+            crate::domain::actions::integrations::set_integration_enabled(
+                cmd,
+                p.id.clone(),
+                target,
+            );
+            self.in_flight.insert(p.id.clone(), target);
+        }
     }
+}
+
+/// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
+fn reconcile_in_flight(in_flight: &mut HashMap<String, bool>, plugins: &[PluginInfo]) {
+    in_flight.retain(|id, target| match plugins.iter().find(|p| &p.id == id) {
+        Some(p) => p.integration_enabled != *target,
+        None => false,
+    });
 }
 
 /// Logos of visible integrations that aren't cached or already requested,
@@ -455,6 +479,28 @@ mod tests {
         let mut requested = HashSet::new();
         requested.insert(key);
         assert!(logos_to_request(&[p], &HashMap::new(), &requested).is_empty());
+    }
+
+    #[test]
+    fn reconcile_unlocks_landed_and_vanished_integration_toggles() {
+        // "enabling": target true, still disabled → stays locked.
+        // "disabling": target false, now disabled → landed, unlock.
+        // "gone": plugin no longer present → unlock.
+        let mut in_flight = std::collections::HashMap::from([
+            ("enabling".to_string(), true),
+            ("disabling".to_string(), false),
+            ("gone".to_string(), true),
+        ]);
+        let plugins = vec![
+            plugin("enabling", true, false),
+            plugin("disabling", true, false),
+        ];
+
+        reconcile_in_flight(&mut in_flight, &plugins);
+
+        assert!(in_flight.contains_key("enabling"), "not enabled yet");
+        assert!(!in_flight.contains_key("disabling"), "disable landed");
+        assert!(!in_flight.contains_key("gone"), "vanished → unlocked");
     }
 
     #[test]
