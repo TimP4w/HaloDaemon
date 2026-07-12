@@ -149,6 +149,16 @@ Include a section to advertise that capability:
 - `lcd = { needs_rgb_restore = <bool> }` — the device has an image panel; see [LCD](#lcd).
 - `dpi = { min, max, steps = { … } }` — a pointing device's DPI; see [DPI & choices](#dpi--choices).
 - `choice = { choices = { … } }` — discrete selectors (e.g. polling rate); see [DPI & choices](#dpi--choices).
+- `range = { ranges = { … } }` — continuous integer sliders (e.g. lift-off distance); see [Controls](#controls).
+- `boolean = { booleans = { … } }` — on/off toggles (e.g. angle-snap); see [Controls](#controls).
+- `action = { actions = { … } }` — fire-and-forget buttons (e.g. calibrate); see [Controls](#controls).
+- `battery = {}` — the device reports battery levels (via `get_batteries`).
+- `connection = {}` — the device reports a wireless connection state (via `connection_status`).
+- `equalizer = {}` — the device has an audio equalizer; see [Equalizer](#equalizer).
+- `pairing = {}` — the device pairs wireless children; see [Pairing](#pairing).
+- `onboard_profiles = {}` — the device has on-board profile slots; see [Onboard profiles](#onboard-profiles).
+- `key_remap = { buttons = { … }, requires_host_mode = <bool>, default_mappings = { … } }`
+  — remappable buttons; see [Key remap](#key-remap).
 - `poll = { interval_ms = <n> }` — run `read_status` on a background loop.
 - `chain = { channels = { … }, accessories = { … } }` — host detachable child
   accessories (fan hubs / ARGB chains); see [Chained accessories](#chained-accessories).
@@ -185,6 +195,27 @@ device's transport; `dev.status` holds the most recent table returned by
 | `lcd_reset(dev)`                 | lcd        | —                             |
 | `set_dpi(dev, dpi)`              | dpi        | —                             |
 | `set_choice(dev, key, selected)` | choice    | —                             |
+| `set_range(dev, key, value)`     | range      | —                             |
+| `get_booleans(dev)`              | boolean    | array of `{key, value}` tables |
+| `set_boolean(dev, key, value)`   | boolean    | —                             |
+| `trigger_action(dev, key)`       | action     | —                             |
+| `get_batteries(dev)`             | battery    | array of battery tables       |
+| `connection_status(dev)`         | connection | a connection table or `nil`   |
+| `get_equalizer(dev)`             | equalizer  | an equalizer table            |
+| `set_eq_preset(dev, preset)`     | equalizer  | —                             |
+| `set_eq_bands(dev, values)`      | equalizer  | —                             |
+| `start_pairing(dev, timeout_secs)` | pairing  | —                             |
+| `stop_pairing(dev)`              | pairing    | —                             |
+| `unpair(dev, slot)`              | pairing    | —                             |
+| `pairing_status(dev)`            | pairing    | a pairing-status table        |
+| `switch_profile(dev, slot)`      | onboard_profiles | —                       |
+| `restore_profile(dev, slot)`     | onboard_profiles | —                       |
+| `set_profile_enabled(dev, slot, enabled)` | onboard_profiles | —              |
+| `onboard_profiles_status(dev)`   | onboard_profiles | a profiles table        |
+| `set_button_mapping(dev, mapping)` | key_remap | —                            |
+| `reset_button_mapping(dev, cid)` | key_remap  | —                             |
+| `reset_all_button_mappings(dev)` | key_remap  | —                             |
+| `key_remap_host_mode(dev)`       | key_remap  | `true` if in the host mode    |
 
 ### RGB
 
@@ -337,6 +368,65 @@ choice = { choices = {
 } },
 set_choice = function(dev, key, selected) --[[ apply ]] end,
 ```
+
+### Controls
+
+Three lightweight control kinds, each keyed by a stable `key`. As with `choice`,
+the host caches the last-written value; the plugin only applies it.
+
+- **`range`** — a continuous integer slider clamped to `[min, max]` (the host
+  clamps before calling). `set_range(dev, key, value)` applies it.
+- **`boolean`** — an on/off toggle. `get_booleans(dev)` returns the live
+  `{ {key, value}, … }` (label/category are backfilled from the decl if omitted);
+  `set_boolean(dev, key, value)` writes one.
+- **`action`** — a fire-and-forget button. `trigger_action(dev, key)` runs it.
+
+```lua
+range = { ranges = { { key = "lod", label = "Lift-off", min = 1, max = 2, default = 1 } } },
+boolean = { booleans = { { key = "snap", label = "Angle Snap", category = "Mouse" } } },
+action = { actions = { { key = "calibrate", label = "Calibrate" } } },
+
+set_range   = function(dev, key, value) --[[ apply ]] end,
+get_booleans = function(dev) return { { key = "snap", value = true } } end,
+set_boolean = function(dev, key, value) --[[ apply ]] end,
+trigger_action = function(dev, key) --[[ run ]] end,
+```
+
+### Battery & connection
+
+`battery = {}` reports one or more battery levels via `get_batteries(dev)`;
+`connection = {}` reports a wireless link state via `connection_status(dev)`
+(return `nil` when unknown). Both sections are empty markers — all state comes
+from the callback.
+
+### Equalizer
+
+`equalizer = {}` advertises an audio equalizer. `get_equalizer(dev)` returns the
+current bands/preset; `set_eq_preset(dev, preset)` selects a built-in preset and
+`set_eq_bands(dev, values)` writes custom band gains.
+
+### Pairing
+
+`pairing = {}` lets the device pair wireless children. `start_pairing(dev,
+timeout_secs)` / `stop_pairing(dev)` bracket a pairing window, `unpair(dev, slot)`
+removes a slot, and `pairing_status(dev)` reports current slots.
+
+### Onboard profiles
+
+`onboard_profiles = {}` exposes the device's on-board profile slots.
+`switch_profile(dev, slot)` / `restore_profile(dev, slot)` change the active slot,
+`set_profile_enabled(dev, slot, enabled)` toggles one, and
+`onboard_profiles_status(dev)` reports their state.
+
+### Key remap
+
+`key_remap = { buttons = { … }, requires_host_mode = <bool>, default_mappings = { … } }`
+declares the device's remappable buttons (fixed hardware, so declared statically).
+The host owns the cached mappings; `set_button_mapping(dev, mapping)` writes one,
+`reset_button_mapping(dev, cid)` restores a single button's default and
+`reset_all_button_mappings(dev)` restores them all. When `requires_host_mode` is
+set, `key_remap_host_mode(dev)` reports whether the device is currently in the
+mode remapping needs (the GUI shows a notice when it isn't).
 
 ## The transport API (`dev.transport`)
 
@@ -555,7 +645,7 @@ OS login/keyring unlocked.
 ## Integration plugins
 
 An integration plugin connects to a **network service** instead of matching
-local hardware — the built-in [OpenRGB](protocols/openrgb.md) client is the
+local hardware — the built-in OpenRGB client is the
 reference example. Set `type = "integration"` and declare no `match` at all:
 the plugin is instantiated from its own [config fields](#config-fields) (a
 host/port the user types), not a discovery handle.
@@ -683,7 +773,7 @@ rediscovery.
 **Built-in plugins are auto-granted their own declared permissions** — they
 ship inside the trusted daemon binary itself, so the consent step (which
 exists to gate untrusted third-party scripts) doesn't apply to them. This is
-why the built-in [OpenRGB integration](protocols/openrgb.md) works out of the
+why the built-in OpenRGB integration works out of the
 box once you set its host/port, with no separate "grant network" click.
 
 ## RGB effects

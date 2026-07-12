@@ -46,13 +46,6 @@ HaloDaemon ships with support to the following devices by default. More devices 
 |--------|-------|---------|----------|-----------|----------|
 | Logitech | G560 Gaming Speaker | 046d:0a78 | [HID++ 1.0](protocols/hidpp1.md) | [HID](transports/hid.md) | 🐧🪟 |
 
-## Monitors
-
-| Vendor | Model | VID:PID | Protocol | Transport | Platform |
-|--------|-------|---------|----------|-----------|----------|
-| Philips | Evnia 49 Ultrawide (DDC/CI) | 2109:8884 | [DDC/CI](protocols/ddc-ci.md) | [USB control](transports/usb-control.md) | 🐧🪟 |
-| Philips | Evnia 49 Ambiglow (rear LEDs) | 0cf2:b201 | [Philips Ambiglow](protocols/philips-ambiglow.md) | [USB control](transports/usb-control.md) | 🐧🪟 |
-
 ## Motherboard / RGB Controllers
 
 | Vendor | Model | VID:PID | Protocol | Transport | Platform |
