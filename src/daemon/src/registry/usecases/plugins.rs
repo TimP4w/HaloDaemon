@@ -157,6 +157,10 @@ pub async fn set_config(
 }
 
 /// Recursively copy `src` into `dst` (both directories), creating `dst`.
+/// Rejects symlinks: `std::fs::copy` dereferences them, so a symlinked entry in
+/// an imported package would otherwise copy the *target's* contents (an
+/// arbitrary host file the daemon can read) into the plugins dir. A legitimate
+/// plugin package has no need for symlinks, so we fail the import outright.
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)
         .with_context(|| format!("creating plugin dir {}", dst.display()))?;
@@ -164,7 +168,10 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         let entry = entry?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            bail!("plugin package contains a symlink: {}", from.display());
+        } else if file_type.is_dir() {
             copy_dir_all(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)
@@ -331,6 +338,49 @@ pub(crate) fn sanitize_slug(filename: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_dir_all_copies_files_and_nested_dirs() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("plugin.yaml"), "id: demo\n").unwrap();
+        std::fs::create_dir(src.path().join("assets")).unwrap();
+        std::fs::write(src.path().join("assets").join("a.png"), b"png").unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let out = dst.path().join("demo");
+        copy_dir_all(src.path(), &out).unwrap();
+
+        assert_eq!(
+            std::fs::read(out.join("plugin.yaml")).unwrap(),
+            b"id: demo\n"
+        );
+        assert_eq!(
+            std::fs::read(out.join("assets").join("a.png")).unwrap(),
+            b"png"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_all_rejects_a_symlink() {
+        let secret = tempfile::tempdir().unwrap();
+        std::fs::write(secret.path().join("secret.txt"), b"top-secret").unwrap();
+
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("plugin.yaml"), "id: demo\n").unwrap();
+        std::os::unix::fs::symlink(
+            secret.path().join("secret.txt"),
+            src.path().join("leak.txt"),
+        )
+        .unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let out = dst.path().join("demo");
+        let err = copy_dir_all(src.path(), &out).unwrap_err();
+        assert!(err.to_string().contains("symlink"));
+        // The dereferenced target's contents must never land in the plugins dir.
+        assert!(!out.join("leak.txt").exists());
+    }
 
     #[test]
     fn sanitize_slugs_a_file_name() {

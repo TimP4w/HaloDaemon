@@ -5,12 +5,10 @@
 //! frame-batched — one render call per instance per frame (pixmap) or per
 //! zone per frame (direct) — never per LED.
 
-use std::cell::Cell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
-use mlua::{Function, HookTriggers, Lua, LuaSerdeExt, Table, VmState};
+use mlua::{Function, Lua, LuaSerdeExt, Table};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
@@ -23,8 +21,9 @@ pub const CANVAS_W: u32 = 400;
 pub const CANVAS_H: u32 = 300;
 
 /// A runaway script (accidental infinite loop) errors out instead of
-/// stalling the RGB engine tick indefinitely.
-const INSTRUCTION_BUDGET: u32 = 50_000_000;
+/// stalling the RGB engine tick indefinitely. Reset per frame, so it bounds a
+/// single render call rather than the effect's whole lifetime.
+const INSTRUCTION_BUDGET: u64 = 50_000_000;
 
 /// One LED's chain/spatial coordinates, passed to a direct effect's
 /// `led_colors_<id>` callback in one batch.
@@ -200,29 +199,6 @@ fn register_effect_helpers(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Install the runaway-script guard: an instruction-count hook that errors
-/// once a single callback call exceeds its budget. The counter is shared
-/// with the hook via `Rc<Cell<_>>` (the VM is single-threaded on its own
-/// worker thread, so this never crosses threads) and reset before each call.
-fn install_budget_hook(lua: &Lua) -> Rc<Cell<u32>> {
-    let counter = Rc::new(Cell::new(0u32));
-    let hook_counter = counter.clone();
-    lua.set_hook(
-        HookTriggers::new().every_nth_instruction(10_000),
-        move |_, _| {
-            let n = hook_counter.get().saturating_add(10_000);
-            hook_counter.set(n);
-            if n > INSTRUCTION_BUDGET {
-                return Err(mlua::Error::RuntimeError(
-                    "effect script exceeded its per-frame instruction budget".into(),
-                ));
-            }
-            Ok(VmState::Continue)
-        },
-    );
-    counter
-}
-
 fn worker_main(
     source: &str,
     effect_id: &str,
@@ -234,7 +210,7 @@ fn worker_main(
     let lua = Lua::new();
     sandbox::apply(&lua, granted, config).map_err(|e| lua_err("sandbox setup", e))?;
     register_effect_helpers(&lua).map_err(|e| lua_err("effect helpers", e))?;
-    let budget = install_budget_hook(&lua);
+    let budget = sandbox::install_instruction_budget_hook(&lua, INSTRUCTION_BUDGET);
 
     let manifest: Table = lua
         .load(source)

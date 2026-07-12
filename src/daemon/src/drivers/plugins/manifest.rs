@@ -7,11 +7,9 @@ use halod_shared::types::{
     EffectParamDescriptor, NativeEffect, Permission, PluginConfigFieldKind, PluginKind,
     RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
 };
-use mlua::{DeserializeOptions, HookTriggers, Lua, LuaSerdeExt, VmState};
+use mlua::{DeserializeOptions, Lua, LuaSerdeExt};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use super::transport::{descriptor_for, known_kinds};
 use crate::drivers::transports::smbus::{PciMatch, SmbusBusKind};
@@ -901,26 +899,6 @@ const MANIFEST_MEMORY_LIMIT: usize = 8 * 1024 * 1024;
 /// `while true do end` from hanging daemon load.
 const MANIFEST_INSTRUCTION_BUDGET: u64 = 5_000_000;
 
-/// Error the parse VM once it burns through `MANIFEST_INSTRUCTION_BUDGET`, so a
-/// runaway top-level body can't hang `load_all`.
-fn install_parse_budget_hook(lua: &Lua) {
-    const STEP: u64 = 10_000;
-    let counter = Rc::new(Cell::new(0u64));
-    lua.set_hook(
-        HookTriggers::new().every_nth_instruction(STEP as u32),
-        move |_, _| {
-            let n = counter.get().saturating_add(STEP);
-            counter.set(n);
-            if n > MANIFEST_INSTRUCTION_BUDGET {
-                return Err(mlua::Error::RuntimeError(
-                    "plugin manifest exceeded its evaluation budget".into(),
-                ));
-            }
-            Ok(VmState::Continue)
-        },
-    );
-}
-
 /// Evaluate a plugin's Lua source and deserialize its returned table into a bare `PluginManifest`.
 fn eval_manifest_table(source: &str) -> Result<PluginManifest> {
     let lua = Lua::new();
@@ -929,7 +907,7 @@ fn eval_manifest_table(source: &str) -> Result<PluginManifest> {
     // must not run `os`/`io`/`require` or hang the daemon before consent.
     super::sandbox::strip_escape_hatches(&lua).map_err(|e| anyhow!("sandbox setup failed: {e}"))?;
     let _ = lua.set_memory_limit(MANIFEST_MEMORY_LIMIT);
-    install_parse_budget_hook(&lua);
+    super::sandbox::install_instruction_budget_hook(&lua, MANIFEST_INSTRUCTION_BUDGET);
     let value: mlua::Value = lua
         .load(source)
         .eval()

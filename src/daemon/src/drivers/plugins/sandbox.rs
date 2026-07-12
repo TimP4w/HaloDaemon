@@ -4,9 +4,11 @@
 //! escape hatches. `string`/`table`/`math` (incl. Lua 5.4 bitwise ops and
 //! `string.pack`) stay available — they're what protocol encoding needs.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use mlua::{Lua, Table};
+use mlua::{HookTriggers, Lua, Table, VmState};
 
 use halod_shared::types::Permission;
 
@@ -65,6 +67,36 @@ pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
         globals.set(*name, mlua::Value::Nil)?;
     }
     Ok(())
+}
+
+/// How many instructions elapse between hook firings. The budget is only
+/// enforced to this granularity, which keeps the hook's own overhead negligible.
+const BUDGET_HOOK_STEP: u32 = 10_000;
+
+/// Install an instruction-count hook that errors once the VM burns through
+/// `budget` instructions, and return the shared counter so a caller can reset it
+/// (`counter.set(0)`) to make the budget per-call rather than per-VM-lifetime.
+/// The counter is a single-threaded `Rc<Cell>` — every plugin VM lives on its
+/// own worker thread and never crosses threads. Shared by the manifest parser,
+/// the effect worker, and the device worker so a runaway `while true do end`
+/// can't hang any of them.
+pub(super) fn install_instruction_budget_hook(lua: &Lua, budget: u64) -> Rc<Cell<u64>> {
+    let counter = Rc::new(Cell::new(0u64));
+    let hook_counter = counter.clone();
+    lua.set_hook(
+        HookTriggers::new().every_nth_instruction(BUDGET_HOOK_STEP),
+        move |_, _| {
+            let n = hook_counter.get().saturating_add(BUDGET_HOOK_STEP as u64);
+            hook_counter.set(n);
+            if n > budget {
+                return Err(mlua::Error::RuntimeError(
+                    "plugin script exceeded its instruction budget".into(),
+                ));
+            }
+            Ok(VmState::Continue)
+        },
+    );
+    counter
 }
 
 /// Longest a single `halod.sleep_ms` call may block the worker thread. A plugin
@@ -203,5 +235,37 @@ mod tests {
         lua.load("assert(type(halod.config) == 'table')")
             .exec()
             .unwrap();
+    }
+
+    #[test]
+    fn instruction_budget_hook_kills_a_runaway_loop() {
+        let lua = Lua::new();
+        install_instruction_budget_hook(&lua, 1_000_000);
+        let err = lua.load("while true do end").exec().unwrap_err();
+        assert!(err.to_string().contains("instruction budget"));
+    }
+
+    #[test]
+    fn instruction_budget_hook_allows_bounded_work() {
+        let lua = Lua::new();
+        install_instruction_budget_hook(&lua, 1_000_000);
+        let sum: i64 = lua
+            .load("local s = 0 for i = 1, 100 do s = s + i end return s")
+            .eval()
+            .unwrap();
+        assert_eq!(sum, 5050);
+    }
+
+    #[test]
+    fn resetting_the_counter_makes_the_budget_per_call() {
+        let lua = Lua::new();
+        let budget = install_instruction_budget_hook(&lua, 1_000_000);
+        let loop_src = "local s = 0 for i = 1, 1000 do s = s + i end";
+        // Run enough iterations that, without a reset, the cumulative count would
+        // exceed the budget — resetting before each call keeps every call bounded.
+        for _ in 0..1_000 {
+            budget.set(0);
+            lua.load(loop_src).exec().unwrap();
+        }
     }
 }

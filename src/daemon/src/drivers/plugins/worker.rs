@@ -29,6 +29,16 @@ use super::transport_api::TransportApi;
 use crate::drivers::transports::smbus::SmBusDevice;
 use crate::drivers::vendors::generic::devices::common::{linear_rgb_zone, ring_led_positions};
 
+/// Instruction budget per capability callback. Generous — a callback
+/// legitimately loops over every LED and builds whole frames — but bounds a
+/// runaway `while true do end` from hanging the device's worker thread. Reset
+/// before each job so it's per-call, not per-VM-lifetime.
+const WORKER_INSTRUCTION_BUDGET: u64 = 50_000_000;
+
+/// Heap cap for a device worker VM. Ample for frame/image buffers, but stops a
+/// script from exhausting host RAM (e.g. `string.rep("A", 2^30)`).
+const WORKER_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+
 /// One accessory the plugin's `detect_accessories` reports.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DetectedAccessory {
@@ -877,6 +887,8 @@ fn worker_main(
 ) -> Result<()> {
     let lua = Lua::new();
     sandbox::apply(&lua, granted, config).map_err(|e| lua_err("sandbox setup", e))?;
+    let _ = lua.set_memory_limit(WORKER_MEMORY_LIMIT);
+    let budget = sandbox::install_instruction_budget_hook(&lua, WORKER_INSTRUCTION_BUDGET);
 
     let manifest: Table = lua
         .load(source)
@@ -897,6 +909,7 @@ fn worker_main(
 
     let ctx = WorkerCtx { lua, dev, manifest };
     while let Some(job) = rx.blocking_recv() {
+        budget.set(0);
         if job(&ctx).is_break() {
             break;
         }
@@ -921,6 +934,8 @@ pub fn run_pre_scan(
     // `pre_scan` is one-time bus preparation before a device is even matched,
     // not general plugin logic — it gets no `halod.config` (an empty map).
     sandbox::apply(&lua, granted, &HashMap::new()).map_err(|e| lua_err("sandbox setup", e))?;
+    let _ = lua.set_memory_limit(WORKER_MEMORY_LIMIT);
+    sandbox::install_instruction_budget_hook(&lua, WORKER_INSTRUCTION_BUDGET);
     let manifest: Table = lua
         .load(source)
         .eval()

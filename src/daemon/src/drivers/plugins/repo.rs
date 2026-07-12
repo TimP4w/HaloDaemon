@@ -1,12 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Thin `git2` wrapper for git-repo plugin sources: pure git in, `Result` out, no daemon/registry knowledge.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use git2::{build::RepoBuilder, ResetType};
 use std::path::Path;
 
+/// URL schemes a plugin repo may use
+const ALLOWED_SCHEMES: &[&str] = &["https", "ssh", "file"];
+
+/// Reject repo URLs on an insecure or unexpected transport before git touches them.
+fn validate_url(url: &str) -> Result<()> {
+    if let Some((scheme, _)) = url.split_once("://") {
+        if !ALLOWED_SCHEMES.contains(&scheme) {
+            bail!("repo URL scheme '{scheme}://' is not allowed (use https, ssh, or file)");
+        }
+    }
+    Ok(())
+}
+
 /// Clone `url` into `dest`, checking out `branch` (or the remote default), and return the HEAD SHA.
 pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<String> {
+    validate_url(url)?;
     let mut builder = RepoBuilder::new();
     if let Some(b) = branch {
         builder.branch(b);
@@ -24,6 +38,7 @@ pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<String> {
 /// List a remote's branch names without cloning it (`git ls-remote --heads`),
 /// sorted alphabetically. No working tree is created or touched.
 pub fn list_remote_branches(url: &str) -> Result<Vec<String>> {
+    validate_url(url)?;
     let mut remote = git2::Remote::create_detached(url)
         .with_context(|| format!("creating detached remote for {url}"))?;
     remote
@@ -270,6 +285,30 @@ mod tests {
             .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
             .unwrap();
         oid.to_string()
+    }
+
+    #[test]
+    fn validate_url_allows_secure_and_local_sources() {
+        for url in [
+            "https://github.com/x/y.git",
+            "ssh://git@github.com/x/y.git",
+            "file:///srv/plugins/repo",
+            "/tmp/local/repo",
+            "git@github.com:x/y.git",
+        ] {
+            assert!(validate_url(url).is_ok(), "{url} should be allowed");
+        }
+    }
+
+    #[test]
+    fn validate_url_rejects_plaintext_and_unknown_schemes() {
+        for url in [
+            "http://example.com/x.git",
+            "git://example.com/x.git",
+            "ftp://example.com/x.git",
+        ] {
+            assert!(validate_url(url).is_err(), "{url} should be rejected");
+        }
     }
 
     #[test]
