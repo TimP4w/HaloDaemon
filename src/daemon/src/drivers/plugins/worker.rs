@@ -341,6 +341,62 @@ impl PluginHandle {
             .await?
     }
 
+    /// Call a **required** callback `name(dev, args…)` and return its result.
+    /// `args` is everything after the implicit `dev` (a plain primitive, a
+    /// tuple, or `()` for none); `R` is anything mlua can build from the return
+    /// (`()`, `u8`, `bool`, …). Collapses the `required → call → lua_err` trio
+    /// that every simple capability op repeats.
+    async fn call<A, R>(&self, name: &'static str, args: A) -> Result<R>
+    where
+        A: mlua::IntoLuaMulti + Send + 'static,
+        R: mlua::FromLuaMulti + Send + 'static,
+    {
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, name)?;
+            let mut mv = args
+                .into_lua_multi(&ctx.lua)
+                .map_err(|e| lua_err(name, e))?;
+            mv.push_front(mlua::Value::Table(ctx.dev.clone()));
+            f.call::<R>(mv).map_err(|e| lua_err(name, e))
+        })
+        .await
+    }
+
+    /// Like [`call`](Self::call) but deserializes the callback's returned Lua
+    /// value into `R` via serde (for structured results like `Vec<Sensor>`).
+    async fn call_ret<A, R>(&self, name: &'static str, args: A) -> Result<R>
+    where
+        A: mlua::IntoLuaMulti + Send + 'static,
+        R: serde::de::DeserializeOwned + Send + 'static,
+    {
+        self.run(move |ctx| {
+            let f = required(&ctx.manifest, name)?;
+            let mut mv = args
+                .into_lua_multi(&ctx.lua)
+                .map_err(|e| lua_err(name, e))?;
+            mv.push_front(mlua::Value::Table(ctx.dev.clone()));
+            let value: Value = f.call(mv).map_err(|e| lua_err(name, e))?;
+            ctx.lua.from_value(value).map_err(|e| lua_err(name, e))
+        })
+        .await
+    }
+
+    /// Call an **optional** callback `name(dev)` returning a serde value, or
+    /// `R::default()` (e.g. an empty `Vec`) when the plugin didn't declare it.
+    async fn call_opt<R>(&self, name: &'static str) -> Result<R>
+    where
+        R: serde::de::DeserializeOwned + Default + Send + 'static,
+    {
+        self.run(move |ctx| {
+            let Some(f) = func(&ctx.manifest, name) else {
+                return Ok(R::default());
+            };
+            let value: Value = f.call(ctx.dev.clone()).map_err(|e| lua_err(name, e))?;
+            ctx.lua.from_value(value).map_err(|e| lua_err(name, e))
+        })
+        .await
+    }
+
     /// Run `initialize`, accepting either a bare bool or a table with dynamic
     /// device info (`{ ok, model, zones, lcd }`). A missing callback means
     /// "present, no info".
@@ -431,21 +487,11 @@ impl PluginHandle {
     }
 
     pub async fn fan_get_duty(&self) -> Result<u8> {
-        self.run(|ctx| {
-            let f = required(&ctx.manifest, "get_duty")?;
-            f.call::<u8>(ctx.dev.clone())
-                .map_err(|e| lua_err("get_duty", e))
-        })
-        .await
+        self.call("get_duty", ()).await
     }
 
     pub async fn fan_set_duty(&self, duty: u8) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "set_duty")?;
-            f.call::<()>((ctx.dev.clone(), duty))
-                .map_err(|e| lua_err("set_duty", e))
-        })
-        .await
+        self.call("set_duty", duty).await
     }
 
     pub async fn fan_get_rpm(&self) -> Option<u32> {
@@ -467,16 +513,7 @@ impl PluginHandle {
     }
 
     pub async fn get_sensors(&self) -> Result<Vec<Sensor>> {
-        self.run(|ctx| {
-            let f = required(&ctx.manifest, "get_sensors")?;
-            let value: Value = f
-                .call(ctx.dev.clone())
-                .map_err(|e| lua_err("get_sensors", e))?;
-            ctx.lua
-                .from_value(value)
-                .map_err(|e| lua_err("get_sensors result", e))
-        })
-        .await
+        self.call_ret("get_sensors", ()).await
     }
 
     /// Run `read_status(dev)` and cache the returned table as `dev.status`.
@@ -500,18 +537,7 @@ impl PluginHandle {
     }
 
     pub async fn detect_accessories(&self) -> Result<Vec<DetectedAccessory>> {
-        self.run(|ctx| {
-            let Some(f) = func(&ctx.manifest, "detect_accessories") else {
-                return Ok(Vec::new());
-            };
-            let value: Value = f
-                .call(ctx.dev.clone())
-                .map_err(|e| lua_err("detect_accessories", e))?;
-            ctx.lua
-                .from_value(value)
-                .map_err(|e| lua_err("detect_accessories result", e))
-        })
-        .await
+        self.call_opt("detect_accessories").await
     }
 
     pub async fn write_ext_frame(&self, channel: &str, colors: &[RgbColor]) -> Result<()> {
@@ -530,18 +556,7 @@ impl PluginHandle {
     }
 
     pub async fn enumerate_controllers(&self) -> Result<Vec<DetectedController>> {
-        self.run(|ctx| {
-            let Some(f) = func(&ctx.manifest, "enumerate_controllers") else {
-                return Ok(Vec::new());
-            };
-            let value: Value = f
-                .call(ctx.dev.clone())
-                .map_err(|e| lua_err("enumerate_controllers", e))?;
-            ctx.lua
-                .from_value(value)
-                .map_err(|e| lua_err("enumerate_controllers result", e))
-        })
-        .await
+        self.call_opt("enumerate_controllers").await
     }
 
     pub async fn write_controller_frame(
@@ -565,39 +580,19 @@ impl PluginHandle {
     }
 
     pub async fn hub_fan_rpm(&self, channel: u8) -> Result<u32> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "fan_rpm")?;
-            f.call::<u32>((ctx.dev.clone(), channel))
-                .map_err(|e| lua_err("fan_rpm", e))
-        })
-        .await
+        self.call("fan_rpm", channel).await
     }
 
     pub async fn hub_fan_duty(&self, channel: u8) -> Result<u8> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "fan_duty")?;
-            f.call::<u8>((ctx.dev.clone(), channel))
-                .map_err(|e| lua_err("fan_duty", e))
-        })
-        .await
+        self.call("fan_duty", channel).await
     }
 
     pub async fn hub_fan_controllable(&self, channel: u8) -> Result<bool> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "fan_controllable")?;
-            f.call::<bool>((ctx.dev.clone(), channel))
-                .map_err(|e| lua_err("fan_controllable", e))
-        })
-        .await
+        self.call("fan_controllable", channel).await
     }
 
     pub async fn hub_set_fan_duty(&self, channel: u8, duty: u8) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "set_fan_duty")?;
-            f.call::<()>((ctx.dev.clone(), channel, duty))
-                .map_err(|e| lua_err("set_fan_duty", e))
-        })
-        .await
+        self.call("set_fan_duty", (channel, duty)).await
     }
 
     pub async fn lcd_stream_frame(
@@ -643,239 +638,93 @@ impl PluginHandle {
     }
 
     pub async fn lcd_set_brightness(&self, brightness: u8, rotation: u32) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "lcd_set_brightness")?;
-            f.call::<()>((ctx.dev.clone(), brightness, rotation))
-                .map_err(|e| lua_err("lcd_set_brightness", e))
-        })
-        .await
+        self.call("lcd_set_brightness", (brightness, rotation))
+            .await
     }
 
     pub async fn lcd_set_rotation(&self, brightness: u8, degrees: u32) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "lcd_set_rotation")?;
-            f.call::<()>((ctx.dev.clone(), brightness, degrees))
-                .map_err(|e| lua_err("lcd_set_rotation", e))
-        })
-        .await
+        self.call("lcd_set_rotation", (brightness, degrees)).await
     }
 
     pub async fn lcd_reset(&self) -> Result<()> {
-        self.run(|ctx| {
-            let f = required(&ctx.manifest, "lcd_reset")?;
-            f.call::<()>(ctx.dev.clone())
-                .map_err(|e| lua_err("lcd_reset", e))
-        })
-        .await
+        self.call("lcd_reset", ()).await
     }
 
     pub async fn dpi_set(&self, dpi: u16) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "set_dpi")?;
-            f.call::<()>((ctx.dev.clone(), dpi))
-                .map_err(|e| lua_err("set_dpi", e))
-        })
-        .await
+        self.call("set_dpi", dpi).await
     }
 
     pub async fn choice_set(&self, key: &str, selected: usize) -> Result<()> {
-        let key = key.to_owned();
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "set_choice")?;
-            f.call::<()>((ctx.dev.clone(), key, selected))
-                .map_err(|e| lua_err("set_choice", e))
-        })
-        .await
+        self.call("set_choice", (key.to_owned(), selected)).await
     }
 
     pub async fn range_set(&self, key: &str, value: i32) -> Result<()> {
-        let key = key.to_owned();
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "set_range")?;
-            f.call::<()>((ctx.dev.clone(), key, value))
-                .map_err(|e| lua_err("set_range", e))
-        })
-        .await
+        self.call("set_range", (key.to_owned(), value)).await
     }
 
     pub async fn boolean_get(&self) -> Result<Vec<Boolean>> {
-        self.run(|ctx| {
-            let Some(f) = func(&ctx.manifest, "get_booleans") else {
-                return Ok(Vec::new());
-            };
-            let value: Value = f
-                .call(ctx.dev.clone())
-                .map_err(|e| lua_err("get_booleans", e))?;
-            ctx.lua
-                .from_value(value)
-                .map_err(|e| lua_err("get_booleans result", e))
-        })
-        .await
+        self.call_opt("get_booleans").await
     }
 
     pub async fn boolean_set(&self, key: &str, value: bool) -> Result<()> {
-        let key = key.to_owned();
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "set_boolean")?;
-            f.call::<()>((ctx.dev.clone(), key, value))
-                .map_err(|e| lua_err("set_boolean", e))
-        })
-        .await
+        self.call("set_boolean", (key.to_owned(), value)).await
     }
 
     pub async fn action_trigger(&self, key: &str) -> Result<()> {
-        let key = key.to_owned();
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "trigger_action")?;
-            f.call::<()>((ctx.dev.clone(), key))
-                .map_err(|e| lua_err("trigger_action", e))
-        })
-        .await
+        self.call("trigger_action", key.to_owned()).await
     }
 
     pub async fn battery_get(&self) -> Result<Vec<Battery>> {
-        self.run(|ctx| {
-            let Some(f) = func(&ctx.manifest, "get_batteries") else {
-                return Ok(Vec::new());
-            };
-            let value: Value = f
-                .call(ctx.dev.clone())
-                .map_err(|e| lua_err("get_batteries", e))?;
-            ctx.lua
-                .from_value(value)
-                .map_err(|e| lua_err("get_batteries result", e))
-        })
-        .await
+        self.call_opt("get_batteries").await
     }
 
     pub async fn connection_get(&self) -> Result<Option<ConnectionStatus>> {
-        self.run(|ctx| {
-            let Some(f) = func(&ctx.manifest, "connection_status") else {
-                return Ok(None);
-            };
-            let value: Value = f
-                .call(ctx.dev.clone())
-                .map_err(|e| lua_err("connection_status", e))?;
-            if matches!(value, Value::Nil) {
-                return Ok(None);
-            }
-            ctx.lua
-                .from_value(value)
-                .map_err(|e| lua_err("connection_status result", e))
-        })
-        .await
+        // Serde maps a missing callback and a Lua `nil` return both to `None`.
+        self.call_opt("connection_status").await
     }
 
     pub async fn equalizer_get(&self) -> Result<Equalizer> {
-        self.run(|ctx| {
-            let f = required(&ctx.manifest, "get_equalizer")?;
-            let value: Value = f
-                .call(ctx.dev.clone())
-                .map_err(|e| lua_err("get_equalizer", e))?;
-            ctx.lua
-                .from_value(value)
-                .map_err(|e| lua_err("get_equalizer result", e))
-        })
-        .await
+        self.call_ret("get_equalizer", ()).await
     }
 
     pub async fn equalizer_set_preset(&self, preset: usize) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "set_eq_preset")?;
-            f.call::<()>((ctx.dev.clone(), preset))
-                .map_err(|e| lua_err("set_eq_preset", e))
-        })
-        .await
+        self.call("set_eq_preset", preset).await
     }
 
     pub async fn equalizer_set_bands(&self, values: &[f32]) -> Result<()> {
-        let values = values.to_vec();
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "set_eq_bands")?;
-            f.call::<()>((ctx.dev.clone(), values))
-                .map_err(|e| lua_err("set_eq_bands", e))
-        })
-        .await
+        self.call("set_eq_bands", values.to_vec()).await
     }
 
     pub async fn pairing_start(&self, timeout_secs: u8) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "start_pairing")?;
-            f.call::<()>((ctx.dev.clone(), timeout_secs))
-                .map_err(|e| lua_err("start_pairing", e))
-        })
-        .await
+        self.call("start_pairing", timeout_secs).await
     }
 
     pub async fn pairing_stop(&self) -> Result<()> {
-        self.run(|ctx| {
-            let f = required(&ctx.manifest, "stop_pairing")?;
-            f.call::<()>(ctx.dev.clone())
-                .map_err(|e| lua_err("stop_pairing", e))
-        })
-        .await
+        self.call("stop_pairing", ()).await
     }
 
     pub async fn pairing_unpair(&self, slot: u8) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "unpair")?;
-            f.call::<()>((ctx.dev.clone(), slot))
-                .map_err(|e| lua_err("unpair", e))
-        })
-        .await
+        self.call("unpair", slot).await
     }
 
     pub async fn pairing_status(&self) -> Result<PairingStatus> {
-        self.run(|ctx| {
-            let f = required(&ctx.manifest, "pairing_status")?;
-            let value: Value = f
-                .call(ctx.dev.clone())
-                .map_err(|e| lua_err("pairing_status", e))?;
-            ctx.lua
-                .from_value(value)
-                .map_err(|e| lua_err("pairing_status result", e))
-        })
-        .await
+        self.call_ret("pairing_status", ()).await
     }
 
     pub async fn onboard_switch_profile(&self, slot: u8) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "switch_profile")?;
-            f.call::<()>((ctx.dev.clone(), slot))
-                .map_err(|e| lua_err("switch_profile", e))
-        })
-        .await
+        self.call("switch_profile", slot).await
     }
 
     pub async fn onboard_restore_profile(&self, slot: u8) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "restore_profile")?;
-            f.call::<()>((ctx.dev.clone(), slot))
-                .map_err(|e| lua_err("restore_profile", e))
-        })
-        .await
+        self.call("restore_profile", slot).await
     }
 
     pub async fn onboard_set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "set_profile_enabled")?;
-            f.call::<()>((ctx.dev.clone(), slot, enabled))
-                .map_err(|e| lua_err("set_profile_enabled", e))
-        })
-        .await
+        self.call("set_profile_enabled", (slot, enabled)).await
     }
 
     pub async fn onboard_profiles_get(&self) -> Result<OnboardProfiles> {
-        self.run(|ctx| {
-            let f = required(&ctx.manifest, "onboard_profiles_status")?;
-            let value: Value = f
-                .call(ctx.dev.clone())
-                .map_err(|e| lua_err("onboard_profiles_status", e))?;
-            ctx.lua
-                .from_value(value)
-                .map_err(|e| lua_err("onboard_profiles_status result", e))
-        })
-        .await
+        self.call_ret("onboard_profiles_status", ()).await
     }
 
     pub async fn key_remap_set_mapping(&self, mapping: ButtonMapping) -> Result<()> {
@@ -892,21 +741,11 @@ impl PluginHandle {
     }
 
     pub async fn key_remap_reset(&self, cid: u16) -> Result<()> {
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "reset_button_mapping")?;
-            f.call::<()>((ctx.dev.clone(), cid))
-                .map_err(|e| lua_err("reset_button_mapping", e))
-        })
-        .await
+        self.call("reset_button_mapping", cid).await
     }
 
     pub async fn key_remap_reset_all(&self) -> Result<()> {
-        self.run(|ctx| {
-            let f = required(&ctx.manifest, "reset_all_button_mappings")?;
-            f.call::<()>(ctx.dev.clone())
-                .map_err(|e| lua_err("reset_all_button_mappings", e))
-        })
-        .await
+        self.call("reset_all_button_mappings", ()).await
     }
 
     /// Whether the device is currently in the host mode remapping requires.
