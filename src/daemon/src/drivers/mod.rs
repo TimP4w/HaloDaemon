@@ -155,6 +155,10 @@ pub trait Device: Send + Sync {
         None
     }
 
+    fn owning_plugin_id(&self) -> Option<String> {
+        None
+    }
+
     async fn wire_connection_type(&self) -> Option<ConnectionType> {
         None
     }

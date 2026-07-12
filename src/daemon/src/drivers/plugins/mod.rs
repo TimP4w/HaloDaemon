@@ -33,7 +33,7 @@ pub use device::LuaDevice;
 pub use effect_worker::{LedCoord, PluginEffectHandle};
 #[cfg(test)]
 pub(crate) use manifest::parse_manifest;
-pub use manifest::{parse_manifest_from_dir, EffectKind, PluginManifest, ProbeMode};
+pub use manifest::{parse_manifest_from_dir, DeviceSpec, EffectKind, PluginManifest, ProbeMode};
 pub use scan::plugin_smbus_scan_entries;
 pub use worker::run_pre_scan;
 
@@ -882,4 +882,16 @@ pub fn has_match(handle: &DiscoveryHandle<'_>) -> bool {
         .iter()
         .filter(|m| !state.disabled.contains(&m.plugin_id) && consent_satisfied(m))
         .any(|m| m.device_for(handle).is_some())
+}
+
+/// Collect every [`DeviceSpec`] declared by the named plugins' manifests
+/// (current registry snapshot). Used to build a scoped [`DiscoveryFilter`].
+pub fn device_specs_for(plugin_ids: &[String]) -> Vec<DeviceSpec> {
+    let state = snapshot();
+    state
+        .manifests
+        .iter()
+        .filter(|m| plugin_ids.contains(&m.plugin_id))
+        .flat_map(|m| m.devices.clone())
+        .collect()
 }

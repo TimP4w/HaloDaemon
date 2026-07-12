@@ -654,6 +654,10 @@ impl Device for LuaDevice {
         (self.plugin_type == PluginKind::Integration).then(|| self.plugin_id.clone())
     }
 
+    fn owning_plugin_id(&self) -> Option<String> {
+        Some(self.plugin_id.clone())
+    }
+
     async fn initialize(&self) -> Result<bool> {
         let Some(w) = &self.worker else {
             return Ok(true);
@@ -1546,6 +1550,10 @@ mod tests {
         let manifest = super::super::parse_manifest(src, Path::new("bare.lua")).unwrap();
         let dev = LuaDevice::device_only("d-0".into(), &manifest, &manifest.devices[0]);
         assert!(dev.capabilities().is_empty());
+        // A device-type plugin reports its owner for scoped teardown, even
+        // though it is not an integration (so `integration_id` stays `None`).
+        assert_eq!(dev.owning_plugin_id(), Some(manifest.plugin_id.clone()));
+        assert_eq!(dev.integration_id(), None);
     }
 
     #[test]
@@ -2211,6 +2219,10 @@ mod tests {
         // `IntegrationLeaf` child must never set it, or they'd disappear too.
         let dev = integration_device(Arc::new(MockTransport::empty()));
         assert_eq!(dev.integration_id(), Some("integ".to_string()));
+        // `owning_plugin_id` is the *scoped teardown* selector and is broader
+        // than `integration_id`: it is set on every plugin device, so the
+        // generic plugin toggle can tear an integration plugin down too.
+        assert_eq!(dev.owning_plugin_id(), Some("integ".to_string()));
         let wire = dev.serialize().await;
         assert_eq!(wire.integration_id, Some("integ".to_string()));
 

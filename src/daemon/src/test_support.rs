@@ -96,6 +96,9 @@ pub struct MockDevice {
     /// Owning plugin id when this device stands in for an integration root
     /// (see `Device::integration_id`). `None` for a normal device.
     pub integration_id: Option<String>,
+    /// Owning plugin id for scoped teardown (see `Device::owning_plugin_id`).
+    /// `None` for a normal native device.
+    pub owning_plugin_id: Option<String>,
     // Capability slots — `None` means the capability is absent.
     pub fan: Option<FanStateSlot>,
     /// RPM returned by `get_rpm()`; `None` (the default) means "no tachometer".
@@ -145,6 +148,7 @@ impl MockDevice {
             load_called: Arc::new(AtomicBool::new(false)),
             closed: Arc::new(AtomicBool::new(false)),
             integration_id: None,
+            owning_plugin_id: None,
             fan: None,
             fan_rpm: None,
             rgb: None,
@@ -205,6 +209,13 @@ impl MockDevice {
     /// `Device::integration_id`).
     pub fn with_integration_id(mut self, id: &str) -> Self {
         self.integration_id = Some(id.to_string());
+        self
+    }
+
+    /// Stand in for a device owned by plugin `id` for scoped teardown
+    /// (see `Device::owning_plugin_id`).
+    pub fn with_owning_plugin_id(mut self, id: &str) -> Self {
+        self.owning_plugin_id = Some(id.to_string());
         self
     }
 
@@ -336,6 +347,10 @@ impl Device for MockDevice {
 
     fn integration_id(&self) -> Option<String> {
         self.integration_id.clone()
+    }
+
+    fn owning_plugin_id(&self) -> Option<String> {
+        self.owning_plugin_id.clone()
     }
 
     async fn load_state(&self, state: &serde_json::Value) {

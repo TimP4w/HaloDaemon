@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 
 use crate::config::Config;
 use crate::ipc::ClientHandle;
+use crate::registry::discovery::DiscoveryFilter;
 use halod_shared::types::{DiscoveryStatus, LogEntry};
 
 mod persistence;
@@ -19,6 +20,14 @@ pub use crate::registry::{HidTracking, HidTrackingEntry};
 pub use crate::run_loop::EngineRunConfig;
 pub use persistence::Persistence;
 pub use workers::{shutdown, start_config_save_worker, start_persist_worker};
+
+/// The scope of a pending plugin rediscovery: either a full flush (`full`)
+/// or a targeted set of plugin ids (`plugins`).
+#[derive(Default)]
+pub struct PendingRediscover {
+    pub full: bool,
+    pub plugins: HashSet<String>,
+}
 
 pub struct AppState {
     // --- Cross-cutting spine (used by nearly every domain) ---
@@ -56,6 +65,13 @@ pub struct AppState {
     /// close-everything-and-rediscover cycle so several plugin edits in a
     /// row only pay for it once, when the user explicitly applies them.
     pub plugins_rediscover_pending: std::sync::atomic::AtomicBool,
+    /// The scope of the pending rediscovery — `full` (the legacy path) or a
+    /// set of plugin ids for a scoped teardown+reprobe.
+    pub pending_rediscover: Mutex<PendingRediscover>,
+    /// An optional discovery gate consulted by scanners. When set, only
+    /// handles matching one of the declared `DeviceSpec`s are registered;
+    /// every other handle is silently skipped. `None` means no filter.
+    pub discovery_filter: RwLock<Option<Arc<DiscoveryFilter>>>,
     /// Latest plugin update/on-disk status, replayed to each client on connect.
     pub plugin_update_status: Mutex<Vec<halod_shared::types::PluginUpdateStatus>>,
     /// Backing store for plugin-declared secret config values (`secure =
@@ -88,6 +104,8 @@ impl AppState {
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
             plugins_rediscover_pending: std::sync::atomic::AtomicBool::new(false),
+            pending_rediscover: Mutex::new(PendingRediscover::default()),
+            discovery_filter: RwLock::new(None),
             plugin_update_status: Mutex::new(Vec::new()),
             secret_store: Arc::new(crate::secrets::FileKeyStore::new()),
         }
@@ -137,6 +155,55 @@ impl AppState {
                 buf.iter().skip(skip).cloned().collect()
             })
             .unwrap_or_default()
+    }
+
+    // --- Scoped plugin rediscovery plumbing ---
+
+    /// Mark a single plugin as needing rediscovery (scoped path).
+    pub async fn mark_plugin_dirty(&self, plugin_id: String) {
+        self.plugins_rediscover_pending
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.pending_rediscover
+            .lock()
+            .await
+            .plugins
+            .insert(plugin_id);
+    }
+
+    /// Mark a full rediscovery as needed (legacy / fallback path).
+    pub async fn mark_full_dirty(&self) {
+        self.plugins_rediscover_pending
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.pending_rediscover.lock().await.full = true;
+    }
+
+    /// Take the pending rediscovery scope, clearing both the set and the
+    /// atomic flag so the serializer sees no pending work.
+    pub async fn take_pending_rediscover(&self) -> PendingRediscover {
+        let mut pending = self.pending_rediscover.lock().await;
+        let taken = std::mem::take(&mut *pending);
+        if taken.full || !taken.plugins.is_empty() {
+            self.plugins_rediscover_pending
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        taken
+    }
+
+    /// Set the discovery filter (scoped discover will skip non-matching handles).
+    pub async fn set_discovery_filter(&self, filter: Option<Arc<DiscoveryFilter>>) {
+        *self.discovery_filter.write().await = filter;
+    }
+
+    /// True when `handle` passes the current filter (or no filter is set).
+    pub async fn handle_in_scope(
+        &self,
+        handle: &crate::registry::discovery::DiscoveryHandle<'_>,
+    ) -> bool {
+        let guard = self.discovery_filter.read().await;
+        match guard.as_ref() {
+            Some(f) => f.matches(handle),
+            None => true,
+        }
     }
 }
 
@@ -426,5 +493,72 @@ mod tests {
         );
 
         unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
+    }
+
+    #[tokio::test]
+    async fn pending_rediscover_accumulates_plugins_then_drains() {
+        use std::sync::atomic::Ordering;
+        let app = make_test_app();
+        assert!(!app.plugins_rediscover_pending.load(Ordering::Relaxed));
+
+        app.mark_plugin_dirty("p1".into()).await;
+        app.mark_plugin_dirty("p2".into()).await;
+        app.mark_plugin_dirty("p1".into()).await; // dedup
+        assert!(app.plugins_rediscover_pending.load(Ordering::Relaxed));
+
+        let scope = app.take_pending_rediscover().await;
+        assert!(!scope.full);
+        assert_eq!(
+            scope.plugins,
+            HashSet::from(["p1".to_string(), "p2".to_string()])
+        );
+        assert!(
+            !app.plugins_rediscover_pending.load(Ordering::Relaxed),
+            "draining clears the serializer-visible flag"
+        );
+
+        // A drained scope leaves nothing pending.
+        let empty = app.take_pending_rediscover().await;
+        assert!(!empty.full && empty.plugins.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mark_full_dirty_takes_precedence_over_scoped() {
+        let app = make_test_app();
+        app.mark_plugin_dirty("p1".into()).await;
+        app.mark_full_dirty().await;
+
+        let scope = app.take_pending_rediscover().await;
+        assert!(scope.full, "a full-flush request must survive the drain");
+    }
+
+    #[tokio::test]
+    async fn handle_in_scope_defaults_open_and_honours_the_filter() {
+        use crate::registry::discovery::{DiscoveryFilter, DiscoveryHandle};
+        let app = make_test_app();
+        let handle = DiscoveryHandle::Hid {
+            vid: 1,
+            pid: 2,
+            path: "",
+            serial: None,
+            idx: 0,
+            usage_page: 0,
+            usage: 0,
+            interface_number: None,
+        };
+
+        // No filter set — every handle passes.
+        assert!(app.handle_in_scope(&handle).await);
+
+        let spec = serde_json::from_value(serde_json::json!({
+            "vendor": "x", "model": "y", "transport": "hid", "vid": 9, "pid": 9,
+        }))
+        .unwrap();
+        app.set_discovery_filter(Some(Arc::new(DiscoveryFilter { specs: vec![spec] })))
+            .await;
+        assert!(!app.handle_in_scope(&handle).await, "out-of-scope handle");
+
+        app.set_discovery_filter(None).await;
+        assert!(app.handle_in_scope(&handle).await);
     }
 }

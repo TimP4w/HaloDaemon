@@ -2,7 +2,6 @@
 //! Managing device plugins: enable/disable, import, and delete.
 
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -34,7 +33,7 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
         crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
     }
     app.request_config_save();
-    mark_pending_and_broadcast(&app).await;
+    mark_plugin_dirty_and_broadcast(&app, id).await;
     Ok(())
 }
 
@@ -78,7 +77,7 @@ pub async fn set_permissions(
             // Pin the grant to the exact script the user is consenting to.
             match hash {
                 Some(h) => {
-                    cfg.plugin_acknowledged.insert(id, h);
+                    cfg.plugin_acknowledged.insert(id.clone(), h);
                 }
                 None => {
                     cfg.plugin_acknowledged.remove(&id);
@@ -89,7 +88,7 @@ pub async fn set_permissions(
         crate::drivers::plugins::set_acknowledged(&cfg.plugin_acknowledged);
     }
     app.request_config_save();
-    mark_pending_and_broadcast(&app).await;
+    mark_plugin_dirty_and_broadcast(&app, id).await;
     Ok(())
 }
 
@@ -152,7 +151,7 @@ pub async fn set_config(
 ) -> Result<()> {
     persist_config_values(&id, &values, &app).await?;
     app.request_config_save();
-    mark_pending_and_broadcast(&app).await;
+    mark_plugin_dirty_and_broadcast(&app, id).await;
     Ok(())
 }
 
@@ -210,7 +209,7 @@ pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
     crate::drivers::plugins::suppress_permission_notice(&manifest.plugin_id);
 
     reload_registry(&app).await;
-    mark_pending_and_broadcast(&app).await;
+    mark_plugin_dirty_and_broadcast(&app, manifest.plugin_id).await;
     Ok(())
 }
 
@@ -240,11 +239,12 @@ pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
     }
 
     reload_registry(&app).await;
-    mark_pending_and_broadcast(&app).await;
+    mark_plugin_dirty_and_broadcast(&app, id).await;
     Ok(())
 }
 
-/// Purge one plugin id's secret, disabled flag, and plaintext config; returns whether config changed. Shared by [`delete`] and `repos::remove_repo`.
+/// Purge one plugin id's secret, disabled flag, and plaintext config; returns
+/// whether config changed. Shared by [`delete`] and `repos::remove_repo`.
 pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     for key in crate::drivers::plugins::secure_config_keys_for(id) {
         if let Err(e) = app.secret_store.delete(id, &key) {
@@ -267,9 +267,14 @@ pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
 }
 
 pub async fn apply_pending_changes(app: Arc<AppState>) -> Result<()> {
-    app.plugins_rediscover_pending
-        .store(false, Ordering::Relaxed);
-    rediscover_devices(app).await;
+    let scope = app.take_pending_rediscover().await;
+    if scope.full || scope.plugins.is_empty() {
+        // Full flush (legacy path, also the safe default when empty).
+        rediscover_devices(app).await;
+    } else {
+        let plugins: Vec<String> = scope.plugins.into_iter().collect();
+        scoped_rediscover(&app, &plugins).await;
+    }
     Ok(())
 }
 
@@ -288,10 +293,18 @@ pub(crate) async fn reload_registry(app: &Arc<AppState>) {
     crate::drivers::plugins::set_secret_store(app.secret_store.clone());
 }
 
-/// Flag a rediscovery as needed and push the updated plugin listing so the GUI shows it immediately. Shared with `repos.rs`.
+/// Flag a full rediscovery as needed and push the updated plugin listing
+/// so the GUI shows it immediately. Shared with `repos.rs` — repo
+/// add/remove/update/upgrade touches an unknown set of plugins, so it
+/// must fall back to the full flush.
 pub(crate) async fn mark_pending_and_broadcast(app: &Arc<AppState>) {
-    app.plugins_rediscover_pending
-        .store(true, Ordering::Relaxed);
+    app.mark_full_dirty().await;
+    crate::ipc::broadcast_state(app).await;
+}
+
+/// Flag a single plugin as needing scoped rediscovery and broadcast.
+async fn mark_plugin_dirty_and_broadcast(app: &Arc<AppState>, plugin_id: String) {
+    app.mark_plugin_dirty(plugin_id).await;
     crate::ipc::broadcast_state(app).await;
 }
 
@@ -311,6 +324,59 @@ async fn rediscover_devices(app: Arc<AppState>) {
 
     crate::registry::initialize_app_state(app.clone()).await;
     crate::ipc::broadcast_state(&app).await;
+}
+
+/// Close and unregister every currently-registered device owned by one of
+/// `plugins` (plus its `_ctrl_` children); leaves every other device untouched.
+async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
+    let owned_ids: Vec<String> = {
+        let devices = app.devices.read().await;
+        devices
+            .iter()
+            .filter(|d| {
+                d.owning_plugin_id()
+                    .is_some_and(|pid| plugins.contains(&pid))
+            })
+            .map(|d| d.id().to_owned())
+            .collect()
+    };
+    for id in &owned_ids {
+        super::registration::unregister_device_and_children(app, id).await;
+    }
+}
+
+/// Scoped teardown + reprobe for `plugins`: only devices owned by one of
+/// these plugin ids are closed and re-discovered; every other device is
+/// left untouched.
+async fn scoped_rediscover(app: &Arc<AppState>, plugins: &[String]) {
+    use crate::registry::discovery::DiscoveryFilter;
+
+    // 1. Refresh manifests + disabled/granted/config so match_handle
+    //    reflects the new state.
+    reload_registry(app).await;
+
+    // 2. Teardown: close and unregister every device owned by a changed plugin.
+    teardown_owned_devices(app, plugins).await;
+
+    // 3. Set the discovery filter so re-probing only registers matching handles.
+    let specs = crate::drivers::plugins::device_specs_for(plugins);
+    app.set_discovery_filter(Some(Arc::new(DiscoveryFilter { specs })))
+        .await;
+
+    // 4. Scoped re-probe.
+    crate::registry::discovery::discover_devices(Arc::clone(app)).await;
+
+    // 5. Clear the filter, then seed known-device records and restore any
+    //    chain layout for the newly registered devices. Each new device's own
+    //    profile state was already applied by `register_device` during the
+    //    scoped probe, so we deliberately skip the global `load_active_profile`
+    //    here — it would clear every device's LCD slot and re-load every
+    //    device's state, disturbing the untouched devices this path exists to
+    //    leave alone (mirroring the integration scoped path).
+    app.set_discovery_filter(None).await;
+    crate::registry::seed_known_devices(Arc::clone(app)).await;
+    crate::registry::usecases::chain::restore_saved_chains(Arc::clone(app)).await;
+    crate::ipc::broadcast_state(app).await;
 }
 
 /// Sanitize a file name or repo URL into a safe plugin id / directory name (lower-cased `[a-z0-9-]`, path-traversal-proof).
@@ -338,6 +404,7 @@ pub(crate) fn sanitize_slug(filename: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn copy_dir_all_copies_files_and_nested_dirs() {
@@ -423,6 +490,93 @@ mod tests {
                 .await
                 .plugins_disabled
                 .contains(&"some_plugin".to_string()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_enabled_marks_only_the_toggled_plugin_dirty() {
+        crate::test_support::with_tmp_config(|app| async move {
+            set_enabled("some_plugin".into(), false, app.clone())
+                .await
+                .unwrap();
+
+            let scope = app.take_pending_rediscover().await;
+            assert!(!scope.full, "a plugin toggle must not force a full flush");
+            assert_eq!(
+                scope.plugins,
+                std::collections::HashSet::from(["some_plugin".to_string()]),
+                "only the toggled plugin is scoped for rediscovery"
+            );
+            // Draining the scope clears the pending flag the serializer reads.
+            assert!(!app.plugins_rediscover_pending.load(Ordering::Relaxed));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mark_pending_and_broadcast_forces_a_full_flush() {
+        crate::test_support::with_tmp_config(|app| async move {
+            mark_pending_and_broadcast(&app).await;
+
+            let scope = app.take_pending_rediscover().await;
+            assert!(
+                scope.full,
+                "a repo-level change must fall back to the full flush"
+            );
+            assert!(scope.plugins.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn teardown_owned_devices_removes_only_the_owning_plugins_subtree() {
+        use crate::test_support::MockDevice;
+        crate::test_support::with_tmp_config(|app| async move {
+            let root = Arc::new(MockDevice::new("p1-abc").with_owning_plugin_id("p1"));
+            // A child registered alongside the plugin root (the `_ctrl_` scheme
+            // `unregister_device_and_children` prunes) — no owner id of its own.
+            let child = Arc::new(MockDevice::new("p1-abc_ctrl_0"));
+            let other_plugin = Arc::new(MockDevice::new("p2-xyz").with_owning_plugin_id("p2"));
+            let native = Arc::new(MockDevice::new("native-dev"));
+            {
+                let mut devices = app.devices.write().await;
+                devices.push(root.clone());
+                devices.push(child.clone());
+                devices.push(other_plugin.clone());
+                devices.push(native.clone());
+            }
+
+            teardown_owned_devices(&app, &["p1".to_string()]).await;
+
+            let remaining: Vec<String> = app
+                .devices
+                .read()
+                .await
+                .iter()
+                .map(|d| d.id().to_owned())
+                .collect();
+            assert_eq!(remaining, vec!["p2-xyz", "native-dev"]);
+
+            assert!(root.closed.load(Ordering::SeqCst));
+            assert!(child.closed.load(Ordering::SeqCst));
+            assert!(!other_plugin.closed.load(Ordering::SeqCst));
+            assert!(!native.closed.load(Ordering::SeqCst));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn teardown_owned_devices_is_a_noop_when_nothing_is_owned() {
+        use crate::test_support::MockDevice;
+        crate::test_support::with_tmp_config(|app| async move {
+            let native = Arc::new(MockDevice::new("native-dev"));
+            app.devices.write().await.push(native.clone());
+
+            teardown_owned_devices(&app, &["p1".to_string()]).await;
+
+            assert_eq!(app.devices.read().await.len(), 1);
+            assert!(!native.closed.load(Ordering::SeqCst));
         })
         .await;
     }

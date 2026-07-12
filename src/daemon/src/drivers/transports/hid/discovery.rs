@@ -513,6 +513,22 @@ async fn add_hid_device(
         usage,
         interface_number,
     };
+    // Scoped-plugin gate: when a discovery filter is active, only the changed
+    // plugins' hardware is reprobed, and an in-scope handle routes through the
+    // replacing path so a newly enabled plugin evicts the native device holding
+    // the same hardware. This deliberately bypasses the TransportSwitchable
+    // adoption below — a plugin HID device always registers as a new primary.
+    {
+        let filter = app.discovery_filter.read().await;
+        if let Some(f) = filter.as_ref() {
+            let in_scope = f.matches(&handle);
+            drop(filter);
+            if in_scope {
+                crate::registry::discovery::discover_handle_replacing(app, handle).await;
+            }
+            return;
+        }
+    }
     let Some(impl_) = make_device(handle) else {
         return;
     };
