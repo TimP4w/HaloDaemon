@@ -720,7 +720,7 @@ impl Device for LuaDevice {
     fn is_live(&self) -> bool {
         self.liveness
             .as_ref()
-            .map_or(true, |l| l.load(Ordering::Relaxed))
+            .is_none_or(|l| l.load(Ordering::Relaxed))
     }
 
     async fn wire_device_connected(&self) -> bool {
