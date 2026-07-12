@@ -24,6 +24,7 @@ fn open(
     _manifest: &PluginManifest,
     handle: &DiscoveryHandle<'_>,
     _config: &HashMap<String, String>,
+    _granted: &[halod_shared::types::Permission],
 ) -> Result<PluginIo> {
     let DiscoveryHandle::Smbus { bus, addr, .. } = handle else {
         bail!("smbus backend matched a non-SMBus handle");

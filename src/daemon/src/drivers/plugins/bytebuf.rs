@@ -10,6 +10,30 @@
 
 use mlua::{Lua, UserData, UserDataMethods};
 
+/// Upper bound on any single plugin-driven native allocation (`halod.buffer`,
+/// `transport:control_read`, image-codec output). `set_memory_limit` only tracks
+/// Lua's own allocator, so an unbounded `vec![0u8; n]` from a Lua-supplied length
+/// would OOM/abort the (root) daemon; this caps every such allocation. Generous —
+/// far above any real LCD frame — so honest plugins never hit it.
+pub const MAX_ALLOC_BYTES: usize = 64 * 1024 * 1024;
+
+/// Reject a plugin-supplied length past [`MAX_ALLOC_BYTES`] with a Lua error
+/// instead of letting a downstream `vec![0u8; n]` OOM/abort the process.
+pub fn check_alloc(n: usize) -> mlua::Result<()> {
+    if n > MAX_ALLOC_BYTES {
+        return Err(mlua::Error::RuntimeError(format!(
+            "requested allocation of {n} bytes exceeds the {MAX_ALLOC_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
+/// Fallibly allocate a zeroed buffer of `n` bytes, capped by [`check_alloc`].
+pub fn alloc_zeroed(n: usize) -> mlua::Result<Vec<u8>> {
+    check_alloc(n)?;
+    Ok(vec![0u8; n])
+}
+
 /// Exposed to Lua as `halod.buffer(n)` / `halod.buffer(str)`.
 #[derive(Clone)]
 pub struct ByteBuf {
@@ -42,7 +66,7 @@ impl ByteBuf {
 pub fn register(lua: &Lua) -> mlua::Result<()> {
     let halod = lua.create_table()?;
     let buffer = lua.create_function(|_, arg: mlua::Value| match arg {
-        mlua::Value::Integer(n) if n >= 0 => Ok(ByteBuf::from_bytes(vec![0u8; n as usize])),
+        mlua::Value::Integer(n) if n >= 0 => Ok(ByteBuf::from_bytes(alloc_zeroed(n as usize)?)),
         mlua::Value::String(s) => Ok(ByteBuf::from_bytes(s.as_bytes().to_vec())),
         _ => Err(mlua::Error::RuntimeError(
             "halod.buffer expects a non-negative length or a string".into(),
@@ -163,6 +187,19 @@ mod tests {
         let lua = Lua::new();
         register(&lua).unwrap();
         lua
+    }
+
+    #[test]
+    fn buffer_rejects_an_allocation_past_the_cap() {
+        let lua = lua();
+        let err = lua
+            .load("return halod.buffer(1000000000000)")
+            .exec()
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+        // A buffer right at the cap is still allowed.
+        assert!(alloc_zeroed(MAX_ALLOC_BYTES).is_ok());
+        assert!(alloc_zeroed(MAX_ALLOC_BYTES + 1).is_err());
     }
 
     #[test]

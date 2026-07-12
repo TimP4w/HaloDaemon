@@ -850,7 +850,7 @@ fn build_device(
     let granted = granted_for(&manifest.plugin_id);
     let config = resolved_config_for(&manifest.plugin_id, &granted);
     let transport = match transport::descriptor_for(&spec.transport)
-        .map(|d| (d.open)(manifest, handle, &config))
+        .map(|d| (d.open)(manifest, handle, &config, &granted))
     {
         Some(Ok(t)) => t,
         Some(Err(e)) => {

@@ -29,6 +29,10 @@ pub const CANVAS_H: u32 = 300;
 /// single render call rather than the effect's whole lifetime.
 const INSTRUCTION_BUDGET: u64 = 50_000_000;
 
+/// Cap on the effect VM's own Lua allocator, so a render loop that keeps
+/// allocating can't OOM the daemon (matches the device worker's bound).
+const EFFECT_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+
 /// One LED's chain/spatial coordinates, passed to a direct effect's
 /// `led_colors_<id>` callback in one batch.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -107,6 +111,9 @@ impl PluginEffectHandle {
         Self(LuaWorker::spawn(
             "halod-effect",
             "effect",
+            // An effect render must finish well inside a frame; a wedged one is
+            // killed fast so it can't stall the engine tick every frame.
+            std::time::Duration::from_secs(2),
             move || build_ctx(&script_source, &effect_id, &params, &granted, &config),
             |call, ctx: &EffectCtx| {
                 ctx.budget.set(0);
@@ -240,10 +247,10 @@ fn build_ctx(
     granted: &[Permission],
     config: &HashMap<String, String>,
 ) -> Result<EffectCtx> {
-    let lua = Lua::new();
-    sandbox::apply(&lua, granted, config).map_err(|e| lua_err("sandbox setup", e))?;
+    let (lua, budget) =
+        sandbox::bootstrap_vm(granted, config, EFFECT_MEMORY_LIMIT, INSTRUCTION_BUDGET)
+            .map_err(|e| lua_err("sandbox setup", e))?;
     register_effect_helpers(&lua).map_err(|e| lua_err("effect helpers", e))?;
-    let budget = sandbox::install_instruction_budget_hook(&lua, INSTRUCTION_BUDGET);
 
     let manifest: Table = lua
         .load(source)

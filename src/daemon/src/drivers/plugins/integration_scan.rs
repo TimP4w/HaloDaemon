@@ -83,9 +83,15 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
     // block for the transport's timeout, so callers run it off the async runtime.
     let open_manifest = manifest.clone();
     let open_config = config.clone();
+    let open_granted = granted.clone();
     let open_transport: Arc<dyn Fn() -> Result<PluginIo> + Send + Sync> =
         Arc::new(move || match super::transport::descriptor_for("tcp") {
-            Some(d) => (d.open)(&open_manifest, &placeholder_handle(), &open_config),
+            Some(d) => (d.open)(
+                &open_manifest,
+                &placeholder_handle(),
+                &open_config,
+                &open_granted,
+            ),
             None => anyhow::bail!("integration plugin: no 'tcp' transport backend registered"),
         });
 

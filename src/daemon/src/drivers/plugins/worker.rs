@@ -307,6 +307,10 @@ impl PluginHandle {
         Self(LuaWorker::spawn(
             "halod-plugin",
             "plugin",
+            // Generous: a capability callback may legitimately do timed transfer
+            // gaps (DDC/CI) or a bounded sleep. Past this the worker is presumed
+            // wedged (e.g. a `pcall`-catching runaway) and the device is dropped.
+            std::time::Duration::from_secs(30),
             move || {
                 build_ctx(
                     &source, transport, dev_match, &granted, &config, handle, &zones,
@@ -937,10 +941,13 @@ fn build_ctx(
     handle: Handle,
     zones: &[RgbZone],
 ) -> Result<WorkerCtx> {
-    let lua = Lua::new();
-    sandbox::apply(&lua, granted, config).map_err(|e| lua_err("sandbox setup", e))?;
-    let _ = lua.set_memory_limit(WORKER_MEMORY_LIMIT);
-    let budget = sandbox::install_instruction_budget_hook(&lua, WORKER_INSTRUCTION_BUDGET);
+    let (lua, budget) = sandbox::bootstrap_vm(
+        granted,
+        config,
+        WORKER_MEMORY_LIMIT,
+        WORKER_INSTRUCTION_BUDGET,
+    )
+    .map_err(|e| lua_err("sandbox setup", e))?;
 
     let manifest: Table = lua
         .load(source)
@@ -985,12 +992,15 @@ pub fn run_pre_scan(
     granted: &[Permission],
     handle: Handle,
 ) -> Result<()> {
-    let lua = Lua::new();
     // `pre_scan` is one-time bus preparation before a device is even matched,
     // not general plugin logic — it gets no `halod.config` (an empty map).
-    sandbox::apply(&lua, granted, &HashMap::new()).map_err(|e| lua_err("sandbox setup", e))?;
-    let _ = lua.set_memory_limit(WORKER_MEMORY_LIMIT);
-    sandbox::install_instruction_budget_hook(&lua, WORKER_INSTRUCTION_BUDGET);
+    let (lua, _budget) = sandbox::bootstrap_vm(
+        granted,
+        &HashMap::new(),
+        WORKER_MEMORY_LIMIT,
+        WORKER_INSTRUCTION_BUDGET,
+    )
+    .map_err(|e| lua_err("sandbox setup", e))?;
     let manifest: Table = lua
         .load(source)
         .eval()

@@ -6,9 +6,19 @@
 
 use mlua::{Lua, Value};
 
-use super::bytebuf::ByteBuf;
+use super::bytebuf::{check_alloc, ByteBuf};
 use super::ffi::{bytes_from as bytes_of, to_lua_err};
 use crate::util::image;
+
+/// Reject plugin-supplied dimensions whose RGBA buffer (`w*h*4`) would exceed the
+/// native-allocation cap, so a decode/resize can't be steered into an OOM.
+fn check_dims(w: u32, h: u32) -> mlua::Result<()> {
+    let bytes = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| mlua::Error::RuntimeError(format!("image dimensions {w}x{h} overflow")))?;
+    check_alloc(bytes)
+}
 
 /// Add the image codecs to the (already-created) `halod` global table.
 pub fn register(lua: &Lua) -> mlua::Result<()> {
@@ -17,6 +27,7 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
     halod.set(
         "rgba_to_q565",
         lua.create_function(|_, (rgba, w, h): (Value, u32, u32)| {
+            check_dims(w, h)?;
             let out = image::rgba_to_q565(&bytes_of(&rgba)?, w, h).map_err(to_lua_err)?;
             Ok(ByteBuf::from_bytes(out))
         })?,
@@ -34,6 +45,7 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
     halod.set(
         "rgba_rotate_square",
         lua.create_function(|_, (rgba, size, deg): (Value, u32, u32)| {
+            check_dims(size, size)?;
             Ok(ByteBuf::from_bytes(image::rotate_rgba_square(
                 &bytes_of(&rgba)?,
                 size,
@@ -45,6 +57,7 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
     halod.set(
         "image_decode",
         lua.create_function(|_, (bytes, w, h): (Value, u32, u32)| {
+            check_dims(w, h)?;
             let out =
                 image::decode_static_image_rgba(&bytes_of(&bytes)?, w, h).map_err(to_lua_err)?;
             Ok(ByteBuf::from_bytes(out))
@@ -54,6 +67,7 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
     halod.set(
         "gif_resize",
         lua.create_function(|_, (bytes, w, h): (Value, u32, u32)| {
+            check_dims(w, h)?;
             let out = image::resize_gif(&bytes_of(&bytes)?, w, h, |_| {}).map_err(to_lua_err)?;
             Ok(ByteBuf::from_bytes(out))
         })?,

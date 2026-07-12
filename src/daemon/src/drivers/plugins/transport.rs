@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use halod_shared::types::{WriteRateLimit, WriteRateStatus};
+use halod_shared::types::{Permission, WriteRateLimit, WriteRateStatus};
 
 use crate::drivers::transports::smbus::{SmBusDevice, SmBusSyncOps};
 use crate::drivers::transports::usb_bulk::UsbBulkTransport;
@@ -244,8 +244,14 @@ pub struct PluginTransportDescriptor {
     /// resolved non-secure config values (see `plugins::config_for`) — HID/
     /// SMBus ignore it; the `tcp` backend reads its host/port keys from it,
     /// since a config-instantiated integration has no real discovery handle.
-    pub open:
-        fn(&PluginManifest, &DiscoveryHandle<'_>, &HashMap<String, String>) -> Result<PluginIo>,
+    /// `granted` is the plugin's granted permissions — a backend that reaches
+    /// off the matched device (the `tcp` backend) gates on `Permission::Network`.
+    pub open: fn(
+        &PluginManifest,
+        &DiscoveryHandle<'_>,
+        &HashMap<String, String>,
+        &[Permission],
+    ) -> Result<PluginIo>,
     /// Stable per-device id suffix from the matched handle.
     pub id_suffix: fn(&DiscoveryHandle<'_>) -> String,
     /// Reject a manifest whose match spec omits a field this kind requires.

@@ -68,6 +68,12 @@ pub struct TcpConfig {
     pub port_key: String,
     #[serde(default = "default_tcp_timeout_ms")]
     pub timeout_ms: u64,
+    /// Opt-in: allow connecting to loopback/private/link-local addresses. Off by
+    /// default so a config-instantiated integration can't be steered into an
+    /// SSRF against localhost services or the cloud metadata endpoint. A plugin
+    /// that legitimately talks to a LAN device (e.g. WLED) sets this true.
+    #[serde(default)]
+    pub allow_private: bool,
 }
 
 impl Default for TcpConfig {
@@ -76,6 +82,7 @@ impl Default for TcpConfig {
             host_key: default_host_key(),
             port_key: default_port_key(),
             timeout_ms: default_tcp_timeout_ms(),
+            allow_private: false,
         }
     }
 }
@@ -902,8 +909,37 @@ const MANIFEST_MEMORY_LIMIT: usize = 8 * 1024 * 1024;
 /// `while true do end` from hanging daemon load.
 const MANIFEST_INSTRUCTION_BUDGET: u64 = 5_000_000;
 
-/// Evaluate a plugin's Lua source and deserialize its returned table into a bare `PluginManifest`.
+/// Wall-clock ceiling on evaluating one manifest. The instruction budget catches
+/// an *uncaught* runaway, but a `pcall`-catching loop (or a pathological alloc/
+/// GC storm) can burn the whole budget repeatedly; since parsing happens on the
+/// scanner thread for every dropped-in file *before* consent, a wedged parse
+/// would otherwise hang discovery. On timeout the eval thread is abandoned
+/// (memory-capped, so bounded) and the plugin is skipped.
+const MANIFEST_EVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Evaluate a plugin's Lua source and deserialize its returned table into a bare
+/// `PluginManifest`, on a throwaway thread bounded by [`MANIFEST_EVAL_TIMEOUT`].
 fn eval_manifest_table(source: &str) -> Result<PluginManifest> {
+    let source = source.to_owned();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("halod-manifest-eval".into())
+        .spawn(move || {
+            let _ = tx.send(eval_manifest_table_inner(&source));
+        })
+        .map_err(|e| anyhow!("spawning manifest eval thread failed: {e}"))?;
+    match rx.recv_timeout(MANIFEST_EVAL_TIMEOUT) {
+        Ok(res) => res,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            bail!("manifest evaluation exceeded its {MANIFEST_EVAL_TIMEOUT:?} deadline")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("manifest eval thread died")
+        }
+    }
+}
+
+fn eval_manifest_table_inner(source: &str) -> Result<PluginManifest> {
     let lua = Lua::new();
     // Reading the manifest evaluates the whole script, so strip the same escape
     // hatches the runtime sandbox does and bound its work — a dropped-in file
@@ -970,6 +1006,13 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     // Only a `device` plugin may hold a usb_control endpoint open.
     if manifest.transports.usb_control.is_some() && manifest.plugin_type != PluginKind::Device {
         bail!("usb_control transport is only valid for a device plugin");
+    }
+    // A tcp transport reaches the network, so the manifest must declare the
+    // `network` permission — that's what drives the consent prompt and what the
+    // tcp backend gates its connect on. Without this a plugin could ship a tcp
+    // integration with an empty permission list and auto-activate silently.
+    if manifest.transports.tcp.is_some() && !manifest.permissions.contains(&Permission::Network) {
+        bail!("a tcp transport requires the 'network' permission to be declared");
     }
     if manifest.effects.iter().any(|e| e.id.is_empty()) {
         bail!("effect declares an empty id");
@@ -1236,6 +1279,24 @@ mod tests {
             devices = { { transport = "carrier_pigeon", vid = 1, vendor = "x", model = "y" } },
         }"#;
         assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
+    }
+
+    #[test]
+    fn tcp_transport_requires_the_network_permission() {
+        // A tcp transport without a declared `network` permission is rejected,
+        // so a plugin can't open a socket without the consent prompt firing.
+        let without = r#"return {
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+            transports = { tcp = {} },
+        }"#;
+        assert!(parse_manifest(without, Path::new("bad.lua")).is_err());
+
+        let with = r#"return {
+            permissions = {"network"},
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+            transports = { tcp = {} },
+        }"#;
+        assert!(parse_manifest(with, Path::new("ok.lua")).is_ok());
     }
 
     #[test]
@@ -1527,6 +1588,7 @@ mod tests {
     #[test]
     fn tcp_transport_config_parses_with_defaults() {
         let src = r#"return {
+            permissions = {"network"},
             devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             transports = { tcp = { host_key = "ip", port_key = "svc_port" } },
         }"#;
@@ -1540,6 +1602,7 @@ mod tests {
     #[test]
     fn tcp_transport_config_defaults_keys_when_omitted() {
         let src = r#"return {
+            permissions = {"network"},
             devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
             transports = { tcp = { timeout_ms = 2000 } },
         }"#;

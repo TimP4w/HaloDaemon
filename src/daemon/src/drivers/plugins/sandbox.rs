@@ -69,6 +69,26 @@ pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
+/// Build a fresh sandboxed plugin VM: strip escape hatches, re-inject the
+/// `halod` surface for `granted`/`config`, cap the Lua allocator at
+/// `memory_limit`, and install the `instruction_budget` hook. Returns the VM and
+/// the budget counter (reset per call to make the budget per-callback). Every
+/// plugin VM — device worker, effect worker, `pre_scan`, manifest parse — goes
+/// through here so none can silently skip a limit (an earlier drift left the
+/// effect VM with no memory cap).
+pub(super) fn bootstrap_vm(
+    granted: &[Permission],
+    config: &HashMap<String, String>,
+    memory_limit: usize,
+    instruction_budget: u64,
+) -> mlua::Result<(Lua, Rc<Cell<u64>>)> {
+    let lua = Lua::new();
+    apply(&lua, granted, config)?;
+    let _ = lua.set_memory_limit(memory_limit);
+    let budget = install_instruction_budget_hook(&lua, instruction_budget);
+    Ok((lua, budget))
+}
+
 /// How many instructions elapse between hook firings. The budget is only
 /// enforced to this granularity, which keeps the hook's own overhead negligible.
 const BUDGET_HOOK_STEP: u32 = 10_000;

@@ -40,6 +40,7 @@ fn open(
     manifest: &PluginManifest,
     handle: &DiscoveryHandle<'_>,
     _config: &HashMap<String, String>,
+    _granted: &[halod_shared::types::Permission],
 ) -> Result<PluginIo> {
     let DiscoveryHandle::Hid { path, vid, pid, .. } = handle else {
         bail!("plugin '{}' matched a non-HID handle", manifest.plugin_id);

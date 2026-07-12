@@ -20,6 +20,7 @@ use tokio::runtime::Handle;
 use crate::drivers::transports::smbus::SmBusSyncOps;
 use crate::drivers::transports::Transport;
 
+use super::bytebuf::check_alloc;
 use super::ffi::{bytes_from, to_lua_err};
 use super::transport::{AddrScope, BulkEndpoint, ControlEndpoints, PluginIo, RegisterBus};
 
@@ -93,6 +94,7 @@ impl UserData for TransportApi {
             };
             (size_str $name:literal, $m:ident) => {
                 methods.add_method($name, |lua, this, size: usize| {
+                    check_alloc(size)?;
                     let data = this
                         .handle
                         .block_on(this.stream()?.$m(size))
@@ -102,6 +104,7 @@ impl UserData for TransportApi {
             };
             (bytes_size_str $name:literal, $m:ident) => {
                 methods.add_method($name, |lua, this, (data, size): (Value, usize)| {
+                    check_alloc(size)?;
                     let bytes = bytes_from(&data)?;
                     let reply = this
                         .handle
@@ -173,7 +176,7 @@ impl UserData for TransportApi {
                 let t = this.control()?.get(&endpoint).ok_or_else(|| {
                     mlua::Error::RuntimeError(format!("unknown control endpoint '{endpoint}'"))
                 })?;
-                let mut buf = vec![0u8; len];
+                let mut buf = super::bytebuf::alloc_zeroed(len)?;
                 let n = t
                     .read_control(bm_request_type, b_request, w_value, w_index, &mut buf)
                     .map_err(to_lua_err)?;

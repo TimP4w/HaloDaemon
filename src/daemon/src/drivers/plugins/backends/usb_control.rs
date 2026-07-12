@@ -35,6 +35,7 @@ fn open(
     manifest: &PluginManifest,
     handle: &DiscoveryHandle<'_>,
     _config: &HashMap<String, String>,
+    _granted: &[halod_shared::types::Permission],
 ) -> Result<PluginIo> {
     let DiscoveryHandle::UsbNonHid { vid, pid } = handle else {
         bail!(
