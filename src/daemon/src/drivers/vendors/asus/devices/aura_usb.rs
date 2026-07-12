@@ -723,21 +723,18 @@ mod tests {
                                 "channel_id": "argb_0",
                                 "name": "ARGB Header 1",
                                 "max_leds": 10,
-                                "link_kind": "generic_aura_argb",
                                 "links": []
                             },
                             {
                                 "channel_id": "argb_1",
                                 "name": "ARGB Header 2",
                                 "max_leds": 10,
-                                "link_kind": "generic_aura_argb",
                                 "links": []
                             },
                             {
                                 "channel_id": "argb_2",
                                 "name": "ARGB Header 3",
                                 "max_leds": 10,
-                                "link_kind": "generic_aura_argb",
                                 "links": []
                             }
                         ]

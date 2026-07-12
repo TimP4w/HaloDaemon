@@ -107,7 +107,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: inttest\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\n",
+            "id: inttest\ntype: integration\npermissions:\n  - network\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\n",
         )
         .unwrap();
         std::fs::write(plugin_dir.join("main.lua"), INTEGRATION_CONFIG_TEST_PLUGIN).unwrap();

@@ -2113,6 +2113,7 @@ mod tests {
     const INTEGRATION_SCRIPT: &str = r#"
         return {
           type = "integration",
+          permissions = {"network"},
           identity = { name = "Test Hub" },
           config = { fields = { { key = "host", label = "Host" }, { key = "port", label = "Port" } } },
           transports = { tcp = {} },
@@ -2335,6 +2336,7 @@ mod tests {
     const INTEGRATION_MULTI_SCRIPT: &str = r#"
         return {
           type = "integration",
+          permissions = {"network"},
           identity = { name = "Multi Hub" },
           config = { fields = { { key = "host", label = "Host" } } },
           transports = { tcp = {} },
