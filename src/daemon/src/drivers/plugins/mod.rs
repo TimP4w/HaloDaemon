@@ -324,6 +324,60 @@ pub fn set_secret_store(store: Arc<dyn crate::secrets::SecretStore>) {
     *write_recover(&SECRET_STORE) = Some(store);
 }
 
+/// Process-wide sink for plugin runtime-error notifications, set once at startup
+/// (mirrors [`set_secret_store`]). `Weak` so it never keeps `AppState` alive.
+/// Background/engine paths would otherwise only log a failed Lua callback; this
+/// lets the device layer (which has no `AppState` of its own) push a toast.
+static NOTIFY_SINK: RwLock<Option<std::sync::Weak<crate::state::AppState>>> = RwLock::new(None);
+
+/// Device ids with an outstanding runtime error, so a plugin that fails every
+/// engine tick is announced once per failure episode, not on every frame.
+/// Cleared by [`clear_runtime_error`] on the next successful call.
+static FAILING_DEVICES: RwLock<Option<HashSet<String>>> = RwLock::new(None);
+
+/// Install the runtime-error notification sink (from `AppState`).
+pub fn set_notification_sink(app: &Arc<crate::state::AppState>) {
+    *write_recover(&NOTIFY_SINK) = Some(Arc::downgrade(app));
+}
+
+/// Surface a plugin device's runtime callback failure to the user as a
+/// [`NotificationCode::PluginRuntimeError`], once per failure episode (deduped
+/// on `device_id`). No-op if the device already has an outstanding error or no
+/// sink is installed.
+pub(super) async fn report_runtime_error(device_id: &str, device_name: &str, detail: String) {
+    {
+        let mut guard = write_recover(&FAILING_DEVICES);
+        if !guard
+            .get_or_insert_with(HashSet::new)
+            .insert(device_id.to_owned())
+        {
+            return; // already reported this episode
+        }
+    }
+    let Some(app) = read_recover(&NOTIFY_SINK)
+        .as_ref()
+        .and_then(std::sync::Weak::upgrade)
+    else {
+        return;
+    };
+    crate::platform::notify::send(
+        &app,
+        halod_shared::types::NotificationCode::PluginRuntimeError {
+            plugin: device_name.to_owned(),
+            detail,
+        },
+    )
+    .await;
+}
+
+/// Clear a device's outstanding-error flag after a successful call, so a later
+/// failure alerts again rather than being deduped away.
+pub(super) fn clear_runtime_error(device_id: &str) {
+    if let Some(set) = write_recover(&FAILING_DEVICES).as_mut() {
+        set.remove(device_id);
+    }
+}
+
 /// A plugin's full resolved config for its Lua VM: `config_for` plus, only
 /// when `Permission::SecureStorage` is granted, its decrypted secure values.
 /// Without that grant the secure keys are simply absent — a plugin can never

@@ -974,3 +974,118 @@ fn build_match_table(lua: &Lua, m: &DevMatch) -> Result<Table> {
     }
     Ok(t)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drivers::transports::mock::test_transport::MockTransport;
+
+    fn stream_io() -> PluginIo {
+        PluginIo::Stream {
+            transport: Arc::new(MockTransport::empty()),
+            bulk: None,
+        }
+    }
+
+    /// Spawn a worker from inline Lua `source`, with `granted` permissions. The
+    /// script never touches the transport, so a null MockTransport suffices.
+    fn spawn(source: &str, granted: Vec<Permission>) -> PluginHandle {
+        PluginHandle::spawn(
+            source.to_owned(),
+            stream_io(),
+            DevMatch {
+                transport: "hid".to_owned(),
+                ..Default::default()
+            },
+            granted,
+            HashMap::new(),
+            Handle::current(),
+        )
+    }
+
+    fn static_state() -> RgbState {
+        RgbState::Static {
+            color: RgbColor { r: 1, g: 2, b: 3 },
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_initialize_apply_poll_then_close() {
+        // A plugin that reports dynamic info, accepts frames, polls, and runs a
+        // close hook — the full spawn → call → close round trip on one worker.
+        let src = r#"
+            local applied = false
+            return {
+                initialize = function(dev) return { ok = true, model = "M-1" } end,
+                apply = function(dev, state) applied = true end,
+                read_status = function(dev) return { ok = applied } end,
+                close = function(dev) end,
+            }
+        "#;
+        let h = spawn(src, vec![]);
+
+        let init = h.initialize().await.unwrap();
+        assert!(init.ok);
+        assert_eq!(init.model.as_deref(), Some("M-1"));
+
+        h.rgb_apply(static_state()).await.unwrap();
+        h.poll().await.unwrap();
+        h.close().await;
+
+        // After close the worker loop has ended, so a further call fails rather
+        // than hanging.
+        assert!(h.rgb_apply(static_state()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_sandbox_blocks_escape_hatches_inside_a_running_callback() {
+        // The sandbox must hold at runtime, not just when `apply` is called in
+        // isolation: a callback reaching for os/io/load fails because the global
+        // is nil in the worker's VM.
+        for hatch in ["os.execute('x')", "io.open('x')", "load('return 1')()"] {
+            let src = format!("return {{ apply = function(dev, state) {hatch} end }}");
+            let h = spawn(&src, vec![]);
+            assert!(
+                h.rgb_apply(static_state()).await.is_err(),
+                "escape hatch '{hatch}' was reachable at runtime"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_gated_global_is_absent_until_granted() {
+        let src = r#"return {
+            apply = function(dev, state) assert(os.time() > 0) end,
+        }"#;
+
+        // Without Permission::Os the `os` table is stripped, so the callback errors.
+        assert!(spawn(src, vec![]).rgb_apply(static_state()).await.is_err());
+
+        // Granting it re-injects the read-only clock, so the same callback succeeds.
+        spawn(src, vec![Permission::Os])
+            .rgb_apply(static_state())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_required_callback_errors_uniformly() {
+        // A plugin with no `apply` yields the shared "plugin has no apply()" error.
+        let h = spawn("return {}", vec![]);
+        let err = h.rgb_apply(static_state()).await.unwrap_err();
+        assert!(
+            err.to_string().contains("plugin has no apply()"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_error_propagates_to_the_caller() {
+        let h = spawn(
+            r#"return { apply = function(dev, state) error("boom") end }"#,
+            vec![],
+        );
+        let err = h.rgb_apply(static_state()).await.unwrap_err();
+        assert!(err.to_string().contains("boom"), "unexpected error: {err}");
+    }
+}

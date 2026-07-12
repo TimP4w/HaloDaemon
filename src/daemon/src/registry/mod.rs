@@ -52,6 +52,7 @@ pub async fn initialize_app_state(app: Arc<AppState>) {
         crate::drivers::plugins::set_integrations_disabled(&cfg.integrations_disabled);
     }
     crate::drivers::plugins::set_secret_store(app.secret_store.clone());
+    crate::drivers::plugins::set_notification_sink(&app);
     // Security: disable any plugin whose files changed on disk since checkout,
     // BEFORE discovery so a tampered plugin never activates. No network, so it
     // runs regardless of GitHub consent. Suppresses the ungranted notice for

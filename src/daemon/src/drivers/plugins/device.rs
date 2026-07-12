@@ -540,6 +540,18 @@ impl LuaDevice {
         self.poll_paused.store(paused, Ordering::Relaxed);
     }
 
+    /// Surface a worker call's Lua runtime error to the user (deduplicated),
+    /// clearing the dedup flag on success. Background/engine paths (RGB apply,
+    /// fan duty, sensor poll) otherwise only log the failure, so a broken plugin
+    /// is invisible — this turns the first failure of an episode into one toast.
+    async fn track<T>(&self, result: Result<T>) -> Result<T> {
+        match &result {
+            Ok(_) => super::clear_runtime_error(&self.id),
+            Err(e) => super::report_runtime_error(&self.id, &self.name, format!("{e:#}")).await,
+        }
+        result
+    }
+
     /// Trigger one status poll synchronously (used by tests; production relies on
     /// the ticker).
     #[cfg(test)]
@@ -705,11 +717,13 @@ impl RgbCapability for LuaDevice {
     async fn apply(&self, state: RgbState) -> Result<()> {
         let state = apply_per_led_transforms(self.descriptor(), &self.rgb_slot, state);
         self.rgb_slot.set_state(Some(state.clone()));
-        self.worker()?.rgb_apply(state).await
+        let r = self.worker()?.rgb_apply(state).await;
+        self.track(r).await
     }
 
     async fn write_frame(&self, zone_id: &str, colors: &[RgbColor]) -> Result<()> {
-        self.worker()?.rgb_write_frame(zone_id, colors).await
+        let r = self.worker()?.rgb_write_frame(zone_id, colors).await;
+        self.track(r).await
     }
 
     fn rgb_state(&self) -> &RgbStateSlot {
@@ -751,7 +765,8 @@ impl FanCapability for LuaDevice {
     }
 
     async fn set_duty(&self, duty: u8) -> Result<()> {
-        self.worker()?.fan_set_duty(duty).await
+        let r = self.worker()?.fan_set_duty(duty).await;
+        self.track(r).await
     }
 
     async fn get_rpm(&self) -> Option<u32> {
@@ -773,7 +788,8 @@ impl FanCapability for LuaDevice {
 #[async_trait]
 impl SensorCapability for LuaDevice {
     async fn get_sensors(&self) -> Result<Vec<Sensor>> {
-        self.worker()?.get_sensors().await
+        let r = self.worker()?.get_sensors().await;
+        self.track(r).await
     }
 }
 
@@ -2198,5 +2214,73 @@ mod tests {
             .write_frame("z2", &[RgbColor { r: 2, g: 2, b: 2 }; 3])
             .await
             .is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_errors_surface_once_per_failure_episode() {
+        use crate::config::Config;
+        use crate::ipc::ClientHandle;
+        use crate::state::AppState;
+
+        // The runtime-error sink and dedup set are process-wide globals.
+        let _guard = super::super::TEST_GLOBALS_LOCK.lock().unwrap();
+
+        // `apply` fails unless the requested colour is black — a per-call toggle
+        // so one device can walk fail → fail → recover → fail.
+        let src = r#"return {
+            devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "T", model = "M" } },
+            transports = { hid = { report_size = 8 } },
+            rgb = { zones = { { id = "z", name = "Z", topology = { type = "linear" },
+                leds = { { id = 0, x = 0.0, y = 0.0 } } } } },
+            apply = function(dev, state)
+                if state.color.r == 0 then return end
+                error("boom")
+            end,
+        }"#;
+        let manifest = super::super::parse_manifest(src, Path::new("err.lua")).unwrap();
+        let dev = hid_device("err-dev", &manifest, Arc::new(MockTransport::empty()));
+
+        let app = Arc::new(AppState::new(Config::default()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Arc<Vec<u8>>>(16);
+        app.clients.lock().await.push(ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        });
+        super::super::set_notification_sink(&app);
+
+        let fail = || RgbState::Static {
+            color: RgbColor { r: 1, g: 0, b: 0 },
+        };
+        let ok = || RgbState::Static {
+            color: RgbColor { r: 0, g: 0, b: 0 },
+        };
+        let code_of = |frame: &[u8]| -> serde_json::Value {
+            serde_json::from_slice::<serde_json::Value>(&frame[5..]).unwrap()["data"]["code"]
+                .clone()
+        };
+
+        // First failure surfaces exactly one plugin_runtime_error toast.
+        assert!(dev.apply(fail()).await.is_err());
+        let frame = rx.try_recv().expect("first failure surfaced");
+        assert_eq!(code_of(&frame), "plugin_runtime_error");
+
+        // A second consecutive failure is deduped — no new toast.
+        assert!(dev.apply(fail()).await.is_err());
+        assert!(
+            rx.try_recv().is_err(),
+            "consecutive failure must not re-toast"
+        );
+
+        // A success clears the dedup flag (and never toasts)...
+        dev.apply(ok()).await.unwrap();
+        assert!(rx.try_recv().is_err(), "success must not toast");
+
+        // ...so the next failure alerts again.
+        assert!(dev.apply(fail()).await.is_err());
+        assert!(
+            rx.try_recv().is_ok(),
+            "a failure after recovery must re-toast"
+        );
     }
 }

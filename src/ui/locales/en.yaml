@@ -35,6 +35,9 @@ notify:
   plugin_content_changed:
     title: Plugin changed on disk
     message: "%{plugin}'s files changed on disk, so it was disabled for safety. Open the Plugins screen to review and re-enable it."
+  plugin_runtime_error:
+    title: "Plugin error — %{plugin}"
+    message: "%{detail}"
 
 tray:
   open: Open HaloDaemon

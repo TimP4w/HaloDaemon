@@ -430,6 +430,14 @@ pub enum NotificationCode {
     PluginContentChanged {
         plugin: String,
     },
+    /// A plugin device's Lua callback failed at runtime on a background path
+    /// (engine tick, sensor poll) where the error would otherwise only be
+    /// logged. Deduplicated daemon-side so a persistently-failing plugin alerts
+    /// once, not every frame. `detail` is the error text, shown verbatim.
+    PluginRuntimeError {
+        plugin: String,
+        detail: String,
+    },
     /// A generic error surfaced as free text (e.g. a failed command's error).
     /// The GUI translates only the title and shows `message` verbatim.
     Generic {
@@ -450,7 +458,8 @@ impl NotificationCode {
             | DeviceReconnectFailed { .. }
             | FanStalled { .. }
             | PluginNeedsPermission { .. }
-            | PluginContentChanged { .. } => NotificationSeverity::Warning,
+            | PluginContentChanged { .. }
+            | PluginRuntimeError { .. } => NotificationSeverity::Warning,
             ProfileSwitched { .. } => NotificationSeverity::Info,
         }
     }
