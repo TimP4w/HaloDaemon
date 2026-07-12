@@ -64,6 +64,17 @@ fn matching_handle_builds_device_with_identity() {
 }
 
 #[test]
+fn registries_are_isolated_per_app_state() {
+    // The whole point of moving the registry onto `AppState`: disabling a plugin
+    // in one `AppState` must not leak into another's registry.
+    let a = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+    let b = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+    a.registry.set_disabled(&["p".to_string()]);
+    assert!(a.registry.snapshot().disabled.contains("p"));
+    assert!(b.registry.snapshot().disabled.is_empty());
+}
+
+#[test]
 fn device_id_falls_back_to_index_without_serial() {
     let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let manifests = vec![manifest()];
