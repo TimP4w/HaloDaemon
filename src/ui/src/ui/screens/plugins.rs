@@ -209,6 +209,10 @@ impl PluginsUi {
             &mut self.in_flight,
             &state.plugins.plugins,
             state.plugins.rediscover_pending,
+            matches!(
+                state.discovery.phase,
+                halod_shared::types::DiscoveryPhase::Discovering
+            ),
         );
 
         // Banner is only for repo changes now; suppress it while a toggle applies.
@@ -1304,9 +1308,16 @@ fn apply_and_lock(cmd: &CommandTx, in_flight: &mut HashMap<String, bool>, id: &s
     in_flight.insert(id.to_owned(), target);
 }
 
-/// A toggle has landed once the plugin is at the target and nothing is pending.
-fn plugin_toggle_landed(p: &PluginInfo, target: bool, rediscover_pending: bool) -> bool {
-    plugin_active(p) == target && !rediscover_pending
+/// A toggle has landed once the plugin is at the target, nothing is pending, and
+/// the re-probe scan has finished — so the toggle stays locked for the whole
+/// (multi-second) device scan, not just until the config flag flips.
+fn plugin_toggle_landed(
+    p: &PluginInfo,
+    target: bool,
+    rediscover_pending: bool,
+    discovering: bool,
+) -> bool {
+    plugin_active(p) == target && !rediscover_pending && !discovering
 }
 
 /// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
@@ -1314,9 +1325,10 @@ fn reconcile_in_flight(
     in_flight: &mut HashMap<String, bool>,
     plugins: &[PluginInfo],
     rediscover_pending: bool,
+    discovering: bool,
 ) {
     in_flight.retain(|id, target| match plugins.iter().find(|p| &p.id == id) {
-        Some(p) => !plugin_toggle_landed(p, *target, rediscover_pending),
+        Some(p) => !plugin_toggle_landed(p, *target, rediscover_pending, discovering),
         None => false,
     });
 }
@@ -2448,18 +2460,25 @@ mod tests {
     }
 
     #[test]
-    fn toggle_lands_only_when_state_matches_and_nothing_pending() {
+    fn toggle_lands_only_when_matched_pending_clear_and_scan_done() {
         let on = info("p", true);
         let off = info("p", false);
-        // Disable target (false): landed when inactive and not pending.
-        assert!(plugin_toggle_landed(&off, false, false));
-        assert!(!plugin_toggle_landed(&on, false, false), "still active");
+        // Disable target (false): landed when inactive, not pending, scan done.
+        assert!(plugin_toggle_landed(&off, false, false, false));
         assert!(
-            !plugin_toggle_landed(&off, false, true),
+            !plugin_toggle_landed(&on, false, false, false),
+            "still active"
+        );
+        assert!(
+            !plugin_toggle_landed(&off, false, true, false),
             "still applying (pending)"
         );
-        // Enable target (true): landed when active and not pending.
-        assert!(plugin_toggle_landed(&on, true, false));
+        assert!(
+            !plugin_toggle_landed(&off, false, false, true),
+            "scan still running"
+        );
+        // Enable target (true): landed when active, not pending, scan done.
+        assert!(plugin_toggle_landed(&on, true, false, false));
     }
 
     #[test]
@@ -2471,7 +2490,7 @@ mod tests {
         ]);
         let plugins = vec![info("keep", true), info("done", true)];
 
-        reconcile_in_flight(&mut in_flight, &plugins, false);
+        reconcile_in_flight(&mut in_flight, &plugins, false, false);
 
         assert!(in_flight.contains_key("keep"), "disable not applied yet");
         assert!(!in_flight.contains_key("done"), "enable landed → unlocked");
@@ -2479,14 +2498,16 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_keeps_all_locked_while_a_rediscovery_is_pending() {
-        let mut in_flight = HashMap::from([("done".to_string(), true)]);
+    fn reconcile_keeps_all_locked_while_pending_or_scanning() {
         let plugins = vec![info("done", true)];
-        reconcile_in_flight(&mut in_flight, &plugins, true);
-        assert!(
-            in_flight.contains_key("done"),
-            "target matches but apply not finished"
-        );
+        // Pending → locked.
+        let mut in_flight = HashMap::from([("done".to_string(), true)]);
+        reconcile_in_flight(&mut in_flight, &plugins, true, false);
+        assert!(in_flight.contains_key("done"), "pending → locked");
+        // Scan still running (pending already cleared) → locked.
+        let mut in_flight = HashMap::from([("done".to_string(), true)]);
+        reconcile_in_flight(&mut in_flight, &plugins, false, true);
+        assert!(in_flight.contains_key("done"), "scanning → locked");
     }
 
     #[test]
