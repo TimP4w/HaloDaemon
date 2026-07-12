@@ -15,15 +15,17 @@ use halod_shared::types::{AppState, PluginInfo, PluginKind};
 use crate::runtime::ipc::CommandTx;
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::screens::plugin_config::{config_section, seed_config_edit_if_needed};
-use crate::ui::screens::plugins::{permissions_section, plugin_needs_permission};
+use crate::ui::screens::plugins::plugin_needs_permission;
 use crate::ui::theme;
 
 /// Whether `p` belongs on the Integrations page: an integration-type plugin
-/// whose Lua is allowed to run. A plugin disabled from the Plugins screen has
-/// no worker, so it can never connect or expose anything — showing it here
-/// (with a toggle that would silently do nothing) would be misleading.
+/// that is actually runnable — enabled from the Plugins screen (a disabled one
+/// has no worker) and with its permissions granted (an ungranted one can never
+/// connect). Showing an inert integration here — with a toggle that would
+/// silently do nothing — would be misleading, so this page only lists ready
+/// ones and never has to surface a permission prompt itself.
 fn is_visible_integration(p: &PluginInfo) -> bool {
-    p.plugin_type == PluginKind::Integration && p.enabled
+    p.plugin_type == PluginKind::Integration && p.enabled && !plugin_needs_permission(p)
 }
 
 /// Local UI state: which integration's Configure panel is expanded, plus its
@@ -70,22 +72,19 @@ pub fn integration_status(state: &AppState, plugin_id: &str) -> IntegrationStatu
     }
 }
 
-/// The state a card's status row communicates, in priority order: a
-/// permission gate always wins over a stale connection, and "disabled" wins
-/// over "not yet connected" — both describe the user's own toggle, not a
-/// live hiccup.
+/// The state a card's status row communicates, in priority order: "disabled"
+/// (the user's own toggle) wins over "not yet connected" (a live hiccup).
+/// Permission gating never appears here — an ungranted integration isn't shown
+/// on this page at all (see `is_visible_integration`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegrationState {
-    NeedsPermission,
     Disabled,
     Connecting,
     Connected,
 }
 
 pub fn integration_state(p: &PluginInfo, status: &IntegrationStatus) -> IntegrationState {
-    if plugin_needs_permission(p) {
-        IntegrationState::NeedsPermission
-    } else if !p.enabled || !p.integration_enabled {
+    if !p.enabled || !p.integration_enabled {
         IntegrationState::Disabled
     } else if status.connected {
         IntegrationState::Connected
@@ -211,11 +210,6 @@ impl IntegrationsUi {
                 },
             );
 
-            if plugin_needs_permission(p) {
-                ui.add_space(12.0);
-                permissions_section(ui, p, cmd);
-            }
-
             if has_config && expanded {
                 ui.add_space(12.0);
                 seed_config_edit_if_needed(&mut self.config_edit, &p.id, &p.config_values);
@@ -234,10 +228,6 @@ impl IntegrationsUi {
 
 fn status_row(ui: &mut egui::Ui, p: &PluginInfo, status: &IntegrationStatus) {
     let (color, label) = match integration_state(p, status) {
-        IntegrationState::NeedsPermission => (
-            theme::STAT_AMBER,
-            t!("integrations.status_needs_permission"),
-        ),
         IntegrationState::Disabled => (theme::TEXT_FAINT2, t!("integrations.status_disabled")),
         IntegrationState::Connecting => (theme::STAT_AMBER, t!("integrations.status_connecting")),
         IntegrationState::Connected => (theme::ONLINE, t!("integrations.status_connected")),
@@ -355,18 +345,18 @@ mod tests {
     }
 
     #[test]
-    fn integration_state_prioritizes_permission_over_connection() {
+    fn is_visible_integration_excludes_ungranted_permission_plugins() {
+        // Regression: an enabled integration that still needs a permission
+        // grant isn't runnable, so it must not appear on this page (which no
+        // longer surfaces a permission prompt at all).
         let mut p = plugin("openrgb", true, true);
         p.declared_permissions = vec![halod_shared::types::Permission::Network];
         p.consented = false;
-        let status = IntegrationStatus {
-            connected: true,
-            device_count: 2,
-        };
-        assert_eq!(
-            integration_state(&p, &status),
-            IntegrationState::NeedsPermission
-        );
+        assert!(!is_visible_integration(&p));
+
+        // Once granted (consented), it becomes visible again.
+        p.consented = true;
+        assert!(is_visible_integration(&p));
     }
 
     #[test]

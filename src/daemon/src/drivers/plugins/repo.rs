@@ -21,15 +21,46 @@ pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<String> {
     Ok(oid.to_string())
 }
 
+/// List a remote's branch names without cloning it (`git ls-remote --heads`),
+/// sorted alphabetically. No working tree is created or touched.
+pub fn list_remote_branches(url: &str) -> Result<Vec<String>> {
+    let mut remote = git2::Remote::create_detached(url)
+        .with_context(|| format!("creating detached remote for {url}"))?;
+    remote
+        .connect(git2::Direction::Fetch)
+        .with_context(|| format!("connecting to {url}"))?;
+    let mut branches: Vec<String> = remote
+        .list()
+        .with_context(|| format!("listing refs on {url}"))?
+        .iter()
+        .filter_map(|head| head.name().strip_prefix("refs/heads/"))
+        .map(str::to_owned)
+        .collect();
+    let _ = remote.disconnect();
+    branches.sort();
+    Ok(branches)
+}
+
 /// The name of the branch an already-cloned repo tracks: `branch`, or its current `HEAD`'s shorthand.
+/// Falls back to origin's default branch (or "main") when HEAD is unborn — a
+/// repo with zero commits yet (e.g. a freshly bootstrapped official-repo mirror).
 fn tracked_branch_name(repo: &git2::Repository, branch: Option<&str>) -> Result<String> {
     if let Some(b) = branch {
         return Ok(b.to_owned());
     }
-    let head = repo.head().context("reading HEAD")?;
-    head.shorthand()
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("HEAD has no shorthand name"))
+    match repo.head() {
+        Ok(head) => head
+            .shorthand()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("HEAD has no shorthand name")),
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => Ok(repo
+            .find_reference("refs/remotes/origin/HEAD")
+            .ok()
+            .and_then(|r| r.symbolic_target().map(str::to_owned))
+            .and_then(|t| t.strip_prefix("refs/remotes/origin/").map(str::to_owned))
+            .unwrap_or_else(|| "main".to_owned())),
+        Err(e) => Err(e).context("reading HEAD"),
+    }
 }
 
 /// Fetch `origin`'s tip into remote-tracking refs and return its SHA, without touching the working tree.
@@ -225,6 +256,24 @@ mod tests {
         checkout_sha(&clone_dir, &second_sha).unwrap();
         let contents = fs::read_to_string(clone_dir.join("main.lua")).unwrap();
         assert_eq!(contents, "return { extra = true }");
+    }
+
+    #[test]
+    fn list_remote_branches_returns_every_head_sorted() {
+        let src = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(src.path()).unwrap();
+        fs::write(src.path().join("plugin.yaml"), "id: demo\n").unwrap();
+        commit_all(&repo, "initial");
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let default = repo.head().unwrap().shorthand().unwrap().to_owned();
+        repo.branch("zebra", &head, false).unwrap();
+        repo.branch("alpha", &head, false).unwrap();
+
+        let branches = list_remote_branches(&src.path().to_string_lossy()).unwrap();
+
+        let mut expected = vec![default, "alpha".to_owned(), "zebra".to_owned()];
+        expected.sort();
+        assert_eq!(branches, expected);
     }
 
     #[test]

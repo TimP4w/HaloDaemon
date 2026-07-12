@@ -8,23 +8,32 @@ plugins:
   # Repository dei plugin
   repos_title: Repository
   repos_check_updates: Controlla aggiornamenti
+  repos_checking: Controllo aggiornamenti…
   repos_url_hint: URL Git (https://...)
   repos_branch_hint: Branch (opzionale)
+  repos_branch_label: BRANCH
+  repos_branch_default: Branch predefinito
+  repos_branch_loading: Caricamento branch…
+  repos_branch_enter_url: Inserisci prima un URL
   repos_add: Aggiungi
   repos_add_title: Aggiungi repository
   repos_add_sub: Collega HALO a un remote Git per sfogliare, installare e aggiornare i suoi plugin.
   repos_empty: Nessun repository di plugin registrato.
   repos_update: Aggiorna
   repos_remove: Rimuovi repository
+  repos_remove_title: Rimuovere il repository?
+  repos_remove_body: Questo annulla la registrazione di %{name} e disinstalla tutti i plugin che fornisce.
   repo_source: ORIGINE
   repo_last_sync: ULTIMA SINCRONIZZAZIONE
   repo_never_synced: mai
   repo_drivers: DRIVER
   repo_drivers_count: "%{count} installati"
   repo_drivers_from: DRIVER DA QUESTO REPOSITORY
+  repo_no_drivers: Nessun driver installato da questo repository.
   # Aggiornamenti per plugin
   updates_available: "%{count} aggiornamento plugin disponibile"
   update_all: Aggiorna tutto
+  updating: Aggiornamento…
   update_available: Aggiornamento disponibile
   # Banner modifiche in sospeso
   pending_changes: Hai modifiche ai plugin non ancora applicate. Applicale per attivare o disattivare i dispositivi.

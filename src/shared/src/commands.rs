@@ -211,6 +211,11 @@ pub enum DaemonCommand {
     RemovePluginRepo {
         slug: String,
     },
+    /// List a remote git repo's branches without cloning it, replying with a
+    /// `repo_branches` frame. Used to populate the Add-repository branch picker.
+    ListRepoBranches {
+        url: String,
+    },
     /// Check every registered repo's remote tip against `locked_sha`, replying with `plugin_repo_updates`.
     CheckPluginRepoUpdates,
     /// Fetch and check out a repo's remote tip, advancing `locked_sha`.
@@ -791,6 +796,17 @@ mod tests {
     fn remove_plugin_repo_wire_format() {
         let v = roundtrip(&DaemonCommand::RemovePluginRepo { slug: "foo".into() });
         assert_eq!(v, json!({"type": "remove_plugin_repo", "slug": "foo"}));
+    }
+
+    #[test]
+    fn list_repo_branches_wire_format() {
+        let v = roundtrip(&DaemonCommand::ListRepoBranches {
+            url: "https://example.com/foo.git".into(),
+        });
+        assert_eq!(
+            v,
+            json!({"type": "list_repo_branches", "url": "https://example.com/foo.git"})
+        );
     }
 
     #[test]

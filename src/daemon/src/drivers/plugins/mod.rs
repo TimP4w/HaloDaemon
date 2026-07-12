@@ -348,13 +348,7 @@ pub fn secure_config_keys_for(plugin_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// True when the plugin may activate. A plugin declaring no permissions runs
-/// freely (it can only talk to its matched device — the base trust every
-/// plugin has). A plugin that *declares* permissions must have every one
-/// granted **and** the grant pinned to the exact script content the user
-/// consented to: editing the script after a grant revokes consent until it is
-/// granted again (trust-on-first-use). This applies uniformly to every
-/// plugin, including those from the official repo — nothing is consent-exempt.
+/// True when the plugin may activate.
 fn consent_satisfied(manifest: &PluginManifest) -> bool {
     if manifest.permissions.is_empty() {
         return true;
@@ -492,6 +486,7 @@ pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
                     (f.key.clone(), is_set)
                 })
                 .collect();
+            let consented = consent_satisfied(m);
             PluginInfo {
                 id: m.plugin_id.clone(),
                 name: m.display_name(),
@@ -499,7 +494,7 @@ pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
                 plugin_type: m.plugin_type,
                 capabilities: m.capability_labels(),
                 effect_names: m.effects.iter().map(|e| e.name.clone()).collect(),
-                enabled: !is_disabled(&m.plugin_id),
+                enabled: !is_disabled(&m.plugin_id) && consented,
                 author: m.author().to_owned(),
                 version: m.version().to_owned(),
                 license: m.license().to_owned(),
@@ -531,7 +526,7 @@ pub fn list(secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
                 config_values: config_values_for(&state, m),
                 secret_set,
                 integration_enabled: !is_integration_disabled(&m.plugin_id),
-                consented: consent_satisfied(m),
+                consented,
                 content_changed: acknowledged_hash_for(&m.plugin_id)
                     .is_some_and(|h| h != m.content_hash()),
             }
@@ -629,9 +624,12 @@ fn scan_plugin_subdirs(root: &Path, out: &mut Vec<PluginManifest>) {
     }
 }
 
-/// Load a git-repo plugin source: a single plugin at `repo_dir`, a `plugins/` subdirectory, or both.
+/// Load a git-repo plugin source: a single plugin at `repo_dir`, packages as
+/// immediate sibling subdirectories of `repo_dir`, and/or nested under a
+/// `plugins/` subdirectory — a repo may use any combination of the three.
 fn scan_repo(repo_dir: &Path, out: &mut Vec<PluginManifest>) {
     try_load_plugin_dir(repo_dir, out);
+    scan_plugin_subdirs(repo_dir, out);
     scan_plugin_subdirs(&repo_dir.join("plugins"), out);
 }
 

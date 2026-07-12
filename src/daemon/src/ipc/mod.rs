@@ -599,7 +599,12 @@ pub fn broadcast_loop(app: Arc<AppState>) -> tokio::task::JoinHandle<Result<()>>
 
 pub async fn broadcast_state(app: &Arc<AppState>) {
     let msg = build_state_msg(app).await;
-    let Some(frame) = encode_json_frame(&msg) else {
+    broadcast_json(app, &msg).await;
+}
+
+/// Fan an arbitrary JSON frame out to every connected client (encoded once).
+pub async fn broadcast_json(app: &Arc<AppState>, msg: &Value) {
+    let Some(frame) = encode_json_frame(msg) else {
         return;
     };
     let frame = Arc::new(frame);

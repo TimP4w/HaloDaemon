@@ -84,6 +84,9 @@ pub struct UiRx {
     pub repo_updates: watch::Receiver<Vec<RepoUpdateStatus>>,
     /// Latest per-plugin update-check result; empty until one is requested.
     pub plugin_updates: watch::Receiver<Vec<PluginUpdateStatus>>,
+    /// Remote branch lists keyed by the repo URL they were fetched for; empty
+    /// until the Add-repository picker requests one via `ListRepoBranches`.
+    pub repo_branches: watch::Receiver<HashMap<String, Vec<String>>>,
     /// Stage/percent of the in-flight LCD image upload; `None` when idle.
     pub lcd_upload: watch::Receiver<Option<LcdUploadProgress>>,
     /// The most recently loaded named LCD template, pushed in response to
@@ -106,6 +109,7 @@ struct UiTx {
     plugin_assets: watch::Sender<HashMap<String, Vec<u8>>>,
     repo_updates: watch::Sender<Vec<RepoUpdateStatus>>,
     plugin_updates: watch::Sender<Vec<PluginUpdateStatus>>,
+    repo_branches: watch::Sender<HashMap<String, Vec<String>>>,
     lcd_upload: watch::Sender<Option<LcdUploadProgress>>,
     lcd_template: watch::Sender<Option<(String, CustomTemplateDef)>>,
     lcd_editor_render: watch::Sender<Option<DecodedEditorRender>>,
@@ -141,6 +145,7 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
     let (assets_s, assets_r) = watch::channel(HashMap::new());
     let (repo_updates_s, repo_updates_r) = watch::channel(Vec::new());
     let (plugin_updates_s, plugin_updates_r) = watch::channel(Vec::new());
+    let (repo_branches_s, repo_branches_r) = watch::channel(HashMap::new());
     let (upload_s, upload_r) = watch::channel(None);
     let (template_s, template_r) = watch::channel(None);
     let (editor_render_s, editor_render_r) = watch::channel(None);
@@ -157,6 +162,7 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
         plugin_assets: assets_s,
         repo_updates: repo_updates_s,
         plugin_updates: plugin_updates_s,
+        repo_branches: repo_branches_s,
         lcd_upload: upload_s,
         lcd_template: template_s,
         lcd_editor_render: editor_render_s,
@@ -173,6 +179,7 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
         plugin_assets: assets_r,
         repo_updates: repo_updates_r,
         plugin_updates: plugin_updates_r,
+        repo_branches: repo_branches_r,
         lcd_upload: upload_r,
         lcd_template: template_r,
         lcd_editor_render: editor_render_r,
@@ -530,6 +537,20 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             repaint();
             return false;
         }
+        Some("repo_branches") => {
+            let url = value.get("url").and_then(|u| u.as_str());
+            let branches: Option<Vec<String>> = value
+                .get("branches")
+                .and_then(|b| serde_json::from_value(b.clone()).ok());
+            if let (Some(url), Some(branches)) = (url, branches) {
+                let url = url.to_owned();
+                tx.repo_branches.send_modify(|m| {
+                    m.insert(url, branches);
+                });
+                repaint();
+            }
+            return false;
+        }
         Some("lcd_template") => {
             let name = value
                 .get("name")
@@ -580,6 +601,7 @@ mod tests {
             plugin_assets: watch::channel(HashMap::new()).0,
             repo_updates: watch::channel(Vec::new()).0,
             plugin_updates: watch::channel(Vec::new()).0,
+            repo_branches: watch::channel(HashMap::new()).0,
             lcd_upload: upload_s,
             lcd_template: watch::channel(None).0,
             lcd_editor_render: watch::channel(None).0,

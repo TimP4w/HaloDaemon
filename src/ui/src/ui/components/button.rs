@@ -13,6 +13,9 @@ pub enum ButtonKind {
     Primary,
     /// Like [`Primary`] but with a trailing `→` arrow after the label.
     PrimaryArrow,
+    /// Amber fill with dark ink — an affirmative action tied to a warning
+    /// context (e.g. the "Update" call-to-action inside an amber update banner).
+    Warn,
     /// Transparent with a hairline border — secondary / cancel.
     Ghost,
     /// Like [`Ghost`] but tinted red — destructive actions (delete/remove).
@@ -99,6 +102,16 @@ fn paint_button(
             },
             theme::semibold(11.5),
         ),
+        ButtonKind::Warn => (
+            theme::lerp_color(a(theme::STAT_AMBER, 0.92), theme::STAT_AMBER, t),
+            Stroke::NONE,
+            if disabled {
+                a(theme::hex(0x0a0d13), 0.5)
+            } else {
+                theme::hex(0x0a0d13)
+            },
+            theme::semibold(11.5),
+        ),
         ButtonKind::Ghost => (
             Color32::TRANSPARENT,
             Stroke::new(
@@ -135,12 +148,16 @@ fn paint_button(
         ),
     };
 
-    if matches!(kind, ButtonKind::Primary | ButtonKind::PrimaryArrow) {
+    if let Some(glow) = match kind {
+        ButtonKind::Primary | ButtonKind::PrimaryArrow => Some(theme::CYAN),
+        ButtonKind::Warn => Some(theme::STAT_AMBER),
+        _ => None,
+    } {
         let time = ui.ctx().input(|i| i.time) as f32;
         let pulse = 0.5 + 0.5 * (time * 2.0).sin();
         let alpha = 0.28 + 0.10 * pulse + 0.32 * t;
         let blur = 20.0 + 5.0 * pulse + 16.0 * t;
-        theme::halo(p, rect, 7.0, a(theme::CYAN, alpha), blur);
+        theme::halo(p, rect, 7.0, a(glow, alpha), blur);
         ui.ctx().request_repaint();
     }
     p.rect_filled(rect, 7.0, fill);

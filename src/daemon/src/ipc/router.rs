@@ -306,6 +306,9 @@ async fn dispatch(
         DaemonCommand::RemovePluginRepo { slug } => {
             registry::usecases::repos::remove_repo(slug, app).await
         }
+        DaemonCommand::ListRepoBranches { url } => {
+            registry::usecases::repos::list_branches(url, client).await
+        }
         DaemonCommand::CheckPluginRepoUpdates => {
             registry::usecases::repos::check_repo_updates(app, client).await
         }

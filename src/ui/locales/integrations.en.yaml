@@ -8,5 +8,4 @@ integrations:
   status_connected: Connected
   status_connecting: Not connected
   status_disabled: Disabled
-  status_needs_permission: Needs permission
   devices_exposed: "%{count} devices"

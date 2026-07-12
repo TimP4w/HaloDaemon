@@ -14,6 +14,7 @@ use halod_shared::types::{
 
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
+use crate::ui::icons;
 use crate::ui::theme;
 
 /// In-progress state of the add-plugin modal. A plugin is always a directory
@@ -26,7 +27,28 @@ struct AddState;
 #[derive(Default)]
 struct AddRepoState {
     url: String,
+    /// Selected branch; empty means the remote's default branch.
     branch: String,
+    /// URL we've already asked the daemon to enumerate branches for.
+    fetched_url: Option<String>,
+    /// Deadline (egui time) after which to request branches for a newly-typed
+    /// URL — a small debounce so we don't `ls-remote` on every keystroke.
+    fetch_at: Option<f64>,
+}
+
+/// Debounce before enumerating a freshly-typed repo URL's branches.
+const REPO_BRANCH_FETCH_DEBOUNCE: f64 = 0.4;
+
+/// Failsafe: drop the "checking for updates" spinner after this long even if
+/// the check never lands (e.g. an unreachable remote).
+const REPO_CHECK_TIMEOUT: f64 = 25.0;
+
+/// A repo whose update check is in flight — the spinner shows until its
+/// `last_sync` advances past `prev_sync` (the check landed) or it times out.
+struct RepoCheck {
+    slug: String,
+    prev_sync: Option<String>,
+    started: f64,
 }
 
 /// What the detail column shows: a plugin, a repo, or nothing (empty state).
@@ -49,6 +71,10 @@ pub struct PluginsUi {
     add_repo: Option<AddRepoState>,
     /// Id pending a delete confirmation, when the dialog is open.
     pending_delete: Option<String>,
+    /// Repo slug pending a remove confirmation, when the dialog is open.
+    pending_repo_delete: Option<String>,
+    /// The repo whose "check for updates" is currently in flight, if any.
+    checking_repo: Option<RepoCheck>,
     /// Id pending a permission consent decision, when the dialog is open.
     pending_consent: Option<String>,
     /// Plugin ids seen as of the previous frame, used only to spot a
@@ -65,7 +91,17 @@ pub struct PluginsUi {
     requested_assets: HashSet<String>,
     /// Decoded asset bytes turned into textures, keyed like `requested_assets`.
     asset_textures: HashMap<String, egui::TextureHandle>,
+    /// Plugin ids whose single-plugin update is in flight → egui time it began.
+    /// The button shows a spinner until the plugin drops its "update available"
+    /// flag (the daemon re-broadcasts once the checkout lands) or it times out.
+    updating: HashMap<String, f64>,
+    /// "Update all" in flight → egui time it began, cleared the same way.
+    updating_all: Option<f64>,
 }
+
+/// Failsafe: drop an update spinner after this long even if the daemon never
+/// re-broadcasts (e.g. an unreachable remote mid-update).
+const UPDATE_TIMEOUT: f64 = 90.0;
 
 impl PluginsUi {
     pub fn show(
@@ -76,6 +112,7 @@ impl PluginsUi {
         plugin_assets: &HashMap<String, Vec<u8>>,
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
+        repo_branches: &HashMap<String, Vec<String>>,
     ) {
         self.selection = resolve_selection(
             self.selection.clone(),
@@ -90,8 +127,9 @@ impl PluginsUi {
         });
 
         self.add_modal(ui.ctx(), cmd);
-        self.add_repo_modal(ui.ctx(), cmd);
+        self.add_repo_modal(ui.ctx(), cmd, repo_branches);
         self.delete_modal(ui.ctx(), state, cmd);
+        self.repo_delete_modal(ui.ctx(), cmd);
         self.consent_modal(ui.ctx(), state, cmd);
     }
 
@@ -152,6 +190,15 @@ impl PluginsUi {
         self.known_ids = Some(ids);
     }
 
+    fn sync_update_progress(&mut self, plugin_updates: &[PluginUpdateStatus], now: f64) {
+        clear_finished_updates(
+            &mut self.updating,
+            &mut self.updating_all,
+            plugin_updates,
+            now,
+        );
+    }
+
     fn body(
         &mut self,
         ui: &mut egui::Ui,
@@ -178,10 +225,20 @@ impl PluginsUi {
             ui.add_space(18.0);
         }
 
+        let now = ui.input(|i| i.time);
+        self.sync_update_progress(plugin_updates, now);
+
         let due = plugin_updates.iter().filter(|s| s.update_available).count();
         if due > 0 {
-            update_all_banner(ui, cmd, due);
+            if update_all_banner(ui, due, self.updating_all.is_some()) {
+                self.updating_all = Some(now);
+                crate::domain::actions::plugins::update_all_plugins(cmd);
+            }
             ui.add_space(18.0);
+        }
+        if self.updating_all.is_some() || !self.updating.is_empty() {
+            // Keep the timeout advancing and the spinner animating.
+            ui.ctx().request_repaint();
         }
 
         widgets::split_columns(ui, 320.0, 18.0, |left, right| {
@@ -339,6 +396,7 @@ impl PluginsUi {
                     .map(|name| ipc::plugin_asset_cache_key(&p.id, name))
                     .and_then(|key| self.asset_textures.get(&key));
                 let update = plugin_updates.iter().find(|s| &s.plugin_id == id);
+                let now = ui.input(|i| i.time);
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -352,6 +410,8 @@ impl PluginsUi {
                                 update,
                                 &mut self.pending_delete,
                                 &mut self.pending_consent,
+                                &mut self.updating,
+                                now,
                             )
                         });
                     });
@@ -365,14 +425,51 @@ impl PluginsUi {
                     );
                     return;
                 };
+                let now = ui.input(|i| i.time);
+                // Drop the spinner once the check lands (last_sync advanced) or
+                // times out.
+                if let Some(c) = &self.checking_repo {
+                    let landed = c.slug == r.slug && r.last_sync != c.prev_sync;
+                    if landed || now - c.started > REPO_CHECK_TIMEOUT {
+                        self.checking_repo = None;
+                    }
+                }
+                let checking = self
+                    .checking_repo
+                    .as_ref()
+                    .is_some_and(|c| c.slug == r.slug);
+
                 let mut select_plugin = None;
+                let mut start_check = false;
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         widgets::card(ui, |ui| {
-                            select_plugin = repo_detail_body(ui, r, &state.plugins.plugins, cmd);
+                            select_plugin = repo_detail_body(
+                                ui,
+                                r,
+                                &state.plugins.plugins,
+                                &mut self.pending_repo_delete,
+                                checking,
+                                &mut start_check,
+                            );
                         });
                     });
+                if start_check {
+                    self.checking_repo = Some(RepoCheck {
+                        slug: r.slug.clone(),
+                        prev_sync: r.last_sync.clone(),
+                        started: now,
+                    });
+                    crate::domain::actions::plugins::check_plugin_updates(
+                        cmd,
+                        Some(r.slug.clone()),
+                    );
+                }
+                if self.checking_repo.is_some() {
+                    // Keep animating the spinner and advancing the timeout.
+                    ui.ctx().request_repaint();
+                }
                 if let Some(id) = select_plugin {
                     self.selection = Selection::Plugin(id);
                 }
@@ -440,12 +537,19 @@ impl PluginsUi {
         self.add = Some(add);
     }
 
-    fn add_repo_modal(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
+    fn add_repo_modal(
+        &mut self,
+        ctx: &egui::Context,
+        cmd: &CommandTx,
+        repo_branches: &HashMap<String, Vec<String>>,
+    ) {
         let Some(mut form) = self.add_repo.take() else {
             return;
         };
         let mut confirm = false;
         let mut cancel = false;
+        let mut fetch_url: Option<String> = None;
+        let now = ctx.input(|i| i.time);
 
         let dismissed = widgets::dialog(
             ctx,
@@ -459,17 +563,28 @@ impl PluginsUi {
                         .color(theme::TEXT_MUT),
                 );
                 ui.add_space(14.0);
-                ui.add(
+                let resp = ui.add(
                     egui::TextEdit::singleline(&mut form.url)
                         .desired_width(f32::INFINITY)
+                        .margin(egui::vec2(12.0, 9.0))
                         .hint_text(t!("plugins.repos_url_hint")),
                 );
-                ui.add_space(8.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut form.branch)
-                        .desired_width(f32::INFINITY)
-                        .hint_text(t!("plugins.repos_branch_hint")),
-                );
+                if resp.changed() {
+                    // A newly-typed URL invalidates the previous branch choice.
+                    form.branch.clear();
+                    form.fetch_at = Some(now + REPO_BRANCH_FETCH_DEBOUNCE);
+                }
+                if let Some(url) = branch_fetch_due(&form, now) {
+                    form.fetched_url = Some(url.clone());
+                    form.fetch_at = None;
+                    fetch_url = Some(url);
+                }
+                ui.add_space(12.0);
+                widgets::caps_label(ui, &t!("plugins.repos_branch_label"));
+                ui.add_space(6.0);
+                if let Some(picked) = branch_selector(ui, &form, repo_branches) {
+                    form.branch = picked;
+                }
             },
             |ui| {
                 // `dialog` lays actions out right-to-left; add the primary first.
@@ -495,6 +610,17 @@ impl PluginsUi {
                 }
             },
         );
+
+        if let Some(url) = fetch_url {
+            crate::domain::actions::plugins::list_repo_branches(cmd, url);
+        }
+        // Keep repainting while a fetch is pending so the debounce deadline
+        // fires even without further keystrokes.
+        if form.fetch_at.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                REPO_BRANCH_FETCH_DEBOUNCE,
+            ));
+        }
 
         if confirm {
             let url = form.url.trim().to_owned();
@@ -567,6 +693,59 @@ impl PluginsUi {
             widgets::resolve_delete_confirm(&mut self.pending_delete, confirm, cancel || dismissed)
         {
             crate::domain::actions::plugins::delete_plugin(cmd, id);
+        }
+    }
+
+    /// Confirm removing a repository before unregistering it (this uninstalls
+    /// every plugin the repo contributed, so it's not silently destructive).
+    fn repo_delete_modal(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
+        let Some(slug) = self.pending_repo_delete.clone() else {
+            return;
+        };
+
+        let mut confirm = false;
+        let mut cancel = false;
+        let dismissed = widgets::dialog(
+            ctx,
+            "remove_plugin_repo",
+            &t!("plugins.repos_remove_title"),
+            420.0,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(t!("plugins.repos_remove_body", name = slug.clone()))
+                        .font(theme::body(12.5))
+                        .color(theme::TEXT_DIM),
+                );
+            },
+            |ui| {
+                if widgets::button(
+                    ui,
+                    &t!("plugins.repos_remove"),
+                    ButtonKind::Danger,
+                    Vec2::new(150.0, 34.0),
+                )
+                .clicked()
+                {
+                    confirm = true;
+                }
+                if widgets::button(
+                    ui,
+                    &t!("plugins.cancel"),
+                    ButtonKind::Ghost,
+                    Vec2::new(90.0, 34.0),
+                )
+                .clicked()
+                {
+                    cancel = true;
+                }
+            },
+        );
+        if let Some(slug) = widgets::resolve_delete_confirm(
+            &mut self.pending_repo_delete,
+            confirm,
+            cancel || dismissed,
+        ) {
+            crate::domain::actions::plugins::remove_plugin_repo(cmd, slug);
         }
     }
 
@@ -704,11 +883,9 @@ fn repo_icon_tile(ui: &mut egui::Ui, size: f32) {
         Stroke::new(1.0, theme::BORDER),
         egui::StrokeKind::Middle,
     );
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        "⑂",
-        theme::body(size * 0.36),
+    icons::draw_fork(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), Vec2::splat(size * 0.44)),
         theme::TEXT_MUT,
     );
 }
@@ -733,37 +910,49 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
     );
     ui.painter()
         .rect_filled(icon_rect, 6.0, theme::hex(0x161320));
-    ui.painter().text(
-        icon_rect.center(),
-        Align2::CENTER_CENTER,
-        "⑂",
-        theme::body(12.0),
-        theme::TEXT_MUT,
+    ui.painter().rect_stroke(
+        icon_rect,
+        6.0,
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Middle,
     );
+    icons::draw_fork(ui.painter(), icon_rect, theme::TEXT_DIM);
 
     let text_x = rect.left() + 40.0;
-    ui.painter().text(
-        Pos2::new(text_x, rect.top() + 12.0),
-        Align2::LEFT_TOP,
-        row.slug,
-        theme::semibold(12.0),
-        theme::TEXT,
-    );
     let sha_text = match &row.remote_short {
         Some(remote) => format!("{} → {}", row.locked_short, remote),
         None => row.locked_short.clone(),
     };
-    ui.painter().text(
-        Pos2::new(text_x, rect.top() + 26.0),
-        Align2::LEFT_TOP,
-        sha_text,
-        theme::mono(9.5),
-        if row.behind {
-            theme::STAT_AMBER
-        } else {
-            theme::TEXT_FAINT2
-        },
-    );
+    if sha_text.is_empty() {
+        // No commit yet (e.g. the official repo before its first sync) — center
+        // the single title line against the icon instead of pinning it to the top.
+        ui.painter().text(
+            Pos2::new(text_x, rect.center().y),
+            Align2::LEFT_CENTER,
+            row.slug,
+            theme::semibold(12.0),
+            theme::TEXT,
+        );
+    } else {
+        ui.painter().text(
+            Pos2::new(text_x, rect.top() + 12.0),
+            Align2::LEFT_TOP,
+            row.slug,
+            theme::semibold(12.0),
+            theme::TEXT,
+        );
+        ui.painter().text(
+            Pos2::new(text_x, rect.top() + 26.0),
+            Align2::LEFT_TOP,
+            sha_text,
+            theme::mono(9.5),
+            if row.behind {
+                theme::STAT_AMBER
+            } else {
+                theme::TEXT_FAINT2
+            },
+        );
+    }
 
     if let Some(branch) = row.branch {
         let branch_pos = Pos2::new(rect.right() - 10.0, rect.center().y);
@@ -777,6 +966,62 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
     }
 
     resp.clicked()
+}
+
+/// The URL whose branches should be fetched now: `Some` once the debounce
+/// deadline has passed for a non-empty URL we haven't already enumerated.
+fn branch_fetch_due(form: &AddRepoState, now: f64) -> Option<String> {
+    let at = form.fetch_at?;
+    if now < at {
+        return None;
+    }
+    let url = form.url.trim();
+    if url.is_empty() || form.fetched_url.as_deref() == Some(url) {
+        return None;
+    }
+    Some(url.to_owned())
+}
+
+/// Combo (id, display) pairs from branch names — id and display are identical
+/// since the branch name is exactly what gets sent.
+fn branch_options(branches: &[String]) -> Vec<(String, String)> {
+    branches.iter().map(|b| (b.clone(), b.clone())).collect()
+}
+
+/// The Add-repository branch picker. Once the fetched URL's branches arrive it
+/// renders a combo (with a leading "default branch" entry mapping to empty);
+/// until then it shows a disabled placeholder combo. Returns the newly-picked
+/// branch (empty = repo default), if it changed this frame.
+fn branch_selector(
+    ui: &mut egui::Ui,
+    form: &AddRepoState,
+    repo_branches: &HashMap<String, Vec<String>>,
+) -> Option<String> {
+    let branches = form
+        .fetched_url
+        .as_deref()
+        .and_then(|u| repo_branches.get(u));
+    if let Some(branches) = branches.filter(|b| !b.is_empty()) {
+        let options = branch_options(branches);
+        return widgets::combo_picker(
+            ui,
+            "repo_branch",
+            &options,
+            &form.branch,
+            Some(&t!("plugins.repos_branch_default")),
+        );
+    }
+    let placeholder = if form.url.trim().is_empty() {
+        t!("plugins.repos_branch_enter_url")
+    } else {
+        t!("plugins.repos_branch_loading")
+    };
+    ui.add_enabled_ui(false, |ui| {
+        egui::ComboBox::from_id_salt("repo_branch_disabled")
+            .selected_text(placeholder)
+            .show_ui(ui, |_| {});
+    });
+    None
 }
 
 /// What the detail column should show: keep the current selection if its
@@ -794,6 +1039,26 @@ fn resolve_selection(
     match plugins.first() {
         Some(p) => Selection::Plugin(p.id.clone()),
         None => Selection::None,
+    }
+}
+
+fn clear_finished_updates(
+    updating: &mut HashMap<String, f64>,
+    updating_all: &mut Option<f64>,
+    plugin_updates: &[PluginUpdateStatus],
+    now: f64,
+) {
+    let still_due = |id: &str| {
+        plugin_updates
+            .iter()
+            .any(|s| s.plugin_id == id && s.update_available)
+    };
+    updating.retain(|id, started| still_due(id) && now - *started < UPDATE_TIMEOUT);
+    if let Some(started) = *updating_all {
+        let any_due = plugin_updates.iter().any(|s| s.update_available);
+        if !any_due || now - started > UPDATE_TIMEOUT {
+            *updating_all = None;
+        }
     }
 }
 
@@ -1048,6 +1313,8 @@ fn detail_body(
     update: Option<&PluginUpdateStatus>,
     pending_delete: &mut Option<String>,
     pending_consent: &mut Option<String>,
+    updating: &mut HashMap<String, f64>,
+    now: f64,
 ) {
     egui::Sides::new().show(
         ui,
@@ -1106,20 +1373,23 @@ fn detail_body(
                 widgets::chip(ui, &format!("⚖ {}", p.license));
             }
             if let PluginSource::Repo { slug } = &p.source {
-                widgets::chip(ui, &format!("⑂ {slug}"));
+                widgets::chip(ui, slug);
             }
         });
     }
 
     if let Some(update) = update.filter(|u| u.update_available) {
         ui.add_space(14.0);
-        update_banner(
+        let in_flight = updating.contains_key(&update.plugin_id);
+        if update_banner(
             ui,
-            cmd,
-            &update.plugin_id,
             &update.current_version,
             &update.available_version,
-        );
+            in_flight,
+        ) {
+            updating.insert(update.plugin_id.clone(), now);
+            crate::domain::actions::plugins::update_plugin(cmd, update.plugin_id.clone());
+        }
     }
 
     if !p.description.is_empty() {
@@ -1447,59 +1717,58 @@ fn status_banner(ui: &mut egui::Ui, p: &PluginInfo) {
         });
 }
 
-/// Amber "N plugin update(s) available / Update all" banner at the top of the page.
-fn update_all_banner(ui: &mut egui::Ui, cmd: &CommandTx, count: usize) {
+fn update_all_banner(ui: &mut egui::Ui, count: usize, updating: bool) -> bool {
+    let mut clicked = false;
     egui::Frame::NONE
         .fill(theme::a(theme::STAT_AMBER, 0.10))
         .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
         .corner_radius(10.0)
         .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {
-            egui::Sides::new().show(
+            // Match the band height to the button so the text centers against it.
+            egui::Sides::new().height(32.0).show(
                 ui,
                 |ui| {
-                    ui.horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                        ui.painter()
-                            .circle_filled(r.center(), 3.5, theme::STAT_AMBER);
-                        ui.label(
-                            egui::RichText::new(t!("plugins.updates_available", count = count))
-                                .font(theme::body(12.5))
-                                .color(theme::TEXT),
-                        );
-                    });
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                    ui.painter()
+                        .circle_filled(r.center(), 3.5, theme::STAT_AMBER);
+                    ui.label(
+                        egui::RichText::new(t!("plugins.updates_available", count = count))
+                            .font(theme::body(12.5))
+                            .color(theme::TEXT),
+                    );
                 },
                 |ui| {
-                    if widgets::button(
-                        ui,
-                        &t!("plugins.update_all"),
-                        ButtonKind::Primary,
-                        Vec2::new(120.0, 32.0),
-                    )
-                    .clicked()
+                    let size = Vec2::new(120.0, 32.0);
+                    if updating {
+                        widgets::button_loading(
+                            ui,
+                            &t!("plugins.updating"),
+                            ButtonKind::Warn,
+                            size,
+                        );
+                    } else if widgets::button(ui, &t!("plugins.update_all"), ButtonKind::Warn, size)
+                        .clicked()
                     {
-                        crate::domain::actions::plugins::update_all_plugins(cmd);
+                        clicked = true;
                     }
                 },
             );
         });
+    clicked
 }
 
-/// Amber "Update available vX → vY / Update" banner in a plugin's detail. Never automatic.
-fn update_banner(
-    ui: &mut egui::Ui,
-    cmd: &CommandTx,
-    plugin_id: &str,
-    current: &str,
-    available: &str,
-) {
+/// Amber "Update available vX → vY / Update" banner in a plugin's detail. Never
+/// automatic.
+fn update_banner(ui: &mut egui::Ui, current: &str, available: &str, updating: bool) -> bool {
+    let mut clicked = false;
     egui::Frame::NONE
         .fill(theme::a(theme::STAT_AMBER, 0.10))
         .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
         .corner_radius(10.0)
         .inner_margin(egui::Margin::symmetric(14, 11))
         .show(ui, |ui| {
-            egui::Sides::new().show(
+            egui::Sides::new().height(30.0).show(
                 ui,
                 |ui| {
                     ui.vertical(|ui| {
@@ -1518,19 +1787,36 @@ fn update_banner(
                     });
                 },
                 |ui| {
-                    if widgets::button(
+                    let size = Vec2::new(90.0, 30.0);
+                    if updating {
+                        widgets::button_loading(
+                            ui,
+                            &t!("plugins.updating"),
+                            ButtonKind::Warn,
+                            size,
+                        );
+                    } else if widgets::button(
                         ui,
                         &t!("plugins.repos_update"),
-                        ButtonKind::Primary,
-                        Vec2::new(90.0, 30.0),
+                        ButtonKind::Warn,
+                        size,
                     )
                     .clicked()
                     {
-                        crate::domain::actions::plugins::update_plugin(cmd, plugin_id.to_owned());
+                        clicked = true;
                     }
                 },
             );
         });
+    clicked
+}
+
+/// `last_sync` is stored as `chrono::Utc::now().to_rfc3339()` (nanosecond
+/// precision + explicit offset), e.g. "2026-07-11T23:44:00.021314418+00:00" —
+/// too noisy for a stat card. Trim to whole seconds: "2026-07-11 23:44:00 UTC".
+fn format_last_sync(raw: &str) -> String {
+    let date_time = raw.split(['.', '+', 'Z']).next().unwrap_or(raw);
+    format!("{} UTC", date_time.replacen('T', " ", 1))
 }
 
 /// A repo's stat box (SOURCE / LAST SYNC / DRIVERS).
@@ -1552,6 +1838,32 @@ fn stat_box(ui: &mut egui::Ui, label: &str, value: &str) {
         });
 }
 
+/// Empty-state panel under "Drivers from this repository" when the repo has
+/// contributed no plugins yet: a dashed border box with centered muted text.
+fn repo_no_drivers_box(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 72.0), Sense::hover());
+    let stroke = Stroke::new(1.0, theme::BORDER);
+    let r = rect.shrink(0.5);
+    let corners = [
+        r.left_top(),
+        r.right_top(),
+        r.right_bottom(),
+        r.left_bottom(),
+        r.left_top(),
+    ];
+    for seg in corners.windows(2) {
+        ui.painter()
+            .extend(egui::Shape::dashed_line(seg, stroke, 6.0, 4.0));
+    }
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        t!("plugins.repo_no_drivers"),
+        theme::body(12.0),
+        theme::TEXT_MUT,
+    );
+}
+
 /// The repo detail panel: header, stat boxes, "Check for updates", the list
 /// of plugins it provides, and Remove (hidden for the official repo). Returns
 /// a clicked plugin id, if any, so the caller can switch the selection to it.
@@ -1559,7 +1871,9 @@ fn repo_detail_body(
     ui: &mut egui::Ui,
     r: &PluginRepoInfo,
     plugins: &[PluginInfo],
-    cmd: &CommandTx,
+    pending_repo_delete: &mut Option<String>,
+    checking: bool,
+    start_check: &mut bool,
 ) -> Option<String> {
     egui::Sides::new().show(
         ui,
@@ -1599,9 +1913,10 @@ fn repo_detail_body(
         stat_box(
             &mut cols[1],
             &t!("plugins.repo_last_sync"),
-            r.last_sync
+            &r.last_sync
                 .as_deref()
-                .unwrap_or(&t!("plugins.repo_never_synced")),
+                .map(format_last_sync)
+                .unwrap_or_else(|| t!("plugins.repo_never_synced").to_string()),
         );
         stat_box(
             &mut cols[2],
@@ -1611,7 +1926,17 @@ fn repo_detail_body(
     });
 
     ui.add_space(14.0);
-    if widgets::button(
+    if checking {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(18.0).color(theme::CYAN));
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(t!("plugins.repos_checking"))
+                    .font(theme::body(12.5))
+                    .color(theme::TEXT_MUT),
+            );
+        });
+    } else if widgets::button(
         ui,
         &t!("plugins.repos_check_updates"),
         ButtonKind::Primary,
@@ -1619,12 +1944,16 @@ fn repo_detail_body(
     )
     .clicked()
     {
-        crate::domain::actions::plugins::check_plugin_updates(cmd, Some(r.slug.clone()));
+        *start_check = true;
     }
 
     ui.add_space(20.0);
     widgets::caps_label(ui, &t!("plugins.repo_drivers_from"));
     ui.add_space(8.0);
+
+    if repo_plugins.is_empty() {
+        repo_no_drivers_box(ui);
+    }
 
     let mut clicked = None;
     for p in &repo_plugins {
@@ -1682,7 +2011,7 @@ fn repo_detail_body(
         )
         .clicked()
         {
-            crate::domain::actions::plugins::remove_plugin_repo(cmd, r.slug.clone());
+            *pending_repo_delete = Some(r.slug.clone());
         }
     }
 
@@ -1738,6 +2067,139 @@ fn spawn_import_plugin(ctx: &egui::Context, cmd: CommandTx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status(id: &str, update_available: bool) -> PluginUpdateStatus {
+        PluginUpdateStatus {
+            plugin_id: id.to_owned(),
+            slug: "repo".to_owned(),
+            update_available,
+            current_version: "1.0.0".to_owned(),
+            available_version: "1.1.0".to_owned(),
+        }
+    }
+
+    #[test]
+    fn clear_finished_updates_retires_a_plugin_that_finished_updating() {
+        let mut updating = HashMap::from([("a".to_owned(), 0.0)]);
+        let mut updating_all = None;
+        // Still reporting an available update: the spinner stays.
+        clear_finished_updates(&mut updating, &mut updating_all, &[status("a", true)], 1.0);
+        assert!(updating.contains_key("a"));
+        // Update landed (flag cleared): the spinner is retired.
+        clear_finished_updates(&mut updating, &mut updating_all, &[status("a", false)], 2.0);
+        assert!(updating.is_empty());
+    }
+
+    #[test]
+    fn clear_finished_updates_drops_a_stuck_spinner_after_the_timeout() {
+        let mut updating = HashMap::from([("a".to_owned(), 0.0)]);
+        let mut updating_all = None;
+        // Still "due" but past the failsafe deadline — drop it anyway.
+        clear_finished_updates(
+            &mut updating,
+            &mut updating_all,
+            &[status("a", true)],
+            UPDATE_TIMEOUT + 1.0,
+        );
+        assert!(updating.is_empty());
+    }
+
+    #[test]
+    fn clear_finished_updates_clears_update_all_once_nothing_is_due() {
+        let mut updating = HashMap::new();
+        let mut updating_all = Some(0.0);
+        // One plugin still due: keep the "update all" spinner.
+        clear_finished_updates(&mut updating, &mut updating_all, &[status("a", true)], 1.0);
+        assert_eq!(updating_all, Some(0.0));
+        // Nothing due anymore: clear it.
+        clear_finished_updates(&mut updating, &mut updating_all, &[status("a", false)], 2.0);
+        assert_eq!(updating_all, None);
+    }
+
+    #[test]
+    fn format_last_sync_trims_fractional_seconds_and_offset() {
+        assert_eq!(
+            format_last_sync("2026-07-11T23:44:00.021314418+00:00"),
+            "2026-07-11 23:44:00 UTC"
+        );
+    }
+
+    #[test]
+    fn format_last_sync_handles_whole_seconds_without_fraction() {
+        assert_eq!(
+            format_last_sync("2026-07-11T23:44:00+00:00"),
+            "2026-07-11 23:44:00 UTC"
+        );
+    }
+
+    #[test]
+    fn branch_fetch_due_waits_for_the_debounce_deadline() {
+        let form = AddRepoState {
+            url: "https://example.com/repo.git".into(),
+            fetch_at: Some(10.0),
+            ..Default::default()
+        };
+        assert_eq!(branch_fetch_due(&form, 9.9), None, "before the deadline");
+        assert_eq!(
+            branch_fetch_due(&form, 10.0),
+            Some("https://example.com/repo.git".to_owned()),
+            "at the deadline"
+        );
+    }
+
+    #[test]
+    fn branch_fetch_due_none_without_a_deadline_or_for_an_empty_or_repeat_url() {
+        let url = "https://example.com/repo.git";
+        // No armed deadline.
+        assert_eq!(
+            branch_fetch_due(
+                &AddRepoState {
+                    url: url.into(),
+                    fetch_at: None,
+                    ..Default::default()
+                },
+                5.0
+            ),
+            None
+        );
+        // Blank URL.
+        assert_eq!(
+            branch_fetch_due(
+                &AddRepoState {
+                    url: "   ".into(),
+                    fetch_at: Some(1.0),
+                    ..Default::default()
+                },
+                5.0
+            ),
+            None
+        );
+        // Already fetched this exact URL.
+        assert_eq!(
+            branch_fetch_due(
+                &AddRepoState {
+                    url: url.into(),
+                    fetch_at: Some(1.0),
+                    fetched_url: Some(url.into()),
+                    ..Default::default()
+                },
+                5.0
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn branch_options_maps_each_name_to_an_identical_id_and_display() {
+        let opts = branch_options(&["main".to_owned(), "dev".to_owned()]);
+        assert_eq!(
+            opts,
+            vec![
+                ("main".to_owned(), "main".to_owned()),
+                ("dev".to_owned(), "dev".to_owned()),
+            ]
+        );
+    }
 
     fn info(id: &str, enabled: bool) -> PluginInfo {
         PluginInfo {

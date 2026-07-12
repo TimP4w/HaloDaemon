@@ -84,6 +84,11 @@ pub fn remove_plugin_repo(cmd: &CommandTx, slug: String) {
     ipc::send(cmd, DaemonCommand::RemovePluginRepo { slug });
 }
 
+/// List a remote's branches (for the Add-repository branch picker).
+pub fn list_repo_branches(cmd: &CommandTx, url: String) {
+    ipc::send(cmd, DaemonCommand::ListRepoBranches { url });
+}
+
 /// Ask the daemon which registered repos are behind their `locked_sha`.
 pub fn check_plugin_repo_updates(cmd: &CommandTx) {
     ipc::send(cmd, DaemonCommand::CheckPluginRepoUpdates);

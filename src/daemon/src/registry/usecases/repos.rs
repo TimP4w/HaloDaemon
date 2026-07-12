@@ -61,6 +61,23 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
     Ok(())
 }
 
+/// List a remote's branches without cloning and reply with a `repo_branches`
+/// frame echoing `url` so the client can match it to the in-progress form.
+pub async fn list_branches(url: String, client: ClientHandle) -> Result<()> {
+    let branches = {
+        let url = url.clone();
+        tokio::task::spawn_blocking(move || repo::list_remote_branches(&url))
+            .await
+            .context("branch-list task panicked")??
+    };
+    client.send_json(&json!({
+        "type": "repo_branches",
+        "url": url,
+        "branches": branches,
+    }));
+    Ok(())
+}
+
 /// Unregister a git-repo plugin source: purge its plugin ids, delete its clone dir, persist, and rediscover.
 /// The official repo cannot be removed — only its content can be updated.
 pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
@@ -126,7 +143,7 @@ async fn compute_repo_updates(app: &Arc<AppState>) -> Vec<RepoUpdateStatus> {
 async fn compute_plugin_updates(
     app: &Arc<AppState>,
     slug_filter: Option<&str>,
-) -> Vec<halod_shared::types::PluginUpdateStatus> {
+) -> (Vec<halod_shared::types::PluginUpdateStatus>, Vec<String>) {
     use halod_shared::types::{PluginSource, PluginUpdateStatus};
 
     let repos: Vec<_> = app
@@ -141,6 +158,7 @@ async fn compute_plugin_updates(
 
     let plugins = crate::drivers::plugins::list(&*app.secret_store);
     let mut out = Vec::new();
+    let mut reached = Vec::new();
     for r in repos {
         let dir = crate::config::plugin_repos_dir().join(&r.slug);
         let branch = r.branch.clone();
@@ -162,6 +180,7 @@ async fn compute_plugin_updates(
                 }
             }
         };
+        reached.push(r.slug.clone());
 
         for p in plugins
             .iter()
@@ -193,7 +212,27 @@ async fn compute_plugin_updates(
             }
         }
     }
-    out
+    (out, reached)
+}
+
+/// Stamp `last_sync` to now for every named repo (those a check actually
+/// reached) and push the updated state so the GUI's "LAST SYNC" reflects it.
+async fn touch_last_sync(app: &Arc<AppState>, slugs: &[String]) {
+    if slugs.is_empty() {
+        return;
+    }
+    {
+        let mut cfg = app.config.write().await;
+        for r in cfg
+            .plugin_repos
+            .iter_mut()
+            .filter(|r| slugs.contains(&r.slug))
+        {
+            r.last_sync = Some(now_rfc3339());
+        }
+    }
+    app.request_config_save();
+    crate::ipc::broadcast_state(app).await;
 }
 
 /// Check registered repos' plugins for updates and reply with a `plugin_updates` frame.
@@ -203,7 +242,10 @@ pub async fn check_plugin_updates(
     app: Arc<AppState>,
     client: ClientHandle,
 ) -> Result<()> {
-    let statuses = compute_plugin_updates(&app, slug.as_deref()).await;
+    let (statuses, reached) = compute_plugin_updates(&app, slug.as_deref()).await;
+    // A check contacts the remote, so it counts as a sync — stamp the reached
+    // repos even when nothing was behind, so "LAST SYNC" isn't stuck at "never".
+    touch_last_sync(&app, &reached).await;
     client.send_json(&json!({
         "type": "plugin_updates",
         "plugins": statuses,
@@ -215,6 +257,15 @@ pub async fn check_plugin_updates(
 /// plugin's subtree, leaving sibling plugins in the same repo untouched.
 /// Content changes, so the existing consent model re-requires approval.
 pub async fn update_plugin(plugin_id: String, app: Arc<AppState>) -> Result<()> {
+    let slug = update_plugin_inner(plugin_id, &app).await?;
+    // The plugin now matches its remote tip, so its "update available" flag has
+    // gone stale in every client — recompute and push a fresh frame so the
+    // update banner disappears.
+    broadcast_plugin_updates(&app, Some(&slug)).await;
+    Ok(())
+}
+
+async fn update_plugin_inner(plugin_id: String, app: &Arc<AppState>) -> Result<String> {
     let (slug, subpath) = crate::drivers::plugins::repo_location_for(&plugin_id)
         .ok_or_else(|| anyhow::anyhow!("plugin '{plugin_id}' is not repo-sourced"))?;
     let branch = {
@@ -254,25 +305,45 @@ pub async fn update_plugin(plugin_id: String, app: Arc<AppState>) -> Result<()> 
         }
     }
     app.request_config_save();
-    reload_registry(&app).await;
-    mark_pending_and_broadcast(&app).await;
-    Ok(())
+    reload_registry(app).await;
+    mark_pending_and_broadcast(app).await;
+    Ok(slug)
+}
+
+/// Recompute per-plugin update status (optionally scoped to one repo) and
+/// broadcast it to every client, so their update banners reflect reality after
+/// an update lands.
+async fn broadcast_plugin_updates(app: &Arc<AppState>, slug_filter: Option<&str>) {
+    let (statuses, reached) = compute_plugin_updates(app, slug_filter).await;
+    touch_last_sync(app, &reached).await;
+    crate::ipc::broadcast_json(
+        app,
+        &json!({
+            "type": "plugin_updates",
+            "plugins": statuses,
+        }),
+    )
+    .await;
 }
 
 /// Update every plugin currently flagged as having an update available, across every repo.
 pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
-    let statuses = compute_plugin_updates(&app, None).await;
+    let (statuses, _reached) = compute_plugin_updates(&app, None).await;
     for status in statuses.into_iter().filter(|s| s.update_available) {
-        if let Err(e) = update_plugin(status.plugin_id.clone(), app.clone()).await {
+        if let Err(e) = update_plugin_inner(status.plugin_id.clone(), &app).await {
             log::warn!("updating plugin '{}': {e:#}", status.plugin_id);
         }
     }
+    broadcast_plugin_updates(&app, None).await;
     Ok(())
 }
 
 /// Check every registered repo for updates and reply to the requesting client with a `plugin_repo_updates` frame.
 pub async fn check_repo_updates(app: Arc<AppState>, client: ClientHandle) -> Result<()> {
     let statuses = compute_repo_updates(&app).await;
+    // Each returned status is a repo we successfully reached — stamp their sync.
+    let reached: Vec<String> = statuses.iter().map(|s| s.slug.clone()).collect();
+    touch_last_sync(&app, &reached).await;
     client.send_json(&json!({
         "type": "plugin_repo_updates",
         "repos": statuses,
@@ -426,6 +497,41 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
+    async fn touch_last_sync_advances_only_the_reached_repos() {
+        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            init_source_repo(src.path(), &slug);
+            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+                .await
+                .unwrap();
+
+            // Force a stale sentinel so a fresh stamp is detectable.
+            const STALE: &str = "2000-01-01T00:00:00+00:00";
+            {
+                let mut cfg = app.config.write().await;
+                for r in cfg.plugin_repos.iter_mut() {
+                    r.last_sync = Some(STALE.to_owned());
+                }
+            }
+
+            touch_last_sync(&app, std::slice::from_ref(&slug)).await;
+
+            let cfg = app.config.read().await;
+            let r = cfg.plugin_repos.iter().find(|r| r.slug == slug).unwrap();
+            assert_ne!(
+                r.last_sync.as_deref(),
+                Some(STALE),
+                "a reached repo's last_sync must advance on check"
+            );
+            assert!(r.last_sync.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn update_repo_advances_locked_sha_and_invalidates_stale_consent() {
         let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
@@ -470,6 +576,60 @@ mod tests {
                 cfg.plugin_acknowledged.get(&slug),
                 Some(&hash_after),
                 "the pre-update acknowledgment must no longer match the new content hash"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn update_plugin_broadcasts_a_cleared_update_flag() {
+        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            init_source_repo(src.path(), &slug);
+            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+                .await
+                .unwrap();
+
+            // Advance the upstream repo so the plugin has an update available.
+            let repo = git2::Repository::open(src.path()).unwrap();
+            std::fs::write(src.path().join("main.lua"), "return { extra = true }").unwrap();
+            commit_all(&repo, "second");
+            let (before, _) = compute_plugin_updates(&app, Some(&slug)).await;
+            assert!(
+                before
+                    .iter()
+                    .any(|s| s.plugin_id == slug && s.update_available),
+                "the plugin should report an available update before updating"
+            );
+
+            // Register a client so the post-update broadcast is captured.
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Arc<Vec<u8>>>(8);
+            app.clients.lock().await.push(crate::ipc::ClientHandle {
+                id: 0,
+                tx,
+                subs: Arc::default(),
+            });
+
+            update_plugin(slug.clone(), app.clone()).await.unwrap();
+
+            // Drain frames until the plugin_updates one, and assert the flag cleared.
+            let mut cleared = None;
+            while let Ok(frame) = rx.try_recv() {
+                let msg: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
+                if msg["type"] == "plugin_updates" {
+                    cleared = msg["plugins"]
+                        .as_array()
+                        .and_then(|a| a.iter().find(|s| s["plugin_id"] == slug))
+                        .map(|s| s["update_available"].as_bool().unwrap());
+                }
+            }
+            assert_eq!(
+                cleared,
+                Some(false),
+                "update_plugin must broadcast a plugin_updates frame clearing the flag"
             );
         })
         .await;

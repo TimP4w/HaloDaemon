@@ -56,6 +56,12 @@ impl App {
         }) {
             self.plugin_updates_cache = self.ui.plugin_updates.borrow_and_update().clone();
         }
+        if self.ui.repo_branches.has_changed().unwrap_or_else(|_| {
+            log::warn!("IPC repo_branches channel closed");
+            false
+        }) {
+            self.repo_branches_cache = self.ui.repo_branches.borrow_and_update().clone();
+        }
         let lcd_preview = if let Page::Device(ref id) = self.page {
             self.ui.lcd_frames.borrow().get(id).cloned()
         } else {
@@ -343,6 +349,7 @@ impl App {
                             &plugin_assets,
                             &self.repo_updates_cache,
                             &self.plugin_updates_cache,
+                            &self.repo_branches_cache,
                         );
                     }
                     Page::Integrations => {

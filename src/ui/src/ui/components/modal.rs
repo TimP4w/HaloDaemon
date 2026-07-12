@@ -108,7 +108,15 @@ pub fn dialog(
             .max_height(max_body)
             .show(ui, body);
         ui.add_space(16.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
+        // Height-bound the centered action row: with padding below it, an
+        // unbounded row claims the auto-sizing modal's full height and grows it
+        // every frame. Zero desired height still expands to fit tall buttons.
+        ui.allocate_ui_with_layout(
+            egui::Vec2::new(ui.available_width(), 0.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            actions,
+        );
+        ui.add_space(6.0);
     })
 }
 
@@ -216,6 +224,74 @@ mod tests {
         assert!(
             body_top >= modal_top + 18.0 + 15.0,
             "modal body overlaps the title row: body_top={body_top} modal_top={modal_top}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dialog_tests {
+    use super::super::button::{button, ButtonKind};
+    use super::*;
+    use egui::{Pos2, Rect, Vec2};
+
+    fn dialog_heights_over_frames(button_h: f32) -> Vec<f32> {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1000.0))),
+            ..Default::default()
+        };
+        let mut heights = Vec::new();
+        for _ in 0..8 {
+            let _ = ctx.run_ui(input(), |ui| {
+                dialog(
+                    ui.ctx(),
+                    "d",
+                    "Title",
+                    420.0,
+                    |ui| {
+                        ui.label("Body text.");
+                        ui.add_space(12.0);
+                    },
+                    |ui| {
+                        let _ = button(ui, "OK", ButtonKind::Primary, Vec2::new(120.0, button_h));
+                    },
+                );
+            });
+            heights.push(
+                ctx.memory(|m| m.area_rect(egui::Id::new(("d", "modal"))))
+                    .map(|r| r.height())
+                    .unwrap_or(0.0),
+            );
+        }
+        heights
+    }
+
+    #[test]
+    fn dialog_height_stays_bounded_across_frames() {
+        // The action row's vertically-centered layout followed by bottom
+        // padding used to claim the auto-sizing modal's full height and feed
+        // back, growing the modal every frame.
+        let h = dialog_heights_over_frames(34.0);
+        assert!(
+            (h.last().unwrap() - h[1]).abs() < 1.0,
+            "dialog modal grew across frames: {h:?}"
+        );
+    }
+
+    #[test]
+    fn dialog_action_row_grows_to_fit_tall_buttons() {
+        // A taller action button must enlarge the modal (not get clipped by the
+        // height-bounded action row) — and still not creep frame over frame.
+        let short = dialog_heights_over_frames(34.0);
+        let tall = dialog_heights_over_frames(60.0);
+        assert!(
+            tall[1] > short[1] + 20.0,
+            "tall action button did not enlarge the modal: short={short:?} tall={tall:?}"
+        );
+        assert!(
+            (tall.last().unwrap() - tall[1]).abs() < 1.0,
+            "dialog with tall buttons grew across frames: {tall:?}"
         );
     }
 }

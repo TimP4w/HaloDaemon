@@ -768,7 +768,9 @@ Plugins install from three sources:
 - **Community repos** — any other git repository registered via the
   Plugins screen's "+ Add repository", each cloned under
   `~/.config/halod/plugin_repos/<slug>/` and scanned for a package at its
-  root and/or under a `plugins/<id>/` subdirectory.
+  root, as sibling package directories directly under its root (the official
+  repo's layout: `nzxt_kraken/`, `ene_smbus/`, …), and/or nested under a
+  `plugins/<id>/` subdirectory — any combination of the three.
 
 A plugin id is owned by whichever source loads it first — official repo,
 then local, then other repos in registration order — so a community repo can

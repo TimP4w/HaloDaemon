@@ -8,5 +8,4 @@ integrations:
   status_connected: Connesso
   status_connecting: Non connesso
   status_disabled: Disattivata
-  status_needs_permission: Richiede permessi
   devices_exposed: "%{count} dispositivi"

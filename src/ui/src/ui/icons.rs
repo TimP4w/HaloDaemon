@@ -207,6 +207,25 @@ pub fn draw_pencil(p: &egui::Painter, rect: Rect, color: Color32) {
     line(nib_base - perp * w, nib_point);
 }
 
+/// Fork glyph drawn flat-line inside `rect` (the bundled Inter subset has no
+/// `⑂`, which would otherwise render as a tofu square). A stem rising from the
+/// base that forks into two prongs, with a node dot at each of the three tips.
+pub fn draw_fork(p: &egui::Painter, rect: Rect, color: Color32) {
+    let s = Stroke::new(rect.width().min(rect.height()) * 0.06, color);
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.5;
+    let base = c + Vec2::new(0.0, r * 0.62);
+    let split = c + Vec2::new(0.0, -r * 0.04);
+    let left = c + Vec2::new(-r * 0.5, -r * 0.62);
+    let right = c + Vec2::new(r * 0.5, -r * 0.62);
+    p.line_segment([base, split], s);
+    p.line_segment([split, left], s);
+    p.line_segment([split, right], s);
+    for tip in [base, left, right] {
+        p.circle_filled(tip, r * 0.16, color);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -67,6 +67,8 @@ pub struct App {
     pub(crate) repo_updates_cache: Vec<halod_shared::types::RepoUpdateStatus>,
     /// Latest per-plugin update-check result; persists like `repo_updates_cache`.
     pub(crate) plugin_updates_cache: Vec<halod_shared::types::PluginUpdateStatus>,
+    /// Remote branch lists keyed by repo URL, for the Add-repository picker.
+    pub(crate) repo_branches_cache: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl App {
@@ -124,6 +126,7 @@ impl App {
             lcd_editor_render_cache: None,
             depcheck_grace: ui::screens::depcheck::GraceState::default(),
             repo_updates_cache: Vec::new(),
+            repo_branches_cache: std::collections::HashMap::new(),
             plugin_updates_cache: Vec::new(),
         }
     }

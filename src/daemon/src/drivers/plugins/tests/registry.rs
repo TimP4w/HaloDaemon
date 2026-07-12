@@ -225,6 +225,53 @@ fn load_all_with_repos_discovers_a_repo_sourced_plugin_and_tags_its_source() {
 }
 
 #[test]
+fn load_all_with_repos_discovers_sibling_packages_at_a_repos_root() {
+    // The official repo's real layout: several packages as immediate sibling
+    // directories under the repo root (no `plugins/` nesting, no
+    // single-package-at-root manifest).
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cfg_guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let config_dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HALOD_CONFIG_DIR", config_dir.path()) };
+
+    let local_dir = tempfile::tempdir().unwrap();
+    let repos_root = crate::config::plugin_repos_dir();
+    let repo_dir = repos_root.join("sibling-repo");
+    let write_pkg = |id: &str| {
+        let dir = repo_dir.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!(
+                "id: {id}\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+    };
+    write_pkg("pkg_a");
+    write_pkg("pkg_b");
+    // A README alongside them must not be mistaken for a package.
+    std::fs::write(repo_dir.join("README.md"), "not a plugin").unwrap();
+
+    load_all_with_repos(local_dir.path(), std::slice::from_ref(&repo_dir));
+
+    let secrets = FakeSecretStore::default();
+    let infos = list(&secrets);
+    for id in ["pkg_a", "pkg_b"] {
+        assert!(
+            infos.iter().any(|p| p.id == id),
+            "sibling package '{id}' at the repo root must be discovered"
+        );
+    }
+
+    load_all(Path::new("/nonexistent"));
+    unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
+}
+
+#[test]
 fn load_all_never_runs_a_dropped_in_scripts_side_effects() {
     // A malicious file dropped into the plugins dir tries to write a
     // sentinel at top level. `load_all` evaluates its manifest, but the
@@ -378,6 +425,57 @@ fn permission_gate_is_inert_until_granted_then_satisfied_once_acknowledged() {
     assert!(consent_satisfied(&m));
     set_granted(&HashMap::new());
     set_acknowledged(&HashMap::new());
+}
+
+#[test]
+fn list_reports_enabled_only_once_permissions_are_granted() {
+    // Invariant: a plugin can never be reported enabled while its permissions
+    // are ungranted — enabling and granting are one atomic step, so an
+    // un-consented plugin is never "on".
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let src = r#"return {
+        devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+        permissions = { "os" },
+    }"#;
+    let m = parse_manifest(src, Path::new("perm_plugin.lua")).unwrap();
+    set_registry(vec![m.clone()]);
+    set_disabled(&[]);
+    set_granted(&HashMap::new());
+    // Acknowledged so only the permission grant — not the content gate —
+    // decides consent here.
+    acknowledge(std::slice::from_ref(&m));
+
+    let secrets = FakeSecretStore::default();
+    let enabled_of = |secrets: &FakeSecretStore| {
+        list(secrets)
+            .into_iter()
+            .find(|p| p.id == "perm_plugin")
+            .map(|p| (p.enabled, p.consented))
+            .unwrap()
+    };
+
+    assert_eq!(
+        enabled_of(&secrets),
+        (false, false),
+        "ungranted permissioned plugin must not report enabled"
+    );
+
+    let granted = HashMap::from([("perm_plugin".to_string(), vec![Permission::Os])]);
+    set_granted(&granted);
+    assert_eq!(
+        enabled_of(&secrets),
+        (true, true),
+        "granting its permission enables it"
+    );
+
+    // An explicitly disabled plugin stays off even when fully granted.
+    set_disabled(&["perm_plugin".to_string()]);
+    assert!(!enabled_of(&secrets).0);
+
+    set_disabled(&[]);
+    set_granted(&HashMap::new());
+    set_acknowledged(&HashMap::new());
+    set_registry(Vec::new());
 }
 
 #[test]

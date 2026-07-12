@@ -8,23 +8,32 @@ plugins:
   # Plugin repositories
   repos_title: Repositories
   repos_check_updates: Check for updates
+  repos_checking: Checking for updates…
   repos_url_hint: Git URL (https://...)
   repos_branch_hint: Branch (optional)
+  repos_branch_label: BRANCH
+  repos_branch_default: Default branch
+  repos_branch_loading: Loading branches…
+  repos_branch_enter_url: Enter a URL first
   repos_add: Add
   repos_add_title: Add repository
   repos_add_sub: Point HALO at a Git remote to browse, install, and update its plugins.
   repos_empty: No plugin repositories registered.
   repos_update: Update
   repos_remove: Remove repository
+  repos_remove_title: Remove repository?
+  repos_remove_body: This unregisters %{name} and uninstalls every plugin it provides.
   repo_source: SOURCE
   repo_last_sync: LAST SYNC
   repo_never_synced: never
   repo_drivers: DRIVERS
   repo_drivers_count: "%{count} installed"
   repo_drivers_from: DRIVERS FROM THIS REPOSITORY
+  repo_no_drivers: No drivers installed from this repository yet.
   # Per-plugin updates
   updates_available: "%{count} plugin update available"
   update_all: Update all
+  updating: Updating…
   update_available: Update available
   # Pending changes banner
   pending_changes: You have unapplied plugin changes. Apply them to hand devices to or from their plugin.
