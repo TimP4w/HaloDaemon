@@ -219,7 +219,6 @@ mod tests {
                     channel_id: "ch0".into(),
                     name: "Header 1".into(),
                     max_leds: 300,
-                    link_kind: "generic_aura_argb".into(),
                     links: vec![],
                 }],
             })],
@@ -246,7 +245,6 @@ mod tests {
                         channel_id: "ch0".into(),
                         name: "Header 1".into(),
                         max_leds: 300,
-                        link_kind: "generic_aura_argb".into(),
                         links: vec![],
                     }],
                 }),
@@ -296,7 +294,6 @@ mod tests {
                 channel_id: "ch0".into(),
                 name: "Header 1".into(),
                 max_leds: 300,
-                link_kind: "generic_aura_argb".into(),
                 links: vec![],
             }],
         });

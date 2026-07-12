@@ -12,7 +12,7 @@ use crate::{
             build_device_id, linear_rgb_zone, per_led_frame, stable_serial,
         },
         CapabilityRef, ChainCapability, Controller, Device, RgbCapability, RgbStateSlot,
-        VisibilitySlot, CHAIN_LINK_KIND_AURA_ARGB,
+        VisibilitySlot,
     },
     registry::discovery::{DeviceDescriptor, DiscoveryHandle},
 };
@@ -449,7 +449,7 @@ impl<T: Transport + 'static> Device for AsusAuraUsb<T> {
             log::warn!("[ASUS Aura USB] initialize() called more than once, chainable_channel_map already set");
         }
 
-        let host = ChainHost::new(self.arc_self_as_adapter(), CHAIN_LINK_KIND_AURA_ARGB);
+        let host = ChainHost::new(self.arc_self_as_adapter());
         if self.chain_host.set(host).is_err() {
             log::warn!(
                 "[ASUS Aura USB] initialize() called more than once, chain_host already set"

@@ -974,7 +974,7 @@ impl LuaDevice {
             });
             if child_manifest.chain.is_some() {
                 let adapter: Arc<dyn ChainAdapter> = child.clone();
-                let host = ChainHost::new(adapter, crate::drivers::CHAIN_LINK_KIND_NZXT_ARGB);
+                let host = ChainHost::new(adapter);
                 child.install_chain_host(host);
             }
             if let Err(e) = child.initialize().await {
@@ -2047,7 +2047,6 @@ mod tests {
 
     fn chain_device(transport: Arc<dyn Transport>) -> Arc<LuaDevice> {
         use crate::drivers::chain::{ChainAdapter, ChainHost};
-        use crate::drivers::CHAIN_LINK_KIND_NZXT_ARGB;
         let manifest = super::super::parse_manifest(CHAIN_SCRIPT, Path::new("kraken.lua")).unwrap();
         let spec = &manifest.devices[0];
         let dev = Arc::new_cyclic(|weak| {
@@ -2066,7 +2065,7 @@ mod tests {
             d
         });
         let adapter: Arc<dyn ChainAdapter> = dev.clone();
-        dev.install_chain_host(ChainHost::new(adapter, CHAIN_LINK_KIND_NZXT_ARGB));
+        dev.install_chain_host(ChainHost::new(adapter));
         dev
     }
 

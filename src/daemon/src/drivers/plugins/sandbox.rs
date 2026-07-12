@@ -119,10 +119,12 @@ pub(super) fn install_instruction_budget_hook(lua: &Lua, budget: u64) -> Rc<Cell
     counter
 }
 
-/// Longest a single `halod.sleep_ms` call may block the worker thread. A plugin
-/// can already busy-loop its own worker (there is no runtime instruction budget),
-/// so this only bounds a single call from pathologically stalling the device's
-/// command queue — protocol inter-transfer gaps are milliseconds, not seconds.
+/// Longest a single `halod.sleep_ms` call may block the worker thread. The
+/// runtime instruction budget kills an *uncaught* runaway, but a `pcall`-catching
+/// loop stays on the worker until the caller's per-request deadline fires
+/// (see `LuaWorker`), so this only bounds a single call from pathologically
+/// stalling the device's command queue — protocol inter-transfer gaps are
+/// milliseconds, not seconds.
 const MAX_SLEEP_MS: u64 = 5_000;
 
 /// Expose `halod.sleep_ms(ms)`: a blocking sleep on the (per-device) worker

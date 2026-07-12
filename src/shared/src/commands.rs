@@ -346,8 +346,6 @@ pub enum DaemonCommand {
         name: String,
         led_count: u32,
         topology: ZoneTopology,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        kind: Option<String>,
     },
     RgbChainRemoveLink {
         id: String,

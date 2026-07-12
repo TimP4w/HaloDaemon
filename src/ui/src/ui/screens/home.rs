@@ -1025,7 +1025,6 @@ mod tests {
                     channel_id: "h1".into(),
                     name: "Header 1".into(),
                     max_leds: 120,
-                    link_kind: "generic".into(),
                     links,
                 }],
             })],

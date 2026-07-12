@@ -887,10 +887,7 @@ fn build_device(
     });
     if manifest.chain.is_some() {
         let adapter: Arc<dyn crate::drivers::chain::ChainAdapter> = device.clone();
-        let host = crate::drivers::chain::ChainHost::new(
-            adapter,
-            crate::drivers::CHAIN_LINK_KIND_NZXT_ARGB,
-        );
+        let host = crate::drivers::chain::ChainHost::new(adapter);
         device.install_chain_host(host);
     }
     Some(device as Arc<dyn Device>)

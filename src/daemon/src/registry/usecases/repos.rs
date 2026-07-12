@@ -519,6 +519,12 @@ mod tests {
     use super::*;
     use crate::drivers::plugins::TEST_GLOBALS_LOCK;
 
+    /// A `file://` URL for a local path — `add_repo`/`clone` now require an
+    /// explicit scheme, so tests clone local source repos through one.
+    fn file_url(path: &std::path::Path) -> String {
+        format!("file://{}", path.display())
+    }
+
     /// Init a local source repo at `dir`; the plugin id must equal `dir`'s file name (see `parse_manifest_from_dir`).
     fn init_source_repo(dir: &std::path::Path, id: &str) -> String {
         std::fs::create_dir_all(dir).unwrap();
@@ -561,10 +567,10 @@ mod tests {
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             // The plugin id inside must match the slug the clone dir is named after.
-            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            let slug = super::sanitize_slug(&file_url(src.path()));
             init_source_repo(src.path(), &slug);
 
-            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+            add_repo(file_url(src.path()), None, app.clone())
                 .await
                 .unwrap();
 
@@ -588,10 +594,10 @@ mod tests {
         let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            let slug = super::sanitize_slug(&file_url(src.path()));
             let first_sha = init_source_repo(src.path(), &slug);
 
-            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+            add_repo(file_url(src.path()), None, app.clone())
                 .await
                 .unwrap();
 
@@ -624,9 +630,9 @@ mod tests {
         let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            let slug = super::sanitize_slug(&file_url(src.path()));
             init_source_repo(src.path(), &slug);
-            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+            add_repo(file_url(src.path()), None, app.clone())
                 .await
                 .unwrap();
 
@@ -659,10 +665,10 @@ mod tests {
         let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            let slug = super::sanitize_slug(&file_url(src.path()));
             init_source_repo(src.path(), &slug);
 
-            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+            add_repo(file_url(src.path()), None, app.clone())
                 .await
                 .unwrap();
 
@@ -710,9 +716,9 @@ mod tests {
         let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            let slug = super::sanitize_slug(&file_url(src.path()));
             init_source_repo(src.path(), &slug);
-            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+            add_repo(file_url(src.path()), None, app.clone())
                 .await
                 .unwrap();
 
@@ -764,9 +770,9 @@ mod tests {
         let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            let slug = super::sanitize_slug(&file_url(src.path()));
             init_source_repo(src.path(), &slug);
-            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+            add_repo(file_url(src.path()), None, app.clone())
                 .await
                 .unwrap();
 
@@ -797,9 +803,9 @@ mod tests {
         let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            let slug = super::sanitize_slug(&file_url(src.path()));
             init_source_repo(src.path(), &slug);
-            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+            add_repo(file_url(src.path()), None, app.clone())
                 .await
                 .unwrap();
 
@@ -850,9 +856,9 @@ mod tests {
         let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            let slug = super::sanitize_slug(&file_url(src.path()));
             init_source_repo(src.path(), &slug);
-            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+            add_repo(file_url(src.path()), None, app.clone())
                 .await
                 .unwrap();
 
@@ -886,10 +892,10 @@ mod tests {
         let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            let slug = super::sanitize_slug(&file_url(src.path()));
             init_source_repo(src.path(), &slug);
 
-            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+            add_repo(file_url(src.path()), None, app.clone())
                 .await
                 .unwrap();
             {

@@ -563,7 +563,6 @@ mod tests {
                     channel_id: "0".into(),
                     name: "Ext".into(),
                     max_leds: 40,
-                    link_kind: "nzxt_argb".into(),
                     links: vec![ChainLinkInfo {
                         child_device_id: child_id.into(),
                         name: "Fan".into(),

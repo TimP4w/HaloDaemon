@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
-use crate::drivers::{ChainCapability, ChainLinkKind, ChainLinkSpec, Device};
+use crate::drivers::{ChainCapability, ChainLinkSpec, Device};
 use crate::ipc;
 use crate::platform::notify;
 use crate::registry::config::{ChainLinkRecord, ChannelLayoutRecord, DeviceLayout};
@@ -35,7 +35,6 @@ pub(super) async fn persist_layout(app: &Arc<AppState>, device: &dyn Device) -> 
                 }
                 links.push(ChainLinkRecord {
                     id: link.child_device_id,
-                    kind: channel.link_kind.clone(),
                     name: link.name,
                     topology: link.topology,
                     led_count: link.led_count,
@@ -69,22 +68,14 @@ pub async fn rgb_chain_add_link(
     name: String,
     led_count: u32,
     topology: ZoneTopology,
-    kind: Option<String>,
     app: Arc<AppState>,
 ) -> Result<()> {
     let device = crate::registry::require_device_owned_id(&id, &app).await?;
     if led_count == 0 {
         anyhow::bail!("led_count must be at least 1");
     }
-    // Fall back to device-derived default when kind is None.
-    let kind = match kind.as_deref() {
-        Some(s) => ChainLinkKind::from_tag(s)
-            .ok_or_else(|| anyhow::anyhow!("unknown chain link kind: {s}"))?,
-        None => default_kind_for_device(device.as_ref())?,
-    };
 
     let spec = ChainLinkSpec {
-        kind,
         name,
         topology,
         led_count,
@@ -151,18 +142,6 @@ pub async fn rgb_chain_detect_channel(
     let device = crate::registry::require_device_owned_id(&id, &app).await?;
     let chain = require_chain(&device)?;
     chain.detect_channel(&channel_id).await
-}
-
-fn default_kind_for_device(device: &dyn Device) -> Result<ChainLinkKind> {
-    let chain = device
-        .as_chain()
-        .context("device does not support chains")?;
-    let channels = chain.chainable_channels();
-    let first = channels
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("device has no chainable channels"))?;
-    ChainLinkKind::from_tag(&first.link_kind)
-        .ok_or_else(|| anyhow::anyhow!("unknown link_kind on device: {}", first.link_kind))
 }
 
 /// No broadcast — the regular startup broadcast picks the restored links up.
@@ -347,7 +326,6 @@ mod tests {
                     channel_id: "ch0".into(),
                     name: "Channel 0".into(),
                     max_leds: 100,
-                    link_kind: "generic_aura_argb".into(),
                     links: vec![],
                 }]),
             );
@@ -358,7 +336,6 @@ mod tests {
             "strip".into(),
             0,
             ZoneTopology::Linear,
-            Some("generic_aura_argb".into()),
             app,
         )
         .await
@@ -379,7 +356,6 @@ mod tests {
                     channel_id: "ch0".into(),
                     name: "Channel 0".into(),
                     max_leds: 100,
-                    link_kind: "generic_aura_argb".into(),
                     links: vec![
                         ChainLinkInfo {
                             child_device_id: "locked-child".into(),
@@ -425,7 +401,6 @@ mod tests {
                     channel_id: "ch0".into(),
                     name: "Channel 0".into(),
                     max_leds: 100,
-                    link_kind: "generic_aura_argb".into(),
                     links: vec![ChainLinkInfo {
                         child_device_id: "locked".into(),
                         name: "Locked".into(),
@@ -470,7 +445,6 @@ mod tests {
                         ChannelLayoutRecord {
                             chain_links: vec![ChainLinkRecord {
                                 id: "bad-link".into(),
-                                kind: "generic_aura_argb".into(),
                                 name: "Bad Link".into(),
                                 topology: strip_topology(),
                                 led_count: 1,

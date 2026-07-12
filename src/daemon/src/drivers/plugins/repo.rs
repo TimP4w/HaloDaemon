@@ -5,15 +5,27 @@ use anyhow::{anyhow, bail, Context, Result};
 use git2::{build::RepoBuilder, ResetType};
 use std::path::Path;
 
-/// URL schemes a plugin repo may use
+/// URL schemes a plugin repo may use. `file://` is a local clone (dev/test and
+/// the official-repo bootstrap); remote sources must be `https`/`ssh`.
 const ALLOWED_SCHEMES: &[&str] = &["https", "ssh", "file"];
 
-/// Reject repo URLs on an insecure or unexpected transport before git touches them.
+/// Reject repo URLs on an insecure or unexpected transport before git touches
+/// them. A URL must carry an explicit `scheme://`: the earlier check only fired
+/// when `://` was present, so a bare path or scp-style `git@host:path` slipped
+/// through *unvalidated* — an `http://` typo, or an unintended local clone from
+/// a bare filesystem path, would pass. Requiring an explicit allow-listed scheme
+/// closes that.
 fn validate_url(url: &str) -> Result<()> {
-    if let Some((scheme, _)) = url.split_once("://") {
-        if !ALLOWED_SCHEMES.contains(&scheme) {
-            bail!("repo URL scheme '{scheme}://' is not allowed (use https, ssh, or file)");
-        }
+    let Some((scheme, rest)) = url.split_once("://") else {
+        bail!(
+            "repo URL must start with an explicit scheme (https://, ssh://, or file://): '{url}'"
+        );
+    };
+    if !ALLOWED_SCHEMES.contains(&scheme) {
+        bail!("repo URL scheme '{scheme}://' is not allowed (use https, ssh, or file)");
+    }
+    if rest.is_empty() {
+        bail!("repo URL has no path/host after '{scheme}://'");
     }
     Ok(())
 }
@@ -28,6 +40,7 @@ pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<String> {
     let repo = builder
         .clone(url, dest)
         .with_context(|| format!("cloning {url} into {}", dest.display()))?;
+    reject_symlinks(dest)?;
     let head = repo.head().context("clone produced no HEAD")?;
     let oid = head
         .target()
@@ -103,7 +116,31 @@ pub fn checkout_sha(repo_dir: &Path, sha: &str) -> Result<()> {
         .find_commit(oid)
         .with_context(|| format!("commit '{sha}' not found (fetch it first)"))?;
     repo.reset(commit.as_object(), ResetType::Hard, None)
-        .with_context(|| format!("resetting working tree to '{sha}'"))
+        .with_context(|| format!("resetting working tree to '{sha}'"))?;
+    reject_symlinks(repo_dir)
+}
+
+/// Bail if any symlink exists under `root` (skipping `.git`). A commit can carry
+/// a symlink and `checkout_*` writes it verbatim; the daemon later reads
+/// `plugin.yaml`/`main.lua` with symlink-following `std::fs`, so a link like
+/// `main.lua -> /etc/shadow` would leak a root-only file's contents through
+/// parse errors/hashes. The import path already rejects symlinks (`copy_dir_all`);
+/// this closes the same hole on the git-repo path.
+pub fn reject_symlinks(root: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(root).with_context(|| format!("reading {}", root.display()))? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            bail!("repo contains a symlink: {}", entry.path().display());
+        }
+        if file_type.is_dir() {
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            reject_symlinks(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// Read a blob's bytes at `path` (relative to `tree`'s root).
@@ -246,7 +283,10 @@ pub fn checkout_subtree(repo_dir: &Path, sha: &str, subpath: &Path) -> Result<()
         opts.path(subpath);
     }
     repo.checkout_tree(tree.as_object(), Some(&mut opts))
-        .with_context(|| format!("checking out '{}' at '{sha}'", subpath.display()))
+        .with_context(|| format!("checking out '{}' at '{sha}'", subpath.display()))?;
+    // Only the checked-out subtree was (re)written, so scope the symlink scan to
+    // it (empty subpath = whole repo).
+    reject_symlinks(&repo_dir.join(subpath))
 }
 
 #[cfg(test)]
@@ -287,25 +327,33 @@ mod tests {
         oid.to_string()
     }
 
+    /// A `file://` URL for a local path, so tests clone with an explicit,
+    /// allow-listed scheme rather than a now-rejected bare path.
+    fn file_url(path: &Path) -> String {
+        format!("file://{}", path.display())
+    }
+
     #[test]
     fn validate_url_allows_secure_and_local_sources() {
         for url in [
             "https://github.com/x/y.git",
             "ssh://git@github.com/x/y.git",
             "file:///srv/plugins/repo",
-            "/tmp/local/repo",
-            "git@github.com:x/y.git",
         ] {
             assert!(validate_url(url).is_ok(), "{url} should be allowed");
         }
     }
 
     #[test]
-    fn validate_url_rejects_plaintext_and_unknown_schemes() {
+    fn validate_url_rejects_plaintext_unknown_and_schemeless_sources() {
         for url in [
             "http://example.com/x.git",
             "git://example.com/x.git",
             "ftp://example.com/x.git",
+            // Bare path and scp-style — no explicit scheme, previously slipped through.
+            "/tmp/local/repo",
+            "git@github.com:x/y.git",
+            "file://",
         ] {
             assert!(validate_url(url).is_err(), "{url} should be rejected");
         }
@@ -318,7 +366,7 @@ mod tests {
 
         let dest = tempfile::tempdir().unwrap();
         let clone_dir = dest.path().join("clone");
-        let sha = clone(&src.path().to_string_lossy(), &clone_dir, None).unwrap();
+        let sha = clone(&file_url(src.path()), &clone_dir, None).unwrap();
 
         assert_eq!(sha, expected);
         assert!(clone_dir.join("plugin.yaml").is_file());
@@ -334,7 +382,7 @@ mod tests {
 
         let dest = tempfile::tempdir().unwrap();
         let clone_dir = dest.path().join("clone");
-        let cloned_sha = clone(&src.path().to_string_lossy(), &clone_dir, None).unwrap();
+        let cloned_sha = clone(&file_url(src.path()), &clone_dir, None).unwrap();
         assert_eq!(cloned_sha, first_sha);
 
         // Advance the source repo with a second commit.
@@ -367,7 +415,7 @@ mod tests {
         repo.branch("zebra", &head, false).unwrap();
         repo.branch("alpha", &head, false).unwrap();
 
-        let branches = list_remote_branches(&src.path().to_string_lossy()).unwrap();
+        let branches = list_remote_branches(&file_url(src.path())).unwrap();
 
         let mut expected = vec![default, "alpha".to_owned(), "zebra".to_owned()];
         expected.sort();
@@ -384,13 +432,28 @@ mod tests {
 
         let dest = tempfile::tempdir().unwrap();
         let clone_dir = dest.path().join("clone");
-        clone(
-            &src.path().to_string_lossy(),
-            &clone_dir,
-            Some(&default_branch),
-        )
-        .unwrap();
+        clone(&file_url(src.path()), &clone_dir, Some(&default_branch)).unwrap();
         assert!(clone_dir.join("plugin.yaml").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_rejects_a_symlinked_entry() {
+        // A repo whose commit carries a symlink must not land on disk for the
+        // daemon to follow when reading plugin.yaml/main.lua.
+        let src = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(src.path()).unwrap();
+        fs::write(src.path().join("plugin.yaml"), "id: demo\n").unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", src.path().join("main.lua")).unwrap();
+        let sha = commit_all(&repo, "with a symlink");
+
+        let _ = sha;
+        let dest = tempfile::tempdir().unwrap();
+        let clone_dir = dest.path().join("clone");
+        // Clone materializes the working tree, so the guard fires here.
+        let err = clone(&file_url(src.path()), &clone_dir, None)
+            .expect_err("a symlinked repo must be rejected");
+        assert!(err.to_string().contains("symlink"), "{err}");
     }
 
     #[test]
@@ -399,7 +462,7 @@ mod tests {
         init_repo_with_plugin(src.path());
         let dest = tempfile::tempdir().unwrap();
         let clone_dir = dest.path().join("clone");
-        clone(&src.path().to_string_lossy(), &clone_dir, None).unwrap();
+        clone(&file_url(src.path()), &clone_dir, None).unwrap();
 
         let err = checkout_sha(&clone_dir, "0000000000000000000000000000000000000f").unwrap_err();
         assert!(err.to_string().contains("not found"));
@@ -482,7 +545,7 @@ mod tests {
 
         let dest = tempfile::tempdir().unwrap();
         let clone_dir = dest.path().join("clone");
-        clone(&src.path().to_string_lossy(), &clone_dir, None).unwrap();
+        clone(&file_url(src.path()), &clone_dir, None).unwrap();
 
         fs::write(
             src.path().join("plugins").join("alpha").join("main.lua"),

@@ -83,7 +83,6 @@ pub fn rgb_chain_remove_link(cmd: &CommandTx, id: &str, channel_id: &str, child_
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn rgb_chain_add_link(
     cmd: &CommandTx,
     id: &str,
@@ -91,7 +90,6 @@ pub fn rgb_chain_add_link(
     name: &str,
     led_count: u32,
     topology: halod_shared::types::ZoneTopology,
-    kind: Option<String>,
 ) {
     ipc::send(
         cmd,
@@ -101,7 +99,6 @@ pub fn rgb_chain_add_link(
             name: name.to_string(),
             led_count,
             topology,
-            kind,
         },
     );
 }

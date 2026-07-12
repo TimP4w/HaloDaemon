@@ -437,10 +437,9 @@ async fn dispatch(
             name,
             led_count,
             topology,
-            kind,
         } => {
             registry::usecases::chain::rgb_chain_add_link(
-                id, channel_id, name, led_count, topology, kind, app,
+                id, channel_id, name, led_count, topology, app,
             )
             .await
         }

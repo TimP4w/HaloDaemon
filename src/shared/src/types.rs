@@ -1357,9 +1357,6 @@ pub struct ChainableChannelInfo {
     pub channel_id: String,
     pub name: String,
     pub max_leds: u32,
-    /// String the UI echoes back as `kind` in `RgbChainAddLink` (e.g.
-    /// `"generic_aura_argb"`).
-    pub link_kind: String,
     pub links: Vec<ChainLinkInfo>,
 }
 

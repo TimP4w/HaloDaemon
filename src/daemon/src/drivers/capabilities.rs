@@ -106,32 +106,9 @@ pub trait TransportSwitchable: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct ChainLinkSpec {
-    pub kind: ChainLinkKind,
     pub name: String,
     pub topology: ZoneTopology,
     pub led_count: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChainLinkKind(pub &'static str);
-
-pub const CHAIN_LINK_KIND_AURA_ARGB: ChainLinkKind = ChainLinkKind("generic_aura_argb");
-pub const CHAIN_LINK_KIND_NZXT_ARGB: ChainLinkKind = ChainLinkKind("nzxt_argb");
-
-const KNOWN_CHAIN_LINK_KINDS: &[ChainLinkKind] =
-    &[CHAIN_LINK_KIND_AURA_ARGB, CHAIN_LINK_KIND_NZXT_ARGB];
-
-impl ChainLinkKind {
-    /// Look up a `ChainLinkKind` by its string tag. Returns `None` for unknown tags.
-    pub fn from_tag(s: &str) -> Option<Self> {
-        KNOWN_CHAIN_LINK_KINDS.iter().copied().find(|k| k.0 == s)
-    }
-}
-
-impl std::fmt::Display for ChainLinkKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
-    }
 }
 
 /// Parent-side capability for managing chainable channels; the CRUD surface

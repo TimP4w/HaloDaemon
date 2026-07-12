@@ -725,7 +725,6 @@ fn add_link_panel(
                             name.trim(),
                             leds,
                             topology_from_idx(topo_idx),
-                            Some(channel.link_kind.clone()),
                         );
                         ui.ctx().data_mut(|d| d.insert_temp(open_key, false));
                     }
@@ -906,7 +905,6 @@ mod tests {
                     channel_id: "h1".into(),
                     name: "Header 1".into(),
                     max_leds: 120,
-                    link_kind: "generic".into(),
                     links: vec![ChainLinkInfo {
                         child_device_id: "child1".into(),
                         name: "Strip".into(),
