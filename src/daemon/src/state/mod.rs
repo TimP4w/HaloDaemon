@@ -74,12 +74,10 @@ pub struct AppState {
     pub discovery_filter: RwLock<Option<Arc<DiscoveryFilter>>>,
     /// Latest plugin update/on-disk status, replayed to each client on connect.
     pub plugin_update_status: Mutex<Vec<halod_shared::types::PluginUpdateStatus>>,
-    /// Backing store for plugin-declared secret config values (`secure =
-    /// true` fields). Defaults to the encrypted-file backend (deterministic,
-    /// no external dependency) so tests get an isolated store scoped to their
-    /// own `HALOD_CONFIG_DIR`; real startup upgrades it via
-    /// `with_secret_store(crate::secrets::open_secret_store())` to prefer the
-    /// OS keyring.
+    /// The device-plugin registry (loaded manifests, consent/config, notice
+    /// dedup, load warnings).
+    pub registry: crate::drivers::plugins::Registry,
+    /// Backing store for plugin-declared secret config values.
     pub secret_store: Arc<dyn crate::secrets::SecretStore>,
 }
 
@@ -107,6 +105,7 @@ impl AppState {
             pending_rediscover: Mutex::new(PendingRediscover::default()),
             discovery_filter: RwLock::new(None),
             plugin_update_status: Mutex::new(Vec::new()),
+            registry: crate::drivers::plugins::Registry::default(),
             secret_store: Arc::new(crate::secrets::FileKeyStore::new()),
         }
     }

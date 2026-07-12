@@ -108,6 +108,7 @@ fn resolve_instance(zone: &PlacedZone, cs: &CanvasState) -> (String, Option<Effe
 /// effect, or a native fallback plus a live plugin worker when it's a
 /// registered plugin effect id, or just the fallback for an unknown id.
 fn build_pixmap_effect(
+    app: &Arc<AppState>,
     def: Option<&EffectDef>,
 ) -> (
     Box<dyn FrameSource>,
@@ -119,7 +120,9 @@ fn build_pixmap_effect(
     if let Some(fx) = canvas::build(&d.effect_id, &d.params) {
         return (fx, None);
     }
-    let plugin = crate::drivers::plugins::build_pixmap_effect(&d.effect_id, &d.params);
+    let plugin =
+        app.registry
+            .build_pixmap_effect(app.secret_store.as_ref(), &d.effect_id, &d.params);
     (canvas::default_source(), plugin)
 }
 
@@ -236,17 +239,21 @@ impl RgbEngine {
     /// Native + plugin-declared pixmap effects. Not memoized (unlike the
     /// pre-plugin `LazyLock`) since plugins can load/unload at runtime; the
     /// merge itself is a cheap `RwLock` read + small-struct clone.
-    pub fn available_effect_descriptors() -> Vec<Animation> {
+    pub fn available_effect_descriptors(
+        registry: &crate::drivers::plugins::Registry,
+    ) -> Vec<Animation> {
         let mut v = canvas::all_descriptors();
-        v.extend(crate::drivers::plugins::pixmap_effect_descriptors());
+        v.extend(registry.pixmap_effect_descriptors());
         v
     }
 
     /// Native + plugin-declared direct effects. See
     /// [`Self::available_effect_descriptors`] for why this isn't memoized.
-    pub fn direct_effect_descriptors() -> Vec<Animation> {
+    pub fn direct_effect_descriptors(
+        registry: &crate::drivers::plugins::Registry,
+    ) -> Vec<Animation> {
         let mut v = direct::direct_descriptors();
-        v.extend(crate::drivers::plugins::direct_effect_descriptors());
+        v.extend(registry.direct_effect_descriptors());
         v
     }
 
@@ -387,7 +394,7 @@ impl RgbEngine {
                     log::error!("canvas: failed to allocate pixmap for '{key}', skipping");
                     continue;
                 };
-                let (effect, plugin) = build_pixmap_effect(def.as_ref());
+                let (effect, plugin) = build_pixmap_effect(&self.app_state, def.as_ref());
                 live.insert(
                     key.clone(),
                     LivePixmap {
@@ -487,7 +494,11 @@ impl RgbEngine {
             if stale {
                 let (effect, plugin) = match direct::build_direct(id, params) {
                     Some(fx) => (fx, None),
-                    None => match crate::drivers::plugins::build_direct_effect(id, params) {
+                    None => match self.app_state.registry.build_direct_effect(
+                        self.app_state.secret_store.as_ref(),
+                        id,
+                        params,
+                    ) {
                         Some(handle) => (direct::off_effect(), Some(handle)),
                         None => {
                             log::warn!("Unknown direct effect id '{id}' on {}; leds off", dev.id());
@@ -1182,9 +1193,8 @@ mod tests {
     /// live `sensor` callback arg into its red channel, so a test can assert
     /// the engine actually threads a live sensor reading through to a
     /// plugin-declared direct effect (mirrors `load_test_effect_plugin`
-    /// above but exercises the `sensor` param/arg wiring instead). Caller
-    /// must hold `crate::drivers::plugins::TEST_GLOBALS_LOCK`.
-    fn load_test_sensor_plugin() -> tempfile::TempDir {
+    /// above but exercises the `sensor` param/arg wiring instead).
+    fn load_test_sensor_plugin(app: &Arc<AppState>) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("engine_sensor_fx");
         std::fs::create_dir_all(&plugin_dir).unwrap();
@@ -1213,19 +1223,15 @@ mod tests {
             "#,
         )
         .unwrap();
-        crate::drivers::plugins::load_all(tmp.path());
+        app.registry.load_all(tmp.path());
         tmp
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn tick_direct_plugin_effect_receives_live_sensor_reading() {
-        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _tmp = load_test_sensor_plugin();
-
         let app = make_app();
+        let _tmp = load_test_sensor_plugin(&app);
+
         let sensor_dev = crate::test_support::MockDevice::new("sensor_dev").with_sensor(vec![
             halod_shared::types::Sensor {
                 id: "temp1".into(),
@@ -1264,8 +1270,6 @@ mod tests {
             colors.iter().all(|c| c.r == expected_r),
             "expected the live sensor reading gamma-encoded into red, got {colors:?}"
         );
-
-        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent-halod-test-dir"));
     }
 
     #[tokio::test]
@@ -1573,9 +1577,8 @@ mod tests {
     // ── Plugin-declared effects (end-to-end through a live tick) ───────────
 
     /// Load a single-file plugin declaring one pixmap and one direct effect
-    /// into the (process-wide) plugin registry. Caller must hold
-    /// `crate::drivers::plugins::TEST_GLOBALS_LOCK` for the duration.
-    fn load_test_effect_plugin() -> tempfile::TempDir {
+    /// into `app`'s plugin registry.
+    fn load_test_effect_plugin(app: &Arc<AppState>) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("engine_test_fx");
         std::fs::create_dir_all(&plugin_dir).unwrap();
@@ -1611,7 +1614,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        crate::drivers::plugins::load_all(tmp.path());
+        app.registry.load_all(tmp.path());
         tmp
     }
 
@@ -1629,14 +1632,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn tick_renders_a_plugin_pixmap_effect_end_to_end() {
-        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _tmp = load_test_effect_plugin();
-
         let app = make_app();
+        let _tmp = load_test_effect_plugin(&app);
         let zone = make_zone("dev0", "ring");
         let dev = MockRgbDevice::new_with_zones("dev0", "ring", 2, false, vec![zone]);
         app.devices
@@ -1669,19 +1667,12 @@ mod tests {
             colors.iter().all(|c| *c == expected),
             "expected the plugin's solid fill sampled into the zone as {expected:?}, got {colors:?}"
         );
-
-        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent-halod-test-dir"));
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn tick_renders_a_plugin_direct_effect_end_to_end() {
-        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _tmp = load_test_effect_plugin();
-
         let app = make_app();
+        let _tmp = load_test_effect_plugin(&app);
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
         *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
             id: "engine_test_fx:ramp".to_string(),
@@ -1704,7 +1695,5 @@ mod tests {
             colors[2].r > colors[0].r,
             "ramp must increase along the chain"
         );
-
-        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent-halod-test-dir"));
     }
 }

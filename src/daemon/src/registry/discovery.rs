@@ -139,33 +139,11 @@ inventory::submit!(TransportScanner {
     }),
 });
 
-/// Does NOT register — the caller decides what to do with the result.
-pub fn make_device(handle: DiscoveryHandle<'_>) -> Option<Arc<dyn crate::drivers::Device>> {
-    // Plugins are consulted before native descriptors so a plugin shadows a
-    // native driver for the same hardware (the Corsair/Razer migration path).
-    if let Some(device) = crate::drivers::plugins::match_handle(&handle) {
-        return Some(device);
-    }
-    for desc in inventory::iter::<DeviceDescriptor> {
-        if (desc.matches)(&handle) {
-            return match (desc.make)(handle) {
-                Ok(device) => Some(device),
-                Err(e) => {
-                    // `{e:#}` prints the full anyhow context chain (e.g. the
-                    // underlying "Permission denied" behind a higher-level wrap).
-                    log::warn!("Device construction failed: {e:#}");
-                    None
-                }
-            };
-        }
-    }
-    None
-}
-
-/// Like [`make_device`] but skips plugin matching — only consults native
-/// descriptors. Used by [`discover_handle_replacing`] to find the native
-/// device a plugin would shadow so it can be evicted before the plugin
-/// takes over.
+/// Construct the native device for `handle` (no plugin matching) — the compile-
+/// time native registry backend. Plugin composition lives in
+/// [`crate::drivers::plugins::Registry::make_device`], which calls this as its
+/// fallback. Also used directly by [`discover_handle_replacing`] to find the
+/// native device a plugin would shadow so it can be evicted.
 pub fn make_device_native_only(
     handle: DiscoveryHandle<'_>,
 ) -> Option<Arc<dyn crate::drivers::Device>> {
@@ -199,7 +177,7 @@ pub async fn discover_handle_replacing(
     app: &Arc<crate::state::AppState>,
     handle: DiscoveryHandle<'_>,
 ) {
-    let Some(device) = make_device(handle.clone()) else {
+    let Some(device) = app.registry.make_device(app, handle.clone()) else {
         return;
     };
     // A plugin claimed hardware a native driver also matches: the native device
@@ -232,7 +210,7 @@ pub async fn discover_handle(app: &Arc<crate::state::AppState>, handle: Discover
         discover_handle_replacing(app, handle).await;
         return;
     }
-    if let Some(device) = make_device(handle) {
+    if let Some(device) = app.registry.make_device(app, handle) {
         crate::registry::usecases::registration::register_device(app, device).await;
     }
 }
@@ -296,7 +274,8 @@ mod tests {
             vid: 0x0000,
             pid: 0x0000,
         };
-        assert!(make_device(handle).is_none());
+        let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+        assert!(app.registry.make_device(&app, handle).is_none());
     }
 
     #[test]

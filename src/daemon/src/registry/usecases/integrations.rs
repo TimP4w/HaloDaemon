@@ -45,7 +45,8 @@ pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppStat
         if !enabled {
             cfg.integrations_disabled.push(id.clone());
         }
-        crate::drivers::plugins::set_integrations_disabled(&cfg.integrations_disabled);
+        app.registry
+            .set_integrations_disabled(&cfg.integrations_disabled);
     }
     app.request_config_save();
 
@@ -94,10 +95,9 @@ mod tests {
         }
     "#;
 
-    /// Loads `INTEGRATION_CONFIG_TEST_PLUGIN` into the (process-wide) plugin
-    /// registry for the duration of `f`. Callers must already hold
-    /// `TEST_GLOBALS_LOCK`.
-    async fn with_integration_config_test_plugin<F, Fut>(f: F)
+    /// Loads `INTEGRATION_CONFIG_TEST_PLUGIN` into `app`'s plugin registry for
+    /// the duration of `f`.
+    async fn with_integration_config_test_plugin<F, Fut>(app: &Arc<AppState>, f: F)
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,
@@ -111,9 +111,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(plugin_dir.join("main.lua"), INTEGRATION_CONFIG_TEST_PLUGIN).unwrap();
-        crate::drivers::plugins::load_all(dir.path());
+        app.registry.load_all(dir.path());
         f().await;
-        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent"));
+        app.registry.load_all(std::path::Path::new("/nonexistent"));
     }
 
     #[tokio::test]
@@ -161,13 +161,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn set_integration_config_splits_secure_values_into_the_secret_store() {
-        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
-            with_integration_config_test_plugin(|| async {
+            with_integration_config_test_plugin(&app, || async {
                 let mut values = HashMap::new();
                 values.insert("host".to_string(), "127.0.0.1".to_string());
                 values.insert("token".to_string(), "s3cr3t".to_string());

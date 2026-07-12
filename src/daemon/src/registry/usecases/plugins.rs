@@ -22,7 +22,7 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
         // for a local edit — or that the user is intentionally editing — isn't
         // re-disabled on the next startup tamper check. No-op for a pristine or
         // non-repo plugin.
-        accept_on_disk_content(&id).await;
+        accept_on_disk_content(&app, &id).await;
     }
     {
         let mut cfg = app.config.write().await;
@@ -30,7 +30,7 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
         if !enabled {
             cfg.plugins_disabled.push(id.clone());
         }
-        crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
+        app.registry.set_disabled(&cfg.plugins_disabled);
     }
     app.request_config_save();
     mark_plugin_dirty_and_broadcast(&app, id).await;
@@ -40,8 +40,8 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
 /// Stage a repo plugin's working-tree files into its git index, making the
 /// tamper-check baseline match what's on disk. Local, best-effort: a failure
 /// (or a non-repo plugin) is logged and ignored.
-async fn accept_on_disk_content(id: &str) {
-    let Some((slug, subpath)) = crate::drivers::plugins::repo_location_for(id) else {
+async fn accept_on_disk_content(app: &Arc<AppState>, id: &str) {
+    let Some((slug, subpath)) = app.registry.repo_location_for(id) else {
         return;
     };
     let dir = crate::config::plugin_repos_dir().join(&slug);
@@ -65,7 +65,7 @@ pub async fn set_permissions(
     granted: Vec<Permission>,
     app: Arc<AppState>,
 ) -> Result<()> {
-    let hash = crate::drivers::plugins::content_hash_for(&id);
+    let hash = app.registry.content_hash_for(&id);
     {
         let mut cfg = app.config.write().await;
         if granted.is_empty() {
@@ -84,8 +84,8 @@ pub async fn set_permissions(
                 }
             }
         }
-        crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
-        crate::drivers::plugins::set_acknowledged(&cfg.plugin_acknowledged);
+        app.registry.set_granted(&cfg.plugin_permissions);
+        app.registry.set_acknowledged(&cfg.plugin_acknowledged);
     }
     app.request_config_save();
     mark_plugin_dirty_and_broadcast(&app, id).await;
@@ -105,10 +105,11 @@ pub(crate) async fn persist_config_values(
     values: &std::collections::HashMap<String, String>,
     app: &Arc<AppState>,
 ) -> Result<()> {
-    let secure_keys: std::collections::HashSet<String> =
-        crate::drivers::plugins::secure_config_keys_for(id)
-            .into_iter()
-            .collect();
+    let secure_keys: std::collections::HashSet<String> = app
+        .registry
+        .secure_config_keys_for(id)
+        .into_iter()
+        .collect();
     let mut cfg = app.config.write().await;
     let plaintext = cfg.plugin_config.entry(id.to_owned()).or_default();
     for (key, value) in values {
@@ -125,13 +126,18 @@ pub(crate) async fn persist_config_values(
     if plaintext.is_empty() {
         cfg.plugin_config.remove(id);
     }
-    crate::drivers::plugins::set_config_values(&cfg.plugin_config);
+    app.registry.set_config_values(&cfg.plugin_config);
     Ok(())
 }
 
 /// Fetch a plugin's display-only asset and send it to the client as base64. Not staged — a pure read.
-pub async fn get_asset(plugin_id: String, name: String, client: ClientHandle) -> Result<()> {
-    let bytes = crate::drivers::plugins::read_asset(&plugin_id, &name)?;
+pub async fn get_asset(
+    plugin_id: String,
+    name: String,
+    client: ClientHandle,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let bytes = app.registry.read_asset(&plugin_id, &name)?;
     let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     client.send_json(&json!({
         "type": "plugin_asset",
@@ -206,7 +212,7 @@ pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
     // A manual import gets the GUI's blocking consent modal instead of the
     // auto-discovery toast — suppress it before the reload below would
     // otherwise fire one for this exact plugin.
-    crate::drivers::plugins::suppress_permission_notice(&manifest.plugin_id);
+    app.registry.suppress_permission_notice(&manifest.plugin_id);
 
     reload_registry(&app).await;
     mark_plugin_dirty_and_broadcast(&app, manifest.plugin_id).await;
@@ -217,7 +223,9 @@ pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
 /// standalone directory to delete on its own — remove its repo instead —
 /// so this refuses anything but a `Local` plugin. Staged — see the module docs.
 pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
-    let is_local = crate::drivers::plugins::list(&*app.secret_store)
+    let is_local = app
+        .registry
+        .list(&*app.secret_store)
         .into_iter()
         .find(|p| p.id == id)
         .map(|p| matches!(p.source, halod_shared::types::PluginSource::Local))
@@ -246,7 +254,7 @@ pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
 /// Purge one plugin id's secret, disabled flag, and plaintext config; returns
 /// whether config changed. Shared by [`delete`] and `repos::remove_repo`.
 pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
-    for key in crate::drivers::plugins::secure_config_keys_for(id) {
+    for key in app.registry.secure_config_keys_for(id) {
         if let Err(e) = app.secret_store.delete(id, &key) {
             log::warn!("deleting secret '{key}' for plugin '{id}': {e:#}");
         }
@@ -258,10 +266,10 @@ pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     let disabled_changed = cfg.plugins_disabled.len() != before;
     let config_changed = cfg.plugin_config.remove(id).is_some();
     if disabled_changed {
-        crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
+        app.registry.set_disabled(&cfg.plugins_disabled);
     }
     if config_changed {
-        crate::drivers::plugins::set_config_values(&cfg.plugin_config);
+        app.registry.set_config_values(&cfg.plugin_config);
     }
     disabled_changed || config_changed
 }
@@ -281,16 +289,16 @@ pub async fn apply_pending_changes(app: Arc<AppState>) -> Result<()> {
 /// Re-read the plugins directory and every configured git-repo source, and re-apply the disabled/granted sets. Shared with `repos.rs`.
 pub(crate) async fn reload_registry(app: &Arc<AppState>) {
     let cfg = app.config.read().await;
-    crate::drivers::plugins::load_all_with_repos(
+    app.registry.load_all_with_repos(
         &crate::config::plugins_dir(),
         &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugin_repos),
     );
-    crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
-    crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
-    crate::drivers::plugins::set_acknowledged(&cfg.plugin_acknowledged);
-    crate::drivers::plugins::set_config_values(&cfg.plugin_config);
-    crate::drivers::plugins::set_integrations_disabled(&cfg.integrations_disabled);
-    crate::drivers::plugins::set_secret_store(app.secret_store.clone());
+    app.registry.set_disabled(&cfg.plugins_disabled);
+    app.registry.set_granted(&cfg.plugin_permissions);
+    app.registry.set_acknowledged(&cfg.plugin_acknowledged);
+    app.registry.set_config_values(&cfg.plugin_config);
+    app.registry
+        .set_integrations_disabled(&cfg.integrations_disabled);
 }
 
 /// Flag a full rediscovery as needed and push the updated plugin listing
@@ -359,7 +367,7 @@ async fn scoped_rediscover(app: &Arc<AppState>, plugins: &[String]) {
     teardown_owned_devices(app, plugins).await;
 
     // 3. Set the discovery filter so re-probing only registers matching handles.
-    let specs = crate::drivers::plugins::device_specs_for(plugins);
+    let specs = app.registry.device_specs_for(plugins);
     app.set_discovery_filter(Some(Arc::new(DiscoveryFilter { specs })))
         .await;
 
@@ -601,19 +609,18 @@ mod tests {
         std::fs::write(dir.join("main.lua"), CONFIG_TEST_PLUGIN).unwrap();
     }
 
-    /// Loads `CONFIG_TEST_PLUGIN` into the (process-wide) plugin registry for
-    /// the duration of `f`, then restores the registry to just the built-ins.
-    /// Callers must already hold `TEST_GLOBALS_LOCK`.
-    async fn with_config_test_plugin<F, Fut>(f: F)
+    /// Loads `CONFIG_TEST_PLUGIN` into `app`'s plugin registry for the duration
+    /// of `f`, then restores the registry to just the built-ins.
+    async fn with_config_test_plugin<F, Fut>(app: &Arc<AppState>, f: F)
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
         let dir = tempfile::tempdir().unwrap();
         write_config_test_plugin(dir.path());
-        crate::drivers::plugins::load_all(dir.path());
+        app.registry.load_all(dir.path());
         f().await;
-        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent"));
+        app.registry.load_all(std::path::Path::new("/nonexistent"));
     }
 
     fn test_client() -> (
@@ -630,11 +637,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn get_asset_replies_with_base64_bytes() {
-        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let app = Arc::new(AppState::new(crate::config::Config::default()));
         let dir = tempfile::tempdir().unwrap();
         let plugin_dir = dir.path().join("assetplug");
         std::fs::create_dir_all(plugin_dir.join("assets")).unwrap();
@@ -646,10 +650,10 @@ mod tests {
         .unwrap();
         std::fs::write(plugin_dir.join("main.lua"), "return {}").unwrap();
         std::fs::write(plugin_dir.join("assets/logo.png"), b"PNGDATA").unwrap();
-        crate::drivers::plugins::load_all(dir.path());
+        app.registry.load_all(dir.path());
 
         let (client, mut rx) = test_client();
-        get_asset("assetplug".into(), "logo.png".into(), client)
+        get_asset("assetplug".into(), "logo.png".into(), client, app.clone())
             .await
             .unwrap();
 
@@ -663,30 +667,27 @@ mod tests {
             .unwrap();
         assert_eq!(decoded, b"PNGDATA");
 
-        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent"));
+        app.registry.load_all(std::path::Path::new("/nonexistent"));
     }
 
     #[tokio::test]
     async fn get_asset_errors_for_unknown_plugin() {
+        let app = Arc::new(AppState::new(crate::config::Config::default()));
         let (client, _rx) = test_client();
-        let err = get_asset("does-not-exist".into(), "logo.png".into(), client)
+        let err = get_asset("does-not-exist".into(), "logo.png".into(), client, app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown plugin"));
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn set_permissions_records_the_acknowledged_content_hash() {
-        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(|| async {
+            with_config_test_plugin(&app, || async {
                 set_permissions("cfgtest".into(), vec![Permission::Network], app.clone())
                     .await
                     .unwrap();
-                let expected = crate::drivers::plugins::content_hash_for("cfgtest");
+                let expected = app.registry.content_hash_for("cfgtest");
                 assert!(expected.is_some());
                 let cfg = app.config.read().await;
                 assert_eq!(cfg.plugin_acknowledged.get("cfgtest"), expected.as_ref());
@@ -701,13 +702,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn revoking_clears_both_the_grant_and_the_content_pin() {
-        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(|| async {
+            with_config_test_plugin(&app, || async {
                 set_permissions("cfgtest".into(), vec![Permission::Network], app.clone())
                     .await
                     .unwrap();
@@ -732,13 +729,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn set_config_splits_secure_values_into_the_secret_store() {
-        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(|| async {
+            with_config_test_plugin(&app, || async {
                 let mut values = std::collections::HashMap::new();
                 values.insert("host".to_string(), "127.0.0.1".to_string());
                 values.insert("token".to_string(), "s3cr3t".to_string());
@@ -769,13 +762,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn set_config_with_blank_secure_value_keeps_the_existing_secret() {
-        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(|| async {
+            with_config_test_plugin(&app, || async {
                 let mut first = std::collections::HashMap::new();
                 first.insert("token".to_string(), "s3cr3t".to_string());
                 set_config("cfgtest".into(), first, app.clone())
@@ -800,16 +789,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn delete_purges_the_plugins_stored_secret() {
-        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let dir = crate::config::plugins_dir();
             std::fs::create_dir_all(&dir).unwrap();
             write_config_test_plugin(&dir);
-            crate::drivers::plugins::load_all(&dir);
+            app.registry.load_all(&dir);
 
             let mut values = std::collections::HashMap::new();
             values.insert("token".to_string(), "s3cr3t".to_string());

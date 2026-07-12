@@ -17,7 +17,6 @@ use crate::state::AppState;
 use super::device::{ChildWorkerFactory, LuaDevice};
 use super::manifest::PluginManifest;
 use super::transport::PluginIo;
-use super::{granted_for, resolved_config_for};
 use crate::drivers::transports::Transport;
 
 /// Sanitize a config value for use in a device id: keep it stable and
@@ -71,8 +70,10 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
         );
         return;
     };
-    let granted = granted_for(&manifest.plugin_id);
-    let config = resolved_config_for(&manifest.plugin_id, &granted);
+    let granted = app.registry.granted_for(&manifest.plugin_id);
+    let config =
+        app.registry
+            .resolved_config_for(app.secret_store.as_ref(), &manifest.plugin_id, &granted);
     let id = root_device_id(&manifest, &config);
 
     if app.devices.read().await.iter().any(|d| d.id() == id) {
@@ -142,8 +143,18 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
         })
     });
 
+    let notify = Arc::downgrade(app);
     let device = Arc::new_cyclic(move |weak| {
-        let mut dev = LuaDevice::integration_root(id, &manifest, transport, child_worker, runtime);
+        let mut dev = LuaDevice::integration_root(
+            id,
+            &manifest,
+            transport,
+            child_worker,
+            runtime,
+            granted,
+            config,
+            notify,
+        );
         dev.set_self_ref(weak.clone());
         dev
     });
@@ -151,7 +162,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
 }
 
 async fn discover(app: Arc<AppState>) {
-    for manifest in super::integration_manifests() {
+    for manifest in app.registry.integration_manifests() {
         build_and_register(&app, manifest).await;
     }
 }
@@ -161,7 +172,7 @@ async fn discover(app: Arc<AppState>) {
 /// device. No-op if `plugin_id` isn't currently an enabled, permission-
 /// satisfied integration.
 pub(crate) async fn discover_one(app: &Arc<AppState>, plugin_id: &str) {
-    if let Some(manifest) = super::integration_manifest(plugin_id) {
+    if let Some(manifest) = app.registry.integration_manifest(plugin_id) {
         build_and_register(app, manifest).await;
     }
 }

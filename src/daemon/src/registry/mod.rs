@@ -41,18 +41,17 @@ pub async fn initialize_app_state(app: Arc<AppState>) {
     ensure_official_repo(&app).await;
     {
         let cfg = app.config.read().await;
-        crate::drivers::plugins::load_all_with_repos(
+        app.registry.load_all_with_repos(
             &crate::config::plugins_dir(),
             &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugin_repos),
         );
-        crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
-        crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
-        crate::drivers::plugins::set_acknowledged(&cfg.plugin_acknowledged);
-        crate::drivers::plugins::set_config_values(&cfg.plugin_config);
-        crate::drivers::plugins::set_integrations_disabled(&cfg.integrations_disabled);
+        app.registry.set_disabled(&cfg.plugins_disabled);
+        app.registry.set_granted(&cfg.plugin_permissions);
+        app.registry.set_acknowledged(&cfg.plugin_acknowledged);
+        app.registry.set_config_values(&cfg.plugin_config);
+        app.registry
+            .set_integrations_disabled(&cfg.integrations_disabled);
     }
-    crate::drivers::plugins::set_secret_store(app.secret_store.clone());
-    crate::drivers::plugins::set_notification_sink(&app);
     // Security: disable any plugin whose files changed on disk since checkout,
     // BEFORE discovery so a tampered plugin never activates. No network, so it
     // runs regardless of GitHub consent. Suppresses the ungranted notice for
@@ -162,7 +161,7 @@ pub(crate) async fn start_update_check(app: Arc<AppState>) {
 pub(crate) async fn notify_ungranted_plugins(app: &Arc<AppState>) {
     use crate::drivers::plugins::UngrantedReason;
     use halod_shared::types::NotificationCode;
-    for (plugin, reason) in crate::drivers::plugins::take_newly_ungranted_plugins() {
+    for (plugin, reason) in app.registry.take_newly_ungranted_plugins() {
         let code = match reason {
             UngrantedReason::NeedsPermission => NotificationCode::PluginNeedsPermission { plugin },
             UngrantedReason::ContentChanged => NotificationCode::PluginContentChanged { plugin },

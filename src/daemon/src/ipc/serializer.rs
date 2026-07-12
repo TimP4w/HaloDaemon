@@ -20,7 +20,10 @@ pub async fn serialize_state(
     // snapshots stay config-free).
     let mut cooling = app.cooling.snapshot(snap.fan_curves).await;
     cooling.config = cfg.cooling.clone();
-    let mut lighting = app.lighting.snapshot(&cfg, snap.placed_zones).await;
+    let mut lighting = app
+        .lighting
+        .snapshot(&app.registry, &cfg, snap.placed_zones)
+        .await;
     lighting.config = cfg.rgb.clone();
     let mut lcd = app
         .lcd
@@ -49,7 +52,7 @@ pub async fn serialize_state(
         },
         process_icons,
         plugins: PluginsState {
-            plugins: crate::drivers::plugins::list(app.secret_store.as_ref()),
+            plugins: app.registry.list(app.secret_store.as_ref()),
             rediscover_pending: app
                 .plugins_rediscover_pending
                 .load(std::sync::atomic::Ordering::Relaxed),

@@ -176,16 +176,15 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     // a "Scan now" without restarting the daemon.
     {
         let cfg = app.config.read().await;
-        crate::drivers::plugins::load_all_with_repos(
+        app.registry.load_all_with_repos(
             &crate::config::plugins_dir(),
             &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugin_repos),
         );
-        crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
-        crate::drivers::plugins::set_granted(&cfg.plugin_permissions);
-        crate::drivers::plugins::set_acknowledged(&cfg.plugin_acknowledged);
-        crate::drivers::plugins::set_config_values(&cfg.plugin_config);
+        app.registry.set_disabled(&cfg.plugins_disabled);
+        app.registry.set_granted(&cfg.plugin_permissions);
+        app.registry.set_acknowledged(&cfg.plugin_acknowledged);
+        app.registry.set_config_values(&cfg.plugin_config);
     }
-    crate::drivers::plugins::set_secret_store(app.secret_store.clone());
     crate::registry::notify_ungranted_plugins(&app).await;
     crate::registry::discovery::discover_devices(Arc::clone(&app)).await;
 

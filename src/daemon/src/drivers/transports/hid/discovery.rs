@@ -7,7 +7,7 @@ use crate::{
     drivers::Device,
     ipc::broadcast_state,
     platform::notify,
-    registry::discovery::{make_device, DeviceDescriptor, DiscoveryHandle, TransportScanner},
+    registry::discovery::{DeviceDescriptor, DiscoveryHandle, TransportScanner},
     state::{AppState, HidTrackingEntry},
 };
 
@@ -70,7 +70,7 @@ pub async fn hotplug_monitor(app: Arc<AppState>) {
         // Re-snapshot so a key freed this cycle can be re-added in the same pass.
         let tracked_keys: HashSet<String> = app.hid.keys().await;
 
-        let picked = pick_hid_devices(&live);
+        let picked = pick_hid_devices(&app.registry, &live);
         for (info, idx) in devices_to_register(&picked, &tracked_keys) {
             let serial_opt = (!info.serial.is_empty()).then_some(info.serial.as_str());
             add_hid_device(
@@ -109,7 +109,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
     // Skip already-registered devices so a rescan never opens a second handle to
     // hardware in use (a rival listener corrupts HID++ messaging for both).
     let tracked_keys: HashSet<String> = app.hid.keys().await;
-    let picked = pick_hid_devices(&entries);
+    let picked = pick_hid_devices(&app.registry, &entries);
     for (info, idx) in devices_to_register(&picked, &tracked_keys) {
         log::debug!(
             "Checking HID {:04x}:{:04x} path={} iface={}",
@@ -189,7 +189,10 @@ impl From<&hidapi::DeviceInfo> for HidDeviceInfo {
 /// satisfies a match is preferred; otherwise the first entry in the group
 /// wins. Result order follows enumeration first-occurrence so device `idx`
 /// assignment stays stable.
-fn pick_hid_devices(entries: &[HidDeviceInfo]) -> Vec<&HidDeviceInfo> {
+fn pick_hid_devices<'a>(
+    registry: &crate::drivers::plugins::Registry,
+    entries: &'a [HidDeviceInfo],
+) -> Vec<&'a HidDeviceInfo> {
     let make_probe = |e: &HidDeviceInfo| DiscoveryHandle::Hid {
         vid: e.vid,
         pid: e.pid,
@@ -206,7 +209,7 @@ fn pick_hid_devices(entries: &[HidDeviceInfo]) -> Vec<&HidDeviceInfo> {
 
     let is_recognized = |probe: &DiscoveryHandle<'_>| {
         inventory::iter::<DeviceDescriptor>().any(|d| (d.matches)(probe))
-            || crate::drivers::plugins::has_match(probe)
+            || registry.has_match(probe)
     };
 
     for e in entries {
@@ -529,7 +532,7 @@ async fn add_hid_device(
             return;
         }
     }
-    let Some(impl_) = make_device(handle) else {
+    let Some(impl_) = app.registry.make_device(app, handle) else {
         return;
     };
     let serial_key = serial.filter(|s| !s.is_empty()).unwrap_or("").to_string();
@@ -620,7 +623,8 @@ mod tests {
             g560_entry("bogus", 2, 0xFF00, 0x0001, "S1"),
             g560_entry("vendor", 2, 0xFF43, 0x0202, "S1"),
         ];
-        let picked = pick_hid_devices(&entries);
+        let app = make_app();
+        let picked = pick_hid_devices(&app.registry, &entries);
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].path, "vendor");
     }
@@ -629,7 +633,8 @@ mod tests {
     fn picker_falls_back_to_first_on_linux_single_node() {
         // Linux hidraw: one node, usage 0/0 — accepted as the G560 fallback.
         let entries = [g560_entry("hidraw3", 2, 0, 0, "S1")];
-        let picked = pick_hid_devices(&entries);
+        let app = make_app();
+        let picked = pick_hid_devices(&app.registry, &entries);
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].path, "hidraw3");
     }
@@ -641,7 +646,8 @@ mod tests {
             g560_entry("a", 2, 0xFF43, 0x0202, "S1"),
             g560_entry("b", 2, 0xFF43, 0x0202, "S1"),
         ];
-        let picked = pick_hid_devices(&entries);
+        let app = make_app();
+        let picked = pick_hid_devices(&app.registry, &entries);
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].path, "a");
     }
@@ -656,7 +662,8 @@ mod tests {
             g560_entry("vendor_B", 2, 0xFF43, 0x0202, "BBB"), // matches — BBB group forms here
             g560_entry("vendor_A", 2, 0xFF43, 0x0202, "AAA"), // matches — AAA group forms here
         ];
-        let picked = pick_hid_devices(&entries);
+        let app = make_app();
+        let picked = pick_hid_devices(&app.registry, &entries);
         assert_eq!(picked.len(), 2);
         assert_eq!(picked[0].path, "vendor_B"); // BBB group first matching entry
         assert_eq!(picked[1].path, "vendor_A"); // AAA group second
@@ -670,16 +677,15 @@ mod tests {
             g560_entry("iface0", 0, 0xFF43, 0x0202, "S1"),
             g560_entry("iface2", 2, 0, 0, "S1"),
         ];
-        let picked = pick_hid_devices(&entries);
+        let app = make_app();
+        let picked = pick_hid_devices(&app.registry, &entries);
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].path, "iface2");
     }
 
     #[test]
     fn picker_recognizes_a_plugin_only_device_with_no_native_descriptor() {
-        let _guard = crate::drivers::plugins::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let app = make_app();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("plugin_only_hid");
         std::fs::create_dir_all(&dir).unwrap();
@@ -689,7 +695,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();
-        crate::drivers::plugins::load_all(tmp.path());
+        app.registry.load_all(tmp.path());
 
         let entry = HidDeviceInfo {
             vid: 0x1E71,
@@ -701,14 +707,12 @@ mod tests {
             usage: 0,
         };
         let entries = [entry];
-        let picked = pick_hid_devices(&entries);
+        let picked = pick_hid_devices(&app.registry, &entries);
         assert_eq!(
             picked.len(),
             1,
             "a plugin-only HID device must survive the discovery pre-filter"
         );
-
-        crate::drivers::plugins::load_all(std::path::Path::new("/nonexistent-halod-test-dir"));
     }
 
     #[test]

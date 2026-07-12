@@ -311,9 +311,9 @@ fn native_scan_jobs() -> Vec<ScanJob> {
         .collect()
 }
 
-fn plugin_scan_jobs() -> Vec<ScanJob> {
-    use crate::drivers::plugins::plugin_smbus_scan_entries;
-    plugin_smbus_scan_entries()
+fn plugin_scan_jobs(registry: &crate::drivers::plugins::Registry) -> Vec<ScanJob> {
+    registry
+        .plugin_smbus_scan_entries()
         .into_iter()
         .map(|e| ScanJob {
             bus_kind: e.bus_kind,
@@ -382,7 +382,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
     let mut open_warned = false;
 
     let mut jobs = native_scan_jobs();
-    jobs.extend(plugin_scan_jobs());
+    jobs.extend(plugin_scan_jobs(&app.registry));
 
     for job in jobs {
         // A GPU job MUST carry a PCI gate: the GPU I²C segment is shared with the
@@ -449,7 +449,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
             // probes, later effect streams) touches the freshly opened bus.
             bus.set_write_rate_limit(job.write_rate_limit);
 
-            run_pre_scan(&job.pre_scan, &bus, bus_info.bus_number).await;
+            run_pre_scan(&app.registry, &job.pre_scan, &bus, bus_info.bus_number).await;
 
             for &addr in &job.addresses {
                 if !probe_addr(&bus, addr, effective_probe) {
@@ -472,7 +472,12 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
 }
 
 /// Run a job's pre-scan (native fn or plugin Lua) against a freshly opened bus.
-async fn run_pre_scan(pre_scan: &PreScan, bus: &Arc<SmBusDevice>, bus_number: u8) {
+async fn run_pre_scan(
+    registry: &crate::drivers::plugins::Registry,
+    pre_scan: &PreScan,
+    bus: &Arc<SmBusDevice>,
+    bus_number: u8,
+) {
     let result = match pre_scan {
         PreScan::None => return,
         PreScan::Native(f) => f(Arc::clone(bus)).await,
@@ -484,7 +489,7 @@ async fn run_pre_scan(pre_scan: &PreScan, bus: &Arc<SmBusDevice>, bus_number: u8
             let bus = Arc::clone(bus);
             let source = source.clone();
             let scope = scope.clone();
-            let granted = crate::drivers::plugins::granted_for(plugin_id);
+            let granted = registry.granted_for(plugin_id);
             tokio::task::spawn_blocking(move || {
                 crate::drivers::plugins::run_pre_scan(
                     &source,

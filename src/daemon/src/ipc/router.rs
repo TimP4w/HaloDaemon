@@ -524,7 +524,7 @@ async fn dispatch(
             lcd::usecases::lcd::delete_lcd_image(filename, app).await
         }
         DaemonCommand::GetPluginAsset { plugin_id, name } => {
-            registry::usecases::plugins::get_asset(plugin_id, name, client).await
+            registry::usecases::plugins::get_asset(plugin_id, name, client, app).await
         }
 
         DaemonCommand::CanvasUpsertEffect { instance_id, def } => {

@@ -6,8 +6,7 @@
 use super::super::*;
 use crate::secrets::SecretStore as _;
 use std::path::Path;
-
-use super::super::TEST_GLOBALS_LOCK as GLOBALS_LOCK;
+use std::sync::Arc;
 
 fn manifest() -> PluginManifest {
     let src = r#"
@@ -32,30 +31,33 @@ fn hid<'a>(vid: u16, pid: u16, serial: Option<&'a str>, idx: usize) -> Discovery
 }
 
 /// Replace the registry snapshot's manifests (and their derived effect
-/// entries) for a test — the snapshot equivalent of the old direct
-/// `*PLUGIN_REGISTRY.write()`. Callers hold `GLOBALS_LOCK`.
-fn set_registry(manifests: Vec<PluginManifest>) {
+/// entries) for a test.
+fn set_registry(reg: &Registry, manifests: Vec<PluginManifest>) {
     let effects: Vec<PluginEffectEntry> = manifests.iter().flat_map(effect_entries_for).collect();
-    update(|s| {
+    reg.update(|s| {
         s.manifests = manifests;
         s.effects = effects;
     });
 }
 
 /// Acknowledge every manifest's current content, as user consent would, so
-/// `consent_satisfied` treats them as consented. Callers hold `GLOBALS_LOCK`.
-fn acknowledge(manifests: &[PluginManifest]) {
+/// `consent_satisfied` treats them as consented.
+fn acknowledge(reg: &Registry, manifests: &[PluginManifest]) {
     let map = manifests
         .iter()
         .map(|m| (m.plugin_id.clone(), m.content_hash()))
         .collect();
-    set_acknowledged(&map);
+    reg.set_acknowledged(&map);
 }
 
 #[test]
 fn matching_handle_builds_device_with_identity() {
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let manifests = vec![manifest()];
-    let dev = match_in(&manifests, &hid(0x1234, 0x5678, Some("SER"), 0)).expect("matches");
+    let dev = app
+        .registry
+        .match_in(&app, &manifests, &hid(0x1234, 0x5678, Some("SER"), 0))
+        .expect("matches");
     assert_eq!(dev.vendor(), "Acme");
     assert_eq!(dev.name(), "Acme K1");
     assert_eq!(dev.id(), "acme_k1-SER");
@@ -63,8 +65,12 @@ fn matching_handle_builds_device_with_identity() {
 
 #[test]
 fn device_id_falls_back_to_index_without_serial() {
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let manifests = vec![manifest()];
-    let dev = match_in(&manifests, &hid(0x1234, 0x5678, None, 3)).expect("matches");
+    let dev = app
+        .registry
+        .match_in(&app, &manifests, &hid(0x1234, 0x5678, None, 3))
+        .expect("matches");
     assert_eq!(dev.id(), "acme_k1-3");
 }
 
@@ -72,7 +78,7 @@ fn device_id_falls_back_to_index_without_serial() {
 fn granted_permission_is_pinned_to_script_content() {
     // A permissioned plugin activates only while its granted content pin
     // matches the current script; editing the script revokes consent.
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"
         return {
           devices = { { transport = "hid", vid = 0xCCCC, pid = 0xDDDD, vendor = "Acme", model = "K2" } },
@@ -81,49 +87,53 @@ fn granted_permission_is_pinned_to_script_content() {
     "#;
     let manifests = vec![parse_manifest(src, Path::new("needs_network.lua")).unwrap()];
     let handle = hid(0xCCCC, 0xDDDD, Some("S"), 0);
-    set_disabled(&[]);
-    set_granted(&HashMap::from([(
+    app.registry.set_disabled(&[]);
+    app.registry.set_granted(&HashMap::from([(
         "needs_network".to_string(),
         vec![Permission::Network],
     )]));
 
     // Granted but not pinned to content → inert.
-    set_acknowledged(&HashMap::new());
+    app.registry.set_acknowledged(&HashMap::new());
     assert!(
-        match_in(&manifests, &handle).is_none(),
+        app.registry.match_in(&app, &manifests, &handle).is_none(),
         "a grant with no content pin must not activate"
     );
 
     // Pinned to the current content → active.
-    acknowledge(&manifests);
+    acknowledge(&app.registry, &manifests);
     assert!(
-        match_in(&manifests, &handle).is_some(),
+        app.registry.match_in(&app, &manifests, &handle).is_some(),
         "grant pinned to the current script activates"
     );
 
     // Content changed (stale pin) → inert again.
-    set_acknowledged(&HashMap::from([(
+    app.registry.set_acknowledged(&HashMap::from([(
         "needs_network".to_string(),
         "deadbeef".to_string(),
     )]));
     assert!(
-        match_in(&manifests, &handle).is_none(),
+        app.registry.match_in(&app, &manifests, &handle).is_none(),
         "a since-modified script must revert to needing consent"
     );
 
-    set_granted(&HashMap::new());
-    set_acknowledged(&HashMap::new());
+    app.registry.set_granted(&HashMap::new());
+    app.registry.set_acknowledged(&HashMap::new());
 }
 
 #[test]
 fn non_matching_handle_returns_none() {
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let manifests = vec![manifest()];
-    assert!(match_in(&manifests, &hid(0x9999, 0x0000, None, 0)).is_none());
+    assert!(app
+        .registry
+        .match_in(&app, &manifests, &hid(0x9999, 0x0000, None, 0))
+        .is_none());
 }
 
 #[test]
 fn disabled_plugin_does_not_match() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"
         return {
           devices = { { transport = "hid", vid = 0xAAAA, pid = 0xBBBB, vendor = "Acme", model = "K1" } },
@@ -131,18 +141,19 @@ fn disabled_plugin_does_not_match() {
     "#;
     let manifests = vec![parse_manifest(src, Path::new("disabled_only_plugin.lua")).unwrap()];
     let handle = hid(0xAAAA, 0xBBBB, Some("S"), 0);
-    set_disabled(&["disabled_only_plugin".to_string()]);
+    app.registry
+        .set_disabled(&["disabled_only_plugin".to_string()]);
     assert!(
-        match_in(&manifests, &handle).is_none(),
+        app.registry.match_in(&app, &manifests, &handle).is_none(),
         "disabled plugin must not shadow native"
     );
-    set_disabled(&[]);
-    assert!(match_in(&manifests, &handle).is_some());
+    app.registry.set_disabled(&[]);
+    assert!(app.registry.match_in(&app, &manifests, &handle).is_some());
 }
 
 #[test]
 fn plugin_with_ungranted_permission_does_not_match() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"
         return {
           devices = { { transport = "hid", vid = 0xCCCC, pid = 0xDDDD, vendor = "Acme", model = "K2" } },
@@ -151,43 +162,43 @@ fn plugin_with_ungranted_permission_does_not_match() {
     "#;
     let manifests = vec![parse_manifest(src, Path::new("needs_network.lua")).unwrap()];
     let handle = hid(0xCCCC, 0xDDDD, Some("S"), 0);
-    set_disabled(&[]);
-    acknowledge(&manifests);
-    set_granted(&HashMap::new());
+    app.registry.set_disabled(&[]);
+    acknowledge(&app.registry, &manifests);
+    app.registry.set_granted(&HashMap::new());
     assert!(
-        match_in(&manifests, &handle).is_none(),
+        app.registry.match_in(&app, &manifests, &handle).is_none(),
         "declared-but-ungranted permission must keep the plugin inert"
     );
 
     let mut granted = HashMap::new();
     granted.insert("needs_network".to_string(), vec![Permission::Network]);
-    set_granted(&granted);
+    app.registry.set_granted(&granted);
     assert!(
-        match_in(&manifests, &handle).is_some(),
+        app.registry.match_in(&app, &manifests, &handle).is_some(),
         "fully granted plugin activates"
     );
-    set_granted(&HashMap::new());
-    set_acknowledged(&HashMap::new());
+    app.registry.set_granted(&HashMap::new());
+    app.registry.set_acknowledged(&HashMap::new());
 }
 
 #[test]
 fn consent_satisfied_true_when_no_permissions_declared() {
     // A plugin that declares no permissions runs freely — it can only talk
     // to its matched device, the base trust every plugin has.
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"
         return {
           devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         }
     "#;
     let m = parse_manifest(src, Path::new("no_perms.lua")).unwrap();
-    set_acknowledged(&HashMap::new());
-    assert!(consent_satisfied(&m));
+    app.registry.set_acknowledged(&HashMap::new());
+    assert!(app.registry.consent_satisfied(&m));
 }
 
 #[test]
 fn load_all_with_repos_discovers_a_repo_sourced_plugin_and_tags_its_source() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let _cfg_guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -205,10 +216,11 @@ fn load_all_with_repos_discovers_a_repo_sourced_plugin_and_tags_its_source() {
     .unwrap();
     std::fs::write(repo_dir.join("main.lua"), "return {}").unwrap();
 
-    load_all_with_repos(local_dir.path(), std::slice::from_ref(&repo_dir));
+    app.registry
+        .load_all_with_repos(local_dir.path(), std::slice::from_ref(&repo_dir));
 
     let secrets = FakeSecretStore::default();
-    let infos = list(&secrets);
+    let infos = app.registry.list(&secrets);
     let p = infos
         .iter()
         .find(|p| p.id == "acme-repo")
@@ -220,7 +232,7 @@ fn load_all_with_repos_discovers_a_repo_sourced_plugin_and_tags_its_source() {
         }
     );
 
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
     unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
 }
 
@@ -229,7 +241,7 @@ fn load_all_with_repos_discovers_sibling_packages_at_a_repos_root() {
     // The official repo's real layout: several packages as immediate sibling
     // directories under the repo root (no `plugins/` nesting, no
     // single-package-at-root manifest).
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let _cfg_guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -256,10 +268,11 @@ fn load_all_with_repos_discovers_sibling_packages_at_a_repos_root() {
     // A README alongside them must not be mistaken for a package.
     std::fs::write(repo_dir.join("README.md"), "not a plugin").unwrap();
 
-    load_all_with_repos(local_dir.path(), std::slice::from_ref(&repo_dir));
+    app.registry
+        .load_all_with_repos(local_dir.path(), std::slice::from_ref(&repo_dir));
 
     let secrets = FakeSecretStore::default();
-    let infos = list(&secrets);
+    let infos = app.registry.list(&secrets);
     for id in ["pkg_a", "pkg_b"] {
         assert!(
             infos.iter().any(|p| p.id == id),
@@ -267,7 +280,7 @@ fn load_all_with_repos_discovers_sibling_packages_at_a_repos_root() {
         );
     }
 
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
     unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
 }
 
@@ -277,7 +290,7 @@ fn load_all_never_runs_a_dropped_in_scripts_side_effects() {
     // sentinel at top level. `load_all` evaluates its manifest, but the
     // sandbox strips `io`/`os`, so the write never happens and the plugin
     // is skipped — dropping a file can't run code before consent.
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let dir = tempfile::tempdir().unwrap();
     let sentinel = dir.path().join("pwned.txt");
     let evil = format!(
@@ -294,21 +307,26 @@ fn load_all_never_runs_a_dropped_in_scripts_side_effects() {
     .unwrap();
     std::fs::write(plugin_dir.join("main.lua"), evil).unwrap();
 
-    load_all(dir.path());
+    app.registry.load_all(dir.path());
 
     assert!(
         !sentinel.exists(),
         "a dropped-in script's filesystem write must never execute at load time"
     );
     assert!(
-        !snapshot().manifests.iter().any(|m| m.plugin_id == "evil"),
+        !app.registry
+            .snapshot()
+            .manifests
+            .iter()
+            .any(|m| m.plugin_id == "evil"),
         "a script that errors under the sandbox must be skipped, not registered"
     );
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
 }
 
 #[test]
 fn ungranted_in_reports_once_then_stays_silent() {
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"
         return {
           devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
@@ -320,14 +338,14 @@ fn ungranted_in_reports_once_then_stays_silent() {
     let manifests = vec![m];
     let mut notified = HashSet::new();
 
-    let first = ungranted_in(&manifests, &mut notified);
+    let first = app.registry.ungranted_in(&manifests, &mut notified);
     assert_eq!(
         first,
         vec![("Needs Net".to_string(), UngrantedReason::NeedsPermission)]
     );
 
     // Same manifest, same notified set: already announced, not repeated.
-    let second = ungranted_in(&manifests, &mut notified);
+    let second = app.registry.ungranted_in(&manifests, &mut notified);
     assert!(
         second.is_empty(),
         "must not repeat an already-notified plugin"
@@ -336,7 +354,7 @@ fn ungranted_in_reports_once_then_stays_silent() {
 
 #[test]
 fn ungranted_in_flags_content_change_when_acknowledgment_is_stale() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"
         return {
           devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
@@ -347,24 +365,24 @@ fn ungranted_in_flags_content_change_when_acknowledgment_is_stale() {
     let m = parse_manifest(src, Path::new("approved_once.lua")).unwrap();
     // Grant the permission but pin acknowledgment to a hash that no longer
     // matches the manifest — i.e. its content changed since approval.
-    set_granted(&HashMap::from([(
+    app.registry.set_granted(&HashMap::from([(
         m.plugin_id.clone(),
         vec![Permission::Network],
     )]));
-    set_acknowledged(&HashMap::from([(
+    app.registry.set_acknowledged(&HashMap::from([(
         m.plugin_id.clone(),
         "stale-hash".to_string(),
     )]));
     let mut notified = HashSet::new();
 
-    let out = ungranted_in(&[m], &mut notified);
+    let out = app.registry.ungranted_in(&[m], &mut notified);
     assert_eq!(
         out,
         vec![("Approved Once".to_string(), UngrantedReason::ContentChanged)]
     );
 
-    set_granted(&HashMap::new());
-    set_acknowledged(&HashMap::new());
+    app.registry.set_granted(&HashMap::new());
+    app.registry.set_acknowledged(&HashMap::new());
 }
 
 #[test]
@@ -374,14 +392,15 @@ fn ungranted_in_skips_satisfied_manifests() {
           devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         }
     "#;
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let m = parse_manifest(src, Path::new("no_perms2.lua")).unwrap();
     let mut notified = HashSet::new();
-    assert!(ungranted_in(&[m], &mut notified).is_empty());
+    assert!(app.registry.ungranted_in(&[m], &mut notified).is_empty());
 }
 
 #[test]
 fn official_repo_plugin_cannot_be_shadowed_by_a_later_source() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let tmp = tempfile::tempdir().unwrap();
     let local_dir = tmp.path().join("plugins");
     let official_dir = tmp.path().join("official");
@@ -403,10 +422,11 @@ fn official_repo_plugin_cannot_be_shadowed_by_a_later_source() {
     write_dup(&official_dir.join("plugins").join("dup"), "Official");
     write_dup(&local_dir.join("dup"), "Community");
 
-    take_plugin_load_warnings(); // drain any stale state from a prior test
-    load_all_with_repos(&local_dir, std::slice::from_ref(&official_dir));
+    app.registry.take_plugin_load_warnings(); // drain any stale state from a prior test
+    app.registry
+        .load_all_with_repos(&local_dir, std::slice::from_ref(&official_dir));
 
-    let state = snapshot();
+    let state = app.registry.snapshot();
     let dup: Vec<_> = state
         .manifests
         .iter()
@@ -423,13 +443,13 @@ fn official_repo_plugin_cannot_be_shadowed_by_a_later_source() {
     );
     drop(state);
 
-    let warnings = take_plugin_load_warnings();
+    let warnings = app.registry.take_plugin_load_warnings();
     assert!(
         warnings.iter().any(|w| w.plugin_id == "dup"),
         "the shadow attempt must be surfaced, not silently dropped"
     );
 
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
 }
 
 #[test]
@@ -437,7 +457,7 @@ fn permission_gate_is_inert_until_granted_then_satisfied_once_acknowledged() {
     // Demonstrates the consent gate uniformly: declared-but-ungranted is
     // unsatisfied; fully granted + acknowledged is satisfied. This applies
     // to every plugin now — no source is exempt.
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"return {
         devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         sensor = {},
@@ -448,19 +468,19 @@ fn permission_gate_is_inert_until_granted_then_satisfied_once_acknowledged() {
     assert!(m.needs_worker());
 
     // Acknowledged, so this isolates the permission gate (not the consent gate).
-    acknowledge(std::slice::from_ref(&m));
-    set_granted(&HashMap::new());
+    acknowledge(&app.registry, std::slice::from_ref(&m));
+    app.registry.set_granted(&HashMap::new());
     assert!(
-        !consent_satisfied(&m),
+        !app.registry.consent_satisfied(&m),
         "ungranted os permission keeps it inert"
     );
 
     let mut granted = HashMap::new();
     granted.insert("permission_demo".to_string(), vec![Permission::Os]);
-    set_granted(&granted);
-    assert!(consent_satisfied(&m));
-    set_granted(&HashMap::new());
-    set_acknowledged(&HashMap::new());
+    app.registry.set_granted(&granted);
+    assert!(app.registry.consent_satisfied(&m));
+    app.registry.set_granted(&HashMap::new());
+    app.registry.set_acknowledged(&HashMap::new());
 }
 
 #[test]
@@ -468,22 +488,23 @@ fn list_reports_enabled_only_once_permissions_are_granted() {
     // Invariant: a plugin can never be reported enabled while its permissions
     // are ungranted — enabling and granting are one atomic step, so an
     // un-consented plugin is never "on".
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"return {
         devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         permissions = { "os" },
     }"#;
     let m = parse_manifest(src, Path::new("perm_plugin.lua")).unwrap();
-    set_registry(vec![m.clone()]);
-    set_disabled(&[]);
-    set_granted(&HashMap::new());
+    set_registry(&app.registry, vec![m.clone()]);
+    app.registry.set_disabled(&[]);
+    app.registry.set_granted(&HashMap::new());
     // Acknowledged so only the permission grant — not the content gate —
     // decides consent here.
-    acknowledge(std::slice::from_ref(&m));
+    acknowledge(&app.registry, std::slice::from_ref(&m));
 
     let secrets = FakeSecretStore::default();
     let enabled_of = |secrets: &FakeSecretStore| {
-        list(secrets)
+        app.registry
+            .list(secrets)
             .into_iter()
             .find(|p| p.id == "perm_plugin")
             .map(|p| (p.enabled, p.consented))
@@ -497,7 +518,7 @@ fn list_reports_enabled_only_once_permissions_are_granted() {
     );
 
     let granted = HashMap::from([("perm_plugin".to_string(), vec![Permission::Os])]);
-    set_granted(&granted);
+    app.registry.set_granted(&granted);
     assert_eq!(
         enabled_of(&secrets),
         (true, true),
@@ -505,13 +526,13 @@ fn list_reports_enabled_only_once_permissions_are_granted() {
     );
 
     // An explicitly disabled plugin stays off even when fully granted.
-    set_disabled(&["perm_plugin".to_string()]);
+    app.registry.set_disabled(&["perm_plugin".to_string()]);
     assert!(!enabled_of(&secrets).0);
 
-    set_disabled(&[]);
-    set_granted(&HashMap::new());
-    set_acknowledged(&HashMap::new());
-    set_registry(Vec::new());
+    app.registry.set_disabled(&[]);
+    app.registry.set_granted(&HashMap::new());
+    app.registry.set_acknowledged(&HashMap::new());
+    set_registry(&app.registry, Vec::new());
 }
 
 #[test]
@@ -589,7 +610,7 @@ impl crate::secrets::SecretStore for FakeSecretStore {
 
 #[test]
 fn config_for_defaults_unset_fields_and_overrides_set_ones() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"return {
         devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         config = { fields = {
@@ -598,15 +619,18 @@ fn config_for_defaults_unset_fields_and_overrides_set_ones() {
           { key = "token", label = "Token", secure = true, default = "unused" },
         } },
     }"#;
-    set_registry(vec![parse_manifest(src, Path::new("cfgfor.lua")).unwrap()]);
+    set_registry(
+        &app.registry,
+        vec![parse_manifest(src, Path::new("cfgfor.lua")).unwrap()],
+    );
     let mut stored = HashMap::new();
     stored.insert(
         "cfgfor".to_string(),
         HashMap::from([("port".to_string(), "9999".to_string())]),
     );
-    set_config_values(&stored);
+    app.registry.set_config_values(&stored);
 
-    let resolved = config_for("cfgfor");
+    let resolved = app.registry.config_for("cfgfor");
     assert_eq!(resolved.get("host"), Some(&"127.0.0.1".to_string()));
     assert_eq!(resolved.get("port"), Some(&"9999".to_string()));
     assert!(
@@ -614,18 +638,19 @@ fn config_for_defaults_unset_fields_and_overrides_set_ones() {
         "secure fields must never appear in the non-secure config map"
     );
 
-    set_config_values(&HashMap::new());
-    set_registry(Vec::new());
+    app.registry.set_config_values(&HashMap::new());
+    set_registry(&app.registry, Vec::new());
 }
 
 #[test]
 fn config_for_unknown_plugin_is_empty() {
-    assert!(config_for("does-not-exist").is_empty());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+    assert!(app.registry.config_for("does-not-exist").is_empty());
 }
 
 #[test]
 fn integration_manifests_filters_by_type_disabled_and_permissions() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let integ_src = r#"return {
         type = "integration",
     }"#;
@@ -636,42 +661,50 @@ fn integration_manifests_filters_by_type_disabled_and_permissions() {
         type = "integration",
         permissions = { "network" },
     }"#;
-    set_registry(vec![
-        parse_manifest(integ_src, Path::new("integ_ok.lua")).unwrap(),
-        parse_manifest(device_src, Path::new("device_only.lua")).unwrap(),
-        parse_manifest(needs_perm_src, Path::new("integ_needs_perm.lua")).unwrap(),
-    ]);
-    set_disabled(&[]);
-    set_granted(&HashMap::new());
+    set_registry(
+        &app.registry,
+        vec![
+            parse_manifest(integ_src, Path::new("integ_ok.lua")).unwrap(),
+            parse_manifest(device_src, Path::new("device_only.lua")).unwrap(),
+            parse_manifest(needs_perm_src, Path::new("integ_needs_perm.lua")).unwrap(),
+        ],
+    );
+    app.registry.set_disabled(&[]);
+    app.registry.set_granted(&HashMap::new());
 
-    let ids: Vec<String> = integration_manifests()
+    let ids: Vec<String> = app
+        .registry
+        .integration_manifests()
         .into_iter()
         .map(|m| m.plugin_id)
         .collect();
     assert_eq!(ids, vec!["integ_ok"]);
 
-    set_disabled(&["integ_ok".to_string()]);
-    assert!(integration_manifests().is_empty());
-    set_disabled(&[]);
+    app.registry.set_disabled(&["integ_ok".to_string()]);
+    assert!(app.registry.integration_manifests().is_empty());
+    app.registry.set_disabled(&[]);
 
     // `integrations_disabled` is a second, independent gate: it must
     // exclude the integration even though the plugin itself is enabled.
-    set_integrations_disabled(&["integ_ok".to_string()]);
-    assert!(integration_manifests().is_empty());
-    assert!(integration_manifest("integ_ok").is_none());
-    set_integrations_disabled(&[]);
+    app.registry
+        .set_integrations_disabled(&["integ_ok".to_string()]);
+    assert!(app.registry.integration_manifests().is_empty());
+    assert!(app.registry.integration_manifest("integ_ok").is_none());
+    app.registry.set_integrations_disabled(&[]);
 
     assert_eq!(
-        integration_manifest("integ_ok").map(|m| m.plugin_id),
+        app.registry
+            .integration_manifest("integ_ok")
+            .map(|m| m.plugin_id),
         Some("integ_ok".to_string())
     );
 
-    set_registry(Vec::new());
+    set_registry(&app.registry, Vec::new());
 }
 
 #[test]
 fn secure_config_keys_for_returns_declared_secure_keys() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"return {
         devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         config = { fields = {
@@ -679,19 +712,26 @@ fn secure_config_keys_for_returns_declared_secure_keys() {
           { key = "token", label = "Token", secure = true },
         } },
     }"#;
-    set_registry(vec![
-        parse_manifest(src, Path::new("securekeys.lua")).unwrap()
-    ]);
+    set_registry(
+        &app.registry,
+        vec![parse_manifest(src, Path::new("securekeys.lua")).unwrap()],
+    );
 
-    assert_eq!(secure_config_keys_for("securekeys"), vec!["token"]);
-    assert!(secure_config_keys_for("does-not-exist").is_empty());
+    assert_eq!(
+        app.registry.secure_config_keys_for("securekeys"),
+        vec!["token"]
+    );
+    assert!(app
+        .registry
+        .secure_config_keys_for("does-not-exist")
+        .is_empty());
 
-    set_registry(Vec::new());
+    set_registry(&app.registry, Vec::new());
 }
 
 #[test]
 fn list_reports_config_fields_values_and_secret_set() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"return {
         devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         config = { fields = {
@@ -699,12 +739,15 @@ fn list_reports_config_fields_values_and_secret_set() {
           { key = "token", label = "Token", secure = true },
         } },
     }"#;
-    set_registry(vec![parse_manifest(src, Path::new("listcfg.lua")).unwrap()]);
+    set_registry(
+        &app.registry,
+        vec![parse_manifest(src, Path::new("listcfg.lua")).unwrap()],
+    );
 
     let secrets = FakeSecretStore::default();
     secrets.set("listcfg", "token", "s3cr3t").unwrap();
 
-    let infos = list(&secrets);
+    let infos = app.registry.list(&secrets);
     let info = infos.iter().find(|p| p.id == "listcfg").expect("present");
     assert_eq!(info.config_fields.len(), 2);
     assert_eq!(
@@ -717,7 +760,7 @@ fn list_reports_config_fields_values_and_secret_set() {
     );
     assert_eq!(info.secret_set.get("token"), Some(&true));
 
-    set_registry(Vec::new());
+    set_registry(&app.registry, Vec::new());
 }
 
 // ── Assets ────────────────────────────────────────────────────────
@@ -744,13 +787,13 @@ fn write_asset_plugin(root: &Path, id: &str, logo_bytes: Option<&[u8]>) -> std::
 
 #[test]
 fn list_surfaces_declared_logo_and_effect_thumbnails() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let tmp = tempfile::tempdir().unwrap();
     write_asset_plugin(tmp.path(), "assetplug", None);
-    load_all(tmp.path());
+    app.registry.load_all(tmp.path());
 
     let secrets = FakeSecretStore::default();
-    let infos = list(&secrets);
+    let infos = app.registry.list(&secrets);
     let info = infos.iter().find(|p| p.id == "assetplug").expect("present");
     assert_eq!(info.logo.as_deref(), Some("logo.png"));
     assert_eq!(info.effect_thumbnails.len(), 1);
@@ -758,12 +801,12 @@ fn list_surfaces_declared_logo_and_effect_thumbnails() {
     assert_eq!(info.effect_thumbnails[0].thumbnail, "rainbow.png");
     assert_eq!(info.source, halod_shared::types::PluginSource::Local);
 
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
 }
 
 #[test]
 fn list_leaves_logo_and_thumbnails_empty_when_undeclared() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("noassets");
     std::fs::create_dir_all(&dir).unwrap();
@@ -773,47 +816,49 @@ fn list_leaves_logo_and_thumbnails_empty_when_undeclared() {
     )
     .unwrap();
     std::fs::write(dir.join("main.lua"), "return {}").unwrap();
-    load_all(tmp.path());
+    app.registry.load_all(tmp.path());
 
     let secrets = FakeSecretStore::default();
-    let infos = list(&secrets);
+    let infos = app.registry.list(&secrets);
     let info = infos.iter().find(|p| p.id == "noassets").expect("present");
     assert!(info.logo.is_none());
     assert!(info.effect_thumbnails.is_empty());
 
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
 }
 
 #[test]
 fn read_asset_returns_bytes_for_a_declared_logo() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let tmp = tempfile::tempdir().unwrap();
     write_asset_plugin(tmp.path(), "readable", Some(b"PNGDATA"));
-    load_all(tmp.path());
+    app.registry.load_all(tmp.path());
 
-    let bytes = read_asset("readable", "logo.png").unwrap();
+    let bytes = app.registry.read_asset("readable", "logo.png").unwrap();
     assert_eq!(bytes, b"PNGDATA");
 
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
 }
 
 #[test]
 fn read_asset_rejects_missing_file_and_unknown_plugin() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let tmp = tempfile::tempdir().unwrap();
     write_asset_plugin(tmp.path(), "nofile", None);
-    load_all(tmp.path());
+    app.registry.load_all(tmp.path());
 
     assert!(
-        read_asset("nofile", "logo.png").is_err(),
+        app.registry.read_asset("nofile", "logo.png").is_err(),
         "declared asset with no file on disk must error"
     );
     assert!(
-        read_asset("does-not-exist", "logo.png").is_err(),
+        app.registry
+            .read_asset("does-not-exist", "logo.png")
+            .is_err(),
         "unknown plugin id must error"
     );
 
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
 }
 
 /// A PNG of `w`×`h` opaque pixels, for exercising the logo dimension/aspect bounds.
@@ -828,66 +873,66 @@ fn png_of(w: u32, h: u32) -> Vec<u8> {
 
 #[test]
 fn load_keeps_valid_square_logo() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let tmp = tempfile::tempdir().unwrap();
     write_asset_plugin(tmp.path(), "goodlogo", Some(&png_of(64, 64)));
-    load_all(tmp.path());
+    app.registry.load_all(tmp.path());
 
-    let info = list(&FakeSecretStore::default());
+    let info = app.registry.list(&FakeSecretStore::default());
     let p = info.iter().find(|p| p.id == "goodlogo").expect("present");
     assert_eq!(p.logo.as_deref(), Some("logo.png"));
-    assert!(take_plugin_load_warnings().is_empty());
+    assert!(app.registry.take_plugin_load_warnings().is_empty());
 
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
 }
 
 #[test]
 fn load_drops_oversized_and_banner_logos() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     for bad in [
         png_of(MAX_LOGO_DIM_PLUS, MAX_LOGO_DIM_PLUS),
         png_of(500, 50),
     ] {
         let tmp = tempfile::tempdir().unwrap();
         write_asset_plugin(tmp.path(), "badlogo", Some(&bad));
-        load_all(tmp.path());
+        app.registry.load_all(tmp.path());
 
-        let info = list(&FakeSecretStore::default());
+        let info = app.registry.list(&FakeSecretStore::default());
         let p = info.iter().find(|p| p.id == "badlogo").expect("present");
         assert!(p.logo.is_none(), "an out-of-bounds logo must be dropped");
-        let warnings = take_plugin_load_warnings();
+        let warnings = app.registry.take_plugin_load_warnings();
         assert!(
             warnings.iter().any(|w| w.plugin_id == "badlogo"),
             "dropping a logo must surface a load warning"
         );
     }
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
 }
 
 const MAX_LOGO_DIM_PLUS: u32 = halod_shared::types::MAX_PLUGIN_LOGO_DIM + 1;
 
 #[test]
 fn read_asset_rejects_oversized_file() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let tmp = tempfile::tempdir().unwrap();
     let huge = vec![0u8; (halod_shared::types::MAX_PLUGIN_ASSET_BYTES + 1) as usize];
     write_asset_plugin(tmp.path(), "huge", Some(&huge));
-    load_all(tmp.path());
+    app.registry.load_all(tmp.path());
 
     assert!(
-        read_asset("huge", "logo.png").is_err(),
+        app.registry.read_asset("huge", "logo.png").is_err(),
         "an asset over the byte limit must be refused"
     );
 
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
 }
 
 #[test]
 fn read_asset_rejects_path_traversal_and_bad_extensions() {
-    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let tmp = tempfile::tempdir().unwrap();
     write_asset_plugin(tmp.path(), "traversal", Some(b"PNGDATA"));
-    load_all(tmp.path());
+    app.registry.load_all(tmp.path());
 
     for bad in [
         "../plugin.yaml",
@@ -897,10 +942,10 @@ fn read_asset_rejects_path_traversal_and_bad_extensions() {
         "/etc/passwd",
     ] {
         assert!(
-            read_asset("traversal", bad).is_err(),
+            app.registry.read_asset("traversal", bad).is_err(),
             "'{bad}' must be rejected"
         );
     }
 
-    load_all(Path::new("/nonexistent"));
+    app.registry.load_all(Path::new("/nonexistent"));
 }

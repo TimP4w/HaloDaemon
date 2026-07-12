@@ -36,33 +36,35 @@ impl PluginScanEntry {
     }
 }
 
-/// Build the SMBus scan entries every enabled plugin declares. Called by the
-/// SMBus scanner each discovery pass, so enable/disable and reloads take effect.
-pub fn plugin_smbus_scan_entries() -> Vec<PluginScanEntry> {
-    let state = super::snapshot();
-    let mut out = Vec::new();
-    for m in state.manifests.iter() {
-        if state.disabled.contains(&m.plugin_id) {
-            continue;
-        }
-        for spec in m.smbus_devices() {
-            let Some(bus_kind) = spec.bus_kind() else {
+impl super::Registry {
+    /// Build the SMBus scan entries every enabled plugin declares. Called by the
+    /// SMBus scanner each discovery pass, so enable/disable and reloads take effect.
+    pub fn plugin_smbus_scan_entries(&self) -> Vec<PluginScanEntry> {
+        let state = self.snapshot();
+        let mut out = Vec::new();
+        for m in state.manifests.iter() {
+            if state.disabled.contains(&m.plugin_id) {
                 continue;
-            };
-            out.push(PluginScanEntry {
-                plugin_id: m.plugin_id.clone(),
-                script_source: m.script_source.clone(),
-                bus_kind,
-                addresses: spec.addresses.clone().unwrap_or_default(),
-                extra_addresses: spec.extra_addresses.clone().unwrap_or_default(),
-                write_rate_limit: spec
-                    .max_bytes_per_sec
-                    .map(|max_bytes_per_sec| WriteRateLimit { max_bytes_per_sec }),
-                pre_scan: spec.pre_scan,
-                probe: spec.probe,
-                pci_match: spec.pci_match.clone(),
-            });
+            }
+            for spec in m.smbus_devices() {
+                let Some(bus_kind) = spec.bus_kind() else {
+                    continue;
+                };
+                out.push(PluginScanEntry {
+                    plugin_id: m.plugin_id.clone(),
+                    script_source: m.script_source.clone(),
+                    bus_kind,
+                    addresses: spec.addresses.clone().unwrap_or_default(),
+                    extra_addresses: spec.extra_addresses.clone().unwrap_or_default(),
+                    write_rate_limit: spec
+                        .max_bytes_per_sec
+                        .map(|max_bytes_per_sec| WriteRateLimit { max_bytes_per_sec }),
+                    pre_scan: spec.pre_scan,
+                    probe: spec.probe,
+                    pci_match: spec.pci_match.clone(),
+                });
+            }
         }
+        out
     }
-    out
 }

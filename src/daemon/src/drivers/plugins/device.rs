@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use halod_shared::types::{
     Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, Choice,
     ConnectionStatus, DeviceCapability, DeviceType, DpiMode, DpiStatus, Equalizer, KeyRemapStatus,
-    LcdDescriptor, NativeEffect, PluginKind, Range, RgbColor, RgbDescriptor, RgbState, RgbZone,
-    ScreenRotation, ScreenShape, Sensor, WriteRateStatus,
+    LcdDescriptor, NativeEffect, Permission, PluginKind, Range, RgbColor, RgbDescriptor, RgbState,
+    RgbZone, ScreenRotation, ScreenShape, Sensor, WriteRateStatus,
 };
 
 use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor};
@@ -334,6 +334,10 @@ pub struct LuaDevice {
     self_ref: Weak<LuaDevice>,
     chain_channels: Vec<ChannelDescriptor>,
     accessories: Vec<AccessoryManifest>,
+
+    /// Weak handle to `AppState` so a failed runtime callback can push a toast
+    /// (via `app.registry`) without the device owning `AppState`.
+    notify: Weak<crate::state::AppState>,
 }
 
 impl Drop for LuaDevice {
@@ -346,11 +350,17 @@ impl Drop for LuaDevice {
 
 impl LuaDevice {
     /// A plugin that declares no capability — identity + lifecycle only.
-    pub fn device_only(id: String, manifest: &PluginManifest, spec: &DeviceSpec) -> Self {
-        Self::build(id, manifest, Some(spec), None, None)
+    pub fn device_only(
+        id: String,
+        manifest: &PluginManifest,
+        spec: &DeviceSpec,
+        notify: Weak<crate::state::AppState>,
+    ) -> Self {
+        Self::build(id, manifest, Some(spec), None, None, notify)
     }
 
     /// A plugin with capabilities, backed by a worker over `transport`.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_transport(
         id: String,
         manifest: &PluginManifest,
@@ -358,23 +368,42 @@ impl LuaDevice {
         dev_match: DevMatch,
         transport: PluginIo,
         handle: tokio::runtime::Handle,
+        granted: Vec<Permission>,
+        config: HashMap<String, String>,
+        notify: Weak<crate::state::AppState>,
     ) -> Self {
-        Self::with_worker(id, manifest, Some(spec), dev_match, transport, handle)
+        Self::with_worker(
+            id,
+            manifest,
+            Some(spec),
+            dev_match,
+            transport,
+            handle,
+            granted,
+            config,
+            notify,
+        )
     }
 
     /// The headless root of a config-instantiated integration plugin
+    #[allow(clippy::too_many_arguments)]
     pub fn integration_root(
         id: String,
         manifest: &PluginManifest,
         transport: PluginIo,
         child_worker: ChildWorkerFactory,
         handle: tokio::runtime::Handle,
+        granted: Vec<Permission>,
+        config: HashMap<String, String>,
+        notify: Weak<crate::state::AppState>,
     ) -> Self {
         let dev_match = DevMatch {
             transport: "tcp".to_owned(),
             ..Default::default()
         };
-        let mut dev = Self::with_worker(id, manifest, None, dev_match, transport, handle);
+        let mut dev = Self::with_worker(
+            id, manifest, None, dev_match, transport, handle, granted, config, notify,
+        );
         dev.integration_child_worker = Some(child_worker);
         dev.root_manifest = Some(Arc::new(manifest.clone()));
         dev
@@ -385,6 +414,7 @@ impl LuaDevice {
     /// worker VM is seeded with the controller `index` in `dev.match.index`, so
     /// the shared script routes each capability call to the right remote
     /// controller.
+    #[allow(clippy::too_many_arguments)]
     pub fn integration_child(
         id: String,
         name: String,
@@ -393,18 +423,24 @@ impl LuaDevice {
         controller_index: u32,
         transport: PluginIo,
         handle: tokio::runtime::Handle,
+        granted: Vec<Permission>,
+        config: HashMap<String, String>,
+        notify: Weak<crate::state::AppState>,
     ) -> Self {
         let dev_match = DevMatch {
             transport: "tcp".to_owned(),
             index: Some(controller_index),
             ..Default::default()
         };
-        let mut dev = Self::with_worker(id, manifest, None, dev_match, transport, handle);
+        let mut dev = Self::with_worker(
+            id, manifest, None, dev_match, transport, handle, granted, config, notify,
+        );
         dev.name = name;
         dev.vendor = vendor;
         dev
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_worker(
         id: String,
         manifest: &PluginManifest,
@@ -412,12 +448,13 @@ impl LuaDevice {
         dev_match: DevMatch,
         transport: PluginIo,
         handle: tokio::runtime::Handle,
+        granted: Vec<Permission>,
+        config: HashMap<String, String>,
+        notify: Weak<crate::state::AppState>,
     ) -> Self {
         // Keep a handle to the (metered) transport so the device can report
         // write-rate/throughput; the worker owns the one it does I/O through.
         let rate_transport = transport.clone();
-        let granted = super::granted_for(&manifest.plugin_id);
-        let config = super::resolved_config_for(&manifest.plugin_id, &granted);
         let zones: Vec<RgbZone> = manifest
             .rgb
             .as_ref()
@@ -438,6 +475,7 @@ impl LuaDevice {
             spec,
             Some(worker.clone()),
             Some(rate_transport),
+            notify,
         );
 
         // The status poll loop stays host-side (not in the single-threaded VM):
@@ -467,6 +505,7 @@ impl LuaDevice {
         spec: Option<&DeviceSpec>,
         worker: Option<PluginHandle>,
         transport: Option<PluginIo>,
+        notify: Weak<crate::state::AppState>,
     ) -> Self {
         Self {
             id,
@@ -551,6 +590,7 @@ impl LuaDevice {
                 .as_ref()
                 .map(|c| c.accessories.clone())
                 .unwrap_or_default(),
+            notify,
         }
     }
 
@@ -576,9 +616,16 @@ impl LuaDevice {
     /// fan duty, sensor poll) otherwise only log the failure, so a broken plugin
     /// is invisible — this turns the first failure of an episode into one toast.
     async fn track<T>(&self, result: Result<T>) -> Result<T> {
+        let Some(app) = self.notify.upgrade() else {
+            return result;
+        };
         match &result {
-            Ok(_) => super::clear_runtime_error(&self.id),
-            Err(e) => super::report_runtime_error(&self.id, &self.name, format!("{e:#}")).await,
+            Ok(_) => app.registry.clear_runtime_error(&self.id),
+            Err(e) => {
+                app.registry
+                    .report_runtime_error(&app, &self.id, &self.name, format!("{e:#}"))
+                    .await
+            }
         }
         result
     }
@@ -930,6 +977,18 @@ impl LuaDevice {
             return Vec::new();
         };
         let handle = tokio::runtime::Handle::current();
+        let (granted, config) = match self.notify.upgrade() {
+            Some(app) => {
+                let granted = app.registry.granted_for(&root_manifest.plugin_id);
+                let config = app.registry.resolved_config_for(
+                    app.secret_store.as_ref(),
+                    &root_manifest.plugin_id,
+                    &granted,
+                );
+                (granted, config)
+            }
+            None => (Vec::new(), HashMap::new()),
+        };
 
         let mut out = Vec::new();
         for controller in detected {
@@ -968,6 +1027,9 @@ impl LuaDevice {
                     controller.index,
                     transport,
                     handle.clone(),
+                    granted.clone(),
+                    config.clone(),
+                    self.notify.clone(),
                 );
                 d.set_self_ref(weak.clone());
                 d
@@ -1462,6 +1524,7 @@ mod tests {
     /// Build a HID plugin device over a mock byte-stream transport.
     fn hid_device(id: &str, manifest: &PluginManifest, transport: Arc<dyn Transport>) -> LuaDevice {
         let spec = &manifest.devices[0];
+        let notify = Weak::new();
         LuaDevice::with_transport(
             id.into(),
             manifest,
@@ -1472,6 +1535,9 @@ mod tests {
                 bulk: None,
             },
             tokio::runtime::Handle::current(),
+            Vec::<Permission>::new(),
+            HashMap::new(),
+            notify,
         )
     }
 
@@ -1548,7 +1614,8 @@ mod tests {
             devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
         }"#;
         let manifest = super::super::parse_manifest(src, Path::new("bare.lua")).unwrap();
-        let dev = LuaDevice::device_only("d-0".into(), &manifest, &manifest.devices[0]);
+        let notify = Weak::new();
+        let dev = LuaDevice::device_only("d-0".into(), &manifest, &manifest.devices[0], notify);
         assert!(dev.capabilities().is_empty());
         // A device-type plugin reports its owner for scoped teardown, even
         // though it is not an integration (so `integration_id` stays `None`).
@@ -2049,6 +2116,7 @@ mod tests {
         use crate::drivers::chain::{ChainAdapter, ChainHost};
         let manifest = super::super::parse_manifest(CHAIN_SCRIPT, Path::new("kraken.lua")).unwrap();
         let spec = &manifest.devices[0];
+        let notify = Weak::new();
         let dev = Arc::new_cyclic(|weak| {
             let mut d = LuaDevice::with_transport(
                 "kraken-0".into(),
@@ -2060,6 +2128,9 @@ mod tests {
                     bulk: None,
                 },
                 tokio::runtime::Handle::current(),
+                Vec::<Permission>::new(),
+                HashMap::new(),
+                notify,
             );
             d.set_self_ref(weak.clone());
             d
@@ -2183,6 +2254,7 @@ mod tests {
                 bulk: None,
             })
         });
+        let notify = Weak::new();
         Arc::new_cyclic(|weak| {
             let mut d = LuaDevice::integration_root(
                 "integ-0".into(),
@@ -2193,6 +2265,9 @@ mod tests {
                 },
                 child_worker,
                 tokio::runtime::Handle::current(),
+                Vec::<Permission>::new(),
+                HashMap::new(),
+                notify,
             );
             d.set_self_ref(weak.clone());
             d
@@ -2392,6 +2467,7 @@ mod tests {
                 bulk: None,
             })
         });
+        let notify = Weak::new();
         Arc::new_cyclic(|weak| {
             let mut d = LuaDevice::integration_root(
                 "multi-0".into(),
@@ -2402,6 +2478,9 @@ mod tests {
                 },
                 child_worker,
                 tokio::runtime::Handle::current(),
+                Vec::<Permission>::new(),
+                HashMap::new(),
+                notify,
             );
             d.set_self_ref(weak.clone());
             d
@@ -2447,6 +2526,7 @@ mod tests {
                 bulk: None,
             })
         });
+        let notify = Weak::new();
         let dev = Arc::new_cyclic(|weak| {
             let mut d = LuaDevice::integration_root(
                 "multi-0".into(),
@@ -2457,6 +2537,9 @@ mod tests {
                 },
                 child_worker,
                 tokio::runtime::Handle::current(),
+                Vec::<Permission>::new(),
+                HashMap::new(),
+                notify,
             );
             d.set_self_ref(weak.clone());
             d
@@ -2478,20 +2561,11 @@ mod tests {
         assert_eq!(sensors[0].value, 42.0);
     }
 
-    // Holds the process-wide test lock across `.await` to serialize the shared
-    // notification sink against other plugin-device tests; nothing awaited here
-    // re-takes that lock, so it can't deadlock.
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn runtime_errors_surface_once_per_failure_episode() {
         use crate::config::Config;
         use crate::ipc::ClientHandle;
         use crate::state::AppState;
-
-        // The runtime-error sink and dedup set are process-wide globals.
-        let _guard = super::super::TEST_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
 
         // `apply` fails unless the requested colour is black — a per-call toggle
         // so one device can walk fail → fail → recover → fail.
@@ -2506,7 +2580,6 @@ mod tests {
             end,
         }"#;
         let manifest = super::super::parse_manifest(src, Path::new("err.lua")).unwrap();
-        let dev = hid_device("err-dev", &manifest, Arc::new(MockTransport::empty()));
 
         let app = Arc::new(AppState::new(Config::default()));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Arc<Vec<u8>>>(16);
@@ -2515,7 +2588,21 @@ mod tests {
             tx,
             subs: Arc::default(),
         });
-        super::super::set_notification_sink(&app);
+
+        let dev = LuaDevice::with_transport(
+            "err-dev".into(),
+            &manifest,
+            &manifest.devices[0],
+            hid_match(),
+            PluginIo::Stream {
+                transport: Arc::new(MockTransport::empty()),
+                bulk: None,
+            },
+            tokio::runtime::Handle::current(),
+            Vec::<Permission>::new(),
+            HashMap::new(),
+            Arc::downgrade(&app),
+        );
 
         let fail = || RgbState::Static {
             color: RgbColor { r: 1, g: 0, b: 0 },

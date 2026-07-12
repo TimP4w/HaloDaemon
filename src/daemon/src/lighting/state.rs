@@ -79,14 +79,19 @@ impl LightingState {
         let _ = self.engine.set(Engine { handle, cfg_tx });
     }
 
-    pub async fn snapshot(&self, cfg: &Config, placed_zones: Vec<PlacedZone>) -> WireLightingState {
+    pub async fn snapshot(
+        &self,
+        registry: &crate::drivers::plugins::Registry,
+        cfg: &Config,
+        placed_zones: Vec<PlacedZone>,
+    ) -> WireLightingState {
         let cs = cfg.effective_canvas_state();
         let custom_direct_effects = self.custom_effects.effects.read().await.clone();
 
         WireLightingState {
             canvas: CanvasState {
-                available_effects: RgbEngine::available_effect_descriptors(),
-                available_direct_effects: RgbEngine::direct_effect_descriptors(),
+                available_effects: RgbEngine::available_effect_descriptors(registry),
+                available_direct_effects: RgbEngine::direct_effect_descriptors(registry),
                 custom_direct_effects,
                 effects: cs.effects.clone(),
                 default_effect: cs.default_effect.clone(),
@@ -160,6 +165,7 @@ mod snapshot_tests {
 
     #[tokio::test]
     async fn snapshot_includes_placed_zones_from_devices() {
+        let app = Arc::new(crate::state::AppState::new(Config::default()));
         let state = LightingState::default();
         let cfg = Config::default();
         let zones = vec![PlacedZone {
@@ -174,7 +180,7 @@ mod snapshot_tests {
             sampling_mode: Default::default(),
         }];
 
-        let wire = state.snapshot(&cfg, zones).await;
+        let wire = state.snapshot(&app.registry, &cfg, zones).await;
 
         assert_eq!(wire.canvas.placed_zones.len(), 1);
         assert_eq!(wire.canvas.placed_zones[0].device_id, "rgb_dev");

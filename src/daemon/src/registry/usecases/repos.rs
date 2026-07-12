@@ -166,7 +166,7 @@ async fn compute_plugin_updates(
         .cloned()
         .collect();
 
-    let plugins = crate::drivers::plugins::list(&*app.secret_store);
+    let plugins = app.registry.list(&*app.secret_store);
     let mut out = Vec::new();
     let mut reached = Vec::new();
     for r in repos {
@@ -196,7 +196,7 @@ async fn compute_plugin_updates(
             .iter()
             .filter(|p| matches!(&p.source, PluginSource::Repo { slug } if *slug == r.slug))
         {
-            let Some((_, subpath)) = crate::drivers::plugins::repo_location_for(&p.id) else {
+            let Some((_, subpath)) = app.registry.repo_location_for(&p.id) else {
                 continue;
             };
             let result = {
@@ -210,7 +210,7 @@ async fn compute_plugin_updates(
             };
             match result {
                 Ok(Ok((remote_hash, remote_version))) => {
-                    let local_hash = crate::drivers::plugins::content_hash_for(&p.id);
+                    let local_hash = app.registry.content_hash_for(&p.id);
                     // Compare the checked-out baseline (not the live file) to the
                     // remote, so a local edit isn't mistaken for an update.
                     let index_hash = plugin_index_content(&dir, &subpath).await;
@@ -291,7 +291,9 @@ pub async fn update_plugin(plugin_id: String, app: Arc<AppState>) -> Result<()> 
 }
 
 async fn update_plugin_inner(plugin_id: String, app: &Arc<AppState>) -> Result<String> {
-    let (slug, subpath) = crate::drivers::plugins::repo_location_for(&plugin_id)
+    let (slug, subpath) = app
+        .registry
+        .repo_location_for(&plugin_id)
         .ok_or_else(|| anyhow::anyhow!("plugin '{plugin_id}' is not repo-sourced"))?;
     let branch = {
         let cfg = app.config.read().await;
@@ -400,7 +402,7 @@ async fn compute_on_disk_changes(
 ) -> Vec<halod_shared::types::PluginUpdateStatus> {
     use halod_shared::types::{PluginSource, PluginUpdateStatus};
     let repos = app.config.read().await.plugin_repos.clone();
-    let plugins = crate::drivers::plugins::list(&*app.secret_store);
+    let plugins = app.registry.list(&*app.secret_store);
     let mut out = Vec::new();
     for r in repos {
         let dir = crate::config::plugin_repos_dir().join(&r.slug);
@@ -408,11 +410,11 @@ async fn compute_on_disk_changes(
             .iter()
             .filter(|p| matches!(&p.source, PluginSource::Repo { slug } if *slug == r.slug))
         {
-            let Some((_, subpath)) = crate::drivers::plugins::repo_location_for(&p.id) else {
+            let Some((_, subpath)) = app.registry.repo_location_for(&p.id) else {
                 continue;
             };
             let index_hash = plugin_index_content(&dir, &subpath).await;
-            let local_hash = crate::drivers::plugins::content_hash_for(&p.id);
+            let local_hash = app.registry.content_hash_for(&p.id);
             let changed = match (&local_hash, &index_hash) {
                 (Some(local), Some(index)) => local != index,
                 _ => false,
@@ -447,13 +449,13 @@ pub async fn quarantine_changed_plugins(app: Arc<AppState>) {
                 cfg.plugins_disabled.push(s.plugin_id.clone());
             }
         }
-        crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
+        app.registry.set_disabled(&cfg.plugins_disabled);
     }
     app.request_config_save();
 
     for s in &statuses {
         // Suppress the ungranted notice so a permissioned plugin isn't double-alerted.
-        crate::drivers::plugins::suppress_permission_notice(&s.plugin_id);
+        app.registry.suppress_permission_notice(&s.plugin_id);
         log::warn!("plugin '{}' changed on disk — disabling it", s.plugin_id);
     }
 
@@ -517,7 +519,6 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::plugins::TEST_GLOBALS_LOCK;
 
     /// A `file://` URL for a local path — `add_repo`/`clone` now require an
     /// explicit scheme, so tests clone local source repos through one.
@@ -561,9 +562,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn add_repo_clones_and_makes_the_plugin_discoverable() {
-        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             // The plugin id inside must match the slug the clone dir is named after.
@@ -579,7 +578,7 @@ mod tests {
             assert_eq!(cfg.plugin_repos[0].slug, slug);
             drop(cfg);
 
-            let plugins = crate::drivers::plugins::list(&*app.secret_store);
+            let plugins = app.registry.list(&*app.secret_store);
             assert!(
                 plugins.iter().any(|p| p.id == slug),
                 "repo-sourced plugin should be discoverable after add_repo"
@@ -589,9 +588,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn check_repo_updates_reports_behind_after_a_new_upstream_commit() {
-        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -625,9 +622,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn touch_last_sync_advances_only_the_reached_repos() {
-        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -660,9 +655,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn update_repo_advances_locked_sha_and_invalidates_stale_consent() {
-        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -673,14 +666,15 @@ mod tests {
                 .unwrap();
 
             // Consent to the plugin as it stands right after add_repo.
-            let hash_before = crate::drivers::plugins::content_hash_for(&slug).unwrap();
+            let hash_before = app.registry.content_hash_for(&slug).unwrap();
             {
                 let mut cfg = app.config.write().await;
                 cfg.plugin_acknowledged
                     .insert(slug.clone(), hash_before.clone());
             }
-            crate::drivers::plugins::set_acknowledged(&app.config.read().await.plugin_acknowledged);
-            assert!(crate::drivers::plugins::content_hash_for(&slug).is_some());
+            app.registry
+                .set_acknowledged(&app.config.read().await.plugin_acknowledged);
+            assert!(app.registry.content_hash_for(&slug).is_some());
 
             // Advance the upstream repo with a content change.
             let repo = git2::Repository::open(src.path()).unwrap();
@@ -696,7 +690,7 @@ mod tests {
                 "locked_sha advances to the new tip"
             );
 
-            let hash_after = crate::drivers::plugins::content_hash_for(&slug).unwrap();
+            let hash_after = app.registry.content_hash_for(&slug).unwrap();
             assert_ne!(
                 hash_before, hash_after,
                 "content_hash must change once the script content changed"
@@ -711,9 +705,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn update_plugin_broadcasts_a_cleared_update_flag() {
-        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -765,9 +757,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn compute_plugin_updates_flags_a_local_edit_as_changed_not_an_update() {
-        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -798,9 +788,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn quarantine_disables_a_tampered_plugin_and_reenabling_accepts_it() {
-        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -851,9 +839,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn compute_on_disk_changes_detects_a_local_edit_without_a_remote() {
-        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -887,9 +873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn remove_repo_deletes_the_clone_dir_and_purges_plugin_state() {
-        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -902,7 +886,8 @@ mod tests {
                 let mut cfg = app.config.write().await;
                 cfg.plugins_disabled.push(slug.clone());
             }
-            crate::drivers::plugins::set_disabled(&app.config.read().await.plugins_disabled);
+            app.registry
+                .set_disabled(&app.config.read().await.plugins_disabled);
 
             let clone_dir = crate::config::plugin_repos_dir().join(&slug);
             assert!(clone_dir.exists());
@@ -917,7 +902,7 @@ mod tests {
                 "the removed plugin's disabled flag must be purged"
             );
             drop(cfg);
-            let plugins = crate::drivers::plugins::list(&*app.secret_store);
+            let plugins = app.registry.list(&*app.secret_store);
             assert!(!plugins.iter().any(|p| p.id == slug));
         })
         .await;
