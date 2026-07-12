@@ -348,15 +348,17 @@ async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
             .map(|d| d.id().to_owned())
             .collect()
     };
+    // Untrack the FULL torn-down set (parent + children): a plugin controller and
+    // its children share one HID key, and `untrack_devices` only prunes a key
+    // once every device it tracks is torn down. Passing only the owning parents
+    // would leave the key tracked, so the HID rescan skips it and the device
+    // never comes back on re-enable.
+    let mut torn_down: std::collections::HashSet<String> = std::collections::HashSet::new();
     for id in &owned_ids {
-        super::registration::unregister_device_and_children(app, id).await;
+        let removed = super::registration::unregister_device_and_children(app, id).await;
+        torn_down.extend(removed);
     }
-    // Prune HID tracking for the torn-down hardware. The full path clears all
-    // HID tracking (`rediscover_devices`); the scoped path must clear just these
-    // keys, or the HID rescan skips the still-tracked key and the device never
-    // comes back on re-enable/config-change.
-    let owned: std::collections::HashSet<String> = owned_ids.into_iter().collect();
-    app.hid.untrack_devices(&owned).await;
+    app.hid.untrack_devices(&torn_down).await;
 }
 
 /// Scoped teardown + reprobe for `plugins`: only devices owned by one of
@@ -545,6 +547,45 @@ mod tests {
             );
             assert!(app.find_device_by_id("P-dev").await.is_none());
             assert!(app.find_device_by_id("Q-dev").await.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn scoped_teardown_untracks_a_key_shared_by_a_parent_and_its_children() {
+        // Regression: a plugin controller and its children (e.g. NZXT Control Hub
+        // + fan cores) share one HID key. Only the parent carries the owning
+        // plugin id, but `untrack_devices` prunes a key only once EVERY device it
+        // tracks is torn down — so teardown must feed it the whole subtree, not
+        // just the owning parents, or the key survives and the re-probe skips the
+        // device.
+        use crate::registry::HidTrackingEntry;
+        use crate::test_support::MockDevice;
+        use std::sync::Arc;
+
+        crate::test_support::with_tmp_config(|app| async move {
+            let parent: Arc<dyn crate::drivers::Device> =
+                Arc::new(MockDevice::new("nzxt-abc").with_owning_plugin_id("nzxt"));
+            // Chain-accessory child: shares the parent key, no owning id of its own.
+            let child: Arc<dyn crate::drivers::Device> =
+                Arc::new(MockDevice::new("nzxt-abc_acc_0_1"));
+            app.devices.write().await.push(parent.clone());
+            app.devices.write().await.push(child.clone());
+            app.hid
+                .track(
+                    "1e71:2022:S".into(),
+                    HidTrackingEntry::Primary(vec![parent, child]),
+                )
+                .await;
+
+            teardown_owned_devices(&app, &["nzxt".to_string()]).await;
+
+            assert!(
+                app.hid.keys().await.is_empty(),
+                "the shared key must be untracked once the whole subtree is torn down"
+            );
+            assert!(app.find_device_by_id("nzxt-abc").await.is_none());
+            assert!(app.find_device_by_id("nzxt-abc_acc_0_1").await.is_none());
         })
         .await;
     }

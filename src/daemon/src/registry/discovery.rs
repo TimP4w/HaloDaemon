@@ -193,9 +193,7 @@ pub async fn discover_handle_replacing(
             .await;
         }
     }
-    // Register children too (chain accessories, controllers): the scoped-filter
-    // path bypasses the HID scanner's own child discovery.
-    crate::registry::usecases::registration::register_device_and_children(app, device).await;
+    crate::registry::usecases::registration::register_device(app, device).await;
 }
 
 /// Convenience: find the matching descriptor, construct, and register.
@@ -213,7 +211,7 @@ pub async fn discover_handle(app: &Arc<crate::state::AppState>, handle: Discover
         return;
     }
     if let Some(device) = app.registry.make_device(app, handle) {
-        crate::registry::usecases::registration::register_device_and_children(app, device).await;
+        crate::registry::usecases::registration::register_device(app, device).await;
     }
 }
 

@@ -516,34 +516,51 @@ async fn add_hid_device(
         usage,
         interface_number,
     };
-    // Scoped-plugin gate: when a discovery filter is active, only the changed
-    // plugins' hardware is reprobed, and an in-scope handle routes through the
-    // replacing path so a newly enabled plugin evicts the native device holding
-    // the same hardware. This deliberately bypasses the TransportSwitchable
-    // adoption below — a plugin HID device always registers as a new primary.
-    {
+    // Scoped-plugin gate: with a discovery filter active, only in-scope handles
+    // (the changed plugins' hardware) register. A scoped device otherwise goes
+    // through the same register → children → track flow as a normal one, so a
+    // re-enabled plugin gets its children and HID tracking too — only the
+    // native-eviction below and skipping the TransportSwitchable adoption are
+    // scoped-specific (a plugin HID device always registers as a new primary).
+    let scoped = {
         let filter = app.discovery_filter.read().await;
-        if let Some(f) = filter.as_ref() {
-            let in_scope = f.matches(&handle);
-            drop(filter);
-            if in_scope {
-                crate::registry::discovery::discover_handle_replacing(app, handle).await;
+        match filter.as_ref() {
+            Some(f) => {
+                if !f.matches(&handle) {
+                    return;
+                }
+                true
             }
-            return;
+            None => false,
         }
-    }
-    let Some(impl_) = app.registry.make_device(app, handle) else {
+    };
+
+    let Some(impl_) = app.registry.make_device(app, handle.clone()) else {
         return;
     };
     let serial_key = serial.filter(|s| !s.is_empty()).unwrap_or("").to_string();
     let key = hid_key(vid, pid, &serial_key);
 
-    if try_connect_direct(app, &impl_, path, pid, key.clone()).await {
+    if scoped {
+        // Evict a stale native device the plugin now shadows: its id differs, so
+        // dedup won't, and both would otherwise bind the same hardware.
+        if impl_.owning_plugin_id().is_some()
+            && crate::registry::discovery::has_native_match(&handle)
+        {
+            if let Some(native) = crate::registry::discovery::make_device_native_only(handle) {
+                let native_id = native.id().to_owned();
+                native.close().await;
+                crate::registry::usecases::registration::unregister_device_and_children(
+                    app, &native_id,
+                )
+                .await;
+            }
+        }
+    } else if try_connect_direct(app, &impl_, path, pid, key.clone()).await {
         return;
     }
 
-    // No transport switch — register as a new primary device via the centralised
-    // registration lifecycle.
+    // Register as a new primary device via the centralised registration lifecycle.
     let registered =
         crate::registry::usecases::registration::register_device(app, impl_.clone()).await;
     if !registered {
@@ -551,8 +568,7 @@ async fn add_hid_device(
     }
 
     if let Some(ctrl) = impl_.as_controller() {
-        let children = ctrl.discover_children().await;
-        for child in children {
+        for child in ctrl.discover_children().await {
             crate::registry::usecases::registration::register_device(app, child).await;
         }
     }

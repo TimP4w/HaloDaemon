@@ -190,8 +190,9 @@ fn is_registered_child(id: &str, root_id: &str) -> bool {
 
 /// The mirror of [`register_device_and_children`]: close and drop `root_id` plus
 /// every child registered alongside it (see [`is_registered_child`]). Used for a
-/// scoped reload of one integration or plugin.
-pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) {
+/// scoped reload of one integration or plugin. Returns the removed ids so the
+/// caller can prune their (shared) HID-tracking entry.
+pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) -> Vec<String> {
     let removed: Vec<Arc<dyn Device>> = {
         let mut devices = app.devices.write().await;
         let mut removed = Vec::new();
@@ -208,6 +209,7 @@ pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) 
     for device in &removed {
         device.close().await;
     }
+    removed.iter().map(|d| d.id().to_owned()).collect()
 }
 
 #[cfg(test)]
