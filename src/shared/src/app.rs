@@ -22,3 +22,10 @@ pub const GUI_PROCESS_NAME: &str = "halod-gui";
 /// the base name of the desktop entry / D-Bus well-known name it registers
 /// (`{APP_ID}.desktop`).
 pub const APP_ID: &str = "dev.timp4w.Halod";
+
+/// Main project repository URL (distinct from the plugins repo in
+/// `daemon::constants::OFFICIAL_PLUGIN_REPO_URL`).
+pub const REPO_URL: &str = "https://github.com/TimP4w/HaloDaemon";
+
+/// Author/developer credit shown in the GUI about/credits.
+pub const AUTHOR: &str = "TimP4w";

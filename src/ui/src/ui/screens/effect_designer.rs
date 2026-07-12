@@ -664,7 +664,10 @@ pub fn spawn_export(ctx: &egui::Context, def: &EffectDef) {
     std::thread::spawn(move || {
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name(format!("{name}.halofx.json"))
-            .add_filter("HaloDaemon effect", &["json"])
+            .add_filter(
+                format!("{} effect", halod_shared::app::APP_DISPLAY_NAME),
+                &["json"],
+            )
             .save_file()
         {
             let value = serde_json::json!({
@@ -687,7 +690,10 @@ pub fn spawn_import(ctx: &egui::Context, cmd: CommandTx) {
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("HaloDaemon effect", &["json"])
+            .add_filter(
+                format!("{} effect", halod_shared::app::APP_DISPLAY_NAME),
+                &["json"],
+            )
             .pick_file()
         else {
             return;

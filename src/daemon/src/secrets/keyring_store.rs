@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use super::SecretStore;
 
-const SERVICE: &str = "halod";
+const SERVICE: &str = halod_shared::app::APP_NAME;
 
 fn account(plugin_id: &str, key: &str) -> String {
     format!("{plugin_id}/{key}")

@@ -168,7 +168,9 @@ pub(super) fn resolve_icons(process_names: &[String]) -> std::collections::HashM
 
 fn icon_cache_dir() -> Option<PathBuf> {
     let base = std::env::var_os("TEMP").or_else(|| std::env::var_os("TMP"))?;
-    let dir = PathBuf::from(base).join("halod").join("icons");
+    let dir = PathBuf::from(base)
+        .join(halod_shared::app::APP_NAME)
+        .join("icons");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }

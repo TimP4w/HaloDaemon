@@ -46,21 +46,22 @@ fn sibling_path(current_exe: Option<&Path>, name: &str) -> Option<PathBuf> {
 /// next to the GUI, then `halod.exe` on `PATH`.
 #[cfg(windows)]
 fn daemon_start_attempts(current_exe: Option<&Path>) -> Vec<(String, Vec<String>)> {
+    let exe = format!("{}.exe", halod_shared::app::APP_NAME);
     let mut attempts = Vec::new();
-    if let Some(sibling) = sibling_path(current_exe, "halod.exe") {
+    if let Some(sibling) = sibling_path(current_exe, &exe) {
         attempts.push((sibling.to_string_lossy().into_owned(), vec![]));
     }
-    attempts.push(("halod.exe".to_string(), vec![]));
+    attempts.push((exe, vec![]));
     attempts
 }
 
 #[cfg(not(windows))]
 fn daemon_start_attempts(current_exe: Option<&Path>) -> Vec<(String, Vec<String>)> {
     let mut attempts = Vec::new();
-    if let Some(sibling) = sibling_path(current_exe, "halod") {
+    if let Some(sibling) = sibling_path(current_exe, halod_shared::app::APP_NAME) {
         attempts.push((sibling.to_string_lossy().into_owned(), vec![]));
     }
-    attempts.push(("halod".to_string(), vec![]));
+    attempts.push((halod_shared::app::APP_NAME.to_string(), vec![]));
     attempts
 }
 

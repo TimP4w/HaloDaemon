@@ -976,7 +976,7 @@ fn about_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
     ui.painter().text(
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
-        "HaloDaemon",
+        halod_shared::app::APP_DISPLAY_NAME,
         theme::body(12.5),
         theme::TEXT,
     );
@@ -1017,7 +1017,7 @@ fn third_party_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
     bottom_border(ui, rect);
 }
 
-const REPO_URL: &str = "https://github.com/TimP4w/HaloDaemon";
+const REPO_URL: &str = halod_shared::app::REPO_URL;
 
 fn repo_row(ui: &mut egui::Ui) {
     let rect = row_rect(ui);
@@ -1032,7 +1032,7 @@ fn repo_row(ui: &mut egui::Ui) {
     ui.painter().text(
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
-        "github.com/TimP4w/HaloDaemon",
+        REPO_URL.trim_start_matches("https://"),
         theme::body(10.5),
         if resp.hovered() {
             theme::CYAN
@@ -1133,7 +1133,7 @@ fn licenses_modal(ctx: &egui::Context, st: &mut SettingsUi) {
 fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
     modal_frame(ctx, &t!("settings.credits_title"), st, 420.0, 340.0, |ui| {
         ui.label(
-            egui::RichText::new("HaloDaemon")
+            egui::RichText::new(halod_shared::app::APP_DISPLAY_NAME)
                 .font(theme::bold(16.0))
                 .color(theme::TEXT),
         );
@@ -1144,9 +1144,13 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
         );
         ui.add_space(8.0);
         ui.label(
-            egui::RichText::new(format!("{} TimP4w", t!("settings.credits_developer")))
-                .font(theme::body(12.0))
-                .color(theme::TEXT_DIM),
+            egui::RichText::new(format!(
+                "{} {}",
+                t!("settings.credits_developer"),
+                halod_shared::app::AUTHOR
+            ))
+            .font(theme::body(12.0))
+            .color(theme::TEXT_DIM),
         );
         ui.label(
             egui::RichText::new(format!(
@@ -1157,10 +1161,10 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
             .color(theme::TEXT_DIM),
         );
         ui.hyperlink_to(
-            egui::RichText::new("https://github.com/TimP4w/HaloDaemon")
+            egui::RichText::new(REPO_URL)
                 .font(theme::body(12.0))
                 .color(theme::CYAN),
-            "https://github.com/TimP4w/HaloDaemon",
+            REPO_URL,
         );
         ui.add_space(16.0);
 
