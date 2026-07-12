@@ -46,13 +46,6 @@ HaloDaemon ships with support to the following devices by default. More devices 
 |--------|-------|---------|----------|-----------|----------|
 | Logitech | G560 Gaming Speaker | 046d:0a78 | [HID++ 1.0](protocols/hidpp1.md) | [HID](transports/hid.md) | 🐧🪟 |
 
-## Motherboard / RGB Controllers
-
-| Vendor | Model | VID:PID | Protocol | Transport | Platform |
-|--------|-------|---------|----------|-----------|----------|
-| ASUS | Aura USB controllers | 0b05:1866, 1867, 1872, 18a3, 18a5, 18f3, 1939, 19af, 1a30, 1a6c, 1aa6, 1b3b, 1bed | [ASUS Aura USB](protocols/asus-aura-usb.md) | [HID](transports/hid.md) | 🐧🪟 |
-
-
 ## Sensors
 
 | Source | VID:PID | Transport | Platform |
