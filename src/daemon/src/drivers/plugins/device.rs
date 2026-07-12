@@ -46,11 +46,11 @@ use crate::drivers::vendors::generic::devices::common::{
 };
 use halod_shared::types::ZoneTopology;
 
-/// Opens a fresh transport (its own connection) for one integration child.
-/// Injectable so tests can back it with a mock transport instead of a real
-/// socket. Each controller gets its own connection + worker (spawned by
-/// [`LuaDevice::integration_child`]), so writes to different controllers run in
-/// parallel rather than serializing behind one shared connection.
+/// Yields the transport one integration child drives its worker over. The `u32`
+/// is the controller index. Injectable so tests can back it with a mock
+/// transport instead of a real socket. Every controller shares the root's single
+/// connection, so their frame writes serialise behind one socket lock and stay
+/// in phase (see `integration_scan`).
 pub(super) type ChildWorkerFactory = Arc<dyn Fn(u32) -> Result<PluginIo> + Send + Sync>;
 
 /// The capability sections a manifest can declare. Stored as `caps` on the
@@ -903,11 +903,11 @@ impl LuaDevice {
 
     /// Integration path: one full `LuaDevice` per controller the plugin's
     /// `enumerate_controllers` reports. Each controller advertises its own
-    /// capabilities (synthesized into a child manifest) and gets its own worker
-    /// (connection + Lua VM), seeded with the controller index so the shared
-    /// script routes each call to the right remote controller — so writes to
-    /// different controllers run in parallel instead of serializing behind one
-    /// shared connection.
+    /// capabilities (synthesized into a child manifest) and gets its own Lua VM,
+    /// seeded with the controller index so the shared script routes each call to
+    /// the right remote controller. All children share the root's single
+    /// connection, so their frame writes serialise behind one socket lock and
+    /// sibling controllers stay in phase.
     async fn discover_controllers(&self) -> Vec<Arc<dyn Device>> {
         let Some(worker) = &self.worker else {
             return Vec::new();
@@ -2310,9 +2310,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integration_leaf_close_shuts_down_only_its_own_worker() {
-        // Each controller owns its own worker/connection, so closing one leaf
-        // must not disturb its siblings — this is what lets writes to different
-        // controllers run in parallel instead of sharing one serial worker.
+        // Each controller owns its own worker VM (they only share the root
+        // connection), so closing one leaf must not disturb its siblings.
         let dev = integration_device(Arc::new(MockTransport::empty()));
         let children = dev.as_controller().unwrap().discover_children().await;
 

@@ -89,15 +89,19 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
             None => anyhow::bail!("integration plugin: no 'tcp' transport backend registered"),
         });
 
-    // Open a small pool of connections so writes to different controllers can
-    // flow in parallel without overwhelming the server (one-per-controller
-    // crashes some SDK servers — e.g. OpenRGB).  Round-robin controllers across
-    // the pool by index.
-    const POOL_SIZE: u32 = 4;
-    let mut pool: Vec<Arc<dyn Transport>> = Vec::with_capacity(POOL_SIZE as usize);
-    // Reuse the root's connection as pool[0].
-    let root_open = open_transport.clone();
-    let transport: PluginIo = match tokio::task::spawn_blocking(move || root_open()).await {
+    // Drive every controller over the *one* root connection: a slot-shared
+    // `Transport` serialises each controller's frame write behind the same
+    // socket lock, so sibling controllers (e.g. the sticks of a DRAM kit) land
+    // in the server's per-controller queues back-to-back and stay in phase
+    // instead of drifting across independent connections. One connection is
+    // also the safe case for servers that crash when a client opens one socket
+    // per controller (e.g. OpenRGB).
+    let transport: PluginIo = match tokio::task::spawn_blocking({
+        let root_open = open_transport.clone();
+        move || root_open()
+    })
+    .await
+    {
         Ok(Ok(t)) => t,
         Ok(Err(e)) => {
             log::warn!(
@@ -114,7 +118,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
             return;
         }
     };
-    let first: Arc<dyn Transport> = match &transport {
+    let shared: Arc<dyn Transport> = match &transport {
         PluginIo::Stream { transport, .. } => transport.clone(),
         _ => {
             log::error!(
@@ -124,45 +128,13 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
             return;
         }
     };
-    pool.push(first.clone());
 
-    // Open remaining pool connections with a small stagger to avoid racing the
-    // server's accept loop.
-    for slot in 1..POOL_SIZE {
-        let open = open_transport.clone();
-        match tokio::task::spawn_blocking(move || open()).await {
-            Ok(Ok(PluginIo::Stream { transport, .. })) => {
-                log::info!(
-                    "integration '{}': pool slot {}/{} connected",
-                    manifest.plugin_id,
-                    slot,
-                    POOL_SIZE
-                );
-                pool.push(transport);
-            }
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => log::warn!(
-                "integration plugin '{}' pool connect failed: {e:#}",
-                manifest.plugin_id
-            ),
-            Err(e) => log::warn!(
-                "integration plugin '{}' pool connect task panicked: {e}",
-                manifest.plugin_id
-            ),
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-
-    let child_worker: ChildWorkerFactory = {
-        let pool = Arc::new(pool);
-        Arc::new(move |index| {
-            let slot = &pool[(index % pool.len() as u32) as usize];
-            Ok(PluginIo::Stream {
-                transport: slot.clone(),
-                bulk: None,
-            })
+    let child_worker: ChildWorkerFactory = Arc::new(move |_index| {
+        Ok(PluginIo::Stream {
+            transport: shared.clone(),
+            bulk: None,
         })
-    };
+    });
 
     let device = Arc::new_cyclic(move |weak| {
         let mut dev = LuaDevice::integration_root(id, &manifest, transport, child_worker, runtime);
