@@ -139,6 +139,15 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                 theme::mono(12.5),
                 theme::TEXT_MUT,
             );
+            if connected && state.discovery.checking_updates {
+                p.text(
+                    Pos2::new(center.x, title_y + 44.0),
+                    Align2::CENTER_CENTER,
+                    t!("misc.radar_checking_updates").to_string(),
+                    theme::mono(11.5),
+                    a(theme::CYAN, 0.7),
+                );
+            }
 
             if connected && complete {
                 dismissed = true;

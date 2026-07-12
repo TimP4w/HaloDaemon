@@ -168,6 +168,15 @@ impl App {
             return;
         }
 
+        // After the radar gate (which returns before toasts.show) so it renders.
+        let quarantine = crate::ui::screens::plugins::quarantine_toasts(
+            &state.plugins.plugins,
+            &self.plugin_updates_cache,
+            &mut self.quarantine_toasted,
+            (time * 1000.0) as u64,
+        );
+        self.toasts.ingest(quarantine, time);
+
         // Prevent desktop bleed-through under transparent panels.
         let screen = ui.max_rect();
         ctx.layer_painter(egui::LayerId::background()).rect_filled(
@@ -253,8 +262,32 @@ impl App {
                     },
                     crate::ui::theme::SIDEBAR_BG,
                 );
-                crate::ui::shell::sidebar(ui, &state, connected, &mut self.page);
+                crate::ui::shell::sidebar(
+                    ui,
+                    &state,
+                    connected,
+                    &mut self.page,
+                    &self.plugin_updates_cache,
+                );
             });
+
+        if crate::ui::screens::download_consent::should_prompt(
+            &state,
+            connected,
+            self.consent_prompt_deferred,
+        ) {
+            use crate::ui::screens::download_consent::Decision;
+            match crate::ui::screens::download_consent::prompt(ctx, &self.cmd) {
+                Decision::Allow => {
+                    domain::actions::system::set_plugin_download_consent(&self.cmd, true)
+                }
+                Decision::Deny => {
+                    domain::actions::system::set_plugin_download_consent(&self.cmd, false)
+                }
+                Decision::Defer => self.consent_prompt_deferred = true,
+                Decision::Pending => {}
+            }
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)

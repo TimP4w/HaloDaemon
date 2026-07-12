@@ -347,6 +347,9 @@ async fn dispatch(
             )
             .await
         }
+        DaemonCommand::SetPluginDownloadConsent { allowed } => {
+            registry::usecases::settings::set_plugin_download_consent(allowed, app).await
+        }
         DaemonCommand::MarkTourSeen { tour } => {
             registry::usecases::settings::mark_tour_seen(tour, app).await
         }

@@ -17,6 +17,14 @@ use crate::state::AppState;
 /// docs; call [`apply_pending_changes`] to hand the device to/from its
 /// native driver.
 pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
+    if enabled {
+        // Re-enabling a plugin accepts its current on-disk content as the new
+        // baseline (stage it into the index), so a plugin that was quarantined
+        // for a local edit — or that the user is intentionally editing — isn't
+        // re-disabled on the next startup tamper check. No-op for a pristine or
+        // non-repo plugin.
+        accept_on_disk_content(&id).await;
+    }
     {
         let mut cfg = app.config.write().await;
         cfg.plugins_disabled.retain(|x| x != &id);
@@ -28,6 +36,24 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
     app.request_config_save();
     mark_pending_and_broadcast(&app).await;
     Ok(())
+}
+
+/// Stage a repo plugin's working-tree files into its git index, making the
+/// tamper-check baseline match what's on disk. Local, best-effort: a failure
+/// (or a non-repo plugin) is logged and ignored.
+async fn accept_on_disk_content(id: &str) {
+    let Some((slug, subpath)) = crate::drivers::plugins::repo_location_for(id) else {
+        return;
+    };
+    let dir = crate::config::plugin_repos_dir().join(&slug);
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        crate::drivers::plugins::repo::stage_subtree(&dir, &subpath)
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("stage task panicked: {e}")))
+    {
+        log::warn!("accepting on-disk content for plugin '{id}': {e:#}");
+    }
 }
 
 /// Replace the set of permissions granted to a plugin and persist the choice.

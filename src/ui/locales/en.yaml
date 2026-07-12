@@ -32,6 +32,9 @@ notify:
   plugin_needs_permission:
     title: Plugin needs permission
     message: "%{plugin} requires permissions you haven't granted yet. Open the Plugins screen to review and grant or remove it."
+  plugin_content_changed:
+    title: Plugin changed on disk
+    message: "%{plugin}'s files changed on disk, so it was disabled for safety. Open the Plugins screen to review and re-enable it."
 
 tray:
   open: Open HaloDaemon

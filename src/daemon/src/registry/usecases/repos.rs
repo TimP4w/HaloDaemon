@@ -134,6 +134,16 @@ async fn compute_repo_updates(app: &Arc<AppState>) -> Vec<RepoUpdateStatus> {
     out
 }
 
+/// A plugin's checked-out baseline hash from the repo's git index; `None` if unread.
+async fn plugin_index_content(dir: &std::path::Path, subpath: &std::path::Path) -> Option<String> {
+    let dir = dir.to_path_buf();
+    let subpath = subpath.to_path_buf();
+    match tokio::task::spawn_blocking(move || repo::index_plugin_content(&dir, &subpath)).await {
+        Ok(Ok(hash)) => Some(hash),
+        _ => None,
+    }
+}
+
 /// Every repo-sourced plugin (optionally scoped to one repo `slug`), each
 /// compared against its repo's *freshly fetched* remote tip via a
 /// content-hash read straight out of git's object database — no checkout.
@@ -189,20 +199,34 @@ async fn compute_plugin_updates(
             let Some((_, subpath)) = crate::drivers::plugins::repo_location_for(&p.id) else {
                 continue;
             };
-            let dir = dir.clone();
-            let sha = remote_sha.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                repo::remote_plugin_content(&dir, &sha, &subpath)
-            })
-            .await;
+            let result = {
+                let dir = dir.clone();
+                let sha = remote_sha.clone();
+                let subpath = subpath.clone();
+                tokio::task::spawn_blocking(move || {
+                    repo::remote_plugin_content(&dir, &sha, &subpath)
+                })
+                .await
+            };
             match result {
                 Ok(Ok((remote_hash, remote_version))) => {
                     let local_hash = crate::drivers::plugins::content_hash_for(&p.id);
-                    let update_available = local_hash.as_deref() != Some(remote_hash.as_str());
+                    // Compare the checked-out baseline (not the live file) to the
+                    // remote, so a local edit isn't mistaken for an update.
+                    let index_hash = plugin_index_content(&dir, &subpath).await;
+                    let update_available = match &index_hash {
+                        Some(ih) => *ih != remote_hash,
+                        None => local_hash.as_deref() != Some(remote_hash.as_str()),
+                    };
+                    let on_disk_changed = match (&local_hash, &index_hash) {
+                        (Some(local), Some(index)) => local != index,
+                        _ => false,
+                    };
                     out.push(PluginUpdateStatus {
                         plugin_id: p.id.clone(),
                         slug: r.slug.clone(),
                         update_available,
+                        on_disk_changed,
                         current_version: p.version.clone(),
                         available_version: remote_version,
                     });
@@ -246,6 +270,7 @@ pub async fn check_plugin_updates(
     // A check contacts the remote, so it counts as a sync — stamp the reached
     // repos even when nothing was behind, so "LAST SYNC" isn't stuck at "never".
     touch_last_sync(&app, &reached).await;
+    *app.plugin_update_status.lock().await = statuses.clone();
     client.send_json(&json!({
         "type": "plugin_updates",
         "plugins": statuses,
@@ -316,14 +341,18 @@ async fn update_plugin_inner(plugin_id: String, app: &Arc<AppState>) -> Result<S
 async fn broadcast_plugin_updates(app: &Arc<AppState>, slug_filter: Option<&str>) {
     let (statuses, reached) = compute_plugin_updates(app, slug_filter).await;
     touch_last_sync(app, &reached).await;
-    crate::ipc::broadcast_json(
-        app,
-        &json!({
-            "type": "plugin_updates",
-            "plugins": statuses,
-        }),
-    )
-    .await;
+    publish_plugin_updates(app, statuses).await;
+}
+
+/// Cache the latest plugin-update status (so a client that connects later gets
+/// it, via `ipc::plugin_updates_frame`) and broadcast it now.
+pub(crate) async fn publish_plugin_updates(
+    app: &Arc<AppState>,
+    statuses: Vec<halod_shared::types::PluginUpdateStatus>,
+) {
+    let frame = json!({ "type": "plugin_updates", "plugins": statuses });
+    *app.plugin_update_status.lock().await = statuses;
+    crate::ipc::broadcast_json(app, &frame).await;
 }
 
 /// Update every plugin currently flagged as having an update available, across every repo.
@@ -336,6 +365,100 @@ pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
     }
     broadcast_plugin_updates(&app, None).await;
     Ok(())
+}
+
+/// Background/startup update check: compute repo- and plugin-level update
+/// status and broadcast both to every connected client (no requesting client).
+/// Errors are logged per-repo inside the compute helpers, so this never fails.
+pub async fn check_updates_broadcast(app: Arc<AppState>) {
+    let repo_statuses = compute_repo_updates(&app).await;
+    let reached: Vec<String> = repo_statuses.iter().map(|s| s.slug.clone()).collect();
+    crate::ipc::broadcast_json(
+        &app,
+        &json!({
+            "type": "plugin_repo_updates",
+            "repos": repo_statuses,
+        }),
+    )
+    .await;
+    touch_last_sync(&app, &reached).await;
+
+    let (mut statuses, plugin_reached) = compute_plugin_updates(&app, None).await;
+    // Re-add on-disk flags for repos whose remote fetch failed (skipped above).
+    for od in compute_on_disk_changes(&app).await {
+        if !statuses.iter().any(|s| s.plugin_id == od.plugin_id) {
+            statuses.push(od);
+        }
+    }
+    touch_last_sync(&app, &plugin_reached).await;
+    publish_plugin_updates(&app, statuses).await;
+}
+
+/// Every repo plugin whose on-disk content differs from its git-index baseline.
+async fn compute_on_disk_changes(
+    app: &Arc<AppState>,
+) -> Vec<halod_shared::types::PluginUpdateStatus> {
+    use halod_shared::types::{PluginSource, PluginUpdateStatus};
+    let repos = app.config.read().await.plugin_repos.clone();
+    let plugins = crate::drivers::plugins::list(&*app.secret_store);
+    let mut out = Vec::new();
+    for r in repos {
+        let dir = crate::config::plugin_repos_dir().join(&r.slug);
+        for p in plugins
+            .iter()
+            .filter(|p| matches!(&p.source, PluginSource::Repo { slug } if *slug == r.slug))
+        {
+            let Some((_, subpath)) = crate::drivers::plugins::repo_location_for(&p.id) else {
+                continue;
+            };
+            let index_hash = plugin_index_content(&dir, &subpath).await;
+            let local_hash = crate::drivers::plugins::content_hash_for(&p.id);
+            let changed = match (&local_hash, &index_hash) {
+                (Some(local), Some(index)) => local != index,
+                _ => false,
+            };
+            if changed {
+                out.push(PluginUpdateStatus {
+                    plugin_id: p.id.clone(),
+                    slug: r.slug.clone(),
+                    update_available: false,
+                    on_disk_changed: true,
+                    current_version: p.version.clone(),
+                    available_version: String::new(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Disable every plugin changed on disk since checkout, before discovery, so a
+/// tampered plugin never activates. Re-enabling accepts the content.
+pub async fn quarantine_changed_plugins(app: Arc<AppState>) {
+    let statuses = compute_on_disk_changes(&app).await;
+    if statuses.is_empty() {
+        return;
+    }
+
+    {
+        let mut cfg = app.config.write().await;
+        for s in &statuses {
+            if !cfg.plugins_disabled.iter().any(|x| x == &s.plugin_id) {
+                cfg.plugins_disabled.push(s.plugin_id.clone());
+            }
+        }
+        crate::drivers::plugins::set_disabled(&cfg.plugins_disabled);
+    }
+    app.request_config_save();
+
+    for s in &statuses {
+        // Suppress the ungranted notice so a permissioned plugin isn't double-alerted.
+        crate::drivers::plugins::suppress_permission_notice(&s.plugin_id);
+        log::warn!("plugin '{}' changed on disk — disabling it", s.plugin_id);
+    }
+
+    publish_plugin_updates(&app, statuses).await;
+    crate::ipc::broadcast_state(&app).await;
 }
 
 /// Check every registered repo for updates and reply to the requesting client with a `plugin_repo_updates` frame.
@@ -631,6 +754,128 @@ mod tests {
                 Some(false),
                 "update_plugin must broadcast a plugin_updates frame clearing the flag"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn compute_plugin_updates_flags_a_local_edit_as_changed_not_an_update() {
+        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            init_source_repo(src.path(), &slug);
+            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+                .await
+                .unwrap();
+
+            // No upstream change, but the checked-out working-tree file is edited.
+            let clone_main = crate::config::plugin_repos_dir()
+                .join(&slug)
+                .join("main.lua");
+            std::fs::write(&clone_main, "return { hacked = true }").unwrap();
+            reload_registry(&app).await;
+
+            let (statuses, _) = compute_plugin_updates(&app, Some(&slug)).await;
+            let s = statuses.iter().find(|s| s.plugin_id == slug).unwrap();
+            assert!(
+                s.on_disk_changed,
+                "a local edit to the checked-out file must be flagged as changed on disk"
+            );
+            assert!(
+                !s.update_available,
+                "a local edit with no upstream change is not an available update"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn quarantine_disables_a_tampered_plugin_and_reenabling_accepts_it() {
+        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            init_source_repo(src.path(), &slug);
+            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+                .await
+                .unwrap();
+
+            // Tamper with the checked-out file, then reload so the manifest hash
+            // reflects the edit.
+            let clone_main = crate::config::plugin_repos_dir()
+                .join(&slug)
+                .join("main.lua");
+            std::fs::write(&clone_main, "return { hacked = true }").unwrap();
+            reload_registry(&app).await;
+
+            quarantine_changed_plugins(app.clone()).await;
+            assert!(
+                app.config
+                    .read()
+                    .await
+                    .plugins_disabled
+                    .iter()
+                    .any(|x| x == &slug),
+                "a plugin changed on disk must be disabled"
+            );
+
+            // Re-enabling accepts the current content as the new baseline, so it
+            // is no longer flagged (and would not be re-quarantined).
+            crate::registry::usecases::plugins::set_enabled(slug.clone(), true, app.clone())
+                .await
+                .unwrap();
+            assert!(
+                compute_on_disk_changes(&app).await.is_empty(),
+                "re-enabling must accept the on-disk content as the new baseline"
+            );
+            assert!(
+                !app.config
+                    .read()
+                    .await
+                    .plugins_disabled
+                    .iter()
+                    .any(|x| x == &slug),
+                "re-enabling clears the disabled flag"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn compute_on_disk_changes_detects_a_local_edit_without_a_remote() {
+        let _guard = TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&src.path().to_string_lossy());
+            init_source_repo(src.path(), &slug);
+            add_repo(src.path().to_string_lossy().into_owned(), None, app.clone())
+                .await
+                .unwrap();
+
+            // Nothing changed on disk yet.
+            assert!(
+                compute_on_disk_changes(&app).await.is_empty(),
+                "a pristine checkout reports no on-disk changes"
+            );
+
+            // Edit the checked-out file, then drop the upstream so no network is
+            // reachable — the local check must still flag the change.
+            let clone_main = crate::config::plugin_repos_dir()
+                .join(&slug)
+                .join("main.lua");
+            std::fs::write(&clone_main, "return { hacked = true }").unwrap();
+            reload_registry(&app).await;
+            drop(src);
+
+            let changed = compute_on_disk_changes(&app).await;
+            assert_eq!(changed.len(), 1);
+            assert_eq!(changed[0].plugin_id, slug);
+            assert!(changed[0].on_disk_changed);
+            assert!(!changed[0].update_available);
         })
         .await;
     }

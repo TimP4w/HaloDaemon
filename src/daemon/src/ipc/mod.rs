@@ -405,6 +405,14 @@ where
     let state_msg = build_state_msg(&app).await;
     handle.send_json(&state_msg);
 
+    let plugin_updates = app.plugin_update_status.lock().await.clone();
+    if !plugin_updates.is_empty() {
+        handle.send_json(&serde_json::json!({
+            "type": "plugin_updates",
+            "plugins": plugin_updates,
+        }));
+    }
+
     {
         let mut clients = app.clients.lock().await;
         clients.push(handle.clone());

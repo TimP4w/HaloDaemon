@@ -116,6 +116,7 @@ fn page_body(
             close_to_tray_row(ui, state, cmd);
             window_controls_row(ui, state, cmd);
             dependency_warning_row(ui, state, cmd);
+            plugin_downloads_row(ui, state, cmd);
             replay_tutorials_row(ui, cmd);
         });
     });
@@ -336,6 +337,21 @@ fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             state.gui.suppress_dependency_warning,
             state.gui.hide_window_controls,
         );
+    }
+    bottom_border(ui, rect);
+}
+
+fn plugin_downloads_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+    let rect = row_rect(ui);
+    row_label(
+        ui,
+        rect,
+        &t!("settings.plugin_downloads_title"),
+        &t!("settings.plugin_downloads_sub"),
+    );
+    let on = state.gui.plugin_downloads == halod_shared::types::PluginDownloadConsent::Allowed;
+    if row_toggle(ui, rect, on, "plugin_downloads") {
+        crate::domain::actions::system::set_plugin_download_consent(cmd, !on);
     }
     bottom_border(ui, rect);
 }

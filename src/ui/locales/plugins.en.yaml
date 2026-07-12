@@ -35,6 +35,8 @@ plugins:
   update_all: Update all
   updating: Updating…
   update_available: Update available
+  modified_on_disk: Disabled — modified on disk
+  modified_on_disk_sub: This plugin's files changed since they were installed, so it was disabled for safety. Re-enable it to accept the change.
   # Pending changes banner
   pending_changes: You have unapplied plugin changes. Apply them to hand devices to or from their plugin.
   apply_changes: Apply changes
@@ -76,9 +78,16 @@ plugins:
   consent_body: "%{name} needs the following to run."
   consent_warning: Permissions are granted as a package. You can revoke them anytime — which disables the plugin.
   consent_modified: This plugin's script changed since you last allowed it — review the permissions again.
+  consent_permission_added: An update to this plugin added a new permission that must be granted before it can run again. Review what it now requires below.
   consent_grant_enable: Grant & enable
   consent_cancel: Cancel
   consent_deny: Not now
+  # First-run consent to contact GitHub for official plugins and updates
+  download_consent_title: Download official plugins?
+  download_consent_body: HaloDaemon can download official plugins from GitHub and check for updates on startup. Nothing is downloaded until you allow it.
+  download_consent_note: You can change this anytime in Settings. Plugins you add yourself are unaffected.
+  download_consent_allow: Allow
+  download_consent_deny: Don't allow
   # Add dialog
   add_title: Add a plugin
   add_sub: Install a plugin package — a folder containing plugin.yaml and its entry script.

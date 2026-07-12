@@ -154,6 +154,65 @@ pub fn remote_plugin_content(
     Ok((hash, meta.version.unwrap_or_default()))
 }
 
+/// A plugin package's content hash from the git *index* (what the working tree
+/// was last checked out from / staged as), mirroring [`remote_plugin_content`]'s
+/// hashing. The index tracks checked-out content per-path exactly — even across
+/// partial per-plugin checkouts — so comparing it to the on-disk content
+/// detects a manual working-tree edit, and comparing it to the remote tip
+/// detects a real upstream update. `locked_sha` is *not* a safe per-plugin
+/// baseline (a per-plugin update advances it repo-wide), so the index is used.
+pub fn index_plugin_content(repo_dir: &Path, subpath: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let index = repo.index().context("reading index")?;
+    let read = |rel: &Path| -> Result<Vec<u8>> {
+        let entry = index
+            .get_path(rel, 0)
+            .ok_or_else(|| anyhow!("{} not staged in index", rel.display()))?;
+        let blob = repo
+            .find_blob(entry.id)
+            .with_context(|| format!("reading {} blob from index", rel.display()))?;
+        Ok(blob.content().to_vec())
+    };
+
+    let yaml_path = subpath.join("plugin.yaml");
+    let yaml_bytes = read(&yaml_path)?;
+    let meta: MetaEntryVersion = serde_yaml::from_slice(&yaml_bytes)
+        .with_context(|| format!("parsing {}", yaml_path.display()))?;
+    let entry = meta.entry.as_deref().unwrap_or("main.lua");
+    let entry_bytes = read(&subpath.join(entry))?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&yaml_bytes);
+    hasher.update(&entry_bytes);
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Stage `subpath`'s current working-tree content into the index, making the
+/// on-disk-change baseline ([`index_plugin_content`]) match the live files —
+/// i.e. accept a local edit as the new baseline so it stops being flagged as
+/// modified. Does not commit.
+pub fn stage_subtree(repo_dir: &Path, subpath: &Path) -> Result<()> {
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let mut index = repo.index().context("reading index")?;
+    let pathspec = if subpath.as_os_str().is_empty() {
+        std::path::PathBuf::from("*")
+    } else {
+        subpath.to_path_buf()
+    };
+    index
+        .add_all([pathspec].iter(), git2::IndexAddOption::DEFAULT, None)
+        .with_context(|| format!("staging '{}'", subpath.display()))?;
+    index.write().context("writing index")
+}
+
 /// Check out only `subpath` (one plugin's files) from `sha` into the working
 /// tree, leaving every other path untouched — a per-plugin update, as opposed
 /// to [`checkout_sha`]'s whole-repo reset. `subpath` empty checks out the

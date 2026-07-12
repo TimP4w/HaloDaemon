@@ -323,6 +323,18 @@ impl Default for LcdConfig {
     }
 }
 
+/// Whether the daemon may contact GitHub to download official plugins and
+/// check for updates automatically. `Unset` until the user is first asked, so
+/// the GUI knows to show the first-run consent prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginDownloadConsent {
+    #[default]
+    Unset,
+    Allowed,
+    Denied,
+}
+
 /// GUI-facing preferences and daemon log level, sent as `AppState.gui` and
 /// persisted on the daemon under `config.yaml`'s `gui` key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -339,6 +351,7 @@ pub struct GuiConfig {
     /// user has completed or skipped.
     pub seen_tours: BTreeSet<String>,
     pub log_level: String,
+    pub plugin_downloads: PluginDownloadConsent,
 }
 
 impl Default for GuiConfig {
@@ -350,6 +363,7 @@ impl Default for GuiConfig {
             hide_window_controls: DEFAULT_HIDE_WINDOW_CONTROLS,
             seen_tours: BTreeSet::new(),
             log_level: DEFAULT_LOG_LEVEL.to_string(),
+            plugin_downloads: PluginDownloadConsent::Unset,
         }
     }
 }
@@ -409,6 +423,13 @@ pub enum NotificationCode {
     PluginNeedsPermission {
         plugin: String,
     },
+    /// A plugin's on-disk content hash changed since it was last acknowledged,
+    /// without going through the update flow (e.g. a manual edit). Emitted for
+    /// plugins that declare no permissions, so the change is still surfaced —
+    /// permission-declaring plugins are covered by `PluginNeedsPermission`.
+    PluginContentChanged {
+        plugin: String,
+    },
     /// A generic error surfaced as free text (e.g. a failed command's error).
     /// The GUI translates only the title and shows `message` verbatim.
     Generic {
@@ -428,7 +449,8 @@ impl NotificationCode {
             | WirelessReinitFailed { .. }
             | DeviceReconnectFailed { .. }
             | FanStalled { .. }
-            | PluginNeedsPermission { .. } => NotificationSeverity::Warning,
+            | PluginNeedsPermission { .. }
+            | PluginContentChanged { .. } => NotificationSeverity::Warning,
             ProfileSwitched { .. } => NotificationSeverity::Info,
         }
     }
@@ -559,7 +581,15 @@ pub struct RepoUpdateStatus {
 pub struct PluginUpdateStatus {
     pub plugin_id: String,
     pub slug: String,
+    /// The repo's checked-out (`locked_sha`) content differs from the remote
+    /// tip — a genuine upstream update the user can pull.
     pub update_available: bool,
+    /// The on-disk content differs from what the repo checked out — a local
+    /// edit (or tampering), not an upstream change. Distinct from
+    /// `update_available` so the GUI can say "modified on disk" rather than
+    /// "update available".
+    #[serde(default)]
+    pub on_disk_changed: bool,
     pub current_version: String,
     pub available_version: String,
 }
@@ -821,6 +851,11 @@ pub struct DiscoveryStatus {
     /// can show live progress. Empty when idle or complete.
     #[serde(default)]
     pub detail: String,
+    /// True while a background plugin-update check is in flight, so the radar
+    /// can show a "checking for updates" step. Independent of `phase`: it may
+    /// still be true after device discovery completes.
+    #[serde(default)]
+    pub checking_updates: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -2260,6 +2295,29 @@ mod default_tests {
         assert!(
             !c.suppress_dependency_warning,
             "default_suppress_dependency_warning"
+        );
+    }
+
+    #[test]
+    fn gui_config_defaults_plugin_downloads_to_unset_when_omitted() {
+        let c: GuiConfig = serde_json::from_str(r#"{"language":"en","log_level":"info"}"#).unwrap();
+        assert_eq!(c.plugin_downloads, PluginDownloadConsent::Unset);
+    }
+
+    #[test]
+    fn plugin_download_consent_round_trips() {
+        for v in [
+            PluginDownloadConsent::Unset,
+            PluginDownloadConsent::Allowed,
+            PluginDownloadConsent::Denied,
+        ] {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: PluginDownloadConsent = serde_json::from_str(&json).unwrap();
+            assert_eq!(v, back);
+        }
+        assert_eq!(
+            serde_json::to_string(&PluginDownloadConsent::Allowed).unwrap(),
+            "\"allowed\""
         );
     }
 

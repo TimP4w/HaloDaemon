@@ -306,11 +306,6 @@ impl PluginsUi {
                         .color(theme::TEXT_MUT),
                 );
             } else {
-                let updating: HashSet<&str> = plugin_updates
-                    .iter()
-                    .filter(|s| s.update_available)
-                    .map(|s| s.plugin_id.as_str())
-                    .collect();
                 egui::ScrollArea::vertical()
                     .max_height(360.0)
                     .auto_shrink([false, false])
@@ -318,7 +313,12 @@ impl PluginsUi {
                         ui.spacing_mut().item_spacing.y = 3.0;
                         for p in &state.plugins.plugins {
                             let selected = self.selection == Selection::Plugin(p.id.clone());
-                            let has_update = updating.contains(p.id.as_str());
+                            // An on-disk change only flags the row while the
+                            // plugin is held disabled; re-enabling accepts it.
+                            let has_update = plugin_updates.iter().any(|s| {
+                                s.plugin_id == p.id
+                                    && (s.update_available || (s.on_disk_changed && !p.enabled))
+                            });
                             let logo_tex = p
                                 .logo
                                 .as_deref()
@@ -775,13 +775,24 @@ impl PluginsUi {
                         .font(theme::body(12.5))
                         .color(theme::TEXT_DIM),
                 );
-                if p.content_changed {
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(t!("plugins.consent_modified"))
-                            .font(theme::body(11.5))
-                            .color(theme::STAT_AMBER),
-                    );
+                match consent_reason(p) {
+                    ConsentReason::PermissionAdded => {
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(t!("plugins.consent_permission_added"))
+                                .font(theme::body(11.5))
+                                .color(theme::STAT_AMBER),
+                        );
+                    }
+                    ConsentReason::ContentChanged => {
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(t!("plugins.consent_modified"))
+                                .font(theme::body(11.5))
+                                .color(theme::STAT_AMBER),
+                        );
+                    }
+                    ConsentReason::New => {}
                 }
                 ui.add_space(12.0);
                 for perm in &p.declared_permissions {
@@ -1051,7 +1062,7 @@ fn clear_finished_updates(
     let still_due = |id: &str| {
         plugin_updates
             .iter()
-            .any(|s| s.plugin_id == id && s.update_available)
+            .any(|s| s.plugin_id == id && (s.update_available || s.on_disk_changed))
     };
     updating.retain(|id, started| still_due(id) && now - *started < UPDATE_TIMEOUT);
     if let Some(started) = *updating_all {
@@ -1096,12 +1107,83 @@ enum RowAction {
     Toggle,
 }
 
+/// Toasts for plugins the daemon quarantined: derived from state (the daemon's
+/// own toast fires before the GUI connects), once each until re-enabled.
+pub(crate) fn quarantine_toasts(
+    plugins: &[PluginInfo],
+    plugin_updates: &[PluginUpdateStatus],
+    toasted: &mut HashSet<String>,
+    timestamp_ms: u64,
+) -> Vec<halod_shared::types::Notification> {
+    use halod_shared::types::{Notification, NotificationCode};
+
+    let is_quarantined = |p: &PluginInfo| {
+        !p.enabled
+            && plugin_updates
+                .iter()
+                .any(|u| u.plugin_id == p.id && u.on_disk_changed)
+    };
+    toasted.retain(|id| plugins.iter().any(|p| &p.id == id && is_quarantined(p)));
+
+    plugins
+        .iter()
+        .filter(|p| is_quarantined(p) && toasted.insert(p.id.clone()))
+        .map(|p| Notification {
+            code: NotificationCode::PluginContentChanged {
+                plugin: p.name.clone(),
+            },
+            timestamp_ms,
+        })
+        .collect()
+}
+
 /// True when `p` declares permissions the user hasn't consented to (never
 /// granted, or the script changed since it was granted). It stays inert until
 /// the user grants them. Shared with the Integrations screen, whose
 /// integrations are plugins too.
 pub(crate) fn plugin_needs_permission(p: &PluginInfo) -> bool {
     !p.declared_permissions.is_empty() && !p.consented
+}
+
+/// Why the consent modal is being shown, so it can explain the cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsentReason {
+    /// Never approved before — a first-time grant.
+    New,
+    /// Previously approved, and an update/edit added permissions beyond those
+    /// already granted.
+    PermissionAdded,
+    /// Previously approved, but the script content changed since (no new
+    /// permissions).
+    ContentChanged,
+}
+
+/// Classify why `p` is asking for consent, from its granted vs declared
+/// permissions and whether its content changed since the last acknowledgment.
+pub(crate) fn consent_reason(p: &PluginInfo) -> ConsentReason {
+    let has_new_permission = p
+        .declared_permissions
+        .iter()
+        .any(|perm| !p.granted_permissions.contains(perm));
+    // A non-empty granted set means the user approved this plugin before.
+    let approved_before = !p.granted_permissions.is_empty();
+    if approved_before && has_new_permission {
+        ConsentReason::PermissionAdded
+    } else if p.content_changed && !has_new_permission {
+        ConsentReason::ContentChanged
+    } else {
+        ConsentReason::New
+    }
+}
+
+/// The permissions `p` declares that haven't been granted yet — the ones an
+/// update newly requires.
+pub(crate) fn newly_required_permissions(p: &PluginInfo) -> Vec<halod_shared::types::Permission> {
+    p.declared_permissions
+        .iter()
+        .filter(|perm| !p.granted_permissions.contains(perm))
+        .copied()
+        .collect()
 }
 
 /// True when the plugin is actually running: toggled on AND consent-satisfied
@@ -1378,7 +1460,16 @@ fn detail_body(
         });
     }
 
-    if let Some(update) = update.filter(|u| u.update_available) {
+    // A local on-disk edit is surfaced ahead of an upstream update: it's the
+    // surprising, security-relevant state (the daemon has disabled the plugin).
+    // Informational — the user re-enables it with the normal toggle, which
+    // accepts the current content (and re-prompts consent if it declares perms).
+    // Only while the plugin is held inactive: once re-enabled, the risk is
+    // accepted and the banner is gone.
+    if update.is_some_and(|u| u.on_disk_changed) && !plugin_active(p) {
+        ui.add_space(14.0);
+        modified_on_disk_banner(ui);
+    } else if let Some(update) = update.filter(|u| u.update_available) {
         ui.add_space(14.0);
         let in_flight = updating.contains_key(&update.plugin_id);
         if update_banner(
@@ -1760,6 +1851,31 @@ fn update_all_banner(ui: &mut egui::Ui, count: usize, updating: bool) -> bool {
 
 /// Amber "Update available vX → vY / Update" banner in a plugin's detail. Never
 /// automatic.
+/// Banner shown when a plugin's on-disk content differs from its checked-out
+/// baseline — a local edit or tampering. The daemon has disabled the plugin for
+/// safety; this explains why and how to recover. Purely informational: the user
+/// re-enables it with the normal toggle, which accepts the current content.
+fn modified_on_disk_banner(ui: &mut egui::Ui) {
+    egui::Frame::NONE
+        .fill(theme::a(theme::STAT_AMBER, 0.10))
+        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 11))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(t!("plugins.modified_on_disk"))
+                    .font(theme::semibold(12.0))
+                    .color(theme::STAT_AMBER),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(t!("plugins.modified_on_disk_sub"))
+                    .font(theme::body(11.5))
+                    .color(theme::TEXT_DIM),
+            );
+        });
+}
+
 fn update_banner(ui: &mut egui::Ui, current: &str, available: &str, updating: bool) -> bool {
     let mut clicked = false;
     egui::Frame::NONE
@@ -2073,6 +2189,7 @@ mod tests {
             plugin_id: id.to_owned(),
             slug: "repo".to_owned(),
             update_available,
+            on_disk_changed: false,
             current_version: "1.0.0".to_owned(),
             available_version: "1.1.0".to_owned(),
         }
@@ -2228,6 +2345,63 @@ mod tests {
             consented: true,
             content_changed: false,
         }
+    }
+
+    #[test]
+    fn quarantine_toasts_fire_once_then_rearm_after_reenable() {
+        let quarantined = |id: &str| PluginUpdateStatus {
+            on_disk_changed: true,
+            ..status(id, false)
+        };
+        let mut disabled = info("edited", true);
+        disabled.enabled = false;
+        let ok = info("ok", true);
+        let updates = vec![quarantined("edited"), status("ok", false)];
+        let mut toasted = HashSet::new();
+
+        let first = quarantine_toasts(&[disabled.clone(), ok.clone()], &updates, &mut toasted, 0);
+        assert_eq!(first.len(), 1);
+        assert!(
+            quarantine_toasts(&[disabled.clone(), ok.clone()], &updates, &mut toasted, 0)
+                .is_empty()
+        );
+
+        // Re-enabled → forgotten, and a later re-quarantine alerts again.
+        let mut reenabled = disabled.clone();
+        reenabled.enabled = true;
+        assert!(quarantine_toasts(&[reenabled, ok.clone()], &updates, &mut toasted, 0).is_empty());
+        assert!(toasted.is_empty());
+        assert_eq!(
+            quarantine_toasts(&[disabled, ok], &updates, &mut toasted, 0).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn consent_reason_classifies_new_added_and_changed() {
+        use halod_shared::types::Permission;
+
+        // Never approved: a first-time grant.
+        let mut p = info("a", false);
+        p.declared_permissions = vec![Permission::Network];
+        p.granted_permissions = vec![];
+        assert_eq!(consent_reason(&p), ConsentReason::New);
+
+        // Approved before (has a granted perm) and an update declares a new one.
+        let mut p = info("a", false);
+        p.declared_permissions = vec![Permission::Network, Permission::Os];
+        p.granted_permissions = vec![Permission::Network];
+        p.content_changed = true;
+        assert_eq!(consent_reason(&p), ConsentReason::PermissionAdded);
+        assert_eq!(newly_required_permissions(&p), vec![Permission::Os]);
+
+        // Approved before, content changed, but no new permission.
+        let mut p = info("a", false);
+        p.declared_permissions = vec![Permission::Network];
+        p.granted_permissions = vec![Permission::Network];
+        p.content_changed = true;
+        assert_eq!(consent_reason(&p), ConsentReason::ContentChanged);
+        assert!(newly_required_permissions(&p).is_empty());
     }
 
     #[test]

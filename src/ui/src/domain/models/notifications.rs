@@ -46,6 +46,10 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
             t!("notify.plugin_needs_permission.title").to_string(),
             t!("notify.plugin_needs_permission.message", plugin = plugin).to_string(),
         ),
+        PluginContentChanged { plugin } => (
+            t!("notify.plugin_content_changed.title").to_string(),
+            t!("notify.plugin_content_changed.message", plugin = plugin).to_string(),
+        ),
         Generic { message } => (t!("notify.error_title").to_string(), message.clone()),
     }
 }
@@ -83,6 +87,9 @@ mod tests {
             },
             FanStalled { fan: "cpu".into() },
             PluginNeedsPermission {
+                plugin: "wled_udp".into(),
+            },
+            PluginContentChanged {
                 plugin: "wled_udp".into(),
             },
             Generic {

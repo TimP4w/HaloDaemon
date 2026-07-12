@@ -52,6 +52,10 @@ pub fn set_ui_config(
     );
 }
 
+pub fn set_plugin_download_consent(cmd: &CommandTx, allowed: bool) {
+    ipc::send(cmd, DaemonCommand::SetPluginDownloadConsent { allowed });
+}
+
 pub fn reset_tours_seen(cmd: &CommandTx) {
     ipc::send(cmd, DaemonCommand::ResetToursSeen);
 }

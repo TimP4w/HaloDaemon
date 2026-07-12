@@ -405,21 +405,46 @@ pub fn suppress_permission_notice(plugin_id: &str) {
         .insert(plugin_id.to_owned());
 }
 
-/// Pure filter behind [`take_newly_ungranted_plugins`]: which manifests are
-/// ungranted and not yet in `notified` (inserting each as it's returned).
-fn ungranted_in(manifests: &[PluginManifest], notified: &mut HashSet<String>) -> Vec<String> {
+/// Why a plugin can't currently activate, so the daemon picks the right alert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UngrantedReason {
+    /// Never approved (or explicitly revoked): the user must grant permissions.
+    NeedsPermission,
+    /// Previously approved, but the on-disk content hash changed since — an
+    /// edit or an update. The user re-approves the new content.
+    ContentChanged,
+}
+
+/// Pure filter behind [`take_newly_ungranted_plugins`]: which manifests can't
+/// activate and aren't yet in `notified` (inserting each as it's returned),
+/// paired with the reason so the caller can choose the notification.
+fn ungranted_in(
+    manifests: &[PluginManifest],
+    notified: &mut HashSet<String>,
+) -> Vec<(String, UngrantedReason)> {
     manifests
         .iter()
         .filter(|m| !consent_satisfied(m) && notified.insert(m.plugin_id.clone()))
-        .map(|m| m.display_name().to_owned())
+        .map(|m| {
+            // A stored acknowledgment that no longer matches means the content
+            // changed under a previously-approved plugin, rather than a plugin
+            // the user has simply never approved.
+            let reason =
+                if acknowledged_hash_for(&m.plugin_id).is_some_and(|h| h != m.content_hash()) {
+                    UngrantedReason::ContentChanged
+                } else {
+                    UngrantedReason::NeedsPermission
+                };
+            (m.display_name().to_owned(), reason)
+        })
         .collect()
 }
 
-/// Display names of plugins that need a permission grant and haven't been
+/// Display names (with reason) of plugins that can't activate and haven't been
 /// announced yet (auto-discovered, not manually imported — those are marked
 /// via [`suppress_permission_notice`] before this is ever called). Marks
 /// every returned plugin as notified so a later rescan won't repeat it.
-pub fn take_newly_ungranted_plugins() -> Vec<String> {
+pub fn take_newly_ungranted_plugins() -> Vec<(String, UngrantedReason)> {
     let state = snapshot();
     let mut guard = NOTIFIED.write().expect("plugin notified set poisoned");
     let notified = guard.get_or_insert_with(HashSet::new);

@@ -321,7 +321,10 @@ fn ungranted_in_reports_once_then_stays_silent() {
     let mut notified = HashSet::new();
 
     let first = ungranted_in(&manifests, &mut notified);
-    assert_eq!(first, vec!["Needs Net".to_string()]);
+    assert_eq!(
+        first,
+        vec![("Needs Net".to_string(), UngrantedReason::NeedsPermission)]
+    );
 
     // Same manifest, same notified set: already announced, not repeated.
     let second = ungranted_in(&manifests, &mut notified);
@@ -329,6 +332,39 @@ fn ungranted_in_reports_once_then_stays_silent() {
         second.is_empty(),
         "must not repeat an already-notified plugin"
     );
+}
+
+#[test]
+fn ungranted_in_flags_content_change_when_acknowledgment_is_stale() {
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let src = r#"
+        return {
+          devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+          identity = { name = "Approved Once" },
+          permissions = { "network" },
+        }
+    "#;
+    let m = parse_manifest(src, Path::new("approved_once.lua")).unwrap();
+    // Grant the permission but pin acknowledgment to a hash that no longer
+    // matches the manifest — i.e. its content changed since approval.
+    set_granted(&HashMap::from([(
+        m.plugin_id.clone(),
+        vec![Permission::Network],
+    )]));
+    set_acknowledged(&HashMap::from([(
+        m.plugin_id.clone(),
+        "stale-hash".to_string(),
+    )]));
+    let mut notified = HashSet::new();
+
+    let out = ungranted_in(&[m], &mut notified);
+    assert_eq!(
+        out,
+        vec![("Approved Once".to_string(), UngrantedReason::ContentChanged)]
+    );
+
+    set_granted(&HashMap::new());
+    set_acknowledged(&HashMap::new());
 }
 
 #[test]

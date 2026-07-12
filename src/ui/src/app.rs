@@ -28,6 +28,12 @@ pub struct App {
     pub(crate) plugin_assets_cache: Arc<HashMap<String, Vec<u8>>>,
     pub(crate) cmd: CommandTx,
     pub(crate) entered: bool,
+    /// The user × -dismissed the first-run plugin-download consent prompt this
+    /// session, so it isn't reopened until the next launch (it stays `Unset`).
+    pub(crate) consent_prompt_deferred: bool,
+    /// Plugin ids already toasted as quarantined (disabled for an on-disk
+    /// change), so each is alerted once until it leaves that state.
+    pub(crate) quarantine_toasted: std::collections::HashSet<String>,
     pub(crate) show_hidden: bool,
     pub(crate) variant: Variant,
     /// Home device-list filter text (matches name or vendor).
@@ -100,6 +106,8 @@ impl App {
             plugin_assets_cache: Arc::new(HashMap::new()),
             cmd,
             entered: false,
+            consent_prompt_deferred: false,
+            quarantine_toasted: std::collections::HashSet::new(),
             show_hidden: false,
             variant: Variant::Grid,
             search: String::new(),

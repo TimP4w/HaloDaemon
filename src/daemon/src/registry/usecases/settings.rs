@@ -126,6 +126,32 @@ pub async fn set_ui_config(
     Ok(())
 }
 
+/// Allow or deny the daemon contacting GitHub for official plugins and
+/// automatic update checks. On a fresh grant, download the (previously
+/// deferred) official repo and kick off a background update check.
+pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> Result<()> {
+    use halod_shared::types::PluginDownloadConsent;
+    let newly_allowed = {
+        let mut cfg = app.config.write().await;
+        let was_allowed = cfg.gui.plugin_downloads == PluginDownloadConsent::Allowed;
+        cfg.gui.plugin_downloads = if allowed {
+            PluginDownloadConsent::Allowed
+        } else {
+            PluginDownloadConsent::Denied
+        };
+        allowed && !was_allowed
+    };
+    app.request_config_save();
+    if newly_allowed {
+        crate::registry::ensure_official_repo(&app).await;
+        super::plugins::reload_registry(&app).await;
+        crate::registry::notify_ungranted_plugins(&app).await;
+        super::plugins::mark_pending_and_broadcast(&app).await;
+        crate::registry::start_update_check(app.clone()).await;
+    }
+    Ok(())
+}
+
 pub async fn mark_tour_seen(tour: String, app: Arc<AppState>) -> Result<()> {
     {
         let mut cfg = app.config.write().await;

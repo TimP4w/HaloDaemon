@@ -261,6 +261,12 @@ pub enum DaemonCommand {
         suppress_dependency_warning: bool,
         hide_window_controls: bool,
     },
+    /// Allow or deny the daemon contacting GitHub for official plugins and
+    /// automatic update checks. Granting triggers the deferred official-repo
+    /// clone and a startup update check.
+    SetPluginDownloadConsent {
+        allowed: bool,
+    },
     MarkTourSeen {
         tour: String,
     },

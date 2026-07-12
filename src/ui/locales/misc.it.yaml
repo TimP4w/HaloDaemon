@@ -55,6 +55,7 @@ misc:
   radar_one_device_ready: 1 dispositivo pronto
   radar_devices_ready: "%{found} dispositivi pronti"
   radar_all_connected: Tutti i dispositivi connessi
+  radar_checking_updates: "Controllo aggiornamenti plugin…"
   radar_scanning: "Scansione dispositivi…"
   radar_scan_fallback: "%{found} trovati · scansione…"
   radar_scan_detail: "%{found} trovati · Scansione %{detail}"

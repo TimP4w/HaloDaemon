@@ -5,6 +5,7 @@ pub mod canvas;
 pub mod cooling;
 pub mod depcheck;
 pub mod device;
+pub mod download_consent;
 pub mod effect_designer;
 pub mod home;
 pub mod integrations;

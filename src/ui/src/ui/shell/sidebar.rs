@@ -2,7 +2,7 @@
 //! Left sidebar: workspace nav, live device list, and the daemon-health footer.
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::AppState;
+use halod_shared::types::{AppState, PluginUpdateStatus};
 
 use crate::domain::models::device as model;
 use crate::domain::state::Page;
@@ -18,7 +18,34 @@ const NAV: [(Icon, &str, Page); 6] = [
     (Icon::Settings, "Settings", Page::Settings),
 ];
 
-pub fn sidebar(ui: &mut egui::Ui, state: &AppState, connected: bool, page: &mut Page) {
+/// Count of plugins needing user attention: an available update, a changed
+/// on-disk hash, or a pending permission consent. Drives the sidebar badge.
+pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateStatus]) -> usize {
+    state
+        .plugins
+        .plugins
+        .iter()
+        .filter(|p| {
+            !p.consented
+                || p.content_changed
+                || plugin_updates.iter().any(|u| {
+                    u.plugin_id == p.id
+                        // An on-disk change only needs action while the plugin
+                        // is held disabled; once re-enabled the risk is accepted.
+                        && (u.update_available || (u.on_disk_changed && !p.enabled))
+                })
+        })
+        .count()
+}
+
+pub fn sidebar(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    connected: bool,
+    page: &mut Page,
+    plugin_updates: &[PluginUpdateStatus],
+) {
+    let plugin_actions = plugins_needing_action(state, plugin_updates);
     let rect = ui.max_rect();
     ui.painter().line_segment(
         [rect.right_top(), rect.right_bottom()],
@@ -33,7 +60,12 @@ pub fn sidebar(ui: &mut egui::Ui, state: &AppState, connected: bool, page: &mut 
             section_label(ui, &t!("shell.workspace"));
             for (icon, _label, target) in &NAV {
                 let row_start = ui.cursor().min;
-                if nav_row(ui, *icon, &nav_label(target), *page == *target) {
+                let badge = if *target == Page::Plugins {
+                    plugin_actions
+                } else {
+                    0
+                };
+                if nav_row(ui, *icon, &nav_label(target), *page == *target, badge) {
                     *page = target.clone();
                 }
                 let row_rect =
@@ -203,7 +235,7 @@ fn nav_label(page: &Page) -> std::borrow::Cow<'static, str> {
     }
 }
 
-fn nav_row(ui: &mut egui::Ui, icon: Icon, label: &str, active: bool) -> bool {
+fn nav_row(ui: &mut egui::Ui, icon: Icon, label: &str, active: bool, badge: usize) -> bool {
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
     let hovered = resp.hovered();
@@ -245,10 +277,40 @@ fn nav_row(ui: &mut egui::Ui, icon: Icon, label: &str, active: bool) -> bool {
         font,
         text_color,
     );
+    if badge > 0 {
+        draw_nav_badge(ui, rect, badge);
+    }
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp.clicked()
+}
+
+/// Amber count pill on the right edge of a nav row, flagging items that need
+/// attention (e.g. plugins with updates or a pending consent).
+fn draw_nav_badge(ui: &mut egui::Ui, row: Rect, count: usize) {
+    let label = if count > 9 {
+        "9+".to_string()
+    } else {
+        count.to_string()
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label, theme::semibold(11.0), Color32::WHITE);
+    let w = (galley.size().x + 12.0).max(18.0);
+    let pill = Rect::from_center_size(
+        Pos2::new(row.right() - 16.0, row.center().y),
+        Vec2::new(w, 18.0),
+    );
+    ui.painter().rect_filled(pill, 9.0, theme::STAT_AMBER);
+    ui.painter().galley(
+        Pos2::new(
+            pill.center().x - galley.size().x / 2.0,
+            pill.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        Color32::WHITE,
+    );
 }
 
 fn device_row(ui: &mut egui::Ui, d: &halod_shared::types::WireDevice, active: bool) -> bool {
@@ -328,4 +390,101 @@ fn device_row(ui: &mut egui::Ui, d: &halod_shared::types::WireDevice, active: bo
         theme::TEXT,
     );
     resp.clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use halod_shared::types::PluginInfo;
+
+    fn plugin(id: &str, consented: bool, content_changed: bool) -> PluginInfo {
+        PluginInfo {
+            id: id.into(),
+            name: id.into(),
+            path: String::new(),
+            plugin_type: Default::default(),
+            capabilities: vec![],
+            effect_names: vec![],
+            enabled: true,
+            author: String::new(),
+            version: String::new(),
+            description: String::new(),
+            targets: vec![],
+            license: String::new(),
+            devices: vec![],
+            logo: None,
+            effect_thumbnails: vec![],
+            source: Default::default(),
+            declared_permissions: vec![],
+            granted_permissions: vec![],
+            config_fields: vec![],
+            config_values: Default::default(),
+            secret_set: Default::default(),
+            integration_enabled: true,
+            consented,
+            content_changed,
+        }
+    }
+
+    fn update(id: &str, available: bool) -> PluginUpdateStatus {
+        PluginUpdateStatus {
+            plugin_id: id.into(),
+            slug: "official".into(),
+            update_available: available,
+            on_disk_changed: false,
+            current_version: String::new(),
+            available_version: String::new(),
+        }
+    }
+
+    fn on_disk_change(id: &str) -> PluginUpdateStatus {
+        PluginUpdateStatus {
+            on_disk_changed: true,
+            ..update(id, false)
+        }
+    }
+
+    #[test]
+    fn plugins_needing_action_counts_updates_changes_and_unconsented() {
+        let mut state = AppState::default();
+        state.plugins.plugins = vec![
+            plugin("ok", true, false), // fine — not counted
+            plugin("unconsented", false, false),
+            plugin("changed", true, true),
+            plugin("has_update", true, false),
+        ];
+        let updates = vec![update("has_update", true), update("ok", false)];
+        assert_eq!(plugins_needing_action(&state, &updates), 3);
+    }
+
+    #[test]
+    fn plugins_needing_action_is_zero_when_all_clear() {
+        let mut state = AppState::default();
+        state.plugins.plugins = vec![plugin("a", true, false), plugin("b", true, false)];
+        assert_eq!(plugins_needing_action(&state, &[]), 0);
+    }
+
+    #[test]
+    fn on_disk_change_counts_only_while_the_plugin_is_disabled() {
+        // Quarantined (disabled) → needs action.
+        let mut disabled = plugin("edited", true, false);
+        disabled.enabled = false;
+        let mut state = AppState::default();
+        state.plugins.plugins = vec![disabled];
+        assert_eq!(
+            plugins_needing_action(&state, &[on_disk_change("edited")]),
+            1
+        );
+
+        // Re-enabled (risk accepted) → no longer counted, even if a stale
+        // on-disk-change status lingers until the next check.
+        let mut enabled = plugin("edited", true, false);
+        enabled.enabled = true;
+        let mut state = AppState::default();
+        state.plugins.plugins = vec![enabled];
+        assert_eq!(
+            plugins_needing_action(&state, &[on_disk_change("edited")]),
+            0
+        );
+    }
 }

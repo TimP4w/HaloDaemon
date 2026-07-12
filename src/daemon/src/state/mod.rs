@@ -56,6 +56,8 @@ pub struct AppState {
     /// close-everything-and-rediscover cycle so several plugin edits in a
     /// row only pay for it once, when the user explicitly applies them.
     pub plugins_rediscover_pending: std::sync::atomic::AtomicBool,
+    /// Latest plugin update/on-disk status, replayed to each client on connect.
+    pub plugin_update_status: Mutex<Vec<halod_shared::types::PluginUpdateStatus>>,
     /// Backing store for plugin-declared secret config values (`secure =
     /// true` fields). Defaults to the encrypted-file backend (deterministic,
     /// no external dependency) so tests get an isolated store scoped to their
@@ -86,6 +88,7 @@ impl AppState {
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
             plugins_rediscover_pending: std::sync::atomic::AtomicBool::new(false),
+            plugin_update_status: Mutex::new(Vec::new()),
             secret_store: Arc::new(crate::secrets::FileKeyStore::new()),
         }
     }
