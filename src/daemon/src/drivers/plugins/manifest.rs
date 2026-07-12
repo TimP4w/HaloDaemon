@@ -712,6 +712,9 @@ fn default_entry() -> String {
     "main.lua".to_owned()
 }
 
+/// Conventional logo filename adopted when `plugin.yaml` declares no `logo`.
+const DEFAULT_LOGO_NAME: &str = "logo.png";
+
 impl PluginManifest {
     /// The first declared device spec that accepts `handle`, if any.
     pub fn device_for(&self, handle: &DiscoveryHandle<'_>) -> Option<&DeviceSpec> {
@@ -1037,7 +1040,14 @@ pub fn parse_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         license: meta.license,
         description: meta.description,
     };
-    manifest.logo = meta.logo;
+    // An undeclared logo defaults to the conventional `assets/logo.png` if one
+    // is present, so a plugin author only needs to drop the file in.
+    manifest.logo = meta.logo.or_else(|| {
+        dir.join("assets")
+            .join(DEFAULT_LOGO_NAME)
+            .is_file()
+            .then(|| DEFAULT_LOGO_NAME.to_owned())
+    });
     manifest.effect_thumbnails = meta.effects;
 
     manifest.plugin_id = meta.id;
@@ -1772,6 +1782,24 @@ mod tests {
         assert_eq!(m.effect_thumbnails.len(), 1);
         assert_eq!(m.effect_thumbnails[0].id, "rainbow");
         assert_eq!(m.effect_thumbnails[0].thumbnail, "rainbow.png");
+    }
+
+    #[test]
+    fn undeclared_logo_defaults_to_conventional_asset_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "conv",
+            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            ENTRY_LUA,
+        );
+        // No `logo:` in the manifest, but the file is present.
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("assets").join("logo.png"), b"x").unwrap();
+        assert_eq!(
+            parse_manifest_from_dir(&dir).unwrap().logo.as_deref(),
+            Some("logo.png")
+        );
     }
 
     #[test]

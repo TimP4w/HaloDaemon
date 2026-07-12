@@ -198,6 +198,45 @@ pub fn sniff_ext(data: &[u8]) -> &'static str {
     }
 }
 
+/// Max encoded size of any plugin display asset (logo/effect thumbnail) served
+/// over IPC. Bounds a careless or hostile plugin from bloating the socket and
+/// the GUI's texture memory. Enforced by the daemon on read.
+pub const MAX_PLUGIN_ASSET_BYTES: u64 = 256 * 1024;
+
+/// Max pixel width/height of a plugin logo. It's painted into a small square
+/// tile, so anything larger is wasted decode/memory.
+pub const MAX_PLUGIN_LOGO_DIM: u32 = 512;
+
+/// Max long:short side ratio of a plugin logo. The tile is square and the GUI
+/// letterboxes to fit, but an extreme banner would shrink to an unreadable
+/// sliver — reject it outright rather than display it.
+pub const MAX_PLUGIN_LOGO_ASPECT: u32 = 2;
+
+/// Validate a decoded plugin logo's dimensions: non-zero, within
+/// [`MAX_PLUGIN_LOGO_DIM`], and no more lopsided than [`MAX_PLUGIN_LOGO_ASPECT`].
+/// Pure so both the daemon (on load) and the GUI (on import) can enforce it.
+pub fn validate_logo_dimensions(width: u32, height: u32) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("logo has a zero dimension".to_owned());
+    }
+    if width > MAX_PLUGIN_LOGO_DIM || height > MAX_PLUGIN_LOGO_DIM {
+        return Err(format!(
+            "logo {width}x{height} exceeds the {MAX_PLUGIN_LOGO_DIM}px maximum"
+        ));
+    }
+    let (long, short) = if width >= height {
+        (width, height)
+    } else {
+        (height, width)
+    };
+    if long > short * MAX_PLUGIN_LOGO_ASPECT {
+        return Err(format!(
+            "logo aspect {width}x{height} exceeds the {MAX_PLUGIN_LOGO_ASPECT}:1 maximum"
+        ));
+    }
+    Ok(())
+}
+
 /// How the canvas sampler maps LEDs to pixmap positions for a zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SamplingMode {
@@ -2355,6 +2394,25 @@ mod default_tests {
                 "should reject {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn validate_logo_dimensions_accepts_square_and_mild_rectangles() {
+        assert!(validate_logo_dimensions(64, 64).is_ok());
+        assert!(validate_logo_dimensions(MAX_PLUGIN_LOGO_DIM, MAX_PLUGIN_LOGO_DIM).is_ok());
+        // Exactly the aspect bound is allowed; just past it is not.
+        assert!(validate_logo_dimensions(200, 100).is_ok());
+        assert!(validate_logo_dimensions(100, 200).is_ok());
+        assert!(validate_logo_dimensions(201, 100).is_err());
+    }
+
+    #[test]
+    fn validate_logo_dimensions_rejects_zero_oversize_and_banners() {
+        assert!(validate_logo_dimensions(0, 64).is_err());
+        assert!(validate_logo_dimensions(64, 0).is_err());
+        assert!(validate_logo_dimensions(MAX_PLUGIN_LOGO_DIM + 1, 64).is_err());
+        assert!(validate_logo_dimensions(64, MAX_PLUGIN_LOGO_DIM + 1).is_err());
+        assert!(validate_logo_dimensions(500, 50).is_err());
     }
 
     #[test]

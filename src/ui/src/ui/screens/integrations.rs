@@ -8,14 +8,17 @@
 //! a separate, independent toggle that only affects this one integration's
 //! root device and the devices it exposes, never the whole device set.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use egui::{Sense, Vec2};
 use halod_shared::types::{AppState, PluginInfo, PluginKind};
 
-use crate::runtime::ipc::CommandTx;
+use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::screens::plugin_config::{config_section, seed_config_edit_if_needed};
-use crate::ui::screens::plugins::plugin_needs_permission;
+use crate::ui::screens::plugins::{
+    decode_new_assets, draw_logo_fit, initials_tile_at, plugin_needs_permission,
+};
 use crate::ui::theme;
 
 /// Whether `p` belongs on the Integrations page: an integration-type plugin
@@ -35,6 +38,11 @@ fn is_visible_integration(p: &PluginInfo) -> bool {
 pub struct IntegrationsUi {
     expanded: Option<String>,
     config_edit: Option<(String, HashMap<String, String>)>,
+    /// Decoded logo textures, keyed like `ipc::plugin_asset_cache_key`.
+    logo_textures: HashMap<String, egui::TextureHandle>,
+    /// Cache keys already requested from the daemon, so a missing logo isn't
+    /// re-requested every frame.
+    requested_logos: HashSet<String>,
 }
 
 /// How many devices an integration currently exposes, and whether its root
@@ -94,8 +102,39 @@ pub fn integration_state(p: &PluginInfo, status: &IntegrationStatus) -> Integrat
 }
 
 impl IntegrationsUi {
-    pub fn show(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &AppState,
+        cmd: &CommandTx,
+        plugin_assets: &HashMap<String, Vec<u8>>,
+    ) {
+        self.sync_logos(ui.ctx(), cmd, &state.plugins.plugins, plugin_assets);
         widgets::page_frame(ui, |ui| self.body(ui, state, cmd));
+    }
+
+    /// Request the logo of every visible integration that hasn't been fetched
+    /// yet, then decode any bytes that have arrived.
+    fn sync_logos(
+        &mut self,
+        ctx: &egui::Context,
+        cmd: &CommandTx,
+        plugins: &[PluginInfo],
+        plugin_assets: &HashMap<String, Vec<u8>>,
+    ) {
+        for (plugin_id, name) in logos_to_request(plugins, plugin_assets, &self.requested_logos) {
+            self.requested_logos
+                .insert(ipc::plugin_asset_cache_key(&plugin_id, &name));
+            crate::domain::actions::plugins::get_plugin_asset(cmd, plugin_id, name);
+        }
+        decode_new_assets(ctx, plugin_assets, &mut self.logo_textures);
+    }
+
+    fn logo_texture(&self, p: &PluginInfo) -> Option<&egui::TextureHandle> {
+        p.logo
+            .as_deref()
+            .map(|name| ipc::plugin_asset_cache_key(&p.id, name))
+            .and_then(|key| self.logo_textures.get(&key))
     }
 
     fn body(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
@@ -143,29 +182,37 @@ impl IntegrationsUi {
             egui::Sides::new().show(
                 ui,
                 |ui| {
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(&p.name)
-                                    .font(theme::semibold(15.0))
-                                    .color(theme::TEXT),
-                            );
-                            if !p.version.is_empty() {
+                    ui.horizontal(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
+                        match self.logo_texture(p) {
+                            Some(tex) => draw_logo_fit(ui.painter(), rect, tex),
+                            None => initials_tile_at(ui, rect, &p.name, &p.id),
+                        }
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
                                 ui.label(
-                                    egui::RichText::new(&p.version)
-                                        .font(theme::mono(10.5))
-                                        .color(theme::TEXT_FAINT),
+                                    egui::RichText::new(&p.name)
+                                        .font(theme::semibold(15.0))
+                                        .color(theme::TEXT),
+                                );
+                                if !p.version.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&p.version)
+                                            .font(theme::mono(10.5))
+                                            .color(theme::TEXT_FAINT),
+                                    );
+                                }
+                            });
+                            if !p.description.is_empty() {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(&p.description)
+                                        .font(theme::body(11.5))
+                                        .color(theme::TEXT_MUT),
                                 );
                             }
                         });
-                        if !p.description.is_empty() {
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(&p.description)
-                                    .font(theme::body(11.5))
-                                    .color(theme::TEXT_MUT),
-                            );
-                        }
                     });
                 },
                 |ui| {
@@ -224,6 +271,25 @@ impl IntegrationsUi {
             }
         });
     }
+}
+
+/// Logos of visible integrations that aren't cached or already requested,
+/// as `(plugin_id, asset_name)` pairs. Pure so it's unit-testable.
+fn logos_to_request(
+    plugins: &[PluginInfo],
+    cache: &HashMap<String, Vec<u8>>,
+    already_requested: &HashSet<String>,
+) -> Vec<(String, String)> {
+    plugins
+        .iter()
+        .filter(|p| is_visible_integration(p))
+        .filter_map(|p| p.logo.as_deref().map(|name| (p, name)))
+        .filter(|(p, name)| {
+            let key = ipc::plugin_asset_cache_key(&p.id, name);
+            !cache.contains_key(&key) && !already_requested.contains(&key)
+        })
+        .map(|(p, name)| (p.id.clone(), name.to_owned()))
+        .collect()
 }
 
 fn status_row(ui: &mut egui::Ui, p: &PluginInfo, status: &IntegrationStatus) {
@@ -357,6 +423,38 @@ mod tests {
         // Once granted (consented), it becomes visible again.
         p.consented = true;
         assert!(is_visible_integration(&p));
+    }
+
+    #[test]
+    fn logos_to_request_lists_visible_integrations_with_a_logo() {
+        let mut visible = plugin("openrgb", true, true);
+        visible.logo = Some("logo.png".into());
+        // A logo-less integration and a Lua-disabled one contribute nothing.
+        let no_logo = plugin("wled", true, true);
+        let mut disabled = plugin("hidden", false, true);
+        disabled.logo = Some("logo.png".into());
+
+        let reqs = logos_to_request(
+            &[visible, no_logo, disabled],
+            &HashMap::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(reqs, vec![("openrgb".to_owned(), "logo.png".to_owned())]);
+    }
+
+    #[test]
+    fn logos_to_request_skips_cached_and_already_requested() {
+        let mut p = plugin("openrgb", true, true);
+        p.logo = Some("logo.png".into());
+        let key = ipc::plugin_asset_cache_key("openrgb", "logo.png");
+
+        let mut cache = HashMap::new();
+        cache.insert(key.clone(), vec![1, 2, 3]);
+        assert!(logos_to_request(std::slice::from_ref(&p), &cache, &HashSet::new()).is_empty());
+
+        let mut requested = HashSet::new();
+        requested.insert(key);
+        assert!(logos_to_request(&[p], &HashMap::new(), &requested).is_empty());
     }
 
     #[test]

@@ -846,6 +846,17 @@ for the logo/effect thumbnails. `plugin.yaml`'s `id` **must equal the
 directory name**. There is no single-file plugin format and nothing is
 compiled into the daemon binary.
 
+A logo need not be declared: an `assets/logo.png` file is adopted
+automatically when `plugin.yaml` omits `logo`. Declare `logo:` explicitly only
+to point at a differently-named file.
+
+Display assets are bounded: any file the daemon serves (logo or effect
+thumbnail) must be at most **256 KB**, and a `logo` is additionally held to at
+most **512×512 px** and a **2:1** long-to-short side ratio — it's painted into
+a small square tile and letterboxed to preserve aspect. A logo that's absent,
+undecodable, or out of bounds is dropped at load (the plugin still loads; a
+warning is surfaced and the GUI falls back to an initials tile).
+
 A plugin's **content hash** (`sha256(plugin.yaml bytes || entry script
 bytes)`) is what user consent is pinned to (trust-on-first-use): granting a
 plugin's declared permissions records this hash, and editing the script —

@@ -151,25 +151,7 @@ impl PluginsUi {
                 }
             }
         }
-        for (key, bytes) in plugin_assets {
-            if self.asset_textures.contains_key(key) {
-                continue;
-            }
-            if let Some(img) = image::load_from_memory(bytes).ok().map(|i| i.into_rgba8()) {
-                let (w, h) = (img.width() as usize, img.height() as usize);
-                let pixels: Vec<egui::Color32> = img
-                    .into_raw()
-                    .chunks_exact(4)
-                    .map(|c| egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
-                    .collect();
-                let tex = ctx.load_texture(
-                    key.clone(),
-                    egui::ColorImage::new([w, h], pixels),
-                    egui::TextureOptions::LINEAR,
-                );
-                self.asset_textures.insert(key.clone(), tex);
-            }
-        }
+        decode_new_assets(ctx, plugin_assets, &mut self.asset_textures);
     }
 
     /// A plugin id that appears now but wasn't present last frame opens the
@@ -1073,6 +1055,55 @@ fn clear_finished_updates(
     }
 }
 
+/// Decode any newly-arrived asset bytes into GPU textures, keyed like the
+/// asset cache. Shared by the Plugins and Integrations screens.
+pub(crate) fn decode_new_assets(
+    ctx: &egui::Context,
+    plugin_assets: &HashMap<String, Vec<u8>>,
+    textures: &mut HashMap<String, egui::TextureHandle>,
+) {
+    for (key, bytes) in plugin_assets {
+        if textures.contains_key(key) {
+            continue;
+        }
+        if let Some(img) = image::load_from_memory(bytes).ok().map(|i| i.into_rgba8()) {
+            let (w, h) = (img.width() as usize, img.height() as usize);
+            let pixels: Vec<egui::Color32> = img
+                .into_raw()
+                .chunks_exact(4)
+                .map(|c| egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
+                .collect();
+            let tex = ctx.load_texture(
+                key.clone(),
+                egui::ColorImage::new([w, h], pixels),
+                egui::TextureOptions::LINEAR,
+            );
+            textures.insert(key.clone(), tex);
+        }
+    }
+}
+
+/// The centered, aspect-preserving sub-rect of `into` that a `tex`-sized image
+/// fills (letterbox). Keeps a non-square logo from being stretched to the
+/// square tile. Pure so the geometry is unit-testable.
+pub(crate) fn logo_fit_rect(tex: Vec2, into: Rect) -> Rect {
+    if tex.x <= 0.0 || tex.y <= 0.0 {
+        return into;
+    }
+    let scale = (into.width() / tex.x).min(into.height() / tex.y);
+    Rect::from_center_size(into.center(), Vec2::new(tex.x * scale, tex.y * scale))
+}
+
+/// Paint a logo texture into `rect`, letterboxed to preserve its aspect ratio.
+pub(crate) fn draw_logo_fit(painter: &egui::Painter, rect: Rect, tex: &egui::TextureHandle) {
+    painter.image(
+        tex.id(),
+        logo_fit_rect(tex.size_vec2(), rect),
+        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+}
+
 /// Which of `p`'s declared display assets aren't cached or already requested.
 fn assets_to_request(
     p: &PluginInfo,
@@ -1264,14 +1295,7 @@ fn list_row(
         Vec2::splat(28.0),
     );
     match logo_tex {
-        Some(tex) => {
-            ui.painter().image(
-                tex.id(),
-                tile_rect,
-                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
-        }
+        Some(tex) => draw_logo_fit(ui.painter(), tile_rect, tex),
         None => initials_tile_at(ui, tile_rect, &p.name, &p.id),
     }
 
@@ -1362,7 +1386,7 @@ fn initials_for(name: &str) -> String {
 
 /// A colored-initials tile at an already-allocated `rect` (for the list rows,
 /// which lay out several elements on one hand-painted row).
-fn initials_tile_at(ui: &mut egui::Ui, rect: Rect, name: &str, id: &str) {
+pub(crate) fn initials_tile_at(ui: &mut egui::Ui, rect: Rect, name: &str, id: &str) {
     let color = initials_color(id);
     ui.painter().rect_filled(rect, 8.0, theme::a(color, 0.16));
     ui.painter().rect_stroke(
@@ -1404,12 +1428,7 @@ fn detail_body(
             match logo_tex {
                 Some(tex) => {
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
-                    ui.painter().image(
-                        tex.id(),
-                        rect,
-                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
+                    draw_logo_fit(ui.painter(), rect, tex);
                 }
                 None => initials_tile(ui, &p.name, &p.id, 44.0),
             }
@@ -2442,6 +2461,20 @@ mod tests {
     fn assets_to_request_empty_when_plugin_declares_no_assets() {
         let p = info("a", true);
         assert!(assets_to_request(&p, &HashMap::new(), &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn logo_fit_rect_fills_square_and_centers() {
+        let into = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::splat(40.0));
+        // A square logo fills the tile exactly.
+        assert_eq!(logo_fit_rect(Vec2::splat(64.0), into), into);
+        // A wide logo keeps its aspect: full width, centered vertically.
+        let wide = logo_fit_rect(Vec2::new(100.0, 50.0), into);
+        assert_eq!(wide.width(), 40.0);
+        assert_eq!(wide.height(), 20.0);
+        assert_eq!(wide.center(), into.center());
+        // A degenerate size falls back to the whole tile rather than dividing by zero.
+        assert_eq!(logo_fit_rect(Vec2::ZERO, into), into);
     }
 
     fn repo(slug: &str, locked_sha: &str) -> PluginRepoInfo {

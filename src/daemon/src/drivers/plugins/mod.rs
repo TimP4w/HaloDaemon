@@ -642,6 +642,15 @@ pub fn read_asset(plugin_id: &str, name: &str) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("plugin '{plugin_id}' has no on-disk assets");
     }
     let path = manifest.plugin_dir.join("assets").join(name);
+    let len = std::fs::metadata(&path)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?
+        .len();
+    if len > halod_shared::types::MAX_PLUGIN_ASSET_BYTES {
+        anyhow::bail!(
+            "asset '{name}' is {len} bytes, over the {} byte limit",
+            halod_shared::types::MAX_PLUGIN_ASSET_BYTES
+        );
+    }
     std::fs::read(&path).map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))
 }
 
@@ -666,6 +675,46 @@ pub fn take_plugin_load_warnings() -> Vec<PluginLoadWarning> {
     std::mem::take(&mut write_recover(&LOAD_WARNINGS))
 }
 
+/// Reason a declared logo is unusable, or `None` if it passes every bound.
+/// A logo whose file is absent isn't rejected here — it's left for the GUI's
+/// initials fallback; only a *present* logo is held to the size/shape bounds.
+fn logo_rejection(dir: &Path, name: &str) -> Option<String> {
+    let path = dir.join("assets").join(name);
+    let bytes = std::fs::read(&path).ok()?;
+    if bytes.len() as u64 > halod_shared::types::MAX_PLUGIN_ASSET_BYTES {
+        return Some(format!(
+            "logo is {} bytes, over the {} byte limit",
+            bytes.len(),
+            halod_shared::types::MAX_PLUGIN_ASSET_BYTES
+        ));
+    }
+    match image::load_from_memory(&bytes) {
+        Ok(img) => halod_shared::types::validate_logo_dimensions(img.width(), img.height()).err(),
+        Err(e) => Some(format!("logo is not a decodable image: {e}")),
+    }
+}
+
+/// Enforce the logo bounds at load: drop a declared logo that's too big or the
+/// wrong shape to `None` and record a warning, so the GUI never advertises or
+/// requests an asset it would only distort or choke on.
+fn validate_logo(dir: &Path, manifest: &mut PluginManifest) {
+    let Some(name) = manifest.logo.clone() else {
+        return;
+    };
+    if let Some(reason) = logo_rejection(dir, &name) {
+        log::warn!(
+            "Ignoring logo for plugin '{}': {reason}",
+            manifest.plugin_id
+        );
+        write_recover(&LOAD_WARNINGS).push(PluginLoadWarning {
+            plugin_id: manifest.plugin_id.clone(),
+            path: dir.join("assets").join(&name).display().to_string(),
+            reason,
+        });
+        manifest.logo = None;
+    }
+}
+
 /// Parse `dir` as one plugin directory and push it into `out`, skipping (never failing) a bad manifest.
 fn try_load_plugin_dir(dir: &Path, out: &mut Vec<PluginManifest>) {
     if !dir.join("plugin.yaml").is_file() {
@@ -681,7 +730,8 @@ fn try_load_plugin_dir(dir: &Path, out: &mut Vec<PluginManifest>) {
                 reason,
             });
         }
-        Ok(m) => {
+        Ok(mut m) => {
+            validate_logo(dir, &mut m);
             log::info!(
                 "Loaded device plugin '{}' from {}",
                 m.plugin_id,

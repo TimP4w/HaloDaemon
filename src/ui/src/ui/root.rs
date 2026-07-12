@@ -386,7 +386,8 @@ impl App {
                         );
                     }
                     Page::Integrations => {
-                        self.integrations_ui.show(ui, &state, &self.cmd);
+                        self.integrations_ui
+                            .show(ui, &state, &self.cmd, &plugin_assets);
                     }
                     Page::Profile(name) => {
                         let name = name.clone();

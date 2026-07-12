@@ -816,6 +816,72 @@ fn read_asset_rejects_missing_file_and_unknown_plugin() {
     load_all(Path::new("/nonexistent"));
 }
 
+/// A PNG of `w`×`h` opaque pixels, for exercising the logo dimension/aspect bounds.
+fn png_of(w: u32, h: u32) -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    bytes.into_inner()
+}
+
+#[test]
+fn load_keeps_valid_square_logo() {
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    write_asset_plugin(tmp.path(), "goodlogo", Some(&png_of(64, 64)));
+    load_all(tmp.path());
+
+    let info = list(&FakeSecretStore::default());
+    let p = info.iter().find(|p| p.id == "goodlogo").expect("present");
+    assert_eq!(p.logo.as_deref(), Some("logo.png"));
+    assert!(take_plugin_load_warnings().is_empty());
+
+    load_all(Path::new("/nonexistent"));
+}
+
+#[test]
+fn load_drops_oversized_and_banner_logos() {
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for bad in [
+        png_of(MAX_LOGO_DIM_PLUS, MAX_LOGO_DIM_PLUS),
+        png_of(500, 50),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        write_asset_plugin(tmp.path(), "badlogo", Some(&bad));
+        load_all(tmp.path());
+
+        let info = list(&FakeSecretStore::default());
+        let p = info.iter().find(|p| p.id == "badlogo").expect("present");
+        assert!(p.logo.is_none(), "an out-of-bounds logo must be dropped");
+        let warnings = take_plugin_load_warnings();
+        assert!(
+            warnings.iter().any(|w| w.plugin_id == "badlogo"),
+            "dropping a logo must surface a load warning"
+        );
+    }
+    load_all(Path::new("/nonexistent"));
+}
+
+const MAX_LOGO_DIM_PLUS: u32 = halod_shared::types::MAX_PLUGIN_LOGO_DIM + 1;
+
+#[test]
+fn read_asset_rejects_oversized_file() {
+    let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let huge = vec![0u8; (halod_shared::types::MAX_PLUGIN_ASSET_BYTES + 1) as usize];
+    write_asset_plugin(tmp.path(), "huge", Some(&huge));
+    load_all(tmp.path());
+
+    assert!(
+        read_asset("huge", "logo.png").is_err(),
+        "an asset over the byte limit must be refused"
+    );
+
+    load_all(Path::new("/nonexistent"));
+}
+
 #[test]
 fn read_asset_rejects_path_traversal_and_bad_extensions() {
     let _guard = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
