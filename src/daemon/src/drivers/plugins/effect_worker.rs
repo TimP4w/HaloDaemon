@@ -5,16 +5,20 @@
 //! frame-batched — one render call per instance per frame (pixmap) or per
 //! zone per frame (direct) — never per LED.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::ops::ControlFlow;
+use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
 use mlua::{Function, Lua, LuaSerdeExt, Table};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use halod_shared::types::{EffectParamValue, Permission};
 
 use super::bytebuf::ByteBuf;
+use super::lua_worker::LuaWorker;
 use super::sandbox;
 
 pub const CANVAS_W: u32 = 400;
@@ -72,13 +76,22 @@ enum EffectCall {
     },
 }
 
-/// Handle a live effect instance's engine passes hold. `UnboundedSender` is
-/// `Send + Sync`, so it can sit in `LivePixmap`/`LiveDirect`. Dropping it
+/// The Lua VM plus the resolved callbacks and params, owned by the worker
+/// thread. Effects are pure compute, so there is no transport here.
+struct EffectCtx {
+    lua: Lua,
+    render_fn: Option<Function>,
+    led_colors_fn: Option<Function>,
+    params_v: mlua::Value,
+    /// Instruction counter for the runaway-guard hook; reset before each call.
+    budget: Rc<Cell<u64>>,
+}
+
+/// Handle a live effect instance's engine passes hold. The inner [`LuaWorker`]
+/// is `Send + Sync`, so it can sit in `LivePixmap`/`LiveDirect`. Dropping it
 /// ends the worker (the channel closes).
 #[derive(Clone)]
-pub struct PluginEffectHandle {
-    tx: mpsc::UnboundedSender<EffectCall>,
-}
+pub struct PluginEffectHandle(LuaWorker<EffectCall>);
 
 impl PluginEffectHandle {
     /// Spawn the worker thread for one live effect instance. `effect_id` is
@@ -91,36 +104,49 @@ impl PluginEffectHandle {
         granted: Vec<Permission>,
         config: HashMap<String, String>,
     ) -> Self {
-        // Unbounded: request() awaits each reply before re-sending, so the queue is self-bounded.
-        let (tx, rx) = mpsc::unbounded_channel();
-        if let Err(e) = std::thread::Builder::new()
-            .name("halod-effect".into())
-            .spawn(move || {
-                if let Err(e) =
-                    worker_main(&script_source, &effect_id, &params, &granted, &config, rx)
-                {
-                    log::error!("effect worker stopped: {e:#}");
+        Self(LuaWorker::spawn(
+            "halod-effect",
+            "effect",
+            move || build_ctx(&script_source, &effect_id, &params, &granted, &config),
+            |call, ctx: &EffectCtx| {
+                ctx.budget.set(0);
+                match call {
+                    EffectCall::RenderPixmap { t, dt, reply } => {
+                        let _ = reply.send(run_render_pixmap(
+                            &ctx.lua,
+                            ctx.render_fn.as_ref(),
+                            t,
+                            dt,
+                            &ctx.params_v,
+                        ));
+                    }
+                    EffectCall::LedColors {
+                        leds,
+                        t,
+                        dt,
+                        sensor,
+                        reply,
+                    } => {
+                        let _ = reply.send(run_led_colors(
+                            &ctx.lua,
+                            ctx.led_colors_fn.as_ref(),
+                            leds,
+                            t,
+                            dt,
+                            &ctx.params_v,
+                            sensor,
+                        ));
+                    }
                 }
-            })
-        {
-            // Dropping rx here makes the handle's sends fail gracefully instead of crashing.
-            log::error!("failed to spawn effect worker thread: {e}");
-        }
-        Self { tx }
-    }
-
-    async fn request<T>(&self, make: impl FnOnce(oneshot::Sender<T>) -> EffectCall) -> Result<T> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(make(reply))
-            .map_err(|_| anyhow!("effect worker is gone"))?;
-        rx.await
-            .map_err(|_| anyhow!("effect worker dropped the reply"))
+                ControlFlow::Continue(())
+            },
+        ))
     }
 
     /// Fill a `CANVAS_W * CANVAS_H * 4` linear-RGBA buffer.
     pub async fn render_pixmap(&self, t: f32, dt: f32) -> Result<Vec<u8>> {
-        self.request(|reply| EffectCall::RenderPixmap { t, dt, reply })
+        self.0
+            .request(|reply| EffectCall::RenderPixmap { t, dt, reply })
             .await?
     }
 
@@ -133,14 +159,15 @@ impl PluginEffectHandle {
         dt: f32,
         sensor: Option<f64>,
     ) -> Result<Vec<PluginLedColor>> {
-        self.request(|reply| EffectCall::LedColors {
-            leds,
-            t,
-            dt,
-            sensor,
-            reply,
-        })
-        .await?
+        self.0
+            .request(|reply| EffectCall::LedColors {
+                leds,
+                t,
+                dt,
+                sensor,
+                reply,
+            })
+            .await?
     }
 }
 
@@ -203,14 +230,16 @@ fn register_effect_helpers(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-fn worker_main(
+/// Build the effect worker's VM context on the worker thread. Runs once at
+/// spawn; the [`LuaWorker`] loop then drives calls against the returned
+/// [`EffectCtx`].
+fn build_ctx(
     source: &str,
     effect_id: &str,
     params: &HashMap<String, EffectParamValue>,
     granted: &[Permission],
     config: &HashMap<String, String>,
-    mut rx: mpsc::UnboundedReceiver<EffectCall>,
-) -> Result<()> {
+) -> Result<EffectCtx> {
     let lua = Lua::new();
     sandbox::apply(&lua, granted, config).map_err(|e| lua_err("sandbox setup", e))?;
     register_effect_helpers(&lua).map_err(|e| lua_err("effect helpers", e))?;
@@ -227,38 +256,13 @@ fn worker_main(
         .to_value(params)
         .map_err(|e| lua_err("params table", e))?;
 
-    while let Some(call) = rx.blocking_recv() {
-        budget.set(0);
-        match call {
-            EffectCall::RenderPixmap { t, dt, reply } => {
-                let _ = reply.send(run_render_pixmap(
-                    &lua,
-                    render_fn.as_ref(),
-                    t,
-                    dt,
-                    &params_v,
-                ));
-            }
-            EffectCall::LedColors {
-                leds,
-                t,
-                dt,
-                sensor,
-                reply,
-            } => {
-                let _ = reply.send(run_led_colors(
-                    &lua,
-                    led_colors_fn.as_ref(),
-                    leds,
-                    t,
-                    dt,
-                    &params_v,
-                    sensor,
-                ));
-            }
-        }
-    }
-    Ok(())
+    Ok(EffectCtx {
+        lua,
+        render_fn,
+        led_colors_fn,
+        params_v,
+        budget,
+    })
 }
 
 fn run_render_pixmap(

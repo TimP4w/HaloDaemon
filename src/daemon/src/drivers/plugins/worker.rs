@@ -6,16 +6,19 @@
 //! from Lua's view; the worker drives the async transport via a captured runtime
 //! handle.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::ControlFlow;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
+use super::lua_worker::LuaWorker;
 use halod_shared::types::{
     Battery, Boolean, ButtonMapping, ConnectionStatus, Equalizer, OnboardProfiles, PairingStatus,
     Permission, RgbColor, RgbDescriptor, RgbState, RgbZone, Sensor, ZoneTopology,
@@ -211,6 +214,8 @@ struct WorkerCtx {
     dev: Table,
     /// The plugin's returned table, holding its callback functions.
     manifest: Table,
+    /// Instruction counter for the runaway-guard hook; reset before each job.
+    budget: Rc<Cell<u64>>,
 }
 
 /// A unit of work the device side sends to the worker thread. It runs against
@@ -235,12 +240,10 @@ fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
     anyhow!("plugin {context}: {e}")
 }
 
-/// Handle the `LuaDevice` holds. `UnboundedSender` is `Send + Sync`, so the
+/// Handle the `LuaDevice` holds. The inner [`LuaWorker`] is `Send + Sync`, so the
 /// device stays `Send + Sync`. Dropping it ends the worker (channel closes).
 #[derive(Clone)]
-pub struct PluginHandle {
-    tx: mpsc::UnboundedSender<Job>,
-}
+pub struct PluginHandle(LuaWorker<Job>);
 
 impl PluginHandle {
     /// Spawn the worker thread. `source` is the full script; the worker builds
@@ -256,22 +259,15 @@ impl PluginHandle {
         config: HashMap<String, String>,
         handle: Handle,
     ) -> Self {
-        // Unbounded: run() awaits each reply before re-sending, so the queue is self-bounded.
-        let (tx, rx) = mpsc::unbounded_channel();
-        if let Err(e) = std::thread::Builder::new()
-            .name("halod-plugin".into())
-            .spawn(move || {
-                if let Err(e) =
-                    worker_main(&source, transport, dev_match, &granted, &config, handle, rx)
-                {
-                    log::error!("plugin worker stopped: {e:#}");
-                }
-            })
-        {
-            // Dropping rx here makes the handle's sends fail gracefully instead of crashing.
-            log::error!("failed to spawn plugin worker thread: {e}");
-        }
-        Self { tx }
+        Self(LuaWorker::spawn(
+            "halod-plugin",
+            "plugin",
+            move || build_ctx(&source, transport, dev_match, &granted, &config, handle),
+            |job: Job, ctx: &WorkerCtx| {
+                ctx.budget.set(0);
+                job(ctx)
+            },
+        ))
     }
 
     /// Run `f` on the worker thread and await its result. `f` gets the VM, the
@@ -282,16 +278,14 @@ impl PluginHandle {
         R: Send + 'static,
         F: FnOnce(&WorkerCtx) -> Result<R> + Send + 'static,
     {
-        let (reply, rx) = oneshot::channel();
-        let job: Job = Box::new(move |ctx| {
-            let _ = reply.send(f(ctx));
-            ControlFlow::Continue(())
-        });
-        self.tx
-            .send(job)
-            .map_err(|_| anyhow!("plugin worker is gone"))?;
-        rx.await
-            .map_err(|_| anyhow!("plugin worker dropped the reply"))?
+        self.0
+            .request(|reply| {
+                Box::new(move |ctx: &WorkerCtx| {
+                    let _ = reply.send(f(ctx));
+                    ControlFlow::Continue(())
+                })
+            })
+            .await?
     }
 
     /// Run `initialize`, accepting either a bare bool or a table with dynamic
@@ -337,19 +331,22 @@ impl PluginHandle {
     }
 
     pub async fn close(&self) {
-        let (reply, rx) = oneshot::channel::<()>();
-        let job: Job = Box::new(move |ctx| {
-            if let Some(f) = func(&ctx.manifest, "close") {
-                if let Err(e) = f.call::<()>(ctx.dev.clone()) {
-                    log::debug!("plugin close: {e}");
-                }
-            }
-            let _ = reply.send(());
-            ControlFlow::Break(())
-        });
-        if self.tx.send(job).is_ok() {
-            let _ = rx.await;
-        }
+        // The job returns `Break` to end the worker loop after running the
+        // plugin's `close` callback; the reply confirms it finished.
+        let _ = self
+            .0
+            .request(|reply: oneshot::Sender<()>| {
+                Box::new(move |ctx: &WorkerCtx| {
+                    if let Some(f) = func(&ctx.manifest, "close") {
+                        if let Err(e) = f.call::<()>(ctx.dev.clone()) {
+                            log::debug!("plugin close: {e}");
+                        }
+                    }
+                    let _ = reply.send(());
+                    ControlFlow::Break(())
+                })
+            })
+            .await;
     }
 
     pub async fn rgb_apply(&self, state: RgbState) -> Result<()> {
@@ -880,15 +877,16 @@ impl PluginHandle {
     }
 }
 
-fn worker_main(
+/// Build the worker's VM context on the worker thread. Runs once at spawn; the
+/// [`LuaWorker`] loop then drives jobs against the returned [`WorkerCtx`].
+fn build_ctx(
     source: &str,
     transport: PluginIo,
     dev_match: DevMatch,
     granted: &[Permission],
     config: &HashMap<String, String>,
     handle: Handle,
-    mut rx: mpsc::UnboundedReceiver<Job>,
-) -> Result<()> {
+) -> Result<WorkerCtx> {
     let lua = Lua::new();
     sandbox::apply(&lua, granted, config).map_err(|e| lua_err("sandbox setup", e))?;
     let _ = lua.set_memory_limit(WORKER_MEMORY_LIMIT);
@@ -911,14 +909,12 @@ fn worker_main(
     dev.set("match", build_match_table(&lua, &dev_match)?)
         .map_err(|e| lua_err("dev.match", e))?;
 
-    let ctx = WorkerCtx { lua, dev, manifest };
-    while let Some(job) = rx.blocking_recv() {
-        budget.set(0);
-        if job(&ctx).is_break() {
-            break;
-        }
-    }
-    Ok(())
+    Ok(WorkerCtx {
+        lua,
+        dev,
+        manifest,
+        budget,
+    })
 }
 
 /// Run a plugin's `pre_scan(dev)` callback against a freshly opened SMBus bus,
