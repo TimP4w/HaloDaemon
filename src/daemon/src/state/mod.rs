@@ -35,6 +35,10 @@ pub struct AppState {
     /// Device registry. `RwLock` because every engine tick, serializer pass, and
     /// `find_device_by_id` is a reader; only discovery/removal takes the write lock.
     pub devices: RwLock<Vec<Arc<dyn crate::drivers::Device>>>,
+    /// Device ids currently going through asynchronous initialization. Several
+    /// transport scanners run concurrently, so checking only `devices` leaves
+    /// a window where the same physical device can be initialized twice.
+    pub device_registrations: Mutex<std::collections::HashSet<String>>,
 
     // --- Domains ---
     pub discovery: Mutex<DiscoveryStatus>,
@@ -86,6 +90,7 @@ impl AppState {
         Self {
             config: RwLock::new(cfg),
             devices: RwLock::new(Vec::new()),
+            device_registrations: Mutex::new(std::collections::HashSet::new()),
             discovery: Mutex::new(DiscoveryStatus::default()),
             hid: HidTracking::new(),
             lighting: LightingState::default(),

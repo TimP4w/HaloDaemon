@@ -130,31 +130,47 @@ async fn ensure_default_baseline(app: &Arc<AppState>, device: &dyn Device) {
 ///
 /// Returns `true` when the device is now active in app.devices.
 pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bool {
-    if app
-        .devices
-        .read()
-        .await
-        .iter()
-        .any(|d| d.id() == device.id())
-    {
+    let device_id = device.id().to_owned();
+    if !claim_registration(app, &device_id).await {
         return false;
     }
     if register_if_disabled(app, &device).await {
+        finish_registration(app, &device_id).await;
         return true;
     }
     match init_device(app, &device).await {
         Ok(true) => {}
-        _ => return false,
+        _ => {
+            finish_registration(app, &device_id).await;
+            return false;
+        }
     }
     // baseline before overrides
     ensure_default_baseline(app, device.as_ref()).await;
     restore_saved_state(app, &device).await;
     app.devices.write().await.push(device.clone());
+    finish_registration(app, &device_id).await;
     log::info!("[{}] registered", device.name());
     if let Some(hook) = device.as_post_register_hook() {
         hook.on_registered(Arc::clone(app)).await;
     }
     true
+}
+
+/// Atomically reserve a device id across the asynchronous initialization
+/// window. The reservation lock is held while consulting `devices`, closing
+/// the check/insert race between concurrent transport scanners.
+async fn claim_registration(app: &Arc<AppState>, id: &str) -> bool {
+    let mut active = app.device_registrations.lock().await;
+    if active.contains(id) || app.devices.read().await.iter().any(|d| d.id() == id) {
+        return false;
+    }
+    active.insert(id.to_owned());
+    true
+}
+
+async fn finish_registration(app: &Arc<AppState>, id: &str) {
+    app.device_registrations.lock().await.remove(id);
 }
 
 /// Register `device`, then — if it's a `Controller` — discover and register
@@ -282,6 +298,19 @@ mod tests {
             !load.load(Ordering::SeqCst),
             "load_state must not be called"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_registration_claims_allow_only_one_owner() {
+        let app = make_app();
+        let (a, b) = tokio::join!(
+            claim_registration(&app, "steelseries-1"),
+            claim_registration(&app, "steelseries-1")
+        );
+
+        assert_ne!(a, b, "exactly one concurrent scanner must own the id");
+        assert_eq!(app.device_registrations.lock().await.len(), 1);
+        finish_registration(&app, "steelseries-1").await;
     }
 
     #[tokio::test]

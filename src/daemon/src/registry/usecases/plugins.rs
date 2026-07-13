@@ -392,6 +392,23 @@ pub(crate) async fn mark_pending_and_broadcast(app: &Arc<AppState>) {
     crate::ipc::broadcast_state(app).await;
 }
 
+/// Apply a repo-driven registry change immediately.
+///
+/// Repository installs and updates are already explicit user actions. Leaving
+/// them in the generic staged-edit queue made the checkout look successful
+/// while the running daemon continued to use the old plugin, and exposed the
+/// obsolete "Apply changes" banner for an operation that should be complete.
+pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<String>) -> Result<()> {
+    if plugin_ids.is_empty() {
+        crate::ipc::broadcast_state(&app).await;
+        return Ok(());
+    }
+    for id in plugin_ids {
+        app.mark_plugin_dirty(id).await;
+    }
+    apply_pending_changes(app).await
+}
+
 /// Flag a single plugin as needing scoped rediscovery and broadcast.
 async fn mark_plugin_dirty_and_broadcast(app: &Arc<AppState>, plugin_id: String) {
     app.mark_plugin_dirty(plugin_id).await;

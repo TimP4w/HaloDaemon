@@ -14,7 +14,8 @@ use crate::state::AppState;
 use halod_shared::types::RepoUpdateStatus;
 
 use super::plugins::{
-    mark_pending_and_broadcast, purge_plugin_state, reload_registry, sanitize_slug,
+    apply_repo_plugins, mark_pending_and_broadcast, purge_plugin_state, reload_registry,
+    sanitize_slug,
 };
 
 /// RFC 3339 timestamp for `PluginRepoRecord::last_sync`.
@@ -282,11 +283,13 @@ pub async fn check_plugin_updates(
 /// plugin's subtree, leaving sibling plugins in the same repo untouched.
 /// Content changes, so the existing consent model re-requires approval.
 pub async fn update_plugin(plugin_id: String, app: Arc<AppState>) -> Result<()> {
-    let slug = update_plugin_inner(plugin_id, &app).await?;
+    let slug = update_plugin_inner(plugin_id.clone(), &app).await?;
     // The plugin now matches its remote tip, so its "update available" flag has
     // gone stale in every client — recompute and push a fresh frame so the
-    // update banner disappears.
+    // update banner disappears. Publish this before rediscovery, whose state
+    // frames can otherwise fill a slow client's queue and hide the result.
     broadcast_plugin_updates(&app, Some(&slug)).await;
+    apply_repo_plugins(app, vec![plugin_id]).await?;
     Ok(())
 }
 
@@ -333,7 +336,6 @@ async fn update_plugin_inner(plugin_id: String, app: &Arc<AppState>) -> Result<S
     }
     app.request_config_save();
     reload_registry(app).await;
-    mark_pending_and_broadcast(app).await;
     Ok(slug)
 }
 
@@ -360,12 +362,16 @@ pub(crate) async fn publish_plugin_updates(
 /// Update every plugin currently flagged as having an update available, across every repo.
 pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
     let (statuses, _reached) = compute_plugin_updates(&app, None).await;
+    let mut updated = Vec::new();
     for status in statuses.into_iter().filter(|s| s.update_available) {
         if let Err(e) = update_plugin_inner(status.plugin_id.clone(), &app).await {
             log::warn!("updating plugin '{}': {e:#}", status.plugin_id);
+        } else {
+            updated.push(status.plugin_id);
         }
     }
     broadcast_plugin_updates(&app, None).await;
+    apply_repo_plugins(app, updated).await?;
     Ok(())
 }
 
@@ -735,6 +741,12 @@ mod tests {
             });
 
             update_plugin(slug.clone(), app.clone()).await.unwrap();
+
+            assert!(
+                !app.plugins_rediscover_pending
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "an explicit plugin update must be applied without leaving staged changes"
+            );
 
             // Drain frames until the plugin_updates one, and assert the flag cleared.
             let mut cleared = None;

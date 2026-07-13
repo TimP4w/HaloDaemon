@@ -146,7 +146,20 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
         crate::registry::ensure_official_repo(&app).await;
         super::plugins::reload_registry(&app).await;
         crate::registry::notify_ungranted_plugins(&app).await;
-        super::plugins::mark_pending_and_broadcast(&app).await;
+        let official_plugins = app
+            .registry
+            .list(&*app.secret_store)
+            .into_iter()
+            .filter_map(|p| match p.source {
+                halod_shared::types::PluginSource::Repo { slug }
+                    if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG =>
+                {
+                    Some(p.id)
+                }
+                _ => None,
+            })
+            .collect();
+        super::plugins::apply_repo_plugins(app.clone(), official_plugins).await?;
         crate::registry::start_update_check(app.clone()).await;
     }
     Ok(())
