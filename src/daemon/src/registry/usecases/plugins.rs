@@ -507,7 +507,11 @@ mod tests {
     #[test]
     fn copy_dir_all_copies_files_and_nested_dirs() {
         let src = tempfile::tempdir().unwrap();
-        std::fs::write(src.path().join("plugin.yaml"), "id: demo\n").unwrap();
+        std::fs::write(
+            src.path().join("plugin.yaml"),
+            "id: demo\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\n",
+        )
+        .unwrap();
         std::fs::create_dir(src.path().join("assets")).unwrap();
         std::fs::write(src.path().join("assets").join("a.png"), b"png").unwrap();
 
@@ -517,7 +521,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read(out.join("plugin.yaml")).unwrap(),
-            b"id: demo\n"
+            b"id: demo\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\n"
         );
         assert_eq!(
             std::fs::read(out.join("assets").join("a.png")).unwrap(),
@@ -532,7 +536,11 @@ mod tests {
         std::fs::write(secret.path().join("secret.txt"), b"top-secret").unwrap();
 
         let src = tempfile::tempdir().unwrap();
-        std::fs::write(src.path().join("plugin.yaml"), "id: demo\n").unwrap();
+        std::fs::write(
+            src.path().join("plugin.yaml"),
+            "id: demo\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\n",
+        )
+        .unwrap();
         std::os::unix::fs::symlink(
             secret.path().join("secret.txt"),
             src.path().join("leak.txt"),
@@ -732,7 +740,7 @@ mod tests {
 
     /// `devices` must be declared here — a directory plugin's own Lua manifest fields are overlaid away.
     const CONFIG_TEST_PLUGIN_YAML: &str =
-        "id: cfgtest\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n";
+        "id: cfgtest\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n";
 
     fn write_config_test_plugin(root: &std::path::Path) {
         let dir = root.join("cfgtest");
@@ -778,7 +786,7 @@ mod tests {
         std::fs::create_dir_all(plugin_dir.join("assets")).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: assetplug\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n\
+            "id: assetplug\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n\
              logo: logo.png\n",
         )
         .unwrap();
@@ -953,7 +961,7 @@ mod tests {
             std::fs::create_dir_all(&pdir).unwrap();
             std::fs::write(
                 pdir.join("plugin.yaml"),
-                "id: numcfg\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+                "id: numcfg\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
             )
             .unwrap();
             std::fs::write(

@@ -708,7 +708,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: plugin_only_hid\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 0x1E71\n    pid: 0x3012\n",
+            "id: plugin_only_hid\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 0x1E71\n    pid: 0x3012\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();

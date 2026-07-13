@@ -2609,7 +2609,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: dirplug2\nentry: driver.lua\nlicense: GPL-3.0-or-later\ndevices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: dirplug2\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\nentry: driver.lua\nlicense: GPL-3.0-or-later\ndevices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\n",
         )
         .unwrap();
         std::fs::write(dir.join("driver.lua"), ENTRY_LUA).unwrap();
@@ -2709,7 +2709,7 @@ mod tests {
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: hashtest\ndevices:\n  - vendor: A\n    model: C\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: hashtest\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: A\n    model: C\n    transport: hid\n    vid: 1\n    pid: 2\n",
         )
         .unwrap();
         let yaml_changed = parse_manifest_from_dir(&dir).unwrap().content_hash();

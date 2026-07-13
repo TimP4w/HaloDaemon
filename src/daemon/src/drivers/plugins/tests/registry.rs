@@ -275,7 +275,7 @@ fn load_all_with_repos_discovers_a_repo_sourced_plugin_and_tags_its_source() {
     std::fs::create_dir_all(&repo_dir).unwrap();
     std::fs::write(
         repo_dir.join("plugin.yaml"),
-        "id: acme-repo\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+        "id: acme-repo\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
     )
     .unwrap();
     std::fs::write(repo_dir.join("main.lua"), "return {}").unwrap();
@@ -321,7 +321,7 @@ fn load_all_with_repos_discovers_sibling_packages_at_a_repos_root() {
         std::fs::write(
             dir.join("plugin.yaml"),
             format!(
-                "id: {id}\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
+                "id: {id}\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
             ),
         )
         .unwrap();
@@ -366,7 +366,7 @@ fn load_all_never_runs_a_dropped_in_scripts_side_effects() {
     std::fs::create_dir_all(&plugin_dir).unwrap();
     std::fs::write(
         plugin_dir.join("plugin.yaml"),
-        "id: evil\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+        "id: evil\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
     )
     .unwrap();
     std::fs::write(plugin_dir.join("main.lua"), evil).unwrap();
@@ -475,7 +475,7 @@ fn official_repo_plugin_cannot_be_shadowed_by_a_later_source() {
         std::fs::write(
             dir.join("plugin.yaml"),
             format!(
-                "id: dup\ndevices:\n  - vendor: {vendor}\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
+                "id: dup\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: {vendor}\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
             ),
         )
         .unwrap();
@@ -616,7 +616,7 @@ fn invalid_plugin_lists_as_load_failed_and_malformed_is_skipped() {
     let invalid = plugins_dir.join("tcpbad");
     std::fs::create_dir_all(&invalid).unwrap();
     let invalid_yaml =
-        "id: tcpbad\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n";
+        "id: tcpbad\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n";
     std::fs::write(invalid.join("plugin.yaml"), invalid_yaml).unwrap();
     std::fs::write(invalid.join("main.lua"), "return {}").unwrap();
 
@@ -647,7 +647,7 @@ fn invalid_plugin_lists_as_load_failed_and_malformed_is_skipped() {
         "malformed plugin is surfaced as skipped: {skipped:?}"
     );
 
-    let fixed_yaml = "id: tcpbad\ntype: integration\npermissions: [network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n";
+    let fixed_yaml = "id: tcpbad\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: integration\npermissions: [network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n";
     std::fs::write(invalid.join("plugin.yaml"), fixed_yaml).unwrap();
     app.registry.load_all(&plugins_dir);
     let fixed = app.registry.list(app.secret_store.as_ref());
@@ -1028,7 +1028,7 @@ fn write_asset_plugin(root: &Path, id: &str, logo_bytes: Option<&[u8]>) -> std::
     std::fs::write(
         dir.join("plugin.yaml"),
         format!(
-            "id: {id}\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n\
+            "id: {id}\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n\
              logo: logo.png\neffects:\n  - id: rainbow\n    thumbnail: rainbow.png\n"
         ),
     )
@@ -1069,7 +1069,7 @@ fn list_leaves_logo_and_thumbnails_empty_when_undeclared() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("plugin.yaml"),
-        "id: noassets\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+        "id: noassets\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
     )
     .unwrap();
     std::fs::write(dir.join("main.lua"), "return {}").unwrap();
