@@ -278,6 +278,9 @@ struct WorkerCtx {
     dev: Table,
     /// The plugin's returned table, holding its callback functions.
     manifest: Table,
+    /// Integration-controller index. When present, RGB calls use the
+    /// controller-aware callbacks instead of ordinary device-plugin callbacks.
+    controller_index: Option<u32>,
     /// Instruction counter for the runaway-guard hook; reset before each job.
     budget: Rc<Cell<u64>>,
 }
@@ -511,13 +514,20 @@ impl PluginHandle {
 
     pub async fn rgb_apply(&self, state: RgbState) -> Result<()> {
         self.run(move |ctx| {
-            let f = required(&ctx.manifest, "apply")?;
+            let (callback, index) = match ctx.controller_index {
+                Some(index) => ("apply_controller", Some(index)),
+                None => ("apply", None),
+            };
+            let f = required(&ctx.manifest, callback)?;
             let state_v = ctx
                 .lua
                 .to_value(&state)
                 .map_err(|e| lua_err("apply arg", e))?;
-            f.call::<()>((ctx.dev.clone(), state_v))
-                .map_err(|e| lua_err("apply", e))
+            match index {
+                Some(index) => f.call::<()>((ctx.dev.clone(), index, state_v)),
+                None => f.call::<()>((ctx.dev.clone(), state_v)),
+            }
+            .map_err(|e| lua_err(callback, e))
         })
         .await
     }
@@ -526,13 +536,20 @@ impl PluginHandle {
         let zone = zone.to_owned();
         let colors = colors.to_vec();
         self.run(move |ctx| {
-            let f = required(&ctx.manifest, "write_frame")?;
+            let (callback, index) = match ctx.controller_index {
+                Some(index) => ("write_controller_frame", Some(index)),
+                None => ("write_frame", None),
+            };
+            let f = required(&ctx.manifest, callback)?;
             let colors_v = ctx
                 .lua
                 .to_value(&colors)
                 .map_err(|e| lua_err("write_frame arg", e))?;
-            f.call::<()>((ctx.dev.clone(), zone, colors_v))
-                .map_err(|e| lua_err("write_frame", e))
+            match index {
+                Some(index) => f.call::<()>((ctx.dev.clone(), index, zone, colors_v)),
+                None => f.call::<()>((ctx.dev.clone(), zone, colors_v)),
+            }
+            .map_err(|e| lua_err(callback, e))
         })
         .await
     }
@@ -827,6 +844,7 @@ fn build_ctx(
     zones: &[RgbZone],
     audio_registry: super::audio_api::SinkRegistry,
 ) -> Result<WorkerCtx> {
+    let controller_index = dev_match.index;
     let (lua, budget) = sandbox::bootstrap_vm(
         sandbox::InjectSurface::FullRuntime { granted, config },
         WORKER_MEMORY_LIMIT,
@@ -875,6 +893,7 @@ fn build_ctx(
         lua,
         dev,
         manifest,
+        controller_index,
         budget,
     })
 }
@@ -1013,6 +1032,23 @@ mod tests {
         )
     }
 
+    fn spawn_controller(source: &str, index: u32) -> PluginHandle {
+        PluginHandle::spawn(
+            source.to_owned(),
+            stream_io(),
+            DevMatch {
+                transport: "tcp".to_owned(),
+                index: Some(index),
+                ..Default::default()
+            },
+            vec![],
+            HashMap::new(),
+            Handle::current(),
+            Vec::new(),
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        )
+    }
+
     fn static_state() -> RgbState {
         RgbState::Static {
             color: RgbColor { r: 1, g: 2, b: 3 },
@@ -1087,6 +1123,26 @@ mod tests {
             err.to_string().contains("plugin has no apply()"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn integration_controller_routes_rgb_callbacks_with_its_index() {
+        let source = r#"return {
+            apply_controller = function(dev, index, state)
+                assert(index == 7)
+            end,
+            write_controller_frame = function(dev, index, zone, colors)
+                assert(index == 7)
+                assert(zone == "zone-1")
+                assert(#colors == 1)
+            end,
+        }"#;
+        let h = spawn_controller(source, 7);
+
+        h.rgb_apply(static_state()).await.unwrap();
+        h.rgb_write_frame("zone-1", &[RgbColor { r: 1, g: 2, b: 3 }])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
