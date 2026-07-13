@@ -1467,6 +1467,22 @@ mod tests {
         assert!(!is_scanning(&scanning(DiscoveryPhase::Error)));
     }
 
+    /// Recursively collect every `.yaml` catalog file under the locales tree.
+    /// Catalogs now live in per-locale subdirs (`locales/<code>/…`), so a flat
+    /// `read_dir` would miss them — rust-i18n walks recursively and so must we.
+    fn locale_yaml_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.extend(locale_yaml_files(&path));
+            } else if path.extension().and_then(|e| e.to_str()) == Some("yaml") {
+                out.push(path);
+            }
+        }
+        out
+    }
+
     /// Merge every `en` catalog file into the set of fully-qualified leaf keys
     /// it defines (mirrors how rust-i18n merges + flattens at load time).
     fn defined_en_keys() -> std::collections::BTreeSet<String> {
@@ -1494,11 +1510,7 @@ mod tests {
         }
         let dir = format!("{}/locales", env!("CARGO_MANIFEST_DIR"));
         let mut out = std::collections::BTreeSet::new();
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
-                continue;
-            }
+        for path in locale_yaml_files(std::path::Path::new(&dir)) {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap();
             if stem.split('.').next_back() != Some("en") {
                 continue;
@@ -1643,11 +1655,7 @@ mod tests {
         }
         let dir = format!("{}/locales", env!("CARGO_MANIFEST_DIR"));
         let mut per_locale: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for entry in std::fs::read_dir(&dir).expect("locales dir") {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
-                continue;
-            }
+        for path in locale_yaml_files(std::path::Path::new(&dir)) {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap();
             let locale = stem.split('.').next_back().unwrap().to_string();
             let text = std::fs::read_to_string(&path).unwrap();
