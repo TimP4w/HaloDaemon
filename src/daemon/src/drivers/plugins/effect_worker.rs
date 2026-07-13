@@ -117,6 +117,7 @@ impl PluginEffectHandle {
             move || build_ctx(&script_source, &effect_id, &params, &granted, &config),
             |call, ctx: &EffectCtx| {
                 ctx.budget.set(0);
+                super::sandbox::set_call_deadline(&ctx.lua, std::time::Duration::from_secs(2));
                 match call {
                     EffectCall::RenderPixmap { t, dt, reply } => {
                         let _ = reply.send(run_render_pixmap(

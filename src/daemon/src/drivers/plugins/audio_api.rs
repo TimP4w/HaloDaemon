@@ -8,15 +8,17 @@
 //! so a plugin can't leak them. Creation is scoped to the device's *own* USB id,
 //! so a plugin can never open sinks for hardware it doesn't drive.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use mlua::{AnyUserData, Lua, UserData, UserDataMethods};
 use tokio::runtime::Handle;
 
 use crate::services::audio::sink::{register_sink, Sink};
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// A host-created sink plus a one-shot removal guard, so an explicit `:remove()`
 /// and the worker's teardown never double-unload the backing pactl modules.
@@ -37,9 +39,10 @@ impl ManagedSink {
     }
 }
 
-/// Per-worker registry of every sink the plugin created, drained on teardown.
-/// `Rc<RefCell>` because the plugin VM (and this) never leaves its worker thread.
-pub type SinkRegistry = Rc<RefCell<Vec<Arc<ManagedSink>>>>;
+/// Registry of every sink a plugin created. `Arc<Mutex>` (Send + Sync) so the
+/// owning device can tear sinks down without going through the Lua worker, which
+/// may be wedged/dead by the time cleanup is needed.
+pub type SinkRegistry = Arc<Mutex<Vec<Arc<ManagedSink>>>>;
 
 /// Max sinks one plugin worker may hold open at once.
 const MAX_SINKS: usize = 4;
@@ -69,7 +72,7 @@ impl UserData for AudioApi {
                     "sink name must be 1..={MAX_SINK_NAME} bytes"
                 )));
             }
-            if this.registry.borrow().len() >= MAX_SINKS {
+            if lock(&this.registry).len() >= MAX_SINKS {
                 return Err(mlua::Error::RuntimeError(format!(
                     "at most {MAX_SINKS} sinks per plugin"
                 )));
@@ -80,7 +83,7 @@ impl UserData for AudioApi {
                         sink,
                         removed: AtomicBool::new(false),
                     });
-                    this.registry.borrow_mut().push(managed.clone());
+                    lock(&this.registry).push(managed.clone());
                     Ok(Some(SinkHandle {
                         sink: managed,
                         handle: this.handle.clone(),
@@ -108,9 +111,7 @@ impl UserData for SinkHandle {
         });
         methods.add_method("remove", |_, this, ()| {
             this.handle.block_on(this.sink.remove_once());
-            this.registry
-                .borrow_mut()
-                .retain(|s| !Arc::ptr_eq(s, &this.sink));
+            lock(&this.registry).retain(|s| !Arc::ptr_eq(s, &this.sink));
             Ok(())
         });
     }
@@ -132,9 +133,41 @@ pub fn build(
     })
 }
 
-/// Remove every sink the worker created — called when the device closes.
-pub fn teardown(registry: &SinkRegistry, handle: &Handle) {
-    for sink in registry.borrow().iter() {
-        handle.block_on(sink.remove_once());
+/// Remove every sink still in the registry, awaiting each teardown. Runs on the
+/// owning device (Send side), so it works even when the Lua worker is dead.
+pub async fn drain_and_remove(registry: &SinkRegistry) {
+    let sinks: Vec<Arc<ManagedSink>> = std::mem::take(&mut *lock(registry));
+    for sink in sinks {
+        sink.remove_once().await;
+    }
+}
+
+/// Owns the sink registry on the device side and guarantees teardown on drop,
+/// covering exit paths where the graceful `close` never runs (timeout,
+/// quarantine, panic). A leftover module is also reclaimed at next startup by
+/// `cleanup_orphaned_sinks`.
+pub struct AudioGuard {
+    registry: SinkRegistry,
+    handle: Handle,
+}
+
+impl AudioGuard {
+    pub fn new(registry: SinkRegistry, handle: Handle) -> Self {
+        Self { registry, handle }
+    }
+}
+
+impl Drop for AudioGuard {
+    fn drop(&mut self) {
+        let sinks: Vec<Arc<ManagedSink>> = std::mem::take(&mut *lock(&self.registry));
+        if sinks.is_empty() {
+            return;
+        }
+        let handle = Handle::try_current().unwrap_or_else(|_| self.handle.clone());
+        handle.spawn(async move {
+            for sink in sinks {
+                sink.remove_once().await;
+            }
+        });
     }
 }

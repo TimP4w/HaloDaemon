@@ -7,6 +7,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use mlua::{HookTriggers, Lua, Table, VmState};
 
@@ -94,6 +95,7 @@ pub(super) fn bootstrap_vm(
     instruction_budget: u64,
 ) -> mlua::Result<(Lua, Rc<Cell<u64>>)> {
     let lua = Lua::new();
+    lua.set_app_data(CallDeadline(Rc::new(Cell::new(None))));
     match surface {
         InjectSurface::FullRuntime { granted, config } => apply(&lua, granted, config)?,
         InjectSurface::StripOnly => strip_escape_hatches(&lua)?,
@@ -141,14 +143,39 @@ pub(super) fn install_instruction_budget_hook(lua: &Lua, budget: u64) -> Rc<Cell
 /// milliseconds, not seconds.
 const MAX_SLEEP_MS: u64 = 5_000;
 
+/// Absolute wall-clock deadline for the current callback, stored as VM app-data
+/// and reset per job. Blocking host calls (sleep) refuse to run past it, so a
+/// callback can't chain sleeps to outlast the worker's request deadline.
+pub(super) struct CallDeadline(pub Rc<Cell<Option<Instant>>>);
+
+/// Reset the current callback's deadline to `now + budget`.
+pub(super) fn set_call_deadline(lua: &Lua, budget: Duration) {
+    if let Some(d) = lua.app_data_ref::<CallDeadline>() {
+        d.0.set(Some(Instant::now() + budget));
+    }
+}
+
 /// Expose `halod.sleep_ms(ms)`: a blocking sleep on the (per-device) worker
 /// thread, for protocols that need timed gaps between transfers (DDC/CI's write
 /// gap and read delay, say). Blocking the worker only serializes that one
 /// device's own queued commands — the async runtime is untouched.
 fn register_sleep(lua: &Lua) -> mlua::Result<()> {
     let halod: Table = lua.globals().get("halod")?;
-    let sleep = lua.create_function(|_, ms: u64| {
-        std::thread::sleep(std::time::Duration::from_millis(ms.min(MAX_SLEEP_MS)));
+    let sleep = lua.create_function(|lua, ms: u64| {
+        let requested = Duration::from_millis(ms.min(MAX_SLEEP_MS));
+        let remaining = lua
+            .app_data_ref::<CallDeadline>()
+            .and_then(|d| d.0.get())
+            .map(|dl| dl.saturating_duration_since(Instant::now()));
+        match remaining {
+            Some(r) if r.is_zero() => {
+                return Err(mlua::Error::RuntimeError(
+                    "plugin callback deadline exceeded".into(),
+                ))
+            }
+            Some(r) => std::thread::sleep(requested.min(r)),
+            None => std::thread::sleep(requested),
+        }
         Ok(())
     })?;
     halod.set("sleep_ms", sleep)
@@ -271,6 +298,27 @@ mod tests {
         lua.load("assert(type(halod.config) == 'table')")
             .exec()
             .unwrap();
+    }
+
+    #[test]
+    fn sleep_refuses_once_the_callback_deadline_passes() {
+        let lua = Lua::new();
+        lua.set_app_data(CallDeadline(Rc::new(Cell::new(None))));
+        apply(&lua, &[], &HashMap::new()).unwrap();
+        // Deadline already in the past → sleep must error.
+        set_call_deadline(&lua, Duration::from_millis(0));
+        std::thread::sleep(Duration::from_millis(1));
+        let err = lua.load("halod.sleep_ms(10)").exec().unwrap_err();
+        assert!(err.to_string().contains("deadline"), "{err}");
+    }
+
+    #[test]
+    fn sleep_within_deadline_is_allowed() {
+        let lua = Lua::new();
+        lua.set_app_data(CallDeadline(Rc::new(Cell::new(None))));
+        apply(&lua, &[], &HashMap::new()).unwrap();
+        set_call_deadline(&lua, Duration::from_secs(5));
+        lua.load("halod.sleep_ms(1)").exec().unwrap();
     }
 
     #[test]

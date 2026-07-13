@@ -280,10 +280,6 @@ struct WorkerCtx {
     manifest: Table,
     /// Instruction counter for the runaway-guard hook; reset before each job.
     budget: Rc<Cell<u64>>,
-    /// Virtual audio sinks (`dev.audio`) this device created, torn down on close.
-    audio_registry: super::audio_api::SinkRegistry,
-    /// Runtime handle for the async sink teardown at close.
-    audio_handle: Handle,
 }
 
 /// A unit of work the device side sends to the worker thread. It runs against
@@ -319,6 +315,7 @@ impl PluginHandle {
     /// plugin's currently-granted permission set, and `config` its resolved
     /// config values (including decrypted secrets if `SecureStorage` is
     /// granted) — both snapshotted at spawn time.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         source: String,
         transport: PluginIo,
@@ -327,6 +324,7 @@ impl PluginHandle {
         config: HashMap<String, String>,
         handle: Handle,
         zones: Vec<RgbZone>,
+        audio_registry: super::audio_api::SinkRegistry,
     ) -> Self {
         let worker = LuaWorker::spawn(
             "halod-plugin",
@@ -337,11 +335,19 @@ impl PluginHandle {
             std::time::Duration::from_secs(30),
             move || {
                 build_ctx(
-                    &source, transport, dev_match, &granted, &config, handle, &zones,
+                    &source,
+                    transport,
+                    dev_match,
+                    &granted,
+                    &config,
+                    handle,
+                    &zones,
+                    audio_registry,
                 )
             },
             |job: Job, ctx: &WorkerCtx| {
                 ctx.budget.set(0);
+                super::sandbox::set_call_deadline(&ctx.lua, std::time::Duration::from_secs(30));
                 job(ctx)
             },
         )
@@ -496,9 +502,6 @@ impl PluginHandle {
                             log::debug!("plugin close: {e}");
                         }
                     }
-                    // Tear down any virtual audio sinks the plugin created, even
-                    // if it didn't remove them itself.
-                    super::audio_api::teardown(&ctx.audio_registry, &ctx.audio_handle);
                     let _ = reply.send(());
                     ControlFlow::Break(())
                 })
@@ -833,6 +836,7 @@ impl PluginHandle {
 
 /// Build the worker's VM context on the worker thread. Runs once at spawn; the
 /// [`LuaWorker`] loop then drives jobs against the returned [`WorkerCtx`].
+#[allow(clippy::too_many_arguments)]
 fn build_ctx(
     source: &str,
     transport: PluginIo,
@@ -841,6 +845,7 @@ fn build_ctx(
     config: &HashMap<String, String>,
     handle: Handle,
     zones: &[RgbZone],
+    audio_registry: super::audio_api::SinkRegistry,
 ) -> Result<WorkerCtx> {
     let (lua, budget) = sandbox::bootstrap_vm(
         sandbox::InjectSurface::FullRuntime { granted, config },
@@ -867,9 +872,7 @@ fn build_ctx(
         .map_err(|e| lua_err("dev.match", e))?;
 
     // `dev.audio`: device-scoped virtual audio sinks, only when granted the
-    // audio-routing permission. Torn down via the shared registry.
-    let audio_registry: super::audio_api::SinkRegistry =
-        Rc::new(std::cell::RefCell::new(Vec::new()));
+    // audio-routing permission. The registry is owned by the device side.
     if granted.contains(&Permission::AudioRouting) {
         let audio_ud = super::audio_api::build(
             &lua,
@@ -893,8 +896,6 @@ fn build_ctx(
         dev,
         manifest,
         budget,
-        audio_registry,
-        audio_handle: handle,
     })
 }
 
@@ -1028,6 +1029,7 @@ mod tests {
             HashMap::new(),
             Handle::current(),
             Vec::new(),
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         )
     }
 

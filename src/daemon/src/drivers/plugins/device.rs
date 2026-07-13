@@ -320,6 +320,11 @@ pub struct LuaDevice {
     poll_task: Option<tokio::task::JoinHandle<()>>,
     poll_paused: Arc<AtomicBool>,
 
+    /// Host-owned virtual-audio sink registry, drained on close; the guard tears
+    /// remaining sinks down on drop even if the worker is dead.
+    audio_registry: Option<super::audio_api::SinkRegistry>,
+    audio_guard: Option<super::audio_api::AudioGuard>,
+
     // ── chain / children (present only when the manifest declares `chain`) ──
     /// Set after construction (needs the `Arc<Self>`); `None` for non-chain devices.
     chain_host: OnceLock<Arc<ChainHost>>,
@@ -461,6 +466,8 @@ impl LuaDevice {
             .as_ref()
             .map(|r| r.zones.clone())
             .unwrap_or_default();
+        let audio_registry: super::audio_api::SinkRegistry =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let worker = PluginHandle::spawn(
             manifest.script_source.clone(),
             transport,
@@ -469,6 +476,7 @@ impl LuaDevice {
             config,
             handle.clone(),
             zones,
+            audio_registry.clone(),
         );
         let mut dev = Self::build(
             id,
@@ -478,6 +486,11 @@ impl LuaDevice {
             Some(rate_transport),
             notify,
         );
+        dev.audio_registry = Some(audio_registry.clone());
+        dev.audio_guard = Some(super::audio_api::AudioGuard::new(
+            audio_registry,
+            handle.clone(),
+        ));
 
         // The status poll loop stays host-side (not in the single-threaded VM):
         // a ticker enqueues one poll per interval, run serially by the worker.
@@ -571,6 +584,8 @@ impl LuaDevice {
             fan_channel: manifest.fan.as_ref().map(|f| f.channel).unwrap_or(0),
             poll_task: None,
             poll_paused: Arc::new(AtomicBool::new(false)),
+            audio_registry: None,
+            audio_guard: None,
             chain_host: OnceLock::new(),
             self_ref: Weak::new(),
             chain_channels: manifest
@@ -773,6 +788,11 @@ impl Device for LuaDevice {
     async fn close(&self) {
         if let Some(w) = &self.worker {
             w.close().await;
+        }
+        // Drain audio sinks on the device side so cleanup runs even if the
+        // worker's close request failed (wedged/dead worker).
+        if let Some(reg) = &self.audio_registry {
+            super::audio_api::drain_and_remove(reg).await;
         }
     }
 

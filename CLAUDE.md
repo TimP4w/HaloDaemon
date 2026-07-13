@@ -90,7 +90,7 @@ The GUI ([ui/src/](src/ui/src/)) uses eframe/egui in immediate-mode style. State
 
 ### Engines
 
-Engines live inside their owning domain module, not a shared `engines/` tree: **canvas**/**direct** (unified RGB effect loop sampling a tiny-skia pixmap per zone) in [daemon/src/lighting/rgb_engine/](src/daemon/src/lighting/rgb_engine/), **fan_curve** (closed-loop temp→PWM with hysteresis and failsafe) in [daemon/src/cooling/fan_curve.rs](src/daemon/src/cooling/fan_curve.rs), **lcd** (template image rendering) in [daemon/src/lcd/engine/](src/daemon/src/lcd/engine/), plus `action_executor`/`key_remap` in [daemon/src/input/](src/daemon/src/input/) and `focus_watcher` in [daemon/src/profiles/focus_watcher/](src/daemon/src/profiles/focus_watcher/) — documented in `docs/engines.md`. [daemon/src/engines.rs](src/daemon/src/engines.rs) holds only the shared `engine_run_loop`/`EngineRunConfig` infra every engine's watch-loop is built on. `AppState` ([daemon/src/state/mod.rs](src/daemon/src/state/mod.rs)) composes each domain's state struct and holds the shared device registry; engines receive runtime config via `watch` channels.
+Engines live inside their owning domain module, not a shared `engines/` tree: **canvas**/**direct** (unified RGB effect loop sampling a tiny-skia pixmap per zone) in [daemon/src/lighting/rgb_engine/](src/daemon/src/lighting/rgb_engine/), **fan_curve** (closed-loop temp→PWM with hysteresis and failsafe) in [daemon/src/cooling/fan_curve.rs](src/daemon/src/cooling/fan_curve.rs), **lcd** (template image rendering) in [daemon/src/lcd/engine/](src/daemon/src/lcd/engine/), plus `action_executor`/`key_remap` in [daemon/src/input/](src/daemon/src/input/) and `focus_watcher` in [daemon/src/profiles/focus_watcher/](src/daemon/src/profiles/focus_watcher/) — documented in `docs/engines.md`. [daemon/src/run_loop.rs](src/daemon/src/run_loop.rs) holds only the shared `engine_run_loop`/`EngineRunConfig` infra every engine's watch-loop is built on. `AppState` ([daemon/src/state/mod.rs](src/daemon/src/state/mod.rs)) composes each domain's state struct and holds the shared device registry; engines receive runtime config via `watch` channels.
 
 ### Config
 
@@ -103,7 +103,7 @@ Persisted as a directory of YAML files under `~/.config/halod/` (Linux) or `%APP
 - `lcd/<name>.yaml` — saved custom LCD templates ([daemon/src/lcd/usecases/templates.rs](src/daemon/src/lcd/usecases/templates.rs))
 - `media/lcd_images/` — uploaded LCD image library
 
-Every file is written atomically (tmp + rename) on each save; profile files are named from a sanitized slug of the profile name and pruned on rename/delete.
+Every file is saved via tmp-file + rename, fsync'd on Unix (a fully durable cross-platform atomic-replace is still being unified); profile files are named from a sanitized slug of the profile name and pruned on rename/delete.
 
 ## Licensing & attribution
 

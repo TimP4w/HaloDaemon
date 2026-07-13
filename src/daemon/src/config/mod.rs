@@ -98,42 +98,8 @@ pub fn save(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    // Unique temp name in the same dir so concurrent writers never collide.
-    let base = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("config");
-    let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = parent.join(format!(".{base}.{}.{n}.tmp", std::process::id()));
-    {
-        use std::io::Write as _;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        f.write_all(contents.as_bytes())?;
-        f.sync_all()?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
-    // fsync the dir so the rename survives power loss.
-    #[cfg(unix)]
-    if let Ok(dir) = std::fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
-    Ok(())
+    crate::util::fs::atomic_write_str(path, contents)
 }
 
 fn load_file<T: Default + DeserializeOwned>(path: &Path, label: &str) -> Result<T> {
@@ -145,13 +111,23 @@ fn load_file<T: Default + DeserializeOwned>(path: &Path, label: &str) -> Result<
         .map_err(|e| anyhow::anyhow!("Failed to parse {label} at {}: {e}", path.display()))
 }
 
-const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_PROFILES: usize = 1024;
 
-/// Read a config file, rejecting anything past the 1 MiB ceiling.
+/// Read a config file, rejecting anything past the 1 MiB ceiling using file
+/// metadata so a huge file is never fully allocated first.
 fn read_bounded(path: &Path, label: &str) -> Result<String> {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_CONFIG_BYTES {
+            anyhow::bail!(
+                "{label} at {} is too large ({} bytes)",
+                path.display(),
+                meta.len()
+            );
+        }
+    }
     let raw = std::fs::read_to_string(path)?;
-    if raw.len() > MAX_CONFIG_BYTES {
+    if raw.len() as u64 > MAX_CONFIG_BYTES {
         anyhow::bail!(
             "{label} at {} is too large ({} bytes)",
             path.display(),
@@ -171,12 +147,17 @@ fn load_profiles() -> Result<HashMap<String, Profile>> {
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("yaml"))
         .collect();
+    anyhow::ensure!(
+        paths.len() <= MAX_PROFILES,
+        "too many profile files ({} > {MAX_PROFILES})",
+        paths.len()
+    );
     paths.sort();
-    paths.truncate(MAX_PROFILES);
     for path in paths {
         let raw = read_bounded(&path, "profile")?;
         let file: ProfileFile = serde_yaml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("Failed to parse profile at {}: {e}", path.display()))?;
+        crate::profiles::validate::validate_profile(&file.name, &file.profile)?;
         out.insert(file.name, file.profile);
     }
     Ok(out)

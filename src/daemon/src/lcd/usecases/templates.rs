@@ -54,12 +54,27 @@ pub fn list_templates() -> Vec<String> {
     names
 }
 
-const MAX_TEMPLATE_BYTES: usize = 512 * 1024;
+const MAX_TEMPLATE_BYTES: u64 = 512 * 1024;
+const MAX_TEMPLATE_WIDGETS: usize = 256;
+
+/// Central template complexity guard.
+pub fn validate_template(def: &CustomTemplateDef) -> Result<()> {
+    anyhow::ensure!(
+        def.widgets.len() <= MAX_TEMPLATE_WIDGETS,
+        "template has too many widgets ({} > {MAX_TEMPLATE_WIDGETS})",
+        def.widgets.len()
+    );
+    Ok(())
+}
 
 pub async fn save_template(name: String, def: CustomTemplateDef, app: Arc<AppState>) -> Result<()> {
     validate_template_name(&name)?;
+    validate_template(&def)?;
     let yaml = serde_yaml::to_string(&def)?;
-    anyhow::ensure!(yaml.len() <= MAX_TEMPLATE_BYTES, "template too large");
+    anyhow::ensure!(
+        yaml.len() as u64 <= MAX_TEMPLATE_BYTES,
+        "template too large"
+    );
     let path = template_path(&name);
     tokio::task::spawn_blocking(move || crate::config::atomic_write(&path, &yaml)).await??;
     log::info!("[LCD] saved template '{name}'");
@@ -70,12 +85,17 @@ pub async fn save_template(name: String, def: CustomTemplateDef, app: Arc<AppSta
 
 pub async fn load_template(name: String, client: ClientHandle) -> Result<()> {
     validate_template_name(&name)?;
-    let raw = tokio::fs::read_to_string(template_path(&name))
+    let path = template_path(&name);
+    if let Ok(meta) = tokio::fs::metadata(&path).await {
+        anyhow::ensure!(meta.len() <= MAX_TEMPLATE_BYTES, "template too large");
+    }
+    let raw = tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| anyhow!("template not found: {e}"))?;
-    anyhow::ensure!(raw.len() <= MAX_TEMPLATE_BYTES, "template too large");
+    anyhow::ensure!(raw.len() as u64 <= MAX_TEMPLATE_BYTES, "template too large");
     let def: CustomTemplateDef = serde_yaml::from_str(&raw)
         .map_err(|e| anyhow!("failed to parse template '{name}': {e}"))?;
+    validate_template(&def)?;
     client.send_json(&json!({ "type": "lcd_template", "name": name, "def": def }));
     Ok(())
 }

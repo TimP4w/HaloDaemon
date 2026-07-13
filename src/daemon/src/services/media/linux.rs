@@ -151,43 +151,67 @@ fn load_art_from_url(url: &str) -> Option<RgbaImage> {
     Some(scaled.to_rgba8())
 }
 
-/// Reject a URL whose host resolves to a loopback/private/link-local address
-/// (same SSRF policy as the plugin TCP transport).
-fn host_is_vetted(url: &str) -> bool {
-    use std::net::ToSocketAddrs;
-    let rest = url
+/// Extract `(host, port)` from an `http(s)` URL, or `None` for any other scheme
+/// or a malformed authority.
+fn http_authority(url: &str) -> Option<(String, u16)> {
+    let (rest, default_port) = url
         .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"));
-    let Some(rest) = rest else { return false };
-    let default_port = if url.starts_with("https://") { 443 } else { 80 };
+        .map(|r| (r, 443u16))
+        .or_else(|| url.strip_prefix("http://").map(|r| (r, 80u16)))?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let authority = authority.rsplit('@').next().unwrap_or(authority);
     let (host, port) = if let Some(h) = authority.strip_prefix('[') {
         // [ipv6]:port
-        match h.split_once(']') {
-            Some((h6, rest)) => (
-                h6.to_string(),
-                rest.strip_prefix(':')
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(default_port),
-            ),
-            None => return false,
-        }
+        let (h6, tail) = h.split_once(']')?;
+        (
+            h6.to_string(),
+            tail.strip_prefix(':')
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(default_port),
+        )
     } else if let Some((h, p)) = authority.rsplit_once(':') {
         (h.to_string(), p.parse().unwrap_or(default_port))
     } else {
         (authority.to_string(), default_port)
     };
-    match (host.as_str(), port).to_socket_addrs() {
-        Ok(addrs) => {
-            let addrs: Vec<_> = addrs.collect();
-            !addrs.is_empty()
-                && !addrs
-                    .iter()
-                    .any(|sa| crate::drivers::plugins::backends::tcp::is_blocked_ip(&sa.ip()))
-        }
-        Err(_) => false,
+    if host.is_empty() {
+        return None;
     }
+    Some((host, port))
+}
+
+/// Split a ureq `host:port` netloc, stripping IPv6 brackets from the host.
+fn split_netloc(netloc: &str) -> Option<(String, u16)> {
+    let (host, port) = netloc.rsplit_once(':')?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    Some((host.to_string(), port.parse().ok()?))
+}
+
+/// Resolve `host:port` and keep only addresses that pass the SSRF policy (same
+/// as the plugin TCP transport). Errors if nothing resolves or all are blocked.
+fn resolve_vetted(host: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = (host, port)
+        .to_socket_addrs()?
+        .filter(|sa| !crate::drivers::plugins::backends::tcp::is_blocked_ip(&sa.ip()))
+        .collect();
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "host has no routable address",
+        ));
+    }
+    Ok(addrs)
+}
+
+/// True if the URL's host resolves to at least one vetted (non loopback/private/
+/// link-local) address. The connection itself is vetted independently by the
+/// agent resolver, so this is only a fast pre-check.
+fn host_is_vetted(url: &str) -> bool {
+    let Some((host, port)) = http_authority(url) else {
+        return false;
+    };
+    resolve_vetted(&host, port).is_ok()
 }
 
 /// Blocking http(s) GET with a 4 s timeout, address vetting, no redirects, and a
@@ -195,13 +219,19 @@ fn host_is_vetted(url: &str) -> bool {
 fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
     use std::io::Read;
     const MAX_BYTES: u64 = 2 * 1024 * 1024;
-    if !host_is_vetted(url) {
-        log::debug!("media: refusing art URL with non-routable host");
-        return None;
-    }
+    http_authority(url)?;
+    // A custom resolver vets the exact address ureq connects to, so the client
+    // can't re-resolve the host to a blocked address after our check (TOCTOU).
     let resp = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(4))
         .redirects(0)
+        .resolver(|netloc: &str| match split_netloc(netloc) {
+            Some((host, port)) => resolve_vetted(&host, port),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "malformed netloc",
+            )),
+        })
         .build()
         .get(url)
         .call()
@@ -608,6 +638,23 @@ mod tests {
         assert!(!host_is_vetted("https://[::1]/a.png"));
         assert!(!host_is_vetted("ftp://example.com/a.png"));
         assert!(!host_is_vetted("http://192.168.1.5/a.png"));
+    }
+
+    #[test]
+    fn resolver_returns_no_vetted_addrs_for_blocked_hosts() {
+        assert!(resolve_vetted("127.0.0.1", 80).is_err());
+        assert!(resolve_vetted("192.168.1.5", 443).is_err());
+        assert!(resolve_vetted("169.254.169.254", 80).is_err());
+        assert!(resolve_vetted("::1", 443).is_err());
+    }
+
+    #[test]
+    fn split_netloc_strips_ipv6_brackets() {
+        assert_eq!(split_netloc("[::1]:443"), Some(("::1".to_string(), 443)));
+        assert_eq!(
+            split_netloc("1.2.3.4:80"),
+            Some(("1.2.3.4".to_string(), 80))
+        );
     }
 
     fn array_value(items: &[&str]) -> OwnedValue {

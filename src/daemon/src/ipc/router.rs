@@ -24,34 +24,7 @@ const IPC_MAX_NODES: usize = 200_000;
 /// Reject a command whose JSON nests too deep or holds too many collection nodes,
 /// so a small frame can't expand into excessive nested work.
 fn check_ipc_bounds(v: &Value) -> Result<(), String> {
-    fn walk(v: &Value, depth: usize, nodes: &mut usize) -> Result<(), String> {
-        if depth > IPC_MAX_DEPTH {
-            return Err(format!("nesting exceeds {IPC_MAX_DEPTH}"));
-        }
-        match v {
-            Value::Array(a) => {
-                *nodes += a.len();
-                if *nodes > IPC_MAX_NODES {
-                    return Err(format!("collection nodes exceed {IPC_MAX_NODES}"));
-                }
-                for e in a {
-                    walk(e, depth + 1, nodes)?;
-                }
-            }
-            Value::Object(o) => {
-                *nodes += o.len();
-                if *nodes > IPC_MAX_NODES {
-                    return Err(format!("collection nodes exceed {IPC_MAX_NODES}"));
-                }
-                for e in o.values() {
-                    walk(e, depth + 1, nodes)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-    walk(v, 0, &mut 0)
+    crate::util::json::check_bounds(v, IPC_MAX_DEPTH, IPC_MAX_NODES)
 }
 
 /// Lease-gated LCD preview forwarder; drops the broadcast receiver when idle.

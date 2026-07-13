@@ -93,16 +93,7 @@ impl FileKeyStore {
 
     fn persist(&self, state: &SecretsFile) -> Result<()> {
         let yaml = serde_yaml::to_string(state)?;
-        let path = secrets_file_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // Owner-only tmp then rename: the ciphertext file is never briefly
-        // world-readable, and rename preserves the mode.
-        let tmp = path.with_extension("yaml.tmp");
-        write_owner_only(&tmp, yaml.as_bytes())?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::util::fs::atomic_write(&secrets_file_path(), yaml.as_bytes())
     }
 }
 

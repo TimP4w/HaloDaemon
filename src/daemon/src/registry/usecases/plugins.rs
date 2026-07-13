@@ -161,6 +161,39 @@ pub async fn set_config(
     Ok(())
 }
 
+static IMPORT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Tracks plugin ids with an import in flight, so concurrent imports of the same
+/// id are rejected rather than racing on the destination directory.
+static IMPORTS_IN_FLIGHT: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+
+struct ImportGuard(String);
+
+impl ImportGuard {
+    fn acquire(id: &str) -> Result<Self> {
+        let mut guard = IMPORTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        let set = guard.get_or_insert_with(std::collections::HashSet::new);
+        if !set.insert(id.to_owned()) {
+            bail!("an import for plugin '{id}' is already in progress");
+        }
+        Ok(Self(id.to_owned()))
+    }
+}
+
+impl Drop for ImportGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = IMPORTS_IN_FLIGHT
+            .lock()
+            .or_else(|e| Ok::<_, ()>(e.into_inner()))
+        {
+            if let Some(set) = guard.as_mut() {
+                set.remove(&self.0);
+            }
+        }
+    }
+}
+
 /// Recursively copy `src` into `dst` (both directories), creating `dst`.
 /// Rejects symlinks: `std::fs::copy` dereferences them, so a symlinked entry in
 /// an imported package would otherwise copy the *target's* contents (an
@@ -178,9 +211,14 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
             bail!("plugin package contains a symlink: {}", from.display());
         } else if file_type.is_dir() {
             copy_dir_all(&from, &to)?;
-        } else {
+        } else if file_type.is_file() {
             std::fs::copy(&from, &to)
                 .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+        } else {
+            bail!(
+                "plugin package contains a non-regular file: {}",
+                from.display()
+            );
         }
     }
     Ok(())
@@ -195,17 +233,22 @@ pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
         .context("plugin package is not a valid manifest")?;
     let id = parsed.plugin_id.clone();
 
+    // Serialize concurrent imports of the same id so two callers can't race on
+    // the same destination.
+    let _guard = ImportGuard::acquire(&id)?;
+
     let plugins_dir = crate::config::plugins_dir();
     let dst = plugins_dir.join(&id);
     if dst.exists() {
         bail!("a plugin '{id}' is already installed");
     }
 
-    // Copy into a private temp sibling, validate the completed copy, then
-    // atomically rename it into place so a failed import never leaves a partial
-    // installed plugin behind.
+    // Copy into a uniquely-named private temp sibling, validate the completed
+    // copy, then atomically rename it into place so a failed import never leaves
+    // a partial installed plugin behind.
     std::fs::create_dir_all(&plugins_dir)?;
-    let staging = plugins_dir.join(format!(".{id}.import.{}", std::process::id()));
+    let seq = IMPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging = plugins_dir.join(format!(".{id}.import.{}.{seq}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     let manifest = (|| {
         copy_dir_all(src, &staging)?;
@@ -460,6 +503,15 @@ pub(crate) fn sanitize_slug(filename: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn import_guard_serializes_same_id() {
+        let _a = ImportGuard::acquire("dup-id").unwrap();
+        assert!(ImportGuard::acquire("dup-id").is_err());
+        drop(_a);
+        // Once released, a fresh acquire succeeds.
+        assert!(ImportGuard::acquire("dup-id").is_ok());
+    }
 
     #[test]
     fn copy_dir_all_copies_files_and_nested_dirs() {
