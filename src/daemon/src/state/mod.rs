@@ -5,7 +5,7 @@ use tokio::sync::{watch, Mutex, RwLock};
 
 use crate::config::Config;
 use crate::ipc::ClientHandle;
-use crate::registry::discovery::DiscoveryScope;
+use crate::registry::discovery::{DiscoveryScope, PendingRediscovery};
 use halod_shared::types::{DiscoveryStatus, LogEntry};
 
 mod persistence;
@@ -58,6 +58,11 @@ pub struct AppState {
     pub shutdown: tokio::sync::Notify,
     /// Discovery gate consulted by scanners. See [`DiscoveryScope`].
     pub discovery_scope: RwLock<DiscoveryScope>,
+    /// Atomically merged pending rediscovery work; see [`PendingRediscovery`].
+    pub pending_rediscovery: Mutex<PendingRediscovery>,
+    /// Elects one drain loop. Callers may merge work while another drain runs,
+    /// then wait on this gate until their request has been consumed.
+    pub rediscovery_runner: Mutex<()>,
     /// Latest plugin update/on-disk status, replayed to each client on connect.
     pub plugin_update_status: Mutex<Vec<halod_shared::types::PluginUpdateStatus>>,
     /// The device-plugin registry (loaded manifests, consent/config, notice
@@ -89,6 +94,8 @@ impl AppState {
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
             discovery_scope: RwLock::new(DiscoveryScope::Clean),
+            pending_rediscovery: Mutex::new(PendingRediscovery::Clean),
+            rediscovery_runner: Mutex::new(()),
             plugin_update_status: Mutex::new(Vec::new()),
             registry: crate::drivers::plugins::Registry::default(),
             secret_store: Arc::new(crate::secrets::FileKeyStore::new()),
@@ -145,6 +152,14 @@ impl AppState {
 
     pub async fn set_discovery_scope(&self, scope: DiscoveryScope) {
         *self.discovery_scope.write().await = scope;
+    }
+
+    pub async fn merge_rediscovery(&self, request: PendingRediscovery) {
+        self.pending_rediscovery.lock().await.merge(request);
+    }
+
+    pub async fn take_rediscovery(&self) -> PendingRediscovery {
+        self.pending_rediscovery.lock().await.take()
     }
 
     /// True when `handle` passes the current scope (`PluginSet`'s filter, or

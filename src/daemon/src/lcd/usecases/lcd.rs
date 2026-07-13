@@ -10,7 +10,14 @@ use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::state::AppState;
 use crate::util::image::compress_for_storage;
-use halod_shared::types::{validate_image_filename, LcdUploadProgress, LcdUploadStage, RgbState};
+use halod_shared::types::{
+    validate_image_filename, LcdHealth, LcdUploadProgress, LcdUploadStage, RgbState,
+};
+
+fn transition_failed(lcd: &dyn crate::drivers::LcdCapability, error: &anyhow::Error) {
+    lcd.lcd_state()
+        .set_health(LcdHealth::Failed(error.to_string()));
+}
 
 /// Clear a live editor session's decoded-image cache after the image library
 /// changes underneath it (upload/delete), so a stale decode isn't served
@@ -197,9 +204,14 @@ async fn set_screen_image_inner(
 
     stop_video_for_device(app, lcd, device.id()).await;
     deactivate_engine_for_device(app, lcd, device.id()).await;
-    lcd.set_image(&compressed).await?;
+    lcd.lcd_state().set_health(LcdHealth::Starting);
+    if let Err(error) = lcd.set_image(&compressed).await {
+        transition_failed(lcd, &error);
+        return Err(error);
+    }
     restore_rgb(device.as_ref(), lcd).await;
     lcd.set_active_image_filename(Some(filename)).await;
+    lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(app, device.as_ref()).await;
 
     client.send_json(
@@ -255,9 +267,14 @@ async fn set_screen_image_from_library_inner(
 
     stop_video_for_device(app, lcd, device.id()).await;
     deactivate_engine_for_device(app, lcd, device.id()).await;
-    lcd.set_image(&data).await?;
+    lcd.lcd_state().set_health(LcdHealth::Starting);
+    if let Err(error) = lcd.set_image(&data).await {
+        transition_failed(lcd, &error);
+        return Err(error);
+    }
     restore_rgb(device.as_ref(), lcd).await;
     lcd.set_active_image_filename(Some(filename)).await;
+    lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(app, device.as_ref()).await;
 
     client.send_json(
@@ -283,25 +300,25 @@ fn rotation_needs_image_reapply(mode: halod_shared::types::LcdMode) -> bool {
 async fn reapply_static_image(
     device: &dyn crate::drivers::Device,
     lcd: &dyn crate::drivers::LcdCapability,
-) {
+) -> Result<()> {
     let state = lcd.current_state();
     if !rotation_needs_image_reapply(state.mode) {
-        return;
+        return Ok(());
     }
     let Some(filename) = state.active_image else {
-        return;
+        return Ok(());
     };
     let path = crate::config::lcd_images_dir().join(&filename);
     match crate::util::image::read_image_bounded_async(&path).await {
         Ok(data) => {
-            if let Err(e) = lcd.set_image(&data).await {
-                log::warn!("[LCD] re-applying {filename} after rotation failed: {e}");
-                return;
-            }
+            lcd.set_image(&data).await.map_err(|error| {
+                anyhow!("re-applying {filename} after rotation failed: {error}")
+            })?;
             restore_rgb(device, lcd).await;
         }
-        Err(e) => log::warn!("[LCD] image {filename} missing, can't re-apply after rotation: {e}"),
+        Err(error) => return Err(anyhow!("image {filename} missing after rotation: {error}")),
     }
+    Ok(())
 }
 
 pub async fn set_screen_rotation(
@@ -323,8 +340,17 @@ pub async fn set_screen_rotation(
         "[LCD] set_screen_rotation: {degrees}° for device {}",
         device.id()
     );
-    lcd.set_rotation(degrees).await?;
-    reapply_static_image(device.as_ref(), lcd).await;
+    lcd.lcd_state().set_health(LcdHealth::Starting);
+    let result = async {
+        lcd.set_rotation(degrees).await?;
+        reapply_static_image(device.as_ref(), lcd).await
+    }
+    .await;
+    if let Err(error) = result {
+        transition_failed(lcd, &error);
+        return Err(error);
+    }
+    lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
     Ok(())
 }
@@ -339,7 +365,12 @@ pub async fn set_screen_brightness(id: String, brightness: u8, app: Arc<AppState
         brightness,
         device.id()
     );
-    lcd.set_brightness(brightness).await?;
+    lcd.lcd_state().set_health(LcdHealth::Starting);
+    if let Err(error) = lcd.set_brightness(brightness).await {
+        transition_failed(lcd, &error);
+        return Err(error);
+    }
+    lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
     Ok(())
 }
@@ -352,9 +383,14 @@ pub async fn set_screen_default(id: String, app: Arc<AppState>) -> Result<()> {
     log::info!("[LCD] set_screen_default for device {}", device.id());
     stop_video_for_device(&app, lcd, device.id()).await;
     deactivate_engine_for_device(&app, lcd, device.id()).await;
-    lcd.reset_to_default().await?;
+    lcd.lcd_state().set_health(LcdHealth::Starting);
+    if let Err(error) = lcd.reset_to_default().await {
+        transition_failed(lcd, &error);
+        return Err(error);
+    }
     // `reset_to_default` only resets the panel; clearing content here also derives mode=Default.
     lcd.set_active_image_filename(None).await;
+    lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
     Ok(())
 }
@@ -366,7 +402,9 @@ pub async fn set_screen_raw_streaming(id: String, enabled: bool, app: Arc<AppSta
         .as_lcd()
         .ok_or_else(|| anyhow!("device does not support LCD"))?;
     log::info!("[LCD] set_screen_raw_streaming: {enabled} for device {id}");
+    lcd.lcd_state().set_health(LcdHealth::Starting);
     lcd.set_raw_streaming(enabled);
+    lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
     Ok(())
 }
@@ -391,9 +429,22 @@ pub async fn set_screen_video(id: String, path: String, app: Arc<AppState>) -> R
         .as_lcd()
         .ok_or_else(|| anyhow!("device does not support LCD"))?;
     log::info!("[LCD] set_screen_video: {path} for device {id}");
+    lcd.lcd_state().set_health(LcdHealth::Starting);
 
     let path_clone = path.clone();
-    let canonical = tokio::task::spawn_blocking(move || resolve_video_path(&path_clone)).await??;
+    let canonical = match tokio::task::spawn_blocking(move || resolve_video_path(&path_clone)).await
+    {
+        Ok(Ok(path)) => path,
+        Ok(Err(error)) => {
+            transition_failed(lcd, &error);
+            return Err(error);
+        }
+        Err(error) => {
+            let error = anyhow!(error);
+            transition_failed(lcd, &error);
+            return Err(error);
+        }
+    };
 
     let video = app
         .lcd
@@ -403,7 +454,10 @@ pub async fn set_screen_video(id: String, path: String, app: Arc<AppState>) -> R
     // Start the engine before mutating device state, so a failure here can't
     // leave the device advertising Video mode when nothing is playing.
     deactivate_engine_for_device(&app, lcd, device.id()).await;
-    video.start(&id, &canonical).await?;
+    if let Err(error) = video.start(&id, &canonical).await {
+        transition_failed(lcd, &error);
+        return Err(error);
+    }
 
     // Also derives mode=Video, clearing any prior image/template content.
     lcd.set_video_path(Some(canonical));

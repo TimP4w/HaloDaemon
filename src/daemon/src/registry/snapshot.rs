@@ -113,11 +113,7 @@ impl AppState {
 
             for cap in &mut wire.capabilities {
                 match cap {
-                    DeviceCapability::Lcd(status) => {
-                        if let Some(video) = self.lcd.video() {
-                            status.health = video.health(&wire.id).await;
-                        }
-                    }
+                    DeviceCapability::Lcd(_) => {}
                     DeviceCapability::Rgb(status) => {
                         if let Some(t) = &transforms {
                             if !t.is_empty() {

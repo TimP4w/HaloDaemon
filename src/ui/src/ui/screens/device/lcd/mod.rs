@@ -231,7 +231,7 @@ fn drive_preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, lcd: &LcdSt
             // image is seen as a change and clears the stale frame.
             st.lcd.preview_key = preview_key(&LcdMode::Gif, lcd.active_image.as_deref());
         }
-        LcdMode::Engine | LcdMode::Video => {
+        LcdMode::Engine | LcdMode::Video | LcdMode::EditorPreview => {
             clear_gif(st);
             // The daemon pre-decodes engine/video preview frames to RGBA; rebuild
             // the texture only when the frame id changes.

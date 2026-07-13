@@ -17,6 +17,13 @@ use tokio::task::JoinHandle;
 use super::FrameTx;
 use crate::drivers::Device;
 use crate::state::AppState;
+use halod_shared::types::LcdHealth;
+
+fn set_device_health(device: &dyn Device, health: LcdHealth) {
+    if let Some(lcd) = device.as_lcd() {
+        lcd.lcd_state().set_health(health);
+    }
+}
 
 /// Panel streaming is bandwidth-bound, so capping the decode avoids queueing
 /// frames faster than they can be delivered.
@@ -64,7 +71,7 @@ enum VideoStream {
         child: Arc<Mutex<tokio::process::Child>>,
     },
     Stopping,
-    Failed(String),
+    Failed,
 }
 
 pub struct VideoEngine {
@@ -100,34 +107,46 @@ impl VideoEngine {
         };
 
         if !std::path::Path::new(path).is_file() {
-            return Err(anyhow!("video file not found: {path}"));
+            let error = anyhow!("video file not found: {path}");
+            set_device_health(device.as_ref(), LcdHealth::Failed(error.to_string()));
+            return Err(error);
         }
 
         if !ffmpeg_available() {
-            return Err(anyhow!("ffmpeg is not installed or not on PATH"));
+            let error = anyhow!("ffmpeg is not installed or not on PATH");
+            set_device_health(device.as_ref(), LcdHealth::Failed(error.to_string()));
+            return Err(error);
         }
 
         self.stop(device_id).await;
+        set_device_health(device.as_ref(), LcdHealth::Starting);
         self.streams
             .lock()
             .await
             .insert(device_id.to_string(), VideoStream::Starting);
 
-        let (task, child) =
-            match self.spawn_player(device, path.to_string(), w, h, device_id.to_string()) {
-                Ok(stream) => stream,
-                Err(error) => {
-                    self.streams.lock().await.insert(
-                        device_id.to_string(),
-                        VideoStream::Failed(error.to_string()),
-                    );
-                    return Err(error);
-                }
-            };
+        let (task, child) = match self.spawn_player(
+            Arc::clone(&device),
+            path.to_string(),
+            w,
+            h,
+            device_id.to_string(),
+        ) {
+            Ok(stream) => stream,
+            Err(error) => {
+                set_device_health(device.as_ref(), LcdHealth::Failed(error.to_string()));
+                self.streams
+                    .lock()
+                    .await
+                    .insert(device_id.to_string(), VideoStream::Failed);
+                return Err(error);
+            }
+        };
         self.streams
             .lock()
             .await
             .insert(device_id.to_string(), VideoStream::Playing { task, child });
+        set_device_health(device.as_ref(), LcdHealth::Stable);
         log::info!("[Video] streaming {path} to {device_id} ({w}x{h})");
         Ok(())
     }
@@ -149,6 +168,10 @@ impl VideoEngine {
         let Some((mut task, child)) = playing else {
             return;
         };
+        let device = self.app.find_device_by_id(device_id).await;
+        if let Some(device) = &device {
+            set_device_health(device.as_ref(), LcdHealth::Stopping);
+        }
         {
             let mut child = child.lock().await;
             let _ = child.kill().await;
@@ -166,18 +189,10 @@ impl VideoEngine {
             .lock()
             .await
             .insert(device_id.to_string(), VideoStream::Stopped);
-        log::info!("[Video] stopped stream for {device_id}");
-    }
-
-    /// `device_id`'s current stream health, for the wire `LcdStatus` overlay.
-    pub async fn health(&self, device_id: &str) -> halod_shared::types::LcdHealth {
-        use halod_shared::types::LcdHealth;
-        match self.streams.lock().await.get(device_id) {
-            Some(VideoStream::Starting) => LcdHealth::Starting,
-            Some(VideoStream::Stopping) => LcdHealth::Stopping,
-            Some(VideoStream::Failed(reason)) => LcdHealth::Failed(reason.clone()),
-            _ => LcdHealth::Stable,
+        if let Some(device) = device {
+            set_device_health(device.as_ref(), LcdHealth::Stable);
         }
+        log::info!("[Video] stopped stream for {device_id}");
     }
 
     fn spawn_player(
@@ -276,7 +291,8 @@ impl VideoEngine {
             // Only overwrite state we own — a concurrent stop()/start() may have already replaced this entry.
             let mut streams = engine.streams.lock().await;
             if matches!(streams.get(&device_id), Some(VideoStream::Playing { .. })) {
-                streams.insert(device_id, VideoStream::Failed(failure));
+                set_device_health(device.as_ref(), LcdHealth::Failed(failure.clone()));
+                streams.insert(device_id, VideoStream::Failed);
             }
         });
         Ok((task, child))
@@ -435,6 +451,14 @@ mod tests {
         (app, dev)
     }
 
+    fn lcd_health(device: &MockDevice) -> LcdHealth {
+        device
+            .as_lcd()
+            .expect("LCD capability")
+            .current_state()
+            .health
+    }
+
     #[tokio::test]
     async fn stop_awaits_the_child_exiting_before_returning() {
         if !ffmpeg_available() {
@@ -455,8 +479,8 @@ mod tests {
         engine.stop("lcd1").await;
 
         assert_eq!(
-            engine.health("lcd1").await,
-            halod_shared::types::LcdHealth::Stable,
+            lcd_health(&dev),
+            LcdHealth::Stable,
             "stop() must await full teardown, leaving a clean Stable state"
         );
     }
@@ -479,10 +503,7 @@ mod tests {
         engine.start("lcd1", video.to_str().unwrap()).await.unwrap();
 
         engine.stop("lcd1").await;
-        assert_eq!(
-            engine.health("lcd1").await,
-            halod_shared::types::LcdHealth::Stable
-        );
+        assert_eq!(lcd_health(&dev), LcdHealth::Stable);
     }
 
     #[tokio::test]
@@ -505,13 +526,13 @@ mod tests {
             .await
             .unwrap();
 
-        let mut health = engine.health("lcd1").await;
+        let mut health = lcd_health(&dev);
         for _ in 0..50 {
             if matches!(health, halod_shared::types::LcdHealth::Failed(_)) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            health = engine.health("lcd1").await;
+            health = lcd_health(&dev);
         }
         assert!(
             matches!(health, halod_shared::types::LcdHealth::Failed(_)),

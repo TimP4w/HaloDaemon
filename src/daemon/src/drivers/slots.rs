@@ -158,6 +158,9 @@ enum LcdActiveContent {
     Video {
         path: String,
     },
+    EditorPreview {
+        previous: Box<LcdActiveContent>,
+    },
 }
 
 fn is_gif_filename(name: &str) -> bool {
@@ -176,6 +179,7 @@ struct LcdStateInner {
     rotation: halod_shared::types::ScreenRotation,
     raw_streaming: bool,
     latches_last_frame: bool,
+    health: halod_shared::types::LcdHealth,
 }
 
 slot_accessors!(LcdStateSlot {
@@ -195,7 +199,58 @@ impl LcdStateSlot {
             LcdActiveContent::StaticImage { .. } => LcdMode::Image,
             LcdActiveContent::TemplateEngine { .. } => LcdMode::Engine,
             LcdActiveContent::Video { .. } => LcdMode::Video,
+            LcdActiveContent::EditorPreview { .. } => LcdMode::EditorPreview,
         }
+    }
+
+    pub fn persistent_mode(&self) -> halod_shared::types::LcdMode {
+        use halod_shared::types::LcdMode;
+        match self.physical_content() {
+            LcdActiveContent::Default => LcdMode::Default,
+            LcdActiveContent::StaticImage { filename } if is_gif_filename(&filename) => {
+                LcdMode::Gif
+            }
+            LcdActiveContent::StaticImage { .. } => LcdMode::Image,
+            LcdActiveContent::TemplateEngine { .. } => LcdMode::Engine,
+            LcdActiveContent::Video { .. } => LcdMode::Video,
+            LcdActiveContent::EditorPreview { .. } => {
+                unreachable!("physical_content unwraps previews")
+            }
+        }
+    }
+
+    fn physical_content(&self) -> LcdActiveContent {
+        let mut content = self.0.with(|state| state.content.clone());
+        while let LcdActiveContent::EditorPreview { previous } = content {
+            content = *previous;
+        }
+        content
+    }
+
+    pub fn set_editor_preview(&self) {
+        self.0.update(|state| {
+            if !matches!(state.content, LcdActiveContent::EditorPreview { .. }) {
+                state.content = LcdActiveContent::EditorPreview {
+                    previous: Box::new(state.content.clone()),
+                };
+            }
+        });
+    }
+
+    pub fn end_editor_preview(&self) {
+        self.0.update(|state| {
+            if let LcdActiveContent::EditorPreview { previous } = &state.content {
+                state.content = *previous.clone();
+            }
+        });
+    }
+
+    pub fn health(&self) -> halod_shared::types::LcdHealth {
+        self.0.with(|state| state.health.clone())
+    }
+
+    pub fn set_health(&self, health: halod_shared::types::LcdHealth) {
+        self.0.update(|state| state.health = health);
     }
 
     /// Reset to `Default`, clearing whichever content was active.
@@ -206,7 +261,7 @@ impl LcdStateSlot {
     }
 
     pub fn active_image(&self) -> Option<String> {
-        match self.0.with(|s| s.content.clone()) {
+        match self.physical_content() {
             LcdActiveContent::StaticImage { filename } => Some(filename),
             _ => None,
         }
@@ -222,7 +277,7 @@ impl LcdStateSlot {
     }
 
     pub fn lcd_template_id(&self) -> Option<String> {
-        match self.0.with(|s| s.content.clone()) {
+        match self.physical_content() {
             LcdActiveContent::TemplateEngine { template_id, .. } => Some(template_id),
             _ => None,
         }
@@ -246,7 +301,7 @@ impl LcdStateSlot {
         });
     }
     pub fn lcd_template_params(&self) -> HashMap<String, halod_shared::types::EffectParamValue> {
-        match self.0.with(|s| s.content.clone()) {
+        match self.physical_content() {
             LcdActiveContent::TemplateEngine { params, .. } => params,
             _ => HashMap::new(),
         }
@@ -268,7 +323,7 @@ impl LcdStateSlot {
     }
 
     pub fn video_path(&self) -> Option<String> {
-        match self.0.with(|s| s.content.clone()) {
+        match self.physical_content() {
             LcdActiveContent::Video { path } => Some(path),
             _ => None,
         }
@@ -347,5 +402,30 @@ mod lcd_state_tests {
         )]));
         slot.set_lcd_template_id(Some("t1".into()));
         assert!(!slot.lcd_template_params().is_empty());
+    }
+
+    #[test]
+    fn editor_preview_is_transient_and_preserves_authoritative_content() {
+        let slot = LcdStateSlot::default();
+        slot.set_video_path(Some("clip.mp4".into()));
+
+        slot.set_editor_preview();
+        slot.set_editor_preview();
+        assert_eq!(slot.mode(), LcdMode::EditorPreview);
+        assert_eq!(slot.persistent_mode(), LcdMode::Video);
+        assert_eq!(slot.video_path().as_deref(), Some("clip.mp4"));
+
+        slot.end_editor_preview();
+        assert_eq!(slot.mode(), LcdMode::Video);
+    }
+
+    #[test]
+    fn lcd_health_is_stored_with_the_authoritative_slot() {
+        let slot = LcdStateSlot::default();
+        slot.set_health(halod_shared::types::LcdHealth::Failed("push failed".into()));
+        assert_eq!(
+            slot.health(),
+            halod_shared::types::LcdHealth::Failed("push failed".into())
+        );
     }
 }

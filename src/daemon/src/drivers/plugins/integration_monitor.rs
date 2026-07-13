@@ -585,13 +585,14 @@ mod tests {
             std::path::Path::new(&format!("{id}.lua")),
         )
         .unwrap();
+        app.registry
+            .update(|s| s.manifests = vec![manifest.clone()]);
         app.registry.set_granted(&HashMap::from([(
             id.to_string(),
             vec![halod_shared::types::Permission::Network],
         )]));
         app.registry
             .set_acknowledged(&HashMap::from([(id.to_string(), manifest.content_hash())]));
-        app.registry.update(|s| s.manifests = vec![manifest]);
     }
 
     #[tokio::test]

@@ -396,6 +396,40 @@ async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
 /// these plugin ids are closed and re-discovered; every other device is
 /// left untouched.
 pub(crate) async fn reconcile_plugins(app: &Arc<AppState>, plugins: &[String]) {
+    use crate::registry::discovery::PendingRediscovery;
+    app.merge_rediscovery(PendingRediscovery::PluginSet(
+        plugins.iter().cloned().collect(),
+    ))
+    .await;
+    drain_rediscovery(app).await;
+}
+
+pub(crate) async fn reconcile_full(app: &Arc<AppState>) {
+    app.merge_rediscovery(crate::registry::discovery::PendingRediscovery::Full)
+        .await;
+    drain_rediscovery(app).await;
+}
+
+async fn drain_rediscovery(app: &Arc<AppState>) {
+    use crate::registry::discovery::{DiscoveryScope, PendingRediscovery};
+    let _runner = app.rediscovery_runner.lock().await;
+    loop {
+        match app.take_rediscovery().await {
+            PendingRediscovery::Clean => return,
+            PendingRediscovery::Full => {
+                reload_registry(app).await;
+                app.set_discovery_scope(DiscoveryScope::Full).await;
+                crate::registry::discovery::discover_devices(Arc::clone(app)).await;
+                app.set_discovery_scope(DiscoveryScope::Clean).await;
+            }
+            PendingRediscovery::PluginSet(plugin_ids) => {
+                reconcile_plugin_set(app, &plugin_ids.into_iter().collect::<Vec<_>>()).await;
+            }
+        }
+    }
+}
+
+async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[String]) {
     use crate::registry::discovery::{DiscoveryFilter, DiscoveryScope};
 
     // Keep both sides of a manifest change in scope. Deleted/disabled plugins

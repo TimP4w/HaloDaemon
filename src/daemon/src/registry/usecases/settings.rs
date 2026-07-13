@@ -196,7 +196,7 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
         app.registry.replace_policy(&cfg.plugins);
     }
     crate::registry::notify_ungranted_plugins(&app).await;
-    crate::registry::discovery::discover_devices(Arc::clone(&app)).await;
+    crate::registry::usecases::plugins::reconcile_full(&app).await;
 
     let controllers: Vec<std::sync::Arc<dyn crate::drivers::Device>> =
         app.devices.read().await.clone();

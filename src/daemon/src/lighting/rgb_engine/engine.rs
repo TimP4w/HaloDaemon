@@ -1315,6 +1315,8 @@ mod tests {
         )
         .unwrap();
         app.registry.load_all(tmp.path());
+        app.registry
+            .replace_policy(&crate::config::PluginPolicy::default());
         tmp
     }
 
@@ -1685,6 +1687,8 @@ mod tests {
         )
         .unwrap();
         app.registry.load_all(tmp.path());
+        app.registry
+            .replace_policy(&crate::config::PluginPolicy::default());
         tmp
     }
 

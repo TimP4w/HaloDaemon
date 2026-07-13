@@ -767,7 +767,7 @@ pub trait LcdCapability: Send + Sync {
             active_image: slot.active_image(),
             raw_streaming: slot.raw_streaming(),
             video_path: slot.video_path(),
-            health: Default::default(),
+            health: slot.health(),
         }
     }
 
@@ -832,13 +832,16 @@ pub trait LcdCapability: Send + Sync {
             "params":       slot.lcd_template_params(),
             "brightness":   slot.brightness(),
             "rotation":     slot.rotation(),
-            "mode":         slot.mode(),
+            "mode":         slot.persistent_mode(),
             "active_image": slot.active_image(),
             "raw_streaming": slot.raw_streaming(),
             "video_path": slot.video_path(),
         })
     }
     async fn restore_state(&self, v: &serde_json::Value) {
+        use halod_shared::types::LcdHealth;
+        self.lcd_state().set_health(LcdHealth::Starting);
+        let mut failure = None;
         if let Some(b) = v["brightness"].as_u64() {
             let b = u8::try_from(b).unwrap_or_else(|_| {
                 log::warn!("[lcd restore_state] brightness {b} out of range, clamping to 0");
@@ -846,6 +849,7 @@ pub trait LcdCapability: Send + Sync {
             });
             if let Err(e) = self.set_brightness(b).await {
                 log::warn!("[lcd restore_state] set_brightness failed: {e:#}");
+                failure = Some(format!("restoring brightness failed: {e}"));
             }
         }
         if let Some(r) = v["rotation"].as_str() {
@@ -874,6 +878,7 @@ pub trait LcdCapability: Send + Sync {
             if let Some(d) = degrees {
                 if let Err(e) = self.set_rotation(d).await {
                     log::warn!("[lcd restore_state] set_rotation failed: {e:#}");
+                    failure.get_or_insert_with(|| format!("restoring rotation failed: {e}"));
                 }
             }
         }
@@ -935,6 +940,10 @@ pub trait LcdCapability: Send + Sync {
             }
             _ => self.lcd_state().set_mode(LcdMode::Default),
         }
+        self.lcd_state().set_health(match failure {
+            Some(error) => LcdHealth::Failed(error),
+            None => LcdHealth::Stable,
+        });
     }
 }
 

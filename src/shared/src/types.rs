@@ -1210,6 +1210,7 @@ pub enum LcdMode {
     Gif,
     Engine,
     Video,
+    EditorPreview,
 }
 
 /// Orthogonal to `LcdMode`: whether the active content is actually rendering.

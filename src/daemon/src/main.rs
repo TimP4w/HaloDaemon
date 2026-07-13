@@ -16,6 +16,7 @@ mod run_loop;
 mod secrets;
 mod services;
 mod state;
+mod task_supervisor;
 #[cfg(test)]
 mod test_support;
 mod util;
@@ -116,39 +117,6 @@ fn main() -> Result<()> {
     runtime.block_on(run_daemon(headless, cfg))
 }
 
-/// Watches one engine's join handle and notifies the user if it exits other
-/// than by a deliberate abort, without affecting any other engine.
-fn spawn_engine_supervisor(
-    app: Arc<state::AppState>,
-    handle: tokio::task::JoinHandle<()>,
-    title: &'static str,
-    body: &'static str,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let result = handle.await;
-        // Aborted tasks are expected during clean shutdown; suppress notifications.
-        if result.as_ref().is_err_and(|e| e.is_cancelled()) {
-            return;
-        }
-        let panicked = result.is_err_and(|e| e.is_panic());
-        if body.is_empty() {
-            if panicked {
-                log::error!("{title} (panicked)");
-            } else {
-                log::info!("{title}");
-            }
-        } else {
-            platform::notify::send(
-                &app,
-                halod_shared::types::NotificationCode::EngineStopped {
-                    detail: body.to_string(),
-                },
-            )
-            .await;
-        }
-    })
-}
-
 /// The actual device server — always a plain, unprivileged user process.
 /// On Windows, register-bus access is delegated to the elevated `halod-broker`
 /// on demand (see `drivers::transports::register_ops`); nothing here elevates.
@@ -187,6 +155,7 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
 
     let ipc_handle = ipc::serve(app.clone());
     let broadcast_handle = ipc::broadcast_loop(app.clone());
+    let mut supervisor = task_supervisor::TaskSupervisor::new(Arc::clone(&app));
 
     // Reclaim sinks leaked by a previous daemon; safe once single-instance owns.
     services::audio::sink::cleanup_orphaned_sinks().await;
@@ -197,35 +166,48 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
 
     // Started only once startup is done — the grace clock must not elapse
     // before a client has had any chance to connect.
-    let _idle_watcher = lifecycle::spawn_idle_watcher(app.clone(), headless);
-    {
-        let app2 = app.clone();
-        let hotplug_handle = tokio::spawn(hid::hotplug_monitor(app2));
-        tokio::spawn(async move {
-            if let Err(e) = hotplug_handle.await {
-                if !e.is_cancelled() {
-                    log::warn!("hotplug monitor exited unexpectedly: {e}");
-                }
-            }
-        });
-    }
+    let idle_app = Arc::clone(&app);
+    supervisor.register(
+        "Idle watcher",
+        "",
+        move || {
+            let app = Arc::clone(&idle_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(lifecycle::spawn_idle_watcher(app, headless))
+            })
+        },
+        || {},
+    );
+    let hotplug_app = Arc::clone(&app);
+    supervisor.register(
+        "HID hotplug monitor",
+        "Device hotplug monitoring stopped unexpectedly.",
+        move || {
+            let app = Arc::clone(&hotplug_app);
+            Box::pin(
+                async move { task_supervisor::TaskHandle(tokio::spawn(hid::hotplug_monitor(app))) },
+            )
+        },
+        || {},
+    );
 
     // Reconnect/liveness watcher for config-instantiated integration plugins
     // (offline-at-startup, mid-run drops, controller add/remove). Runs beside
     // the HID hotplug monitor.
-    {
-        let app2 = app.clone();
-        let monitor_handle = tokio::spawn(
-            drivers::plugins::integration_monitor::integration_monitor(app2),
-        );
-        tokio::spawn(async move {
-            if let Err(e) = monitor_handle.await {
-                if !e.is_cancelled() {
-                    log::warn!("integration monitor exited unexpectedly: {e}");
-                }
-            }
-        });
-    }
+    let integration_app = Arc::clone(&app);
+    supervisor.register(
+        "Plugin integration monitor",
+        "Plugin integration monitoring stopped unexpectedly.",
+        move || {
+            let app = Arc::clone(&integration_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(
+                    drivers::plugins::integration_monitor::integration_monitor(app),
+                ))
+            })
+        },
+        || {},
+    );
 
     let (cooling_cfg, rgb_cfg, lcd_cfg) = {
         let cfg = app.config.read().await;
@@ -243,62 +225,91 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
     let lcd = lcd::engine::LcdEngine::new(app.clone());
     let video = lcd::engine::video::VideoEngine::new(app.clone(), lcd.frame_sender());
 
-    let (focus_ctrl_tx, focus_ctrl_rx) =
-        tokio::sync::mpsc::channel::<profiles::focus_watcher::ControlMsg>(32);
-    app.focus.set_ctrl_tx(focus_ctrl_tx).await;
-
     let focus_watcher = profiles::focus_watcher::FocusWatcherEngine::new(app.clone());
 
-    app.lighting.set_engine(rgb.clone(), rgb_cfg_tx);
-    app.cooling.set_engine(fan_curve_cfg_tx, failsafe_duty_tx);
-    app.lcd.set_engine(lcd.clone(), video, lcd_cfg_tx);
+    app.lighting.set_engine(rgb.clone(), rgb_cfg_tx.clone());
+    app.cooling
+        .set_engine(fan_curve_cfg_tx.clone(), failsafe_duty_tx.clone());
+    app.lcd.set_engine(lcd.clone(), video, lcd_cfg_tx.clone());
     // Receivers are subscribed lazily; SendError just means no live receivers yet,
     // but watch still stores the value so future subscribers see `true`.
     let _ = app.engines_ready.send(true);
 
-    let fan_curve_handle = fan_curve.start(fan_curve_cfg_rx, failsafe_duty_rx);
-    let rgb_handle = rgb.start(rgb_cfg_rx).await;
-    let lcd_handle = lcd.start(lcd_cfg_rx).await;
-    let focus_watcher_handle = focus_watcher.start(focus_ctrl_rx).await;
-
-    // Engines are supervised independently so one exiting can't take the others down.
-    let engine_aborts = [
-        fan_curve_handle.abort_handle(),
-        rgb_handle.abort_handle(),
-        lcd_handle.abort_handle(),
-        focus_watcher_handle.abort_handle(),
-    ];
-    let supervise = |handle, title, body| spawn_engine_supervisor(app.clone(), handle, title, body);
-    let engine_supervisors = [
-        supervise(
-            fan_curve_handle,
-            "FanCurve engine exited",
-            "FanCurve engine exited unexpectedly, fan control will no longer respond to sensors.",
-        ),
-        supervise(
-            rgb_handle,
-            "RGB engine exited",
-            "RGB engine exited unexpectedly, RGB animations will stop.",
-        ),
-        supervise(
-            lcd_handle,
-            "LCD engine exited",
-            "LCD engine exited unexpectedly, device LCDs will stop updating.",
-        ),
-        supervise(focus_watcher_handle, "FocusWatcher engine exited", ""),
-    ];
+    drop((fan_curve_cfg_rx, failsafe_duty_rx, rgb_cfg_rx, lcd_cfg_rx));
+    let fan_engine = Arc::clone(&fan_curve);
+    let fan_cfg = fan_curve_cfg_tx.clone();
+    let fan_failsafe = failsafe_duty_tx.clone();
+    supervisor.register(
+        "FanCurve engine",
+        "FanCurve engine exited unexpectedly; fan control will no longer respond to sensors.",
+        move || {
+            let engine = Arc::clone(&fan_engine);
+            let cfg = fan_cfg.subscribe();
+            let failsafe = fan_failsafe.subscribe();
+            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg, failsafe)) })
+        },
+        || {},
+    );
+    let rgb_engine = Arc::clone(&rgb);
+    let rgb_config = rgb_cfg_tx.clone();
+    supervisor.register(
+        "RGB engine",
+        "RGB engine exited unexpectedly; RGB animations will stop.",
+        move || {
+            let engine = Arc::clone(&rgb_engine);
+            let cfg = rgb_config.subscribe();
+            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg).await) })
+        },
+        || {},
+    );
+    let lcd_engine = Arc::clone(&lcd);
+    let lcd_config = lcd_cfg_tx.clone();
+    supervisor.register(
+        "LCD engine",
+        "LCD engine exited unexpectedly; device LCDs will stop updating.",
+        move || {
+            let engine = Arc::clone(&lcd_engine);
+            let cfg = lcd_config.subscribe();
+            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg).await) })
+        },
+        || {},
+    );
+    let focus_engine = Arc::clone(&focus_watcher);
+    let focus_app = Arc::clone(&app);
+    supervisor.register(
+        "Focus watcher",
+        "",
+        move || {
+            let engine = Arc::clone(&focus_engine);
+            let app = Arc::clone(&focus_app);
+            Box::pin(async move {
+                let (tx, rx) =
+                    tokio::sync::mpsc::channel::<profiles::focus_watcher::ControlMsg>(32);
+                app.focus.set_ctrl_tx(tx).await;
+                task_supervisor::TaskHandle(engine.start(rx).await)
+            })
+        },
+        || {},
+    );
 
     // Action executor may fail to init on headless Linux.
-    let mut remap_handle = None;
     match input::action_executor::ActionExecutor::new() {
         Ok(executor) => {
             let executor = Arc::new(executor);
             app.input.set_executor(Arc::clone(&executor));
             let remap_engine =
                 Arc::new(input::key_remap::KeyRemapEngine::new(executor, app.clone()));
-            let handle = remap_engine.start();
-            remap_handle = Some(handle);
-            // KeyRemapEngine has no config channel; supervise its handle.
+            let remap_start = Arc::clone(&remap_engine);
+            let remap_app = Arc::clone(&app);
+            supervisor.register(
+                "Key remap engine",
+                "Key remapping stopped unexpectedly.",
+                move || {
+                    let engine = Arc::clone(&remap_start);
+                    Box::pin(async move { task_supervisor::TaskHandle(engine.start()) })
+                },
+                move || remap_app.input.shutdown(),
+            );
         }
         Err(e) => {
             platform::notify::send(
@@ -341,23 +352,8 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
         r = broadcast_handle => { if let Err(e) = r { log::error!("Broadcast: {e}"); } }
     }
 
-    // Stop engines before closing devices so no tick writes mid-close.
-    for abort in &engine_aborts {
-        abort.abort();
-    }
-    for supervisor in engine_supervisors {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), supervisor).await;
-    }
-
-    app.input.shutdown();
-    if let Some(handle) = remap_handle {
-        if tokio::time::timeout(std::time::Duration::from_secs(3), handle)
-            .await
-            .is_err()
-        {
-            log::error!("KeyRemapEngine did not finish input cleanup");
-        }
-    }
+    // Stop every supervised task before closing devices so no engine writes mid-close.
+    supervisor.shutdown().await;
     if let Some(executor) = app.input.executor() {
         executor.shutdown().await;
     }
@@ -427,24 +423,5 @@ mod tests {
             process_role(&argv(&["--frobnicate", "foo"])),
             ProcessRole::Server { headless: false }
         );
-    }
-
-    #[tokio::test]
-    async fn aborting_one_supervised_engine_does_not_affect_another() {
-        let app = Arc::new(state::AppState::new(crate::config::Config::default()));
-
-        let never_ending = tokio::spawn(std::future::pending::<()>());
-        let survivor_handle = tokio::spawn(std::future::pending::<()>());
-
-        let aborted_sup = spawn_engine_supervisor(app.clone(), never_ending, "aborted", "");
-        // Give the supervised task a moment to start awaiting the join handle.
-        tokio::task::yield_now().await;
-
-        aborted_sup.abort();
-        let _ = aborted_sup.await;
-
-        // The other engine's supervisor is untouched and the task keeps running.
-        assert!(!survivor_handle.is_finished());
-        survivor_handle.abort();
     }
 }

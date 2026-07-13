@@ -9,6 +9,62 @@ use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::drivers::plugins::DeviceSpec;
 
+/// Pending rediscovery work. This is distinct from [`DiscoveryScope`], which
+/// describes the scanner currently running. `Full` dominates and plugin sets
+/// are unioned, so concurrent requests cannot overwrite each other.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PendingRediscovery {
+    #[default]
+    Clean,
+    PluginSet(std::collections::HashSet<String>),
+    Full,
+}
+
+impl PendingRediscovery {
+    pub fn merge(&mut self, incoming: Self) {
+        match (&mut *self, incoming) {
+            (Self::Full, _) | (_, Self::Clean) => {}
+            (state, Self::Full) => *state = Self::Full,
+            (Self::Clean, Self::PluginSet(ids)) => *self = Self::PluginSet(ids),
+            (Self::PluginSet(current), Self::PluginSet(ids)) => current.extend(ids),
+        }
+    }
+
+    pub fn take(&mut self) -> Self {
+        std::mem::take(self)
+    }
+}
+
+#[cfg(test)]
+mod pending_rediscovery_tests {
+    use super::PendingRediscovery;
+    use std::collections::HashSet;
+
+    fn ids(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn plugin_requests_union_and_take_returns_to_clean() {
+        let mut pending = PendingRediscovery::Clean;
+        pending.merge(PendingRediscovery::PluginSet(ids(&["a"])));
+        pending.merge(PendingRediscovery::PluginSet(ids(&["b", "a"])));
+        assert_eq!(
+            pending.take(),
+            PendingRediscovery::PluginSet(ids(&["a", "b"]))
+        );
+        assert_eq!(pending, PendingRediscovery::Clean);
+    }
+
+    #[test]
+    fn full_dominates_all_scoped_work() {
+        let mut pending = PendingRediscovery::PluginSet(ids(&["a"]));
+        pending.merge(PendingRediscovery::Full);
+        pending.merge(PendingRediscovery::PluginSet(ids(&["b"])));
+        assert_eq!(pending, PendingRediscovery::Full);
+    }
+}
+
 /// All information a bus scanner passes to a device descriptor.
 #[derive(Clone)]
 pub enum DiscoveryHandle<'a> {

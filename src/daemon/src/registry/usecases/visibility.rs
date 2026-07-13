@@ -53,7 +53,7 @@ pub async fn set_device_visibility(
         new_state == VisibilityState::Visible && prev_state == Some(VisibilityState::Disabled);
     if enabling_from_disabled {
         app.devices.write().await.retain(|d| d.id() != device_id);
-        crate::registry::discovery::discover_devices(app).await;
+        crate::registry::usecases::plugins::reconcile_full(&app).await;
         return Ok(());
     }
 

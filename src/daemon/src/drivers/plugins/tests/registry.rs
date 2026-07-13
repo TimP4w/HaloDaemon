@@ -38,6 +38,7 @@ fn set_registry(reg: &Registry, manifests: Vec<PluginManifest>) {
         s.manifests = manifests;
         s.effects = effects;
     });
+    reg.update(advance_activation);
 }
 
 /// Acknowledge every manifest's current content, as user consent would, so
@@ -54,6 +55,7 @@ fn acknowledge(reg: &Registry, manifests: &[PluginManifest]) {
 fn matching_handle_builds_device_with_identity() {
     let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let manifests = vec![manifest()];
+    set_registry(&app.registry, manifests.clone());
     let dev = app
         .registry
         .match_in(&app, &manifests, &hid(0x1234, 0x5678, Some("SER"), 0))
@@ -78,6 +80,7 @@ fn registries_are_isolated_per_app_state() {
 fn device_id_falls_back_to_index_without_serial() {
     let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let manifests = vec![manifest()];
+    set_registry(&app.registry, manifests.clone());
     let dev = app
         .registry
         .match_in(&app, &manifests, &hid(0x1234, 0x5678, None, 3))
@@ -98,6 +101,12 @@ fn activation_status_reports_disabled_needs_consent_and_ready() {
         }
     "#;
     let m = parse_manifest(src, Path::new("needs_network.lua")).unwrap();
+    app.registry.update(|s| s.manifests = vec![m.clone()]);
+
+    assert!(matches!(
+        app.registry.activation_status(&secrets, &m),
+        ActivationState::Discovered
+    ));
 
     app.registry.set_disabled(&["needs_network".to_string()]);
     assert!(matches!(
@@ -138,6 +147,7 @@ fn granted_permission_is_pinned_to_script_content() {
         }
     "#;
     let manifests = vec![parse_manifest(src, Path::new("needs_network.lua")).unwrap()];
+    set_registry(&app.registry, manifests.clone());
     let handle = hid(0xCCCC, 0xDDDD, Some("S"), 0);
     app.registry.set_disabled(&[]);
     app.registry.set_granted(&HashMap::from([(
@@ -192,6 +202,7 @@ fn disabled_plugin_does_not_match() {
         }
     "#;
     let manifests = vec![parse_manifest(src, Path::new("disabled_only_plugin.lua")).unwrap()];
+    set_registry(&app.registry, manifests.clone());
     let handle = hid(0xAAAA, 0xBBBB, Some("S"), 0);
     app.registry
         .set_disabled(&["disabled_only_plugin".to_string()]);
@@ -213,6 +224,7 @@ fn plugin_with_ungranted_permission_does_not_match() {
         }
     "#;
     let manifests = vec![parse_manifest(src, Path::new("needs_network.lua")).unwrap()];
+    set_registry(&app.registry, manifests.clone());
     let handle = hid(0xCCCC, 0xDDDD, Some("S"), 0);
     app.registry.set_disabled(&[]);
     acknowledge(&app.registry, &manifests);

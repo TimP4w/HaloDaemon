@@ -176,12 +176,14 @@ impl LcdEngine {
     }
 
     /// Drop the editor session if it's been idle past the timeout.
-    fn evict_idle_editor_session(&self) {
+    async fn evict_idle_editor_session(&self) {
+        let mut expired_device = None;
         if let Ok(mut session) = self.app_state.lcd.editor_session.try_lock() {
             if session
                 .as_ref()
                 .is_some_and(|s| s.is_idle(Instant::now(), custom::EDITOR_SESSION_IDLE_TIMEOUT))
             {
+                expired_device = session.as_ref().map(|session| session.device_id.clone());
                 *session = None;
                 // Dropping the session only returns its buffers to the
                 // allocator; ask glibc to hand free pages back to the OS so
@@ -189,6 +191,15 @@ impl LcdEngine {
                 #[cfg(target_os = "linux")]
                 unsafe {
                     libc::malloc_trim(0);
+                }
+            }
+        }
+        if let Some(device_id) = expired_device {
+            if let Some(device) = self.app_state.find_device_by_id(&device_id).await {
+                if let Some(lcd) = device.as_lcd() {
+                    lcd.lcd_state().end_editor_preview();
+                    lcd.lcd_state()
+                        .set_health(halod_shared::types::LcdHealth::Stable);
                 }
             }
         }
@@ -215,7 +226,7 @@ impl LcdEngine {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            self.evict_idle_editor_session();
+            self.evict_idle_editor_session().await;
         }
     }
 
@@ -223,24 +234,19 @@ impl LcdEngine {
         self: Arc<Self>,
         cfg_rx: watch::Receiver<EngineRunConfig>,
     ) -> tokio::task::JoinHandle<()> {
-        let evictor = Arc::clone(&self);
-        tokio::spawn(async move {
-            evictor
-                .run_editor_session_evictor(EDITOR_SESSION_EVICT_INTERVAL)
-                .await;
-        });
         tokio::spawn(async move {
             let start = Instant::now();
             // Idle whenever no device has an active template; wake instantly when
             // one is set. Everything else (master switch, fps, config changes)
             // routes through the shared engine loop.
+            let self_tick = Arc::clone(&self);
             let (self_wait, self_has) = (Arc::clone(&self), Arc::clone(&self));
-            crate::run_loop::engine_run_loop_idle(
+            let engine_loop = crate::run_loop::engine_run_loop_idle(
                 "LCD",
                 cfg_rx,
                 tokio::time::MissedTickBehavior::Skip,
                 move |_cfg| {
-                    let this = Arc::clone(&self);
+                    let this = Arc::clone(&self_tick);
                     let t = start.elapsed().as_secs_f64();
                     async move { this.tick(t).await }
                 },
@@ -252,13 +258,17 @@ impl LcdEngine {
                     let this = Arc::clone(&self_has);
                     async move { this.has_active_content().await }
                 },
-            )
-            .await;
+            );
+            let evictor = Arc::clone(&self);
+            tokio::select! {
+                _ = engine_loop => {}
+                _ = evictor.run_editor_session_evictor(EDITOR_SESSION_EVICT_INTERVAL) => {}
+            }
         })
     }
 
     async fn tick(&self, t: f64) {
-        self.evict_idle_editor_session();
+        self.evict_idle_editor_session().await;
         let sensors = self.app_state.snapshot_sensors().await;
 
         let receiver_count = self.frame_tx.receiver_count();
