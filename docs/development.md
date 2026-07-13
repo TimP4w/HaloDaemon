@@ -72,8 +72,9 @@ For a **dev run** (`cargo run -p halod`, no service installed) the daemon
 launches the broker itself: the **first** time it touches a DRAM/GPU/SuperIO
 register you get **one UAC prompt for `halod-broker.exe`**. Accept it and
 register-bus devices work; decline it and they're unavailable (a clear log line
-explains why) while HID and network/plugin devices keep working. To skip the
-broker entirely and run everything in-process, set `HALOD_NO_BROKER=1`.
+explains why) while HID and network/plugin devices keep working. Windows
+register-bus access always goes through the broker; the daemon has no direct,
+in-process privileged-hardware path.
 
 See [Windows privilege separation](windows-privilege-separation.md) for the full
 design, threat model and process topology.

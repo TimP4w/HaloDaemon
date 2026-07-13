@@ -9,8 +9,8 @@ single tiny binary, **`halod-broker.exe`**, and everything else runs at the
 user's normal (medium) integrity.
 
 This document is the design and threat model for that split. For the day-to-day
-developer workflow (dev-run UAC prompt, `HALOD_NO_BROKER`, installer testing)
-see [development.md](development.md#windows-privilege-separation).
+developer workflow (dev-run UAC prompt and installer testing), see
+[development.md](development.md#windows-privilege-separation).
 
 ## Process topology
 
