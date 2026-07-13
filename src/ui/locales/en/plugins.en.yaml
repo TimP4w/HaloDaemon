@@ -26,6 +26,10 @@ plugins:
   repo_source: SOURCE
   repo_last_sync: LAST SYNC
   repo_never_synced: never
+  repo_sync_just_now: just now
+  repo_sync_minutes: "%{count}m ago"
+  repo_sync_hours: "%{count}h ago"
+  repo_sync_days: "%{count}d ago"
   repo_drivers: DRIVERS
   repo_drivers_count: "%{count} installed"
   repo_drivers_from: DRIVERS FROM THIS REPOSITORY
@@ -97,8 +101,8 @@ plugins:
   consent_deny: Not now
   # First-run consent to contact GitHub for official plugins and updates
   download_consent_title: Download official plugins?
-  download_consent_body: HaloDaemon can download official plugins from GitHub and check for updates on startup. Nothing is downloaded until you allow it.
-  download_consent_note: You can change this anytime in Settings. Plugins you add yourself are unaffected.
+  download_consent_body: Official HaloDaemon plugins are hosted on GitHub. To protect your privacy, HaloDaemon makes no network requests for them unless you explicitly allow it.
+  download_consent_note: If allowed, HaloDaemon downloads official plugins automatically and periodically checks GitHub for updates. If not allowed, it never contacts GitHub and you must add plugins manually. You can change this anytime in Settings.
   download_consent_allow: Allow
   download_consent_deny: Don't allow
   # Add dialog

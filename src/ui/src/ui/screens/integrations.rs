@@ -144,10 +144,15 @@ impl IntegrationsUi {
 
     fn body(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         reconcile_in_flight(&mut self.in_flight, &state.plugins.plugins);
-        ui.label(
+        let title_resp = ui.label(
             egui::RichText::new(t!("integrations.title"))
                 .font(theme::bold(22.0))
                 .color(theme::TEXT),
+        );
+        crate::domain::tour::anchor(
+            ui.ctx(),
+            crate::domain::tour::AnchorId::IntegrationsOverview,
+            title_resp.rect,
         );
         ui.add_space(3.0);
         ui.label(
@@ -225,10 +230,24 @@ impl IntegrationsUi {
                 },
                 |ui| {
                     if let Some(target) = locked {
+                        let toggle_anchor =
+                            egui::Rect::from_min_size(ui.cursor().min, egui::Vec2::new(34.0, 18.0));
+                        crate::domain::tour::anchor(
+                            ui.ctx(),
+                            crate::domain::tour::AnchorId::IntegrationsToggle,
+                            toggle_anchor,
+                        );
                         ui.add_enabled_ui(false, |ui| {
                             widgets::toggle(ui, target);
                         });
                     } else {
+                        let toggle_anchor =
+                            egui::Rect::from_min_size(ui.cursor().min, egui::Vec2::new(34.0, 18.0));
+                        crate::domain::tour::anchor(
+                            ui.ctx(),
+                            crate::domain::tour::AnchorId::IntegrationsToggle,
+                            toggle_anchor,
+                        );
                         let target = widgets::toggle(ui, p.integration_enabled);
                         if target != p.integration_enabled {
                             toggled = Some(target);

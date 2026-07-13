@@ -205,10 +205,15 @@ impl PluginsUi {
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
     ) {
-        ui.label(
+        let title_resp = ui.label(
             egui::RichText::new(t!("plugins.title"))
                 .font(theme::bold(22.0))
                 .color(theme::TEXT),
+        );
+        crate::domain::tour::anchor(
+            ui.ctx(),
+            crate::domain::tour::AnchorId::PluginsOverview,
+            title_resp.rect,
         );
         ui.add_space(3.0);
         ui.label(
@@ -290,14 +295,18 @@ impl PluginsUi {
                     });
                 },
                 |ui| {
-                    if widgets::button(
+                    let add_resp = widgets::button(
                         ui,
                         &t!("plugins.add"),
                         ButtonKind::Primary,
                         Vec2::new(96.0, 30.0),
-                    )
-                    .clicked()
-                    {
+                    );
+                    crate::domain::tour::anchor(
+                        ui.ctx(),
+                        crate::domain::tour::AnchorId::PluginsAddPlugin,
+                        add_resp.rect,
+                    );
+                    if add_resp.clicked() {
                         self.add = Some(AddState);
                     }
                 },
@@ -360,8 +369,14 @@ impl PluginsUi {
                     widgets::caps_label_inline(ui, &t!("plugins.repos_title"));
                 },
                 |ui| {
-                    if widgets::button(ui, "+", ButtonKind::Ghost, Vec2::new(28.0, 26.0)).clicked()
-                    {
+                    let add_repo_resp =
+                        widgets::button(ui, "+", ButtonKind::Ghost, Vec2::new(28.0, 26.0));
+                    crate::domain::tour::anchor(
+                        ui.ctx(),
+                        crate::domain::tour::AnchorId::PluginsAddRepo,
+                        add_repo_resp.rect,
+                    );
+                    if add_repo_resp.clicked() {
                         self.add_repo = Some(AddRepoState::default());
                     }
                 },
@@ -987,6 +1002,13 @@ fn repo_icon_tile(ui: &mut egui::Ui, size: f32) {
 fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+    if row.official {
+        crate::domain::tour::anchor(
+            ui.ctx(),
+            crate::domain::tour::AnchorId::PluginsOfficialRepo,
+            rect,
+        );
+    }
     if selected {
         ui.painter().rect_filled(rect, 9.0, theme::ROW_ACTIVE);
     } else if resp.hovered() {
@@ -1224,15 +1246,15 @@ fn assets_to_request(
         .collect()
 }
 
-/// The file name shown for a plugin (the basename of its script path).
+// ── Row + detail painters ───────────────────────────────────────────────────
+
+#[cfg(test)]
 fn plugin_file_name(p: &PluginInfo) -> &str {
     std::path::Path::new(&p.path)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(&p.path)
 }
-
-// ── Row + detail painters ───────────────────────────────────────────────────
 
 enum RowAction {
     None,
@@ -1459,17 +1481,19 @@ fn list_row(
     ui.painter().text(
         Pos2::new(text_x, rect.top() + 9.0),
         Align2::LEFT_TOP,
-        &p.name,
+        compact_plugin_name(&p.name),
         theme::semibold(12.5),
         theme::TEXT,
     );
-    ui.painter().text(
-        Pos2::new(text_x, rect.top() + 27.0),
-        Align2::LEFT_TOP,
-        plugin_file_name(p),
-        theme::mono(9.5),
-        theme::TEXT_FAINT,
-    );
+    if !p.version.is_empty() {
+        ui.painter().text(
+            Pos2::new(text_x, rect.top() + 27.0),
+            Align2::LEFT_TOP,
+            &p.version,
+            theme::mono(9.5),
+            theme::TEXT_FAINT,
+        );
+    }
     if has_update {
         ui.painter().circle_filled(
             Pos2::new(tile_rect.right() - 2.0, tile_rect.top() + 2.0),
@@ -1502,6 +1526,11 @@ fn list_row(
         ui.id().with(("plugin_toggle", &p.id)),
         toggle_sense,
     );
+    crate::domain::tour::anchor(
+        ui.ctx(),
+        crate::domain::tour::AnchorId::PluginsToggle,
+        toggle_rect,
+    );
     let toggle_on = locked_target.unwrap_or_else(|| plugin_active(p));
     let t = ui.ctx().animate_bool_with_time(tresp.id, toggle_on, 0.15);
     widgets::paint_toggle(ui.painter(), toggle_rect, t);
@@ -1522,6 +1551,17 @@ fn list_row(
         RowAction::Select
     } else {
         RowAction::None
+    }
+}
+
+fn compact_plugin_name(name: &str) -> String {
+    const MAX_CHARS: usize = 25;
+    let mut chars = name.chars();
+    let compact: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{compact}...")
+    } else {
+        compact
     }
 }
 
@@ -1929,6 +1969,11 @@ fn targets_permissions_row(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
 /// plus a Revoke control once granted. Grants happen through the enable-time
 /// consent modal, not here. Shared with the Integrations screen.
 pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
+    crate::domain::tour::anchor(
+        ui.ctx(),
+        crate::domain::tour::AnchorId::PluginsPermissions,
+        ui.max_rect(),
+    );
     ui.horizontal(|ui| {
         widgets::caps_label_inline(ui, &t!("plugins.permissions"));
         let (text, color) = if p.consented {
@@ -2194,12 +2239,30 @@ fn update_banner(ui: &mut egui::Ui, current: &str, available: &str, updating: bo
     clicked
 }
 
-/// `last_sync` is stored as `chrono::Utc::now().to_rfc3339()` (nanosecond
-/// precision + explicit offset), e.g. "2026-07-11T23:44:00.021314418+00:00" —
-/// too noisy for a stat card. Trim to whole seconds: "2026-07-11 23:44:00 UTC".
+/// `last_sync` is stored as an RFC3339 timestamp. Keep the stat compact by
+/// showing a relative age (the exact value remains available in the source
+/// data and can be inspected in diagnostics).
 fn format_last_sync(raw: &str) -> String {
-    let date_time = raw.split(['.', '+', 'Z']).next().unwrap_or(raw);
-    format!("{} UTC", date_time.replacen('T', " ", 1))
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) else {
+        return raw.to_owned();
+    };
+    format_last_sync_at(parsed.with_timezone(&chrono::Utc), chrono::Utc::now())
+}
+
+fn format_last_sync_at(
+    parsed: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let seconds = (now - parsed).num_seconds().max(0);
+    if seconds < 60 {
+        t!("plugins.repo_sync_just_now").to_string()
+    } else if seconds < 3_600 {
+        t!("plugins.repo_sync_minutes", count = seconds / 60).to_string()
+    } else if seconds < 86_400 {
+        t!("plugins.repo_sync_hours", count = seconds / 3_600).to_string()
+    } else {
+        t!("plugins.repo_sync_days", count = seconds / 86_400).to_string()
+    }
 }
 
 /// A repo's stat box (SOURCE / LAST SYNC / DRIVERS).
@@ -2275,11 +2338,24 @@ fn repo_detail_body(
                             widgets::chip(ui, branch);
                         }
                     });
-                    ui.label(
-                        egui::RichText::new(&r.url)
-                            .font(theme::mono(10.0))
-                            .color(theme::TEXT_FAINT2),
+                    let url = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&r.url)
+                                .font(theme::mono(10.0))
+                                .color(theme::CYAN)
+                                .underline(),
+                        )
+                        .sense(Sense::click()),
                     );
+                    if url.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if url.clicked() {
+                        ui.ctx().open_url(egui::OpenUrl {
+                            url: r.url.clone(),
+                            new_tab: true,
+                        });
+                    }
                 });
             });
         },
@@ -2360,10 +2436,11 @@ fn repo_detail_body(
             theme::semibold(12.0),
             theme::TEXT,
         );
-        let sub = if p.license.is_empty() {
-            plugin_file_name(p).to_owned()
-        } else {
-            format!("{} · {}", plugin_file_name(p), p.license)
+        let sub = match (p.version.is_empty(), p.license.is_empty()) {
+            (false, false) => format!("{} · {}", p.version, p.license),
+            (false, true) => p.version.clone(),
+            (true, false) => p.license.clone(),
+            (true, true) => String::new(),
         };
         ui.painter().text(
             Pos2::new(text_x, rect.top() + 22.0),
@@ -2505,18 +2582,24 @@ mod tests {
 
     #[test]
     fn format_last_sync_trims_fractional_seconds_and_offset() {
-        assert_eq!(
-            format_last_sync("2026-07-11T23:44:00.021314418+00:00"),
-            "2026-07-11 23:44:00 UTC"
-        );
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T23:46:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let parsed = chrono::DateTime::parse_from_rfc3339("2026-07-11T23:44:00.021314418+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(format_last_sync_at(parsed, now), "1m ago");
     }
 
     #[test]
     fn format_last_sync_handles_whole_seconds_without_fraction() {
-        assert_eq!(
-            format_last_sync("2026-07-11T23:44:00+00:00"),
-            "2026-07-11 23:44:00 UTC"
-        );
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-12T00:44:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let parsed = chrono::DateTime::parse_from_rfc3339("2026-07-11T23:44:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(format_last_sync_at(parsed, now), "1h ago");
     }
 
     #[test]

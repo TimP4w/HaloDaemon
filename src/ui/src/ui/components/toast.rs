@@ -29,7 +29,7 @@ fn shows_details(code: &NotificationCode) -> bool {
 }
 
 /// Height of the Details button row.
-const DETAILS_ROW_H: f32 = 22.0;
+const DETAILS_ROW_H: f32 = 30.0;
 
 /// Extra card height for the Details row (0 when the code has no detail).
 fn details_extra_height(note: &Notification) -> f32 {
@@ -40,7 +40,7 @@ fn details_extra_height(note: &Notification) -> f32 {
     }
 }
 
-/// Accent color for a toast's severity stripe + title.
+/// Accent color for a toast's severity indicator and title.
 fn severity_color(severity: NotificationSeverity) -> Color32 {
     match severity {
         NotificationSeverity::Error => theme::TRAFFIC_RED,
@@ -166,15 +166,16 @@ fn toast_card(ui: &mut egui::Ui, rect: Rect, note: &Notification, idx: usize) ->
     p.rect_stroke(
         rect,
         12.0,
-        Stroke::new(1.0, theme::BORDER),
+        Stroke::new(1.0, a(color, 0.34)),
         egui::StrokeKind::Middle,
     );
-    // Severity stripe down the left edge.
-    let stripe = Rect::from_min_size(rect.left_top(), Vec2::new(3.0, rect.height()));
-    p.rect_filled(stripe, 1.5, color);
+
+    // A compact severity dot keeps the color hint local to the title without
+    // splitting the card with a persistent vertical bar.
+    p.circle_filled(Pos2::new(rect.left() + 17.0, rect.top() + 21.0), 3.0, color);
 
     p.text(
-        Pos2::new(rect.left() + 14.0, rect.top() + 14.0),
+        Pos2::new(rect.left() + 28.0, rect.top() + 14.0),
         Align2::LEFT_TOP,
         &title,
         theme::semibold(13.0),
@@ -218,12 +219,18 @@ fn toast_card(ui: &mut egui::Ui, rect: Rect, note: &Notification, idx: usize) ->
         details: false,
     };
 
-    // "Details" link (bottom-left) for codes carrying full error text.
+    // Details action: a compact pill in the bottom-right, separated from the
+    // message copy so it reads as an intentional button rather than a loose
+    // link at the edge of the card.
     if shows_details(&note.code) {
         let label = t!("plugins.issue_details");
+        const DETAILS_W: f32 = 78.0;
         let d_rect = Rect::from_min_size(
-            Pos2::new(rect.left() + 14.0, rect.bottom() - DETAILS_ROW_H + 2.0),
-            Vec2::new(70.0, 18.0),
+            Pos2::new(
+                rect.right() - 14.0 - DETAILS_W,
+                rect.bottom() - DETAILS_ROW_H + 4.0,
+            ),
+            Vec2::new(DETAILS_W, 20.0),
         );
         let d_resp = ui.interact(
             d_rect,
@@ -238,9 +245,21 @@ fn toast_card(ui: &mut egui::Ui, rect: Rect, note: &Notification, idx: usize) ->
         if d_resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
+        let button_fill = if d_resp.hovered() {
+            a(color, 0.18)
+        } else {
+            a(color, 0.06)
+        };
+        ui.painter().rect_filled(d_rect, 8.0, button_fill);
+        ui.painter().rect_stroke(
+            d_rect,
+            8.0,
+            Stroke::new(1.0, a(color, if d_resp.hovered() { 0.55 } else { 0.28 })),
+            egui::StrokeKind::Middle,
+        );
         ui.painter().text(
-            d_rect.left_center(),
-            Align2::LEFT_CENTER,
+            d_rect.center(),
+            Align2::CENTER_CENTER,
             &label,
             theme::semibold(12.0),
             d_col,

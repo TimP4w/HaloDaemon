@@ -31,6 +31,7 @@ pub fn show(
     conflict_prompted: &mut HashSet<String>,
     history: &HashMap<String, VecDeque<f32>>,
     page: &mut crate::domain::state::Page,
+    allow_modals: bool,
 ) {
     open_new_conflict_prompt(state, conflict_choice, conflict_prompted);
     egui::ScrollArea::vertical()
@@ -92,8 +93,10 @@ pub fn show(
                 });
         });
 
-    remove_confirm_modal(ui.ctx(), cmd, confirm_remove);
-    conflict_choice_modal(ui.ctx(), cmd, conflict_choice);
+    if allow_modals {
+        remove_confirm_modal(ui.ctx(), cmd, confirm_remove);
+        conflict_choice_modal(ui.ctx(), cmd, conflict_choice);
+    }
 }
 
 /// A pending "remove chained device" confirmation: the child to unlink plus the
@@ -1114,11 +1117,13 @@ fn device_card(
         theme::body(11.0),
         theme::TEXT_MUT,
     );
+    let name_font = theme::semibold(13.5);
+    let display_name = ellipsize(p, &d.name, &name_font, rect.width() - 32.0);
     p.text(
         Pos2::new(rect.left() + 16.0, type_y - 6.0 - 16.0),
         Align2::LEFT_BOTTOM,
-        &d.name,
-        theme::semibold(13.5),
+        display_name,
+        name_font,
         theme::TEXT,
     );
 

@@ -2,7 +2,7 @@
 //! Left sidebar: workspace nav, live device list, and the daemon-health footer.
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{AppState, PluginUpdateStatus};
+use halod_shared::types::{AppState, FanCurveStatus, PluginUpdateStatus};
 
 use crate::domain::models::device as model;
 use crate::domain::state::Page;
@@ -18,27 +18,58 @@ const NAV: [(Icon, &str, Page); 6] = [
     (Icon::Settings, "Settings", Page::Settings),
 ];
 
-/// Count of plugins needing user attention: an outstanding issue, an available
-/// update, a changed on-disk hash, or a pending permission consent. Drives the
-/// sidebar badge.
+/// Count of plugins needing user attention: an error, an available update, or
+/// a plugin disabled by the security gate after its content changed or it
+/// requested a new permission. Ordinary first-time consent is intentionally
+/// not surfaced here because enabling the plugin presents that flow in context.
 pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateStatus]) -> usize {
     state
         .plugins
         .plugins
         .iter()
         .filter(|p| {
-            p.issue.is_some()
-                || !p.consented
-                || p.content_changed
-                || plugin_updates.iter().any(|u| {
-                    u.plugin_id == p.id
-                        // An on-disk change only needs action while the plugin
-                        // is held disabled; once re-enabled the risk is accepted.
-                        && (u.update_available || (u.on_disk_changed && !p.enabled))
-                })
+            let has_new_permission = p
+                .declared_permissions
+                .iter()
+                .any(|perm| !p.granted_permissions.contains(perm));
+            let was_approved = !p.granted_permissions.is_empty();
+            let security_blocked =
+                !p.enabled && (p.content_changed || (was_approved && has_new_permission));
+            let update_available = plugin_updates.iter().any(|u| {
+                u.plugin_id == p.id
+                    && (u.update_available
+                        // The daemon may report the content change separately
+                        // from the plugin snapshot while quarantine is active.
+                        || (u.on_disk_changed && !p.enabled))
+            });
+            p.issue.is_some() || security_blocked || update_available
         })
         .count()
-        + state.plugins.skipped.len()
+}
+
+/// Count fan curves with an actionable status, such as no temperature sensor,
+/// a sensor malfunction, a stalled fan, or a failed write. Healthy curves do
+/// not add noise to the Cooling navigation item.
+pub fn cooling_needing_action(state: &AppState) -> usize {
+    state
+        .cooling
+        .fan_curves
+        .iter()
+        .filter(|curve| {
+            // Hidden and disabled devices are intentionally out of scope for
+            // the global Cooling attention hint. A missing device has no
+            // visibility state, so its NoDevice status remains actionable.
+            if state
+                .devices
+                .iter()
+                .find(|device| device.id == curve.fan_id)
+                .is_some_and(model::is_hidden)
+            {
+                return false;
+            }
+            !matches!(&curve.status, FanCurveStatus::Ok)
+        })
+        .count()
 }
 
 pub fn sidebar(
@@ -49,6 +80,7 @@ pub fn sidebar(
     plugin_updates: &[PluginUpdateStatus],
 ) {
     let plugin_actions = plugins_needing_action(state, plugin_updates);
+    let cooling_actions = cooling_needing_action(state);
     let rect = ui.max_rect();
     ui.painter().line_segment(
         [rect.right_top(), rect.right_bottom()],
@@ -63,10 +95,10 @@ pub fn sidebar(
             section_label(ui, &t!("shell.workspace"));
             for (icon, _label, target) in &NAV {
                 let row_start = ui.cursor().min;
-                let badge = if *target == Page::Plugins {
-                    plugin_actions
-                } else {
-                    0
+                let badge = match target {
+                    Page::Plugins => plugin_actions,
+                    Page::Cooling => cooling_actions,
+                    _ => 0,
                 };
                 if nav_row(ui, *icon, &nav_label(target), *page == *target, badge) {
                     *page = target.clone();
@@ -77,6 +109,8 @@ pub fn sidebar(
                     Page::Home => crate::domain::tour::AnchorId::HomeSidebarHome,
                     Page::Lighting => crate::domain::tour::AnchorId::HomeSidebarLighting,
                     Page::Cooling => crate::domain::tour::AnchorId::HomeSidebarCooling,
+                    Page::Integrations => crate::domain::tour::AnchorId::HomeSidebarIntegrations,
+                    Page::Plugins => crate::domain::tour::AnchorId::HomeSidebarPlugins,
                     Page::Settings => crate::domain::tour::AnchorId::HomeSidebarSettings,
                     _ => continue,
                 };
@@ -449,16 +483,20 @@ mod tests {
     }
 
     #[test]
-    fn plugins_needing_action_counts_updates_changes_and_unconsented() {
+    fn plugins_needing_action_counts_updates_and_security_blocks_only() {
         let mut state = AppState::default();
         state.plugins.plugins = vec![
-            plugin("ok", true, false), // fine — not counted
-            plugin("unconsented", false, false),
-            plugin("changed", true, true),
+            plugin("ok", true, false),           // fine — not counted
+            plugin("unconsented", false, false), // first-time consent is contextual
+            {
+                let mut changed = plugin("changed", true, true);
+                changed.enabled = false;
+                changed
+            },
             plugin("has_update", true, false),
         ];
         let updates = vec![update("has_update", true), update("ok", false)];
-        assert_eq!(plugins_needing_action(&state, &updates), 3);
+        assert_eq!(plugins_needing_action(&state, &updates), 2);
     }
 
     #[test]
@@ -469,7 +507,27 @@ mod tests {
     }
 
     #[test]
-    fn plugins_needing_action_counts_an_outstanding_issue() {
+    fn plugins_needing_action_counts_new_permission_only_after_prior_approval() {
+        let mut p = plugin("permission", true, false);
+        p.enabled = false;
+        p.granted_permissions = vec![halod_shared::types::Permission::Os];
+        p.declared_permissions = vec![
+            halod_shared::types::Permission::Os,
+            halod_shared::types::Permission::Network,
+        ];
+        let mut state = AppState::default();
+        state.plugins.plugins = vec![p];
+        assert_eq!(plugins_needing_action(&state, &[]), 1);
+
+        let mut first_run = plugin("first-run", false, false);
+        first_run.enabled = false;
+        first_run.declared_permissions = vec![halod_shared::types::Permission::Network];
+        state.plugins.plugins = vec![first_run];
+        assert_eq!(plugins_needing_action(&state, &[]), 0);
+    }
+
+    #[test]
+    fn plugins_needing_action_counts_runtime_issues() {
         let mut with_issue = plugin("failing", true, false);
         with_issue.issue = Some(halod_shared::types::PluginIssue {
             kind: halod_shared::types::PluginIssueKind::ConnectFailed,
@@ -482,14 +540,44 @@ mod tests {
     }
 
     #[test]
-    fn plugins_needing_action_counts_skipped_plugins() {
+    fn plugins_needing_action_ignores_skipped_plugins() {
         let mut state = AppState::default();
         state.plugins.plugins = vec![plugin("ok", true, false)];
         state.plugins.skipped = vec![halod_shared::types::SkippedPlugin {
             path: "/a/broken".into(),
             reason: "bad yaml".into(),
         }];
-        assert_eq!(plugins_needing_action(&state, &[]), 1);
+        assert_eq!(plugins_needing_action(&state, &[]), 0);
+    }
+
+    #[test]
+    fn cooling_needing_action_counts_only_unhealthy_curves() {
+        let mut state = AppState::default();
+        state.cooling.fan_curves = vec![
+            halod_shared::types::WireFanCurve {
+                fan_id: "ok".into(),
+                sensor_id: Some("temp".into()),
+                points: vec![],
+                status: FanCurveStatus::Ok,
+            },
+            halod_shared::types::WireFanCurve {
+                fan_id: "missing-sensor".into(),
+                sensor_id: None,
+                points: vec![],
+                status: FanCurveStatus::NoSensor,
+            },
+            halod_shared::types::WireFanCurve {
+                fan_id: "disabled".into(),
+                sensor_id: None,
+                points: vec![],
+                status: FanCurveStatus::FanStalled,
+            },
+        ];
+        let mut disabled = halod_shared::types::WireDevice::default();
+        disabled.id = "disabled".into();
+        disabled.active_state = halod_shared::types::VisibilityState::Disabled;
+        state.devices.push(disabled);
+        assert_eq!(cooling_needing_action(&state), 1);
     }
 
     #[test]

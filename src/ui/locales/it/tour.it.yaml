@@ -13,19 +13,25 @@ tour:
       title: "Dispositivi nascosti"
       body: "Qui puoi scegliere se mostrare o nascondere i dispositivi che hai contrassegnato come nascosti."
     sidebar_home:
-      title: "Barra laterale: Home"
+      title: "Home"
       body: "La pagina Home elenca tutti i dispositivi collegati. Puoi cercarli, nasconderli o gestirli facendo clic con il pulsante destro sulla relativa scheda."
     sidebar_lighting:
-      title: "Barra laterale: Illuminazione RGB"
+      title: "Illuminazione RGB"
       body: "Applica contemporaneamente un colore o un effetto a tutti i dispositivi RGB. Qui puoi creare, importare e gestire effetti personalizzati."
     sidebar_cooling:
-      title: "Barra laterale: Raffreddamento"
+      title: "Raffreddamento"
       body: "Visualizza le curve di ventole e pompe, le letture dei sensori e i profili di raffreddamento di tutti i dispositivi."
     sidebar_canvas:
-      title: "Barra laterale: Canvas degli effetti"
+      title: "Canvas degli effetti"
       body: "Combina effetti su più dispositivi in un canvas condiviso. Sposta le zone, sovrapponi gli effetti e regola il campionamento."
+    sidebar_integrations:
+      title: "Integrazioni"
+      body: "Collega HaloDaemon ad altre applicazioni e servizi. Le integrazioni connesse espongono i loro dispositivi nello spazio di lavoro."
+    sidebar_plugins:
+      title: "Plugin"
+      body: "Estendi HaloDaemon con supporto hardware, effetti e integrazioni. Qui puoi controllare aggiornamenti, errori e permessi dei plugin."
     sidebar_settings:
-      title: "Barra laterale: Impostazioni"
+      title: "Impostazioni"
       body: "Qui trovi le preferenze dell'applicazione, i controlli dei motori e il comportamento della finestra quando la chiudi nell'area di notifica."
     switch_profiles:
       title: "Cambia profili"
@@ -175,3 +181,29 @@ tour:
     tune:
       title: "Regola i parametri"
       body: "Scegli un generatore, regola i colori e la velocità, quindi modella la curva di luminosità. Ogni controllo modifica la formula procedurale mostrata sopra il grafico."
+  page_plugins:
+    overview:
+      title: "Cosa sono i plugin?"
+      body: "I plugin aggiungono supporto hardware, effetti e integrazioni senza ricompilare il daemon. Sono estensioni separate e controllate tramite permessi."
+    official_repo:
+      title: "Il repository ufficiale"
+      body: "Il repository ufficiale è la fonte attendibile dei plugin mantenuti da HaloDaemon. I suoi plugin possono essere aggiornati insieme da questa pagina."
+    add_plugin:
+      title: "Aggiungi un plugin"
+      body: "Usa Aggiungi plugin per caricare una cartella locale. Controlla dettagli e permessi prima di abilitarla."
+    add_repo:
+      title: "Aggiungi un repository"
+      body: "Aggiungi un altro repository Git per usare plugin della comunità o privati. Puoi scegliere un branch quando disponibile."
+    toggle:
+      title: "Abilita o disabilita un plugin"
+      body: "Usa l'interruttore nella riga del plugin per controllarne l'attivazione. Disabilitarlo rimuove i dispositivi o gli effetti che fornisce."
+    permissions:
+      title: "Permessi del plugin"
+      body: "I permessi spiegano cosa può usare un plugin, ad esempio rete o orologio di sistema. Concedi solo ciò di cui ti fidi e revoca l'accesso dai dettagli."
+  page_integrations:
+    overview:
+      title: "Integrazioni"
+      body: "Le integrazioni collegano HaloDaemon a un'altra applicazione o servizio. Le integrazioni connesse espongono i loro dispositivi nello spazio di lavoro."
+    toggle:
+      title: "Connetti un'integrazione"
+      body: "Usa l'interruttore per connettere o disconnettere un'integrazione. Configura eventuali endpoint o account richiesti prima di abilitarla."

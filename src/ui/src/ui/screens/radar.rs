@@ -69,7 +69,9 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
             let complete = matches!(state.discovery.phase, DiscoveryPhase::Complete);
             let found = state.devices.iter().filter(|d| model::listable(d)).count();
 
-            // Brand wordmark, top-center of the radar body.
+            // Build the screen as one centered vertical composition. Keeping the
+            // logo, radar and status copy in the same layout calculation avoids
+            // the uneven gaps caused by independent percentage offsets.
             let halo = p.layout_no_wrap("halo".to_string(), theme::bold(22.0), theme::TEXT);
             let daemon = p.layout_no_wrap(
                 "daemon".to_string(),
@@ -78,8 +80,20 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
             );
             let icon_size = 48.0_f32;
             let total = icon_size + 14.0 + halo.size().x + daemon.size().x;
+            let logo_height = icon_size;
+            let gap = 28.0_f32;
+            let checking = connected && state.discovery.checking_updates;
+            let status_height = if checking { 68.0 } else { 48.0 };
+            let fixed_height = logo_height + gap * 2.0 + status_height;
+            let radius = ((full.height() - fixed_height) / 2.0)
+                .min(full.width() * 0.34)
+                .min(210.0)
+                .max(48.0);
+            let composition_height = fixed_height + radius * 2.0;
+            let top = full.center().y - composition_height / 2.0;
+
             let mark = Rect::from_min_size(
-                Pos2::new(full.center().x - total / 2.0, full.top() + 20.0),
+                Pos2::new(full.center().x - total / 2.0, top),
                 Vec2::splat(icon_size),
             );
             theme::logo_icon(&p, &ctx, mark, time as f32);
@@ -91,8 +105,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                 theme::hex(0x9b7fe0),
             );
 
-            let center = Pos2::new(full.center().x, full.top() + full.height() * 0.42);
-            let radius = (full.height() * 0.45).min(full.width() * 0.34).min(210.0);
+            let center = Pos2::new(full.center().x, mark.bottom() + gap + radius);
             draw_radar(&p, center, radius, time);
 
             for (i, d) in state
@@ -106,7 +119,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
 
             // Title + subtitle. When the daemon is down there is nothing to scan,
             // so prompt the user to start it instead.
-            let title_y = center.y + radius + if connected { 34.0 } else { 78.0 };
+            let title_y = center.y + radius + gap + 10.0;
             let (title, sub) = if !connected {
                 (
                     t!("misc.radar_daemon_down").to_string(),

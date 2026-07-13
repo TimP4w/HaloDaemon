@@ -13,19 +13,25 @@ tour:
       title: "Hidden devices"
       body: "Use this option to show or hide devices that you marked as hidden."
     sidebar_home:
-      title: "Sidebar: Home"
+      title: "Home"
       body: "The Home page lists all your connected devices. Search for them, hide them, or right-click a card to manage its device."
     sidebar_lighting:
-      title: "Sidebar: RGB Lighting"
+      title: "RGB Lighting"
       body: "Apply one color or effect to every RGB device at once. Create, import, and manage custom effects here."
     sidebar_cooling:
-      title: "Sidebar: Cooling"
+      title: "Cooling"
       body: "View fan and pump curves, sensor readings, and cooling presets across all devices."
     sidebar_canvas:
-      title: "Sidebar: Effects Canvas"
+      title: "Effects Canvas"
       body: "Combine effects across multiple devices on a shared canvas. Move zones, layer effects, and adjust sampling."
+    sidebar_integrations:
+      title: "Integrations"
+      body: "Connect HaloDaemon to other applications and services. Connected integrations expose their devices in the workspace."
+    sidebar_plugins:
+      title: "Plugins"
+      body: "Extend HaloDaemon with hardware support, effects, and integrations. Review plugin updates, errors, and permissions here."
     sidebar_settings:
-      title: "Sidebar: Settings"
+      title: "Settings"
       body: "Configure application preferences, engine controls, and close-to-tray behavior here."
     switch_profiles:
       title: "Switch profiles"
@@ -175,3 +181,29 @@ tour:
     tune:
       title: "Tune the parameters"
       body: "Choose a generator, adjust the colors and speed, then shape the brightness curve. Each control changes the procedural formula shown above the graph."
+  page_plugins:
+    overview:
+      title: "What are plugins?"
+      body: "Plugins add hardware support, effects, and integrations. They run as separate, permission-controlled extensions."
+    official_repo:
+      title: "The official repository"
+      body: "The official repository is the trusted source for HaloDaemon-maintained plugins. Its plugins can be updated together from this page."
+    add_plugin:
+      title: "Add a plugin"
+      body: "Use Add plugin to load a local plugin folder. Review its details and permissions before enabling it."
+    add_repo:
+      title: "Add a repository"
+      body: "Add another Git repository when you need community or private plugins. Choose a branch when the repository supports one."
+    toggle:
+      title: "Enable or disable a plugin"
+      body: "Use the switch on a plugin row to control whether it is active. Disabling a plugin removes the devices or effects it provides."
+    permissions:
+      title: "Plugin permissions"
+      body: "Permissions explain what a plugin can access, such as the network or system clock. Grant only what you trust, and revoke access from the details view."
+  page_integrations:
+    overview:
+      title: "Integrations"
+      body: "Integrations connect HaloDaemon to another application or service. Connected integrations expose their devices in the main workspace."
+    toggle:
+      title: "Connect an integration"
+      body: "Use the switch to connect or disconnect an integration. Configure any required endpoint or account details before enabling it."

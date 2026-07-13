@@ -248,6 +248,27 @@ impl App {
             }
         }
 
+        // Start the page tour before rendering any modal. This lets the tour
+        // establish precedence on its first frame, even though its spotlight
+        // is painted after the page widgets have registered their anchors.
+        let tour_key = tour_key_for(
+            &self.page,
+            &self.device_ui,
+            self.lighting_ui.tab,
+            &self.tour,
+            &state.gui.seen_tours,
+        );
+        if let Some(key) = tour_key {
+            domain::tour::maybe_start(&mut self.tour, &state.gui.seen_tours, key);
+        }
+        let tour_active = domain::tour::is_active(&self.tour);
+        let download_prompt = !tour_active
+            && crate::ui::screens::download_consent::should_prompt(
+                &state,
+                connected,
+                self.consent_prompt_deferred,
+            );
+
         egui::Panel::left("sidebar")
             .exact_size(236.0)
             .resizable(false)
@@ -272,11 +293,7 @@ impl App {
                 );
             });
 
-        if crate::ui::screens::download_consent::should_prompt(
-            &state,
-            connected,
-            self.consent_prompt_deferred,
-        ) {
+        if download_prompt {
             use crate::ui::screens::download_consent::Decision;
             match crate::ui::screens::download_consent::prompt(ctx, &self.cmd) {
                 Decision::Allow => crate::runtime::ipc::send(
@@ -324,6 +341,7 @@ impl App {
                             &mut self.conflict_prompted,
                             &self.sensor_history,
                             &mut self.page,
+                            !tour_active && !download_prompt,
                         );
                     }
                     Page::Device(id) => {
@@ -417,40 +435,41 @@ impl App {
                 }
 
                 // Modal overlays rendered unconditionally so they work from any page.
-                crate::ui::screens::profile::add_modal(
-                    ui.ctx(),
-                    &state,
-                    &self.cmd,
-                    &mut self.profile_ui,
-                );
+                if !tour_active && !download_prompt {
+                    crate::ui::screens::profile::add_modal(
+                        ui.ctx(),
+                        &state,
+                        &self.cmd,
+                        &mut self.profile_ui,
+                    );
+                }
             });
 
-        crate::ui::screens::depcheck::show(
-            ctx,
-            &state,
-            &self.cmd,
-            debug.as_ref(),
-            connected,
-            within_grace,
-            &mut self.depcheck_ui,
-        );
+        if !tour_active && !download_prompt {
+            crate::ui::screens::depcheck::show(
+                ctx,
+                &state,
+                &self.cmd,
+                debug.as_ref(),
+                connected,
+                within_grace,
+                &mut self.depcheck_ui,
+            );
+        }
 
         // The tutorial tour: suppressed while the healthcheck dialog is up so
         // the two overlays don't fight over the screen.
-        let depcheck_visible = crate::ui::screens::depcheck::visible(
-            &state,
-            debug.as_ref(),
-            connected,
-            within_grace,
-            &self.depcheck_ui,
-        );
-        let tour_key = tour_key_for(
-            &self.page,
-            &self.device_ui,
-            self.lighting_ui.tab,
-            &self.tour,
-            &state.gui.seen_tours,
-        );
+        // The dependency dialog is deliberately not rendered while a tour is
+        // active. Keep the same gate here, otherwise the stale dependency
+        // state would suppress the tour indefinitely.
+        let depcheck_visible = !tour_active
+            && crate::ui::screens::depcheck::visible(
+                &state,
+                debug.as_ref(),
+                connected,
+                within_grace,
+                &self.depcheck_ui,
+            );
         crate::ui::tour::show(
             ctx,
             &mut self.tour,
@@ -472,15 +491,17 @@ impl App {
                 });
             }
         }
-        if let Some(modal) = &self.plugin_issue_modal {
-            let dismissed = crate::ui::components::issue_modal(
-                ctx,
-                "plugin_issue",
-                &modal.title,
-                &modal.detail,
-            );
-            if dismissed {
-                self.plugin_issue_modal = None;
+        if !domain::tour::is_active(&self.tour) && !download_prompt {
+            if let Some(modal) = &self.plugin_issue_modal {
+                let dismissed = crate::ui::components::issue_modal(
+                    ctx,
+                    "plugin_issue",
+                    &modal.title,
+                    &modal.detail,
+                );
+                if dismissed {
+                    self.plugin_issue_modal = None;
+                }
             }
         }
     }
@@ -512,8 +533,8 @@ fn tour_key_for(
             }
         }
         Page::EffectDesigner => Some(domain::tour::TourKey::EffectDesigner),
-        Page::Plugins => None,
-        Page::Integrations => None,
+        Page::Plugins => Some(domain::tour::TourKey::PagePlugins),
+        Page::Integrations => Some(domain::tour::TourKey::PageIntegrations),
     }
 }
 
