@@ -41,11 +41,14 @@ plugins:
   issue_connect_failed: Can't connect
   issue_runtime_error: Runtime error
   issue_load_warning: Loaded with a warning
+  issue_load_failed: Failed to load
   issue_details: Details
   issue_modal_title: "Plugin issue: %{plugin}"
   issue_copy: Copy
   issue_copied: Copied!
   issue_close: Close
+  skipped_heading: Skipped plugins
+  skipped_title: This plugin has been skipped
   # Detail panel
   type_device: Driver
   type_effect: Effects

@@ -38,6 +38,7 @@ pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateSt
                 })
         })
         .count()
+        + state.plugins.skipped.len()
 }
 
 pub fn sidebar(
@@ -477,6 +478,17 @@ mod tests {
         });
         let mut state = AppState::default();
         state.plugins.plugins = vec![with_issue, plugin("ok", true, false)];
+        assert_eq!(plugins_needing_action(&state, &[]), 1);
+    }
+
+    #[test]
+    fn plugins_needing_action_counts_skipped_plugins() {
+        let mut state = AppState::default();
+        state.plugins.plugins = vec![plugin("ok", true, false)];
+        state.plugins.skipped = vec![halod_shared::types::SkippedPlugin {
+            path: "/a/broken".into(),
+            reason: "bad yaml".into(),
+        }];
         assert_eq!(plugins_needing_action(&state, &[]), 1);
     }
 

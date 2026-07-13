@@ -596,6 +596,60 @@ async fn runtime_error_persists_issue_and_clears_on_success() {
 }
 
 #[test]
+fn invalid_plugin_lists_as_load_failed_and_malformed_is_skipped() {
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins_dir = tmp.path().join("plugins");
+
+    let invalid = plugins_dir.join("tcpbad");
+    std::fs::create_dir_all(&invalid).unwrap();
+    let invalid_yaml =
+        "id: tcpbad\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n";
+    std::fs::write(invalid.join("plugin.yaml"), invalid_yaml).unwrap();
+    std::fs::write(invalid.join("main.lua"), "return {}").unwrap();
+
+    let broken = plugins_dir.join("broken");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(broken.join("plugin.yaml"), "a: b: c\n").unwrap();
+
+    app.registry.load_all(&plugins_dir);
+
+    let list = app.registry.list(app.secret_store.as_ref());
+    let failed = list
+        .iter()
+        .find(|p| p.id == "tcpbad")
+        .expect("invalid plugin is listed");
+    assert!(!failed.enabled, "invalid plugin can't be enabled");
+    assert_eq!(
+        failed.issue.as_ref().map(|i| &i.kind),
+        Some(&PluginIssueKind::LoadFailed)
+    );
+
+    assert!(
+        list.iter().all(|p| p.id != "broken"),
+        "malformed plugin is not listed as an entry"
+    );
+    let skipped = app.registry.skipped();
+    assert!(
+        skipped.iter().any(|s| s.path.contains("broken")),
+        "malformed plugin is surfaced as skipped: {skipped:?}"
+    );
+
+    let fixed_yaml = "id: tcpbad\ntype: integration\npermissions: [network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n";
+    std::fs::write(invalid.join("plugin.yaml"), fixed_yaml).unwrap();
+    app.registry.load_all(&plugins_dir);
+    let fixed = app.registry.list(app.secret_store.as_ref());
+    let fixed = fixed
+        .iter()
+        .find(|p| p.id == "tcpbad")
+        .expect("still listed after fix");
+    assert!(
+        fixed.issue.is_none(),
+        "fixing the manifest clears the issue"
+    );
+}
+
+#[test]
 fn permission_gate_is_inert_until_granted_then_satisfied_once_acknowledged() {
     // Demonstrates the consent gate uniformly: declared-but-ungranted is
     // unsatisfied; fully granted + acknowledged is satisfied. This applies

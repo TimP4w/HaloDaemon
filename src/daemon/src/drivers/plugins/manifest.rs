@@ -1077,7 +1077,7 @@ fn validate_entry_path(entry: &str) -> Result<()> {
 }
 
 /// Cross-field validation, gated by `plugin_type`.
-fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
+pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     if let Some(rgb) = &manifest.rgb {
         check_zone_count(rgb.zones.len())?;
     }
@@ -1223,6 +1223,12 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
 
 /// Parse a directory plugin: `dir/plugin.yaml` overlaid on `dir/<entry>`'s capability sections/callbacks.
 pub fn parse_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
+    let manifest = build_manifest_from_dir(dir)?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
     let dir_name = dir
         .file_name()
         .and_then(|s| s.to_str())
@@ -1282,7 +1288,6 @@ pub fn parse_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
     manifest.plugin_dir = dir.to_path_buf();
     manifest.manifest_bytes = manifest_bytes;
 
-    validate_manifest(&manifest)?;
     Ok(manifest)
 }
 

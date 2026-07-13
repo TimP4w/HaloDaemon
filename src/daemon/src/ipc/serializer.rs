@@ -66,6 +66,7 @@ pub async fn serialize_state(
                     official: r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG,
                 })
                 .collect(),
+            skipped: app.registry.skipped(),
         },
     };
     match serde_json::to_value(wire) {

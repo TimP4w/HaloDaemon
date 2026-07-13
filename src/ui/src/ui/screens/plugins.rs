@@ -329,7 +329,11 @@ impl PluginsUi {
                                 .as_deref()
                                 .map(|name| ipc::plugin_asset_cache_key(&p.id, name))
                                 .and_then(|key| self.asset_textures.get(&key));
-                            let locked = self.in_flight.get(&p.id).copied();
+                            let locked = if is_load_failed(p) {
+                                Some(false)
+                            } else {
+                                self.in_flight.get(&p.id).copied()
+                            };
                             match list_row(ui, p, selected, has_update, logo_tex, locked) {
                                 RowAction::Select => {
                                     self.selection = Selection::Plugin(p.id.clone())
@@ -346,6 +350,8 @@ impl PluginsUi {
                         }
                     });
             }
+
+            self.skipped_notice(ui, state);
 
             ui.add_space(18.0);
             egui::Sides::new().show(
@@ -378,6 +384,52 @@ impl PluginsUi {
                 }
             }
         });
+    }
+
+    fn skipped_notice(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        if state.plugins.skipped.is_empty() {
+            return;
+        }
+        ui.add_space(18.0);
+        widgets::caps_label_inline(ui, &t!("plugins.skipped_heading"));
+        ui.add_space(6.0);
+        for s in &state.plugins.skipped {
+            let name = std::path::Path::new(&s.path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(s.path.as_str());
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.horizontal(|ui| {
+                        let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                        ui.painter()
+                            .circle_filled(dot.center(), 3.0, theme::TRAFFIC_RED);
+                        ui.label(
+                            egui::RichText::new(name)
+                                .font(theme::body(12.0))
+                                .color(theme::TEXT_DIM),
+                        );
+                    });
+                },
+                |ui| {
+                    if widgets::button(
+                        ui,
+                        &t!("plugins.issue_details"),
+                        ButtonKind::Ghost,
+                        Vec2::new(70.0, 26.0),
+                    )
+                    .clicked()
+                    {
+                        self.issue_modal = Some((
+                            t!("plugins.skipped_title").to_string(),
+                            format!("{}\n\n{}", s.path, s.reason),
+                        ));
+                    }
+                },
+            );
+            ui.add_space(4.0);
+        }
     }
 
     // ── Right: detail ───────────────────────────────────────────────────────
@@ -1588,6 +1640,19 @@ fn detail_body(
         },
     );
 
+    if is_load_failed(p) {
+        if let Some(issue) = &p.issue {
+            ui.add_space(14.0);
+            if issue_banner(ui, issue) {
+                *issue_modal = Some((
+                    t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
+                    issue.detail.clone(),
+                ));
+            }
+        }
+        return;
+    }
+
     ui.add_space(14.0);
     status_banner(ui, p);
 
@@ -2026,7 +2091,14 @@ fn issue_label_key(kind: &PluginIssueKind) -> &'static str {
         PluginIssueKind::ConnectFailed => "plugins.issue_connect_failed",
         PluginIssueKind::RuntimeError => "plugins.issue_runtime_error",
         PluginIssueKind::LoadWarning => "plugins.issue_load_warning",
+        PluginIssueKind::LoadFailed => "plugins.issue_load_failed",
     }
+}
+
+fn is_load_failed(p: &PluginInfo) -> bool {
+    p.issue
+        .as_ref()
+        .is_some_and(|i| i.kind == PluginIssueKind::LoadFailed)
 }
 
 /// A per-plugin issue banner with a "Details" button; returns `true` when
@@ -2625,6 +2697,28 @@ mod tests {
             issue_label_key(&PluginIssueKind::LoadWarning),
             "plugins.issue_load_warning"
         );
+        assert_eq!(
+            issue_label_key(&PluginIssueKind::LoadFailed),
+            "plugins.issue_load_failed"
+        );
+    }
+
+    #[test]
+    fn is_load_failed_only_for_load_failed_issue() {
+        let mut p = info("p", true);
+        assert!(!is_load_failed(&p));
+        p.issue = Some(PluginIssue {
+            kind: PluginIssueKind::RuntimeError,
+            detail: "x".into(),
+            timestamp_ms: 0,
+        });
+        assert!(!is_load_failed(&p));
+        p.issue = Some(PluginIssue {
+            kind: PluginIssueKind::LoadFailed,
+            detail: "x".into(),
+            timestamp_ms: 0,
+        });
+        assert!(is_load_failed(&p));
     }
 
     #[test]

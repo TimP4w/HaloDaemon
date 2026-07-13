@@ -44,7 +44,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use halod_shared::types::{
     Animation, EffectParamValue, Permission, PluginInfo, PluginIssue, PluginIssueKind, PluginKind,
-    WriteRateLimit,
+    SkippedPlugin, WriteRateLimit,
 };
 
 use crate::drivers::Device;
@@ -144,6 +144,8 @@ pub struct Registry {
     /// [`PluginInfo::issue`] so it persists on the plugin page and the sidebar
     /// badge past the transient toast. Keyed by plugin_id.
     issues: RwLock<HashMap<String, PluginIssue>>,
+    invalid_manifests: RwLock<Vec<(PluginManifest, PluginIssue)>>,
+    skipped: RwLock<Vec<SkippedPlugin>>,
     /// Rejected-load warnings retained for validation tests.
     #[cfg(test)]
     load_warnings: RwLock<Vec<PluginLoadWarning>>,
@@ -703,77 +705,101 @@ impl Registry {
     /// value stored, without ever reading the plaintext (see `PluginInfo::secret_set`).
     pub fn list(&self, secrets: &dyn crate::secrets::SecretStore) -> Vec<PluginInfo> {
         let state = self.snapshot();
-        state
+        let mut infos: Vec<PluginInfo> = state
             .manifests
             .iter()
-            .map(|m| {
-                let secret_set = m
-                    .config_fields()
-                    .iter()
-                    .filter(|f| f.secure)
-                    .map(|f| {
-                        let is_set = secrets
-                            .get(&m.plugin_id, &f.key)
-                            .unwrap_or_else(|e| {
-                                log::warn!(
-                                    "checking secret '{}' for plugin '{}': {e:#}",
-                                    f.key,
-                                    m.plugin_id
-                                );
-                                None
-                            })
-                            .is_some();
-                        (f.key.clone(), is_set)
+            .map(|m| self.build_plugin_info(m, &state, secrets))
+            .collect();
+        let loaded: HashSet<&str> = state
+            .manifests
+            .iter()
+            .map(|m| m.plugin_id.as_str())
+            .collect();
+        for (m, issue) in read_recover(&self.invalid_manifests).iter() {
+            if loaded.contains(m.plugin_id.as_str()) {
+                continue;
+            }
+            let mut info = self.build_plugin_info(m, &state, secrets);
+            info.enabled = false;
+            info.consented = false;
+            info.integration_enabled = false;
+            info.issue = Some(issue.clone());
+            infos.push(info);
+        }
+        infos
+    }
+
+    fn build_plugin_info(
+        &self,
+        m: &PluginManifest,
+        state: &PluginState,
+        secrets: &dyn crate::secrets::SecretStore,
+    ) -> PluginInfo {
+        let secret_set = m
+            .config_fields()
+            .iter()
+            .filter(|f| f.secure)
+            .map(|f| {
+                let is_set = secrets
+                    .get(&m.plugin_id, &f.key)
+                    .unwrap_or_else(|e| {
+                        log::warn!(
+                            "checking secret '{}' for plugin '{}': {e:#}",
+                            f.key,
+                            m.plugin_id
+                        );
+                        None
                     })
-                    .collect();
-                let consented = self.consent_satisfied(m);
-                PluginInfo {
-                    id: m.plugin_id.clone(),
-                    name: m.display_name(),
-                    path: m.source_path.display().to_string(),
-                    plugin_type: m.plugin_type,
-                    capabilities: m.capability_labels(),
-                    effect_names: m.effects.iter().map(|e| e.name.clone()).collect(),
-                    enabled: !self.is_disabled(&m.plugin_id) && consented,
-                    author: m.author().to_owned(),
-                    version: m.version().to_owned(),
-                    license: m.license().to_owned(),
-                    description: m.description().to_owned(),
-                    targets: m.target_labels(),
-                    devices: m
-                        .devices
-                        .iter()
-                        .map(|d| halod_shared::types::PluginDeviceInfo {
-                            vendor: d.vendor.clone(),
-                            model: d.model.clone(),
-                            name: d.display_name().to_owned(),
-                            device_type: d.device_type,
-                        })
-                        .collect(),
-                    logo: m.logo.clone(),
-                    effect_thumbnails: m
-                        .effect_thumbnails
-                        .iter()
-                        .map(|e| halod_shared::types::PluginEffectAsset {
-                            id: e.id.clone(),
-                            thumbnail: e.thumbnail.clone(),
-                        })
-                        .collect(),
-                    source: plugin_source_for(&m.plugin_dir),
-                    declared_permissions: m.permissions.clone(),
-                    granted_permissions: self.granted_for(&m.plugin_id),
-                    config_fields: m.config_fields().iter().map(Into::into).collect(),
-                    config_values: config_values_for(&state, m),
-                    secret_set,
-                    integration_enabled: !self.is_integration_disabled(&m.plugin_id),
-                    consented,
-                    content_changed: self
-                        .acknowledged_hash_for(&m.plugin_id)
-                        .is_some_and(|h| h != m.content_hash()),
-                    issue: self.issue_for(&m.plugin_id),
-                }
+                    .is_some();
+                (f.key.clone(), is_set)
             })
-            .collect()
+            .collect();
+        let consented = self.consent_satisfied(m);
+        PluginInfo {
+            id: m.plugin_id.clone(),
+            name: m.display_name(),
+            path: m.source_path.display().to_string(),
+            plugin_type: m.plugin_type,
+            capabilities: m.capability_labels(),
+            effect_names: m.effects.iter().map(|e| e.name.clone()).collect(),
+            enabled: !self.is_disabled(&m.plugin_id) && consented,
+            author: m.author().to_owned(),
+            version: m.version().to_owned(),
+            license: m.license().to_owned(),
+            description: m.description().to_owned(),
+            targets: m.target_labels(),
+            devices: m
+                .devices
+                .iter()
+                .map(|d| halod_shared::types::PluginDeviceInfo {
+                    vendor: d.vendor.clone(),
+                    model: d.model.clone(),
+                    name: d.display_name().to_owned(),
+                    device_type: d.device_type,
+                })
+                .collect(),
+            logo: m.logo.clone(),
+            effect_thumbnails: m
+                .effect_thumbnails
+                .iter()
+                .map(|e| halod_shared::types::PluginEffectAsset {
+                    id: e.id.clone(),
+                    thumbnail: e.thumbnail.clone(),
+                })
+                .collect(),
+            source: plugin_source_for(&m.plugin_dir),
+            declared_permissions: m.permissions.clone(),
+            granted_permissions: self.granted_for(&m.plugin_id),
+            config_fields: m.config_fields().iter().map(Into::into).collect(),
+            config_values: config_values_for(state, m),
+            secret_set,
+            integration_enabled: !self.is_integration_disabled(&m.plugin_id),
+            consented,
+            content_changed: self
+                .acknowledged_hash_for(&m.plugin_id)
+                .is_some_and(|h| h != m.content_hash()),
+            issue: self.issue_for(&m.plugin_id),
+        }
     }
 
     /// Read a plugin's display-only asset (logo/effect thumbnail) from `<plugin_dir>/assets/<name>`.
@@ -861,50 +887,71 @@ fn validate_logo(dir: &Path, manifest: &mut PluginManifest, warnings: &mut Vec<P
     }
 }
 
-/// Parse `dir` as one plugin directory and push it into `out`, skipping (never failing) a bad manifest.
-fn try_load_plugin_dir(
-    dir: &Path,
-    out: &mut Vec<PluginManifest>,
-    warnings: &mut Vec<PluginLoadWarning>,
-) {
+#[derive(Default)]
+struct LoadScan {
+    manifests: Vec<PluginManifest>,
+    warnings: Vec<PluginLoadWarning>,
+    invalid: Vec<(PluginManifest, String)>,
+    skipped: Vec<SkippedPlugin>,
+}
+
+fn try_load_plugin_dir(dir: &Path, scan: &mut LoadScan) {
     if !dir.join("plugin.yaml").is_file() {
         return;
     }
-    match parse_manifest_from_dir(dir) {
-        Ok(m) if out.iter().any(|e| e.plugin_id == m.plugin_id) => {
-            let reason = format!("id '{}' is already claimed by another source", m.plugin_id);
-            log::warn!("Ignoring plugin {}: {reason}", dir.display());
-            warnings.push(PluginLoadWarning {
-                plugin_id: m.plugin_id,
+    let manifest = match manifest::build_manifest_from_dir(dir) {
+        Ok(m) => m,
+        Err(e) => {
+            let reason = format!("{e:#}");
+            log::warn!("Skipping plugin {}: {reason}", dir.display());
+            scan.skipped.push(SkippedPlugin {
                 path: dir.display().to_string(),
                 reason,
             });
+            return;
         }
-        Ok(mut m) => {
-            validate_logo(dir, &mut m, warnings);
-            log::info!(
-                "Loaded device plugin '{}' from {}",
-                m.plugin_id,
-                dir.display()
-            );
-            out.push(m);
-        }
-        Err(e) => log::warn!("Skipping plugin {}: {e:#}", dir.display()),
+    };
+    if let Err(e) = manifest::validate_manifest(&manifest) {
+        let reason = format!("{e:#}");
+        log::warn!("Plugin {} is invalid: {reason}", dir.display());
+        scan.invalid.push((manifest, reason));
+        return;
     }
+    if scan
+        .manifests
+        .iter()
+        .any(|e| e.plugin_id == manifest.plugin_id)
+    {
+        let reason = format!(
+            "id '{}' is already claimed by another source",
+            manifest.plugin_id
+        );
+        log::warn!("Ignoring plugin {}: {reason}", dir.display());
+        scan.warnings.push(PluginLoadWarning {
+            plugin_id: manifest.plugin_id,
+            path: dir.display().to_string(),
+            reason,
+        });
+        return;
+    }
+    let mut m = manifest;
+    validate_logo(dir, &mut m, &mut scan.warnings);
+    log::info!(
+        "Loaded device plugin '{}' from {}",
+        m.plugin_id,
+        dir.display()
+    );
+    scan.manifests.push(m);
 }
 
 /// Scan every immediate subdirectory of `root` that contains a `plugin.yaml`.
-fn scan_plugin_subdirs(
-    root: &Path,
-    out: &mut Vec<PluginManifest>,
-    warnings: &mut Vec<PluginLoadWarning>,
-) {
+fn scan_plugin_subdirs(root: &Path, scan: &mut LoadScan) {
     match std::fs::read_dir(root) {
         Ok(entries) => {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    try_load_plugin_dir(&path, out, warnings);
+                    try_load_plugin_dir(&path, scan);
                 }
             }
         }
@@ -918,21 +965,17 @@ fn scan_plugin_subdirs(
 /// Load a git-repo plugin source: a single plugin at `repo_dir`, packages as
 /// immediate sibling subdirectories of `repo_dir`, and/or nested under a
 /// `plugins/` subdirectory — a repo may use any combination of the three.
-fn scan_repo(
-    repo_dir: &Path,
-    out: &mut Vec<PluginManifest>,
-    warnings: &mut Vec<PluginLoadWarning>,
-) {
-    try_load_plugin_dir(repo_dir, out, warnings);
-    scan_plugin_subdirs(repo_dir, out, warnings);
-    scan_plugin_subdirs(&repo_dir.join("plugins"), out, warnings);
+fn scan_repo(repo_dir: &Path, scan: &mut LoadScan) {
+    try_load_plugin_dir(repo_dir, scan);
+    scan_plugin_subdirs(repo_dir, scan);
+    scan_plugin_subdirs(&repo_dir.join("plugins"), scan);
 }
 
 /// Plugin ids discoverable under a repo's clone directory, for purging a removed repo's state.
 pub fn repo_plugin_ids(repo_dir: &Path) -> Vec<String> {
-    let mut manifests = Vec::new();
-    scan_repo(repo_dir, &mut manifests, &mut Vec::new());
-    manifests.into_iter().map(|m| m.plugin_id).collect()
+    let mut scan = LoadScan::default();
+    scan_repo(repo_dir, &mut scan);
+    scan.manifests.into_iter().map(|m| m.plugin_id).collect()
 }
 
 /// Every configured repo's checked-out clone directory, for [`Registry::load_all_with_repos`].
@@ -963,27 +1006,30 @@ impl Registry {
     /// whichever source provides it first and no later source can shadow it (see
     /// [`try_load_plugin_dir`]'s collision handling).
     pub fn load_all_with_repos(&self, dir: &Path, repo_dirs: &[std::path::PathBuf]) {
-        let mut manifests = Vec::new();
-        let mut warnings = Vec::new();
+        let mut scan = LoadScan::default();
         let is_official = |d: &std::path::PathBuf| {
             d.file_name().and_then(|n| n.to_str())
                 == Some(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
         };
         for repo_dir in repo_dirs.iter().filter(|d| is_official(d)) {
-            scan_repo(repo_dir, &mut manifests, &mut warnings);
+            scan_repo(repo_dir, &mut scan);
         }
-        scan_plugin_subdirs(dir, &mut manifests, &mut warnings);
+        scan_plugin_subdirs(dir, &mut scan);
         for repo_dir in repo_dirs.iter().filter(|d| !is_official(d)) {
-            scan_repo(repo_dir, &mut manifests, &mut warnings);
+            scan_repo(repo_dir, &mut scan);
         }
         let effects: Vec<PluginEffectEntry> =
-            manifests.iter().flat_map(effect_entries_for).collect();
+            scan.manifests.iter().flat_map(effect_entries_for).collect();
         // Re-derive load-warning issues from scratch so a warning the user has
         // since fixed doesn't linger; only surface warnings for plugins that
         // actually loaded (the GUI lists nothing else).
         self.clear_load_warnings();
-        let loaded: HashSet<&str> = manifests.iter().map(|m| m.plugin_id.as_str()).collect();
-        for warning in &warnings {
+        let loaded: HashSet<&str> = scan
+            .manifests
+            .iter()
+            .map(|m| m.plugin_id.as_str())
+            .collect();
+        for warning in &scan.warnings {
             log::warn!(
                 "plugin '{}' rejected at {}: {}",
                 warning.plugin_id,
@@ -994,14 +1040,35 @@ impl Registry {
                 self.set_load_warning(&warning.plugin_id, warning.reason.clone());
             }
         }
+        drop(loaded);
+        let invalid = scan
+            .invalid
+            .into_iter()
+            .map(|(m, reason)| {
+                (
+                    m,
+                    PluginIssue {
+                        kind: PluginIssueKind::LoadFailed,
+                        detail: reason,
+                        timestamp_ms: crate::util::time::now_ms(),
+                    },
+                )
+            })
+            .collect();
+        *write_recover(&self.invalid_manifests) = invalid;
+        *write_recover(&self.skipped) = scan.skipped;
         #[cfg(test)]
         {
-            *write_recover(&self.load_warnings) = warnings;
+            *write_recover(&self.load_warnings) = scan.warnings;
         }
         self.update(|s| {
-            s.manifests = manifests;
+            s.manifests = scan.manifests;
             s.effects = effects;
         });
+    }
+
+    pub fn skipped(&self) -> Vec<SkippedPlugin> {
+        read_recover(&self.skipped).clone()
     }
 }
 

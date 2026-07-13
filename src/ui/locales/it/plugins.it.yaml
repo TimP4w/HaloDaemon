@@ -41,11 +41,14 @@ plugins:
   issue_connect_failed: Impossibile connettersi
   issue_runtime_error: Errore di runtime
   issue_load_warning: Caricato con un avviso
+  issue_load_failed: Caricamento non riuscito
   issue_details: Dettagli
   issue_modal_title: "Il plugin %{plugin} sta riscontrando un problema"
   issue_copy: Copia
   issue_copied: Copiato!
   issue_close: Chiudi
+  skipped_heading: Plugin ignorati
+  skipped_title: Questo plugin è stato ignorato
   # Pannello dettagli
   type_device: Driver
   type_effect: Effetti

@@ -611,6 +611,17 @@ pub struct PluginsState {
     /// Registered git-repo plugin sources, for the "Plugin Repositories" section of the Plugins screen.
     #[serde(default)]
     pub repos: Vec<PluginRepoInfo>,
+    /// Plugins whose manifest was too malformed to load, shown as a "skipped"
+    /// notice rather than a plugin entry.
+    #[serde(default)]
+    pub skipped: Vec<SkippedPlugin>,
+}
+
+/// A plugin directory that couldn't be parsed into a manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedPlugin {
+    pub path: String,
+    pub reason: String,
 }
 
 /// A registered git-repo plugin source, as shown in the GUI. Mirrors the daemon's `PluginRepoRecord`.
@@ -760,6 +771,8 @@ pub enum PluginIssueKind {
     RuntimeError,
     /// The plugin loaded with a non-fatal warning (bad logo, id collision).
     LoadWarning,
+    /// The plugin's manifest built but failed validation, so it can't be enabled.
+    LoadFailed,
 }
 
 /// A plugin's most recent outstanding issue, persisted daemon-side and surfaced
@@ -1994,6 +2007,26 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(info.issue, None);
+    }
+
+    #[test]
+    fn load_failed_and_skipped_round_trip() {
+        let failed = PluginIssue {
+            kind: PluginIssueKind::LoadFailed,
+            detail: "needs network".into(),
+            timestamp_ms: 1,
+        };
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap()["kind"],
+            "load_failed"
+        );
+        let skipped = SkippedPlugin {
+            path: "/a/b".into(),
+            reason: "bad yaml".into(),
+        };
+        let back: SkippedPlugin =
+            serde_json::from_str(&serde_json::to_string(&skipped).unwrap()).unwrap();
+        assert_eq!(back, skipped);
     }
 
     #[test]
