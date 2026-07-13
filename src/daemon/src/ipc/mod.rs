@@ -359,7 +359,7 @@ pub fn serve(app: Arc<AppState>) -> tokio::task::JoinHandle<Result<()>> {
         let path = socket_path();
 
         // Explicit security descriptor so the non-elevated UI can connect even
-        // when the daemon runs elevated (see `PipeSecurity`). Built once and
+        // if process integrity differs (see `PipeSecurity`). Built once and
         // kept alive for the whole accept loop.
         let security = PipeSecurity::new()?;
 

@@ -12,19 +12,18 @@
 //!     installed on-demand `HalodBroker` service is started via the SCM (no
 //!     UAC); a dev run with no service falls back to one `runas` UAC prompt.
 //!
-//! The trait boundaries (`SmBusSyncOps` for a bus, `PawnioOps` for a PawnIO
-//! module) are unchanged, so every call site is agnostic to which backend it
-//! got — that is the entire point of keeping the seam here.
+//! SMBus retains its existing trait boundary. AMD SMN and LPC use concrete,
+//! typed broker clients so the daemon cannot name PawnIO modules or functions.
 
 use anyhow::Result;
 
 use halod_hwaccess::smbus::{BusInfo, SmBusSyncOps};
 
 #[cfg(target_os = "windows")]
-use halod_hwaccess::pawnio::PawnioOps;
+mod win_client;
 
 #[cfg(target_os = "windows")]
-mod win_client;
+pub use win_client::{AmdSmnBrokerClient, LpcIoBrokerClient};
 
 /// Open the register bus described by `info`, returning ops the caller can
 /// meter and lock behind a `SmBusDevice` exactly as before.
@@ -40,9 +39,12 @@ pub fn open_smbus(info: &BusInfo, addresses: &[u8]) -> Result<Box<dyn SmBusSyncO
     }
 }
 
-/// Open a PawnIO module into its own ops handle (LpcIO / AMD SMN). Windows-only
-/// — PawnIO does not exist on other platforms.
 #[cfg(target_os = "windows")]
-pub fn open_pawnio(module: &str) -> Result<Box<dyn PawnioOps>> {
-    win_client::open_pawnio(module)
+pub fn open_amd_smn() -> Result<AmdSmnBrokerClient> {
+    win_client::open_amd_smn()
+}
+
+#[cfg(target_os = "windows")]
+pub fn open_lpc_io() -> Result<LpcIoBrokerClient> {
+    win_client::open_lpc_io()
 }

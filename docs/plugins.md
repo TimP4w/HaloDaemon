@@ -949,7 +949,6 @@ Supported transports: HID (stream), SMBus (register), USB vendor control
 only). Not yet available to plugins: the USB *bulk* transport beyond what LCD
 streaming already exposes via `write_bulk`.
 
-On Windows, the process that runs plugin code is elevated (Administrator),
-since some native transports (chipset/GPU SMBus, SuperIO fans) need that —
-plugins run with the same privilege the daemon itself does, there's no
-separate sandboxing by privilege level today.
+On Windows, plugin code runs inside the non-elevated daemon. Register-bus
+operations that need PawnIO are delegated to the narrow `halod-broker` process;
+plugin SMBus access remains gated by its declared permission and address scope.

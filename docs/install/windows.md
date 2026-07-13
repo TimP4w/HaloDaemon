@@ -4,7 +4,7 @@
 
 Download `halod-setup-x64.exe` from the [releases page](https://github.com/TimP4w/HaloDaemon/releases) and run it. The installer:
 
-- registers the daemon as a Windows service,
+- registers the on-demand privileged register-bus broker as a Windows service,
 - installs the `halod-gui` UI,
 - bundles `ffmpeg` (LCD video) and the PawnIO kernel driver blobs.
 
@@ -16,7 +16,7 @@ No separate runtime dependencies need to be installed — the required libraries
 
 Chipset SMBus access (ASUS/ENE DRAM RGB, Corsair DRAM RGB) and SuperIO fan control (NCT677x temperature sensors and PWM headers) require the [PawnIO](https://pawnio.eu/) signed kernel driver. PawnIO provides safe, signed port I/O from user space without needing full kernel patches. The driver modules are bundled with the installer.
 
-On first launch the daemon prompts for Administrator elevation via UAC and relaunches itself elevated. Declining the UAC prompt is non-fatal — the daemon keeps running, but chipset SMBus and SuperIO devices will not be available.
+Installed builds start the on-demand `halod-broker` LocalSystem service when register-bus access is first needed; `halod.exe` itself is never elevated. Development builds without the service launch only `halod-broker.exe` through UAC. Declining that development prompt is non-fatal, but chipset SMBus, AMD SMN temperatures, and SuperIO devices are unavailable.
 
 Devices that talk over plain USB HID (AIOs, mice, keyboards, headsets, ASUS Aura USB, monitors) work without PawnIO.
 
@@ -37,4 +37,4 @@ Fully **quit and disable autostart** (or uninstall) any of the following that ma
 
 Disable these from their own settings (turn off "start with Windows") and via **Task Manager → Startup**, then reboot so nothing re-claims the buses before HaloDaemon starts.
 
-If a device won't appear, make sure no vendor service is still running in the background (Task Manager → Services / Details) and that you accepted the UAC elevation prompt.
+If a device won't appear, make sure no vendor service is still running in the background (Task Manager → Services / Details) and that the broker service can start (or, in a development run, that you accepted its UAC prompt).

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Named-pipe RPC client to the elevated `halod-broker`.
 //!
-//! One connection per opened bus / PawnIO module: a `SmBusDevice` already
-//! serialises its ops behind a mutex, so a single blocking request/response
-//! stream per handle needs no extra locking. [`connect_or_spawn`] brings the
+//! One connection per opened SMBus, AMD SMN, or LPC handle. A single blocking
+//! request/response stream is retained per handle. [`connect_or_spawn`] brings the
 //! broker up on first use: the installed on-demand `HalodBroker` service is
 //! started via the SCM (no UAC); a dev run with no service installed falls back
 //! to a single `runas` UAC prompt.
@@ -15,7 +14,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 
-use halod_hwaccess::pawnio::PawnioOps;
 use halod_hwaccess::proto::{
     self, CapabilityScope, Request, Response, BROKER_SERVICE_NAME, MAX_OPERATIONS_PER_CAPABILITY,
     MAX_OPERATIONS_PER_SECOND, PIPE_NAME,
@@ -340,61 +338,125 @@ pub fn open_bus(info: &BusInfo, addresses: &[u8]) -> Result<Box<dyn SmBusSyncOps
     }))
 }
 
-// ── PawnIO over RPC ────────────────────────────────────────────────────────
+// ── Typed AMD SMN and LPC RPC clients ──────────────────────────────────────
 
-struct BrokerPawnio {
-    // `PawnioOps::execute` takes `&self`, so the connection needs interior
-    // mutability for the write-then-read round trip.
+pub struct AmdSmnBrokerClient {
     pipe: Mutex<AuthorizedPipe>,
     handle: u32,
 }
 
-impl PawnioOps for BrokerPawnio {
-    fn execute(&self, function: &str, args: &[u64]) -> Result<Vec<u64>> {
+impl AmdSmnBrokerClient {
+    pub fn read_smn(&self, offset: u32) -> Result<u32> {
         let mut pipe = self.pipe.lock().unwrap_or_else(|e| e.into_inner());
-        match pipe.request(&Request::PawnioExec {
+        match pipe.request(&Request::ReadSmn {
             handle: self.handle,
-            function: function.to_string(),
-            args: args.to_vec(),
+            offset,
         })? {
-            Response::Words(w) => Ok(w),
-            Response::Error(e) => bail!("broker pawnio: {e}"),
+            Response::Dword(value) => Ok(value),
+            Response::Error(e) => bail!("broker AMD SMN: {e}"),
             other => bail!("unexpected broker reply: {other:?}"),
         }
     }
 }
 
-pub fn open_pawnio(module: &str) -> Result<Box<dyn PawnioOps>> {
-    let functions: &[&str] = match module {
-        "AMDFamily17.bin" => &["ioctl_read_smn"],
-        "LpcIO.bin" => &[
-            "ioctl_select_slot",
-            "ioctl_find_bars",
-            "ioctl_pio_inb",
-            "ioctl_pio_outb",
-            "ioctl_superio_inb",
-            "ioctl_superio_outb",
-        ],
-        other => bail!("broker PawnIO module is not allowlisted: {other}"),
-    };
-    let scope = CapabilityScope::Pawnio {
-        module: module.to_string(),
-        functions: functions
-            .iter()
-            .map(|function| (*function).to_string())
-            .collect(),
+pub fn open_amd_smn() -> Result<AmdSmnBrokerClient> {
+    let scope = CapabilityScope::AmdSmn {
         max_operations_per_second: MAX_OPERATIONS_PER_SECOND,
         max_operations: MAX_OPERATIONS_PER_CAPABILITY,
     };
     let mut pipe = connect_or_spawn(&scope)?;
-    let handle = expect_opened(
-        pipe.request(&Request::PawnioOpen {
-            module: module.to_string(),
-        })?,
-        "pawnio module",
-    )?;
-    Ok(Box::new(BrokerPawnio {
+    let handle = expect_opened(pipe.request(&Request::OpenAmdSmn)?, "AMD SMN")?;
+    Ok(AmdSmnBrokerClient {
         pipe: Mutex::new(pipe),
         handle,
-    }))
+    })
+}
+
+pub struct LpcIoBrokerClient {
+    pipe: Mutex<AuthorizedPipe>,
+    handle: u32,
+}
+
+impl LpcIoBrokerClient {
+    fn request(&self, request: Request) -> Result<Response> {
+        self.pipe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .request(&request)
+    }
+
+    fn unit(&self, request: Request) -> Result<()> {
+        match self.request(request)? {
+            Response::Unit => Ok(()),
+            Response::Error(e) => bail!("broker LPC: {e}"),
+            other => bail!("unexpected broker reply: {other:?}"),
+        }
+    }
+
+    fn byte(&self, request: Request) -> Result<u8> {
+        match self.request(request)? {
+            Response::Byte(value) => Ok(value),
+            Response::Error(e) => bail!("broker LPC: {e}"),
+            other => bail!("unexpected broker reply: {other:?}"),
+        }
+    }
+
+    pub fn select_slot(&self, slot: u8) -> Result<()> {
+        if slot > 1 {
+            bail!("LPC slot {slot} is outside 0..=1");
+        }
+        self.unit(Request::LpcSelectSlot {
+            handle: self.handle,
+            slot,
+        })
+    }
+
+    pub fn find_bars(&self) -> Result<()> {
+        self.unit(Request::LpcFindBars {
+            handle: self.handle,
+        })
+    }
+
+    pub fn read_port(&self, port: u16) -> Result<u8> {
+        self.byte(Request::LpcReadPort {
+            handle: self.handle,
+            port,
+        })
+    }
+
+    pub fn write_port(&self, port: u16, value: u8) -> Result<()> {
+        self.unit(Request::LpcWritePort {
+            handle: self.handle,
+            port,
+            value,
+        })
+    }
+
+    pub fn superio_inb(&self, register: u8) -> Result<u8> {
+        self.byte(Request::LpcSuperioInb {
+            handle: self.handle,
+            register,
+        })
+    }
+
+    pub fn superio_outb(&self, register: u8, value: u8) -> Result<()> {
+        self.unit(Request::LpcSuperioOutb {
+            handle: self.handle,
+            register,
+            value,
+        })
+    }
+}
+
+pub fn open_lpc_io() -> Result<LpcIoBrokerClient> {
+    let scope = CapabilityScope::LpcIo {
+        max_operations_per_second: MAX_OPERATIONS_PER_SECOND,
+        max_operations: MAX_OPERATIONS_PER_CAPABILITY,
+    };
+    let mut pipe = connect_or_spawn(&scope)?;
+    let handle = expect_opened(pipe.request(&Request::OpenLpcIo)?, "LPC I/O")?;
+    Ok(LpcIoBrokerClient {
+        pipe: Mutex::new(pipe),
+        handle,
+    })
 }

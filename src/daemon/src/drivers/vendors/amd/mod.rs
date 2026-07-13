@@ -3,10 +3,9 @@
 
 //! AMD CPU support — Ryzen (Zen, family 17h/19h/1Ah) on-die thermal sensors.
 //!
-//! Detects the CPU via CPUID; if it's a supported AMD Zen part, opens PawnIO's
-//! `AMDFamily17.bin` SMN module and registers a single temperature-sensor
-//! device. Windows only (PawnIO), and the SMN module + Administrator are
-//! required — without them no AMD CPU sensor appears.
+//! Detects the CPU via CPUID; if it is a supported AMD Zen part, opens the
+//! broker's typed SMN service and registers one temperature-sensor device.
+//! Windows only; PawnIO and the elevated broker are required.
 
 pub mod devices;
 pub mod protocols;

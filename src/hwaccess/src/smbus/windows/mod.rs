@@ -11,7 +11,7 @@
 //! Runtime requirements:
 //!   - PawnIO installed, with `SmbusI801.bin` (Intel) / `SmbusPIIX4.bin` (AMD)
 //!     placed next to the executable.
-//!   - The process running with Administrator privileges.
+//!   - The broker process running with Administrator/LocalSystem privileges.
 
 use super::*;
 

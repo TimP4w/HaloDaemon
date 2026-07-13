@@ -5,9 +5,8 @@
 //! (the daemon's `lpcio` for SuperIO fan control, the `smbus::windows::chipset`
 //! backend for chipset SMBus, `amd_smn` for AMD SMN) opens its own
 //! [`PawnioModule`] — a fresh `pawnio_open` handle with one PawnIO `.bin` module
-//! loaded into it. Module-internal state (e.g. LpcIO's `select_slot` +
-//! `find_bars` BAR registration) therefore stays isolated between consumers and
-//! between distinct chips.
+//! loaded into it. This module is used only inside the elevated broker; the
+//! daemon sees typed SMBus, AMD SMN, and LPC operations instead.
 //!
 //! The `PawnIOLib.dll` handle and the on-disk module blobs are both cached
 //! process-wide so opening N modules does not re-load the DLL N times or
@@ -18,30 +17,6 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
-
-/// Largest PawnIO ioctl result observed across the modules we drive
-/// (`ioctl_smbus_xfer` returns 5 words); sized generously so a by-name
-/// [`PawnioOps::execute`] reply is never truncated.
-const PAWNIO_MAX_OUTPUT_WORDS: usize = 64;
-
-/// Name-addressed PawnIO execution against one opened module handle. This is
-/// the seam the daemon's `LpcIoBus`/`AmdSmnBus` talk through: in-process it is
-/// backed by a [`PawnioModule`]; over the broker RPC it is backed by a handle
-/// on the elevated process. Each owner holds its **own** implementor so the
-/// module's internal `select_slot`/`find_bars` state stays isolated per chip.
-pub trait PawnioOps: Send + Sync {
-    fn execute(&self, function: &str, args: &[u64]) -> Result<Vec<u64>>;
-}
-
-impl PawnioOps for PawnioModule {
-    fn execute(&self, function: &str, args: &[u64]) -> Result<Vec<u64>> {
-        let func = std::ffi::CString::new(function)
-            .map_err(|e| anyhow!("invalid PawnIO function: {e}"))?;
-        let mut out = [0u64; PAWNIO_MAX_OUTPUT_WORDS];
-        let n = self.exec(&func, args, &mut out)?;
-        Ok(out[..n].to_vec())
-    }
-}
 
 // ── FFI ──────────────────────────────────────────────────────────────────────
 
@@ -239,8 +214,8 @@ impl PawnioModule {
     /// returned `usize` is the number of meaningful `u64` words PawnIO wrote
     /// (≤ `output.len()`). Pass an empty slice when the ioctl returns nothing.
     ///
-    /// Not metered here: every owner wraps its `PawnioModule` in the daemon's
-    /// `Metered` itself — gating in both places would double-count the bytes.
+    /// Not metered here: broker RPC capabilities provide request bounds, while
+    /// daemon transports apply their hardware-specific write limits.
     pub fn exec(&self, func: &std::ffi::CStr, input: &[u64], output: &mut [u64]) -> Result<usize> {
         let handle = *self.handle.lock().unwrap_or_else(|e| e.into_inner());
         let mut ret = 0usize;

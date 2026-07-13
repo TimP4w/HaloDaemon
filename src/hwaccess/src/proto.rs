@@ -2,10 +2,10 @@
 //! Wire protocol between the daemon (client) and the elevated broker (server).
 //!
 //! The surface is exactly the register-bus primitives: the [`crate::smbus`]
-//! enumeration + `SmBusSyncOps` methods, plus the name-addressed
-//! [`crate::pawnio::pawnio_execute`]. There is deliberately no filesystem,
-//! process-spawn, or generic "run this" op — that narrowness is the security
-//! value of the split (see the privilege-separation design doc).
+//! enumeration + `SmBusSyncOps` methods, AMD SMN reads, and the fixed LPC
+//! operations used by SuperIO. There is deliberately no filesystem,
+//! process-spawn, module-name, or generic function-execution operation — that
+//! narrowness is the security value of the split.
 //!
 //! Framing is a `u32` little-endian length prefix followed by that many bytes
 //! of JSON. This is a local IPC (named pipe / same-user socket), not a network
@@ -38,8 +38,6 @@ pub const CAPABILITY_TTL_MS: u64 = 60_000;
 /// list unbounded. Runtime-loaded plugins may declare any future device
 /// addresses; no broker rebuild or hard-coded address allowlist is involved.
 pub const MAX_SCOPE_ADDRESSES: usize = 256;
-pub const MAX_PAWNIO_FUNCTIONS: usize = 16;
-pub const MAX_PAWNIO_ARGS: usize = 16;
 // One SMBus capability is shared by every device discovered on that physical
 // bus. Four-to-eight RGB DIMMs at 60 FPS legitimately produce several thousand
 // small register RPCs per second, so this DoS ceiling must sit above that
@@ -59,9 +57,11 @@ pub enum CapabilityScope {
         max_operations_per_second: u32,
         max_operations: u32,
     },
-    Pawnio {
-        module: String,
-        functions: Vec<String>,
+    AmdSmn {
+        max_operations_per_second: u32,
+        max_operations: u32,
+    },
+    LpcIo {
         max_operations_per_second: u32,
         max_operations: u32,
     },
@@ -125,19 +125,36 @@ pub enum Request {
     SupportsBlockWrite {
         bus: u32,
     },
-    /// Open a PawnIO module into its own broker-side handle; replies
-    /// [`Response::Opened`]. Handle-based (not name-addressed) so each
-    /// `LpcIoBus`/`AmdSmnBus` keeps its own `select_slot`/`find_bars` state —
-    /// a shared per-blob handle would collide those on multi-chip boards.
-    PawnioOpen {
-        module: String,
-    },
-    /// Run `function` against a previously [`Request::PawnioOpen`]ed handle;
-    /// replies [`Response::Words`].
-    PawnioExec {
+    OpenAmdSmn,
+    ReadSmn {
         handle: u32,
-        function: String,
-        args: Vec<u64>,
+        offset: u32,
+    },
+    OpenLpcIo,
+    LpcSelectSlot {
+        handle: u32,
+        slot: u8,
+    },
+    LpcFindBars {
+        handle: u32,
+    },
+    LpcReadPort {
+        handle: u32,
+        port: u16,
+    },
+    LpcWritePort {
+        handle: u32,
+        port: u16,
+        value: u8,
+    },
+    LpcSuperioInb {
+        handle: u32,
+        register: u8,
+    },
+    LpcSuperioOutb {
+        handle: u32,
+        register: u8,
+        value: u8,
     },
 }
 
@@ -151,10 +168,10 @@ pub enum Response {
     },
     Buses(Vec<BusInfo>),
     Opened(u32),
+    Dword(u32),
     Byte(u8),
     Bool(bool),
     Unit,
-    Words(Vec<u64>),
     Error(String),
 }
 
@@ -243,6 +260,20 @@ mod tests {
                         max_operations: 1_000,
                     },
                 }),
+            ".*".prop_map(|bootstrap_token| Request::Authenticate {
+                bootstrap_token,
+                scope: CapabilityScope::AmdSmn {
+                    max_operations_per_second: 100,
+                    max_operations: 1_000,
+                },
+            }),
+            ".*".prop_map(|bootstrap_token| Request::Authenticate {
+                bootstrap_token,
+                scope: CapabilityScope::LpcIo {
+                    max_operations_per_second: 100,
+                    max_operations: 1_000,
+                },
+            }),
             ".*".prop_map(|capability| Request::Renew { capability }),
             Just(Request::Enumerate),
             Just(Request::EnumerateGpu),
@@ -280,17 +311,31 @@ mod tests {
                     data
                 }),
             any::<u32>().prop_map(|bus| Request::SupportsBlockWrite { bus }),
-            ".*".prop_map(|module| Request::PawnioOpen { module }),
-            (
-                any::<u32>(),
-                ".*",
-                prop::collection::vec(any::<u64>(), 0..8)
-            )
-                .prop_map(|(handle, function, args)| Request::PawnioExec {
+            Just(Request::OpenAmdSmn),
+            (any::<u32>(), any::<u32>())
+                .prop_map(|(handle, offset)| Request::ReadSmn { handle, offset }),
+            Just(Request::OpenLpcIo),
+            (any::<u32>(), any::<u8>())
+                .prop_map(|(handle, slot)| Request::LpcSelectSlot { handle, slot }),
+            any::<u32>().prop_map(|handle| Request::LpcFindBars { handle }),
+            (any::<u32>(), any::<u16>())
+                .prop_map(|(handle, port)| Request::LpcReadPort { handle, port }),
+            (any::<u32>(), any::<u16>(), any::<u8>()).prop_map(|(handle, port, value)| {
+                Request::LpcWritePort {
                     handle,
-                    function,
-                    args
-                }),
+                    port,
+                    value,
+                }
+            }),
+            (any::<u32>(), any::<u8>())
+                .prop_map(|(handle, register)| { Request::LpcSuperioInb { handle, register } }),
+            (any::<u32>(), any::<u8>(), any::<u8>()).prop_map(|(handle, register, value)| {
+                Request::LpcSuperioOutb {
+                    handle,
+                    register,
+                    value,
+                }
+            }),
         ]
     }
 
@@ -302,10 +347,10 @@ mod tests {
             }),
             prop::collection::vec(arb_bus_info(), 0..4).prop_map(Response::Buses),
             any::<u32>().prop_map(Response::Opened),
+            any::<u32>().prop_map(Response::Dword),
             any::<u8>().prop_map(Response::Byte),
             any::<bool>().prop_map(Response::Bool),
             Just(Response::Unit),
-            prop::collection::vec(any::<u64>(), 0..8).prop_map(Response::Words),
             ".*".prop_map(Response::Error),
         ]
     }

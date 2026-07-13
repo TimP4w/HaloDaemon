@@ -75,13 +75,12 @@ sudo cp udev/60-halod.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-**Windows:** requires [PawnIO](https://pawnio.eu/) installed and `halod` running as Administrator. The daemon self-elevates via UAC on startup; declining the prompt disables chipset SMBus devices for that session.
+**Windows:** requires [PawnIO](https://pawnio.eu/) installed. The non-elevated daemon delegates chipset SMBus access to the on-demand LocalSystem `halod-broker` service; development runs without that service launch only the broker through UAC.
 
 ---
 
 ## Security note
 
-On Windows the entire daemon process runs elevated because PawnIO requires Administrator.
-The IPC named pipe uses a Medium integrity label so the unelevated UI can connect while preventing lower-integrity processes from accessing the elevated daemon.
+On Windows `halod.exe` and its plugin host remain at medium integrity. Only `halod-broker.exe` loads PawnIO and performs register-bus operations. The broker pipe is restricted to the coordinator's exact SID/session and authenticated, capability-scoped requests.
 
 ---

@@ -374,7 +374,7 @@ pub async fn set_screen_raw_streaming(id: String, enabled: bool, app: Arc<AppSta
     Ok(())
 }
 
-/// Resolve `path` to a canonical regular-file path. The daemon runs elevated and
+/// Resolve `path` to a canonical regular-file path. The daemon is non-elevated, but
 /// hands this straight to ffmpeg, so a client must not be able to point it at a
 /// directory, device node, or symlink trap. The canonical path is what we hand
 /// downstream so the engine and ffmpeg agree on exactly which inode is read.

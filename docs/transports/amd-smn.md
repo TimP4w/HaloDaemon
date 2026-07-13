@@ -52,12 +52,12 @@ The driver only opens the module after CPUID confirms an `AuthenticAMD` vendor a
 
 ## Module loading
 
-Loading follows the shared [PawnIO bridge](lpcio.md#module-loading): `PawnIOLib.dll` is resolved only from the trusted install locations, and `AMDFamily17.bin` is loaded only from beside the elevated executable (or `pwnio/` next to it). If the blob is missing or the daemon is not elevated, the AMD CPU sensor is silently unavailable.
+The non-elevated daemon sends only typed `OpenAmdSmn` and `ReadSmn` requests to `halod-broker`. The elevated broker maps those requests to `AMDFamily17.bin` and `ioctl_read_smn`; module and function names never cross the RPC boundary. `PawnIOLib.dll` is resolved only from trusted install locations, and the blob is loaded only from beside the broker executable (or `pwnio/` next to it). If PawnIO or the blob is unavailable, the AMD CPU sensor is silently unavailable.
 
 ---
 
 ## Limitations
 
 - Windows only — excluded from Linux builds at the compiler level. (On Linux, CPU temperatures come from the [hwmon transport](hwmon.md) via `k10temp`.)
-- Requires PawnIO installed and the daemon running as Administrator.
+- Requires PawnIO installed; only the on-demand `halod-broker` helper runs as LocalSystem/Administrator.
 - SMN reads touch PCI config space, the same window the chipset-SMBus transports use; the PawnIO module serialises PCI access internally, but heavy concurrent chipset-SMBus activity can momentarily delay a poll.

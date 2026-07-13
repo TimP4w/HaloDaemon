@@ -47,16 +47,18 @@ is deliberately just the register-bus primitives:
 
 - SMBus: open an enumerated controller and use the byte/word/block
   read/write ops — each addressed by a broker-side **handle** returned at open.
-- PawnIO: open a module into a handle, then execute a named function against
-  that handle.
+- AMD SMN: open a typed AMD handle and read a 32-bit SMN offset.
+- LPC I/O: open a typed LPC handle, select one of the two SuperIO slots, find
+  BARs, and perform the fixed port/config-register byte operations.
 
 There is **no** filesystem op, process-spawn, or generic "run this" verb. Frames
 are a `u32` length prefix + JSON, capped at `MAX_FRAME_LEN` (64 KiB) so a hostile
 length prefix cannot force a huge allocation. Before any operation, a connection
 must exchange the per-process bootstrap secret for a short-lived,
 connection-bound capability. An SMBus capability names one exact enumerated bus
-and address set. A PawnIO capability names one hard-allowlisted module and exact
-function set. Both carry request-rate and total-operation ceilings.
+and address set. Separate AMD SMN and LPC capabilities expose only their typed
+operations; module names, function names, and argument vectors are not part of
+the wire protocol. Every scope carries request-rate and total-operation ceilings.
 
 ## Trust boundaries
 
@@ -139,7 +141,7 @@ A LocalSystem service must not let a peer exhaust it
   is created.
 - **Worker threads** are retained and joined after completion rather than
   detached and forgotten.
-- **Per-connection handles** (open buses / PawnIO modules) are capped
+- **Per-connection handles** (open buses / typed AMD and LPC modules) are capped
   (`MAX_HANDLES_PER_KIND`), so one connection cannot grow its handle maps without
   bound.
 - **Handle-id allocation** is checked (`checked_add`), never wrapping.

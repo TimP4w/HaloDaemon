@@ -6,11 +6,10 @@ use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use halod_hwaccess::pawnio::{PawnioModule, PawnioOps};
+use halod_hwaccess::pawnio::PawnioModule;
 use halod_hwaccess::proto::{
     self, CapabilityScope, Request, Response, CAPABILITY_TTL_MS, MAX_OPERATIONS_PER_CAPABILITY,
-    MAX_OPERATIONS_PER_SECOND, MAX_PAWNIO_ARGS, MAX_PAWNIO_FUNCTIONS, MAX_SCOPE_ADDRESSES,
-    PIPE_NAME,
+    MAX_OPERATIONS_PER_SECOND, MAX_SCOPE_ADDRESSES, PIPE_NAME,
 };
 use halod_hwaccess::smbus::{self, SmBusSyncOps, SMBUS_BLOCK_MAX};
 use halod_hwaccess::winsec;
@@ -222,9 +221,33 @@ struct Capability {
 struct Conn {
     buses: HashMap<u32, Box<dyn SmBusSyncOps + Send>>,
     next_bus: u32,
-    pawnio: HashMap<u32, PawnioModule>,
+    register_io: HashMap<u32, RegisterIoHandle>,
     next_pawnio: u32,
     capability: Option<Capability>,
+}
+
+enum RegisterIoHandle {
+    AmdSmn(PawnioModule),
+    LpcIo(PawnioModule),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RegisterIoKind {
+    AmdSmn,
+    LpcIo,
+}
+
+impl RegisterIoHandle {
+    fn kind(&self) -> RegisterIoKind {
+        match self {
+            Self::AmdSmn(_) => RegisterIoKind::AmdSmn,
+            Self::LpcIo(_) => RegisterIoKind::LpcIo,
+        }
+    }
+}
+
+fn handle_kind_allows(actual: RegisterIoKind, expected: RegisterIoKind) -> bool {
+    actual == expected
 }
 
 impl Conn {
@@ -239,7 +262,7 @@ impl Conn {
         let id = random_token()?;
         let remaining = scope_limits(&scope).1;
         self.buses.clear();
-        self.pawnio.clear();
+        self.register_io.clear();
         self.capability = Some(Capability {
             id: id.clone(),
             scope,
@@ -426,27 +449,118 @@ fn dispatch(conn: &mut Conn, scope: &CapabilityScope, req: Request) -> Response 
         Request::SupportsBlockWrite { bus } => {
             with_bus(conn, bus, |b| Ok(Response::Bool(b.supports_block_write())))
         }
-        Request::PawnioOpen { module } => ok_or_err((|| {
-            let id = next_handle_id(&conn.pawnio, &mut conn.next_pawnio, "pawnio")?;
-            let m = PawnioModule::open(&[module.as_str()])?;
-            conn.pawnio.insert(id, m);
+        Request::OpenAmdSmn => ok_or_err((|| {
+            let id = next_handle_id(&conn.register_io, &mut conn.next_pawnio, "register-I/O")?;
+            let module = PawnioModule::open(&["AMDFamily17.bin"])?;
+            conn.register_io
+                .insert(id, RegisterIoHandle::AmdSmn(module));
             Ok(Response::Opened(id))
         })()),
-        Request::PawnioExec {
-            handle,
-            function,
-            args,
-        } => ok_or_err((|| {
-            let m = conn
-                .pawnio
-                .get(&handle)
-                .ok_or_else(|| anyhow!("unknown pawnio handle {handle}"))?;
-            Ok(Response::Words(m.execute(&function, &args)?))
+        Request::ReadSmn { handle, offset } => with_amd_smn(conn, handle, |module| {
+            let value = exec_one(module, c"ioctl_read_smn", &[offset as u64])?;
+            Ok(Response::Dword((value & 0xFFFF_FFFF) as u32))
+        }),
+        Request::OpenLpcIo => ok_or_err((|| {
+            let id = next_handle_id(&conn.register_io, &mut conn.next_pawnio, "register-I/O")?;
+            let module = PawnioModule::open(&["LpcIO.bin"])?;
+            conn.register_io.insert(id, RegisterIoHandle::LpcIo(module));
+            Ok(Response::Opened(id))
         })()),
+        Request::LpcSelectSlot { handle, slot } => with_lpc_io(conn, handle, |module| {
+            if slot > 1 {
+                bail!("LPC slot {slot} is outside 0..=1");
+            }
+            exec_unit(module, c"ioctl_select_slot", &[slot as u64])?;
+            Ok(Response::Unit)
+        }),
+        Request::LpcFindBars { handle } => with_lpc_io(conn, handle, |module| {
+            exec_unit(module, c"ioctl_find_bars", &[])?;
+            Ok(Response::Unit)
+        }),
+        Request::LpcReadPort { handle, port } => with_lpc_io(conn, handle, |module| {
+            let value = exec_one(module, c"ioctl_pio_inb", &[port as u64])?;
+            Ok(Response::Byte((value & 0xFF) as u8))
+        }),
+        Request::LpcWritePort {
+            handle,
+            port,
+            value,
+        } => with_lpc_io(conn, handle, |module| {
+            exec_unit(module, c"ioctl_pio_outb", &[port as u64, value as u64])?;
+            Ok(Response::Unit)
+        }),
+        Request::LpcSuperioInb { handle, register } => with_lpc_io(conn, handle, |module| {
+            let value = exec_one(module, c"ioctl_superio_inb", &[register as u64])?;
+            Ok(Response::Byte((value & 0xFF) as u8))
+        }),
+        Request::LpcSuperioOutb {
+            handle,
+            register,
+            value,
+        } => with_lpc_io(conn, handle, |module| {
+            exec_unit(
+                module,
+                c"ioctl_superio_outb",
+                &[register as u64, value as u64],
+            )?;
+            Ok(Response::Unit)
+        }),
         Request::Enumerate
         | Request::EnumerateGpu
         | Request::Authenticate { .. }
         | Request::Renew { .. } => Response::Error("operation not available in this state".into()),
+    }
+}
+
+fn exec_unit(module: &PawnioModule, function: &std::ffi::CStr, args: &[u64]) -> Result<()> {
+    module.exec(function, args, &mut [])?;
+    Ok(())
+}
+
+fn exec_one(module: &PawnioModule, function: &std::ffi::CStr, args: &[u64]) -> Result<u64> {
+    let mut output = [0u64; 1];
+    let count = module.exec(function, args, &mut output)?;
+    require_one_word(function, &output[..count])
+}
+
+fn require_one_word(function: &std::ffi::CStr, output: &[u64]) -> Result<u64> {
+    let [value] = output else {
+        bail!(
+            "pawnio_execute({}) returned {} words, expected 1",
+            output.len(),
+            function.to_string_lossy()
+        );
+    };
+    Ok(*value)
+}
+
+fn with_amd_smn(
+    conn: &Conn,
+    handle: u32,
+    f: impl FnOnce(&PawnioModule) -> Result<Response>,
+) -> Response {
+    match conn.register_io.get(&handle) {
+        Some(entry) if !handle_kind_allows(entry.kind(), RegisterIoKind::AmdSmn) => {
+            Response::Error(format!("register-I/O handle {handle} is LPC, not AMD SMN"))
+        }
+        Some(RegisterIoHandle::AmdSmn(module)) => ok_or_err(f(module)),
+        Some(RegisterIoHandle::LpcIo(_)) => unreachable!("kind checked above"),
+        None => Response::Error(format!("unknown register-I/O handle {handle}")),
+    }
+}
+
+fn with_lpc_io(
+    conn: &Conn,
+    handle: u32,
+    f: impl FnOnce(&PawnioModule) -> Result<Response>,
+) -> Response {
+    match conn.register_io.get(&handle) {
+        Some(entry) if !handle_kind_allows(entry.kind(), RegisterIoKind::LpcIo) => {
+            Response::Error(format!("register-I/O handle {handle} is AMD SMN, not LPC"))
+        }
+        Some(RegisterIoHandle::LpcIo(module)) => ok_or_err(f(module)),
+        Some(RegisterIoHandle::AmdSmn(_)) => unreachable!("kind checked above"),
+        None => Response::Error(format!("unknown register-I/O handle {handle}")),
     }
 }
 
@@ -483,20 +597,14 @@ fn validate_scope(mut scope: CapabilityScope) -> Result<CapabilityScope> {
             }
             clamp_limits(max_operations_per_second, max_operations);
         }
-        CapabilityScope::Pawnio {
-            module,
-            functions,
+        CapabilityScope::AmdSmn {
+            max_operations_per_second,
+            max_operations,
+        }
+        | CapabilityScope::LpcIo {
             max_operations_per_second,
             max_operations,
         } => {
-            functions.sort();
-            functions.dedup();
-            if functions.is_empty() || functions.len() > MAX_PAWNIO_FUNCTIONS {
-                bail!("PawnIO capability has an invalid function count");
-            }
-            if !functions.iter().all(|f| pawnio_function_allowed(module, f)) {
-                bail!("PawnIO module/function is not broker-approved");
-            }
             clamp_limits(max_operations_per_second, max_operations);
         }
     }
@@ -515,10 +623,13 @@ fn scope_limits(scope: &CapabilityScope) -> (u32, u32) {
             max_operations,
             ..
         }
-        | CapabilityScope::Pawnio {
+        | CapabilityScope::AmdSmn {
             max_operations_per_second,
             max_operations,
-            ..
+        }
+        | CapabilityScope::LpcIo {
+            max_operations_per_second,
+            max_operations,
         } => (*max_operations_per_second, *max_operations),
     }
 }
@@ -549,50 +660,21 @@ fn request_allowed(scope: &CapabilityScope, req: &Request) -> Result<()> {
             }
             Ok(())
         }
+        (CapabilityScope::AmdSmn { .. }, Request::OpenAmdSmn | Request::ReadSmn { .. }) => Ok(()),
         (
-            CapabilityScope::Pawnio {
-                module, functions, ..
-            },
-            Request::PawnioOpen { module: requested },
-        ) if requested == module => Ok(()),
-        (
-            CapabilityScope::Pawnio {
-                module, functions, ..
-            },
-            Request::PawnioExec { function, args, .. },
-        ) if functions.contains(function)
-            && args.len() <= MAX_PAWNIO_ARGS
-            && pawnio_signature_allowed(module, function, args.len()) =>
-        {
-            Ok(())
+            CapabilityScope::LpcIo { .. },
+            Request::OpenLpcIo
+            | Request::LpcFindBars { .. }
+            | Request::LpcReadPort { .. }
+            | Request::LpcWritePort { .. }
+            | Request::LpcSuperioInb { .. }
+            | Request::LpcSuperioOutb { .. },
+        ) => Ok(()),
+        (CapabilityScope::LpcIo { .. }, Request::LpcSelectSlot { slot: 0..=1, .. }) => Ok(()),
+        (CapabilityScope::LpcIo { .. }, Request::LpcSelectSlot { slot, .. }) => {
+            bail!("LPC slot {slot} is outside 0..=1")
         }
         _ => bail!("operation is outside the capability"),
-    }
-}
-
-fn pawnio_function_allowed(module: &str, function: &str) -> bool {
-    matches!(
-        (module, function),
-        ("AMDFamily17.bin", "ioctl_read_smn")
-            | ("LpcIO.bin", "ioctl_select_slot")
-            | ("LpcIO.bin", "ioctl_find_bars")
-            | ("LpcIO.bin", "ioctl_pio_inb")
-            | ("LpcIO.bin", "ioctl_pio_outb")
-            | ("LpcIO.bin", "ioctl_superio_inb")
-            | ("LpcIO.bin", "ioctl_superio_outb")
-    )
-}
-
-fn pawnio_signature_allowed(module: &str, function: &str, args: usize) -> bool {
-    match (module, function) {
-        ("AMDFamily17.bin", "ioctl_read_smn") => args == 1,
-        ("LpcIO.bin", "ioctl_select_slot") => args == 1,
-        ("LpcIO.bin", "ioctl_find_bars") => args == 0,
-        ("LpcIO.bin", "ioctl_pio_inb") => args == 1,
-        ("LpcIO.bin", "ioctl_pio_outb") => args == 2,
-        ("LpcIO.bin", "ioctl_superio_inb") => args == 1,
-        ("LpcIO.bin", "ioctl_superio_outb") => args == 2,
-        _ => false,
     }
 }
 
@@ -661,31 +743,54 @@ mod tests {
     }
 
     #[test]
-    fn pawnio_scope_pins_module_function_and_arity() {
-        let scope = CapabilityScope::Pawnio {
-            module: "AMDFamily17.bin".into(),
-            functions: vec!["ioctl_read_smn".into()],
+    fn typed_scopes_reject_cross_use_and_invalid_lpc_slots() {
+        let amd = CapabilityScope::AmdSmn {
             max_operations_per_second: 10,
             max_operations: 10,
         };
+        let lpc = CapabilityScope::LpcIo {
+            max_operations_per_second: 10,
+            max_operations: 10,
+        };
+        assert!(request_allowed(&amd, &Request::OpenAmdSmn).is_ok());
         assert!(request_allowed(
-            &scope,
-            &Request::PawnioExec {
+            &amd,
+            &Request::ReadSmn {
                 handle: 1,
-                function: "ioctl_read_smn".into(),
-                args: vec![0x1234],
+                offset: 0x1234,
             }
         )
         .is_ok());
-        assert!(request_allowed(
-            &scope,
-            &Request::PawnioExec {
-                handle: 1,
-                function: "ioctl_read_smn".into(),
-                args: vec![],
-            }
-        )
-        .is_err());
+        assert!(request_allowed(&amd, &Request::OpenLpcIo).is_err());
+        assert!(request_allowed(&lpc, &Request::OpenAmdSmn).is_err());
+        assert!(request_allowed(&lpc, &Request::LpcSelectSlot { handle: 1, slot: 1 }).is_ok());
+        assert!(request_allowed(&lpc, &Request::LpcSelectSlot { handle: 1, slot: 2 }).is_err());
+    }
+
+    #[test]
+    fn typed_handle_kinds_reject_cross_use() {
+        assert!(handle_kind_allows(
+            RegisterIoKind::AmdSmn,
+            RegisterIoKind::AmdSmn
+        ));
+        assert!(handle_kind_allows(
+            RegisterIoKind::LpcIo,
+            RegisterIoKind::LpcIo
+        ));
+        assert!(!handle_kind_allows(
+            RegisterIoKind::AmdSmn,
+            RegisterIoKind::LpcIo
+        ));
+        assert!(!handle_kind_allows(
+            RegisterIoKind::LpcIo,
+            RegisterIoKind::AmdSmn
+        ));
+    }
+
+    #[test]
+    fn malformed_empty_pawnio_read_fails_closed() {
+        assert!(require_one_word(c"ioctl_read_smn", &[]).is_err());
+        assert_eq!(require_one_word(c"ioctl_pio_inb", &[0x42]).unwrap(), 0x42);
     }
 
     #[test]
