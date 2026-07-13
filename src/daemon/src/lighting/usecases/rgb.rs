@@ -6,8 +6,38 @@ use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::registry::usecases::settings;
 use crate::{ipc, state::AppState};
-use halod_shared::types::RgbState;
+use halod_shared::types::{RgbState, RgbZone, ZoneTopology};
 use halod_shared::zone_transform::ZoneContentTransform;
+
+fn validate_zone_transform(zone: &RgbZone, transform: &mut ZoneContentTransform) -> Result<()> {
+    match &zone.topology {
+        ZoneTopology::Ring => {
+            anyhow::ensure!(
+                !transform.flip_h && !transform.flip_v && !transform.swap_rings,
+                "ring transforms cannot use geometric flips or swap_rings"
+            );
+            if !zone.leds.is_empty() {
+                transform.led_offset = transform.led_offset.rem_euclid(zone.leds.len() as i32);
+            }
+        }
+        ZoneTopology::Rings { count } => {
+            anyhow::ensure!(
+                !transform.flip_h && !transform.flip_v,
+                "ring transforms cannot use geometric flips"
+            );
+            let ring_len = zone.leds.len() / usize::from((*count).max(1));
+            anyhow::ensure!(ring_len > 0, "ring zone has no addressable LEDs");
+            transform.led_offset = transform.led_offset.rem_euclid(ring_len as i32);
+        }
+        ZoneTopology::Linear | ZoneTopology::Grid | ZoneTopology::Keyboard { .. } => {
+            anyhow::ensure!(
+                !transform.reverse && transform.led_offset == 0 && !transform.swap_rings,
+                "non-ring transforms only support geometric flips"
+            );
+        }
+    }
+    Ok(())
+}
 
 pub async fn rgb_apply(id: String, state: RgbState, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
@@ -61,16 +91,19 @@ pub async fn rgb_apply(id: String, state: RgbState, app: Arc<AppState>) -> Resul
 pub async fn set_zone_transform(
     id: String,
     zone_id: String,
-    transform: ZoneContentTransform,
+    mut transform: ZoneContentTransform,
     app: Arc<AppState>,
 ) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let rgb = device.as_rgb().context("device does not support RGB")?;
 
-    anyhow::ensure!(
-        rgb.descriptor().zones.iter().any(|z| z.id == zone_id),
-        "zone '{zone_id}' not found on device '{id}'"
-    );
+    let zone = rgb
+        .descriptor()
+        .zones
+        .iter()
+        .find(|z| z.id == zone_id)
+        .ok_or_else(|| anyhow::anyhow!("zone '{zone_id}' not found on device '{id}'"))?;
+    validate_zone_transform(zone, &mut transform)?;
 
     rgb.set_zone_transform(zone_id.clone(), transform);
 
@@ -160,7 +193,7 @@ mod tests {
             "dev1".into(),
             "ring".into(),
             ZoneContentTransform {
-                flip_h: true,
+                reverse: true,
                 ..Default::default()
             },
             app.clone(),
@@ -190,14 +223,14 @@ mod tests {
             "dev1".into(),
             "ring".into(),
             ZoneContentTransform {
-                flip_v: true,
+                reverse: true,
                 ..Default::default()
             },
             app,
         )
         .await
         .unwrap();
-        assert!(dev.zone_transforms().get("ring").unwrap().flip_v);
+        assert!(dev.zone_transforms().get("ring").unwrap().reverse);
     }
 
     #[tokio::test]

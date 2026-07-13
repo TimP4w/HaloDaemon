@@ -30,10 +30,10 @@ pub async fn set_fan_curve_points(
     app: Arc<AppState>,
 ) -> Result<()> {
     let points: Vec<(f32, f32)> = points.iter().map(|p| (p[0], p[1])).collect();
-    validate_points(&points)?;
-    require_temperature_sensor(&sensor_id, &app).await?;
-
     let record = FanCurveRecord { sensor_id, points };
+    record.validate()?;
+    require_temperature_sensor(&record.sensor_id, &app).await?;
+
     with_fan(&fan_id, &app, |fan| fan.set_fan_curve(record)).await
 }
 
@@ -49,10 +49,9 @@ pub async fn set_fan_curve_preset(
         .ok_or_else(|| anyhow!("unknown preset: {preset}"))?
         .points
         .to_vec();
-    validate_points(&points)?;
-    require_temperature_sensor(&sensor_id, &app).await?;
-
     let record = FanCurveRecord { sensor_id, points };
+    record.validate()?;
+    require_temperature_sensor(&record.sensor_id, &app).await?;
     with_fan(&fan_id, &app, |fan| fan.set_fan_curve(record)).await
 }
 
@@ -75,27 +74,11 @@ pub async fn remove_fan_curve(fan_id: String, app: Arc<AppState>) -> Result<()> 
 }
 
 fn validate_points(points: &[(f32, f32)]) -> Result<()> {
-    if points.len() < 2 {
-        anyhow::bail!("fan curve must have at least 2 points");
+    FanCurveRecord {
+        sensor_id: None,
+        points: points.to_vec(),
     }
-    if points.len() > FanCurveRecord::MAX_POINTS {
-        anyhow::bail!(
-            "fan curve has too many points ({} > {})",
-            points.len(),
-            FanCurveRecord::MAX_POINTS
-        );
-    }
-    for &(_, duty) in points {
-        if !(0.0..=100.0).contains(&duty) {
-            anyhow::bail!("duty must be between 0 and 100, got {duty}");
-        }
-    }
-    for window in points.windows(2) {
-        if window[0].0 >= window[1].0 {
-            anyhow::bail!("temperature points must be strictly ascending");
-        }
-    }
-    Ok(())
+    .validate()
 }
 
 #[cfg(test)]
@@ -202,7 +185,7 @@ mod tests {
             .map(|i| (i as f32, 50.0))
             .collect();
         let err = validate_points(&points).unwrap_err();
-        assert!(err.to_string().contains("too many"), "{err}");
+        assert!(err.to_string().contains("exceeds"), "{err}");
     }
 
     #[tokio::test]
@@ -315,12 +298,12 @@ mod tests {
     #[test]
     fn validate_points_errors_on_duty_above_100() {
         let err = validate_points(&[(30.0, 20.0), (50.0, 101.0)]).unwrap_err();
-        assert!(err.to_string().contains("duty must be between 0 and 100"));
+        assert!(err.to_string().contains("duty"));
     }
 
     #[test]
     fn validate_points_errors_on_negative_duty() {
         let err = validate_points(&[(30.0, 20.0), (50.0, -1.0)]).unwrap_err();
-        assert!(err.to_string().contains("duty must be between 0 and 100"));
+        assert!(err.to_string().contains("duty"));
     }
 }

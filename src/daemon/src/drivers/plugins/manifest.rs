@@ -4,11 +4,12 @@
 use anyhow::{anyhow, bail, Context, Result};
 use halod_shared::types::{
     Animation, ButtonDescriptor, ButtonMapping, ChoiceDisplay, ChoiceOption, DeviceType,
-    EffectParamDescriptor, NativeEffect, Permission, PluginConfigFieldKind, PluginKind,
-    RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
+    EffectParamDescriptor, EffectParamValue, NativeEffect, ParamKind, Permission,
+    PluginConfigFieldKind, PluginKind, RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
 };
 use mlua::{DeserializeOptions, LuaSerdeExt};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::transport::{descriptor_for, known_kinds};
@@ -1010,6 +1011,18 @@ pub const MAX_PLUGIN_ZONES: usize = 256;
 /// vector (the deeper thread-ceiling / process-isolation fix is tracked as ARCH-R1).
 pub const MAX_PLUGIN_CONTROLLERS: usize = 256;
 
+const MAX_PLUGIN_DEVICES: usize = 256;
+const MAX_PLUGIN_EFFECTS: usize = 256;
+const MAX_EFFECT_PARAMS: usize = 64;
+const MAX_CONFIG_FIELDS: usize = 128;
+const MAX_USB_ENDPOINTS: usize = 32;
+const MAX_CHAIN_CHANNELS: usize = 64;
+const MAX_CHAIN_ACCESSORIES: usize = 256;
+const MAX_CONTROL_DEFS: usize = 256;
+const MAX_KEY_MAPPINGS: usize = 256;
+const MAX_TEXT_BYTES: usize = 256;
+const MAX_LONG_TEXT_BYTES: usize = 4_096;
+
 /// Reject a plugin-declared LED count above [`MAX_PLUGIN_LEDS`]. `what` names the
 /// offending zone/accessory for the error.
 pub fn check_led_count(what: &str, led_count: u32) -> Result<()> {
@@ -1085,15 +1098,65 @@ fn validate_entry_path(entry: &str) -> Result<()> {
 
 /// Cross-field validation, gated by `plugin_type`.
 pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
+    check_count("devices", manifest.devices.len(), MAX_PLUGIN_DEVICES)?;
+    check_count("effects", manifest.effects.len(), MAX_PLUGIN_EFFECTS)?;
+    check_count(
+        "effect thumbnails",
+        manifest.effect_thumbnails.len(),
+        MAX_PLUGIN_EFFECTS,
+    )?;
+    validate_identity(&manifest.identity)?;
+    validate_effects(&manifest.effects, "effect")?;
+    validate_effect_assets(manifest)?;
+    validate_transports(manifest)?;
+    validate_controls(manifest)?;
     if let Some(rgb) = &manifest.rgb {
         check_zone_count(rgb.zones.len())?;
+        validate_rgb(rgb)?;
     }
     if let Some(chain) = &manifest.chain {
+        check_count("chain channels", chain.channels.len(), MAX_CHAIN_CHANNELS)?;
+        check_count(
+            "chain accessories",
+            chain.accessories.len(),
+            MAX_CHAIN_ACCESSORIES,
+        )?;
+        let mut channels = HashSet::new();
         for ch in &chain.channels {
+            validate_component("chain channel id", &ch.id)?;
+            validate_short_text("chain channel name", &ch.name)?;
+            if !channels.insert(&ch.id) {
+                bail!("chain channel id '{}' is declared more than once", ch.id);
+            }
             check_led_count(&ch.id, ch.max_leds)?;
         }
+        let mut accessories = HashSet::new();
         for acc in &chain.accessories {
+            validate_short_text("accessory name", &acc.name)?;
+            if !accessories.insert(acc.id) {
+                bail!("chain accessory id '{}' is declared more than once", acc.id);
+            }
             check_led_count(&acc.name, acc.led_count)?;
+            match acc.topology.as_str() {
+                "ring" | "linear" | "grid" => {
+                    if acc.rings != 0 {
+                        bail!(
+                            "accessory '{}' declares rings for non-rings topology",
+                            acc.name
+                        );
+                    }
+                }
+                "rings" if acc.rings > 0 => {}
+                "rings" => bail!(
+                    "accessory '{}' with rings topology must declare rings",
+                    acc.name
+                ),
+                _ => bail!(
+                    "accessory '{}' has unsupported topology '{}'",
+                    acc.name,
+                    acc.topology
+                ),
+            }
         }
     }
     match manifest.plugin_type {
@@ -1145,16 +1208,238 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
             }
         }
     }
-    // Only a `device` plugin may hold a usb_control endpoint open.
+    // A tcp transport reaches the network, so the manifest must declare the
+    // `network` permission — that's what drives the consent prompt and what the
+    // tcp backend gates its connect on. Without this a plugin could ship a tcp
+    // integration with an empty permission list and auto-activate silently.
+    if manifest.transports.tcp.is_some() && !manifest.permissions.contains(&Permission::Network) {
+        bail!("a tcp transport requires the 'network' permission to be declared");
+    }
+    validate_component("plugin id", &manifest.plugin_id)?;
+    Ok(())
+}
+
+fn check_count(what: &str, count: usize, max: usize) -> Result<()> {
+    if count > max {
+        bail!("declares {count} {what}, exceeding the {max} limit");
+    }
+    Ok(())
+}
+
+fn validate_short_text(what: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > MAX_TEXT_BYTES || value.contains('\0') {
+        bail!("{what} must be non-empty, contain no NUL, and be at most {MAX_TEXT_BYTES} bytes");
+    }
+    Ok(())
+}
+
+fn validate_optional_text(what: &str, value: &Option<String>, max: usize) -> Result<()> {
+    if let Some(value) = value {
+        if value.len() > max || value.contains('\0') {
+            bail!("{what} must contain no NUL and be at most {max} bytes");
+        }
+    }
+    Ok(())
+}
+
+fn validate_identity(identity: &Identity) -> Result<()> {
+    validate_optional_text("identity name", &identity.name, MAX_TEXT_BYTES)?;
+    if let Some(id) = &identity.id {
+        validate_component("identity id", id)?;
+    }
+    validate_optional_text("identity author", &identity.author, MAX_TEXT_BYTES)?;
+    validate_optional_text("identity version", &identity.version, MAX_TEXT_BYTES)?;
+    validate_optional_text("identity license", &identity.license, MAX_TEXT_BYTES)?;
+    validate_optional_text(
+        "identity description",
+        &identity.description,
+        MAX_LONG_TEXT_BYTES,
+    )
+}
+
+fn validate_effects(effects: &[EffectManifest], what: &str) -> Result<()> {
+    let mut ids = HashSet::new();
+    for effect in effects {
+        validate_component(&format!("{what} id"), &effect.id)?;
+        validate_short_text(&format!("{what} '{}' name", effect.id), &effect.name)?;
+        if !ids.insert(&effect.id) {
+            bail!("{what} id '{}' is declared more than once", effect.id);
+        }
+        validate_effect_params(&effect.params, &format!("{what} '{}'", effect.id))?;
+    }
+    Ok(())
+}
+
+fn validate_effect_params(params: &[EffectParamDescriptor], owner: &str) -> Result<()> {
+    check_count(
+        &format!("parameters for {owner}"),
+        params.len(),
+        MAX_EFFECT_PARAMS,
+    )?;
+    let mut ids = HashSet::new();
+    for param in params {
+        validate_component(&format!("parameter id for {owner}"), &param.id)?;
+        validate_short_text(&format!("parameter '{}' label", param.id), &param.label)?;
+        if !ids.insert(&param.id) {
+            bail!("parameter id '{}' is duplicated in {owner}", param.id);
+        }
+        match (&param.kind, &param.default) {
+            (ParamKind::Range { min, max, step }, EffectParamValue::Float(value)) => {
+                validate_numeric_param(&param.id, *min, *max, Some(*step), *value)?;
+            }
+            (ParamKind::Number { min, max }, EffectParamValue::Float(value)) => {
+                validate_numeric_param(&param.id, *min, *max, None, *value)?;
+            }
+            (ParamKind::Enum { options }, EffectParamValue::Str(value)) => {
+                check_count("enum options", options.len(), MAX_CONTROL_DEFS)?;
+                if options.is_empty() || !options.iter().any(|option| option == value) {
+                    bail!(
+                        "enum parameter '{}' default is not one of its options",
+                        param.id
+                    );
+                }
+                for option in options {
+                    validate_short_text("enum option", option)?;
+                }
+            }
+            (ParamKind::Color, EffectParamValue::Color(_))
+            | (ParamKind::Boolean, EffectParamValue::Bool(_)) => {}
+            (
+                ParamKind::Text | ParamKind::Sensor | ParamKind::Image,
+                EffectParamValue::Str(value),
+            ) => {
+                if value.len() > MAX_LONG_TEXT_BYTES || value.contains('\0') {
+                    bail!("parameter '{}' default text is invalid", param.id);
+                }
+            }
+            (ParamKind::Steps, EffectParamValue::Steps(steps)) => {
+                check_count("effect parameter steps", steps.len(), MAX_CONTROL_DEFS)?;
+                if steps.iter().any(|step| !step.value.is_finite()) {
+                    bail!(
+                        "steps parameter '{}' contains a non-finite threshold",
+                        param.id
+                    );
+                }
+            }
+            _ => bail!(
+                "parameter '{}' default does not match its declared kind",
+                param.id
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn validate_numeric_param(
+    id: &str,
+    min: f64,
+    max: f64,
+    step: Option<f64>,
+    default: f64,
+) -> Result<()> {
+    if !min.is_finite() || !max.is_finite() || !default.is_finite() || min > max {
+        bail!("numeric parameter '{id}' has invalid bounds or default");
+    }
+    if default < min || default > max {
+        bail!("numeric parameter '{id}' default is outside its bounds");
+    }
+    if let Some(step) = step {
+        if !step.is_finite() || step <= 0.0 {
+            bail!("range parameter '{id}' has an invalid step");
+        }
+    }
+    Ok(())
+}
+
+fn validate_rgb(rgb: &RgbManifest) -> Result<()> {
+    let mut zones = HashSet::new();
+    for zone in &rgb.zones {
+        validate_component("RGB zone id", &zone.id)?;
+        validate_short_text("RGB zone name", &zone.name)?;
+        if !zones.insert(&zone.id) {
+            bail!("RGB zone id '{}' is declared more than once", zone.id);
+        }
+        check_led_count(&zone.id, u32::try_from(zone.leds.len()).unwrap_or(u32::MAX))?;
+    }
+    let effects: Vec<EffectManifest> = rgb
+        .native_effects
+        .iter()
+        .map(|effect| EffectManifest {
+            kind: EffectKind::Pixmap,
+            id: effect.id.clone(),
+            name: effect.name.clone(),
+            params: effect.params.clone(),
+        })
+        .collect();
+    check_count("native effects", effects.len(), MAX_PLUGIN_EFFECTS)?;
+    validate_effects(&effects, "native effect")
+}
+
+fn validate_effect_assets(manifest: &PluginManifest) -> Result<()> {
+    let mut thumbnails = HashSet::new();
+    for asset in &manifest.effect_thumbnails {
+        validate_component("effect thumbnail id", &asset.id)?;
+        if !thumbnails.insert(&asset.id) {
+            bail!(
+                "effect thumbnail id '{}' is declared more than once",
+                asset.id
+            );
+        }
+        validate_asset_name("effect thumbnail", &asset.thumbnail)?;
+    }
+    if let Some(logo) = &manifest.logo {
+        validate_asset_name("plugin logo", logo)?;
+    }
+    Ok(())
+}
+
+fn validate_asset_name(what: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > MAX_TEXT_BYTES
+        || value.contains('\0')
+        || Path::new(value).components().count() != 1
+    {
+        bail!("{what} must be a non-empty bare filename no longer than {MAX_TEXT_BYTES} bytes");
+    }
+    Ok(())
+}
+
+fn validate_transports(manifest: &PluginManifest) -> Result<()> {
+    if let Some(hid) = &manifest.transports.hid {
+        if !(1..=1024).contains(&hid.report_size) || !(1..=60_000).contains(&hid.timeout_ms) {
+            bail!("hid transport report_size must be 1..=1024 and timeout_ms 1..=60000");
+        }
+    }
+    if let Some(tcp) = &manifest.transports.tcp {
+        validate_component("tcp host_key", &tcp.host_key)?;
+        validate_component("tcp port_key", &tcp.port_key)?;
+        if tcp.host_key == tcp.port_key {
+            bail!("tcp host_key and port_key must differ");
+        }
+        if !(1..=60_000).contains(&tcp.timeout_ms) {
+            bail!("tcp timeout_ms must be 1..=60000");
+        }
+        if manifest.config.is_some() {
+            let fields: HashSet<&str> = manifest
+                .config_fields()
+                .iter()
+                .map(|field| field.key.as_str())
+                .collect();
+            if !fields.contains(tcp.host_key.as_str()) || !fields.contains(tcp.port_key.as_str()) {
+                bail!("tcp host_key and port_key must name declared config fields");
+            }
+        }
+    }
     if let Some(usb) = &manifest.transports.usb_control {
         if manifest.plugin_type != PluginKind::Device {
             bail!("usb_control transport is only valid for a device plugin");
         }
-        // The primary endpoint is the matched (consented) device; each *secondary*
-        // endpoint opens an arbitrary VID/PID off that device. `matches`/consent
-        // only gate the primary, so at least hold the secondaries to a validated,
-        // non-colliding, non-wildcard shape rather than opening them unchecked.
-        let mut seen = std::collections::HashSet::new();
+        check_count(
+            "usb_control endpoints",
+            usb.endpoints.len(),
+            MAX_USB_ENDPOINTS,
+        )?;
+        let mut seen = HashSet::new();
         for ep in &usb.endpoints {
             validate_component("usb_control endpoint id", &ep.id)?;
             if !seen.insert(&ep.id) {
@@ -1171,19 +1456,166 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
             }
         }
     }
-    // A tcp transport reaches the network, so the manifest must declare the
-    // `network` permission — that's what drives the consent prompt and what the
-    // tcp backend gates its connect on. Without this a plugin could ship a tcp
-    // integration with an empty permission list and auto-activate silently.
-    if manifest.transports.tcp.is_some() && !manifest.permissions.contains(&Permission::Network) {
-        bail!("a tcp transport requires the 'network' permission to be declared");
+    Ok(())
+}
+
+fn validate_controls(manifest: &PluginManifest) -> Result<()> {
+    if let Some(dpi) = &manifest.dpi {
+        check_count("DPI steps", dpi.steps.len(), MAX_CONTROL_DEFS)?;
+        if dpi.min > dpi.max
+            || dpi.steps.is_empty()
+            || dpi.steps.windows(2).any(|pair| pair[0] >= pair[1])
+            || dpi
+                .steps
+                .iter()
+                .any(|step| *step < dpi.min || *step > dpi.max)
+        {
+            bail!("DPI steps must be non-empty, strictly increasing, and within min/max");
+        }
     }
-    validate_component("plugin id", &manifest.plugin_id)?;
-    for e in &manifest.effects {
-        validate_component("effect id", &e.id)?;
+    validate_keyed_controls(manifest)?;
+    if let Some(config) = &manifest.config {
+        check_count("config fields", config.fields.len(), MAX_CONFIG_FIELDS)?;
+        let mut keys = HashSet::new();
+        for field in &config.fields {
+            validate_component("config field key", &field.key)?;
+            validate_short_text("config field label", &field.label)?;
+            if !keys.insert(&field.key) {
+                bail!(
+                    "config field key '{}' is declared more than once",
+                    field.key
+                );
+            }
+            if field.default.len() > MAX_LONG_TEXT_BYTES || field.default.contains('\0') {
+                bail!(
+                    "config default for '{}' is too long or contains NUL",
+                    field.key
+                );
+            }
+            match field.kind {
+                PluginConfigFieldKind::Text => {
+                    if field.min.is_some() || field.max.is_some() {
+                        bail!(
+                            "text config field '{}' must not declare numeric bounds",
+                            field.key
+                        );
+                    }
+                }
+                PluginConfigFieldKind::Number => {
+                    if field.default.is_empty() {
+                        continue;
+                    }
+                    let value: f64 = field.default.parse().map_err(|_| {
+                        anyhow!(
+                            "number config field '{}' has a non-numeric default",
+                            field.key
+                        )
+                    })?;
+                    if !value.is_finite()
+                        || field.min.is_some_and(|v| !v.is_finite())
+                        || field.max.is_some_and(|v| !v.is_finite())
+                        || field.min.zip(field.max).is_some_and(|(min, max)| min > max)
+                        || field.min.is_some_and(|min| value < min)
+                        || field.max.is_some_and(|max| value > max)
+                    {
+                        bail!(
+                            "number config field '{}' has invalid bounds or default",
+                            field.key
+                        );
+                    }
+                }
+            }
+        }
     }
-    for f in manifest.config_fields() {
-        validate_component("config field key", &f.key)?;
+    if let Some(poll) = &manifest.poll {
+        if !(100..=60_000).contains(&poll.interval_ms) {
+            bail!("poll interval_ms must be 100..=60000");
+        }
+    }
+    if let Some(remap) = &manifest.key_remap {
+        check_count("key remap buttons", remap.buttons.len(), MAX_KEY_MAPPINGS)?;
+        check_count(
+            "key remap default mappings",
+            remap.default_mappings.len(),
+            MAX_KEY_MAPPINGS,
+        )?;
+        let mut buttons = HashSet::new();
+        for button in &remap.buttons {
+            validate_short_text("key remap button label", &button.label)?;
+            if !buttons.insert(button.cid) {
+                bail!("key remap CID {} is declared more than once", button.cid);
+            }
+        }
+        let mut mappings = HashSet::new();
+        for mapping in &remap.default_mappings {
+            if !mappings.insert(mapping.cid) || !buttons.contains(&mapping.cid) {
+                bail!(
+                    "key remap default mapping references duplicate or unknown CID {}",
+                    mapping.cid
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_keyed_controls(manifest: &PluginManifest) -> Result<()> {
+    let mut keys = HashSet::new();
+    if let Some(choice) = &manifest.choice {
+        check_count("choices", choice.choices.len(), MAX_CONTROL_DEFS)?;
+        for value in &choice.choices {
+            validate_component("choice key", &value.key)?;
+            validate_short_text("choice label", &value.label)?;
+            if !keys.insert(&value.key)
+                || value.options.is_empty()
+                || value.options.len() > MAX_CONTROL_DEFS
+                || value.default >= value.options.len()
+            {
+                bail!(
+                    "choice '{}' has duplicate key, invalid option count, or invalid default",
+                    value.key
+                );
+            }
+        }
+    }
+    if let Some(range) = &manifest.range {
+        check_count("ranges", range.ranges.len(), MAX_CONTROL_DEFS)?;
+        for value in &range.ranges {
+            validate_component("range key", &value.key)?;
+            validate_short_text("range label", &value.label)?;
+            if !keys.insert(&value.key)
+                || value.min > value.max
+                || value.step <= 0
+                || value.default < value.min
+                || value.default > value.max
+                || (value.default - value.min) % value.step != 0
+            {
+                bail!(
+                    "range '{}' has duplicate key or invalid bounds, step, or default",
+                    value.key
+                );
+            }
+        }
+    }
+    if let Some(boolean) = &manifest.boolean {
+        check_count("boolean controls", boolean.booleans.len(), MAX_CONTROL_DEFS)?;
+        for value in &boolean.booleans {
+            validate_component("boolean key", &value.key)?;
+            validate_short_text("boolean label", &value.label)?;
+            if !keys.insert(&value.key) {
+                bail!("control key '{}' is declared more than once", value.key);
+            }
+        }
+    }
+    if let Some(action) = &manifest.action {
+        check_count("action controls", action.actions.len(), MAX_CONTROL_DEFS)?;
+        for value in &action.actions {
+            validate_component("action key", &value.key)?;
+            validate_short_text("action label", &value.label)?;
+            if !keys.insert(&value.key) {
+                bail!("control key '{}' is declared more than once", value.key);
+            }
+        }
     }
     Ok(())
 }
@@ -1418,6 +1850,64 @@ mod tests {
             transports = { usb_control = { endpoints = { { id = "e", vid = 0, pid = 4 } } } },
         }"#;
         assert!(parse_manifest(zero, Path::new("usb.lua")).is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_duplicate_and_invalid_control_declarations() {
+        let duplicate = r#"return {
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
+            range = { ranges = {
+              { key = "speed", label = "Speed", min = 1, max = 10, step = 1, default = 5 },
+              { key = "speed", label = "Again", min = 1, max = 10, step = 1, default = 5 },
+            } },
+        }"#;
+        assert!(parse_manifest(duplicate, Path::new("controls.lua")).is_err());
+
+        let bad_range = r#"return {
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
+            range = { ranges = { { key = "speed", label = "Speed", min = 10, max = 1, default = 5 } } },
+        }"#;
+        assert!(parse_manifest(bad_range, Path::new("range.lua")).is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_invalid_config_and_tcp_cross_fields() {
+        let bad_default = r#"return {
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
+            config = { fields = { { key = "port", label = "Port", kind = "number", default = "99999", min = 1, max = 65535 } } },
+        }"#;
+        assert!(parse_manifest(bad_default, Path::new("config.lua")).is_err());
+
+        let missing_tcp_field = r#"return {
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
+            permissions = { "network" },
+            config = { fields = { { key = "host", label = "Host" } } },
+            transports = { tcp = { host_key = "host", port_key = "port" } },
+        }"#;
+        assert!(parse_manifest(missing_tcp_field, Path::new("tcp.lua")).is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_invalid_effect_parameter_definition() {
+        let src = r#"return {
+            type = "effect",
+            effects = { { id = "wave", name = "Wave", params = {
+                { id = "speed", label = "Speed", kind = { kind = "range", min = 10, max = 1, step = 1 }, default = 5 },
+            } } },
+        }"#;
+        assert!(parse_manifest(src, Path::new("effect.lua")).is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_duplicate_key_remap_defaults() {
+        let src = r#"return {
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
+            key_remap = {
+              buttons = { { cid = 1, label = "Primary", divertable = true, group = 0 } },
+              default_mappings = { { cid = 1 }, { cid = 1 } },
+            },
+        }"#;
+        assert!(parse_manifest(src, Path::new("remap.lua")).is_err());
     }
 
     #[test]

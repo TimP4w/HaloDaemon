@@ -89,6 +89,7 @@ mod tests {
         return {
           config = { fields = {
             { key = "host", label = "Host", default = "127.0.0.1" },
+            { key = "port", label = "Port", default = "12345" },
             { key = "token", label = "Token", secure = true },
           } },
         }

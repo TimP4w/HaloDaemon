@@ -15,6 +15,9 @@ const MAX_SCROLL_CLICKS: i32 = 10_000;
 const MAX_CMD_ARGS: usize = 64;
 /// Max length of an executable path / command / argument string.
 const MAX_STR_LEN: usize = 4096;
+/// A device may expose many controls, but accepting an unbounded persisted
+/// mapping list would still make restore and hardware application expensive.
+pub const MAX_BUTTON_MAPPINGS: usize = 256;
 
 /// Validate a macro step list: non-empty, within the step-count, per-step delay,
 /// and aggregate-duration ceilings.
@@ -92,6 +95,31 @@ pub fn validate_button_action(action: &ButtonAction) -> Result<()> {
 pub fn validate_button_mapping(mapping: &ButtonMapping) -> Result<()> {
     validate_button_action(&mapping.base)?;
     validate_button_action(&mapping.shifted)?;
+    Ok(())
+}
+
+/// Validate a complete mapping set before it is persisted or applied.  This
+/// deliberately composes action and capability validation so callers cannot
+/// accidentally validate only one of the two boundaries.
+pub fn validate_button_mappings(
+    buttons: &[ButtonDescriptor],
+    mappings: &[ButtonMapping],
+) -> Result<()> {
+    ensure!(
+        mappings.len() <= MAX_BUTTON_MAPPINGS,
+        "mapping collection exceeds {MAX_BUTTON_MAPPINGS} entries"
+    );
+    for (index, mapping) in mappings.iter().enumerate() {
+        ensure!(
+            !mappings[..index]
+                .iter()
+                .any(|prior| prior.cid == mapping.cid),
+            "mapping collection contains duplicate control id {}",
+            mapping.cid
+        );
+        validate_button_mapping(mapping)?;
+        validate_cid(buttons, mapping)?;
+    }
     Ok(())
 }
 
@@ -243,5 +271,28 @@ mod tests {
             &map(1, ButtonAction::MomentaryDpi { dpi: 800 })
         )
         .is_ok());
+    }
+
+    #[test]
+    fn mapping_collection_rejects_duplicates_and_excess_entries() {
+        let duplicate = vec![map(1, ButtonAction::Native), map(1, ButtonAction::Native)];
+        assert!(validate_button_mappings(&[desc(1, true)], &duplicate).is_err());
+
+        let mappings: Vec<_> = (0..=MAX_BUTTON_MAPPINGS)
+            .map(|cid| map(cid as u16, ButtonAction::Native))
+            .collect();
+        assert!(validate_button_mappings(&[], &mappings).is_err());
+    }
+
+    #[test]
+    fn mapping_collection_composes_action_and_capability_checks() {
+        let invalid_action = vec![map(1, ButtonAction::MomentaryDpi { dpi: 0 })];
+        assert!(validate_button_mappings(&[desc(1, true)], &invalid_action).is_err());
+        assert!(
+            validate_button_mappings(&[desc(2, true)], &[map(1, ButtonAction::Native)]).is_err()
+        );
+        assert!(
+            validate_button_mappings(&[desc(1, true)], &[map(1, ButtonAction::Native)]).is_ok()
+        );
     }
 }

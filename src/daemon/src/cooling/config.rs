@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 
 /// A single fan curve assignment: links a fan device to a temperature sensor and curve points.
@@ -18,6 +19,60 @@ impl FanCurveRecord {
     pub const MAX_TEMP_C: f32 = 150.0;
     /// Max control points in one curve — rejected at ingress, truncated on restore.
     pub const MAX_POINTS: usize = 64;
+    /// Sensor ids are device-owned identifiers, subject to the same practical
+    /// bound as other persisted device references.
+    pub const MAX_SENSOR_ID_LEN: usize = 256;
+
+    /// Validate a curve exactly as supplied at an ingress boundary.  Unlike
+    /// `sanitize`, this never repairs data: callers can reject malformed IPC,
+    /// persisted state, or generated state before it is used.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(sensor_id) = &self.sensor_id {
+            ensure!(
+                !sensor_id.is_empty(),
+                "fan curve sensor id must not be empty"
+            );
+            ensure!(
+                sensor_id.len() <= Self::MAX_SENSOR_ID_LEN,
+                "fan curve sensor id exceeds {} bytes",
+                Self::MAX_SENSOR_ID_LEN
+            );
+            ensure!(
+                !sensor_id.contains('\0'),
+                "fan curve sensor id contains a NUL byte"
+            );
+        }
+        ensure!(
+            self.points.len() >= 2,
+            "fan curve must have at least 2 points"
+        );
+        ensure!(
+            self.points.len() <= Self::MAX_POINTS,
+            "fan curve exceeds {} points",
+            Self::MAX_POINTS
+        );
+        for &(temp, duty) in &self.points {
+            ensure!(temp.is_finite(), "fan curve temperature must be finite");
+            ensure!(duty.is_finite(), "fan curve duty must be finite");
+            ensure!(
+                (Self::MIN_TEMP_C..=Self::MAX_TEMP_C).contains(&temp),
+                "fan curve temperature {temp} is outside {}..={}",
+                Self::MIN_TEMP_C,
+                Self::MAX_TEMP_C
+            );
+            ensure!(
+                (0.0..=100.0).contains(&duty),
+                "fan curve duty {duty} is outside 0..=100"
+            );
+        }
+        for pair in self.points.windows(2) {
+            ensure!(
+                pair[0].0 < pair[1].0,
+                "fan curve temperatures must be strictly ascending"
+            );
+        }
+        Ok(())
+    }
 
     /// Clamps and sorts points so `cooling::fan_curve::interpolate` never sees
     /// out-of-range or unsorted data, even from a hand-edited or corrupted
@@ -173,5 +228,38 @@ mod tests {
         };
         record.sanitize();
         assert_eq!(record.points.len(), FanCurveRecord::MAX_POINTS);
+    }
+
+    #[test]
+    fn validate_accepts_valid_and_rejects_invalid_curves() {
+        let valid = FanCurveRecord {
+            sensor_id: Some("temp0".into()),
+            points: vec![(30.0, 20.0), (60.0, 70.0)],
+        };
+        assert!(valid.validate().is_ok());
+
+        for points in [
+            vec![(30.0, 20.0)],
+            vec![(30.0, 20.0), (30.0, 70.0)],
+            vec![(f32::NAN, 20.0), (60.0, 70.0)],
+            vec![(30.0, 20.0), (60.0, f32::INFINITY)],
+            vec![(FanCurveRecord::MIN_TEMP_C - 1.0, 20.0), (60.0, 70.0)],
+        ] {
+            assert!(FanCurveRecord {
+                sensor_id: None,
+                points
+            }
+            .validate()
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn validate_rejects_invalid_sensor_id() {
+        let record = FanCurveRecord {
+            sensor_id: Some("\0".into()),
+            points: vec![(30.0, 20.0), (60.0, 70.0)],
+        };
+        assert!(record.validate().is_err());
     }
 }

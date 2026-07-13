@@ -425,7 +425,7 @@ mod tests {
         };
         dev.fan.set_fan_curve(FanCurveRecord {
             sensor_id: Some("cpu".into()),
-            points: vec![],
+            points: vec![(30.0, 25.0), (70.0, 75.0)],
         });
 
         let saved = dev.save_state().await;

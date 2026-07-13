@@ -6,7 +6,90 @@ use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::{config, ipc, state::AppState};
 use halod_shared::commands::EngineKind;
-use halod_shared::types::{EffectDef, RgbColor, RgbState, SamplingMode, ZoneTopology};
+use halod_shared::types::{
+    EffectDef, EffectParamValue, PlacedZone, RgbColor, RgbState, SamplingMode, ZoneTopology,
+};
+
+const MAX_CANVAS_ID_LEN: usize = 64;
+const MAX_CANVAS_NAME_LEN: usize = 256;
+const MAX_CANVAS_PARAM_TEXT_LEN: usize = 4096;
+const MAX_ZONE_SIZE: f32 = 4.0;
+
+fn validate_canvas_id(what: &str, id: &str) -> Result<()> {
+    anyhow::ensure!(
+        !id.is_empty() && id.len() <= MAX_CANVAS_ID_LEN,
+        "{what} must be 1..={MAX_CANVAS_ID_LEN} bytes"
+    );
+    anyhow::ensure!(
+        id.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':')),
+        "{what} contains invalid characters"
+    );
+    Ok(())
+}
+
+fn validate_effect_def(instance_id: &str, def: &EffectDef, app: &AppState) -> Result<()> {
+    validate_canvas_id("effect instance id", instance_id)?;
+    validate_canvas_id("effect id", &def.effect_id)?;
+    anyhow::ensure!(
+        def.params.len() <= halod_shared::types::MAX_EFFECT_PARAMS,
+        "effect has too many params"
+    );
+    if let Some(name) = &def.name {
+        anyhow::ensure!(name.len() <= MAX_CANVAS_NAME_LEN, "effect name is too long");
+    }
+    for (key, value) in &def.params {
+        validate_canvas_id("effect parameter id", key)?;
+        match value {
+            EffectParamValue::Float(v) => {
+                anyhow::ensure!(v.is_finite(), "effect parameter '{key}' is not finite")
+            }
+            EffectParamValue::Str(v) => anyhow::ensure!(
+                v.len() <= MAX_CANVAS_PARAM_TEXT_LEN && !v.contains('\0'),
+                "effect parameter '{key}' is invalid"
+            ),
+            EffectParamValue::Steps(steps) => anyhow::ensure!(
+                steps.len() <= halod_shared::types::MAX_EFFECT_PARAMS
+                    && steps.iter().all(|s| s.value.is_finite()),
+                "effect parameter '{key}' has invalid steps"
+            ),
+            EffectParamValue::Color(_) | EffectParamValue::Bool(_) => {}
+        }
+    }
+    let known = crate::lighting::rgb_engine::RgbEngine::available_effect_descriptors(&app.registry)
+        .iter()
+        .any(|descriptor| descriptor.id == def.effect_id);
+    anyhow::ensure!(known, "unknown canvas effect '{}'", def.effect_id);
+    Ok(())
+}
+
+fn validate_placed_zone(
+    zone: &PlacedZone,
+    effects: &std::collections::HashMap<String, EffectDef>,
+) -> Result<()> {
+    validate_canvas_id("device id", &zone.device_id)?;
+    validate_canvas_id("zone id", &zone.zone_id)?;
+    anyhow::ensure!(
+        zone.x.is_finite()
+            && zone.y.is_finite()
+            && zone.w.is_finite()
+            && zone.h.is_finite()
+            && zone.rotation.is_finite()
+            && zone.w > 0.0
+            && zone.h > 0.0
+            && zone.w <= MAX_ZONE_SIZE
+            && zone.h <= MAX_ZONE_SIZE,
+        "canvas zone geometry is invalid"
+    );
+    if let Some(effect) = &zone.effect {
+        validate_canvas_id("zone effect id", effect)?;
+        anyhow::ensure!(
+            effects.contains_key(effect),
+            "unknown canvas effect instance '{effect}'"
+        );
+    }
+    Ok(())
+}
 
 /// Default `(w, h)` for a freshly placed zone, in normalized canvas units. A
 /// linear strip gets a short box so it doesn't float in empty space; every other
@@ -42,10 +125,7 @@ pub async fn upsert_effect(
         .name
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty());
-    anyhow::ensure!(
-        def.params.len() <= halod_shared::types::MAX_EFFECT_PARAMS,
-        "effect has too many params"
-    );
+    validate_effect_def(&instance_id, &def, &app)?;
     {
         let mut cfg = app.config.write().await;
         let effects = &mut cfg.canvas_state_for_edit().effects;
@@ -70,6 +150,11 @@ pub async fn remove_effect(instance_id: String, app: Arc<AppState>) -> Result<()
         if cs.default_effect.as_deref() == Some(instance_id.as_str()) {
             cs.default_effect = None;
         }
+        for zone in &mut cs.placed_zones {
+            if zone.effect.as_deref() == Some(instance_id.as_str()) {
+                zone.effect = None;
+            }
+        }
     }
     app.request_config_save();
     ipc::broadcast_state(&app).await;
@@ -79,7 +164,15 @@ pub async fn remove_effect(instance_id: String, app: Arc<AppState>) -> Result<()
 pub async fn set_default_effect(instance_id: Option<String>, app: Arc<AppState>) -> Result<()> {
     {
         let mut cfg = app.config.write().await;
-        cfg.canvas_state_for_edit().default_effect = instance_id;
+        let cs = cfg.canvas_state_for_edit();
+        if let Some(id) = &instance_id {
+            validate_canvas_id("default effect instance id", id)?;
+            anyhow::ensure!(
+                cs.effects.contains_key(id),
+                "unknown canvas effect instance '{id}'"
+            );
+        }
+        cs.default_effect = instance_id;
     }
     app.request_config_save();
     ipc::broadcast_state(&app).await;
@@ -101,10 +194,21 @@ async fn modify_canvas_zones(
 
     let mut zones = rgb.canvas_zones();
     mutate(&mut zones);
-    for z in &mut zones {
-        z.sanitize();
+    anyhow::ensure!(
+        zones.len() <= halod_shared::types::MAX_PLACED_ZONES,
+        "too many canvas zones"
+    );
+    let effects = app.config.read().await.effective_canvas_state().effects;
+    for z in &zones {
+        validate_placed_zone(z, &effects)?;
     }
-    zones.truncate(halod_shared::types::MAX_PLACED_ZONES);
+    let mut placement_ids = std::collections::HashSet::with_capacity(zones.len());
+    for z in &zones {
+        anyhow::ensure!(
+            placement_ids.insert((&z.device_id, &z.zone_id)),
+            "canvas contains a duplicate device-zone placement"
+        );
+    }
     rgb.set_canvas_zones(zones);
 
     persist_device_state(app, device.as_ref()).await;
@@ -134,6 +238,13 @@ pub async fn place_zone(
     let h = h.unwrap_or(def_h) as f32;
     let rotation = rotation.unwrap_or(0.0) as f32;
 
+    if let Some(effect_id) = &effect {
+        let effects = &app.config.read().await.effective_canvas_state().effects;
+        anyhow::ensure!(
+            effects.contains_key(effect_id),
+            "unknown canvas effect instance '{effect_id}'"
+        );
+    }
     let device = modify_canvas_zones(&device_id, &app, |zones| {
         zones.retain(|z| !(z.device_id == device_id && z.zone_id == zone_id));
         zones.push(config::PlacedZone {
@@ -199,6 +310,13 @@ pub async fn move_zone(
     let new_w = w.map(|v| v as f32);
     let new_h = h.map(|v| v as f32);
     let new_rotation = rotation.map(|v| v as f32);
+    if let Some(effect_id) = &effect {
+        let effects = &app.config.read().await.effective_canvas_state().effects;
+        anyhow::ensure!(
+            effects.contains_key(effect_id),
+            "unknown canvas effect instance '{effect_id}'"
+        );
+    }
 
     let _ = modify_canvas_zones(&device_id, &app, |zones| {
         if let Some(z) = zones
@@ -305,6 +423,9 @@ mod tests {
     async fn place_zone_adds_zone_to_device_slot() {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
         let app = make_app(dev.clone());
+        upsert_effect("bars".into(), def("screen_sampler"), app.clone())
+            .await
+            .unwrap();
         place_zone(
             "dev0".into(),
             "ring".into(),
@@ -421,6 +542,9 @@ mod tests {
     async fn move_zone_updates_position_and_effect_in_slot() {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
         let app = make_app(dev.clone());
+        upsert_effect("bars".into(), def("screen_sampler"), app.clone())
+            .await
+            .unwrap();
         place_zone(
             "dev0".into(),
             "ring".into(),
@@ -601,8 +725,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_default_effect_rejects_a_dangling_instance() {
+        let app = Arc::new(AppState::new(Config::default()));
+        assert!(set_default_effect(Some("missing".into()), app)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn place_zone_rejects_a_dangling_effect() {
+        let dev = Arc::new(MockDevice::new("dev0").with_rgb());
+        let app = make_app(dev);
+        assert!(place_zone(
+            "dev0".into(),
+            "ring".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("missing".into()),
+            None,
+            app,
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
     async fn set_default_effect_updates_config() {
         let app = Arc::new(AppState::new(Config::default()));
+        upsert_effect("bars".into(), def("screen_sampler"), app.clone())
+            .await
+            .unwrap();
         set_default_effect(Some("bars".into()), app.clone())
             .await
             .unwrap();

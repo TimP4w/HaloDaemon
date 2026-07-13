@@ -20,6 +20,12 @@ pub const WIDGETS_JSON_PARAM: &str = "widgets_json";
 /// with a real upload (`validate_image_filename` rejects it).
 pub const LOGO_IMAGE: &str = "@halo-logo";
 
+/// Templates are supplied over IPC and kept in profiles. Keep their work and
+/// persisted size bounded independently of the generic effect-param limit.
+pub const MAX_LCD_WIDGETS: usize = 64;
+pub const MAX_WIDGET_ID_BYTES: usize = 64;
+pub const MAX_WIDGET_TEXT_BYTES: usize = 4096;
+
 /// The bundled HaloDaemon logo, rasterized by the daemon and GUI for the
 /// [`LOGO_IMAGE`] sentinel.
 pub const LOGO_SVG: &[u8] = include_bytes!("../../../assets/icon.svg");
@@ -327,7 +333,21 @@ pub fn sensor_fill_color(fill: RgbColor, high: RgbColor, gradient: bool, frac: f
 /// on save, load, and preview.
 pub fn validate_widgets(def: &CustomTemplateDef) -> Result<(), String> {
     let scale_ok = |s: f32| s.is_finite() && s > 0.0 && s <= 100.0;
+    if def.widgets.len() > MAX_LCD_WIDGETS {
+        return Err(format!("template has more than {MAX_LCD_WIDGETS} widgets"));
+    }
+    let mut ids = std::collections::HashSet::with_capacity(def.widgets.len());
     for w in &def.widgets {
+        if w.id.is_empty()
+            || w.id.len() > MAX_WIDGET_ID_BYTES
+            || w.id.contains('\0')
+            || !ids.insert(&w.id)
+        {
+            return Err(format!("widget '{}' has an invalid or duplicate id", w.id));
+        }
+        if w.widget_type == WidgetType::Unknown {
+            return Err(format!("widget '{}' has an unknown widget type", w.id));
+        }
         if !w.x.is_finite()
             || !(0.0..=1.0).contains(&w.x)
             || !w.y.is_finite()
@@ -344,24 +364,109 @@ pub fn validate_widgets(def: &CustomTemplateDef) -> Result<(), String> {
         if w.params.len() > MAX_EFFECT_PARAMS {
             return Err(format!("widget '{}' has too many params", w.id));
         }
-        if let Some(EffectParamValue::Float(sy)) = w.params.get("scale_y") {
-            if !scale_ok(*sy as f32) {
-                return Err(format!("widget '{}' scale_y out of range", w.id));
-            }
-        }
-        if let Some(EffectParamValue::Str(name)) = w.params.get("filename") {
-            if !name.is_empty() && crate::types::validate_image_filename(name).is_err() {
-                return Err(format!("widget '{}' has an invalid image filename", w.id));
-            }
-        }
+        validate_widget_params(w, scale_ok)?;
     }
     if let BgKind::Image { filename, dim } = &def.style.background {
         if !filename.is_empty() && crate::types::validate_image_filename(filename).is_err() {
             return Err("background image filename is invalid".to_string());
         }
-        if !dim.is_finite() {
-            return Err("background image dim is not finite".to_string());
+        if !dim.is_finite() || !(0.0..=100.0).contains(dim) {
+            return Err("background image dim must be between 0 and 100".to_string());
         }
+    }
+    Ok(())
+}
+
+fn validate_widget_params(w: &WidgetDef, scale_ok: impl Fn(f32) -> bool) -> Result<(), String> {
+    let schema = widget_schema(w.widget_type);
+    for (key, value) in &w.params {
+        if key.is_empty() || key.len() > MAX_WIDGET_ID_BYTES || key.contains('\0') {
+            return Err(format!("widget '{}' has an invalid parameter key", w.id));
+        }
+        if key == "scale_y" {
+            if !is_box_widget(w.widget_type) {
+                return Err(format!("widget '{}' cannot use scale_y", w.id));
+            }
+            match value {
+                EffectParamValue::Float(scale_y) if scale_ok(*scale_y as f32) => continue,
+                _ => return Err(format!("widget '{}' scale_y out of range", w.id)),
+            }
+        }
+        let Some(desc) = schema.iter().find(|desc| desc.id == *key) else {
+            return Err(format!("widget '{}' has unknown parameter '{key}'", w.id));
+        };
+        validate_widget_param_value(w, desc, value)?;
+    }
+    if w.widget_type == WidgetType::Sensor {
+        let min = w
+            .params
+            .get("min")
+            .and_then(|v| match v {
+                EffectParamValue::Float(v) => Some(*v),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        let max = w
+            .params
+            .get("max")
+            .and_then(|v| match v {
+                EffectParamValue::Float(v) => Some(*v),
+                _ => None,
+            })
+            .unwrap_or(100.0);
+        if min >= max {
+            return Err(format!(
+                "widget '{}' sensor min must be less than max",
+                w.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_widget_param_value(
+    widget: &WidgetDef,
+    desc: &EffectParamDescriptor,
+    value: &EffectParamValue,
+) -> Result<(), String> {
+    let err = |detail: &str| {
+        Err(format!(
+            "widget '{}' parameter '{}' {detail}",
+            widget.id, desc.id
+        ))
+    };
+    match (&desc.kind, value) {
+        (ParamKind::Range { min, max, step }, EffectParamValue::Float(value)) => {
+            if !value.is_finite() || value < min || value > max {
+                return err("is out of range");
+            }
+            if *step > 0.0 && (((value - min) / step).round() * step - (value - min)).abs() > 1e-8 {
+                return err("does not align to its step");
+            }
+        }
+        (ParamKind::Number { min, max }, EffectParamValue::Float(value))
+            if value.is_finite() && value >= min && value <= max => {}
+        (ParamKind::Enum { options }, EffectParamValue::Str(value))
+            if options.iter().any(|option| option == value) => {}
+        (ParamKind::Color, EffectParamValue::Color(_))
+        | (ParamKind::Boolean, EffectParamValue::Bool(_)) => {}
+        (ParamKind::Text | ParamKind::Sensor, EffectParamValue::Str(value)) => {
+            if value.len() > MAX_WIDGET_TEXT_BYTES || value.contains('\0') {
+                return err("contains invalid text");
+            }
+        }
+        (ParamKind::Image, EffectParamValue::Str(value)) => {
+            if value != LOGO_IMAGE
+                && !value.is_empty()
+                && crate::types::validate_image_filename(value).is_err()
+            {
+                return err("has an invalid image filename");
+            }
+        }
+        (ParamKind::Steps, EffectParamValue::Steps(steps))
+            if steps.len() <= MAX_EFFECT_PARAMS
+                && steps.iter().all(|step| step.value.is_finite()) => {}
+        _ => return err("has the wrong type or value"),
     }
     Ok(())
 }
@@ -852,6 +957,45 @@ mod tests {
             w.params.insert(k, v);
         }
         assert!(validate_widgets(&def_with(vec![w])).is_err());
+    }
+
+    #[test]
+    fn validate_widgets_enforces_schema_and_widget_specific_invariants() {
+        let mut unknown = widget_with(&[("not_a_param", EffectParamValue::Bool(true))]);
+        unknown.widget_type = WidgetType::Logo;
+        assert!(validate_widgets(&def_with(vec![unknown])).is_err());
+
+        let mut wrong_type = widget_with(&[("opacity", EffectParamValue::Str("100".to_string()))]);
+        wrong_type.widget_type = WidgetType::Logo;
+        assert!(validate_widgets(&def_with(vec![wrong_type])).is_err());
+
+        let mut sensor = widget_with(&[
+            ("min", EffectParamValue::Float(100.0)),
+            ("max", EffectParamValue::Float(10.0)),
+        ]);
+        sensor.widget_type = WidgetType::Sensor;
+        assert!(validate_widgets(&def_with(vec![sensor])).is_err());
+    }
+
+    #[test]
+    fn validate_widgets_rejects_duplicate_ids_and_non_box_scale_y() {
+        let a = widget_with(&[]);
+        let b = widget_with(&[]);
+        assert!(validate_widgets(&def_with(vec![a, b])).is_err());
+
+        let mut clock = widget_with(&[("scale_y", EffectParamValue::Float(2.0))]);
+        clock.widget_type = WidgetType::Clock;
+        assert!(validate_widgets(&def_with(vec![clock])).is_err());
+    }
+
+    #[test]
+    fn validate_widgets_requires_a_bounded_background_dim() {
+        let mut def = def_with(vec![widget_with(&[])]);
+        def.style.background = BgKind::Image {
+            filename: "wallpaper.png".to_string(),
+            dim: 101.0,
+        };
+        assert!(validate_widgets(&def).is_err());
     }
 
     #[test]

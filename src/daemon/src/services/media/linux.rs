@@ -130,12 +130,13 @@ fn percent_decode(s: &str) -> String {
 /// longest side is ≤ 240 px (LCD panels are ≤ 240). Any failure → `None`.
 fn load_art_from_url(url: &str) -> Option<RgbaImage> {
     let bytes = if let Some(path) = file_url_to_path(url) {
-        // Regular files only — no symlinks, fifos, devices.
-        let meta = std::fs::symlink_metadata(&path).ok()?;
-        if !meta.file_type().is_file() {
+        // The common helper rejects symlinks/non-regular files and performs a
+        // metadata size check before allocating the file contents.
+        let bytes = crate::util::image::read_image_bounded(std::path::Path::new(&path)).ok()?;
+        if bytes.len() > 2 * 1024 * 1024 {
             return None;
         }
-        std::fs::read(&path).ok()?
+        bytes
     } else if url.starts_with("http://") || url.starts_with("https://") {
         fetch_http_bytes(url)?
     } else {

@@ -273,6 +273,11 @@ impl FanCurveEngine {
         sensors: &HashMap<String, halod_shared::types::Sensor>,
         failsafe_duty: u8,
     ) -> FanCurveStatus {
+        if let Err(e) = record.validate() {
+            log::warn!("[FanCurve] Invalid curve for {fan_id}: {e:#}");
+            self.apply_failsafe(fan_id, failsafe_duty).await;
+            return FanCurveStatus::WriteError(format!("invalid fan curve configuration: {e}"));
+        }
         let Some(sensor_id) = &record.sensor_id else {
             self.apply_failsafe(fan_id, failsafe_duty).await;
             return FanCurveStatus::NoSensor;
@@ -283,6 +288,11 @@ impl FanCurveEngine {
             self.apply_failsafe(fan_id, failsafe_duty).await;
             return FanCurveStatus::NoSensor;
         };
+        if sensor.sensor_type != halod_shared::types::SensorType::Temperature {
+            log::warn!("[FanCurve] Sensor {sensor_id} is not a temperature sensor");
+            self.apply_failsafe(fan_id, failsafe_duty).await;
+            return FanCurveStatus::NoSensor;
+        }
         let temp = self.update_control_temp(fan_id, sensor.value as f32);
         let target = interpolate(&record.points, temp);
         let fan_device = self.app_state.find_device_by_id(fan_id).await;

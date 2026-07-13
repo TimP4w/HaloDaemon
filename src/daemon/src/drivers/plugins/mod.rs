@@ -459,11 +459,46 @@ fn config_values_for(state: &PluginState, manifest: &PluginManifest) -> HashMap<
         .map(|f| {
             let value = stored
                 .and_then(|m| m.get(&f.key))
+                .filter(|value| validate_config_value(f, value).is_ok())
                 .cloned()
                 .unwrap_or_else(|| f.default.clone());
             (f.key.clone(), value)
         })
         .collect()
+}
+
+/// Bounds a single configuration value at every ingress and again while
+/// resolving persisted values for a plugin worker.  The second use makes stale
+/// or hand-edited config inert instead of passing it to Lua or a transport.
+fn validate_config_value(field: &manifest::ConfigFieldDef, value: &str) -> anyhow::Result<()> {
+    use halod_shared::types::PluginConfigFieldKind;
+
+    anyhow::ensure!(
+        value.len() <= 4096 && !value.contains('\0'),
+        "config '{}' exceeds the text bounds",
+        field.key
+    );
+    if field.kind == PluginConfigFieldKind::Number && !value.is_empty() {
+        let n: f64 = value
+            .parse()
+            .map_err(|_| anyhow::anyhow!("config '{}' must be a number", field.key))?;
+        anyhow::ensure!(n.is_finite(), "config '{}' must be finite", field.key);
+        if let Some(min) = field.min {
+            anyhow::ensure!(
+                n >= min,
+                "config '{}' is below the minimum {min}",
+                field.key
+            );
+        }
+        if let Some(max) = field.max {
+            anyhow::ensure!(
+                n <= max,
+                "config '{}' is above the maximum {max}",
+                field.key
+            );
+        }
+    }
+    Ok(())
 }
 
 impl Registry {
@@ -582,10 +617,20 @@ impl Registry {
         if !granted.contains(&Permission::SecureStorage) {
             return config;
         }
+        let snapshot = self.snapshot();
+        let manifest = snapshot.manifests.iter().find(|m| m.plugin_id == plugin_id);
         for key in self.secure_config_keys_for(plugin_id) {
             match secrets.get(plugin_id, &key) {
                 Ok(Some(value)) => {
-                    config.insert(key, value);
+                    let valid = manifest
+                        .as_ref()
+                        .and_then(|m| m.config_fields().iter().find(|f| f.key == key))
+                        .is_some_and(|field| validate_config_value(field, &value).is_ok());
+                    if valid {
+                        config.insert(key, value);
+                    } else {
+                        log::warn!("ignoring invalid persisted secret config '{key}' for plugin '{plugin_id}'");
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => log::warn!("reading secret '{key}' for plugin '{plugin_id}': {e:#}"),
@@ -618,7 +663,6 @@ impl Registry {
         plugin_id: &str,
         values: &HashMap<String, String>,
     ) -> anyhow::Result<()> {
-        use halod_shared::types::PluginConfigFieldKind;
         let snap = self.snapshot();
         let manifest = snap
             .manifests
@@ -630,17 +674,7 @@ impl Registry {
             let field = fields.iter().find(|f| &f.key == key).ok_or_else(|| {
                 anyhow::anyhow!("unknown config key '{key}' for plugin '{plugin_id}'")
             })?;
-            if field.kind == PluginConfigFieldKind::Number && !value.is_empty() {
-                let n: f64 = value
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("config '{key}' must be a number"))?;
-                if let Some(min) = field.min {
-                    anyhow::ensure!(n >= min, "config '{key}' is below the minimum {min}");
-                }
-                if let Some(max) = field.max {
-                    anyhow::ensure!(n <= max, "config '{key}' is above the maximum {max}");
-                }
-            }
+            validate_config_value(field, value)?;
         }
         Ok(())
     }

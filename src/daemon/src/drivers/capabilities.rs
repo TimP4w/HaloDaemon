@@ -623,9 +623,12 @@ pub trait FanCapability: Send + Sync {
     }
     async fn restore_state(&self, v: &serde_json::Value) {
         match serde_json::from_value::<Option<crate::cooling::config::FanCurveRecord>>(v.clone()) {
-            Ok(Some(c)) => self.set_fan_curve(c),
+            Ok(Some(c)) => match c.validate() {
+                Ok(()) => self.set_fan_curve(c),
+                Err(e) => log::warn!("[fan restore_state] dropping invalid curve: {e:#}"),
+            },
             Ok(None) => self.clear_fan_curve(),
-            Err(_) => {}
+            Err(e) => log::warn!("[fan restore_state] invalid curve payload: {e}"),
         }
     }
 }

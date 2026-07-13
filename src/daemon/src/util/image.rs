@@ -12,6 +12,13 @@ use std::path::Path;
 /// Read an image file, rejecting anything past [`MAX_LCD_IMAGE_BYTES`] by
 /// metadata before the bytes are allocated. Mirrors `config::read_bounded`.
 pub fn read_image_bounded(path: &Path) -> Result<Vec<u8>> {
+    let link_meta = std::fs::symlink_metadata(path)?;
+    if link_meta.file_type().is_symlink() || !link_meta.is_file() {
+        anyhow::bail!(
+            "image {} must be a regular, non-symlink file",
+            path.display()
+        );
+    }
     let meta = std::fs::metadata(path)?;
     if meta.len() > MAX_LCD_IMAGE_BYTES {
         anyhow::bail!(
@@ -21,12 +28,23 @@ pub fn read_image_bounded(path: &Path) -> Result<Vec<u8>> {
         );
     }
     let data = std::fs::read(path)?;
+    let after = std::fs::symlink_metadata(path)?;
+    if after.file_type().is_symlink() || !after.is_file() || after.len() != data.len() as u64 {
+        anyhow::bail!("image {} changed while it was being read", path.display());
+    }
     validate_image_upload_size(data.len() as u64).map_err(|e| anyhow::anyhow!(e))?;
     Ok(data)
 }
 
 /// Async sibling of [`read_image_bounded`] for the tokio-runtime usecases.
 pub async fn read_image_bounded_async(path: &Path) -> Result<Vec<u8>> {
+    let link_meta = tokio::fs::symlink_metadata(path).await?;
+    if link_meta.file_type().is_symlink() || !link_meta.is_file() {
+        anyhow::bail!(
+            "image {} must be a regular, non-symlink file",
+            path.display()
+        );
+    }
     let meta = tokio::fs::metadata(path).await?;
     if meta.len() > MAX_LCD_IMAGE_BYTES {
         anyhow::bail!(
@@ -36,6 +54,10 @@ pub async fn read_image_bounded_async(path: &Path) -> Result<Vec<u8>> {
         );
     }
     let data = tokio::fs::read(path).await?;
+    let after = tokio::fs::symlink_metadata(path).await?;
+    if after.file_type().is_symlink() || !after.is_file() || after.len() != data.len() as u64 {
+        anyhow::bail!("image {} changed while it was being read", path.display());
+    }
     validate_image_upload_size(data.len() as u64).map_err(|e| anyhow::anyhow!(e))?;
     Ok(data)
 }
@@ -46,15 +68,27 @@ pub async fn read_image_bounded_async(path: &Path) -> Result<Vec<u8>> {
 /// plugin), so every in-memory decode goes through [`decode_limited`]. Far above
 /// any real LCD panel.
 pub const MAX_DECODE_DIM: u32 = 8192;
+/// Upper bound for decoded source pixels (64 MiB as RGBA8), independent of
+/// per-side dimensions. A 8192×8192 image is otherwise still excessive for
+/// the small LCD renderers.
+pub const MAX_DECODE_PIXELS: u64 = 16 * 1024 * 1024;
+pub const MAX_DECODE_RGBA_BYTES: u64 = MAX_DECODE_PIXELS * 4;
 
 /// Decode an image from memory under [`MAX_DECODE_DIM`] source-dimension limits.
 /// Bounds decompression-bomb allocation that `image::load_from_memory` (which
 /// applies no limits) would otherwise incur before a resize can shrink it.
 pub fn decode_limited(data: &[u8]) -> Result<image::DynamicImage> {
+    let header_reader =
+        image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format()?;
+    let (width, height) = header_reader.into_dimensions()?;
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_DECODE_PIXELS {
+        anyhow::bail!("image dimensions {width}×{height} exceed the decoded pixel limit");
+    }
     let mut reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format()?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_DECODE_DIM);
     limits.max_image_height = Some(MAX_DECODE_DIM);
+    limits.max_alloc = Some(MAX_DECODE_RGBA_BYTES);
     reader.limits(limits);
     Ok(reader.decode()?)
 }
@@ -97,12 +131,22 @@ pub fn resize_gif(
             .map_err(|e| anyhow::anyhow!("GIF decode: {e}"))?;
         (hdr.width() as u32, hdr.height() as u32)
     };
-    if src_w == width && src_h == height {
-        return Ok(data.to_vec());
+    if src_w == 0
+        || src_h == 0
+        || src_w > MAX_DECODE_DIM
+        || src_h > MAX_DECODE_DIM
+        || u64::from(src_w) * u64::from(src_h) > MAX_DECODE_PIXELS
+    {
+        anyhow::bail!("GIF dimensions {src_w}×{src_h} exceed the decoded pixel limit");
     }
 
-    if src_w > MAX_DECODE_DIM || src_h > MAX_DECODE_DIM {
-        anyhow::bail!("GIF dimensions {src_w}×{src_h} exceed the {MAX_DECODE_DIM} px limit");
+    const MAX_GIF_FRAMES: usize = 500;
+    let total_frames = count_gif_frames(data)?;
+    if total_frames > MAX_GIF_FRAMES {
+        anyhow::bail!("GIF exceeds the {MAX_GIF_FRAMES} frame limit");
+    }
+    if src_w == width && src_h == height {
+        return Ok(data.to_vec());
     }
 
     // Composite all frames to RGBA before resizing
@@ -115,11 +159,6 @@ pub fn resize_gif(
         .set_repeat(image::codecs::gif::Repeat::Infinite)
         .map_err(|e| anyhow::anyhow!("GIF set repeat: {e}"))?;
 
-    const MAX_GIF_FRAMES: usize = 500;
-    let total_frames = count_gif_frames(data)?;
-    if total_frames > MAX_GIF_FRAMES {
-        anyhow::bail!("GIF exceeds the {MAX_GIF_FRAMES} frame limit");
-    }
     let mut frame_count = 0usize;
     for frame in decoder.into_frames() {
         let frame = frame.map_err(|e| anyhow::anyhow!("GIF frame: {e}"))?;
@@ -343,6 +382,20 @@ mod tests {
             )
             .unwrap();
         assert!(decode_limited(&small).is_ok());
+    }
+
+    #[test]
+    fn decode_limited_rejects_images_over_total_pixel_budget() {
+        // Each side is below the dimension limit, but the decoded RGBA image
+        // would exceed the 16 Mi-pixel allocation budget.
+        let mut data = Vec::new();
+        image::GrayImage::new(5000, 5000)
+            .write_to(
+                &mut std::io::Cursor::new(&mut data),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        assert!(decode_limited(&data).is_err());
     }
 
     #[test]

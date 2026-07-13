@@ -2019,7 +2019,7 @@ mod tests {
             return {
               devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
               sensor = {},
-              poll = { interval_ms = 3600000 },
+              poll = { interval_ms = 60000 },
               read_status = function(dev)
                 local b = halod.buffer(dev.transport:read_nonblocking(1))
                 return { temp = b:get_u8(0) }
@@ -2717,7 +2717,10 @@ mod tests {
           type = "integration",
           permissions = {"network"},
           identity = { name = "Multi Hub" },
-          config = { fields = { { key = "host", label = "Host" } } },
+          config = { fields = {
+            { key = "host", label = "Host" },
+            { key = "port", label = "Port", default = "12345" },
+          } },
           transports = { tcp = {} },
 
           enumerate_controllers = function(dev)
