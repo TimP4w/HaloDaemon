@@ -73,6 +73,9 @@ pub async fn remove_fan_curve(fan_id: String, app: Arc<AppState>) -> Result<()> 
     with_fan(&fan_id, &app, |fan| fan.clear_fan_curve()).await
 }
 
+/// Test-only convenience wrapper for exercising the same record validation as
+/// the command ingress path without fabricating a sensor assignment.
+#[cfg(test)]
 fn validate_points(points: &[(f32, f32)]) -> Result<()> {
     FanCurveRecord {
         sensor_id: None,

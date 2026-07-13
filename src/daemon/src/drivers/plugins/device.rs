@@ -1092,6 +1092,7 @@ struct ChildBuildCtx {
     handle: tokio::runtime::Handle,
     granted: Vec<Permission>,
     config: HashMap<String, String>,
+    identity_scope: crate::registry::identity::IdentityScope,
 }
 
 impl LuaDevice {
@@ -1202,12 +1203,18 @@ impl LuaDevice {
             }
             None => (Vec::new(), HashMap::new()),
         };
+        let tcp = root_manifest.transports.tcp.clone().unwrap_or_default();
+        let identity_scope = crate::registry::identity::integration_scope(
+            config.get(&tcp.host_key).map(String::as_str),
+            config.get(&tcp.port_key).map(String::as_str),
+        );
         Some(ChildBuildCtx {
             factory,
             root_manifest,
             handle,
             granted,
             config,
+            identity_scope,
         })
     }
 
@@ -1278,7 +1285,19 @@ impl LuaDevice {
             child.close().await;
             return None;
         }
-        Some(child as Arc<dyn Device>)
+        let identity = crate::registry::identity::DeviceIdentity {
+            scope: Some(ctx.identity_scope.clone()),
+            serial: crate::registry::identity::normalize_serial(controller.serial.as_deref()),
+            location: crate::registry::identity::location_from_openrgb(
+                controller.location.as_deref(),
+            ),
+            usb: None,
+        };
+        Some(Arc::new(crate::registry::identity::IdentifiedDevice::new(
+            child as Arc<dyn Device>,
+            identity,
+            crate::registry::identity::DeviceOrigin::Integration(self.plugin_id.clone()),
+        )))
     }
 }
 

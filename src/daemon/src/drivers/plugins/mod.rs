@@ -1249,8 +1249,14 @@ impl Registry {
         app: &Arc<crate::state::AppState>,
         handle: DiscoveryHandle<'_>,
     ) -> Option<Arc<dyn Device>> {
-        self.match_handle(app, &handle)
-            .or_else(|| crate::registry::discovery::make_device_native_only(handle))
+        let identity = crate::registry::identity::identity_from_handle(&handle);
+        let device = self
+            .match_handle(app, &handle)
+            .or_else(|| crate::registry::discovery::make_device_native_only(handle))?;
+        let origin = device.conflict_origin();
+        Some(Arc::new(crate::registry::identity::IdentifiedDevice::new(
+            device, identity, origin,
+        )))
     }
 
     /// Build a device from a matched manifest, the spec that matched, and the

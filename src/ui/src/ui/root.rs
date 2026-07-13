@@ -320,6 +320,8 @@ impl App {
                             &mut self.search,
                             &mut self.rename,
                             &mut self.confirm_remove,
+                            &mut self.conflict_choice,
+                            &mut self.conflict_prompted,
                             &self.sensor_history,
                             &mut self.page,
                         );

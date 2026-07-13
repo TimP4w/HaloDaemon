@@ -1096,6 +1096,44 @@ pub struct WireDevice {
     /// integration exposes as children.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_id: Option<String>,
+    /// Other live devices that may control the same physical hardware. This
+    /// is computed by the daemon for each snapshot and is never persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<DeviceConflictSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictConfidence {
+    Confirmed,
+    Possible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceConflictSummary {
+    pub peer_ids: Vec<String>,
+    pub recommended_id: String,
+    pub confidence: ConflictConfidence,
+    /// Source metadata for every participant. Kept alongside the conflict so
+    /// clients can explain an integration/plugin choice without guessing from
+    /// the device id.
+    #[serde(default)]
+    pub participants: Vec<ConflictParticipant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictParticipant {
+    pub id: String,
+    pub source: ConflictDeviceSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictDeviceSource {
+    #[default]
+    Native,
+    Plugin(String),
+    Integration(String),
 }
 
 fn span_default() -> u8 {

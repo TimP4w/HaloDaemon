@@ -21,6 +21,20 @@ home:
   show_sensor: Mostra sensore
   hide_sensor: Nascondi sensore
   offline: Offline
+  conflict_confirmed: Dispositivo duplicato
+  conflict_possible: Possibile duplicato
+  conflict_recommended: Proprietario consigliato
+  conflict_owner: "Proprietario consigliato: %{name}"
+  conflict_with: "Potrebbe controllare anche: %{name}. Fai clic per scegliere quale dispositivo mantenere."
+  conflict_dialog_title: Scegli il proprietario del dispositivo
+  conflict_dialog_confirmed: "Queste voci controllano lo stesso dispositivo fisico. Scegli quale mantenere abilitata; le altre verranno disabilitate."
+  conflict_dialog_possible: "Queste voci potrebbero controllare lo stesso dispositivo fisico. Scegli quale mantenere abilitata; le altre verranno disabilitate."
+  conflict_keep: "Mantieni %{name}"
+  conflict_keep_recommended: "Mantieni %{name} (consigliato)"
+  conflict_choose_owner: Scegli questo proprietario del dispositivo
+  conflict_source_native: Driver nativo
+  conflict_source_plugin: "Plugin: %{name}"
+  conflict_source_integration: "Integrazione: %{name}"
   no_matching: Nessun dispositivo trovato
   no_matching_sub: Nessun dispositivo connesso corrisponde alla ricerca
   no_devices: Nessun dispositivo connesso

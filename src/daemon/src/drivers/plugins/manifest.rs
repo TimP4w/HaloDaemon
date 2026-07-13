@@ -1406,8 +1406,8 @@ fn validate_asset_name(what: &str, value: &str) -> Result<()> {
 
 fn validate_transports(manifest: &PluginManifest) -> Result<()> {
     if let Some(hid) = &manifest.transports.hid {
-        if !(1..=1024).contains(&hid.report_size) || !(1..=60_000).contains(&hid.timeout_ms) {
-            bail!("hid transport report_size must be 1..=1024 and timeout_ms 1..=60000");
+        if hid.report_size > 1024 || !(1..=60_000).contains(&hid.timeout_ms) {
+            bail!("hid transport report_size must be 0 (raw) or 1..=1024 and timeout_ms 1..=60000");
         }
     }
     if let Some(tcp) = &manifest.transports.tcp {
@@ -1834,6 +1834,21 @@ mod tests {
         assert!(validate_component("id", "a/b").is_err());
         assert!(validate_component("id", "a b").is_err());
         assert!(validate_component("id", "").is_err());
+    }
+
+    #[test]
+    fn hid_raw_report_size_zero_remains_a_supported_transport_mode() {
+        let raw = r#"return {
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
+            transports = { hid = { report_size = 0, timeout_ms = 1000 } },
+        }"#;
+        assert!(parse_manifest(raw, Path::new("raw_hid.lua")).is_ok());
+
+        let oversized = r#"return {
+            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
+            transports = { hid = { report_size = 1025, timeout_ms = 1000 } },
+        }"#;
+        assert!(parse_manifest(oversized, Path::new("oversized_hid.lua")).is_err());
     }
 
     #[test]

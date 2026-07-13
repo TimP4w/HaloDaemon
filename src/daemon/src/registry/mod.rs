@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pub mod config;
 pub mod discovery;
+pub mod identity;
 pub mod snapshot;
 pub mod state;
 pub mod usecases;

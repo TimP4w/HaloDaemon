@@ -7,9 +7,49 @@
 //! to a `Color32`.
 
 use halod_shared::types::{
-    AppState, BatteryStatus, ConnectionType, DeviceCapability, DeviceType, SensorType, SensorUnit,
-    VisibilityState, WireDevice, WriteRateStatus,
+    AppState, BatteryStatus, ConflictConfidence, ConnectionType, DeviceCapability, DeviceType,
+    SensorType, SensorUnit, VisibilityState, WireDevice, WriteRateStatus,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictPresentation {
+    pub peer_names: Vec<String>,
+    pub recommended_name: String,
+    pub confidence: ConflictConfidence,
+    pub is_recommended: bool,
+    pub can_disable: bool,
+}
+
+pub fn conflict_presentation(
+    d: &WireDevice,
+    devices: &[WireDevice],
+) -> Option<ConflictPresentation> {
+    let conflict = d.conflict.as_ref()?;
+    let peer_names = conflict
+        .peer_ids
+        .iter()
+        .map(|id| {
+            devices
+                .iter()
+                .find(|other| other.id == *id)
+                .map(|other| other.name.clone())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect();
+    let recommended_name = devices
+        .iter()
+        .find(|other| other.id == conflict.recommended_id)
+        .map(|other| other.name.clone())
+        .unwrap_or_else(|| conflict.recommended_id.clone());
+    let is_recommended = conflict.recommended_id == d.id;
+    Some(ConflictPresentation {
+        peer_names,
+        recommended_name,
+        confidence: conflict.confidence,
+        is_recommended,
+        can_disable: !is_recommended && d.active_state != VisibilityState::Disabled,
+    })
+}
 
 /// Find the parent hub whose RGB chain lists `device_id` and return its
 /// write-rate status. Chain accessories share their parent's transport, so
@@ -271,6 +311,31 @@ mod tests {
             capabilities: caps,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn conflict_presentation_resolves_peer_and_recommendation() {
+        use halod_shared::types::{ConflictConfidence, DeviceConflictSummary};
+        let primary = WireDevice {
+            id: "native".into(),
+            name: "Native".into(),
+            ..Default::default()
+        };
+        let duplicate = WireDevice {
+            id: "openrgb".into(),
+            name: "OpenRGB".into(),
+            conflict: Some(DeviceConflictSummary {
+                peer_ids: vec!["native".into()],
+                recommended_id: "native".into(),
+                confidence: ConflictConfidence::Confirmed,
+                participants: vec![],
+            }),
+            ..Default::default()
+        };
+        let p = conflict_presentation(&duplicate, &[primary, duplicate.clone()]).unwrap();
+        assert_eq!(p.peer_names, vec!["Native"]);
+        assert_eq!(p.recommended_name, "Native");
+        assert!(p.can_disable);
     }
 
     #[test]

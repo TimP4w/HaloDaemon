@@ -4,6 +4,8 @@ pub mod plugins;
 pub mod transports;
 pub mod vendors;
 
+use crate::registry::identity::{DeviceIdentity, DeviceOrigin};
+
 use crate::drivers::vendors::generic::devices::common::WireDeviceBuilder;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -185,6 +187,18 @@ pub trait Device: Send + Sync {
     /// Used to detect the same physical device appearing on a different transport.
     fn hardware_serial(&self) -> Option<String> {
         None
+    }
+
+    /// Metadata used only to detect independently registered devices that may
+    /// represent the same physical hardware.
+    fn identity(&self) -> DeviceIdentity {
+        DeviceIdentity::serial(self.hardware_serial())
+    }
+
+    fn conflict_origin(&self) -> DeviceOrigin {
+        self.owning_plugin_id()
+            .map(DeviceOrigin::Plugin)
+            .unwrap_or(DeviceOrigin::Native)
     }
 
     /// All capabilities this device exposes.  Add a `CapabilityRef` variant when

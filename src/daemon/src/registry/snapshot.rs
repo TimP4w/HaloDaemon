@@ -2,6 +2,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::identity::{detect_conflicts, ConflictEntry};
 use super::AppState;
 use crate::config::{Config, PlacedZone};
 use crate::cooling::config::FanCurveRecord;
@@ -136,6 +137,24 @@ impl AppState {
             }
         }
 
+        let conflicts = detect_conflicts(
+            &device_list
+                .iter()
+                .zip(devices.iter())
+                .map(|(device, wire)| ConflictEntry {
+                    id: device.id().to_owned(),
+                    identity: device.identity(),
+                    origin: device.conflict_origin(),
+                    connected: wire.connected,
+                    active_state: wire.active_state.clone(),
+                    integration_root: wire.integration_id.is_some(),
+                })
+                .collect::<Vec<_>>(),
+        );
+        for (wire, conflict) in devices.iter_mut().zip(conflicts) {
+            wire.conflict = conflict;
+        }
+
         DevicesSnapshot {
             devices,
             fan_curves,
@@ -153,6 +172,38 @@ mod tests {
     use crate::state::AppState;
     use crate::test_support::MockDevice;
     use async_trait::async_trait;
+
+    #[tokio::test]
+    async fn snapshot_marks_matching_serials_as_a_confirmed_conflict() {
+        use crate::registry::identity::{DeviceIdentity, DeviceOrigin, IdentifiedDevice};
+        let app = Arc::new(AppState::new(Config::default()));
+        for (id, origin) in [
+            ("native", DeviceOrigin::Native),
+            ("openrgb", DeviceOrigin::Integration("openrgb".into())),
+        ] {
+            let identity = DeviceIdentity {
+                scope: Some(crate::registry::identity::IdentityScope::Local),
+                serial: Some("unit-1".into()),
+                ..Default::default()
+            };
+            let dev: Arc<dyn Device> = Arc::new(IdentifiedDevice::new(
+                Arc::new(MockDevice::new(id).with_name(id)),
+                identity,
+                origin,
+            ));
+            app.devices.write().await.push(dev);
+        }
+        let cfg = app.config.read().await.clone();
+        let snapshot = app.snapshot_devices(&cfg).await;
+        let native = snapshot.devices.iter().find(|d| d.id == "native").unwrap();
+        let openrgb = snapshot.devices.iter().find(|d| d.id == "openrgb").unwrap();
+        assert_eq!(native.conflict.as_ref().unwrap().recommended_id, "native");
+        assert_eq!(openrgb.conflict.as_ref().unwrap().recommended_id, "native");
+        assert_eq!(
+            native.conflict.as_ref().unwrap().confidence,
+            halod_shared::types::ConflictConfidence::Confirmed
+        );
+    }
 
     #[tokio::test]
     async fn serialize_synthesizes_fan_sensors() {

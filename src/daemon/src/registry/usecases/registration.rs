@@ -149,12 +149,52 @@ pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bo
     ensure_default_baseline(app, device.as_ref()).await;
     restore_saved_state(app, &device).await;
     app.devices.write().await.push(device.clone());
+    log_registration_conflicts(app, &device).await;
     finish_registration(app, &device_id).await;
     log::info!("[{}] registered", device.name());
     if let Some(hook) = device.as_post_register_hook() {
         hook.on_registered(Arc::clone(app)).await;
     }
     true
+}
+
+async fn log_registration_conflicts(app: &Arc<AppState>, device: &Arc<dyn Device>) {
+    if device.active_state() == VisibilityState::Disabled || !device.is_live() {
+        return;
+    }
+    let identity = device.identity();
+    if identity.is_empty() {
+        return;
+    }
+    let origin = device.conflict_origin();
+    for other in app.devices.read().await.iter() {
+        if other.id() == device.id()
+            || other.active_state() == VisibilityState::Disabled
+            || !other.is_live()
+            || other.integration_id().is_some()
+        {
+            continue;
+        }
+        match crate::registry::identity::compare(
+            &identity,
+            &origin,
+            &other.identity(),
+            &other.conflict_origin(),
+        ) {
+            crate::registry::identity::MatchEvidence::ConfirmedSerial
+            | crate::registry::identity::MatchEvidence::ConfirmedLocation => log::warn!(
+                "device '{}' may conflict with '{}' (same physical hardware)",
+                device.id(),
+                other.id()
+            ),
+            crate::registry::identity::MatchEvidence::PossibleUsb => log::info!(
+                "device '{}' may conflict with '{}' (matching VID/PID)",
+                device.id(),
+                other.id()
+            ),
+            _ => {}
+        }
+    }
 }
 
 /// Atomically reserve a device id across the asynchronous initialization

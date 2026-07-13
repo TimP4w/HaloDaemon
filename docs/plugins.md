@@ -450,10 +450,11 @@ values; reads return Lua strings.
 | `:write_many({p1, p2, …})`          | write several packets                   |
 
 `transports = { hid = { report_size, feature_report, timeout_ms } }` configures
-the stream. `report_size` sets the padding target (a leading `0x00` report id is
-prepended and the payload padded to `report_size`); set **`report_size = 0` for
-raw passthrough** — no report id, no padding — when the script builds the exact
-wire buffer itself (e.g. the Razer 90-byte feature report). `feature_report = true`
+the stream. `report_size` is either **`0` for raw passthrough** (no report id or
+padding) or `1..=1024` as the padding target. With a non-zero size, the transport
+adds the platform's report-id framing and pads the payload; use raw mode only
+when the script constructs the exact wire frame itself (for example, the ASUS
+Aura `0xEC` 65-byte frame). `timeout_ms` is `1..=60000`. `feature_report = true`
 routes `:write` through `send_feature_report`.
 
 ### Stream transport (TCP)
@@ -873,6 +874,28 @@ entry Lua file (`main.lua` by default) and an optional `assets/` subdirectory
 for the logo/effect thumbnails. `plugin.yaml`'s `id` **must equal the
 directory name**. There is no single-file plugin format and nothing is
 compiled into the daemon binary.
+
+### Manifest validation and limits
+
+The daemon validates a package when it is loaded, again when configuration is
+changed, and again before persisted configuration is handed to a plugin worker.
+The GUI may report an error earlier, but it is not the enforcement boundary.
+
+- IDs are non-empty, ASCII-safe identifiers; duplicate device, zone, field,
+  effect, parameter, control, and chain IDs are rejected.
+- Text values may not contain NUL and are bounded (configuration values are at
+  most 4096 bytes). Numeric defaults and submitted number fields must be finite
+  and satisfy their declared inclusive `min`/`max` bounds.
+- HID report sizes are `0` (raw) or `1..=1024`; HID/TCP timeouts are
+  `1..=60000` ms; a TCP transport's `host_key` and `port_key` must name declared
+  non-secret config fields.
+- Manifest collection limits apply to devices, zones, effects, controls,
+  configuration fields, chain channels/accessories, and effect parameters.
+  Keep package data small and declarative; do not rely on truncation.
+
+Invalid stored plugin configuration is not passed through to Lua: the affected
+non-secret field falls back to its manifest default, while an invalid secret is
+omitted. Correct the value in the Plugins screen to make it available again.
 
 A logo need not be declared: an `assets/logo.png` file is adopted
 automatically when `plugin.yaml` omits `logo`. Declare `logo:` explicitly only

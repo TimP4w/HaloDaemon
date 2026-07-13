@@ -21,6 +21,20 @@ home:
   show_sensor: Show sensor
   hide_sensor: Hide sensor
   offline: Offline
+  conflict_confirmed: Duplicate device
+  conflict_possible: Possible duplicate
+  conflict_recommended: Recommended owner
+  conflict_owner: "Recommended owner: %{name}"
+  conflict_with: "May also control: %{name}. Click to choose which device to keep."
+  conflict_dialog_title: Choose device owner
+  conflict_dialog_confirmed: "These entries control the same physical device. Choose the one to keep enabled; the others will be disabled."
+  conflict_dialog_possible: "These entries may control the same physical device. Choose the one to keep enabled; the others will be disabled."
+  conflict_keep: "Keep %{name}"
+  conflict_keep_recommended: "Keep %{name} (recommended)"
+  conflict_choose_owner: Choose this device owner
+  conflict_source_native: Native driver
+  conflict_source_plugin: "Plugin: %{name}"
+  conflict_source_integration: "Integration: %{name}"
   no_matching: No matching devices
   no_matching_sub: None of your connected devices match this search
   no_devices: No devices connected

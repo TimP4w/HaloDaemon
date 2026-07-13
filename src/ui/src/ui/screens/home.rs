@@ -3,10 +3,12 @@
 //! the device grid/list. All data comes from the live daemon state.
 
 use crate::ui::components as widgets;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{AppState, DeviceCapability, VisibilityState, WireDevice};
+use halod_shared::types::{
+    AppState, ConflictDeviceSource, DeviceCapability, DeviceType, VisibilityState, WireDevice,
+};
 
 use crate::domain::models::device::{self as model, Metric};
 use crate::domain::state::{Rename, Variant};
@@ -25,9 +27,12 @@ pub fn show(
     search: &mut String,
     rename: &mut Option<Rename>,
     confirm_remove: &mut Option<ConfirmRemove>,
+    conflict_choice: &mut Option<ConflictChoice>,
+    conflict_prompted: &mut HashSet<String>,
     history: &HashMap<String, VecDeque<f32>>,
     page: &mut crate::domain::state::Page,
 ) {
+    open_new_conflict_prompt(state, conflict_choice, conflict_prompted);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -69,6 +74,7 @@ pub fn show(
                                 cmd,
                                 rename,
                                 confirm_remove,
+                                conflict_choice,
                                 page,
                             ),
                             Variant::List => list(
@@ -78,6 +84,7 @@ pub fn show(
                                 cmd,
                                 rename,
                                 confirm_remove,
+                                conflict_choice,
                                 page,
                             ),
                         }
@@ -86,6 +93,7 @@ pub fn show(
         });
 
     remove_confirm_modal(ui.ctx(), cmd, confirm_remove);
+    conflict_choice_modal(ui.ctx(), cmd, conflict_choice);
 }
 
 /// A pending "remove chained device" confirmation: the child to unlink plus the
@@ -95,6 +103,274 @@ pub struct ConfirmRemove {
     pub child_name: String,
     pub parent_id: String,
     pub channel_id: String,
+}
+
+/// A pending choice of the one device that should remain enabled in a
+/// conflict group. Names are captured from the snapshot so the dialog remains
+/// stable even while the live list refreshes.
+pub struct ConflictChoice {
+    pub devices: Vec<ConflictChoiceDevice>,
+    pub recommended_id: String,
+    pub confidence: halod_shared::types::ConflictConfidence,
+}
+
+pub struct ConflictChoiceDevice {
+    pub id: String,
+    pub name: String,
+    pub device_type: DeviceType,
+    pub source: ConflictDeviceSource,
+}
+
+fn conflict_choice_for(d: &WireDevice, all_devices: &[WireDevice]) -> Option<ConflictChoice> {
+    let conflict = d.conflict.as_ref()?;
+    let ids = std::iter::once(&d.id).chain(conflict.peer_ids.iter());
+    let devices = ids
+        .filter_map(|id| {
+            all_devices
+                .iter()
+                .find(|candidate| candidate.id == *id)
+                .map(|candidate| ConflictChoiceDevice {
+                    id: candidate.id.clone(),
+                    name: candidate.name.clone(),
+                    device_type: candidate.device_type,
+                    source: conflict
+                        .participants
+                        .iter()
+                        .find(|participant| participant.id == candidate.id)
+                        .map(|participant| participant.source.clone())
+                        .unwrap_or_default(),
+                })
+        })
+        .collect::<Vec<_>>();
+    (devices.len() > 1).then(|| ConflictChoice {
+        devices,
+        recommended_id: conflict.recommended_id.clone(),
+        confidence: conflict.confidence.clone(),
+    })
+}
+
+fn conflict_key(d: &WireDevice) -> Option<String> {
+    let conflict = d.conflict.as_ref()?;
+    let mut ids = conflict.peer_ids.clone();
+    ids.push(d.id.clone());
+    ids.sort();
+    Some(format!("{:?}:{}", conflict.confidence, ids.join("\u{1f}")))
+}
+
+/// Prompt once for each newly observed group. A dismissed dialog stays
+/// dismissed for this GUI session; its card badge can still reopen it.
+fn open_new_conflict_prompt(
+    state: &AppState,
+    conflict_choice: &mut Option<ConflictChoice>,
+    conflict_prompted: &mut HashSet<String>,
+) {
+    if conflict_choice.is_some() {
+        return;
+    }
+    for d in &state.devices {
+        let Some(key) = conflict_key(d) else {
+            continue;
+        };
+        if conflict_prompted.insert(key) {
+            *conflict_choice = conflict_choice_for(d, &state.devices);
+            break;
+        }
+    }
+}
+
+fn ids_to_disable(choice: &ConflictChoice, kept_id: &str) -> Vec<String> {
+    choice
+        .devices
+        .iter()
+        .filter(|device| device.id != kept_id)
+        .map(|device| device.id.clone())
+        .collect()
+}
+
+fn conflict_choice_modal(
+    ctx: &egui::Context,
+    cmd: &CommandTx,
+    conflict_choice: &mut Option<ConflictChoice>,
+) {
+    let Some(choice) = conflict_choice.as_ref() else {
+        return;
+    };
+    let mut keep = None;
+    let mut cancel = false;
+    let body = if choice.confidence == halod_shared::types::ConflictConfidence::Confirmed {
+        t!("home.conflict_dialog_confirmed")
+    } else {
+        t!("home.conflict_dialog_possible")
+    };
+    let dismissed = widgets::dialog(
+        ctx,
+        "home_conflict_choice",
+        &t!("home.conflict_dialog_title"),
+        440.0,
+        |ui| {
+            ui.label(
+                egui::RichText::new(body)
+                    .font(theme::body(12.5))
+                    .color(theme::TEXT_MUT),
+            );
+            ui.add_space(12.0);
+            let option_side = ((ui.available_width() - 10.0) / 2.0).clamp(130.0, 180.0);
+            for row in choice.devices.chunks(2) {
+                ui.horizontal(|ui| {
+                    let gap = 10.0;
+                    let row_width =
+                        option_side * row.len() as f32 + gap * row.len().saturating_sub(1) as f32;
+                    // Center the whole pair (or a final unpaired tile), not
+                    // merely the contents of each individual tile.
+                    ui.add_space(((ui.available_width() - row_width) / 2.0).max(0.0));
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    for device in row {
+                        if conflict_device_option(
+                            ui,
+                            device,
+                            device.id == choice.recommended_id,
+                            option_side,
+                        ) {
+                            keep = Some(device.id.clone());
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+            }
+        },
+        |ui| {
+            if widgets::button(
+                ui,
+                &t!("home.cancel"),
+                widgets::ButtonKind::Ghost,
+                egui::vec2(96.0, 32.0),
+            )
+            .clicked()
+            {
+                cancel = true;
+            }
+        },
+    );
+    if let Some(kept_id) = keep {
+        let choice = conflict_choice.take().expect("dialog choice exists");
+        for id in ids_to_disable(&choice, &kept_id) {
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::SetDeviceVisibility {
+                    device_id: id,
+                    state: VisibilityState::Disabled,
+                },
+            );
+        }
+    } else if cancel || dismissed {
+        *conflict_choice = None;
+    }
+}
+
+fn conflict_device_option(
+    ui: &mut egui::Ui,
+    device: &ConflictChoiceDevice,
+    recommended: bool,
+    side: f32,
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(side, side), Sense::click());
+    let accent = if recommended {
+        theme::CYAN
+    } else {
+        theme::BORDER
+    };
+    let fill = if response.hovered() {
+        a(theme::CYAN, 0.10)
+    } else {
+        theme::INNER_BG
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 12.0, fill);
+    painter.rect_stroke(
+        rect,
+        12.0,
+        Stroke::new(if recommended { 1.5 } else { 1.0 }, accent),
+        egui::StrokeKind::Middle,
+    );
+    let badge = Rect::from_center_size(
+        Pos2::new(rect.center().x, rect.top() + side * 0.34),
+        Vec2::splat(side * 0.29),
+    );
+    widgets::device_badge(painter, badge, device.device_type);
+    let name_font = theme::semibold(12.0);
+    let source_font = theme::body(10.0);
+    let max_text_width = side - 18.0;
+    let name = ellipsize(painter, &device.name, &name_font, max_text_width);
+    let full_source = conflict_source_label(&device.source);
+    let source = ellipsize(painter, &full_source, &source_font, max_text_width);
+    painter.text(
+        Pos2::new(rect.center().x, rect.top() + side * 0.59),
+        Align2::CENTER_TOP,
+        name,
+        name_font,
+        theme::TEXT,
+    );
+    painter.text(
+        Pos2::new(rect.center().x, rect.top() + side * 0.76),
+        Align2::CENTER_TOP,
+        source,
+        source_font,
+        theme::TEXT_MUT,
+    );
+    if recommended {
+        painter.text(
+            Pos2::new(rect.center().x, rect.bottom() - 10.0),
+            Align2::CENTER_BOTTOM,
+            t!("home.conflict_recommended"),
+            theme::body(9.0),
+            theme::CYAN,
+        );
+    }
+    response
+        .on_hover_text(format!(
+            "{}\n{}\n{}",
+            device.name,
+            full_source,
+            t!("home.conflict_choose_owner")
+        ))
+        .clicked()
+}
+
+fn ellipsize(painter: &egui::Painter, text: &str, font: &egui::FontId, max_width: f32) -> String {
+    if painter
+        .layout_no_wrap(text.to_owned(), font.clone(), theme::TEXT)
+        .rect
+        .width()
+        <= max_width
+    {
+        return text.to_owned();
+    }
+    let mut clipped = text.chars().collect::<Vec<_>>();
+    while !clipped.is_empty() {
+        let candidate = format!("{}…", clipped.iter().collect::<String>());
+        if painter
+            .layout_no_wrap(candidate.clone(), font.clone(), theme::TEXT)
+            .rect
+            .width()
+            <= max_width
+        {
+            return candidate;
+        }
+        clipped.pop();
+    }
+    "…".into()
+}
+
+fn conflict_source_label(source: &ConflictDeviceSource) -> String {
+    match source {
+        ConflictDeviceSource::Native => t!("home.conflict_source_native").into_owned(),
+        ConflictDeviceSource::Plugin(id) => {
+            t!("home.conflict_source_plugin", name = id).into_owned()
+        }
+        ConflictDeviceSource::Integration(id) => {
+            t!("home.conflict_source_integration", name = id).into_owned()
+        }
+    }
 }
 
 /// If `child_id` is a user-added (unlocked) link in some device's RGB chain,
@@ -674,6 +950,7 @@ fn grid(
     cmd: &CommandTx,
     rename: &mut Option<Rename>,
     confirm_remove: &mut Option<ConfirmRemove>,
+    conflict_choice: &mut Option<ConflictChoice>,
     page: &mut crate::domain::state::Page,
 ) {
     let avail = ui.available_width();
@@ -695,11 +972,15 @@ fn grid(
                     );
                     anchored_a_card = true;
                 }
-                device_card(ui, rect, d, resp.hovered());
+                let conflict_clicked =
+                    device_card(ui, rect, d, all_devices, conflict_choice, resp.hovered());
                 if resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
-                if resp.clicked() && d.active_state != VisibilityState::Disabled {
+                if resp.clicked()
+                    && !conflict_clicked
+                    && d.active_state != VisibilityState::Disabled
+                {
                     *page = crate::domain::state::Page::Device(d.id.clone());
                 }
                 resp.context_menu(|ui| card_menu(ui, d, all_devices, cmd, rename, confirm_remove));
@@ -765,7 +1046,14 @@ fn draw_card_glow(ui: &egui::Ui, rect: Rect, d: &WireDevice, color: Color32, t: 
     }
 }
 
-fn device_card(ui: &egui::Ui, rect: Rect, d: &WireDevice, hovered: bool) {
+fn device_card(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    d: &WireDevice,
+    all_devices: &[WireDevice],
+    conflict_choice: &mut Option<ConflictChoice>,
+    hovered: bool,
+) -> bool {
     let color = theme::device_color(d);
     // Smoothly animate hover state in [0,1] for halo growth + lift.
     let t = ui
@@ -849,6 +1137,54 @@ fn device_card(ui: &egui::Ui, rect: Rect, d: &WireDevice, hovered: bool) {
         Stroke::new(1.0, border),
         egui::StrokeKind::Middle,
     );
+    conflict_control(ui, rect, d, all_devices, conflict_choice)
+}
+
+fn conflict_control(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    d: &WireDevice,
+    all_devices: &[WireDevice],
+    conflict_choice: &mut Option<ConflictChoice>,
+) -> bool {
+    let Some(conflict) = model::conflict_presentation(d, all_devices) else {
+        return false;
+    };
+    let label = if conflict.is_recommended {
+        t!("home.conflict_recommended").into_owned()
+    } else if conflict.confidence == halod_shared::types::ConflictConfidence::Confirmed {
+        t!("home.conflict_confirmed").into_owned()
+    } else {
+        t!("home.conflict_possible").into_owned()
+    };
+    let y = rect.top() + 43.0;
+    let chip = Rect::from_min_size(
+        Pos2::new(rect.right() - 106.0, y - 9.0),
+        Vec2::new(96.0, 18.0),
+    );
+    let response = ui.interact(chip, egui::Id::new(("conflict", &d.id)), Sense::click());
+    let color = if conflict.confidence == halod_shared::types::ConflictConfidence::Confirmed {
+        theme::OFFLINE_TEXT
+    } else {
+        theme::TEXT_MUT
+    };
+    ui.painter().text(
+        chip.right_top(),
+        Align2::RIGHT_TOP,
+        &label,
+        theme::body(9.0),
+        color,
+    );
+    let clicked = response.clicked();
+    response.on_hover_text(if conflict.is_recommended {
+        t!("home.conflict_owner", name = conflict.recommended_name)
+    } else {
+        t!("home.conflict_with", name = conflict.peer_names.join(", "))
+    });
+    if clicked {
+        *conflict_choice = conflict_choice_for(d, all_devices);
+    }
+    clicked
 }
 
 fn metric_row(p: &egui::Painter, rect: Rect, top: f32, h: f32, metrics: &[Metric]) {
@@ -922,6 +1258,7 @@ fn list(
     cmd: &CommandTx,
     rename: &mut Option<Rename>,
     confirm_remove: &mut Option<ConfirmRemove>,
+    conflict_choice: &mut Option<ConflictChoice>,
     page: &mut crate::domain::state::Page,
 ) {
     egui::Frame::NONE
@@ -940,11 +1277,22 @@ fn list(
                         rect,
                     );
                 }
-                list_row(ui, rect, d, i + 1 < devices.len(), resp.hovered());
+                let conflict_clicked = list_row(
+                    ui,
+                    rect,
+                    d,
+                    all_devices,
+                    conflict_choice,
+                    i + 1 < devices.len(),
+                    resp.hovered(),
+                );
                 if resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
-                if resp.clicked() && d.active_state != VisibilityState::Disabled {
+                if resp.clicked()
+                    && !conflict_clicked
+                    && d.active_state != VisibilityState::Disabled
+                {
                     *page = crate::domain::state::Page::Device(d.id.clone());
                 }
                 resp.context_menu(|ui| card_menu(ui, d, all_devices, cmd, rename, confirm_remove));
@@ -952,7 +1300,15 @@ fn list(
         });
 }
 
-fn list_row(ui: &egui::Ui, rect: Rect, d: &WireDevice, divider: bool, hovered: bool) {
+fn list_row(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    d: &WireDevice,
+    all_devices: &[WireDevice],
+    conflict_choice: &mut Option<ConflictChoice>,
+    divider: bool,
+    hovered: bool,
+) -> bool {
     let p = ui.painter();
     if hovered {
         p.rect_filled(rect, 0.0, a(Color32::WHITE, 0.025));
@@ -1010,6 +1366,13 @@ fn list_row(ui: &egui::Ui, rect: Rect, d: &WireDevice, divider: bool, hovered: b
     if !d.connected {
         p.rect_filled(rect, 0.0, a(theme::MAIN_BG, 0.35));
     }
+    conflict_control(
+        ui,
+        rect.translate(Vec2::new(0.0, 16.0)),
+        d,
+        all_devices,
+        conflict_choice,
+    )
 }
 
 fn empty(ui: &mut egui::Ui, filtered: bool) {
@@ -1055,6 +1418,7 @@ mod tests {
             write_rate: Default::default(),
             control_layout: Vec::new(),
             integration_id: None,
+            conflict: None,
         }
     }
 
@@ -1085,6 +1449,30 @@ mod tests {
         assert_eq!(chain_parent(&devices, "child1"), None);
         // A device that is nobody's child yields nothing.
         assert_eq!(chain_parent(&devices, "stranger"), None);
+    }
+
+    #[test]
+    fn keeping_one_conflict_owner_disables_every_other_participant() {
+        let choice = ConflictChoice {
+            devices: vec![
+                ConflictChoiceDevice {
+                    id: "native".into(),
+                    name: "Native driver".into(),
+                    device_type: DeviceType::Mouse,
+                    source: ConflictDeviceSource::Native,
+                },
+                ConflictChoiceDevice {
+                    id: "openrgb".into(),
+                    name: "OpenRGB".into(),
+                    device_type: DeviceType::Mouse,
+                    source: ConflictDeviceSource::Integration("openrgb".into()),
+                },
+            ],
+            recommended_id: "native".into(),
+            confidence: halod_shared::types::ConflictConfidence::Confirmed,
+        };
+        assert_eq!(ids_to_disable(&choice, "native"), vec!["openrgb"]);
+        assert_eq!(ids_to_disable(&choice, "openrgb"), vec!["native"]);
     }
 
     #[test]

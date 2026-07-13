@@ -27,7 +27,7 @@ use halod_shared::types::{EffectParamValue, RgbColor, RgbState, WriteRateLimit, 
 use super::device::LuaDevice;
 use super::manifest::{parse_manifest_from_dir, PluginManifest};
 use super::transport::PluginIo;
-use super::worker::DevMatch;
+use super::worker::{DevMatch, PluginHandle};
 
 /// `mlua::Error` isn't reliably `Send + Sync` (an `ExternalError` may box a
 /// non-Send/Sync inner error), so it can't flow through `anyhow::Result` via
@@ -188,17 +188,121 @@ fn build_harness(
     )
     .anyhow()?;
 
-    let manifest = manifest.clone();
+    let open_manifest = manifest.clone();
+    let open_handle = handle.clone();
     h.set(
         "open",
         lua.create_function(move |lua, (_self, spec): (Table, Option<Table>)| {
-            open_device(lua, &manifest, handle.clone(), spec).map_err(mlua_err)
+            open_device(lua, &open_manifest, open_handle.clone(), spec).map_err(mlua_err)
+        })
+        .anyhow()?,
+    )
+    .anyhow()?;
+
+    let integration_manifest = manifest.clone();
+    h.set(
+        "open_integration",
+        lua.create_function(move |lua, (_self, spec): (Table, Option<Table>)| {
+            open_integration(lua, &integration_manifest, handle.clone(), spec).map_err(mlua_err)
         })
         .anyhow()?,
     )
     .anyhow()?;
 
     Ok(h)
+}
+
+/// Build an integration worker directly so external integration plugins can
+/// test enumeration without opening a real network connection.
+fn open_integration(
+    lua: &Lua,
+    manifest: &PluginManifest,
+    handle: tokio::runtime::Handle,
+    spec_table: Option<Table>,
+) -> Result<Table> {
+    if manifest.plugin_type != halod_shared::types::PluginKind::Integration {
+        anyhow::bail!("open_integration requires an integration plugin");
+    }
+    let recording = Arc::new(RecordingStream::new(reads_from_spec(&spec_table)));
+    let worker = PluginHandle::spawn(
+        manifest.script_source.clone(),
+        PluginIo::Stream {
+            transport: recording.clone() as Arc<dyn Transport>,
+            bulk: None,
+        },
+        DevMatch {
+            transport: "tcp".into(),
+            ..Default::default()
+        },
+        manifest.permissions.clone(),
+        std::collections::HashMap::new(),
+        handle.clone(),
+        Vec::new(),
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    let dev = lua.create_table().anyhow()?;
+    {
+        let worker = worker.clone();
+        let handle = handle.clone();
+        dev.set(
+            "initialize",
+            lua.create_function(move |_, _self: Table| {
+                Ok(handle.block_on(worker.initialize()).map_err(mlua_err)?.ok)
+            })
+            .anyhow()?,
+        )
+        .anyhow()?;
+    }
+    {
+        let worker = worker.clone();
+        let handle = handle.clone();
+        dev.set(
+            "enumerate_controllers",
+            lua.create_function(move |lua, _self: Table| {
+                let controllers = handle
+                    .block_on(worker.enumerate_controllers())
+                    .map_err(mlua_err)?;
+                let out = lua.create_table()?;
+                for (i, controller) in controllers.iter().enumerate() {
+                    let item = lua.create_table()?;
+                    item.set("index", controller.index)?;
+                    item.set("name", controller.name.clone())?;
+                    item.set("serial", controller.serial.clone())?;
+                    item.set("location", controller.location.clone())?;
+                    let zones = lua.create_table()?;
+                    for (z, zone) in controller.zones.iter().enumerate() {
+                        let zone_t = lua.create_table()?;
+                        zone_t.set("id", zone.id.clone())?;
+                        zone_t.set("name", zone.name.clone())?;
+                        zone_t.set("led_count", zone.led_count)?;
+                        zones.set(z + 1, zone_t)?;
+                    }
+                    item.set("zones", zones)?;
+                    out.set(i + 1, item)?;
+                }
+                Ok(out)
+            })
+            .anyhow()?,
+        )
+        .anyhow()?;
+    }
+    {
+        let recording = recording.clone();
+        dev.set(
+            "writes",
+            lua.create_function(move |lua, _self: Table| {
+                let written = recording.written.lock().expect("recording poisoned");
+                let out = lua.create_table()?;
+                for (i, bytes) in written.iter().enumerate() {
+                    out.set(i + 1, lua.create_sequence_from(bytes.iter().copied())?)?;
+                }
+                Ok(out)
+            })
+            .anyhow()?,
+        )
+        .anyhow()?;
+    }
+    Ok(dev)
 }
 
 /// `serde`-compare two Lua values (mlua's `serialize` feature makes `Value` `Serialize`).

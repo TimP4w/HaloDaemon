@@ -258,6 +258,7 @@ impl WireDeviceBuilder {
             write_rate: Default::default(),
             control_layout: self.control_layout,
             integration_id: self.integration_id,
+            conflict: None,
         }
     }
 }

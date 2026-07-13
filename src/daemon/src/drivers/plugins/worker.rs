@@ -71,6 +71,10 @@ pub struct DetectedControllerZone {
 pub struct DetectedController {
     pub index: u32,
     pub name: String,
+    #[serde(default)]
+    pub serial: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
     /// RGB-topology shorthand: computed into an `RgbManifest` when no explicit
     /// `rgb` section is given (see `child_manifest_for`).
     #[serde(default)]
