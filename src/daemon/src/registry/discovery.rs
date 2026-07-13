@@ -238,22 +238,29 @@ pub async fn discover_devices(app: Arc<AppState>) {
     }
     broadcast_state(&app).await;
 
-    for scanner in inventory::iter::<TransportScanner> {
-        if let Some(platform) = scanner.platform {
-            if platform != std::env::consts::OS {
-                continue;
+    // Unit tests drive the usecase/reconcile layer with synthetic handles and a
+    // `MockDevice` registry; enumerating the host's real USB/HID/SMBus hardware
+    // here would hang and non-deterministically register stray devices. Skip the
+    // scanners under `cfg(test)` — device construction/matching is covered
+    // directly via `make_device`/`discover_handle` with hand-built handles.
+    if !cfg!(test) {
+        for scanner in inventory::iter::<TransportScanner> {
+            if let Some(platform) = scanner.platform {
+                if platform != std::env::consts::OS {
+                    continue;
+                }
             }
-        }
-        log::debug!("Running transport scanner: {}", scanner.name);
-        set_discovery_detail(&app, scanner.name).await;
-        if tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            (scanner.scan)(Arc::clone(&app)),
-        )
-        .await
-        .is_err()
-        {
-            log::warn!("Scanner '{}' timed out", scanner.name);
+            log::debug!("Running transport scanner: {}", scanner.name);
+            set_discovery_detail(&app, scanner.name).await;
+            if tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                (scanner.scan)(Arc::clone(&app)),
+            )
+            .await
+            .is_err()
+            {
+                log::warn!("Scanner '{}' timed out", scanner.name);
+            }
         }
     }
 
