@@ -336,6 +336,16 @@ fn next_handle_id<V>(map: &HashMap<u32, V>, next: &mut u32, kind: &str) -> Resul
     Ok(id)
 }
 
+/// A read failure that just means the client closed its end of the pipe.
+fn is_expected_disconnect(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
 fn serve(mut stream: PipeStream, first_request: Request) {
     let mut conn = Conn::default();
     let mut pending = Some(first_request);
@@ -364,7 +374,14 @@ fn serve(mut stream: PipeStream, first_request: Request) {
             None => match proto::read_frame(&mut stream) {
                 Ok(request) => request,
                 Err(e) => {
-                    log::debug!("[broker] connection closed: {e}");
+                    if is_expected_disconnect(&e) {
+                        // A client dropping its pipe handle is the normal
+                        // teardown for a discovery probe or a released device;
+                        // keep it out of the (Debug-capped) op log.
+                        log::trace!("[broker] connection closed: {e}");
+                    } else {
+                        log::debug!("[broker] connection closed unexpectedly: {e}");
+                    }
                     break;
                 }
             },
@@ -712,6 +729,23 @@ mod tests {
             max_operations_per_second: 10,
             max_operations: 100,
         }
+    }
+
+    #[test]
+    fn expected_disconnects_are_classified() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::UnexpectedEof,
+        ] {
+            assert!(is_expected_disconnect(&Error::new(kind, "x")), "{kind:?}");
+        }
+        assert!(!is_expected_disconnect(&Error::new(
+            ErrorKind::InvalidData,
+            "frame too long"
+        )));
+        assert!(!is_expected_disconnect(&Error::other("bad json")));
     }
 
     #[test]
