@@ -4,13 +4,11 @@
 // https://gitlab.com/CalcProgrammer1/OpenRGB/-/blob/master/Controllers/ENESMBusController/ENESMBusInterface/ENESMBusInterface_i2c_smbus.cpp
 // SPD reference: https://gitlab.com/CalcProgrammer1/OpenRGB/-/blob/master/Controllers/ENESMBusController/ENESMBusController.cpp
 //
-// Platform backends live in sibling files, each selected by `cfg`:
-//   - `linux.rs`          — i2c-dev ioctl interface
-//   - `windows/chipset.rs` — PawnIO chipset SMBus
-//   - `windows/nvapi.rs`   — NvAPI GPU i2c
-//   - `fallback.rs`       — unsupported platforms
-// Every backend exposes the same four items consumed below: `SmBusInner`,
-// `enumerate_buses`, `enumerate_gpu_buses`, `open_device`.
+// The raw SMBus primitives and per-platform backends (Linux i2c-dev, Windows
+// PawnIO chipset, NvAPI GPU i2c, and the unsupported-platform fallback) now
+// live in `halod-hwaccess` (shared with the elevated broker); see the imports
+// below. This module hosts the daemon-side transport: discovery/scan jobs, the
+// PCI gate, write-rate metering, and the `SmBusDevice` handle.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};

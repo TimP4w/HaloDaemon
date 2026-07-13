@@ -155,7 +155,6 @@ struct LcdStateInner {
     mode: halod_shared::types::LcdMode,
     active_image: Option<String>,
     video_path: Option<String>,
-    /// Use the raw (uncompressed, 24-bit) `0x09` path instead of Q565 `0x08`.
     raw_streaming: bool,
     latches_last_frame: bool,
 }
