@@ -1630,6 +1630,7 @@ mod tests {
             transport: "hid".into(),
             bus: None,
             addr: None,
+            vid: None,
             pid: Some(0x300E), // Kraken Z (320x320 LCD) for LCD-capable tests
             index: None,
         }

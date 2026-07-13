@@ -171,7 +171,9 @@ Not a capability, but declarable by any plugin: `config = { fields = { … } }`
 
 Every callback receives `dev` as its first argument. `dev.transport` is the
 device's transport; `dev.status` holds the most recent table returned by
-`read_status` (see [polling](#polling)).
+`read_status` (see [polling](#polling)); `dev.match` carries the matched-spec
+identity (`dev.match.vid`/`pid`/…); and `dev.audio` creates
+[virtual audio sinks](#virtual-audio-sinks-devaudio).
 
 | callback                         | capability | returns                       |
 |----------------------------------|------------|-------------------------------|
@@ -544,6 +546,32 @@ timed gaps between transfers (DDC/CI's inter-write gap and read delay) drives th
 with **`halod.sleep_ms(ms)`** — a blocking sleep on the device's own worker thread,
 so it only serializes that device's queued commands. See the built-in
 `philips_evnia` plugin for a full worked example.
+
+## Virtual audio sinks (`dev.audio`)
+
+A device that mixes multiple audio streams in software — e.g. a headset base
+station's **ChatMix** game/chat balance dial — can create virtual audio sinks
+bound to its own USB device. `dev.audio:register(name)` creates a
+PulseAudio/PipeWire null-sink looped into the device's physical sink and returns
+a handle (or `nil` when the device has no physical sink, or the OS can't create
+one — e.g. Windows). The handle exposes `:set_volume(pct)` (0–100) and
+`:remove()`.
+
+```lua
+-- in initialize: create the sinks
+media = dev.audio:register("MyHeadset Media")
+chat  = dev.audio:register("MyHeadset Chat")
+
+-- when the balance dial moves (parsed in read_status):
+if media then media:set_volume(game); chat:set_volume(chat_vol) end
+```
+
+Sinks are **host-owned**: the daemon tears every one down when the device
+closes (and reclaims any a crashed daemon leaked at next startup), so a plugin
+can't leak them — calling `:remove()` yourself is optional. Creation is scoped
+to the device's *own* USB id (`dev.match.vid`/`pid`), so a plugin can never open
+sinks for hardware it doesn't drive. See the built-in `steelseries_arctis`
+plugin for a full ChatMix example.
 
 ## The byte buffer (`halod.buffer`)
 

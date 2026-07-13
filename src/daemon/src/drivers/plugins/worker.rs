@@ -154,6 +154,9 @@ pub struct DevMatch {
     pub transport: String,
     pub bus: Option<String>,
     pub addr: Option<u8>,
+    /// USB vendor id, so device-scoped host APIs (e.g. `dev.audio`) can bind to
+    /// the right hardware. `None` for non-USB transports.
+    pub vid: Option<u16>,
     /// HID product id, so a callback can branch on device variant (e.g. an LCD
     /// panel picking its native resolution). `None` for non-HID transports.
     pub pid: Option<u16>,
@@ -277,6 +280,10 @@ struct WorkerCtx {
     manifest: Table,
     /// Instruction counter for the runaway-guard hook; reset before each job.
     budget: Rc<Cell<u64>>,
+    /// Virtual audio sinks (`dev.audio`) this device created, torn down on close.
+    audio_registry: super::audio_api::SinkRegistry,
+    /// Runtime handle for the async sink teardown at close.
+    audio_handle: Handle,
 }
 
 /// A unit of work the device side sends to the worker thread. It runs against
@@ -484,6 +491,9 @@ impl PluginHandle {
                             log::debug!("plugin close: {e}");
                         }
                     }
+                    // Tear down any virtual audio sinks the plugin created, even
+                    // if it didn't remove them itself.
+                    super::audio_api::teardown(&ctx.audio_registry, &ctx.audio_handle);
                     let _ = reply.send(());
                     ControlFlow::Break(())
                 })
@@ -842,7 +852,7 @@ fn build_ctx(
     // The `dev` argument every callback receives: exposes the transport and the
     // matched-spec identity (`dev.match`).
     let dev = lua.create_table().map_err(|e| lua_err("dev table", e))?;
-    let api = TransportApi::new(transport, handle);
+    let api = TransportApi::new(transport, handle.clone());
     let api_ud = lua
         .create_userdata(api)
         .map_err(|e| lua_err("transport userdata", e))?;
@@ -850,6 +860,21 @@ fn build_ctx(
         .map_err(|e| lua_err("dev.transport", e))?;
     dev.set("match", build_match_table(&lua, &dev_match)?)
         .map_err(|e| lua_err("dev.match", e))?;
+
+    // `dev.audio`: device-scoped virtual audio sinks (ChatMix). Bound to this
+    // device's own USB id, and torn down from `close` via the shared registry.
+    let audio_registry: super::audio_api::SinkRegistry =
+        Rc::new(std::cell::RefCell::new(Vec::new()));
+    let audio_ud = super::audio_api::build(
+        &lua,
+        dev_match.vid,
+        dev_match.pid,
+        handle.clone(),
+        audio_registry.clone(),
+    )
+    .map_err(|e| lua_err("dev.audio", e))?;
+    dev.set("audio", audio_ud)
+        .map_err(|e| lua_err("dev.audio", e))?;
     if !zones.is_empty() {
         let zones_v = lua.to_value(zones).map_err(|e| lua_err("dev.zones", e))?;
         dev.set("zones", zones_v)
@@ -861,6 +886,8 @@ fn build_ctx(
         dev,
         manifest,
         budget,
+        audio_registry,
+        audio_handle: handle,
     })
 }
 
@@ -954,6 +981,9 @@ fn build_match_table(lua: &Lua, m: &DevMatch) -> Result<Table> {
     }
     if let Some(addr) = m.addr {
         t.set("addr", addr).map_err(|e| lua_err("match.addr", e))?;
+    }
+    if let Some(vid) = m.vid {
+        t.set("vid", vid).map_err(|e| lua_err("match.vid", e))?;
     }
     if let Some(pid) = m.pid {
         t.set("pid", pid).map_err(|e| lua_err("match.pid", e))?;

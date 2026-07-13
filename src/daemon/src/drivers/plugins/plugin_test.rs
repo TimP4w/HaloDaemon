@@ -252,6 +252,7 @@ fn open_device(
         transport: spec.transport.clone(),
         bus: spec.bus.clone(),
         addr: None,
+        vid: spec.vid,
         pid: spec.pid,
         index: None,
     };

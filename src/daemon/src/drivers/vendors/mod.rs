@@ -4,4 +4,3 @@ pub mod amd;
 pub mod generic;
 pub mod logitech;
 pub mod nvidia;
-pub mod steelseries;

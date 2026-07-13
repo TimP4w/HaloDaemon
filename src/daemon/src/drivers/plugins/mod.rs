@@ -11,6 +11,7 @@
 //! snapshot, and `make_device` consults `match_handle` before the native
 //! descriptors, so a plugin shadows a native driver for the same hardware.
 
+mod audio_api;
 mod backends;
 mod bytebuf;
 mod chain_leaf;
@@ -951,6 +952,11 @@ impl Registry {
             bus: spec.bus.clone(),
             addr: match handle {
                 DiscoveryHandle::Smbus { addr, .. } => Some(*addr),
+                _ => None,
+            },
+            vid: match handle {
+                DiscoveryHandle::Hid { vid, .. } => Some(*vid),
+                DiscoveryHandle::UsbNonHid { vid, .. } => Some(*vid),
                 _ => None,
             },
             pid: match handle {

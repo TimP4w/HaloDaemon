@@ -30,9 +30,6 @@ HaloDaemon ships with support to the following devices by default. More devices 
 
 | Vendor | Model | VID:PID | Protocol | Transport | Platform |
 |--------|-------|---------|----------|-----------|----------|
-| SteelSeries | Arctis Nova Pro Wireless | 1038:12e0 | [SteelSeries](protocols/steelseries-arctis.md) | [HID](transports/hid.md) | 🐧🪟 |
-| SteelSeries | Arctis Nova Pro Wireless X | 1038:12e5 | [SteelSeries](protocols/steelseries-arctis.md) | [HID](transports/hid.md) | 🐧🪟 |
-| SteelSeries | Arctis Nova Pro Wireless X | 1038:225d | [SteelSeries](protocols/steelseries-arctis.md) | [HID](transports/hid.md) | 🐧🪟 |
 | Logitech | PRO X Wireless Gaming Headset | 046d:0aba | [HID++](protocols/hidpp2.md) | [HID](transports/hid.md) | 🐧🪟 |
 | Logitech | PRO X 2 LIGHTSPEED | 046d:0af7 | [HID++](protocols/hidpp2.md) | [HID](transports/hid.md) | 🐧🪟 |
 | Logitech | G733 LIGHTSPEED | 046d:0ab5 \| 0afe | [HID++](protocols/hidpp2.md) | [HID](transports/hid.md) | 🐧🪟 |

@@ -106,7 +106,7 @@ Configuration lives in `~/.config/halod/config.yaml` (Linux) or `%APPDATA%\halod
 
 Implement the `Device` trait. Declare capabilities in `fn capabilities()` — the list of `Capability` variants the device supports (e.g. `Capability::Rgb`, `Capability::Fan`, `Capability::Battery`). Each capability variant has a matching accessor (`as_rgb()`, `as_fan()`, etc.) that returns a trait object.
 
-See any existing device (e.g. `steelseries/devices/arctis_nova_pro_wireless.rs`) for a complete example.
+See any existing device (e.g. `logitech/devices/g560.rs`) for a complete example.
 
 ### 2. Add a protocol module (if new)
 
