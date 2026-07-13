@@ -13,7 +13,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -27,19 +27,19 @@ jobs:
   reuse:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
       - name: REUSE lint
-        uses: fsfe/reuse-action@REPLACE_WITH_SHA_FOR_fsfe_reuse_action # v5 (pin exact patch, e.g. v5.0.0)
+        uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6.0.0
 
   # Windows covers the daemon (-p halod) only.
   win-build-test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
 
       # Minimal UCRT64 toolchain: GNU Rust plus gcc/pkgconf for hidapi/rusb.
       - name: Set up MSYS2 (UCRT64)
-        uses: msys2/setup-msys2@REPLACE_WITH_SHA_FOR_msys2_setup_msys2 # v2 (pin exact patch, e.g. v2.24.1)
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 #v2.32.0
         with:
           msystem: UCRT64
           update: true
@@ -64,7 +64,7 @@ jobs:
   linux-build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
 
       - name: Install build dependencies
         run: |

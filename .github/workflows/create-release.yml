@@ -32,7 +32,7 @@ jobs:
     outputs:
       new_version: ${{ steps.calc.outputs.new }}
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
         with:
           ref: main
 
@@ -62,7 +62,7 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -111,7 +111,7 @@ jobs:
         run: cargo build --release -p halod -p halod-gui
 
       - name: Upload release binaries
-        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: linux-release-bin
           path: |
@@ -125,10 +125,10 @@ jobs:
     needs: version
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
 
       - name: Set up MSYS2 (UCRT64)
-        uses: msys2/setup-msys2@REPLACE_WITH_SHA_FOR_msys2_setup_msys2 # v2 (pin exact patch, e.g. v2.24.1)
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 #v2.32.0
         with:
           msystem: UCRT64
           update: true
@@ -176,7 +176,7 @@ jobs:
           cargo build --release -p halod -p halod-gui
 
       - name: Upload release binaries
-        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: windows-release-bin
           path: |
@@ -191,7 +191,7 @@ jobs:
     outputs:
       new_version: ${{ needs.version.outputs.new_version }}
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
         with:
           ref: main
 
@@ -257,16 +257,16 @@ jobs:
     needs: [test-windows, prepare]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
 
       - name: Download Windows release binaries
-        uses: actions/download-artifact@REPLACE_WITH_SHA_FOR_actions_download_artifact # v4 (pin exact patch, e.g. v4.1.8)
+        uses: actions/download-artifact@v8.0.1
         with:
           name: windows-release-bin
           path: src/target/release
 
       - name: Set up MSYS2 (UCRT64) for ffmpeg
-        uses: msys2/setup-msys2@REPLACE_WITH_SHA_FOR_msys2_setup_msys2 # v2 (pin exact patch, e.g. v2.24.1)
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 #v2.32.0
         with:
           msystem: UCRT64
           update: true
@@ -294,7 +294,7 @@ jobs:
             packaging\windows\halod.iss
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: halod-setup-x64
           path: packaging/windows/Output/halod-setup-x64.exe
@@ -306,10 +306,10 @@ jobs:
     needs: [test-linux, prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
 
       - name: Download Linux release binaries
-        uses: actions/download-artifact@REPLACE_WITH_SHA_FOR_actions_download_artifact # v4 (pin exact patch, e.g. v4.1.8)
+        uses: actions/download-artifact@v8.0.1
         with:
           name: linux-release-bin
           path: src/target/release
@@ -352,7 +352,7 @@ jobs:
           tar czf halod-linux-x64.tar.gz "$d"
 
       - name: Upload tarball artifact
-        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: halod-linux-x64
           path: halod-linux-x64.tar.gz
@@ -366,7 +366,7 @@ jobs:
     needs: [test-linux, prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
         with:
           ref: main
 
@@ -376,7 +376,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Download Linux release binaries
-        uses: actions/download-artifact@REPLACE_WITH_SHA_FOR_actions_download_artifact # v4 (pin exact patch, e.g. v4.1.8)
+        uses: actions/download-artifact@v8.0.1
         with:
           name: linux-release-bin
           path: src/target/release
@@ -392,7 +392,7 @@ jobs:
         run: cargo deb --no-build --no-strip --manifest-path src/daemon/Cargo.toml
 
       - name: Upload .deb artifact
-        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: halod-deb
           path: src/target/debian/*.deb
@@ -407,14 +407,14 @@ jobs:
     needs: [test-linux, prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
         with:
           ref: main
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Download Linux release binaries
-        uses: actions/download-artifact@REPLACE_WITH_SHA_FOR_actions_download_artifact # v4 (pin exact patch, e.g. v4.1.8)
+        uses: actions/download-artifact@v8.0.1
         with:
           name: linux-release-bin
           path: src/target/release
@@ -433,7 +433,7 @@ jobs:
         run: cargo generate-rpm -p daemon
 
       - name: Upload .rpm artifact
-        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: halod-rpm
           path: src/target/generate-rpm/*.rpm
@@ -444,10 +444,10 @@ jobs:
     needs: [prepare, windows-installer, linux-tarball, linux-deb, linux-rpm]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
+      - uses: actions/checkout@v7.0.0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@REPLACE_WITH_SHA_FOR_actions_download_artifact # v4 (pin exact patch, e.g. v4.1.8)
+        uses: actions/download-artifact@v8.0.1
         with:
           path: artifacts
 
@@ -507,7 +507,7 @@ jobs:
           fi
 
       - name: Publish release
-        uses: softprops/action-gh-release@REPLACE_WITH_SHA_FOR_softprops_action_gh_release # v2 (pin exact patch, e.g. v2.2.1)
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b #v3.0.1
         with:
           tag_name: v${{ needs.prepare.outputs.new_version }}
           name: HaloDaemon ${{ needs.prepare.outputs.new_version }}
