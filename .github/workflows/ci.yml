@@ -31,7 +31,8 @@ jobs:
       - name: REUSE lint
         uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6.0.0
 
-  # Windows covers the daemon (-p halod) only.
+  # Windows covers every workspace member, including the GUI, hardware-access
+  # library, and elevated register-bus broker.
   win-build-test:
     runs-on: windows-latest
     steps:
@@ -49,17 +50,23 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-rust
 
-      - name: Test daemon
+      - name: Build workspace
         shell: msys2 {0}
         run: |
           cd src
-          cargo test -p halod
+          cargo build --workspace
+
+      - name: Test workspace
+        shell: msys2 {0}
+        run: |
+          cd src
+          cargo test --workspace
 
       - name: Clippy
         shell: msys2 {0}
         run: |
           cd src
-          cargo clippy -p halod --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets -- -D warnings
 
   linux-build-test:
     runs-on: ubuntu-latest

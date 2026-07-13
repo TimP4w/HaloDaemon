@@ -2,10 +2,10 @@ name: Create Release
 
 # Triggered manually to cut a new release in the correct order:
 #   1. test        — test on both Linux and Windows, then build release
-#   2. commit      — bump the workspace version in Cargo.toml / Cargo.lock
-#   3. tag         — create a vX.Y.Z tag on that commit
-#   4. package     — produce the Windows installer + Linux tarball
-#   5. publish     — create the GitHub release with both artifacts
+#   2. commit      — bump the version, then pin PKGBUILD to that commit
+#   3. tag         — create a vX.Y.Z tag on the version commit
+#   4. package     — produce the Windows installer + Linux packages
+#   5. publish     — create the GitHub release with all artifacts
 
 on:
   workflow_dispatch:
@@ -120,7 +120,8 @@ jobs:
 
   # ── Test (Windows) ───────────────────────────────────────────────
   # Run tests + clippy first (fail fast), then build the release
-  # binaries (daemon + egui UI) and cache them for the installer step.
+  # binaries (daemon + egui UI + elevated broker) and cache them for the
+  # installer step.
   test-windows:
     needs: version
     runs-on: windows-latest
@@ -164,8 +165,8 @@ jobs:
         shell: msys2 {0}
         run: |
           cd src
-          cargo test -p halod
-          cargo clippy -p halod --all-targets -- -D warnings
+          cargo test --workspace
+          cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build release binaries
         shell: msys2 {0}
@@ -173,7 +174,7 @@ jobs:
           HALOD_REQUIRE_LICENSES: "1"
         run: |
           cd src
-          cargo build --release -p halod -p halod-gui
+          cargo build --release -p halod -p halod-gui -p halod-broker
 
       - name: Upload release binaries
         uses: actions/upload-artifact@v7.0.1
@@ -182,6 +183,7 @@ jobs:
           path: |
             src/target/release/halod.exe
             src/target/release/halod-gui.exe
+            src/target/release/halod-broker.exe
 
   # ── Prepare ──────────────────────────────────────────────────────
   # Version bump commit + tag. Only runs after both test jobs pass.
@@ -190,6 +192,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ needs.version.outputs.new_version }}
+      release_sha: ${{ steps.release_commit.outputs.sha }}
     steps:
       - uses: actions/checkout@v7.0.0
         with:
@@ -221,8 +224,9 @@ jobs:
           )
           lock.write_text(locktext)
 
-          # The Arch PKGBUILD builds the git tag this workflow is about to
-          # create, so its pkgver must track the release version.
+          # Keep pkgver synchronized in the release commit. The immutable
+          # source SHA is written after this commit exists (a commit cannot
+          # contain its own hash).
           pkgbuild = pathlib.Path("packaging/arch/PKGBUILD")
           pbtext, n = re.subn(
               r'(?m)^(pkgver=).*$',
@@ -235,19 +239,45 @@ jobs:
           pkgbuild.write_text(pbtext)
           PY
 
-      - name: Commit version bump
+      - name: Create release commit
+        id: release_commit
         run: |
           v="${{ needs.version.outputs.new_version }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/Cargo.toml src/Cargo.lock packaging/arch/PKGBUILD
           git commit -m "chore: bump version to v${v}"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Pin PKGBUILD to release commit
+        run: |
+          v="${{ needs.version.outputs.new_version }}"
+          release_sha="${{ steps.release_commit.outputs.sha }}"
+          python3 - "$release_sha" <<'PY'
+          import pathlib, re, sys
+          release_sha = sys.argv[1]
+          if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
+              sys.exit(f"Invalid release commit SHA: {release_sha!r}")
+
+          pkgbuild = pathlib.Path("packaging/arch/PKGBUILD")
+          text, n = re.subn(
+              r"(?m)^(source=.*#commit=)[^\"']+",
+              lambda m: f"{m.group(1)}{release_sha}",
+              pkgbuild.read_text(),
+              count=1,
+          )
+          if n == 0:
+              sys.exit("Failed to patch source commit in packaging/arch/PKGBUILD")
+          pkgbuild.write_text(text)
+          PY
+          git add packaging/arch/PKGBUILD
+          git commit -m "chore: pin Arch package for v${v}"
           git push origin HEAD:main
 
       - name: Tag release
         run: |
           v="${{ needs.version.outputs.new_version }}"
-          git tag "v${v}"
+          git tag "v${v}" "${{ steps.release_commit.outputs.sha }}"
           git push origin "v${v}"
 
   # ── Windows installer ────────────────────────────────────────────
