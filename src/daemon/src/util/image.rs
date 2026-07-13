@@ -6,7 +6,39 @@
 //! can pre-validate before uploading.
 
 use anyhow::Result;
-use halod_shared::types::sniff_ext;
+use halod_shared::types::{sniff_ext, validate_image_upload_size, MAX_LCD_IMAGE_BYTES};
+use std::path::Path;
+
+/// Read an image file, rejecting anything past [`MAX_LCD_IMAGE_BYTES`] by
+/// metadata before the bytes are allocated. Mirrors `config::read_bounded`.
+pub fn read_image_bounded(path: &Path) -> Result<Vec<u8>> {
+    let meta = std::fs::metadata(path)?;
+    if meta.len() > MAX_LCD_IMAGE_BYTES {
+        anyhow::bail!(
+            "image {} is too large ({} bytes)",
+            path.display(),
+            meta.len()
+        );
+    }
+    let data = std::fs::read(path)?;
+    validate_image_upload_size(data.len() as u64).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(data)
+}
+
+/// Async sibling of [`read_image_bounded`] for the tokio-runtime usecases.
+pub async fn read_image_bounded_async(path: &Path) -> Result<Vec<u8>> {
+    let meta = tokio::fs::metadata(path).await?;
+    if meta.len() > MAX_LCD_IMAGE_BYTES {
+        anyhow::bail!(
+            "image {} is too large ({} bytes)",
+            path.display(),
+            meta.len()
+        );
+    }
+    let data = tokio::fs::read(path).await?;
+    validate_image_upload_size(data.len() as u64).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(data)
+}
 
 /// Cap on the source dimensions the image decoder may allocate for. A valid
 /// header can declare enormous width/height that balloon allocation *before* any
@@ -69,9 +101,8 @@ pub fn resize_gif(
         return Ok(data.to_vec());
     }
 
-    const MAX_GIF_DIM: u32 = 8192;
-    if src_w > MAX_GIF_DIM || src_h > MAX_GIF_DIM {
-        anyhow::bail!("GIF dimensions {src_w}×{src_h} exceed the {MAX_GIF_DIM} px limit");
+    if src_w > MAX_DECODE_DIM || src_h > MAX_DECODE_DIM {
+        anyhow::bail!("GIF dimensions {src_w}×{src_h} exceed the {MAX_DECODE_DIM} px limit");
     }
 
     // Composite all frames to RGBA before resizing
@@ -367,6 +398,17 @@ mod tests {
             .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgb8)
             .unwrap();
         out
+    }
+
+    #[test]
+    fn read_image_bounded_reads_small_file_and_rejects_missing() {
+        use std::io::Write as _;
+        let png = make_png(4, 4);
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(&png).unwrap();
+        assert_eq!(read_image_bounded(f.path()).unwrap(), png);
+
+        assert!(read_image_bounded(std::path::Path::new("no-such-image.png")).is_err());
     }
 
     #[test]

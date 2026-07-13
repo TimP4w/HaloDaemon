@@ -614,6 +614,11 @@ fn validate_scope(mut scope: CapabilityScope) -> Result<CapabilityScope> {
             }
             clamp_limits(max_operations_per_second, max_operations);
         }
+        // AMD SMN offsets and LPC ports/registers are intentionally NOT bounded
+        // to a numeric range the way SMBus addresses are: a granted raw-register
+        // capability is inherently privileged (whole-capability trust), and any
+        // per-chipset range would be arbitrary. Only the rate/op limits are
+        // clamped. Deliberate — do not "fix" without adding chipset-aware ranges.
         CapabilityScope::AmdSmn {
             max_operations_per_second,
             max_operations,

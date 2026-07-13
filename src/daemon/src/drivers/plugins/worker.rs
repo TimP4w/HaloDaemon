@@ -37,15 +37,7 @@ use super::transport_api::TransportApi;
 use crate::drivers::transports::smbus::SmBusDevice;
 use crate::drivers::vendors::generic::devices::common::{linear_rgb_zone, ring_led_positions};
 
-/// Instruction budget per capability callback. Generous — a callback
-/// legitimately loops over every LED and builds whole frames — but bounds a
-/// runaway `while true do end` from hanging the device's worker thread. Reset
-/// before each job so it's per-call, not per-VM-lifetime.
-const WORKER_INSTRUCTION_BUDGET: u64 = 50_000_000;
-
-/// Heap cap for a device worker VM. Ample for frame/image buffers, but stops a
-/// script from exhausting host RAM (e.g. `string.rep("A", 2^30)`).
-const WORKER_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+use super::{PLUGIN_INSTRUCTION_BUDGET, PLUGIN_VM_MEMORY_BYTES};
 
 /// One accessory the plugin's `detect_accessories` reports.
 #[derive(Debug, Clone, Deserialize)]
@@ -847,8 +839,8 @@ fn build_ctx(
     let controller_index = dev_match.index;
     let (lua, budget) = sandbox::bootstrap_vm(
         sandbox::InjectSurface::FullRuntime { granted, config },
-        WORKER_MEMORY_LIMIT,
-        WORKER_INSTRUCTION_BUDGET,
+        PLUGIN_VM_MEMORY_BYTES,
+        PLUGIN_INSTRUCTION_BUDGET,
     )
     .map_err(|e| lua_err("sandbox setup", e))?;
 
@@ -956,8 +948,8 @@ fn run_pre_scan_inner(
             granted,
             config: &HashMap::new(),
         },
-        WORKER_MEMORY_LIMIT,
-        WORKER_INSTRUCTION_BUDGET,
+        PLUGIN_VM_MEMORY_BYTES,
+        PLUGIN_INSTRUCTION_BUDGET,
     )
     .map_err(|e| lua_err("sandbox setup", e))?;
     let manifest: Table = lua

@@ -438,14 +438,18 @@ pub(super) fn poll_picker(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &s
 /// Read + base64-encode the picked file off the UI thread (a multi-MB GIF would
 /// otherwise freeze the page for the whole encode) and send it to the daemon.
 fn start_upload(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, path: PathBuf) {
-    // Reject oversized files up front (cheap metadata read)
-    const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024; // 32 MiB
-    let size_ok = std::fs::metadata(&path)
-        .map(|m| m.len() <= MAX_IMAGE_BYTES)
-        .unwrap_or(false);
-    if !size_ok {
-        log::warn!("image file {path:?} exceeds {MAX_IMAGE_BYTES} bytes, skipped");
-        return;
+    // Feedback only: the daemon re-enforces the same ceiling on receipt.
+    match std::fs::metadata(&path) {
+        Ok(m) => {
+            if let Err(e) = halod_shared::types::validate_image_upload_size(m.len()) {
+                log::warn!("image file {path:?} rejected: {e}");
+                return;
+            }
+        }
+        Err(e) => {
+            log::warn!("image file {path:?} not readable: {e}");
+            return;
+        }
     }
 
     // The spinner clears when the refreshed library grows (see `upload_base`).

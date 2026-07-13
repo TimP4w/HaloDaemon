@@ -540,6 +540,7 @@ impl KeyRemapCapability for LogitechDevice {
             {
                 bail!("key remapping requires host mode");
             }
+            crate::input::validate::validate_cid(&state.remap.reprog_cids, &mapping)?;
         }
         {
             let mut state = self.state.lock().await;
@@ -624,6 +625,22 @@ impl KeyRemapCapability for LogitechDevice {
 
     async fn restore_state(&self, v: &serde_json::Value) {
         if let Ok(mappings) = serde_json::from_value::<Vec<ButtonMapping>>(v.clone()) {
+            let mappings: Vec<ButtonMapping> = mappings
+                .into_iter()
+                .filter(
+                    |m| match crate::input::validate::validate_button_mapping(m) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!(
+                                "[{}] dropping invalid restored mapping cid={}: {e}",
+                                self.id,
+                                m.cid
+                            );
+                            false
+                        }
+                    },
+                )
+                .collect();
             {
                 let mut st = self.state.lock().await;
                 st.remap.button_mappings = mappings;

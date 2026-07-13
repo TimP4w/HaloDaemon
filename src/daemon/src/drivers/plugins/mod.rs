@@ -52,6 +52,13 @@ use crate::registry::discovery::DiscoveryHandle;
 
 mod scan;
 
+/// Heap cap for a plugin VM and ceiling on any single plugin-driven native
+/// allocation; shared by the device worker, effect worker, and `bytebuf`.
+pub(crate) const PLUGIN_VM_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Instruction budget per plugin callback / effect render, reset per call.
+pub(crate) const PLUGIN_INSTRUCTION_BUDGET: u64 = 50_000_000;
+
 #[cfg(test)]
 mod tests;
 
@@ -545,6 +552,40 @@ impl Registry {
             .unwrap_or_default()
     }
 
+    /// Reject config values whose key isn't a declared field, or whose `Number`
+    /// value doesn't parse or falls outside the field's declared `min`/`max`.
+    pub fn validate_config_values(
+        &self,
+        plugin_id: &str,
+        values: &HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        use halod_shared::types::PluginConfigFieldKind;
+        let snap = self.snapshot();
+        let manifest = snap
+            .manifests
+            .iter()
+            .find(|m| m.plugin_id == plugin_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown plugin '{plugin_id}'"))?;
+        let fields = manifest.config_fields();
+        for (key, value) in values {
+            let field = fields.iter().find(|f| &f.key == key).ok_or_else(|| {
+                anyhow::anyhow!("unknown config key '{key}' for plugin '{plugin_id}'")
+            })?;
+            if field.kind == PluginConfigFieldKind::Number && !value.is_empty() {
+                let n: f64 = value
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("config '{key}' must be a number"))?;
+                if let Some(min) = field.min {
+                    anyhow::ensure!(n >= min, "config '{key}' is below the minimum {min}");
+                }
+                if let Some(max) = field.max {
+                    anyhow::ensure!(n <= max, "config '{key}' is above the maximum {max}");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// True when the plugin's consent gate is satisfied (permissions granted and
     /// the acknowledged content-hash still matches). Being consent-satisfied is
     /// necessary but not sufficient to activate — see [`Registry::activation_status`],
@@ -816,16 +857,24 @@ impl Registry {
             anyhow::bail!("plugin '{plugin_id}' has no on-disk assets");
         }
         let path = manifest.plugin_dir.join("assets").join(name);
-        let len = std::fs::metadata(&path)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?
-            .len();
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("asset '{name}' is a symlink");
+        }
+        let len = meta.len();
         if len > halod_shared::types::MAX_PLUGIN_ASSET_BYTES {
             anyhow::bail!(
                 "asset '{name}' is {len} bytes, over the {} byte limit",
                 halod_shared::types::MAX_PLUGIN_ASSET_BYTES
             );
         }
-        std::fs::read(&path).map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))
+        let data =
+            std::fs::read(&path).map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+        // Bound dimensions before the bytes reach the GUI's unbounded decoder.
+        crate::util::image::decode_limited(&data)
+            .map_err(|e| anyhow::anyhow!("asset '{name}' is not a decodable image: {e}"))?;
+        Ok(data)
     }
 }
 
@@ -852,14 +901,19 @@ fn logo_rejection(dir: &Path, name: &str) -> Option<String> {
         return Some(format!("logo name is invalid: {e}"));
     }
     let path = dir.join("assets").join(name);
-    let bytes = std::fs::read(&path).ok()?;
-    if bytes.len() as u64 > halod_shared::types::MAX_PLUGIN_ASSET_BYTES {
+    // Absent logo -> None (fall back to initials); symlink/oversize -> rejected.
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if meta.file_type().is_symlink() {
+        return Some("logo is a symlink".to_string());
+    }
+    if meta.len() > halod_shared::types::MAX_PLUGIN_ASSET_BYTES {
         return Some(format!(
             "logo is {} bytes, over the {} byte limit",
-            bytes.len(),
+            meta.len(),
             halod_shared::types::MAX_PLUGIN_ASSET_BYTES
         ));
     }
+    let bytes = std::fs::read(&path).ok()?;
     match crate::util::image::decode_limited(&bytes) {
         Ok(img) => halod_shared::types::validate_logo_dimensions(img.width(), img.height()).err(),
         Err(e) => Some(format!("logo is not a decodable image: {e}")),

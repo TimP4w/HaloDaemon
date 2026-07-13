@@ -1577,6 +1577,7 @@ impl KeyRemapCapability for LuaDevice {
     }
 
     async fn set_button_mapping(&self, mapping: ButtonMapping) -> Result<()> {
+        crate::input::validate::validate_cid(&self.key_remap_buttons, &mapping)?;
         self.worker()?
             .key_remap_set_mapping(mapping.clone())
             .await?;

@@ -64,6 +64,7 @@ pub fn validate_template(def: &CustomTemplateDef) -> Result<()> {
         "template has too many widgets ({} > {MAX_TEMPLATE_WIDGETS})",
         def.widgets.len()
     );
+    halod_shared::lcd_custom::validate_widgets(def).map_err(|e| anyhow::anyhow!(e))?;
     Ok(())
 }
 

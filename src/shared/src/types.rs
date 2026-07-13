@@ -185,6 +185,20 @@ pub fn validate_image_filename(name: &str) -> Result<(), &'static str> {
     }
 }
 
+/// Max byte size of a user-supplied LCD image. Sized so its base64 fits one IPC
+/// frame ([`crate::frames::MAX_PAYLOAD`]); enforced by both GUI and daemon.
+pub const MAX_LCD_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Reject an image payload past [`MAX_LCD_IMAGE_BYTES`].
+pub fn validate_image_upload_size(len: u64) -> Result<(), String> {
+    if len > MAX_LCD_IMAGE_BYTES {
+        return Err(format!(
+            "image is {len} bytes, over the {MAX_LCD_IMAGE_BYTES}-byte limit"
+        ));
+    }
+    Ok(())
+}
+
 /// Sniff an image's format from its magic bytes, returning a file extension.
 pub fn sniff_ext(data: &[u8]) -> &'static str {
     if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
@@ -301,6 +315,40 @@ impl Default for CanvasState {
             placed_zones: Vec::new(),
             sample_radius: DEFAULT_SAMPLE_RADIUS,
         }
+    }
+}
+
+/// Max placed zones on one device's canvas.
+pub const MAX_PLACED_ZONES: usize = 256;
+/// Max distinct canvas effect instances.
+pub const MAX_CANVAS_EFFECTS: usize = 256;
+/// Max params on a single effect or LCD widget.
+pub const MAX_EFFECT_PARAMS: usize = 64;
+/// Max device/zone ids in a lighting-target selection.
+pub const MAX_LIGHTING_TARGET_IDS: usize = 512;
+
+impl PlacedZone {
+    /// Replace any non-finite coordinate with a safe default; `serde_json`
+    /// rejects non-finite floats, and the sampler must never see NaN.
+    pub fn sanitize(&mut self) {
+        self.x = finite_or(self.x, 0.0);
+        self.y = finite_or(self.y, 0.0);
+        self.w = finite_or(self.w, DEFAULT_ZONE_SIZE);
+        self.h = finite_or(self.h, DEFAULT_ZONE_SIZE);
+        self.rotation = finite_or(self.rotation, 0.0);
+    }
+}
+
+impl CanvasState {
+    /// Finite-clean every placed zone and bound the collections — applied on
+    /// config load and before persistence so corrupt/hostile state never
+    /// reaches the engine or the wire.
+    pub fn sanitize(&mut self) {
+        for z in &mut self.placed_zones {
+            z.sanitize();
+        }
+        self.placed_zones.truncate(MAX_PLACED_ZONES);
+        self.sample_radius = finite_or(self.sample_radius, DEFAULT_SAMPLE_RADIUS);
     }
 }
 
@@ -909,6 +957,10 @@ pub struct PluginConfigField {
     pub category: String,
     #[serde(default)]
     pub secure: bool,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2537,6 +2589,38 @@ mod default_tests {
         assert!(validate_logo_dimensions(MAX_PLUGIN_LOGO_DIM + 1, 64).is_err());
         assert!(validate_logo_dimensions(64, MAX_PLUGIN_LOGO_DIM + 1).is_err());
         assert!(validate_logo_dimensions(500, 50).is_err());
+    }
+
+    #[test]
+    fn validate_image_upload_size_gates_at_the_ceiling() {
+        assert!(validate_image_upload_size(0).is_ok());
+        assert!(validate_image_upload_size(MAX_LCD_IMAGE_BYTES).is_ok());
+        assert!(validate_image_upload_size(MAX_LCD_IMAGE_BYTES + 1).is_err());
+        assert!(validate_image_upload_size(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn canvas_state_sanitize_cleans_nonfinite_and_caps_zones() {
+        let mut cs = CanvasState {
+            placed_zones: (0..MAX_PLACED_ZONES + 10)
+                .map(|_| PlacedZone::default())
+                .collect(),
+            ..CanvasState::default()
+        };
+        cs.placed_zones[0].x = f32::NAN;
+        cs.placed_zones[0].rotation = f32::INFINITY;
+        cs.sanitize();
+        assert_eq!(cs.placed_zones.len(), MAX_PLACED_ZONES);
+        assert!(cs.placed_zones[0].x.is_finite());
+        assert!(cs.placed_zones[0].rotation.is_finite());
+    }
+
+    #[test]
+    fn max_lcd_image_base64_fits_in_one_ipc_frame() {
+        // An accepted image's base64 (≈4/3) plus envelope must fit the frame cap,
+        // or the upload the size check "passes" would be rejected at the wire.
+        let base64_len = MAX_LCD_IMAGE_BYTES.div_ceil(3) * 4;
+        assert!(base64_len < crate::frames::MAX_PAYLOAD as u64);
     }
 
     #[test]

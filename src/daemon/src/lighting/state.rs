@@ -4,23 +4,14 @@ use tokio::sync::{watch, RwLock};
 
 use halod_shared::types::{
     finite_or, CanvasState, EffectDef, LightingState as WireLightingState, DEFAULT_SAMPLE_RADIUS,
-    DEFAULT_ZONE_SIZE,
 };
 
 use crate::config::{Config, PlacedZone};
 use crate::lighting::rgb_engine::RgbEngine;
 use crate::run_loop::EngineRunConfig;
 
-/// Sanitize a placed zone before it goes on the wire: `serde_json` rejects
-/// non-finite floats, so a NaN/Inf from a hand-edited config.yaml would panic
-/// the broadcast loop. Config and wire share one `PlacedZone` type now, so this
-/// is a plain in-place clean rather than a type conversion.
 fn sanitize_zone(mut p: PlacedZone) -> PlacedZone {
-    p.x = finite_or(p.x, 0.0);
-    p.y = finite_or(p.y, 0.0);
-    p.w = finite_or(p.w, DEFAULT_ZONE_SIZE);
-    p.h = finite_or(p.h, DEFAULT_ZONE_SIZE);
-    p.rotation = finite_or(p.rotation, 0.0);
+    p.sanitize();
     p
 }
 

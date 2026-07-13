@@ -1076,11 +1076,12 @@ fn list_leaves_logo_and_thumbnails_empty_when_undeclared() {
 fn read_asset_returns_bytes_for_a_declared_logo() {
     let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let tmp = tempfile::tempdir().unwrap();
-    write_asset_plugin(tmp.path(), "readable", Some(b"PNGDATA"));
+    let png = png_of(32, 32);
+    write_asset_plugin(tmp.path(), "readable", Some(&png));
     app.registry.load_all(tmp.path());
 
     let bytes = app.registry.read_asset("readable", "logo.png").unwrap();
-    assert_eq!(bytes, b"PNGDATA");
+    assert_eq!(bytes, png);
 
     app.registry.load_all(Path::new("/nonexistent"));
 }

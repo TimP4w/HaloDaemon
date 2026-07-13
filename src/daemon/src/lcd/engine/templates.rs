@@ -150,7 +150,7 @@ impl Background {
             return Vec::new();
         }
         let path = images_dir.join(filename);
-        let data = match std::fs::read(&path) {
+        let data = match crate::util::image::read_image_bounded(&path) {
             Ok(d) => d,
             Err(e) => {
                 log::warn!("[LCD bg] cannot read {filename}: {e}");

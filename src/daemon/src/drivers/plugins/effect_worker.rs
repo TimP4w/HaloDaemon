@@ -20,18 +20,10 @@ use halod_shared::types::{EffectParamValue, Permission};
 use super::bytebuf::ByteBuf;
 use super::lua_worker::LuaWorker;
 use super::sandbox;
+use super::{PLUGIN_INSTRUCTION_BUDGET, PLUGIN_VM_MEMORY_BYTES};
 
 pub const CANVAS_W: u32 = 400;
 pub const CANVAS_H: u32 = 300;
-
-/// A runaway script (accidental infinite loop) errors out instead of
-/// stalling the RGB engine tick indefinitely. Reset per frame, so it bounds a
-/// single render call rather than the effect's whole lifetime.
-const INSTRUCTION_BUDGET: u64 = 50_000_000;
-
-/// Cap on the effect VM's own Lua allocator, so a render loop that keeps
-/// allocating can't OOM the daemon (matches the device worker's bound).
-const EFFECT_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// One LED's chain/spatial coordinates, passed to a direct effect's
 /// `led_colors_<id>` callback in one batch.
@@ -255,8 +247,8 @@ fn build_ctx(
 ) -> Result<EffectCtx> {
     let (lua, budget) = sandbox::bootstrap_vm(
         sandbox::InjectSurface::FullRuntime { granted, config },
-        EFFECT_MEMORY_LIMIT,
-        INSTRUCTION_BUDGET,
+        PLUGIN_VM_MEMORY_BYTES,
+        PLUGIN_INSTRUCTION_BUDGET,
     )
     .map_err(|e| lua_err("sandbox setup", e))?;
     register_effect_helpers(&lua).map_err(|e| lua_err("effect helpers", e))?;

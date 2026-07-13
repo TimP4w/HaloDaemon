@@ -18,19 +18,19 @@ fn default_zone_size(topology: Option<ZoneTopology>) -> (f64, f64) {
     }
 }
 
-/// Topology of a device's RGB zone, if the device exists and exposes it.
-async fn zone_topology(
-    device_id: &str,
-    zone_id: &str,
-    app: &Arc<AppState>,
-) -> Option<ZoneTopology> {
-    let device = require_device_owned_id(device_id, app).await.ok()?;
-    let rgb = device.as_rgb()?;
+/// Topology of a device's RGB zone, erroring if the device/zone is unknown so a
+/// bogus `zone_id` is never persisted.
+async fn require_zone(device_id: &str, zone_id: &str, app: &Arc<AppState>) -> Result<ZoneTopology> {
+    let device = require_device_owned_id(device_id, app).await?;
+    let rgb = device
+        .as_rgb()
+        .ok_or_else(|| anyhow::anyhow!("device does not support canvas engine: {device_id}"))?;
     rgb.descriptor()
         .zones
         .iter()
         .find(|z| z.id == zone_id)
         .map(|z| z.topology.clone())
+        .ok_or_else(|| anyhow::anyhow!("zone '{zone_id}' not found on device '{device_id}'"))
 }
 
 pub async fn upsert_effect(
@@ -42,9 +42,19 @@ pub async fn upsert_effect(
         .name
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty());
+    anyhow::ensure!(
+        def.params.len() <= halod_shared::types::MAX_EFFECT_PARAMS,
+        "effect has too many params"
+    );
     {
         let mut cfg = app.config.write().await;
-        cfg.canvas_state_for_edit().effects.insert(instance_id, def);
+        let effects = &mut cfg.canvas_state_for_edit().effects;
+        anyhow::ensure!(
+            effects.contains_key(&instance_id)
+                || effects.len() < halod_shared::types::MAX_CANVAS_EFFECTS,
+            "too many canvas effects"
+        );
+        effects.insert(instance_id, def);
     }
     app.request_config_save();
     ipc::broadcast_state(&app).await;
@@ -91,6 +101,10 @@ async fn modify_canvas_zones(
 
     let mut zones = rgb.canvas_zones();
     mutate(&mut zones);
+    for z in &mut zones {
+        z.sanitize();
+    }
+    zones.truncate(halod_shared::types::MAX_PLACED_ZONES);
     rgb.set_canvas_zones(zones);
 
     persist_device_state(app, device.as_ref()).await;
@@ -113,7 +127,7 @@ pub async fn place_zone(
 ) -> Result<()> {
     // Default placement size depends on the zone's topology: a linear strip is
     // a thin line, so a square box leaves it floating in empty space.
-    let (def_w, def_h) = default_zone_size(zone_topology(&device_id, &zone_id, &app).await);
+    let (def_w, def_h) = default_zone_size(Some(require_zone(&device_id, &zone_id, &app).await?));
     let x = x.unwrap_or(0.0) as f32;
     let y = y.unwrap_or(0.0) as f32;
     let w = w.unwrap_or(def_w) as f32;
@@ -246,6 +260,45 @@ mod tests {
         for topology in [ZoneTopology::Ring, ZoneTopology::Grid] {
             assert_eq!(default_zone_size(Some(topology)), default_size);
         }
+    }
+
+    #[tokio::test]
+    async fn place_zone_rejects_unknown_zone_id() {
+        let dev = Arc::new(MockDevice::new("dev0").with_rgb());
+        let app = make_app(dev.clone());
+        let err = place_zone(
+            "dev0".into(),
+            "nope".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            app,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn upsert_effect_rejects_too_many_params() {
+        let dev = Arc::new(MockDevice::new("dev0").with_rgb());
+        let app = make_app(dev);
+        let mut def = EffectDef {
+            effect_id: "x".into(),
+            name: None,
+            params: std::collections::HashMap::new(),
+        };
+        for i in 0..halod_shared::types::MAX_EFFECT_PARAMS + 1 {
+            def.params.insert(
+                format!("k{i}"),
+                halod_shared::types::EffectParamValue::Float(1.0),
+            );
+        }
+        assert!(upsert_effect("inst".into(), def, app).await.is_err());
     }
 
     #[tokio::test]

@@ -1368,7 +1368,9 @@ fn decode_source_image(filename: &str) -> Option<Arc<DecodedImage>> {
         return None;
     }
     let path = crate::config::lcd_images_dir().join(filename);
-    let data = std::fs::read(&path).ok()?;
+    let data = crate::util::image::read_image_bounded(&path)
+        .map_err(|e| log::warn!("[LCD custom] cannot read {filename}: {e}"))
+        .ok()?;
     let decoded = super::templates::decode_image_frames(&data)
         .map_err(|e| log::warn!("[LCD custom] decode {filename} failed: {e}"))
         .ok()?;

@@ -104,6 +104,7 @@ pub(crate) async fn persist_config_values(
     values: &std::collections::HashMap<String, String>,
     app: &Arc<AppState>,
 ) -> Result<()> {
+    app.registry.validate_config_values(id, values)?;
     let secure_keys: std::collections::HashSet<String> = app
         .registry
         .secure_config_keys_for(id)
@@ -745,7 +746,15 @@ mod tests {
         )
         .unwrap();
         std::fs::write(plugin_dir.join("main.lua"), "return {}").unwrap();
-        std::fs::write(plugin_dir.join("assets/logo.png"), b"PNGDATA").unwrap();
+        let png = {
+            let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([1, 2, 3, 255]));
+            let mut b = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut b, image::ImageFormat::Png)
+                .unwrap();
+            b.into_inner()
+        };
+        std::fs::write(plugin_dir.join("assets/logo.png"), &png).unwrap();
         app.registry.load_all(dir.path());
 
         let (client, mut rx) = test_client();
@@ -761,7 +770,7 @@ mod tests {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(v["data_b64"].as_str().unwrap())
             .unwrap();
-        assert_eq!(decoded, b"PNGDATA");
+        assert_eq!(decoded, png);
 
         app.registry.load_all(std::path::Path::new("/nonexistent"));
     }
@@ -895,6 +904,47 @@ mod tests {
                 );
             })
             .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_config_rejects_unknown_key_and_out_of_range_number() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let dir = crate::config::plugins_dir();
+            let pdir = dir.join("numcfg");
+            std::fs::create_dir_all(&pdir).unwrap();
+            std::fs::write(
+                pdir.join("plugin.yaml"),
+                "id: numcfg\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            )
+            .unwrap();
+            std::fs::write(
+                pdir.join("main.lua"),
+                r#"return { config = { fields = { { key = "hz", label = "Hz", kind = "number", min = 1, max = 100 } } } }"#,
+            )
+            .unwrap();
+            app.registry.load_all(&dir);
+
+            let one = |k: &str, v: &str| {
+                let mut m = std::collections::HashMap::new();
+                m.insert(k.to_string(), v.to_string());
+                m
+            };
+            assert!(set_config("numcfg".into(), one("nope", "1"), app.clone())
+                .await
+                .is_err());
+            assert!(set_config("numcfg".into(), one("hz", "999"), app.clone())
+                .await
+                .is_err());
+            assert!(set_config("numcfg".into(), one("hz", "abc"), app.clone())
+                .await
+                .is_err());
+            set_config("numcfg".into(), one("hz", "50"), app.clone())
+                .await
+                .unwrap();
+
+            app.registry.load_all(std::path::Path::new("/nonexistent"));
         })
         .await;
     }

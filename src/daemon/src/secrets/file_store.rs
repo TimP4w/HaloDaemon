@@ -156,7 +156,7 @@ fn load_secrets_file() -> Result<SecretsFile> {
     if !path.exists() {
         return Ok(SecretsFile::default());
     }
-    let raw = std::fs::read_to_string(&path)?;
+    let raw = crate::config::read_bounded(&path, "plugin secrets")?;
     Ok(serde_yaml::from_str(&raw)?)
 }
 

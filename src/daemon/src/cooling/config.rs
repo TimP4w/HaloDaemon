@@ -16,6 +16,8 @@ impl FanCurveRecord {
     pub const MIN_TEMP_C: f32 = -50.0;
     /// Highest temperature a control point may specify, in °C.
     pub const MAX_TEMP_C: f32 = 150.0;
+    /// Max control points in one curve — rejected at ingress, truncated on restore.
+    pub const MAX_POINTS: usize = 64;
 
     /// Clamps and sorts points so `cooling::fan_curve::interpolate` never sees
     /// out-of-range or unsorted data, even from a hand-edited or corrupted
@@ -34,6 +36,7 @@ impl FanCurveRecord {
         }
         self.points.sort_by(|a, b| a.0.total_cmp(&b.0));
         self.points.dedup_by(|a, b| a.0 == b.0);
+        self.points.truncate(Self::MAX_POINTS);
     }
 
     pub fn serialize(
@@ -154,6 +157,21 @@ mod tests {
             for w in record.points.windows(2) {
                 assert_ne!(w[0].0, w[1].0, "duplicate temp {} found", w[0].0);
             }
+
+            // 5. Point count never exceeds the cap
+            assert!(record.points.len() <= FanCurveRecord::MAX_POINTS);
         }
+    }
+
+    #[test]
+    fn sanitize_truncates_to_the_point_cap() {
+        let mut record = FanCurveRecord {
+            sensor_id: None,
+            points: (0..FanCurveRecord::MAX_POINTS as i32 + 50)
+                .map(|i| (i as f32, 50.0))
+                .collect(),
+        };
+        record.sanitize();
+        assert_eq!(record.points.len(), FanCurveRecord::MAX_POINTS);
     }
 }

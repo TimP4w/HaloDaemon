@@ -183,6 +183,8 @@ mod tests {
             kind: PluginConfigFieldKind::Text,
             category: String::new(),
             secure,
+            min: None,
+            max: None,
         }
     }
 

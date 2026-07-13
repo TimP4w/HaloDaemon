@@ -38,7 +38,7 @@ fn read_thumbnail(stream: IRandomAccessStream) -> Option<RgbaImage> {
     let mut bytes = vec![0u8; len];
     reader.ReadBytes(&mut bytes).ok()?;
 
-    let img = image::load_from_memory(&bytes).ok()?;
+    let img = crate::util::image::decode_limited(&bytes).ok()?;
     const MAX_SIDE: u32 = 240;
     let (w, h) = (img.width(), img.height());
     let scaled = if w.max(h) > MAX_SIDE {

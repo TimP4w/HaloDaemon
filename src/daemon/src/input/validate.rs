@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Domain validation for input actions and macros — apply at every ingress.
 
-use anyhow::{ensure, Result};
+use anyhow::{bail, ensure, Result};
 use halod_shared::types::{
-    ButtonAction, ButtonMapping, MacroStep, MACRO_MAX_DELAY_MS, MACRO_MAX_STEPS, MACRO_MAX_TOTAL_MS,
+    ButtonAction, ButtonDescriptor, ButtonMapping, MacroStep, MACRO_MAX_DELAY_MS, MACRO_MAX_STEPS,
+    MACRO_MAX_TOTAL_MS,
 };
 
 /// Max modifiers in a key chord (every distinct ModKey variant is few).
@@ -94,6 +95,25 @@ pub fn validate_button_mapping(mapping: &ButtonMapping) -> Result<()> {
     Ok(())
 }
 
+fn is_native(mapping: &ButtonMapping) -> bool {
+    mapping.base == ButtonAction::Native && mapping.shifted == ButtonAction::Native
+}
+
+/// Reject a `cid` the device never advertised, or a divert to a non-divertable
+/// control. `buttons` empty (controls not yet enumerated) skips the check.
+pub fn validate_cid(buttons: &[ButtonDescriptor], mapping: &ButtonMapping) -> Result<()> {
+    if buttons.is_empty() {
+        return Ok(());
+    }
+    match buttons.iter().find(|b| b.cid == mapping.cid) {
+        None => bail!("control id {} is not exposed by this device", mapping.cid),
+        Some(d) if !d.divertable && !is_native(mapping) => {
+            bail!("control id {} is not remappable", mapping.cid)
+        }
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +199,49 @@ mod tests {
             base: ButtonAction::Native,
             shifted: ButtonAction::Native,
         })
+        .is_ok());
+    }
+
+    fn desc(cid: u16, divertable: bool) -> ButtonDescriptor {
+        ButtonDescriptor {
+            cid,
+            label: String::new(),
+            divertable,
+            group: 0,
+        }
+    }
+
+    fn map(cid: u16, base: ButtonAction) -> ButtonMapping {
+        ButtonMapping {
+            cid,
+            base,
+            shifted: ButtonAction::Native,
+        }
+    }
+
+    #[test]
+    fn validate_cid_skips_check_when_no_controls_enumerated() {
+        assert!(validate_cid(&[], &map(999, ButtonAction::Native)).is_ok());
+    }
+
+    #[test]
+    fn validate_cid_rejects_unknown_cid() {
+        assert!(validate_cid(&[desc(1, true)], &map(2, ButtonAction::Native)).is_err());
+    }
+
+    #[test]
+    fn validate_cid_rejects_divert_of_non_divertable_but_allows_native_reset() {
+        let buttons = [desc(1, false)];
+        assert!(validate_cid(&buttons, &map(1, ButtonAction::MomentaryDpi { dpi: 800 })).is_err());
+        assert!(validate_cid(&buttons, &map(1, ButtonAction::Native)).is_ok());
+    }
+
+    #[test]
+    fn validate_cid_accepts_divertable_mapping() {
+        assert!(validate_cid(
+            &[desc(1, true)],
+            &map(1, ButtonAction::MomentaryDpi { dpi: 800 })
+        )
         .is_ok());
     }
 }

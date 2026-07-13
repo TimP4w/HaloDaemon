@@ -99,12 +99,13 @@ fn load_file<T: Default + DeserializeOwned>(path: &Path, label: &str) -> Result<
         .map_err(|e| anyhow::anyhow!("Failed to parse {label} at {}: {e}", path.display()))
 }
 
-const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_PROFILES: usize = 1024;
 
 /// Read a config file, rejecting anything past the 1 MiB ceiling using file
 /// metadata so a huge file is never fully allocated first.
-fn read_bounded(path: &Path, label: &str) -> Result<String> {
+/// TODO: probably belongs to utils
+pub(crate) fn read_bounded(path: &Path, label: &str) -> Result<String> {
     if let Ok(meta) = std::fs::metadata(path) {
         if meta.len() > MAX_CONFIG_BYTES {
             anyhow::bail!(
@@ -143,9 +144,12 @@ fn load_profiles() -> Result<HashMap<String, Profile>> {
     paths.sort();
     for path in paths {
         let raw = read_bounded(&path, "profile")?;
-        let file: ProfileFile = serde_yaml::from_str(&raw)
+        let mut file: ProfileFile = serde_yaml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("Failed to parse profile at {}: {e}", path.display()))?;
         crate::profiles::validate::validate_profile(&file.name, &file.profile)?;
+        if let Some(canvas) = file.profile.lighting.canvas.as_mut() {
+            canvas.sanitize();
+        }
         out.insert(file.name, file.profile);
     }
     Ok(out)

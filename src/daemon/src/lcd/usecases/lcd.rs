@@ -169,6 +169,7 @@ async fn set_screen_image_inner(
         .ok_or_else(|| anyhow!("device does not support LCD"))?;
 
     let data = base64::engine::general_purpose::STANDARD.decode(&data_b64)?;
+    halod_shared::types::validate_image_upload_size(data.len() as u64).map_err(|e| anyhow!(e))?;
     log::debug!(
         "[LCD] set_screen_image: received {} bytes for device {}",
         data.len(),
@@ -242,7 +243,7 @@ async fn set_screen_image_from_library_inner(
     validate_image_filename(&filename).map_err(|e| anyhow!(e))?;
 
     let path = crate::config::lcd_images_dir().join(&filename);
-    let data = tokio::fs::read(&path)
+    let data = crate::util::image::read_image_bounded_async(&path)
         .await
         .map_err(|e| anyhow!("image not found: {e}"))?;
     log::info!(
@@ -291,7 +292,7 @@ async fn reapply_static_image(
         return;
     };
     let path = crate::config::lcd_images_dir().join(&filename);
-    match tokio::fs::read(&path).await {
+    match crate::util::image::read_image_bounded_async(&path).await {
         Ok(data) => {
             if let Err(e) = lcd.set_image(&data).await {
                 log::warn!("[LCD] re-applying {filename} after rotation failed: {e}");

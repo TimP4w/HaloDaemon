@@ -443,14 +443,25 @@ impl FanCapability for MockDevice {
     }
 }
 
-static EMPTY_RGB_DESC: std::sync::OnceLock<RgbDescriptor> = std::sync::OnceLock::new();
+static MOCK_RGB_DESC: std::sync::OnceLock<RgbDescriptor> = std::sync::OnceLock::new();
 
 #[async_trait]
 impl RgbCapability for MockDevice {
     fn descriptor(&self) -> &RgbDescriptor {
-        EMPTY_RGB_DESC.get_or_init(|| RgbDescriptor {
-            zones: vec![],
-            native_effects: vec![],
+        MOCK_RGB_DESC.get_or_init(|| {
+            let zone = |id: &str, topology| halod_shared::types::RgbZone {
+                id: id.to_string(),
+                name: id.to_string(),
+                topology,
+                leds: vec![],
+            };
+            RgbDescriptor {
+                zones: vec![
+                    zone("ring", halod_shared::types::ZoneTopology::Ring),
+                    zone("strip", halod_shared::types::ZoneTopology::Linear),
+                ],
+                native_effects: vec![],
+            }
         })
     }
     async fn apply(&self, state: RgbState) -> Result<()> {

@@ -7,7 +7,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{EffectParamDescriptor, EffectParamValue, ParamKind, RgbColor, SensorUnit};
+use crate::types::{
+    EffectParamDescriptor, EffectParamValue, ParamKind, RgbColor, SensorUnit, MAX_EFFECT_PARAMS,
+};
 
 /// Param key the custom template's `widgets_json` is stored under in
 /// `EffectDef`/`RgbState`-style parameter maps.
@@ -317,6 +319,51 @@ pub fn sensor_fill_color(fill: RgbColor, high: RgbColor, gradient: bool, frac: f
     } else {
         fill
     }
+}
+
+/// Validate every widget's geometry and referenced assets: finite coords, an
+/// on-canvas center, a positive/bounded scale, a bounded param map, and valid
+/// image filenames. Pure — the GUI uses it for feedback, the daemon enforces it
+/// on save, load, and preview.
+pub fn validate_widgets(def: &CustomTemplateDef) -> Result<(), String> {
+    let scale_ok = |s: f32| s.is_finite() && s > 0.0 && s <= 100.0;
+    for w in &def.widgets {
+        if !w.x.is_finite()
+            || !(0.0..=1.0).contains(&w.x)
+            || !w.y.is_finite()
+            || !(0.0..=1.0).contains(&w.y)
+        {
+            return Err(format!("widget '{}' position out of bounds", w.id));
+        }
+        if !scale_ok(w.scale) {
+            return Err(format!("widget '{}' scale out of range", w.id));
+        }
+        if !w.rotation.is_finite() {
+            return Err(format!("widget '{}' rotation is not finite", w.id));
+        }
+        if w.params.len() > MAX_EFFECT_PARAMS {
+            return Err(format!("widget '{}' has too many params", w.id));
+        }
+        if let Some(EffectParamValue::Float(sy)) = w.params.get("scale_y") {
+            if !scale_ok(*sy as f32) {
+                return Err(format!("widget '{}' scale_y out of range", w.id));
+            }
+        }
+        if let Some(EffectParamValue::Str(name)) = w.params.get("filename") {
+            if !name.is_empty() && crate::types::validate_image_filename(name).is_err() {
+                return Err(format!("widget '{}' has an invalid image filename", w.id));
+            }
+        }
+    }
+    if let BgKind::Image { filename, dim } = &def.style.background {
+        if !filename.is_empty() && crate::types::validate_image_filename(filename).is_err() {
+            return Err("background image filename is invalid".to_string());
+        }
+        if !dim.is_finite() {
+            return Err("background image dim is not finite".to_string());
+        }
+    }
+    Ok(())
 }
 
 /// Full param schema for a widget type: the type-specific rows plus the
@@ -752,6 +799,59 @@ mod tests {
             let back: CustomTemplateDef = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(back, def);
         }
+
+        #[test]
+        fn validate_widgets_never_panics(def in custom_template_def_strategy()) {
+            let _ = validate_widgets(&def);
+        }
+    }
+
+    fn def_with(widgets: Vec<WidgetDef>) -> CustomTemplateDef {
+        CustomTemplateDef {
+            widgets,
+            style: ScreenStyle::default(),
+        }
+    }
+
+    #[test]
+    fn validate_widgets_accepts_a_default_widget() {
+        assert!(validate_widgets(&def_with(vec![widget_with(&[])])).is_ok());
+    }
+
+    #[test]
+    fn validate_widgets_rejects_offcanvas_and_nonfinite() {
+        let mut off = widget_with(&[]);
+        off.x = 1.5;
+        assert!(validate_widgets(&def_with(vec![off])).is_err());
+
+        let mut nan_rot = widget_with(&[]);
+        nan_rot.rotation = f32::NAN;
+        assert!(validate_widgets(&def_with(vec![nan_rot])).is_err());
+
+        let mut bad_scale = widget_with(&[]);
+        bad_scale.scale = 0.0;
+        assert!(validate_widgets(&def_with(vec![bad_scale])).is_err());
+    }
+
+    #[test]
+    fn validate_widgets_rejects_traversal_image_filename() {
+        let w = widget_with(&[(
+            "filename",
+            EffectParamValue::Str("../../etc/shadow".to_string()),
+        )]);
+        assert!(validate_widgets(&def_with(vec![w])).is_err());
+    }
+
+    #[test]
+    fn validate_widgets_rejects_too_many_params() {
+        let params: Vec<(String, EffectParamValue)> = (0..MAX_EFFECT_PARAMS + 1)
+            .map(|i| (format!("k{i}"), EffectParamValue::Float(1.0)))
+            .collect();
+        let mut w = widget_with(&[]);
+        for (k, v) in params {
+            w.params.insert(k, v);
+        }
+        assert!(validate_widgets(&def_with(vec![w])).is_err());
     }
 
     #[test]

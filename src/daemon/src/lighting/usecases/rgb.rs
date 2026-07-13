@@ -67,6 +67,11 @@ pub async fn set_zone_transform(
     let device = require_device_owned_id(&id, &app).await?;
     let rgb = device.as_rgb().context("device does not support RGB")?;
 
+    anyhow::ensure!(
+        rgb.descriptor().zones.iter().any(|z| z.id == zone_id),
+        "zone '{zone_id}' not found on device '{id}'"
+    );
+
     rgb.set_zone_transform(zone_id.clone(), transform);
 
     if let Some(state) = rgb.current_state() {

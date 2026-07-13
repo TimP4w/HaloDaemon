@@ -24,6 +24,7 @@ pub async fn render(
     app: Arc<AppState>,
     client: ClientHandle,
 ) -> Result<()> {
+    crate::lcd::usecases::templates::validate_template(&def)?;
     let device = require_device_owned_id(&device_id, &app).await?;
     let descriptor = device
         .as_lcd()

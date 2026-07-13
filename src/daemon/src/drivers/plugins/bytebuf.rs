@@ -13,9 +13,9 @@ use mlua::{Lua, UserData, UserDataMethods};
 /// Upper bound on any single plugin-driven native allocation (`halod.buffer`,
 /// `transport:control_read`, image-codec output). `set_memory_limit` only tracks
 /// Lua's own allocator, so an unbounded `vec![0u8; n]` from a Lua-supplied length
-/// would OOM/abort the (root) daemon; this caps every such allocation. Generous —
-/// far above any real LCD frame — so honest plugins never hit it.
-pub const MAX_ALLOC_BYTES: usize = 64 * 1024 * 1024;
+/// would OOM/abort the (root) daemon; this caps every such allocation. Shares the
+/// plugin-VM heap ceiling so the two never drift — see [`super::PLUGIN_VM_MEMORY_BYTES`].
+pub const MAX_ALLOC_BYTES: usize = super::PLUGIN_VM_MEMORY_BYTES;
 
 /// Reject a plugin-supplied length past [`MAX_ALLOC_BYTES`] with a Lua error
 /// instead of letting a downstream `vec![0u8; n]` OOM/abort the process.

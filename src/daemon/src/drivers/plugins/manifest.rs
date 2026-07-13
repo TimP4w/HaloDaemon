@@ -211,6 +211,11 @@ pub struct ConfigFieldDef {
     /// plugin was granted `Permission::SecureStorage`.
     #[serde(default)]
     pub secure: bool,
+    /// Inclusive bounds enforced on a `Number` value at ingress.
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
 }
 
 /// A plugin's declared user-editable settings.
@@ -375,6 +380,8 @@ impl From<&ConfigFieldDef> for halod_shared::types::PluginConfigField {
             kind: f.kind,
             category: f.category.clone(),
             secure: f.secure,
+            min: f.min,
+            max: f.max,
         }
     }
 }
