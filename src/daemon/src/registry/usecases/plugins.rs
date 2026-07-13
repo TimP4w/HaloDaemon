@@ -705,14 +705,16 @@ mod tests {
 
     /// Loads `CONFIG_TEST_PLUGIN` into `app`'s plugin registry for the duration
     /// of `f`, then restores the registry to just the built-ins.
+    /// Requires `with_tmp_config`.
     async fn with_config_test_plugin<F, Fut>(app: &Arc<AppState>, f: F)
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        let dir = tempfile::tempdir().unwrap();
-        write_config_test_plugin(dir.path());
-        app.registry.load_all(dir.path());
+        let dir = crate::config::plugins_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        write_config_test_plugin(&dir);
+        app.registry.load_all(&dir);
         f().await;
         app.registry.load_all(std::path::Path::new("/nonexistent"));
     }
