@@ -4,8 +4,8 @@ use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
+use windows::core::{BOOL, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
 use windows::Win32::Graphics::Gdi::{
     DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, DIB_RGB_COLORS, HDC, HGDIOBJ,
@@ -264,7 +264,7 @@ unsafe fn encode_hicon_png(icon: HICON) -> Option<Vec<u8>> {
     bi.bmiHeader.biCompression = BI_RGB.0;
 
     let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
-    let hdc: HDC = GetDC(HWND::default());
+    let hdc: HDC = GetDC(None);
     let lines = GetDIBits(
         hdc,
         info.hbmColor,
@@ -274,7 +274,7 @@ unsafe fn encode_hicon_png(icon: HICON) -> Option<Vec<u8>> {
         &mut bi,
         DIB_RGB_COLORS,
     );
-    ReleaseDC(HWND::default(), hdc);
+    ReleaseDC(None, hdc);
 
     cleanup(&info);
 

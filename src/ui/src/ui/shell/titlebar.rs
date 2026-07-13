@@ -65,6 +65,9 @@ impl WinCtl {
 /// Which side of the title bar the window controls sit on.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Side {
+    // Only produced by the GNOME (Linux) button-layout parse; the layout code
+    // still matches it on every platform, so it is never constructed on Windows.
+    #[allow(dead_code)]
     Left,
     Right,
 }
@@ -173,6 +176,9 @@ fn detect_native_chrome() -> ChromeConfig {
 /// that aren't window controls (`appmenu`, `menu`, `icon`, `spacer`, …) are
 /// ignored. A layout with controls on the right wins the side; otherwise the left
 /// group is used. An empty result means "no controls" — a valid preference.
+// GNOME desktop layout parsing — only used by the Linux native-chrome detection
+// (and its cross-platform unit tests).
+#[cfg(any(target_os = "linux", test))]
 fn parse_gnome_button_layout(layout: &str) -> (Side, Vec<WinCtl>) {
     let (left, right) = layout.split_once(':').unwrap_or((layout, ""));
     let group = |g: &str| -> Vec<WinCtl> {

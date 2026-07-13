@@ -139,6 +139,8 @@ impl App {
         }
     }
 
+    // Only the Wayland custom-hide loop drives this out-of-frame tray sync.
+    #[cfg(target_os = "linux")]
     pub(crate) fn sync_tray_background(&mut self, ctx: &egui::Context) {
         let state = self.ui.state.borrow();
         self.tray.sync(ctx, &state);

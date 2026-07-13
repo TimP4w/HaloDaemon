@@ -529,7 +529,9 @@ mod tests {
     /// A `file://` URL for a local path — `add_repo`/`clone` now require an
     /// explicit scheme, so tests clone local source repos through one.
     fn file_url(path: &std::path::Path) -> String {
-        format!("file://{}", path.display())
+        url::Url::from_file_path(path)
+            .expect("temporary repository path must be absolute")
+            .into()
     }
 
     /// Init a local source repo at `dir`; the plugin id must equal `dir`'s file name (see `parse_manifest_from_dir`).

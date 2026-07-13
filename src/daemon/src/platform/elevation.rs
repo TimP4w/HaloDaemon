@@ -125,7 +125,10 @@ use crate::platform::win32::{wide, wide_path};
 /// using the CommandLineToArgvW escaping rules:
 /// - Wrap in double quotes if the argument is empty or contains spaces/tabs/quotes.
 /// - Backslashes before a `"` (or the closing quote) are doubled.
-#[cfg(windows)]
+///
+/// Currently exercised only by tests — `spawn_broker_elevated` passes no
+/// parameters — so it is compiled in test builds only until a caller needs it.
+#[cfg(all(windows, test))]
 pub(crate) fn quote_arg(arg: &str) -> String {
     let needs_quoting = arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
     if !needs_quoting {

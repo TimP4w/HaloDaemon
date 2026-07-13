@@ -732,15 +732,7 @@ impl PluginManifest {
 
     /// Hex SHA-256 of `manifest_bytes` + `script_source`; consent is pinned to this.
     pub fn content_hash(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&self.manifest_bytes);
-        hasher.update(self.script_source.as_bytes());
-        hasher
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        plugin_content_hash(&self.manifest_bytes, self.script_source.as_bytes())
     }
 
     /// Device specs that request an SMBus scan.
@@ -893,6 +885,34 @@ impl PluginManifest {
             .map(|f| f.key.as_str())
             .collect()
     }
+}
+
+/// Hash the two text files that define a plugin package. Git may materialize
+/// LF blobs as CRLF in a Windows working tree, so normalize CRLF before hashing
+/// to keep consent and tamper baselines stable across checkout configurations.
+pub(super) fn plugin_content_hash(manifest: &[u8], script: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    fn update_text(hasher: &mut Sha256, bytes: &[u8]) {
+        let mut start = 0;
+        for (i, pair) in bytes.windows(2).enumerate() {
+            if pair == b"\r\n" {
+                hasher.update(&bytes[start..i]);
+                hasher.update(b"\n");
+                start = i + 2;
+            }
+        }
+        hasher.update(&bytes[start..]);
+    }
+
+    let mut hasher = Sha256::new();
+    update_text(&mut hasher, manifest);
+    update_text(&mut hasher, script);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Parse (and validate) a plugin script's manifest. Does not register it.

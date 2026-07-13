@@ -91,4 +91,53 @@ mod tests {
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
+
+    // Windows durability: `std::fs::rename` maps to `MoveFileEx` with
+    // REPLACE_EXISTING, and Rust opens files with FILE_SHARE_DELETE, so a
+    // replace must succeed atomically even while another handle holds the
+    // destination open — the case a naive delete-then-write would corrupt.
+    // These pin that native behaviour (RF-15) so a toolchain/target change that
+    // regressed it would fail here rather than silently truncate live config.
+    #[cfg(windows)]
+    #[test]
+    fn replaces_destination_held_open_by_a_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        atomic_write_str(&p, "old").unwrap();
+        let reader = std::fs::File::open(&p).unwrap();
+        atomic_write_str(&p, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        drop(reader);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replaces_destination_held_open_by_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        atomic_write_str(&p, "old").unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        atomic_write_str(&p, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        drop(writer);
+    }
+
+    // Repeated in-place replacement leaves exactly the last write and no temp
+    // debris, including when the destination already exists each round.
+    #[cfg(windows)]
+    #[test]
+    fn repeated_replacement_leaves_only_the_final_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("cfg.yaml");
+        for i in 0..25 {
+            atomic_write_str(&p, &format!("gen {i}")).unwrap();
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), format!("gen {i}"));
+        }
+        let leftovers = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
 }

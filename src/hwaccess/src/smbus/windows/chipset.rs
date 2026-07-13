@@ -270,16 +270,9 @@ impl Drop for ChipsetBus {
 /// the PCI VEN_/DEV_/SUBSYS_ identifiers out of each `DeviceID`.
 pub(super) fn enumerate_buses() -> Vec<BusInfo> {
     use std::collections::HashMap;
-    use wmi::{COMLibrary, Variant, WMIConnection};
+    use wmi::{Variant, WMIConnection};
 
-    let com = match COMLibrary::new() {
-        Ok(c) => c,
-        Err(e) => {
-            log::debug!("[SmBus] COM init failed: {e}");
-            return vec![];
-        }
-    };
-    let conn = match WMIConnection::new(com) {
+    let conn = match WMIConnection::new() {
         Ok(c) => c,
         Err(e) => {
             log::debug!("[SmBus] WMI connect failed: {e}");

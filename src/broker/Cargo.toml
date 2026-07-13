@@ -25,12 +25,13 @@ log    = { workspace = true, features = ["std"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # SCM dispatcher + service install/uninstall/stop for the on-demand service.
-windows-service = "0.7"
-windows = { version = "0.58", features = [
+windows-service = "0.8.1"
+windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
     "Win32_System_IO",
+    "Win32_System_Threading",
 ] }

@@ -167,7 +167,7 @@ fn current_user_sid() -> Result<String> {
         ConvertSidToStringSidW(token_user.User.Sid, &mut sid_str)
             .map_err(|e| anyhow::anyhow!("ConvertSidToStringSidW failed: {e}"))?;
         let result = sid_str.to_string();
-        let _ = LocalFree(HLOCAL(sid_str.0 as *mut std::ffi::c_void));
+        let _ = LocalFree(Some(HLOCAL(sid_str.0 as *mut std::ffi::c_void)));
         result.map_err(|e| anyhow::anyhow!("SID string not valid UTF-16: {e}"))
     }
 }
@@ -236,7 +236,7 @@ impl Drop for PipeSecurity {
         if !self.descriptor.0.is_null() {
             // SAFETY: `descriptor` was allocated by the Convert* call in `new`.
             unsafe {
-                let _ = LocalFree(HLOCAL(self.descriptor.0));
+                let _ = LocalFree(Some(HLOCAL(self.descriptor.0)));
             }
         }
     }

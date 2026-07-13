@@ -32,7 +32,7 @@ fn read_thumbnail(stream: IRandomAccessStream) -> Option<RgbaImage> {
     let op = input
         .ReadAsync(&buffer, size as u32, InputStreamOptions::ReadAhead)
         .ok()?;
-    let result = op.get().ok()?;
+    let result = op.join().ok()?;
     let len = result.Length().ok()? as usize;
     let reader = windows::Storage::Streams::DataReader::FromBuffer(&result).ok()?;
     let mut bytes = vec![0u8; len];
@@ -76,12 +76,12 @@ pub fn run(weak: Weak<MediaHandle>) {
 }
 
 fn poll_once(art_cache: &mut ArtCache) -> windows::core::Result<Option<MediaInfo>> {
-    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.get()?;
+    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.join()?;
     let Ok(session) = manager.GetCurrentSession() else {
         return Ok(None);
     };
 
-    let props = session.TryGetMediaPropertiesAsync()?.get()?;
+    let props = session.TryGetMediaPropertiesAsync()?.join()?;
     let title = props.Title().map(|s| s.to_string()).unwrap_or_default();
     let artist = props.Artist().map(|s| s.to_string()).unwrap_or_default();
     let album = props
@@ -101,7 +101,7 @@ fn poll_once(art_cache: &mut ArtCache) -> windows::core::Result<Option<MediaInfo
         Some(cached)
     } else if let Ok(thumb_ref) = props.Thumbnail() {
         match thumb_ref.OpenReadAsync() {
-            Ok(op) => match op.get() {
+            Ok(op) => match op.join() {
                 Ok(stream) => {
                     let loaded = match stream.cast::<IRandomAccessStream>() {
                         Ok(stream) => read_thumbnail(stream),

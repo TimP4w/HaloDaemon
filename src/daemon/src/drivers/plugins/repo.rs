@@ -177,8 +177,6 @@ pub fn remote_plugin_content(
     sha: &str,
     subpath: &Path,
 ) -> Result<(String, String)> {
-    use sha2::{Digest, Sha256};
-
     let repo = git2::Repository::open(repo_dir)
         .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
     let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
@@ -194,14 +192,7 @@ pub fn remote_plugin_content(
     let entry = meta.entry.as_deref().unwrap_or("main.lua");
     let entry_bytes = read_blob_at(&repo, &tree, &subpath.join(entry))?;
 
-    let mut hasher = Sha256::new();
-    hasher.update(&yaml_bytes);
-    hasher.update(&entry_bytes);
-    let hash = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let hash = super::manifest::plugin_content_hash(&yaml_bytes, &entry_bytes);
 
     Ok((hash, meta.version.unwrap_or_default()))
 }
@@ -214,8 +205,6 @@ pub fn remote_plugin_content(
 /// detects a real upstream update. `locked_sha` is *not* a safe per-plugin
 /// baseline (a per-plugin update advances it repo-wide), so the index is used.
 pub fn index_plugin_content(repo_dir: &Path, subpath: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
-
     let repo = git2::Repository::open(repo_dir)
         .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
     let index = repo.index().context("reading index")?;
@@ -236,14 +225,10 @@ pub fn index_plugin_content(repo_dir: &Path, subpath: &Path) -> Result<String> {
     let entry = meta.entry.as_deref().unwrap_or("main.lua");
     let entry_bytes = read(&subpath.join(entry))?;
 
-    let mut hasher = Sha256::new();
-    hasher.update(&yaml_bytes);
-    hasher.update(&entry_bytes);
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(super::manifest::plugin_content_hash(
+        &yaml_bytes,
+        &entry_bytes,
+    ))
 }
 
 /// Stage `subpath`'s current working-tree content into the index, making the
@@ -330,7 +315,9 @@ mod tests {
     /// A `file://` URL for a local path, so tests clone with an explicit,
     /// allow-listed scheme rather than a now-rejected bare path.
     fn file_url(path: &Path) -> String {
-        format!("file://{}", path.display())
+        url::Url::from_file_path(path)
+            .expect("temporary repository path must be absolute")
+            .into()
     }
 
     #[test]

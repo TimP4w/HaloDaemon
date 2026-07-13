@@ -23,7 +23,9 @@ pub struct UsbClaim {
     pub handle: rusb::DeviceHandle<rusb::Context>,
     pub interface: u8,
     /// `true` when we detached a kernel driver in [`Self::claim`], so
-    /// [`Drop`] knows to re-attach it.
+    /// [`Drop`] knows to re-attach it. Kernel-driver detach/reattach is a Linux
+    /// (libusb) concern only.
+    #[cfg(target_os = "linux")]
     had_kernel_driver: bool,
 }
 
@@ -39,9 +41,7 @@ impl UsbClaim {
 
     /// Claim an interface on an already-opened device handle.
     pub fn claim(handle: rusb::DeviceHandle<rusb::Context>, interface: u8) -> Result<Self> {
-        // Only the Linux `cfg` block below reassigns this; elsewhere it stays
-        // `false`, so `mut` is unused off Linux.
-        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        #[cfg(target_os = "linux")]
         let mut had_kernel_driver = false;
         #[cfg(target_os = "linux")]
         match handle.kernel_driver_active(interface) {
@@ -60,6 +60,7 @@ impl UsbClaim {
         Ok(Self {
             handle,
             interface,
+            #[cfg(target_os = "linux")]
             had_kernel_driver,
         })
     }

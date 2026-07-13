@@ -2338,11 +2338,11 @@ mod tests {
           end,
 
           -------------------------------
-          -- Per-controller callbacks; dev.match.index routes to the right
-          -- controller. The same script source is shared by every child worker.
+          -- Per-controller callbacks. The daemon passes the controller index;
+          -- the same script source is shared by every child worker.
 
-          write_frame = function(dev, zone_id, colors)
-            local bytes = { dev.match.index, string.byte(zone_id, 1) }
+          write_controller_frame = function(dev, index, zone_id, colors)
+            local bytes = { index, string.byte(zone_id, 1) }
             for _, c in ipairs(colors) do
               bytes[#bytes+1] = c.r
               bytes[#bytes+1] = c.g
@@ -2351,12 +2351,11 @@ mod tests {
             dev.transport:write(string.char(table.unpack(bytes)))
           end,
 
-          apply = function(dev, state)
+          apply_controller = function(dev, index, state)
             local color = (state.mode == "static") and state.color
             if not color then return end
-            local idx = dev.match.index
             -- Zone layout per controller (mirrors enumerate_controllers).
-            local zones = idx == 0 and {
+            local zones = index == 0 and {
               { id = "main", n = 4 },
             } or {
               { id = "aux", n = 2 },
@@ -2366,7 +2365,7 @@ mod tests {
               local cs = {}
               for i = 1, z.n do cs[i] = color end
               -- Reuse the write_frame wire format so tests see the same bytes.
-              local bytes = { idx, string.byte(z.id, 1) }
+              local bytes = { index, string.byte(z.id, 1) }
               for _, c in ipairs(cs) do
                 bytes[#bytes+1] = c.r
                 bytes[#bytes+1] = c.g

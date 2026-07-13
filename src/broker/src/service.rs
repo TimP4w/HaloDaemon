@@ -92,11 +92,18 @@ pub fn install() -> Result<()> {
     Ok(())
 }
 
-/// Allow interactive (non-elevated) users to start and stop the broker service,
-/// so the worker can bring it up on demand. Best-effort.
+/// Allow interactive (non-elevated) users to start the broker service on demand
+/// and query its state. Best-effort.
+///
+/// The grant is deliberately **start + query only** (no SERVICE_STOP): the
+/// broker self-stops once idle, so no unprivileged caller needs to stop it, and
+/// withholding STOP keeps one interactive user from stopping another user's
+/// in-use broker (a cross-user denial of service). Which user is served is
+/// enforced at the pipe, not here: even a user who starts the service cannot
+/// connect unless they are the bound coordinator (see `clientauth`).
 fn grant_user_service_control() {
-    // Interactive Users: SERVICE_START (RP) + SERVICE_STOP (WP) + query (LC).
-    const ACE: &str = "(A;;RPWPLC;;;IU)";
+    // Interactive Users: SERVICE_START (RP) + query (LC). No SERVICE_STOP (WP).
+    const ACE: &str = "(A;;RPLC;;;IU)";
 
     let shown = Command::new("sc.exe")
         .args(["sdshow", SERVICE_NAME])

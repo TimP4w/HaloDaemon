@@ -90,8 +90,4 @@ impl LpcIoBus {
     pub fn rate_status(&self) -> WriteRateStatus {
         self.io.status()
     }
-
-    pub fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
-        self.io.set_limit(limit);
-    }
 }

@@ -9,21 +9,36 @@
 //! `find_bars` state isolated.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use halod_hwaccess::pawnio::{PawnioModule, PawnioOps};
 use halod_hwaccess::proto::{self, Request, Response, PIPE_NAME};
 use halod_hwaccess::smbus::{self, SmBusSyncOps};
 use halod_hwaccess::winsec;
 
+use crate::clientauth::{self, Admission, Gate};
 use crate::pipe::{create_instance, wait_for_client, PipeSecurity, PipeStream};
 
-/// Live client connections, so [`wait_until_idle`] can stop the on-demand
-/// service once its worker is gone rather than sitting elevated forever.
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// Most concurrent client connections. The trusted daemon opens one connection
+/// per bus/module handle it holds; this bounds a buggy or hostile peer from
+/// exhausting threads and pipe instances (RF-13).
+const MAX_CLIENTS: usize = 64;
+
+/// Most bus / PawnIO handles a single connection may open, so one connection
+/// cannot grow its handle maps without bound (RF-13).
+const MAX_HANDLES_PER_KIND: usize = 64;
+
+/// Gate state shared across accept threads: the bound coordinator identity and
+/// the live connection count. [`wait_until_idle`] reads the count to stop the
+/// on-demand service once its worker is gone rather than sitting elevated.
+static GATE: Mutex<Gate> = Mutex::new(Gate::new());
+
+fn gate() -> MutexGuard<'static, Gate> {
+    GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Accept connections forever, serving each on its own thread. Returns only on
 /// a fatal error creating the secured pipe.
@@ -39,11 +54,38 @@ pub fn serve_forever() -> Result<()> {
             drop(stream);
             continue;
         }
-        ACTIVE.fetch_add(1, Ordering::SeqCst);
-        std::thread::spawn(move || {
-            serve(stream);
-            ACTIVE.fetch_sub(1, Ordering::SeqCst);
-        });
+
+        // Bind the broker to exactly one interactive user: identify the client
+        // and admit only the coordinator (see `clientauth`). A refused client is
+        // disconnected by dropping its stream.
+        let identity = match clientauth::pipe_client_identity(handle) {
+            Ok(id) => id,
+            Err(e) => {
+                log::warn!("[broker] could not identify pipe client ({e}); refusing");
+                drop(stream);
+                continue;
+            }
+        };
+        match clientauth::decide(&mut gate(), &identity, MAX_CLIENTS) {
+            Admission::Ok => {
+                std::thread::spawn(move || {
+                    serve(stream);
+                    clientauth::release(&mut gate());
+                });
+            }
+            Admission::WrongUser => {
+                log::warn!(
+                    "[broker] refusing client SID {} session {}: broker is bound to another user",
+                    identity.sid,
+                    identity.session
+                );
+                drop(stream);
+            }
+            Admission::TooMany => {
+                log::warn!("[broker] refusing client: {MAX_CLIENTS} connections already active");
+                drop(stream);
+            }
+        }
     }
 }
 
@@ -57,7 +99,7 @@ pub fn wait_until_idle(grace: Duration) {
     let mut empty_since: Option<Instant> = Some(Instant::now());
     loop {
         std::thread::sleep(Duration::from_secs(1));
-        if ACTIVE.load(Ordering::SeqCst) == 0 {
+        if gate().active() == 0 {
             let since = *empty_since.get_or_insert_with(Instant::now);
             if since.elapsed() >= grace {
                 return;
@@ -75,6 +117,20 @@ struct Conn {
     next_bus: u32,
     pawnio: HashMap<u32, PawnioModule>,
     next_pawnio: u32,
+}
+
+/// Allocate the next handle id in `next`, refusing once `map` is at
+/// `MAX_HANDLES_PER_KIND` or the counter would overflow. Keeps id allocation
+/// checked and the per-connection handle maps bounded (RF-13).
+fn next_handle_id<V>(map: &HashMap<u32, V>, next: &mut u32, kind: &str) -> Result<u32> {
+    if map.len() >= MAX_HANDLES_PER_KIND {
+        bail!("too many open {kind} handles on this connection (max {MAX_HANDLES_PER_KIND})");
+    }
+    let id = next
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("{kind} handle id space exhausted"))?;
+    *next = id;
+    Ok(id)
 }
 
 fn serve(mut stream: PipeStream) {
@@ -107,9 +163,8 @@ fn dispatch(conn: &mut Conn, req: Request) -> Response {
         Request::EnumerateGpu => Response::Buses(smbus::enumerate_gpu_buses()),
 
         Request::OpenBus { info } => ok_or_err((|| {
+            let id = next_handle_id(&conn.buses, &mut conn.next_bus, "bus")?;
             let bus = smbus::open_bus(&info)?;
-            conn.next_bus += 1;
-            let id = conn.next_bus;
             log::info!(
                 "[broker] open bus {id}: #{} {} ({:04x}:{:04x})",
                 info.bus_number,
@@ -175,9 +230,8 @@ fn dispatch(conn: &mut Conn, req: Request) -> Response {
         }
 
         Request::PawnioOpen { module } => ok_or_err((|| {
+            let id = next_handle_id(&conn.pawnio, &mut conn.next_pawnio, "pawnio")?;
             let m = PawnioModule::open(&[module.as_str()])?;
-            conn.next_pawnio += 1;
-            let id = conn.next_pawnio;
             log::info!("[broker] open pawnio {id}: module {module}");
             conn.pawnio.insert(id, m);
             Ok(Response::Opened(id))
@@ -207,5 +261,32 @@ fn with_bus(
     match conn.buses.get_mut(&bus) {
         Some(b) => ok_or_err(f(b.as_mut())),
         None => Response::Error(format!("unknown bus handle {bus}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handle_ids_start_at_one_and_increment() {
+        let map: HashMap<u32, ()> = HashMap::new();
+        let mut next = 0;
+        assert_eq!(next_handle_id(&map, &mut next, "bus").unwrap(), 1);
+        assert_eq!(next_handle_id(&map, &mut next, "bus").unwrap(), 2);
+    }
+
+    #[test]
+    fn handle_ids_are_refused_at_the_per_connection_cap() {
+        let map: HashMap<u32, ()> = (0..MAX_HANDLES_PER_KIND as u32).map(|i| (i, ())).collect();
+        let mut next = 0;
+        assert!(next_handle_id(&map, &mut next, "bus").is_err());
+    }
+
+    #[test]
+    fn handle_id_allocation_is_checked_against_overflow() {
+        let map: HashMap<u32, ()> = HashMap::new();
+        let mut next = u32::MAX;
+        assert!(next_handle_id(&map, &mut next, "bus").is_err());
     }
 }

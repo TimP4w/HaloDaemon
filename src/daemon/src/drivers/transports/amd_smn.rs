@@ -17,12 +17,11 @@ use anyhow::{bail, Result};
 use crate::drivers::transports::register_ops;
 use crate::drivers::Metered;
 use halod_hwaccess::pawnio::PawnioOps;
-use halod_shared::types::{WriteRateLimit, WriteRateStatus};
+use halod_shared::types::WriteRateLimit;
 
 pub struct AmdSmnBus {
-    /// Gated like every other transport for a uniform write-rate surface,
-    /// even though this bus only ever reads: `rate_status` legitimately
-    /// reports zero writes, and if a write op is ever added here it's
+    /// Gated like every other transport for a uniform write-rate surface, even
+    /// though this bus only ever reads — if a write op is ever added here it's
     /// already behind the gate.
     io: Metered<Box<dyn PawnioOps>>,
 }
@@ -47,11 +46,4 @@ impl AmdSmnBus {
         Ok((first & 0xFFFF_FFFF) as u32)
     }
 
-    pub fn rate_status(&self) -> WriteRateStatus {
-        self.io.status()
-    }
-
-    pub fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
-        self.io.set_limit(limit);
-    }
 }

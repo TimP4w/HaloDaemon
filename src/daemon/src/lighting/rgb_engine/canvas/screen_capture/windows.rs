@@ -110,7 +110,7 @@ fn run_dxgi_capture(
             D3D11CreateDevice(
                 None,
                 D3D_DRIVER_TYPE_HARDWARE,
-                None,
+                Default::default(),
                 D3D11_CREATE_DEVICE_FLAG(0),
                 None,
                 D3D11_SDK_VERSION,

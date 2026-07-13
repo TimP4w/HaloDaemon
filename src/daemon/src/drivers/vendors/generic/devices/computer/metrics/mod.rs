@@ -128,9 +128,10 @@ pub fn make_backend() -> Option<std::sync::Arc<dyn HostMetricsBackend>> {
     None
 }
 
-// --- Pure parsers, shared by the Linux backend and exercised by tests. ---
+// --- Pure `/proc` parsers, used only by the Linux backend (exercised by tests). ---
 
 /// `(idle, total)` jiffies from the aggregate `cpu ` line of `/proc/stat`.
+#[cfg(target_os = "linux")]
 pub fn parse_proc_stat(content: &str) -> Option<(u64, u64)> {
     let line = content.lines().find(|l| l.starts_with("cpu "))?;
     let vals: Vec<u64> = line
@@ -149,6 +150,7 @@ pub fn parse_proc_stat(content: &str) -> Option<(u64, u64)> {
 
 /// CPU load percent from two `/proc/stat` snapshots. `None` if the interval had
 /// no elapsed jiffies (e.g. identical samples).
+#[cfg(target_os = "linux")]
 pub fn cpu_load_pct(prev: (u64, u64), cur: (u64, u64)) -> Option<f64> {
     let d_idle = cur.0.saturating_sub(prev.0) as f64;
     let d_total = cur.1.saturating_sub(prev.1) as f64;
@@ -159,6 +161,7 @@ pub fn cpu_load_pct(prev: (u64, u64), cur: (u64, u64)) -> Option<f64> {
 }
 
 /// Parse `/proc/meminfo` into a [`MemInfo`], using `MemAvailable` for "used".
+#[cfg(target_os = "linux")]
 pub fn parse_meminfo(content: &str) -> Option<MemInfo> {
     let mut total_kib = None;
     let mut avail_kib = None;
@@ -180,6 +183,7 @@ pub fn parse_meminfo(content: &str) -> Option<MemInfo> {
 }
 
 /// Average `cpu MHz` across all cores in `/proc/cpuinfo`.
+#[cfg(target_os = "linux")]
 pub fn parse_cpu_mhz(content: &str) -> Option<f64> {
     let mut sum = 0.0;
     let mut n = 0u32;
@@ -198,6 +202,7 @@ pub fn parse_cpu_mhz(content: &str) -> Option<f64> {
 }
 
 /// Uptime seconds from `/proc/uptime` (its first field).
+#[cfg(target_os = "linux")]
 pub fn parse_uptime(content: &str) -> Option<f64> {
     content
         .split_whitespace()
@@ -209,6 +214,7 @@ pub fn parse_uptime(content: &str) -> Option<f64> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn parses_proc_stat_and_derives_load() {
         let prev = parse_proc_stat("cpu  100 0 100 800 0 0 0 0\nintr 1").unwrap();
@@ -221,6 +227,7 @@ mod tests {
         assert_eq!(cpu_load_pct(cur, cur), None);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn parses_meminfo() {
         let m = parse_meminfo(
@@ -242,6 +249,7 @@ mod tests {
         assert!((m.total_gib - 30.517).abs() < 0.01);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn parses_cpu_mhz_average_and_uptime() {
         let info = "processor: 0\ncpu MHz\t\t: 3000.0\nprocessor: 1\ncpu MHz\t\t: 4000.0\n";

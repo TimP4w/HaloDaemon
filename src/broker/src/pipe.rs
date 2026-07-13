@@ -58,7 +58,7 @@ impl Drop for PipeSecurity {
     fn drop(&mut self) {
         if !self.sd.0.is_null() {
             unsafe {
-                let _ = LocalFree(HLOCAL(self.sd.0));
+                let _ = LocalFree(Some(HLOCAL(self.sd.0)));
             }
         }
     }
@@ -148,5 +148,28 @@ impl Drop for PipeStream {
             let _ = DisconnectNamedPipe(self.0);
             let _ = CloseHandle(self.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_sddl_parses_the_broker_dacl_and_frees_it() {
+        // The real broker DACL round-trips through the parser; the descriptor is
+        // non-null and freed on drop without a double-free (run under the alloc
+        // checks the test harness applies).
+        let sec = PipeSecurity::from_sddl("D:P(A;;GA;;;IU)(A;;GA;;;SY)")
+            .expect("valid SDDL should parse");
+        assert!(!sec.sd.0.is_null());
+        let sa = sec.attributes();
+        assert_eq!(sa.lpSecurityDescriptor, sec.sd.0);
+        assert!(!sa.bInheritHandle.as_bool());
+    }
+
+    #[test]
+    fn from_sddl_rejects_a_malformed_descriptor() {
+        assert!(PipeSecurity::from_sddl("not a security descriptor").is_err());
     }
 }

@@ -80,10 +80,12 @@ pub enum Nct677xVariant {
     Nct6798D,
     Nct6799D,
     Nct6701D,
+    #[allow(dead_code)]
     Nct5585D,
     Nct6683D,
     Nct6686D,
     Nct6687D,
+    #[allow(dead_code)]
     Nct6687DR,
     Nct610Xd,
 }

@@ -20,6 +20,8 @@
 //! elevated surface with a logged boundary — see the privilege-separation doc.
 
 #[cfg(target_os = "windows")]
+mod clientauth;
+#[cfg(target_os = "windows")]
 mod log_file;
 #[cfg(target_os = "windows")]
 mod pipe;

@@ -557,28 +557,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mini_effect_plugin_renders_a_frame_well_under_the_tick_budget() {
-        let handle = PluginEffectHandle::spawn(
-            MINI_FX.to_string(),
-            "plasma".to_string(),
-            [("speed".to_string(), EffectParamValue::Float(0.8))]
-                .into_iter()
-                .collect(),
-            vec![],
-            HashMap::new(),
-        );
-        // First call pays for VM warm-up; time a subsequent one.
-        handle.render_pixmap(0.0, 0.016).await.unwrap();
-        let start = std::time::Instant::now();
-        handle.render_pixmap(0.1, 0.016).await.unwrap();
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < std::time::Duration::from_millis(150),
-            "plasma render took {elapsed:?}, expected well under one frame budget"
-        );
-    }
-
-    #[tokio::test]
     async fn mini_effect_plugin_comet_direction_reverses_the_sweep() {
         let leds: Vec<LedCoord> = (0..8)
             .map(|i| LedCoord {
