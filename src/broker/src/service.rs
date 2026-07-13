@@ -159,7 +159,7 @@ fn replace_coordinator_ace(sddl: &str, coordinator_sid: &str, ace: &str) -> Opti
             break;
         };
         let candidate = &candidate[..=close];
-        let is_interactive = candidate.ends_with(";;;IU)");
+        let is_interactive = candidate.ends_with(";;;IU)") || candidate.ends_with(";;;S-1-5-4)");
         let is_coordinator = candidate.ends_with(&format!(";;;{coordinator_sid})"));
         if !is_interactive && !is_coordinator {
             kept.push_str(candidate);
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn coordinator_ace_replaces_all_interactive_aces() {
-        let sddl = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWLOCRRC;;;IU)S:(AU;FA;CCDCLC;;;WD)";
+        let sddl = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CC;;;S-1-5-4)(A;;CCLCSWLOCRRC;;;IU)S:(AU;FA;CCDCLC;;;WD)";
         let out = replace_coordinator_ace(sddl, SID, ACE).expect("DACL");
         assert_eq!(
             out,

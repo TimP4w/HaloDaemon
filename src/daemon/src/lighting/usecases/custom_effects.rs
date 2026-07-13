@@ -56,13 +56,9 @@ pub async fn save_custom_effect(
         name: Some(name.clone()),
         params: normalized,
     };
-    let dir = custom_effects_dir();
-    tokio::fs::create_dir_all(&dir).await?;
     let path = effect_path(&name);
-    let tmp = path.with_extension("yaml.tmp");
     let yaml = serde_yaml::to_string(&def)?;
-    tokio::fs::write(&tmp, &yaml).await?;
-    tokio::fs::rename(&tmp, &path).await?;
+    tokio::task::spawn_blocking(move || crate::config::atomic_write(&path, &yaml)).await??;
     log::info!("[RGB] saved custom effect '{name}'");
     app.lighting.custom_effects.refresh().await;
     crate::ipc::broadcast_state(&app).await;

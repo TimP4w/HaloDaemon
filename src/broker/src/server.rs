@@ -17,10 +17,13 @@ use halod_hwaccess::winsec;
 use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
 
 use crate::clientauth::{self, Admission, ClientIdentity, Gate};
-use crate::pipe::{create_instance, wait_for_client, PipeSecurity, PipeStream};
+use crate::pipe::{
+    create_instance, disconnect_handle_value, wait_for_client, PipeSecurity, PipeStream,
+};
 
 const MAX_CLIENTS: usize = 32;
 const MAX_HANDLES_PER_KIND: usize = 64;
+const AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CLIENT_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Clone)]
@@ -113,12 +116,43 @@ pub fn serve_forever() -> Result<()> {
         }
 
         let handle = create_instance(PIPE_NAME, &sec)?;
-        let stream = PipeStream::new(handle);
+        let mut stream = PipeStream::new(handle);
         if let Err(e) = wait_for_client(handle) {
             log::warn!("[broker] wait_for_client failed: {e}");
             drop(stream);
             continue;
         }
+
+        // Windows requires the server to consume data from a named-pipe client
+        // before ImpersonateNamedPipeClient can derive that client's token.
+        // Read exactly the mandatory first authentication frame here, then hand
+        // it to the admitted worker so it is processed only once.
+        match stream.wait_readable(AUTHENTICATION_TIMEOUT) {
+            Ok(true) => {}
+            Ok(false) => {
+                log::warn!("[broker] client did not authenticate within the timeout; refusing");
+                drop(stream);
+                continue;
+            }
+            Err(e) => {
+                log::debug!("[broker] authentication wait failed: {e}");
+                drop(stream);
+                continue;
+            }
+        }
+        let first_request: Request = match proto::read_frame(&mut stream) {
+            Ok(request @ Request::Authenticate { .. }) => request,
+            Ok(_) => {
+                log::warn!("[broker] first client frame was not Authenticate; refusing");
+                drop(stream);
+                continue;
+            }
+            Err(e) => {
+                log::debug!("[broker] could not read authentication frame: {e}");
+                drop(stream);
+                continue;
+            }
+        };
 
         let identity = match clientauth::pipe_client_identity(handle) {
             Ok(id) => id,
@@ -136,7 +170,7 @@ pub fn serve_forever() -> Result<()> {
                 let worker = std::thread::Builder::new()
                     .name(format!("halod-broker-{id}"))
                     .spawn(move || {
-                        serve(stream);
+                        serve(stream, first_request);
                         clientauth::release(&mut gate());
                         let _ = done.send(id);
                     })?;
@@ -279,27 +313,40 @@ fn next_handle_id<V>(map: &HashMap<u32, V>, next: &mut u32, kind: &str) -> Resul
     Ok(id)
 }
 
-fn serve(mut stream: PipeStream) {
+fn serve(mut stream: PipeStream, first_request: Request) {
     let mut conn = Conn::default();
+    let mut pending = Some(first_request);
+    enum Activity {
+        Request,
+        Closed,
+    }
+    let (activity_tx, activity_rx) = mpsc::channel();
+    let pipe_handle = stream.handle_value();
+    let idle_watchdog = std::thread::Builder::new()
+        .name("halod-broker-idle-watchdog".into())
+        .spawn(move || loop {
+            match activity_rx.recv_timeout(CLIENT_IDLE_TIMEOUT) {
+                Ok(Activity::Request) => {}
+                Ok(Activity::Closed) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    log::info!("[broker] disconnecting idle client");
+                    disconnect_handle_value(pipe_handle);
+                    return;
+                }
+            }
+        });
     loop {
-        match stream.wait_readable(CLIENT_IDLE_TIMEOUT) {
-            Ok(true) => {}
-            Ok(false) => {
-                log::info!("[broker] closing idle client");
-                break;
-            }
-            Err(e) => {
-                log::debug!("[broker] connection wait failed: {e}");
-                break;
-            }
-        }
-        let req: Request = match proto::read_frame(&mut stream) {
-            Ok(r) => r,
-            Err(e) => {
-                log::debug!("[broker] connection closed: {e}");
-                break;
-            }
+        let req = match pending.take() {
+            Some(request) => request,
+            None => match proto::read_frame(&mut stream) {
+                Ok(request) => request,
+                Err(e) => {
+                    log::debug!("[broker] connection closed: {e}");
+                    break;
+                }
+            },
         };
+        let _ = activity_tx.send(Activity::Request);
         let resp = match req {
             Request::Authenticate {
                 bootstrap_token,
@@ -315,6 +362,10 @@ fn serve(mut stream: PipeStream) {
             log::debug!("[broker] reply write failed: {e}");
             break;
         }
+    }
+    let _ = activity_tx.send(Activity::Closed);
+    if let Ok(watchdog) = idle_watchdog {
+        let _ = watchdog.join();
     }
 }
 

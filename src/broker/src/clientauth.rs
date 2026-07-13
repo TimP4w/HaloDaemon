@@ -2,13 +2,13 @@
 //! Identify the user behind a connected named-pipe client and bind the broker to
 //! exactly one interactive session.
 //!
-//! The pipe DACL keeps out session-0 / network callers, but it grants every
-//! *interactive* user (`IU`) — so on a multi-session box (fast-user-switching,
-//! RDP) a second logged-in user could otherwise connect to the elevated broker
-//! and issue raw register writes. To close that, the broker impersonates each
-//! connecting client, reads its token's SID + logon-session id, and admits only
-//! the concrete identity supplied through the authenticated broker bootstrap.
-//! No caller can claim an unbound broker by winning a connection race.
+//! The pipe DACL already restricts access to the concrete coordinator SID (plus
+//! SYSTEM), but a single user can hold several logon sessions at once
+//! (fast-user-switching, RDP, `runas`), so the SID alone does not pin one
+//! session. To close that, the broker impersonates each connecting client, reads
+//! its token's SID + logon-session id, and admits only the concrete identity
+//! supplied through the authenticated broker bootstrap. No caller can claim an
+//! unbound broker by winning a connection race.
 //!
 //! The FFI (impersonate → read token → revert) is kept small; the admission
 //! decision itself is a pure function ([`decide`]) so it can be unit-tested
@@ -247,5 +247,38 @@ mod tests {
         let mut gate = Gate::new();
         release(&mut gate);
         assert_eq!(gate.active(), 0);
+    }
+
+    #[test]
+    fn pipe_identity_succeeds_after_server_consumes_client_data() {
+        use std::io::{Read as _, Write as _};
+
+        use crate::pipe::{create_instance, wait_for_client, PipeSecurity, PipeStream};
+
+        let (sid, session) = halod_hwaccess::winsec::current_process_identity().unwrap();
+        let name = format!(r"\\.\pipe\halod-auth-test-{}", std::process::id());
+        let security =
+            PipeSecurity::from_sddl(&halod_hwaccess::winsec::coordinator_dacl_sddl(&sid).unwrap())
+                .unwrap();
+        let handle = create_instance(&name, &security).unwrap();
+        let mut server = PipeStream::new(handle);
+        let client = std::thread::spawn(move || {
+            let mut client = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(name)
+                .unwrap();
+            client.write_all(&[0x42]).unwrap();
+        });
+
+        wait_for_client(handle).unwrap();
+        let mut byte = [0u8; 1];
+        server.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, [0x42]);
+        assert_eq!(
+            pipe_client_identity(handle).unwrap(),
+            ClientIdentity { sid, session }
+        );
+        client.join().unwrap();
     }
 }

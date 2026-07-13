@@ -46,6 +46,22 @@ pub fn sensors(state: &AppState, include_hidden: bool) -> Vec<SensorView> {
     out
 }
 
+/// Number of hidden sensors across all devices. Used to decide whether the
+/// home "show hidden" toggle should be offered even when no device is hidden.
+pub fn hidden_count(state: &AppState) -> usize {
+    state
+        .devices
+        .iter()
+        .flat_map(|d| &d.capabilities)
+        .filter_map(|cap| match cap {
+            DeviceCapability::Sensors(ss) => Some(ss),
+            _ => None,
+        })
+        .flatten()
+        .filter(|s| s.visibility != VisibilityState::Visible)
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +110,23 @@ mod tests {
             .map(|s| s.hidden)
             .collect();
         assert_eq!(hidden_flags, vec![false, true]);
+    }
+
+    #[test]
+    fn hidden_count_counts_non_visible_sensors() {
+        let d = dev(
+            DeviceType::Sensor,
+            vec![DeviceCapability::Sensors(vec![
+                sensor("vis", SensorType::Temperature, VisibilityState::Visible),
+                sensor("hid", SensorType::Temperature, VisibilityState::Hidden),
+                sensor("hid2", SensorType::Load, VisibilityState::Hidden),
+            ])],
+        );
+        let state = AppState {
+            devices: vec![d],
+            ..Default::default()
+        };
+        assert_eq!(hidden_count(&state), 2);
     }
 
     #[test]

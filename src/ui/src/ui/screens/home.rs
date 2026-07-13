@@ -291,7 +291,8 @@ fn header(
         .devices
         .iter()
         .filter(|d| model::listable(d) && model::is_hidden(d))
-        .count();
+        .count()
+        + crate::domain::models::sensors::hidden_count(state);
 
     ui.horizontal(|ui| {
         ui.vertical(|ui| {

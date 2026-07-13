@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::smbus::BusInfo;
 
-/// Named pipe the broker serves and the daemon connects to. Restricted to
-/// interactive-logon users by the broker's DACL when the pipe is created.
+/// Named pipe the broker serves and the daemon connects to. Restricted to the
+/// concrete coordinator SID by the broker's protected DACL.
 pub const PIPE_NAME: &str = r"\\.\pipe\halod-broker";
 
 /// SCM name of the on-demand LocalSystem broker service. The installer registers
@@ -34,11 +34,21 @@ pub const CAPABILITY_TTL_MS: u64 = 60_000;
 
 /// Hard protocol bounds. The broker may clamp a requested scope further, but
 /// never permits a caller to raise these ceilings.
-pub const MAX_SCOPE_ADDRESSES: usize = 64;
+/// Covers the complete `u8` address representation without making the scope
+/// list unbounded. Runtime-loaded plugins may declare any future device
+/// addresses; no broker rebuild or hard-coded address allowlist is involved.
+pub const MAX_SCOPE_ADDRESSES: usize = 256;
 pub const MAX_PAWNIO_FUNCTIONS: usize = 16;
 pub const MAX_PAWNIO_ARGS: usize = 16;
-pub const MAX_OPERATIONS_PER_SECOND: u32 = 2_000;
-pub const MAX_OPERATIONS_PER_CAPABILITY: u32 = 100_000;
+// One SMBus capability is shared by every device discovered on that physical
+// bus. Four-to-eight RGB DIMMs at 60 FPS legitimately produce several thousand
+// small register RPCs per second, so this DoS ceiling must sit above that
+// aggregate. Hardware-specific byte-rate safety remains enforced in the daemon.
+pub const MAX_OPERATIONS_PER_SECOND: u32 = 20_000;
+// Clients renew halfway through the 60-second TTL. Keep the total above one
+// full half-life at the maximum request rate so a legitimate stream cannot
+// exhaust its capability before it is eligible for renewal.
+pub const MAX_OPERATIONS_PER_CAPABILITY: u32 = 1_000_000;
 
 /// Exact elevated surface requested for one named-pipe connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

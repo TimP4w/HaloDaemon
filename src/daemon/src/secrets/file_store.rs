@@ -181,41 +181,12 @@ fn load_or_create_key() -> Result<Key> {
         Err(e) => return Err(anyhow!("[secrets] reading {}: {e}", path.display())),
     }
     let key = Key::generate();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    write_owner_only(&path, key.as_slice())
+    // The durable helper creates the temp owner-only (0o600 on Unix, an
+    // owner+SYSTEM SDDL DACL on Windows) before the fsync'd replace, so the key
+    // is never briefly world-readable.
+    crate::util::fs::atomic_write(&path, key.as_slice())
         .with_context(|| format!("[secrets] persisting key {}", path.display()))?;
     Ok(key)
-}
-
-/// The mode is set at create time, not via a later chmod, so the file is never
-/// briefly world-readable.
-fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(bytes)
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, bytes)?;
-        restrict_permissions(path);
-        Ok(())
-    }
-}
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &std::path::Path) {
-    // Windows ACLs are left at their inherited default (the config dir is
-    // already user-owned); a tighter per-user ACL is tracked as a follow-up.
 }
 
 #[cfg(test)]

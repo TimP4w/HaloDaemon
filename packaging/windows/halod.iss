@@ -64,8 +64,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut for HaloDaemon"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Files]
-; packaging\windows\staging\ is produced by stage-release.ps1 — the two exes, bundled ffmpeg
-; (+ its DLLs and license), and the PawnIO blobs.
+; packaging\windows\staging\ is produced by stage-release.ps1 — the three exes
+; (halod, halod-gui, halod-broker), bundled ffmpeg (+ its DLLs and license), and
+; the PawnIO blobs.
 Source: "staging\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

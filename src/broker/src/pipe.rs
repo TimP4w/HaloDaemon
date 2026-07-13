@@ -118,6 +118,12 @@ impl PipeStream {
         Self(handle)
     }
 
+    /// Stable integer form used by the connection's bounded idle watchdog.
+    /// The worker keeps owning the handle until that watchdog is joined.
+    pub fn handle_value(&self) -> usize {
+        self.0 .0 as usize
+    }
+
     /// Wait until at least one request byte is available without letting an
     /// authenticated but silent client retain broker resources forever.
     pub fn wait_readable(&self, timeout: Duration) -> io::Result<bool> {
@@ -134,8 +140,18 @@ impl PipeStream {
             if started.elapsed() >= timeout {
                 return Ok(false);
             }
-            std::thread::sleep(Duration::from_millis(50));
+            // Used only for the initial authentication frame. Keep the poll
+            // responsive without putting a sleep in the per-operation path.
+            std::thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+/// Break a worker's blocking read when its authenticated connection has been
+/// idle for too long. The worker still owns and ultimately closes the handle.
+pub fn disconnect_handle_value(handle: usize) {
+    unsafe {
+        let _ = DisconnectNamedPipe(HANDLE(handle as *mut _));
     }
 }
 

@@ -151,6 +151,11 @@ fn connect_or_spawn(scope: &CapabilityScope) -> Result<AuthorizedPipe> {
                             capability,
                             expires_in_ms,
                         }) => {
+                            // A later broker exit may legitimately require a
+                            // fresh dev-run UAC launch. Only suppress repeated
+                            // prompts until one authenticated connection has
+                            // actually succeeded.
+                            BROKER_SPAWN_REQUESTED.store(false, Ordering::SeqCst);
                             return Ok(AuthorizedPipe {
                                 pipe,
                                 capability,

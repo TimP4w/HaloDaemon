@@ -128,37 +128,40 @@ pub struct SuperIoTransport;
 
 impl SuperIoTransport {
     pub async fn discover(app: Arc<AppState>) -> anyhow::Result<()> {
-        // Read the motherboard identity once so fan labels match the BIOS
-        // silkscreen on known boards. WMI queries can block for hundreds of
-        // milliseconds, so run in spawn_blocking to avoid stalling a Tokio
-        // worker thread.
-        let board_info = tokio::task::spawn_blocking(board::read_board_info)
-            .await
-            .unwrap_or_default();
+        // WMI, broker RPC, and PawnIO are all blocking Win32 calls. Run the
+        // entire hardware probe off the async runtime; otherwise one stuck
+        // driver call prevents the scanner's 30-second timeout from firing and
+        // discovery never advances to HID/USB.
+        let (board_info, buses) = tokio::task::spawn_blocking(|| {
+            let board_info = board::read_board_info();
+            // Detect each port with its own PawnIO instance so chip A's
+            // find_bars registration isn't clobbered by probing chip B's slot.
+            let mut buses: Vec<(DetectedChip, Arc<Mutex<LpcIoBus>>)> = Vec::new();
+            for &port in PROBE_PORTS {
+                let bus = match LpcIoBus::open(None) {
+                    Ok(bus) => bus,
+                    Err(e) => {
+                        log::debug!("[SuperIO] LpcIO.bin not available: {e}");
+                        return (board_info, buses);
+                    }
+                };
 
-        // Detect each port with its own PawnIO instance so chip A's
-        // find_bars registration isn't clobbered by probing chip B's slot.
-        let mut buses: Vec<(DetectedChip, Arc<Mutex<LpcIoBus>>)> = Vec::new();
-        for &port in PROBE_PORTS {
-            let bus = match LpcIoBus::open(None) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::debug!("[SuperIO] LpcIO.bin not available: {e}");
-                    return Ok(());
+                if let Err(e) = bus.select_slot(port_slot(port)) {
+                    log::debug!("[SuperIO] select_slot for port 0x{port:02X} failed: {e}");
+                    continue;
                 }
-            };
 
-            if let Err(e) = bus.select_slot(port_slot(port)) {
-                log::debug!("[SuperIO] select_slot for port 0x{port:02X} failed: {e}");
-                continue;
+                match nct677x::detect(&bus, port) {
+                    Ok(Some(d)) => {
+                        buses.push((DetectedChip::Nct677x(d), Arc::new(Mutex::new(bus))))
+                    }
+                    Ok(None) => {} // bus drops, closing the PawnIO handle
+                    Err(e) => log::debug!("[NCT677x] detect on port 0x{port:02X} failed: {e}"),
+                }
             }
-
-            match nct677x::detect(&bus, port) {
-                Ok(Some(d)) => buses.push((DetectedChip::Nct677x(d), Arc::new(Mutex::new(bus)))),
-                Ok(None) => {} // bus drops, closing the PawnIO handle
-                Err(e) => log::debug!("[NCT677x] detect on port 0x{port:02X} failed: {e}"),
-            }
-        }
+            (board_info, buses)
+        })
+        .await?;
 
         if buses.is_empty() {
             log::debug!("[SuperIO] no recognised SuperIO chip found");
