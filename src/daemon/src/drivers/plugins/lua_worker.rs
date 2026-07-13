@@ -16,18 +16,35 @@
 //! seam), and/or cap concurrent spawns. Tracked as a deliberate follow-up.
 
 use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
 
-/// Handle over a dedicated Lua-VM worker thread. `UnboundedSender` is
-/// `Send + Sync`, so the handle is too. Dropping the last clone closes the
-/// channel, which ends the worker loop.
+/// Process-wide ceiling on concurrent Lua worker threads, so a flood of plugins
+/// (or one plugin repeatedly respawned) can't exhaust OS threads.
+const MAX_WORKER_THREADS: usize = 64;
+static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Bounded per-worker command queue: caps in-flight jobs so slow transport/Lua
+/// callbacks can't accumulate unbounded memory.
+const WORKER_QUEUE_CAP: usize = 64;
+
+/// Decrements [`WORKER_COUNT`] when the worker thread exits.
+struct WorkerSlot;
+impl Drop for WorkerSlot {
+    fn drop(&mut self) {
+        WORKER_COUNT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Handle over a dedicated Lua-VM worker thread. `Sender` is `Send + Sync`, so
+/// the handle is too. Dropping the last clone closes the channel, which ends the
+/// worker loop.
 pub(super) struct LuaWorker<Cmd> {
-    tx: mpsc::UnboundedSender<Cmd>,
+    tx: mpsc::Sender<Cmd>,
     /// "plugin" / "effect" — keeps each worker's error text distinct.
     label: &'static str,
     /// How long a single [`request`](Self::request) waits before giving up and
@@ -65,27 +82,55 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
         call_timeout: Duration,
         build: impl FnOnce() -> Result<Ctx> + Send + 'static,
         handle: impl Fn(Cmd, &Ctx) -> ControlFlow<()> + Send + 'static,
-    ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        std::thread::Builder::new()
+    ) -> Result<Self> {
+        // Reserve a thread slot; refuse rather than exhaust OS threads.
+        let n = WORKER_COUNT.fetch_add(1, Ordering::Relaxed);
+        if n >= MAX_WORKER_THREADS {
+            WORKER_COUNT.fetch_sub(1, Ordering::Relaxed);
+            return Err(anyhow!(
+                "{label} worker limit reached ({MAX_WORKER_THREADS} threads)"
+            ));
+        }
+        let (tx, rx) = mpsc::channel(WORKER_QUEUE_CAP);
+        let spawned = std::thread::Builder::new()
             .name(name.into())
-            .spawn(move || match build() {
-                Ok(ctx) => {
-                    let mut rx = rx;
-                    while let Some(cmd) = rx.blocking_recv() {
-                        if handle(cmd, &ctx).is_break() {
-                            break;
+            .spawn(move || {
+                let _slot = WorkerSlot;
+                match build() {
+                    Ok(ctx) => {
+                        let mut rx = rx;
+                        while let Some(cmd) = rx.blocking_recv() {
+                            if handle(cmd, &ctx).is_break() {
+                                break;
+                            }
                         }
                     }
+                    Err(e) => log::error!("{label} worker stopped: {e:#}"),
                 }
-                Err(e) => log::error!("{label} worker stopped: {e:#}"),
-            })
-            .expect("spawn lua worker thread");
-        Self {
+            });
+        if let Err(e) = spawned {
+            WORKER_COUNT.fetch_sub(1, Ordering::Relaxed);
+            return Err(anyhow!("{label} worker thread spawn failed: {e}"));
+        }
+        Ok(Self {
             tx,
             label,
             call_timeout,
             dead: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// A worker that owns no thread and fails every request — used when a real
+    /// worker can't be spawned (thread ceiling/exhaustion) so the plugin is
+    /// disabled rather than crashing the daemon.
+    pub(super) fn dead(label: &'static str) -> Self {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        Self {
+            tx,
+            label,
+            call_timeout: Duration::from_secs(1),
+            dead: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -103,9 +148,10 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
             ));
         }
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(make(reply))
-            .map_err(|_| anyhow!("{} worker is gone", self.label))?;
+        self.tx.try_send(make(reply)).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => anyhow!("{} worker is busy", self.label),
+            mpsc::error::TrySendError::Closed(_) => anyhow!("{} worker is gone", self.label),
+        })?;
         match tokio::time::timeout(self.call_timeout, rx).await {
             Ok(res) => res.map_err(|_| anyhow!("{} worker dropped the reply", self.label)),
             Err(_) => {
@@ -140,6 +186,7 @@ mod tests {
             move || Ok(seed),
             |job: Job, ctx: &i32| job(ctx),
         )
+        .expect("spawn test worker")
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -170,6 +217,21 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err2.to_string().contains("wedged"), "{err2}");
+    }
+
+    #[tokio::test]
+    async fn a_dead_worker_fails_every_request() {
+        let worker: LuaWorker<Job> = LuaWorker::dead("test");
+        let err = worker
+            .request(|reply| {
+                Box::new(move |_: &i32| {
+                    let _ = reply.send(());
+                    ControlFlow::Continue(())
+                })
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("wedged"), "{err}");
     }
 
     #[tokio::test]
@@ -204,7 +266,7 @@ mod tests {
     async fn request_fails_when_the_channel_is_closed() {
         // Hand-build a worker whose receiver is already dropped, so the send
         // fails deterministically (no thread timing involved).
-        let (tx, rx) = mpsc::unbounded_channel::<Job>();
+        let (tx, rx) = mpsc::channel::<Job>(1);
         drop(rx);
         let worker = LuaWorker {
             tx,

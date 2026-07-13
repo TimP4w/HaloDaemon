@@ -108,7 +108,7 @@ impl PluginEffectHandle {
         granted: Vec<Permission>,
         config: HashMap<String, String>,
     ) -> Self {
-        Self(LuaWorker::spawn(
+        let worker = LuaWorker::spawn(
             "halod-effect",
             "effect",
             // An effect render must finish well inside a frame; a wedged one is
@@ -147,7 +147,12 @@ impl PluginEffectHandle {
                 }
                 ControlFlow::Continue(())
             },
-        ))
+        )
+        .unwrap_or_else(|e| {
+            log::error!("effect worker not started: {e:#}");
+            LuaWorker::dead("effect")
+        });
+        Self(worker)
     }
 
     /// Fill a `CANVAS_W * CANVAS_H * 4` linear-RGBA buffer.

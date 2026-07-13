@@ -7,8 +7,8 @@
 .DESCRIPTION
     Copies the release executables, the bundled ffmpeg.exe (+ its DLL deps) and
     the PawnIO kernel blobs into packaging\windows\staging\, which is packaged verbatim
-    by halod.iss.  halod-gui uses wgpu (D3D12/Vulkan) built into Windows, so the
-    two Rust exes need no runtime DLLs of their own — but the LCD video mode
+    by halod.iss.  halod-gui uses the glow (OpenGL) renderer via opengl32 built
+    into Windows, so the Rust exes need no runtime DLLs of their own — but the LCD video mode
     shells out to ffmpeg.exe (placed beside halod.exe), which is a dynamically
     linked MSYS2 build and DOES need its libav* DLLs collected here.
 

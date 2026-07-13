@@ -13,7 +13,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -27,22 +27,19 @@ jobs:
   reuse:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
       - name: REUSE lint
-        uses: fsfe/reuse-action@v5
+        uses: fsfe/reuse-action@REPLACE_WITH_SHA_FOR_fsfe_reuse_action # v5 (pin exact patch, e.g. v5.0.0)
 
-  # Windows covers the daemon (-p halod) only, not the GUI. The egui GUI has no
-  # platform-specific logic and is already covered by the Linux job. Windows CI
-  # exists to guard the daemon's platform glue (HID/SMBus/LpcIO, named-pipe IPC),
-  # so a minimal toolchain suffices.
+  # Windows covers the daemon (-p halod) only.
   win-build-test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
 
       # Minimal UCRT64 toolchain: GNU Rust plus gcc/pkgconf for hidapi/rusb.
       - name: Set up MSYS2 (UCRT64)
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@REPLACE_WITH_SHA_FOR_msys2_setup_msys2 # v2 (pin exact patch, e.g. v2.24.1)
         with:
           msystem: UCRT64
           update: true
@@ -67,7 +64,7 @@ jobs:
   linux-build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
 
       - name: Install build dependencies
         run: |

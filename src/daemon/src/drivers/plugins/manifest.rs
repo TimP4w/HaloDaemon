@@ -1090,6 +1090,9 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                         known_kinds().join(", ")
                     ),
                 }
+                if spec.transport == "smbus" && !manifest.permissions.contains(&Permission::Smbus) {
+                    bail!("a device using the smbus transport must declare the `smbus` permission");
+                }
             }
         }
         PluginKind::Effect => {
@@ -1553,6 +1556,7 @@ mod tests {
     #[test]
     fn array_of_devices_parses() {
         let src = r#"return {
+            permissions = { "smbus" },
             devices = {
               { transport = "smbus", bus = "chipset", addresses = { 0x70, 0x71 },
                 device_type = "ram", vendor = "ENE", model = "DRAM", name = "DRAM" },
@@ -1592,8 +1596,24 @@ mod tests {
     }
 
     #[test]
+    fn smbus_device_requires_smbus_permission() {
+        let base = r#"return {
+            PERMS
+            devices = { { transport = "smbus", bus = "chipset", addresses = { 0x70 },
+                           vendor = "x", model = "y" } },
+        }"#;
+        assert!(parse_manifest(&base.replace("PERMS", ""), Path::new("no.lua")).is_err());
+        assert!(parse_manifest(
+            &base.replace("PERMS", "permissions = { \"smbus\" },"),
+            Path::new("yes.lua")
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn gpu_spec_with_pci_match_parses_and_round_trips() {
         let src = r#"return {
+            permissions = { "smbus" },
             devices = { { transport = "smbus", bus = "gpu", addresses = { 0x67 },
               vendor = "ENE", model = "GPU",
               pci_match = {

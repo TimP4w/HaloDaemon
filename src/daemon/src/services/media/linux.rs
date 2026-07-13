@@ -129,13 +129,19 @@ fn percent_decode(s: &str) -> String {
 /// Blocking: load art from a `file://` or `http(s)://` URL, downscaled so the
 /// longest side is ≤ 240 px (LCD panels are ≤ 240). Any failure → `None`.
 fn load_art_from_url(url: &str) -> Option<RgbaImage> {
-    let img = if let Some(path) = file_url_to_path(url) {
-        image::open(path).ok()?
+    let bytes = if let Some(path) = file_url_to_path(url) {
+        // Regular files only — no symlinks, fifos, devices.
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        if !meta.file_type().is_file() {
+            return None;
+        }
+        std::fs::read(&path).ok()?
     } else if url.starts_with("http://") || url.starts_with("https://") {
-        image::load_from_memory(&fetch_http_bytes(url)?).ok()?
+        fetch_http_bytes(url)?
     } else {
         return None;
     };
+    let img = crate::util::image::decode_limited(&bytes).ok()?;
     const MAX_SIDE: u32 = 240;
     let scaled = if img.width().max(img.height()) > MAX_SIDE {
         img.resize(MAX_SIDE, MAX_SIDE, image::imageops::FilterType::Lanczos3)
@@ -145,21 +151,70 @@ fn load_art_from_url(url: &str) -> Option<RgbaImage> {
     Some(scaled.to_rgba8())
 }
 
-/// Blocking http(s) GET with a 4 s timeout and a 2 MB size cap.
+/// Reject a URL whose host resolves to a loopback/private/link-local address
+/// (same SSRF policy as the plugin TCP transport).
+fn host_is_vetted(url: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    let Some(rest) = rest else { return false };
+    let default_port = if url.starts_with("https://") { 443 } else { 80 };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let (host, port) = if let Some(h) = authority.strip_prefix('[') {
+        // [ipv6]:port
+        match h.split_once(']') {
+            Some((h6, rest)) => (
+                h6.to_string(),
+                rest.strip_prefix(':')
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(default_port),
+            ),
+            None => return false,
+        }
+    } else if let Some((h, p)) = authority.rsplit_once(':') {
+        (h.to_string(), p.parse().unwrap_or(default_port))
+    } else {
+        (authority.to_string(), default_port)
+    };
+    match (host.as_str(), port).to_socket_addrs() {
+        Ok(addrs) => {
+            let addrs: Vec<_> = addrs.collect();
+            !addrs.is_empty()
+                && !addrs
+                    .iter()
+                    .any(|sa| crate::drivers::plugins::backends::tcp::is_blocked_ip(&sa.ip()))
+        }
+        Err(_) => false,
+    }
+}
+
+/// Blocking http(s) GET with a 4 s timeout, address vetting, no redirects, and a
+/// 2 MB size cap (an over-cap body is rejected, not silently truncated).
 fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
     use std::io::Read;
     const MAX_BYTES: u64 = 2 * 1024 * 1024;
+    if !host_is_vetted(url) {
+        log::debug!("media: refusing art URL with non-routable host");
+        return None;
+    }
     let resp = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(4))
+        .redirects(0)
         .build()
         .get(url)
         .call()
         .ok()?;
     let mut buf = Vec::new();
     resp.into_reader()
-        .take(MAX_BYTES)
+        .take(MAX_BYTES + 1)
         .read_to_end(&mut buf)
         .ok()?;
+    if buf.len() as u64 > MAX_BYTES {
+        log::debug!("media: art response exceeds {MAX_BYTES} bytes; rejecting");
+        return None;
+    }
     Some(buf)
 }
 
@@ -543,6 +598,16 @@ mod tests {
 
     fn str_value(s: &str) -> OwnedValue {
         OwnedValue::try_from(Value::Str(Str::from(s.to_string()))).unwrap()
+    }
+
+    #[test]
+    fn vetting_rejects_loopback_and_private_and_bad_scheme() {
+        assert!(!host_is_vetted("http://127.0.0.1/a.png"));
+        assert!(!host_is_vetted("http://localhost:8080/a.png"));
+        assert!(!host_is_vetted("https://169.254.169.254/latest"));
+        assert!(!host_is_vetted("https://[::1]/a.png"));
+        assert!(!host_is_vetted("ftp://example.com/a.png"));
+        assert!(!host_is_vetted("http://192.168.1.5/a.png"));
     }
 
     fn array_value(items: &[&str]) -> OwnedValue {

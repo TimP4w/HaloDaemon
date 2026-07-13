@@ -48,7 +48,7 @@ fn resolve_vetted_addr(host: &str, port: u16, allow_private: bool) -> Result<Soc
 }
 
 /// Address ranges an untrusted integration must not reach by default.
-fn is_blocked_ip(ip: &IpAddr) -> bool {
+pub(crate) fn is_blocked_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             v4.is_loopback()

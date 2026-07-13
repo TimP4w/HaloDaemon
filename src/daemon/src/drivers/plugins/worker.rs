@@ -328,7 +328,7 @@ impl PluginHandle {
         handle: Handle,
         zones: Vec<RgbZone>,
     ) -> Self {
-        Self(LuaWorker::spawn(
+        let worker = LuaWorker::spawn(
             "halod-plugin",
             "plugin",
             // Generous: a capability callback may legitimately do timed transfer
@@ -344,7 +344,12 @@ impl PluginHandle {
                 ctx.budget.set(0);
                 job(ctx)
             },
-        ))
+        )
+        .unwrap_or_else(|e| {
+            log::error!("plugin worker not started: {e:#}");
+            LuaWorker::dead("plugin")
+        });
+        Self(worker)
     }
 
     /// Run `f` on the worker thread and await its result. `f` gets the VM, the
@@ -861,20 +866,22 @@ fn build_ctx(
     dev.set("match", build_match_table(&lua, &dev_match)?)
         .map_err(|e| lua_err("dev.match", e))?;
 
-    // `dev.audio`: device-scoped virtual audio sinks (ChatMix). Bound to this
-    // device's own USB id, and torn down from `close` via the shared registry.
+    // `dev.audio`: device-scoped virtual audio sinks, only when granted the
+    // audio-routing permission. Torn down via the shared registry.
     let audio_registry: super::audio_api::SinkRegistry =
         Rc::new(std::cell::RefCell::new(Vec::new()));
-    let audio_ud = super::audio_api::build(
-        &lua,
-        dev_match.vid,
-        dev_match.pid,
-        handle.clone(),
-        audio_registry.clone(),
-    )
-    .map_err(|e| lua_err("dev.audio", e))?;
-    dev.set("audio", audio_ud)
+    if granted.contains(&Permission::AudioRouting) {
+        let audio_ud = super::audio_api::build(
+            &lua,
+            dev_match.vid,
+            dev_match.pid,
+            handle.clone(),
+            audio_registry.clone(),
+        )
         .map_err(|e| lua_err("dev.audio", e))?;
+        dev.set("audio", audio_ud)
+            .map_err(|e| lua_err("dev.audio", e))?;
+    }
     if !zones.is_empty() {
         let zones_v = lua.to_value(zones).map_err(|e| lua_err("dev.zones", e))?;
         dev.set("zones", zones_v)

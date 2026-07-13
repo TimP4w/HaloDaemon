@@ -195,19 +195,39 @@ pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
         .context("plugin package is not a valid manifest")?;
     let id = parsed.plugin_id.clone();
 
-    let dst = crate::config::plugins_dir().join(&id);
+    let plugins_dir = crate::config::plugins_dir();
+    let dst = plugins_dir.join(&id);
     if dst.exists() {
         bail!("a plugin '{id}' is already installed");
     }
-    copy_dir_all(src, &dst)?;
+
+    // Copy into a private temp sibling, validate the completed copy, then
+    // atomically rename it into place so a failed import never leaves a partial
+    // installed plugin behind.
+    std::fs::create_dir_all(&plugins_dir)?;
+    let staging = plugins_dir.join(format!(".{id}.import.{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
+    let manifest = (|| {
+        copy_dir_all(src, &staging)?;
+        crate::drivers::plugins::parse_manifest_from_dir(&staging)
+            .context("re-parsing imported plugin directory")
+    })();
+    let manifest = match manifest {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+    if let Err(e) = std::fs::rename(&staging, &dst) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e).with_context(|| format!("installing plugin into {}", dst.display()));
+    }
     log::info!(
         "Imported plugin package {} into {}",
         src.display(),
         dst.display()
     );
-
-    let manifest = crate::drivers::plugins::parse_manifest_from_dir(&dst)
-        .context("re-parsing imported plugin directory")?;
 
     // A manual import gets the GUI's blocking consent modal instead of the
     // auto-discovery toast — suppress it before the reload below would
@@ -251,8 +271,11 @@ pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-/// Purge one plugin id's secret, disabled flag, and plaintext config; returns
-/// whether config changed. Shared by [`delete`] and `repos::remove_repo`.
+/// Purge every id-keyed piece of plugin state — secret, disabled flag, plaintext
+/// config, granted permissions, acknowledged content hash, and integration
+/// disable — returning whether config changed. Shared by [`delete`] and
+/// `repos::remove_repo`, so a reinstall of identical content can't inherit an
+/// old grant or acknowledgement.
 pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     for key in app.registry.secure_config_keys_for(id) {
         if let Err(e) = app.secret_store.delete(id, &key) {
@@ -265,13 +288,29 @@ pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     cfg.plugins_disabled.retain(|x| x != id);
     let disabled_changed = cfg.plugins_disabled.len() != before;
     let config_changed = cfg.plugin_config.remove(id).is_some();
+    let perms_changed = cfg.plugin_permissions.remove(id).is_some();
+    let ack_changed = cfg.plugin_acknowledged.remove(id).is_some();
+    let integ_before = cfg.integrations_disabled.len();
+    cfg.integrations_disabled.retain(|x| x != id);
+    let integ_changed = cfg.integrations_disabled.len() != integ_before;
+
     if disabled_changed {
         app.registry.set_disabled(&cfg.plugins_disabled);
     }
     if config_changed {
         app.registry.set_config_values(&cfg.plugin_config);
     }
-    disabled_changed || config_changed
+    if perms_changed {
+        app.registry.set_granted(&cfg.plugin_permissions);
+    }
+    if ack_changed {
+        app.registry.set_acknowledged(&cfg.plugin_acknowledged);
+    }
+    if integ_changed {
+        app.registry
+            .set_integrations_disabled(&cfg.integrations_disabled);
+    }
+    disabled_changed || config_changed || perms_changed || ack_changed || integ_changed
 }
 
 pub async fn apply_pending_changes(app: Arc<AppState>) -> Result<()> {

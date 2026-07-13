@@ -12,7 +12,7 @@
 //! descriptors, so a plugin shadows a native driver for the same hardware.
 
 mod audio_api;
-mod backends;
+pub(crate) mod backends;
 mod bytebuf;
 mod chain_leaf;
 mod device;

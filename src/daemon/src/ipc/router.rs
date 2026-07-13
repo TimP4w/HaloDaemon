@@ -18,6 +18,42 @@ use crate::state::AppState;
 const LCD_PREVIEW_LEASE: Duration =
     Duration::from_secs(halod_shared::types::LCD_PREVIEW_LEASE_SECS);
 
+const IPC_MAX_DEPTH: usize = 64;
+const IPC_MAX_NODES: usize = 200_000;
+
+/// Reject a command whose JSON nests too deep or holds too many collection nodes,
+/// so a small frame can't expand into excessive nested work.
+fn check_ipc_bounds(v: &Value) -> Result<(), String> {
+    fn walk(v: &Value, depth: usize, nodes: &mut usize) -> Result<(), String> {
+        if depth > IPC_MAX_DEPTH {
+            return Err(format!("nesting exceeds {IPC_MAX_DEPTH}"));
+        }
+        match v {
+            Value::Array(a) => {
+                *nodes += a.len();
+                if *nodes > IPC_MAX_NODES {
+                    return Err(format!("collection nodes exceed {IPC_MAX_NODES}"));
+                }
+                for e in a {
+                    walk(e, depth + 1, nodes)?;
+                }
+            }
+            Value::Object(o) => {
+                *nodes += o.len();
+                if *nodes > IPC_MAX_NODES {
+                    return Err(format!("collection nodes exceed {IPC_MAX_NODES}"));
+                }
+                for e in o.values() {
+                    walk(e, depth + 1, nodes)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    walk(v, 0, &mut 0)
+}
+
 /// Lease-gated LCD preview forwarder; drops the broadcast receiver when idle.
 async fn lcd_preview_forward_loop(app: Arc<AppState>, client: ClientHandle) {
     let mut keepalive = client.lcd_keepalive_rx();
@@ -107,6 +143,11 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
     }
 
     let req_id = msg["request_id"].as_str();
+
+    if let Err(e) = check_ipc_bounds(&msg) {
+        reply_error(&client, cmd, req_id, anyhow::anyhow!("frame rejected: {e}"));
+        return;
+    }
 
     let typed = match DaemonCommand::deserialize(&msg) {
         Ok(typed) => typed,
@@ -707,6 +748,27 @@ mod tests {
     use crate::ipc::ClientHandle;
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn ipc_bounds_reject_deep_nesting() {
+        let mut v = json!(0);
+        for _ in 0..IPC_MAX_DEPTH + 2 {
+            v = json!([v]);
+        }
+        assert!(check_ipc_bounds(&v).is_err());
+    }
+
+    #[test]
+    fn ipc_bounds_reject_too_many_nodes() {
+        let v = json!(vec![0u8; IPC_MAX_NODES + 1]);
+        assert!(check_ipc_bounds(&v).is_err());
+    }
+
+    #[test]
+    fn ipc_bounds_allow_large_string_single_node() {
+        let v = json!({ "data": "x".repeat(5_000_000) });
+        assert!(check_ipc_bounds(&v).is_ok());
+    }
 
     #[tokio::test]
     async fn error_reply_echoes_request_id() {

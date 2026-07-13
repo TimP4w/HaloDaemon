@@ -11,6 +11,38 @@
 //!   - [`spawn_broker_elevated`] — on a **dev run** (no installed service to
 //!     launch the broker), bring the broker up ourselves with one UAC prompt.
 
+/// Whether the current process runs with elevated privilege. On Unix the daemon
+/// is meant to run per-user; a non-zero effective UID is normal and `false`.
+/// Running as root is treated as elevated so configuration-triggered process
+/// launches (Command/OpenApp) are refused rather than run as root.
+#[cfg(unix)]
+pub(crate) fn is_elevated() -> bool {
+    // SAFETY: geteuid is always safe and never fails.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Emit a loud, one-time warning if the daemon is running as root on Unix.
+#[cfg(unix)]
+pub(crate) fn warn_if_elevated() {
+    if is_elevated() {
+        log::warn!(
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        );
+        log::warn!(
+            "!!!!!!! HaloDaemon IS RUNNING AS ROOT - THIS IS DANGEROUS AND UNSUPPORTED !!!!!!!"
+        );
+        log::warn!(
+            "!!!!!!! Run it as your normal user. Command/OpenApp button actions are     !!!!!!!"
+        );
+        log::warn!(
+            "!!!!!!! DISABLED while elevated so a button mapping can't run as root.      !!!!!!!"
+        );
+        log::warn!(
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        );
+    }
+}
+
 /// Whether the current process token is elevated.
 #[cfg(windows)]
 pub(crate) fn is_elevated() -> bool {

@@ -66,9 +66,13 @@ plugins:
   permission_network: Rete
   permission_os: Sistema Operativo
   permission_secure_storage: Archiviazione sicura
+  permission_smbus: SMBus
+  permission_audio_routing: Instradamento audio
   permission_network_desc: Apre connessioni di rete (es. a un SDK/server locale). Uno script malevolo potrebbe inviare dati fuori da questo computer.
   permission_os_desc: Legge il clock di sistema (os.time / os.clock). Basso rischio - nessun accesso a file o processi viene mai concesso.
   permission_secure_storage_desc: Legge i valori segreti salvati di questo plugin (es. un token API) in chiaro durante l'esecuzione.
+  permission_smbus_desc: Scansiona, legge e scrive dispositivi SMBus/I2C. Raggiunge ogni dispositivo sul bus, non solo l'hardware di questo plugin, quindi una scrittura errata può destabilizzare altri dispositivi.
+  permission_audio_routing_desc: Crea e instrada sink audio di sistema. Uno script malevolo potrebbe avviare moduli audio o catturare/reindirizzare l'audio su questo computer.
   # Campi di configurazione
   settings: IMPOSTAZIONI
   save_settings: Salva

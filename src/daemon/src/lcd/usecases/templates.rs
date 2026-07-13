@@ -54,12 +54,14 @@ pub fn list_templates() -> Vec<String> {
     names
 }
 
+const MAX_TEMPLATE_BYTES: usize = 512 * 1024;
+
 pub async fn save_template(name: String, def: CustomTemplateDef, app: Arc<AppState>) -> Result<()> {
     validate_template_name(&name)?;
-    let dir = lcd_templates_dir();
-    tokio::fs::create_dir_all(&dir).await?;
     let yaml = serde_yaml::to_string(&def)?;
-    tokio::fs::write(template_path(&name), yaml).await?;
+    anyhow::ensure!(yaml.len() <= MAX_TEMPLATE_BYTES, "template too large");
+    let path = template_path(&name);
+    tokio::task::spawn_blocking(move || crate::config::atomic_write(&path, &yaml)).await??;
     log::info!("[LCD] saved template '{name}'");
     app.lcd.refresh_templates().await;
     crate::ipc::broadcast_state(&app).await;
@@ -71,6 +73,7 @@ pub async fn load_template(name: String, client: ClientHandle) -> Result<()> {
     let raw = tokio::fs::read_to_string(template_path(&name))
         .await
         .map_err(|e| anyhow!("template not found: {e}"))?;
+    anyhow::ensure!(raw.len() <= MAX_TEMPLATE_BYTES, "template too large");
     let def: CustomTemplateDef = serde_yaml::from_str(&raw)
         .map_err(|e| anyhow!("failed to parse template '{name}': {e}"))?;
     client.send_json(&json!({ "type": "lcd_template", "name": name, "def": def }));

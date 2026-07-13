@@ -690,6 +690,14 @@ pub enum Permission {
     /// Read this plugin's own decrypted secret config values (`secure = true`
     /// fields) via `halod.config`. Non-secure config values need no permission.
     SecureStorage,
+    /// Scan, read, or write SMBus/I2C devices (the `smbus` transport backend and
+    /// `pre_scan`). A raw bus grants access to every device on it, so it is an
+    /// explicit grant separate from a plugin's matched-hardware access.
+    Smbus,
+    /// Create/route host audio sinks (`dev.audio`) via the `pactl`-backed sink
+    /// registry. Gates `AudioApi` so plugins cannot spawn host audio modules
+    /// without consent.
+    AudioRouting,
 }
 
 /// Which discovery path a plugin registers into.
@@ -1677,6 +1685,9 @@ pub struct MacroStep {
 /// Upper bounds shared by the GUI editor clamps and the daemon guards.
 pub const MACRO_MAX_STEPS: usize = 512;
 pub const MACRO_MAX_DELAY_MS: u32 = 60_000;
+/// Aggregate ceiling on a macro's total programmed delay, so a macro under the
+/// per-step and step-count limits still can't schedule input for hours.
+pub const MACRO_MAX_TOTAL_MS: u64 = 600_000;
 
 /// Action to execute when a button event fires.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

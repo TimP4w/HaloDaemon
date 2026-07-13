@@ -13,7 +13,9 @@ optdepends=('ffmpeg: LCD video playback'
             'nvidia-utils: GPU temperature readout via nvidia-smi'
             'i2c-tools: SMBus/DRAM + GPU RGB (provides the i2c group)')
 install="$pkgname.install"
-source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#tag=v$pkgver")
+# Pin to an immutable commit, not the mutable `#tag=v$pkgver`: a tag can be force-moved after publication so "v$pkgver" is not reproducible, whereas `#commit=` locks makepkg to a fixed git object. 'SKIP' is still correct because makepkg cannot sha256 a VCS ref (no single downloaded file to hash) — integrity is delegated to git verifying the checked-out tree against the pinned commit SHA.
+# MAINTAINER: for each release, replace REPLACE_WITH_RELEASE_COMMIT_SHA with the exact 40-char commit SHA that the `v$pkgver` tag points at (verify with git rev-list -n1 v$pkgver). Do NOT revert to `#tag=` — the tag is mutable.
+source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=REPLACE_WITH_RELEASE_COMMIT_SHA")
 sha256sums=('SKIP')
 
 prepare() {

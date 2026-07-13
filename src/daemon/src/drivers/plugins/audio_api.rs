@@ -41,6 +41,11 @@ impl ManagedSink {
 /// `Rc<RefCell>` because the plugin VM (and this) never leaves its worker thread.
 pub type SinkRegistry = Rc<RefCell<Vec<Arc<ManagedSink>>>>;
 
+/// Max sinks one plugin worker may hold open at once.
+const MAX_SINKS: usize = 4;
+/// Max length of a sink display name.
+const MAX_SINK_NAME: usize = 64;
+
 /// `dev.audio`: creates virtual sinks scoped to this device's own USB id.
 pub struct AudioApi {
     vid: Option<u16>,
@@ -59,6 +64,16 @@ impl UserData for AudioApi {
                     "dev.audio requires a USB (HID) device".into(),
                 ));
             };
+            if name.is_empty() || name.len() > MAX_SINK_NAME {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "sink name must be 1..={MAX_SINK_NAME} bytes"
+                )));
+            }
+            if this.registry.borrow().len() >= MAX_SINKS {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "at most {MAX_SINKS} sinks per plugin"
+                )));
+            }
             match this.handle.block_on(register_sink(vid, pid, &name)) {
                 Some(sink) => {
                     let managed = Arc::new(ManagedSink {
@@ -69,6 +84,7 @@ impl UserData for AudioApi {
                     Ok(Some(SinkHandle {
                         sink: managed,
                         handle: this.handle.clone(),
+                        registry: this.registry.clone(),
                     }))
                 }
                 None => Ok(None),
@@ -81,6 +97,7 @@ impl UserData for AudioApi {
 pub struct SinkHandle {
     sink: Arc<ManagedSink>,
     handle: Handle,
+    registry: SinkRegistry,
 }
 
 impl UserData for SinkHandle {
@@ -91,6 +108,9 @@ impl UserData for SinkHandle {
         });
         methods.add_method("remove", |_, this, ()| {
             this.handle.block_on(this.sink.remove_once());
+            this.registry
+                .borrow_mut()
+                .retain(|s| !Arc::ptr_eq(s, &this.sink));
             Ok(())
         });
     }

@@ -420,15 +420,32 @@ pub async fn set_screen_video(id: String, path: String, app: Arc<AppState>) -> R
 
 /// Return a list of all images in the lcd_images_dir to the requesting client.
 pub async fn list_lcd_images(client: ClientHandle) -> Result<()> {
+    const MAX_ENTRIES: usize = 4096;
     let dir = crate::config::lcd_images_dir();
-    let mut files: Vec<Value> = Vec::new();
+    let mut items: Vec<(String, u64)> = Vec::new();
     if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let name = entry.file_name().to_string_lossy().to_string();
+            if validate_image_filename(&name).is_err() {
+                continue;
+            }
+            // Regular files only — skip dirs, symlinks, and special files.
+            match entry.file_type().await {
+                Ok(ft) if ft.is_file() => {}
+                _ => continue,
+            }
             let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
-            files.push(json!({ "name": name, "size_bytes": size }));
+            items.push((name, size));
+            if items.len() >= MAX_ENTRIES {
+                break;
+            }
         }
     }
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    let files: Vec<Value> = items
+        .into_iter()
+        .map(|(name, size)| json!({ "name": name, "size_bytes": size }))
+        .collect();
     log::debug!("[LCD] list_lcd_images: {} files", files.len());
     client.send_json(&json!({ "type": "lcd_images", "files": files }));
     Ok(())

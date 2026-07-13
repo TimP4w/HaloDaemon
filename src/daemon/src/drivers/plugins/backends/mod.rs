@@ -5,5 +5,5 @@
 
 mod hid;
 mod smbus;
-mod tcp;
+pub(crate) mod tcp;
 mod usb_control;

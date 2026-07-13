@@ -52,15 +52,19 @@ impl FileKeyStore {
         }
     }
 
-    fn cipher(&self) -> &XChaCha20Poly1305 {
-        self.cipher
-            .get_or_init(|| XChaCha20Poly1305::new(&load_or_create_key()))
+    fn cipher(&self) -> Result<&XChaCha20Poly1305> {
+        if let Some(c) = self.cipher.get() {
+            return Ok(c);
+        }
+        let key = load_or_create_key()?;
+        let _ = self.cipher.set(XChaCha20Poly1305::new(&key));
+        Ok(self.cipher.get().expect("cipher just initialized"))
     }
 
     fn encrypt(&self, plaintext: &str) -> Result<String> {
         let nonce = XNonce::generate();
         let ct = self
-            .cipher()
+            .cipher()?
             .encrypt(&nonce, plaintext.as_bytes())
             .map_err(|_| anyhow!("encryption failed"))?;
         let mut blob = Vec::with_capacity(nonce.len() + ct.len());
@@ -81,7 +85,7 @@ impl FileKeyStore {
         let (nonce_bytes, ct) = blob.split_at(24);
         let nonce = XNonce::try_from(nonce_bytes).map_err(|_| anyhow!("malformed nonce"))?;
         let pt = self
-            .cipher()
+            .cipher()?
             .decrypt(&nonce, ct)
             .map_err(|_| anyhow!("decryption failed (wrong key or corrupted token)"))?;
         String::from_utf8(pt).context("decrypted secret is not valid UTF-8")
@@ -169,26 +173,33 @@ fn load_secrets_file() -> Result<SecretsFile> {
     Ok(serde_yaml::from_str(&raw)?)
 }
 
-/// Load the machine-local key, generating and persisting one on first use.
-fn load_or_create_key() -> Key {
+/// Load the machine-local key, generating and durably persisting one on first
+/// use. Refuses to return a key that could not be persisted (it would decrypt
+/// nothing after a restart) and refuses to overwrite an existing key of
+/// unexpected length rather than silently discarding recoverable ciphertext.
+fn load_or_create_key() -> Result<Key> {
     let path = key_file_path();
-    if let Ok(bytes) = std::fs::read(&path) {
-        if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
-            return Key::from(arr);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let arr = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+                anyhow!(
+                    "[secrets] {} has unexpected length ({} bytes); move it aside to reset",
+                    path.display(),
+                    bytes.len()
+                )
+            })?;
+            return Ok(Key::from(arr));
         }
-        log::warn!(
-            "[secrets] {} has unexpected length, regenerating",
-            path.display()
-        );
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow!("[secrets] reading {}: {e}", path.display())),
     }
     let key = Key::generate();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    if let Err(e) = write_owner_only(&path, key.as_slice()) {
-        log::error!("[secrets] failed to persist {}: {e}", path.display());
-    }
-    key
+    write_owner_only(&path, key.as_slice())
+        .with_context(|| format!("[secrets] persisting key {}", path.display()))?;
+    Ok(key)
 }
 
 /// The mode is set at create time, not via a later chmod, so the file is never
@@ -314,6 +325,18 @@ mod tests {
             store.set("openrgb", "token", "super-secret-value").unwrap();
             let raw = std::fs::read_to_string(secrets_file_path()).unwrap();
             assert!(!raw.contains("super-secret-value"));
+        });
+    }
+
+    #[test]
+    fn wrong_length_key_errors_instead_of_overwriting() {
+        with_tmp_config(|| {
+            std::fs::create_dir_all(key_file_path().parent().unwrap()).unwrap();
+            std::fs::write(key_file_path(), [0u8; 10]).unwrap();
+            let store = FileKeyStore::new();
+            assert!(store.set("openrgb", "token", "s3cr3t").is_err());
+            // The malformed key must be preserved, not silently replaced.
+            assert_eq!(std::fs::read(key_file_path()).unwrap().len(), 10);
         });
     }
 

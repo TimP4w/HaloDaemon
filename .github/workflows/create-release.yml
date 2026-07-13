@@ -32,7 +32,7 @@ jobs:
     outputs:
       new_version: ${{ steps.calc.outputs.new }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
         with:
           ref: main
 
@@ -62,7 +62,7 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -111,7 +111,7 @@ jobs:
         run: cargo build --release -p halod -p halod-gui
 
       - name: Upload release binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
         with:
           name: linux-release-bin
           path: |
@@ -125,10 +125,10 @@ jobs:
     needs: version
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
 
       - name: Set up MSYS2 (UCRT64)
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@REPLACE_WITH_SHA_FOR_msys2_setup_msys2 # v2 (pin exact patch, e.g. v2.24.1)
         with:
           msystem: UCRT64
           update: true
@@ -176,7 +176,7 @@ jobs:
           cargo build --release -p halod -p halod-gui
 
       - name: Upload release binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
         with:
           name: windows-release-bin
           path: |
@@ -191,7 +191,7 @@ jobs:
     outputs:
       new_version: ${{ needs.version.outputs.new_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
         with:
           ref: main
 
@@ -257,16 +257,16 @@ jobs:
     needs: [test-windows, prepare]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
 
       - name: Download Windows release binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@REPLACE_WITH_SHA_FOR_actions_download_artifact # v4 (pin exact patch, e.g. v4.1.8)
         with:
           name: windows-release-bin
           path: src/target/release
 
       - name: Set up MSYS2 (UCRT64) for ffmpeg
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@REPLACE_WITH_SHA_FOR_msys2_setup_msys2 # v2 (pin exact patch, e.g. v2.24.1)
         with:
           msystem: UCRT64
           update: true
@@ -294,7 +294,7 @@ jobs:
             packaging\windows\halod.iss
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
         with:
           name: halod-setup-x64
           path: packaging/windows/Output/halod-setup-x64.exe
@@ -306,10 +306,10 @@ jobs:
     needs: [test-linux, prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
 
       - name: Download Linux release binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@REPLACE_WITH_SHA_FOR_actions_download_artifact # v4 (pin exact patch, e.g. v4.1.8)
         with:
           name: linux-release-bin
           path: src/target/release
@@ -352,7 +352,7 @@ jobs:
           tar czf halod-linux-x64.tar.gz "$d"
 
       - name: Upload tarball artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
         with:
           name: halod-linux-x64
           path: halod-linux-x64.tar.gz
@@ -366,14 +366,17 @@ jobs:
     needs: [test-linux, prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
         with:
           ref: main
 
+      # dtolnay/rust-toolchain has no versioned releases: `@stable` is a rolling
+      # ref by design (tracks current stable Rust). Intentionally left unpinned;
+      # pin to a commit SHA here if a fully reproducible toolchain is required.
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Download Linux release binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@REPLACE_WITH_SHA_FOR_actions_download_artifact # v4 (pin exact patch, e.g. v4.1.8)
         with:
           name: linux-release-bin
           path: src/target/release
@@ -389,7 +392,7 @@ jobs:
         run: cargo deb --no-build --no-strip --manifest-path src/daemon/Cargo.toml
 
       - name: Upload .deb artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
         with:
           name: halod-deb
           path: src/target/debian/*.deb
@@ -404,14 +407,14 @@ jobs:
     needs: [test-linux, prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
         with:
           ref: main
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Download Linux release binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@REPLACE_WITH_SHA_FOR_actions_download_artifact # v4 (pin exact patch, e.g. v4.1.8)
         with:
           name: linux-release-bin
           path: src/target/release
@@ -430,7 +433,7 @@ jobs:
         run: cargo generate-rpm -p daemon
 
       - name: Upload .rpm artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@REPLACE_WITH_SHA_FOR_actions_upload_artifact # v4 (pin exact patch, e.g. v4.4.3)
         with:
           name: halod-rpm
           path: src/target/generate-rpm/*.rpm
@@ -441,10 +444,10 @@ jobs:
     needs: [prepare, windows-installer, linux-tarball, linux-deb, linux-rpm]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@REPLACE_WITH_SHA_FOR_actions_checkout # v4 (pin exact patch, e.g. v4.2.2)
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@REPLACE_WITH_SHA_FOR_actions_download_artifact # v4 (pin exact patch, e.g. v4.1.8)
         with:
           path: artifacts
 
@@ -478,14 +481,44 @@ jobs:
           | \`$(basename "$RPM")\` | \`${RPM_HASH}\` |
           EOF
 
+      - name: Generate SHA256SUMS and detached signature
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp artifacts/halod-setup-x64/halod-setup-x64.exe release/
+          cp artifacts/halod-linux-x64/halod-linux-x64.tar.gz release/
+          cp artifacts/halod-deb/*.deb release/
+          cp artifacts/halod-rpm/*.rpm release/
+          ( cd release && sha256sum -- * > SHA256SUMS )
+          echo "release/SHA256SUMS:"; cat release/SHA256SUMS
+          if [ -n "${GPG_PRIVATE_KEY}" ]; then
+            echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+            KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')
+            gpg --batch --yes --pinentry-mode loopback \
+              ${GPG_PASSPHRASE:+--passphrase "$GPG_PASSPHRASE"} \
+              --local-user "$KEYID" --detach-sign --armor \
+              --output release/SHA256SUMS.asc release/SHA256SUMS
+            echo "Wrote detached signature release/SHA256SUMS.asc"
+          else
+            echo "GPG_PRIVATE_KEY not set — skipping detached signature"
+          fi
+
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@REPLACE_WITH_SHA_FOR_softprops_action_gh_release # v2 (pin exact patch, e.g. v2.2.1)
         with:
           tag_name: v${{ needs.prepare.outputs.new_version }}
           name: HaloDaemon ${{ needs.prepare.outputs.new_version }}
           body_path: release-notes.md
+          # SHA256SUMS.asc is only present when GPG_PRIVATE_KEY is configured;
+          # softprops/action-gh-release defaults to fail_on_unmatched_files: false,
+          # so its absence is a warning, not a failure.
           files: |
             artifacts/halod-setup-x64/halod-setup-x64.exe
             artifacts/halod-linux-x64/halod-linux-x64.tar.gz
             artifacts/halod-deb/*.deb
             artifacts/halod-rpm/*.rpm
+            release/SHA256SUMS
+            release/SHA256SUMS.asc

@@ -81,11 +81,11 @@ async fn profile_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>
 
 /// Spawn a user-configured `Command`/`OpenApp` button action.
 ///
-/// Refused while elevated (Windows): the daemon may run at high integrity for
-/// PawnIO SMBus access, and we don't want a button mapping to become a
-/// privilege-escalation path from a medium-integrity UI compromise.
+/// Refused while elevated on every platform: on Windows the daemon may run at
+/// high integrity for PawnIO SMBus access, and on Linux it is meant to run
+/// per-user — if it is manually or accidentally run as root, a stored button
+/// mapping must not become a way to launch programs as root.
 fn spawn_process(cmd: &str, args: &[String]) {
-    #[cfg(windows)]
     if crate::platform::elevation::is_elevated() {
         log::warn!(
             "ActionExecutor: refusing to spawn {cmd:?} while running elevated \
@@ -610,11 +610,15 @@ impl ActionExecutor {
             ButtonAction::OpenApp { path } if pressed => spawn_process(path, &[]),
             ButtonAction::Command { cmd, args } if pressed => spawn_process(cmd, args),
             ButtonAction::Macro { steps } if pressed => {
-                platform::run_macro(
-                    steps.clone(),
-                    Arc::clone(&self.inner),
-                    Arc::clone(&self.macro_active),
-                );
+                if let Err(e) = crate::input::validate::validate_macro(steps) {
+                    log::warn!("ActionExecutor: refusing invalid stored macro: {e}");
+                } else {
+                    platform::run_macro(
+                        steps.clone(),
+                        Arc::clone(&self.inner),
+                        Arc::clone(&self.macro_active),
+                    );
+                }
             }
 
             // Press-only actions with pressed=false — nothing to do.

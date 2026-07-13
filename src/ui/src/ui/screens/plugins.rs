@@ -1698,6 +1698,8 @@ fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'
         Permission::Network => t!("plugins.permission_network"),
         Permission::Os => t!("plugins.permission_os"),
         Permission::SecureStorage => t!("plugins.permission_secure_storage"),
+        Permission::Smbus => t!("plugins.permission_smbus"),
+        Permission::AudioRouting => t!("plugins.permission_audio_routing"),
     }
 }
 
@@ -1709,6 +1711,8 @@ fn permission_description(perm: halod_shared::types::Permission) -> std::borrow:
         Permission::Network => t!("plugins.permission_network_desc"),
         Permission::Os => t!("plugins.permission_os_desc"),
         Permission::SecureStorage => t!("plugins.permission_secure_storage_desc"),
+        Permission::Smbus => t!("plugins.permission_smbus_desc"),
+        Permission::AudioRouting => t!("plugins.permission_audio_routing_desc"),
     }
 }
 
