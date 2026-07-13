@@ -141,10 +141,6 @@ impl SecretStore for FileKeyStore {
         }
         Ok(())
     }
-
-    fn backend_name(&self) -> &'static str {
-        "encrypted-file"
-    }
 }
 
 fn secrets_file_path() -> PathBuf {

@@ -28,20 +28,6 @@ pub fn set_screen_video(cmd: &CommandTx, id: &str, path: String) {
     );
 }
 
-#[expect(
-    dead_code,
-    reason = "LCD action retained for brightness-capable devices"
-)]
-pub fn set_screen_brightness(cmd: &CommandTx, id: &str, brightness: u8) {
-    ipc::send(
-        cmd,
-        DaemonCommand::SetScreenBrightness {
-            id: id.to_string(),
-            brightness,
-        },
-    );
-}
-
 pub fn set_screen_rotation(cmd: &CommandTx, id: &str, rotation: ScreenRotation) {
     ipc::send(
         cmd,

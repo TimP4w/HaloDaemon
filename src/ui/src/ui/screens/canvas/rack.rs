@@ -163,6 +163,7 @@ pub(super) fn instance_name<'a>(effects: &'a HashMap<String, EffectDef>, id: &'a
 }
 
 /// The first `max` labels plus a "+N more" overflow chip label.
+#[cfg(test)]
 fn chip_overflow(labels: &[String], max: usize) -> (&[String], Option<String>) {
     if labels.len() > max {
         (

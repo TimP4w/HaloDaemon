@@ -93,24 +93,6 @@ pub mod test_transport {
     }
 
     #[tokio::test]
-    async fn read_matching_returns_first_match() {
-        let transport = MockTransport::new(vec![vec![0x00], vec![0xAA], vec![0xBB]]);
-        let result: Option<Vec<u8>> = transport
-            .read_matching(1, |b: &[u8]| b.first() == Some(&0xAA), 3)
-            .await;
-        assert_eq!(result, Some(vec![0xAA]));
-    }
-
-    #[tokio::test]
-    async fn read_matching_skips_non_matching_and_returns_none_on_exhaustion() {
-        let transport = MockTransport::new(vec![vec![0x11], vec![0x22], vec![0x33]]);
-        let result: Option<Vec<u8>> = transport
-            .read_matching(1, |b: &[u8]| b.first() == Some(&0xFF), 3)
-            .await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
     async fn write_many_writes_all_packets_in_order() {
         let transport = MockTransport::empty();
         transport

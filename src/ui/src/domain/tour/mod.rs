@@ -25,7 +25,6 @@ pub enum AnchorId {
     HomeSidebarHome,
     HomeSidebarLighting,
     HomeSidebarCooling,
-    HomeSidebarCanvas,
     HomeSidebarSettings,
     LightingEffects,
     LightingImport,

@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use tokio::sync::{watch, Mutex};
 
-use crate::cooling::fan_curve::FanCurveEngine;
 use crate::run_loop::EngineRunConfig;
 use halod_shared::types::FanCurveStatus;
 
 struct Engine {
-    #[expect(dead_code, reason = "handle is retained to own the running engine")]
-    handle: Arc<FanCurveEngine>,
     cfg_tx: watch::Sender<EngineRunConfig>,
     /// Failsafe duty sent to the engine independently of the run config.
     failsafe_duty_tx: watch::Sender<u8>,
@@ -35,20 +32,13 @@ impl CoolingEngineState {
 
     pub fn set_engine(
         &self,
-        handle: Arc<FanCurveEngine>,
         cfg_tx: watch::Sender<EngineRunConfig>,
         failsafe_duty_tx: watch::Sender<u8>,
     ) {
         let _ = self.engine.set(Engine {
-            handle,
             cfg_tx,
             failsafe_duty_tx,
         });
-    }
-
-    #[expect(dead_code, reason = "engine accessor is reserved for runtime control")]
-    pub fn engine(&self) -> Option<&Arc<FanCurveEngine>> {
-        self.engine.get().map(|e| &e.handle)
     }
 
     pub fn cfg_tx(&self) -> Option<&watch::Sender<EngineRunConfig>> {

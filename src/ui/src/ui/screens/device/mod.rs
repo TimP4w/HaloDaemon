@@ -160,13 +160,6 @@ pub enum LcdMediaTab {
 /// One decoded GIF frame: `(rgba_bytes, width, height, delay_ms)`.
 pub type GifFrame = (Vec<u8>, usize, usize, u32);
 
-/// Animated-GIF frames as textures, for the editor's Image-widget preview.
-pub struct GifTex {
-    pub frames: Vec<egui::TextureHandle>,
-    pub delays: Vec<f64>,
-    pub total_ms: f64,
-}
-
 /// What a completed native file pick applies to.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum PickerTarget {
@@ -240,7 +233,6 @@ pub struct LcdTab {
     pub gif_advance_at: Option<f64>,
     /// Editor Image-widget GIF frames keyed by filename. `None` marks a file
     /// that isn't an animated GIF (or failed) so it isn't retried.
-    pub gif_widget_tex: HashMap<String, Option<GifTex>>,
     /// Editor state for the "custom" template's stage + inspector.
     pub editor: lcd::editor::EditorState,
 }
@@ -359,6 +351,7 @@ pub(super) fn is_terminal_upload_for(
 }
 
 /// Shared empty LED-color map for contexts without live canvas frames (tests).
+#[cfg(test)]
 pub fn empty_led_colors() -> &'static crate::ui::screens::canvas::LedColorMap {
     static EMPTY: std::sync::OnceLock<crate::ui::screens::canvas::LedColorMap> =
         std::sync::OnceLock::new();

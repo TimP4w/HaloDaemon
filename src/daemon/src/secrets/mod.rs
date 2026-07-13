@@ -23,15 +23,12 @@ use anyhow::Result;
 
 /// Per-plugin secret storage. Keys are namespaced by `(plugin_id, field_key)` so
 /// one plugin's secret can never collide with, or be read as, another's.
-#[expect(dead_code, reason = "backend name is diagnostic provider metadata")]
 pub trait SecretStore: Send + Sync {
     fn set(&self, plugin_id: &str, key: &str, plaintext: &str) -> Result<()>;
     /// `Ok(None)` when nothing is stored for this key (not an error).
     fn get(&self, plugin_id: &str, key: &str) -> Result<Option<String>>;
     /// Deleting an absent entry is not an error.
     fn delete(&self, plugin_id: &str, key: &str) -> Result<()>;
-    /// Which backend is active, for startup logging.
-    fn backend_name(&self) -> &'static str;
 }
 
 /// Pick the OS keyring if reachable, else the encrypted-file fallback. Probes

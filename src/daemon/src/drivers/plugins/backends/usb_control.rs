@@ -36,6 +36,7 @@ fn open(
     handle: &DiscoveryHandle<'_>,
     _config: &HashMap<String, String>,
     _granted: &[halod_shared::types::Permission],
+    limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
     let DiscoveryHandle::UsbNonHid { vid, pid } = handle else {
         bail!(
@@ -47,12 +48,14 @@ fn open(
 
     let mut endpoints: HashMap<String, Arc<dyn ControlTransport>> = HashMap::new();
     let primary = UsbControlTransport::open(*vid, *pid, cfg.interface, None)?;
+    primary.set_write_rate_limit(limit);
     endpoints.insert(ControlEndpoints::PRIMARY.to_owned(), Arc::new(primary));
 
     // Secondary devices this plugin bundles (e.g. the Ambiglow LED controller):
     // opened by their declared VID/PID and reached from Lua by their id.
     for ep in &cfg.endpoints {
         let t = UsbControlTransport::open(ep.vid, ep.pid, ep.interface, None)?;
+        t.set_write_rate_limit(limit);
         endpoints.insert(ep.id.clone(), Arc::new(t));
     }
 

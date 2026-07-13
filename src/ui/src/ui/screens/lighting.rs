@@ -1327,6 +1327,7 @@ fn has_rgb_zones(d: &WireDevice) -> bool {
 
 /// Selected devices that are actually present — offline ids stay saved but
 /// don't count toward "applies to N devices".
+#[cfg(test)]
 fn effective_sel_count(state: &AppState, st: &LightingUi) -> usize {
     rgb_devices(state)
         .filter(|d| st.sel_ids.contains(&d.id))

@@ -62,7 +62,7 @@ fn device_svg(ty: DeviceType) -> &'static [u8] {
     }
 }
 
-#[expect(dead_code, reason = "complete icon coverage table validated by tests")]
+#[cfg(test)]
 const DEVICE_TYPES: [DeviceType; 15] = [
     DeviceType::Keyboard,
     DeviceType::Mouse,

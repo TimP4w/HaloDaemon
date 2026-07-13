@@ -624,26 +624,6 @@ impl PluginHandle {
         Ok(controllers)
     }
 
-    pub async fn write_controller_frame(
-        &self,
-        index: u32,
-        zone: &str,
-        colors: &[RgbColor],
-    ) -> Result<()> {
-        let zone = zone.to_owned();
-        let colors = colors.to_vec();
-        self.run(move |ctx| {
-            let f = required(&ctx.manifest, "write_controller_frame")?;
-            let colors_v = ctx
-                .lua
-                .to_value(&colors)
-                .map_err(|e| lua_err("write_controller_frame arg", e))?;
-            f.call::<()>((ctx.dev.clone(), index, zone, colors_v))
-                .map_err(|e| lua_err("write_controller_frame", e))
-        })
-        .await
-    }
-
     pub async fn hub_fan_rpm(&self, channel: u8) -> Result<u32> {
         self.call("fan_rpm", channel).await
     }

@@ -239,6 +239,7 @@ impl Controls {
     fn backfill_booleans(&self, live: &mut [Boolean]) {
         for b in live {
             if let Some(decl) = self.booleans.iter().find(|d| d.key == b.key) {
+                b.read_only = decl.read_only;
                 if b.label.is_empty() {
                     b.label = decl.label.clone();
                 }

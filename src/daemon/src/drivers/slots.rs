@@ -169,5 +169,15 @@ slot_accessors!(LcdStateSlot {
     active_image / set_active_image : active_image : Option<String>,
     raw_streaming / set_raw_streaming : raw_streaming : bool,
     video_path / set_video_path : video_path : Option<String>,
-    latches_last_frame / set_latches_last_frame : latches_last_frame : bool,
 });
+
+impl LcdStateSlot {
+    pub fn set_latches_last_frame(&self, value: bool) {
+        self.0.update(|state| state.latches_last_frame = value);
+    }
+
+    #[cfg(test)]
+    pub fn latches_last_frame(&self) -> bool {
+        self.0.with(|state| state.latches_last_frame)
+    }
+}

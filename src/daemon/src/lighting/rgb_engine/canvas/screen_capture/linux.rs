@@ -16,6 +16,7 @@ struct MmapCache {
 }
 
 impl MmapCache {
+    #[cfg(test)]
     fn new(ptr: *mut libc::c_void, len: usize, fd: i32) -> Self {
         Self { ptr, len, fd }
     }

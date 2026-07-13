@@ -120,7 +120,7 @@ impl HidTracking {
         keys.len()
     }
 
-    /// A clone of one tracked entry, if present.
+    #[cfg(test)]
     pub async fn get(&self, key: &str) -> Option<HidTrackingEntry> {
         self.tracking.lock().await.get(key).cloned()
     }

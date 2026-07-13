@@ -495,6 +495,7 @@ pub(crate) async fn try_connect_direct(
 /// If an existing device with the same `hardware_serial()` implements `TransportSwitchable`
 /// it adopts this HID path as its wired transport (Arc identity is preserved for engines).
 /// Otherwise the new device is registered as a brand-new `Primary` entry.
+#[allow(clippy::too_many_arguments)] // HID identity and usage tuple comes directly from hidapi
 async fn add_hid_device(
     app: &Arc<AppState>,
     vid: u16,

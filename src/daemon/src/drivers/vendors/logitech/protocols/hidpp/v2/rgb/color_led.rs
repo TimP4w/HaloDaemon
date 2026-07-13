@@ -35,21 +35,15 @@ pub fn color_led_location_name(location: u16) -> &'static str {
 /// Which parameters an effect ID uses, and at what byte offset in the 10-byte
 /// payload (after the lead effect-ID byte).
 #[derive(Clone, Debug)]
+#[cfg(test)]
 pub struct LedEffectLayout {
     /// Per-param `(name, offset, size)` triples.
     pub params: &'static [(&'static str, usize, usize)],
 }
 
-/// Colour at `off` (3 bytes), or a byte param with `min..=max` and optional
-/// per-effect period range.
-#[derive(Clone)]
-pub struct LedEffectDef {
-    pub name: &'static str,
-    pub layout: LedEffectLayout,
-}
-
 // ── Effect table ──────────────────────────────────────────────────────────────
 
+#[cfg(test)]
 pub static LED_EFFECTS: &[(&str, u8, LedEffectLayout)] = &[
     ("Disabled", 0x00, LedEffectLayout { params: &[] }),
     (
@@ -125,13 +119,9 @@ pub static LED_EFFECTS: &[(&str, u8, LedEffectLayout)] = &[
 ];
 
 /// Find an effect definition by numeric ID.
+#[cfg(test)]
 pub fn find_led_effect(id: u8) -> Option<&'static (&'static str, u8, LedEffectLayout)> {
     LED_EFFECTS.iter().find(|(_, eid, _)| *eid == id)
-}
-
-/// Find an effect definition by string name.
-pub fn find_led_effect_by_name(name: &str) -> Option<&'static (&'static str, u8, LedEffectLayout)> {
-    LED_EFFECTS.iter().find(|(n, _, _)| *n == name)
 }
 
 // ── Reply parsers ─────────────────────────────────────────────────────────────
@@ -186,6 +176,7 @@ pub fn encode_color_led_set_effect_static(zone_idx: u8, slot: u8, color: RgbColo
 }
 
 /// The effect slot for the given zone index and effect-table slot.
+#[cfg(test)]
 pub fn color_led_effect_command(_zone_idx: u8, effect_slot: u8, payload: &[u8]) -> Vec<u8> {
     let mut cmd = Vec::with_capacity(1 + payload.len());
     cmd.push(effect_slot);
@@ -244,6 +235,12 @@ mod tests {
         assert!(find_led_effect(0x01).is_some());
         assert!(find_led_effect(0x03).is_some());
         assert!(find_led_effect(0x0B).is_some());
+        for (_, _, layout) in LED_EFFECTS {
+            assert!(layout
+                .params
+                .iter()
+                .all(|(_, offset, size)| offset + size <= 10));
+        }
     }
 
     #[test]

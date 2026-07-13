@@ -7,12 +7,7 @@ use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use image::{Rgba, RgbaImage};
 use imageproc::drawing::draw_text_mut;
 
-use halod_shared::types::{
-    EffectParamDescriptor, EffectParamValue, LcdEngineTemplateDescriptor, ParamKind, RgbColor,
-    Sensor,
-};
-
-use crate::util::effect_params::{param_f64, param_str};
+use halod_shared::types::{EffectParamValue, LcdEngineTemplateDescriptor, RgbColor, Sensor};
 
 use super::custom;
 
@@ -180,36 +175,6 @@ impl Background {
             source,
             sized: None,
         }
-    }
-
-    /// The params every image-capable template appends to its schema.
-    fn params() -> Vec<EffectParamDescriptor> {
-        vec![
-            EffectParamDescriptor {
-                id: "image".to_string(),
-                label: "Background image".to_string(),
-                kind: ParamKind::Image,
-                default: EffectParamValue::Str(String::new()),
-            },
-            EffectParamDescriptor {
-                id: "dim".to_string(),
-                label: "Background dim".to_string(),
-                kind: ParamKind::Range {
-                    min: 0.0,
-                    max: 100.0,
-                    step: 1.0,
-                },
-                default: EffectParamValue::Float(0.0),
-            },
-        ]
-    }
-
-    fn from_params(params: &HashMap<String, EffectParamValue>, images_dir: &Path) -> Self {
-        Self::new(
-            &param_str(params, "image", ""),
-            param_f64(params, "dim", 0.0),
-            images_dir,
-        )
     }
 
     fn load_frames(filename: &str, images_dir: &Path) -> Vec<GifFrame> {

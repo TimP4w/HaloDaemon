@@ -40,6 +40,7 @@ impl TcpTransport {
     /// Connect to `host:port`, bounding both the connect attempt and every
     /// subsequent read/write by `timeout_ms` (falls back to a 5s default when
     /// `0`, so a plugin can't accidentally hang the discovery pass forever).
+    #[cfg(test)]
     pub async fn connect(host: &str, port: u16, timeout_ms: u64) -> Result<Self> {
         let timeout = resolve_timeout(timeout_ms);
         let stream = tokio::time::timeout(timeout, TcpStream::connect((host, port)))
@@ -63,6 +64,7 @@ impl TcpTransport {
     /// Callers on a shared async runtime should run this inside
     /// `tokio::task::spawn_blocking` (a real network connect can block for the
     /// full timeout) rather than calling it directly from an async task.
+    #[cfg(test)]
     pub fn connect_blocking(host: &str, port: u16, timeout_ms: u64) -> Result<Self> {
         use std::net::ToSocketAddrs;
 

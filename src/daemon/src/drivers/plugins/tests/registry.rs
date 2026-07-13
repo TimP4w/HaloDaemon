@@ -706,9 +706,6 @@ impl crate::secrets::SecretStore for FakeSecretStore {
             .remove(&(plugin_id.to_owned(), key.to_owned()));
         Ok(())
     }
-    fn backend_name(&self) -> &'static str {
-        "fake"
-    }
 }
 
 #[test]

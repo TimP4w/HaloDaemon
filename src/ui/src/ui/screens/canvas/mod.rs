@@ -50,8 +50,6 @@ enum LedMode {
 }
 
 struct DragState {
-    device_id: String,
-    zone_id: String,
     handle: Handle,
     orig: PlacedZone,
     /// Originals of every selected zone, captured at press. A `Body` drag moves
@@ -188,7 +186,6 @@ pub struct CanvasUi {
     drag_zones: HashMap<String, PlacedZone>,
     pending: PendingCommands,
     param_edits: HashMap<String, HashMap<String, EffectParamValue>>,
-    group_collapsed: HashSet<String>,
     marquee: Option<MarqueeState>,
     /// The instance rack row currently expanded for editing.
     selected_instance: Option<String>,
@@ -215,9 +212,6 @@ pub struct CanvasUi {
     sample_edit_at: f64,
     /// Cached formatted FPS string; recomputed only when `fps.display` changes.
     fps_label: String,
-    /// Cached (on, total) zone count label.
-    zones_count_label: String,
-    zones_counts: (usize, usize),
     /// Target of a right-click context menu, cleared after showing.
     context_menu_target: Option<(String, String)>,
 }
@@ -233,7 +227,6 @@ impl Default for CanvasUi {
             drag_zones: HashMap::new(),
             pending: PendingCommands::default(),
             param_edits: HashMap::new(),
-            group_collapsed: HashSet::new(),
             marquee: None,
             selected_instance: None,
             rename_instance: None,
@@ -251,8 +244,6 @@ impl Default for CanvasUi {
             sample_radius: 3.0,
             sample_edit_at: 0.0,
             fps_label: "0 FPS".to_string(),
-            zones_count_label: "0/0".to_string(),
-            zones_counts: (0, 0),
             context_menu_target: None,
         }
     }
@@ -341,6 +332,7 @@ pub fn ingest_frame(ctx: &egui::Context, ui: &mut CanvasUi, frame: &CanvasFrame)
 /// The Effects Canvas tab body: right-hand instance rack + the live canvas
 /// stage. The shared RGB Lighting header (title + transport chrome + tab bar)
 /// is rendered by [`crate::ui::screens::lighting::show`] above this.
+#[allow(clippy::too_many_arguments)] // top-level canvas view dependencies are explicit borrows
 pub(crate) fn body(
     ui: &mut egui::Ui,
     state: &AppState,
@@ -461,8 +453,6 @@ mod test_fixtures {
 
     pub fn drag(zone: &PlacedZone, handle: Handle) -> DragState {
         DragState {
-            device_id: zone.device_id.clone(),
-            zone_id: zone.zone_id.clone(),
             handle,
             orig: zone.clone(),
             group: vec![zone.clone()],

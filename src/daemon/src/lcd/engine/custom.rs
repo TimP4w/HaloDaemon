@@ -490,6 +490,7 @@ impl CustomTemplate {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // text rasterization inputs remain independently meaningful
     fn render_text(
         &self,
         img: &mut RgbaImage,
@@ -1528,6 +1529,7 @@ fn draw_ring(
 /// Flat progress bar: a rounded-rect `track` with a rounded-rect `fill`. The
 /// fill's corner radius is clamped to half its own width, so a short fill reads
 /// as a small rounded sliver rather than a full-height ball.
+#[allow(clippy::too_many_arguments)] // primitive geometry/style parameters
 fn draw_bar(
     img: &mut RgbaImage,
     cx: f32,
@@ -1671,6 +1673,7 @@ fn sensor_fill(widget: &WidgetDef, base: RgbColor, frac: f32) -> RgbColor {
     sensor_fill_color(fill, high, gradient, frac)
 }
 
+#[allow(clippy::too_many_arguments)] // primitive text geometry/style parameters
 fn draw_centered_text(
     img: &mut RgbaImage,
     color: RgbColor,
@@ -1915,6 +1918,7 @@ impl CustomTemplate {
 /// what `update_def` decides needs it); otherwise starts a fresh one so the
 /// caller keeps it alive for the next request. Returns the changed sprites
 /// plus the current (id, signature) pair for every widget.
+#[allow(clippy::too_many_arguments)] // editor render request plus reusable session state
 pub(crate) fn render_editor_sprites(
     device_id: &str,
     def: &CustomTemplateDef,
@@ -2660,11 +2664,7 @@ mod tests {
         let info = MediaInfo {
             title: "Track".to_string(),
             artist: "Artist".to_string(),
-            album: "Album".to_string(),
             status: crate::services::media::PlaybackStatus::Playing,
-            position: None,
-            position_at: None,
-            length: None,
             art: None,
         };
         // show_art only: no title, no artist.
@@ -2678,11 +2678,7 @@ mod tests {
         let info = MediaInfo {
             title: "A Very Long Track Title That Would Scroll".to_string(),
             artist: "Artist".to_string(),
-            album: "Album".to_string(),
             status: crate::services::media::PlaybackStatus::Playing,
-            position: None,
-            position_at: None,
-            length: None,
             art: None,
         };
         let layout = now_playing_layout(Some(&info), true, true, true);
@@ -2696,11 +2692,7 @@ mod tests {
         let info = MediaInfo {
             title: "Track".to_string(),
             artist: "Artist".to_string(),
-            album: "Album".to_string(),
             status: crate::services::media::PlaybackStatus::Playing,
-            position: None,
-            position_at: None,
-            length: None,
             art: None,
         };
         let layout = now_playing_layout(Some(&info), true, true, false);

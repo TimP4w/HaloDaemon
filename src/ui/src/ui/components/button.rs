@@ -11,8 +11,6 @@ use crate::ui::theme::{self, a};
 pub enum ButtonKind {
     /// Bright accent fill with dark ink — the affirmative action.
     Primary,
-    /// Like [`Primary`] but with a trailing `→` arrow after the label.
-    PrimaryArrow,
     /// Amber fill with dark ink — an affirmative action tied to a warning
     /// context (e.g. the "Update" call-to-action inside an amber update banner).
     Warn,
@@ -92,7 +90,7 @@ fn paint_button(
     let p = ui.painter();
 
     let (fill, stroke, text_color, font) = match kind {
-        ButtonKind::Primary | ButtonKind::PrimaryArrow => (
+        ButtonKind::Primary => (
             theme::lerp_color(a(theme::CYAN, 0.92), theme::CYAN, t),
             Stroke::NONE,
             if disabled {
@@ -149,7 +147,7 @@ fn paint_button(
     };
 
     if let Some(glow) = match kind {
-        ButtonKind::Primary | ButtonKind::PrimaryArrow => Some(theme::CYAN),
+        ButtonKind::Primary => Some(theme::CYAN),
         ButtonKind::Warn => Some(theme::STAT_AMBER),
         _ => None,
     } {
@@ -165,10 +163,6 @@ fn paint_button(
         p.rect_stroke(rect, 7.0, stroke, egui::StrokeKind::Middle);
     }
 
-    let text = if matches!(kind, ButtonKind::PrimaryArrow) {
-        format!("{label}   →")
-    } else {
-        label.to_string()
-    };
+    let text = label.to_string();
     p.text(rect.center(), Align2::CENTER_CENTER, text, font, text_color);
 }

@@ -72,7 +72,7 @@ pub(super) fn open_probe(
     granted: &[Permission],
 ) -> Result<PluginIo> {
     match super::transport::descriptor_for("tcp") {
-        Some(d) => (d.open)(manifest, &placeholder_handle(), config, granted),
+        Some(d) => (d.open)(manifest, &placeholder_handle(), config, granted, None),
         None => anyhow::bail!("integration plugin: no 'tcp' transport backend registered"),
     }
 }

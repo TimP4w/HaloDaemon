@@ -247,17 +247,11 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
         tokio::sync::mpsc::channel::<profiles::focus_watcher::ControlMsg>(32);
     app.focus.set_ctrl_tx(focus_ctrl_tx).await;
 
-    let (focus_watcher_cfg_tx, focus_watcher_cfg_rx) =
-        watch::channel(EngineRunConfig::focus_watcher());
-
     let focus_watcher = profiles::focus_watcher::FocusWatcherEngine::new(app.clone());
 
     app.lighting.set_engine(rgb.clone(), rgb_cfg_tx);
-    app.cooling
-        .set_engine(fan_curve.clone(), fan_curve_cfg_tx, failsafe_duty_tx);
+    app.cooling.set_engine(fan_curve_cfg_tx, failsafe_duty_tx);
     app.lcd.set_engine(lcd.clone(), video, lcd_cfg_tx);
-    app.focus
-        .set_engine(focus_watcher.clone(), focus_watcher_cfg_tx);
     // Receivers are subscribed lazily; SendError just means no live receivers yet,
     // but watch still stores the value so future subscribers see `true`.
     let _ = app.engines_ready.send(true);
@@ -265,9 +259,7 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
     let fan_curve_handle = fan_curve.start(fan_curve_cfg_rx, failsafe_duty_rx);
     let rgb_handle = rgb.start(rgb_cfg_rx).await;
     let lcd_handle = lcd.start(lcd_cfg_rx).await;
-    let focus_watcher_handle = focus_watcher
-        .start(focus_watcher_cfg_rx, focus_ctrl_rx)
-        .await;
+    let focus_watcher_handle = focus_watcher.start(focus_ctrl_rx).await;
 
     // Engines are supervised independently so one exiting can't take the others down.
     let engine_aborts = [

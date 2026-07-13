@@ -42,7 +42,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use halod_shared::types::{Animation, EffectParamValue, Permission, PluginInfo, PluginKind};
+use halod_shared::types::{
+    Animation, EffectParamValue, Permission, PluginInfo, PluginKind, WriteRateLimit,
+};
 
 use crate::drivers::Device;
 use crate::registry::discovery::DiscoveryHandle;
@@ -51,6 +53,10 @@ mod scan;
 
 #[cfg(test)]
 mod tests;
+
+fn declared_write_rate_limit(max_bytes_per_sec: Option<u32>) -> Option<WriteRateLimit> {
+    max_bytes_per_sec.map(|max_bytes_per_sec| WriteRateLimit { max_bytes_per_sec })
+}
 
 /// One RGB effect a plugin declares, registered under its namespaced catalog
 /// id (`<plugin_id>:<effect.id>`) so it can never collide with a native
@@ -129,7 +135,8 @@ pub struct Registry {
     /// Device ids with an outstanding runtime error, so a plugin that fails every
     /// engine tick is announced once per failure episode, not on every frame.
     failing_devices: RwLock<HashSet<String>>,
-    /// Rejected-load warnings (id collisions / bad logos) drained by the GUI.
+    /// Rejected-load warnings retained for validation tests.
+    #[cfg(test)]
     load_warnings: RwLock<Vec<PluginLoadWarning>>,
 }
 
@@ -842,11 +849,13 @@ pub fn repo_plugin_dirs(repos: &[crate::config::PluginRepoRecord]) -> Vec<std::p
 impl Registry {
     /// Every load warning recorded during the most recent `load_all_with_repos`,
     /// draining the set so a later poll doesn't repeat it.
+    #[cfg(test)]
     pub fn take_plugin_load_warnings(&self) -> Vec<PluginLoadWarning> {
         std::mem::take(&mut write_recover(&self.load_warnings))
     }
 
     /// [`Registry::load_all_with_repos`] with no configured repos.
+    #[cfg(test)]
     pub fn load_all(&self, dir: &Path) {
         self.load_all_with_repos(dir, &[]);
     }
@@ -872,7 +881,18 @@ impl Registry {
         }
         let effects: Vec<PluginEffectEntry> =
             manifests.iter().flat_map(effect_entries_for).collect();
-        *write_recover(&self.load_warnings) = warnings;
+        for warning in &warnings {
+            log::warn!(
+                "plugin '{}' rejected at {}: {}",
+                warning.plugin_id,
+                warning.path,
+                warning.reason
+            );
+        }
+        #[cfg(test)]
+        {
+            *write_recover(&self.load_warnings) = warnings;
+        }
         self.update(|s| {
             s.manifests = manifests;
             s.effects = effects;
@@ -933,8 +953,9 @@ impl Registry {
         // The grants + resolved config were validated by `activation_status` when it
         // produced this `ReadyPlugin` — reuse them rather than re-resolving.
         let ReadyPlugin { granted, config } = ready;
+        let write_rate_limit = declared_write_rate_limit(spec.max_bytes_per_sec);
         let transport = match transport::descriptor_for(&spec.transport)
-            .map(|d| (d.open)(manifest, handle, &config, &granted))
+            .map(|d| (d.open)(manifest, handle, &config, &granted, write_rate_limit))
         {
             Some(Ok(t)) => t,
             Some(Err(e)) => {
@@ -986,6 +1007,7 @@ impl Registry {
 
     /// Match a handle against a given manifest slice (consent checked against
     /// this registry's granted/acknowledged state). Used by tests.
+    #[cfg(test)]
     pub fn match_in(
         &self,
         app: &Arc<crate::state::AppState>,

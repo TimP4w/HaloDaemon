@@ -56,8 +56,4 @@ impl SecretStore for KeyringStore {
             Err(e) => Err(e).context("deleting secret"),
         }
     }
-
-    fn backend_name(&self) -> &'static str {
-        "keyring"
-    }
 }

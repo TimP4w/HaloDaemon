@@ -303,7 +303,7 @@ fn build_tour(key: TourKey) -> Tour {
 }
 
 /// Every [`TourKey`] variant, for exhaustive testing/proptesting over "any tour".
-#[expect(dead_code, reason = "complete tour registry validated by tests")]
+#[cfg(test)]
 pub const ALL_TOUR_KEYS: &[TourKey] = &[
     TourKey::PageHome,
     TourKey::PageLighting,
@@ -331,8 +331,10 @@ pub const ALL_TOUR_KEYS: &[TourKey] = &[
 /// the tour engine expects is preserved while still honouring a runtime locale
 /// switch: the first request for a locale builds and leaks that locale's copy;
 /// later requests return the cached reference.
-fn cache() -> &'static Mutex<HashMap<(String, &'static str), Arc<Tour>>> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, &'static str), Arc<Tour>>>> = OnceLock::new();
+type TourCache = Mutex<HashMap<(String, &'static str), Arc<Tour>>>;
+
+fn cache() -> &'static TourCache {
+    static CACHE: OnceLock<TourCache> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

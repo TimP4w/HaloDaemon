@@ -33,6 +33,7 @@ pub enum DiscoveryHandle<'a> {
         addr: u8,
         bus_kind: crate::drivers::transports::smbus::SmbusBusKind,
     },
+    #[allow(dead_code)] // plugin discovery protocol variant; no built-in currently emits it
     ChainAccessory {
         channel_id: u8,
         accessory_id: u8,
@@ -71,14 +72,14 @@ impl DiscoveryFilter {
 
 /// SMBus scan configuration submitted alongside a `DeviceDescriptor`.
 /// The SMBus scanner iterates these to know which addresses to probe on which bus, then calls `discover_handle()` for each hit.
+type SmBusPreScan = fn(
+    Arc<crate::drivers::transports::smbus::SmBusDevice>,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
+
 pub struct SmBusScanEntry {
     pub bus_kind: crate::drivers::transports::smbus::SmbusBusKind,
     pub addresses: &'static [u8],
-    pub pre_scan: Option<
-        fn(
-            Arc<crate::drivers::transports::smbus::SmBusDevice>,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>,
-    >,
+    pub pre_scan: Option<SmBusPreScan>,
     /// Optional write-rate ceiling applied to the bus this entry opens, shared
     /// by every stick/controller it discovers. Slow controllers (e.g. ENE DRAM)
     /// declare one so a rapid effect stream to several modules on one bus can't
@@ -93,11 +94,13 @@ pub struct SmBusScanEntry {
 inventory::collect!(SmBusScanEntry);
 
 /// A bus scanner registered by a transport module.
+type TransportScan = fn(Arc<crate::state::AppState>) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
 pub struct TransportScanner {
     pub name: &'static str,
     /// `std::env::consts::OS` value to restrict to one platform, or `None`.
     pub platform: Option<&'static str>,
-    pub scan: fn(Arc<crate::state::AppState>) -> Pin<Box<dyn Future<Output = ()> + Send>>,
+    pub scan: TransportScan,
 }
 inventory::collect!(TransportScanner);
 

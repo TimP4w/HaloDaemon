@@ -107,6 +107,7 @@ pub struct PluginsUi {
 const UPDATE_TIMEOUT: f64 = 90.0;
 
 impl PluginsUi {
+    #[allow(clippy::too_many_arguments)] // screen inputs mirror independent IPC result streams
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -1230,7 +1231,8 @@ pub(crate) fn consent_reason(p: &PluginInfo) -> ConsentReason {
 
 /// The permissions `p` declares that haven't been granted yet — the ones an
 /// update newly requires.
-pub(crate) fn newly_required_permissions(p: &PluginInfo) -> Vec<halod_shared::types::Permission> {
+#[cfg(test)]
+fn newly_required_permissions(p: &PluginInfo) -> Vec<halod_shared::types::Permission> {
     p.declared_permissions
         .iter()
         .filter(|perm| !p.granted_permissions.contains(perm))
@@ -1493,6 +1495,7 @@ fn initials_tile(ui: &mut egui::Ui, name: &str, id: &str, size: f32) {
     initials_tile_at(ui, rect, name, id);
 }
 
+#[allow(clippy::too_many_arguments)] // detail pane mutates independent modal/task state slots
 fn detail_body(
     ui: &mut egui::Ui,
     p: &PluginInfo,

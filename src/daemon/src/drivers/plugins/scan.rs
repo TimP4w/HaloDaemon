@@ -56,9 +56,7 @@ impl super::Registry {
                     bus_kind,
                     addresses: spec.addresses.clone().unwrap_or_default(),
                     extra_addresses: spec.extra_addresses.clone().unwrap_or_default(),
-                    write_rate_limit: spec
-                        .max_bytes_per_sec
-                        .map(|max_bytes_per_sec| WriteRateLimit { max_bytes_per_sec }),
+                    write_rate_limit: super::declared_write_rate_limit(spec.max_bytes_per_sec),
                     pre_scan: spec.pre_scan,
                     probe: spec.probe,
                     pci_match: spec.pci_match.clone(),

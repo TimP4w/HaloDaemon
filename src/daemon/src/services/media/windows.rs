@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use image::RgbaImage;
 use windows::core::Interface;
@@ -96,30 +96,6 @@ fn poll_once(art_cache: &mut ArtCache) -> windows::core::Result<Option<MediaInfo
         .map(map_status)
         .unwrap_or(PlaybackStatus::Stopped);
 
-    let (position, length) = session
-        .GetTimelineProperties()
-        .ok()
-        .map(|tp| {
-            let position = tp.Position().ok().and_then(|d| {
-                let ticks = d.Duration;
-                if ticks >= 0 {
-                    Some(Duration::from_nanos(ticks as u64 * 100))
-                } else {
-                    None
-                }
-            });
-            let end = tp.EndTime().ok().and_then(|d| {
-                let ticks = d.Duration;
-                if ticks > 0 {
-                    Some(Duration::from_nanos(ticks as u64 * 100))
-                } else {
-                    None
-                }
-            });
-            (position, end)
-        })
-        .unwrap_or((None, None));
-
     let art_key = format!("{title}\u{1}{album}");
     let art = if let Some(cached) = art_cache.get(&art_key) {
         Some(cached)
@@ -148,11 +124,7 @@ fn poll_once(art_cache: &mut ArtCache) -> windows::core::Result<Option<MediaInfo
     Ok(Some(MediaInfo {
         title,
         artist,
-        album,
         status,
-        position,
-        position_at: Some(Instant::now()),
-        length,
         art,
     }))
 }

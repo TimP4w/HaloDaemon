@@ -222,10 +222,10 @@ fn gnome_button_layout() -> Option<String> {
 /// (control, hit-rect) pairs and the horizontal span `(min_x, max_x)` the group
 /// occupies, or `None` when there are no controls (so other chrome — the logo and
 /// profile button — can be kept clear of them).
-fn window_controls_layout(
-    bar: Rect,
-    cfg: &ChromeConfig,
-) -> (Vec<(WinCtl, Rect)>, Option<(f32, f32)>) {
+type WindowControlRects = Vec<(WinCtl, Rect)>;
+type HorizontalSpan = Option<(f32, f32)>;
+
+fn window_controls_layout(bar: Rect, cfg: &ChromeConfig) -> (WindowControlRects, HorizontalSpan) {
     let n = cfg.buttons.len();
     if n == 0 {
         return (Vec::new(), None);

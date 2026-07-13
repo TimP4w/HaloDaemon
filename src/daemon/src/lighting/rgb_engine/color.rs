@@ -30,7 +30,8 @@ pub fn linear_to_led(c: f32, gamma: f32) -> u8 {
     (c.clamp(0.0, 1.0).powf(1.0 / gamma) * 255.0).round() as u8
 }
 
-pub fn hue_to_srgb(hue: f32) -> (u8, u8, u8) {
+#[cfg(test)]
+fn hue_to_srgb(hue: f32) -> (u8, u8, u8) {
     let h = (hue.rem_euclid(1.0)) * 6.0;
     let sector = h as i32;
     let f = h - sector as f32;

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use egui::Color32;
 
-use crate::ui::screens::device::{DeviceUi, GifFrame, GifTex, TabCtx};
+use crate::ui::screens::device::{DeviceUi, GifFrame, TabCtx};
 
 // ── Textures ──────────────────────────────────────────────────────────────────
 
@@ -116,87 +116,6 @@ pub(super) fn spawn_gif_stream(
         });
     });
     rx
-}
-
-/// Decode an animated GIF into one texture per frame, or `None` if the file
-/// isn't an animated GIF (static images use the plain thumbnail cache).
-pub(super) fn decode_gif_tex(
-    ctx: &TabCtx,
-    egui_ctx: &egui::Context,
-    filename: &str,
-) -> Option<GifTex> {
-    let bytes = std::fs::read(lcd_images_dir(ctx)?.join(filename)).ok()?;
-    if !(bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
-        return None;
-    }
-    let mut frames = Vec::new();
-    let mut delays = Vec::new();
-    stream_gif_frames(&bytes, |(data, w, h, delay_ms)| {
-        let name = format!("{filename}#gif{}", frames.len());
-        frames.push(rgba_texture(egui_ctx, &name, &data, w, h));
-        delays.push(delay_ms as f64);
-        true
-    });
-    if frames.len() <= 1 {
-        return None;
-    }
-    let total_ms = delays.iter().sum();
-    Some(GifTex {
-        frames,
-        delays,
-        total_ms,
-    })
-}
-
-/// Decode at most one uncached Image-widget GIF per frame into
-/// `st.lcd.gif_widget_tex`, mirroring [`decode_next_thumb`]'s one-per-frame budget.
-pub(super) fn decode_next_gif<'a>(
-    ui: &egui::Ui,
-    ctx: &TabCtx,
-    st: &mut DeviceUi,
-    filenames: impl Iterator<Item = &'a String>,
-) {
-    if lcd_images_dir(ctx).is_none() {
-        return;
-    }
-    for filename in filenames {
-        if st.lcd.gif_widget_tex.contains_key(filename) {
-            continue;
-        }
-        let tex = decode_gif_tex(ctx, ui.ctx(), filename);
-        st.lcd.gif_widget_tex.insert(filename.clone(), tex);
-        ui.ctx().request_repaint();
-        break;
-    }
-}
-
-/// Which `gif_widget_tex` keys survive a prune: only filenames still
-/// referenced by a current Image widget. Mirrors the daemon's
-/// `image_cache` prune so a long-lived editor tab doesn't accumulate GPU
-/// textures for GIFs removed from the layout. Pure so it's unit-tested.
-pub(super) fn retained_gif_filenames<'a>(
-    current: impl Iterator<Item = &'a String>,
-    referenced: &std::collections::HashSet<String>,
-) -> Vec<String> {
-    current
-        .filter(|f| referenced.contains(f.as_str()))
-        .cloned()
-        .collect()
-}
-
-/// Index of the GIF frame visible at time `t` seconds, by cumulative delay.
-pub(super) fn gif_frame_at(delays: &[f64], total_ms: f64, t: f64) -> usize {
-    if delays.len() <= 1 || !total_ms.is_finite() || total_ms <= 0.0 {
-        return 0;
-    }
-    let mut pos = (t * 1000.0).rem_euclid(total_ms);
-    for (i, &d) in delays.iter().enumerate() {
-        if pos < d {
-            return i;
-        }
-        pos -= d;
-    }
-    delays.len() - 1
 }
 
 /// Decode at most one uncached library file per frame into
@@ -356,19 +275,6 @@ pub(super) fn advance_gif(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn retained_gif_filenames_drops_unreferenced_and_keeps_referenced() {
-        let current = [
-            "a.gif".to_string(),
-            "b.gif".to_string(),
-            "c.gif".to_string(),
-        ];
-        let referenced: std::collections::HashSet<String> =
-            ["a.gif".to_string(), "c.gif".to_string()].into();
-        let kept = retained_gif_filenames(current.iter(), &referenced);
-        assert_eq!(kept, vec!["a.gif".to_string(), "c.gif".to_string()]);
-    }
 
     /// Encode a tiny `n`-frame GIF in memory for the decode tests.
     fn make_gif(n: usize) -> Vec<u8> {

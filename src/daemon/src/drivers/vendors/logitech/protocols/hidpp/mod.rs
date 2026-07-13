@@ -758,8 +758,10 @@ pub(crate) mod test_util {
     use super::*;
     use std::collections::VecDeque;
 
+    type RepliesByFunction = HashMap<u8, VecDeque<std::result::Result<Vec<u8>, String>>>;
+
     pub struct MockHidppChannel {
-        by_func: std::sync::Mutex<HashMap<u8, VecDeque<std::result::Result<Vec<u8>, String>>>>,
+        by_func: std::sync::Mutex<RepliesByFunction>,
         notify: broadcast::Sender<HidppNotification>,
     }
 

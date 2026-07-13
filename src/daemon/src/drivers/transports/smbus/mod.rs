@@ -75,7 +75,6 @@ impl PciMatch {
 }
 
 pub struct SmBusDevice {
-    pub bus_number: u8,
     /// Rate-limits the whole bus; devices sharing a `SmBusScanEntry` already
     /// share this gate and its bus mutex. Boxed so tests can inject a recording
     /// backend without opening real hardware.
@@ -86,37 +85,8 @@ impl SmBusDevice {
     pub fn open(info: &BusInfo) -> Result<Arc<Self>> {
         let inner = super::register_ops::open_smbus(info)?;
         Ok(Arc::new(Self {
-            bus_number: info.bus_number,
             io: Metered::new(Mutex::new(inner), None),
         }))
-    }
-
-    /// Wrap an arbitrary synchronous ops backend — a mock in tests.
-    #[cfg(test)]
-    pub fn from_ops(bus_number: u8, ops: Box<dyn SmBusSyncOps + Send>) -> Arc<Self> {
-        Arc::new(Self {
-            bus_number,
-            io: Metered::new(Mutex::new(ops), None),
-        })
-    }
-
-    /// Run a batch of synchronous SMBus ops in one `spawn_blocking` call,
-    /// tallying written bytes and metering them through the bus's write-rate gate.
-    pub async fn run_batch<F, R>(&self, f: F) -> Result<R>
-    where
-        F: FnOnce(&mut dyn SmBusSyncOps) -> Result<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        self.io
-            .write_tallied(move |inner, bytes| {
-                let mut g = inner.lock().map_err(|_| anyhow!("smbus lock poisoned"))?;
-                let mut counting = CountingSmBusOps {
-                    inner: &mut **g,
-                    bytes,
-                };
-                f(&mut counting)
-            })
-            .await
     }
 
     /// Inline twin of [`run_batch`](Self::run_batch): runs the ops on the
@@ -205,16 +175,12 @@ impl SmBusSyncOps for CountingSmBusOps<'_> {
 
 /// Abstraction over an SMBus bus, so [`crate::registry::discovery::DiscoveryHandle`] stays free of the concrete type.
 pub trait SmBusOps: Send + Sync {
-    fn bus_number(&self) -> u8;
     /// Convert this `Arc<Self>` into `Arc<dyn Any + Send + Sync>` so the
     /// standard [`Arc::downcast`] can recover the concrete type.
     fn into_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
 }
 
 impl SmBusOps for SmBusDevice {
-    fn bus_number(&self) -> u8 {
-        self.bus_number
-    }
     fn into_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
     }

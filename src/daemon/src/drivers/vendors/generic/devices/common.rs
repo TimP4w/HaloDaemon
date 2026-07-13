@@ -7,12 +7,14 @@ use halod_shared::keyboard::KeyLayoutSpec;
 use std::f32::consts::PI;
 
 use halod_shared::types::{
-    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, EffectParamValue, KeyboardLayout,
-    LedPosition, RgbColor, RgbZone, WireDevice, ZoneTopology,
+    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, KeyboardLayout, LedPosition,
+    RgbColor, RgbZone, WireDevice, ZoneTopology,
 };
 use halod_shared::zone_transform::transform_colors;
 
-use crate::drivers::{Device, RgbStateSlot};
+use crate::drivers::RgbStateSlot;
+#[cfg(test)]
+use halod_shared::types::EffectParamValue;
 
 /// Build a stable device ID of the form `<prefix>_<serial>`, falling back to `<prefix>_<index>` when no usable serial is available.
 pub fn build_device_id(prefix: &str, serial: Option<&str>, index: usize) -> String {
@@ -52,14 +54,6 @@ fn key_positions(spec: &KeyLayoutSpec<'_>, col_max: f32) -> Vec<LedPosition> {
 /// bounds (`col ∈ [0, 17.5]`, `row ∈ [-1.5, 7.5]`).
 pub fn tkl_key_positions(spec: &KeyLayoutSpec<'_>) -> Vec<LedPosition> {
     key_positions(spec, 17.5)
-}
-
-/// Generate `LedPosition` entries for a full-size (100%) keyboard zone.
-///
-/// Same as [`tkl_key_positions`] but normalized to the wider full-size grid
-/// (`col ∈ [0, 22.5]`) to accommodate the numpad columns.
-pub fn full_size_key_positions(spec: &KeyLayoutSpec<'_>) -> Vec<LedPosition> {
-    key_positions(spec, 22.5)
 }
 
 /// Swap the `layout` field on a `Keyboard` topology variant, leaving other topology variants unchanged.
@@ -103,7 +97,8 @@ pub fn transformed_zone_frame(
 }
 
 /// Extract a color value from a native-effect param map.
-pub fn effect_color(params: &HashMap<String, EffectParamValue>, key: &str) -> Option<RgbColor> {
+#[cfg(test)]
+fn effect_color(params: &HashMap<String, EffectParamValue>, key: &str) -> Option<RgbColor> {
     if let Some(EffectParamValue::Color(c)) = params.get(key) {
         Some(*c)
     } else {
@@ -112,7 +107,8 @@ pub fn effect_color(params: &HashMap<String, EffectParamValue>, key: &str) -> Op
 }
 
 /// Extract a string value from a native-effect param map.
-pub fn effect_str<'a>(params: &'a HashMap<String, EffectParamValue>, key: &str) -> Option<&'a str> {
+#[cfg(test)]
+fn effect_str<'a>(params: &'a HashMap<String, EffectParamValue>, key: &str) -> Option<&'a str> {
     if let Some(EffectParamValue::Str(s)) = params.get(key) {
         Some(s.as_str())
     } else {
@@ -192,16 +188,6 @@ pub struct WireDeviceBuilder {
 }
 
 impl WireDeviceBuilder {
-    /// Seed a builder from the device's `id/name/vendor/model` getters.
-    pub fn from_device(device: &dyn Device) -> Self {
-        Self::from_parts(
-            device.id().to_owned(),
-            device.name().to_string(),
-            device.vendor().to_string(),
-            device.model().to_string(),
-        )
-    }
-
     /// Seed a builder from raw string parts — used by the Device trait default
     /// serialize impl where coercing `&Self` to `&dyn Device` is not possible.
     pub fn from_parts(id: String, name: String, vendor: String, model: String) -> Self {
@@ -218,14 +204,6 @@ impl WireDeviceBuilder {
             control_layout: Vec::new(),
             integration_id: None,
         }
-    }
-
-    /// Override the name seeded from `Device::name()` — for devices whose wire
-    /// name is a runtime value (e.g. the model reported by the hardware) rather
-    /// than the static name the trait getter returns.
-    pub fn name(mut self, name: String) -> Self {
-        self.name = name;
-        self
     }
 
     pub fn device_type(mut self, device_type: DeviceType) -> Self {
@@ -250,14 +228,6 @@ impl WireDeviceBuilder {
 
     pub fn serial_number(mut self, serial_number: Option<String>) -> Self {
         self.serial_number = serial_number;
-        self
-    }
-
-    /// Declare a responsive grid layout for the generic Controls tab's
-    /// category cards. Omit (or leave empty) for the default stacked,
-    /// alphabetical full-width layout.
-    pub fn control_layout(mut self, control_layout: Vec<CategoryLayout>) -> Self {
-        self.control_layout = control_layout;
         self
     }
 

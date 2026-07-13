@@ -20,7 +20,6 @@ const THIRD_PARTY_LICENSES: &str =
 
 #[derive(Default)]
 pub struct SettingsUi {
-    pub profile_popup: bool,
     /// Which modal overlay is currently open.
     modal: Option<Modal>,
     /// Set once we've asked the daemon for `DebugInfo` to populate the

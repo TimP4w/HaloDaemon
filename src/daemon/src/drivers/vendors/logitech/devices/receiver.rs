@@ -19,7 +19,7 @@ use crate::{
         vendors::logitech::protocols::hidpp::{
             self,
             v1::{
-                receiver::{decode_link_established, decode_pairing_lock, PairedDevice},
+                receiver::{decode_link_established, decode_pairing_lock},
                 Hidpp10,
             },
             DirectReport, HidppChannel, HidppNotification, PkWriteCoordinator, RECEIVER_DEVNUM,
@@ -170,10 +170,6 @@ impl LogitechReceiver {
 
     async fn read_device_count(&self) -> u8 {
         self.hidpp1().device_count().await
-    }
-
-    async fn read_paired_device_info(&self, n: u8) -> Option<PairedDevice> {
-        self.hidpp1().paired_info(n).await
     }
 
     fn start_notification_watcher(&self, app: Arc<AppState>) {

@@ -78,6 +78,7 @@ fn open(
     _handle: &DiscoveryHandle<'_>,
     config: &HashMap<String, String>,
     granted: &[Permission],
+    limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
     // A tcp transport reaches off the matched hardware onto the network, so it
     // is gated on the explicit Network grant (defence in depth: validate_manifest
@@ -114,6 +115,7 @@ fn open(
                 manifest.plugin_id
             )
         })?;
+    crate::drivers::transports::Transport::set_write_rate_limit(&transport, limit);
     Ok(PluginIo::Stream {
         transport: std::sync::Arc::new(transport),
         bulk: None,
@@ -181,7 +183,7 @@ mod tests {
     fn open_errors_when_host_field_is_unset() {
         let manifest = manifest_with_tcp();
         let config = HashMap::from([("port".to_string(), "6742".to_string())]);
-        let err = match open(&manifest, &hid(), &config, NET) {
+        let err = match open(&manifest, &hid(), &config, NET, None) {
             Err(e) => e,
             Ok(_) => panic!("expected an error"),
         };
@@ -195,7 +197,7 @@ mod tests {
             ("host".to_string(), "127.0.0.1".to_string()),
             ("port".to_string(), "not-a-number".to_string()),
         ]);
-        let err = match open(&manifest, &hid(), &config, NET) {
+        let err = match open(&manifest, &hid(), &config, NET, None) {
             Err(e) => e,
             Ok(_) => panic!("expected an error"),
         };
@@ -212,7 +214,7 @@ mod tests {
         // Requires a runtime for `TcpStream::from_std`'s reactor registration.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
-        assert!(open(&manifest, &hid(), &config, NET).is_err());
+        assert!(open(&manifest, &hid(), &config, NET, None).is_err());
     }
 
     #[test]
@@ -222,7 +224,7 @@ mod tests {
             ("host".to_string(), "127.0.0.1".to_string()),
             ("port".to_string(), "6742".to_string()),
         ]);
-        let err = err_msg(open(&manifest, &hid(), &config, &[]));
+        let err = err_msg(open(&manifest, &hid(), &config, &[], None));
         assert!(err.contains("network"), "{err}");
     }
 
@@ -241,7 +243,7 @@ mod tests {
                 ("host".to_string(), host.to_string()),
                 ("port".to_string(), "80".to_string()),
             ]);
-            let err = err_msg(open(&manifest, &hid(), &config, NET));
+            let err = err_msg(open(&manifest, &hid(), &config, NET, None));
             assert!(
                 err.contains("non-routable"),
                 "host {host} should be blocked: {err}"

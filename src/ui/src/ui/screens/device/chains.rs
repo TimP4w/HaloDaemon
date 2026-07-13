@@ -20,7 +20,8 @@ const ADD_LEDS_DEFAULT: u32 = 30;
 
 /// Topology choices in the Add-link form: (constructor, LED-count divisor).
 /// Display text comes from `topology_label()`, keyed off the variant.
-const TOPOLOGY_CHOICES: &[(fn() -> ZoneTopology, u32)] = &[
+type TopologyChoice = (fn() -> ZoneTopology, u32);
+const TOPOLOGY_CHOICES: &[TopologyChoice] = &[
     (|| ZoneTopology::Linear, 1),
     (|| ZoneTopology::Ring, 1),
     (|| ZoneTopology::Rings { count: 2 }, 2),

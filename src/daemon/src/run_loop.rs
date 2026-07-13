@@ -34,14 +34,6 @@ impl EngineRunConfig {
             tick_ms: 1000 / c.fps.clamp(1, 240) as u64,
         }
     }
-
-    /// Run config for the focus-watcher engine.
-    pub fn focus_watcher() -> Self {
-        Self {
-            enabled: true,
-            tick_ms: 0,
-        }
-    }
 }
 use tokio::time::MissedTickBehavior;
 

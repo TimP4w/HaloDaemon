@@ -51,6 +51,7 @@ impl HwmonIo {
         self.io.status()
     }
 
+    #[cfg(test)]
     pub fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
         self.io.set_limit(limit);
     }
@@ -78,7 +79,6 @@ impl HwmonTransport {
         }
         struct ChipEntry {
             path: std::path::PathBuf,
-            stable_id: String,
             fans: Vec<FanEntry>,
         }
 
@@ -116,7 +116,6 @@ impl HwmonTransport {
                 }
                 chips.push(ChipEntry {
                     path: entry.path(),
-                    stable_id,
                     fans,
                 });
             }

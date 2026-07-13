@@ -351,6 +351,7 @@ pub(super) async fn reconcile_onboard_profile(
 /// path. `None` = button event forwarded to key-remap (no broadcast); `Some(changed)`
 /// otherwise. `hidpp: None` skips transport reconciles but still applies DPI steps;
 /// `reconcile_mode_on_other_address` is the wired-only onboard-mode safety net.
+#[allow(clippy::too_many_arguments)] // HID++ notification packet plus reconciliation state
 pub(super) async fn reconcile_feature_notification(
     hidpp: Option<&Hidpp20>,
     sub_id: u8,

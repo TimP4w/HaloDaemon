@@ -141,8 +141,6 @@ pub(super) fn canvas_view(
                         .interact_pointer_pos()
                         .unwrap_or_else(|| norm_to_screen(norm, canvas_rect));
                     canvas_ui.drag = Some(DragState {
-                        device_id: dev_id,
-                        zone_id,
                         handle,
                         orig,
                         group,

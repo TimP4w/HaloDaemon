@@ -43,6 +43,8 @@ pub(super) struct LogitechTransport {
     pub(super) coordinator: Option<Arc<PkWriteCoordinator>>,
 }
 
+type TransportHook = Box<dyn Fn(TransportMode) + Send + Sync + 'static>;
+
 pub struct LogitechDevice {
     pub(super) id: String,
     pub(super) profile: Option<&'static LogitechDeviceProfile>,
@@ -58,7 +60,7 @@ pub struct LogitechDevice {
     /// Callback fired after a transport switch (direct ↔ hub-mediated).
     /// Registered by `after_register` so the application layer can re-apply
     /// config without the device holding an `AppState` reference.
-    transport_hook: std::sync::Mutex<Option<Box<dyn Fn(TransportMode) + Send + Sync + 'static>>>,
+    transport_hook: std::sync::Mutex<Option<TransportHook>>,
     pub(super) rgb: RgbStateSlot,
     pub(super) visibility: VisibilitySlot,
     /// Choice (report rate) state cache — required by `ChoiceCapability`.
@@ -163,6 +165,7 @@ impl LogitechDevice {
     /// short/long collections or only the long report. The messenger is built by
     /// the protocol's [`hidpp::open_wired`]; both run at `devnum = 0xFF` and own
     /// their HID listener. `device_type` is declared at registration.
+    #[allow(clippy::too_many_arguments)] // mirrors the HID identity/collection tuple
     pub fn new_direct(
         path: &str,
         serial: Option<&str>,

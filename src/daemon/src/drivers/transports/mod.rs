@@ -148,10 +148,6 @@ pub trait ControlTransport: Send + Sync {
 }
 
 #[async_trait]
-#[expect(
-    dead_code,
-    reason = "matching reads and rate limits are optional protocol hooks"
-)]
 pub trait Transport: Send + Sync {
     async fn write(&self, data: &[u8]) -> Result<()>;
     async fn read(&self, size: usize) -> Result<Vec<u8>>;
@@ -187,28 +183,6 @@ pub trait Transport: Send + Sync {
 
     async fn read_long(&self, size: usize) -> Result<Vec<u8>> {
         self.read(size).await
-    }
-
-    // `Self: Sized` keeps this generic method out of the vtable so `dyn
-    // Transport` stays object-safe (the plugin layer holds `Arc<dyn Transport>`).
-    // Concrete callers are unaffected.
-    async fn read_matching<F>(&self, size: usize, predicate: F, max_tries: usize) -> Option<Vec<u8>>
-    where
-        F: Fn(&[u8]) -> bool + Send,
-        Self: Sized,
-    {
-        for i in 0..max_tries {
-            match self.read(size).await {
-                Ok(msg) if predicate(&msg) => return Some(msg),
-                Ok(_) => {}
-                Err(e) => log::debug!("read_matching: read failed: {e}"),
-            }
-            // Backoff to avoid tight-spinning on non-blocking transports.
-            if i > 0 && i % 10 == 0 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-            }
-        }
-        None
     }
 
     /// Live write-rate limit and throughput. No default: every implementor

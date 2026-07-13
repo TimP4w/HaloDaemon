@@ -32,53 +32,43 @@ pub enum BulkEndpoint {
     Usb {
         vid: u16,
         pid: u16,
+        limit: Option<halod_shared::types::WriteRateLimit>,
         inner: std::sync::Mutex<Option<UsbBulkTransport>>,
     },
-    /// Records every write instead of touching hardware (tests only).
-    #[cfg(test)]
-    Recording(std::sync::Mutex<Vec<Vec<u8>>>),
 }
 
 impl BulkEndpoint {
-    pub fn new(vid: u16, pid: u16) -> Arc<Self> {
+    pub fn new(
+        vid: u16,
+        pid: u16,
+        limit: Option<halod_shared::types::WriteRateLimit>,
+    ) -> Arc<Self> {
         Arc::new(Self::Usb {
             vid,
             pid,
+            limit,
             inner: std::sync::Mutex::new(None),
         })
-    }
-
-    #[cfg(test)]
-    pub fn recording() -> Arc<Self> {
-        Arc::new(Self::Recording(std::sync::Mutex::new(Vec::new())))
-    }
-
-    #[cfg(test)]
-    pub fn recorded(&self) -> Vec<Vec<u8>> {
-        match self {
-            BulkEndpoint::Recording(m) => m.lock().unwrap().clone(),
-            _ => Vec::new(),
-        }
     }
 
     /// Write the whole payload to the bulk endpoint, opening the device on first
     /// use. `UsbBulkTransport::write` loops internally until every byte is sent.
     pub fn write(&self, data: &[u8]) -> Result<()> {
         match self {
-            BulkEndpoint::Usb { vid, pid, inner } => {
+            BulkEndpoint::Usb {
+                vid,
+                pid,
+                limit,
+                inner,
+            } => {
                 let mut guard = inner
                     .lock()
                     .map_err(|_| anyhow::anyhow!("plugin bulk endpoint mutex poisoned"))?;
                 let transport = match &mut *guard {
                     Some(t) => t,
-                    none => none.insert(UsbBulkTransport::open(*vid, *pid, None)?),
+                    none => none.insert(UsbBulkTransport::open(*vid, *pid, *limit)?),
                 };
                 transport.write(data)?;
-                Ok(())
-            }
-            #[cfg(test)]
-            BulkEndpoint::Recording(m) => {
-                m.lock().unwrap().push(data.to_vec());
                 Ok(())
             }
         }
@@ -222,6 +212,7 @@ type PluginOpenFn = fn(
     &DiscoveryHandle<'_>,
     &HashMap<String, String>,
     &[Permission],
+    Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo>;
 
 pub struct PluginTransportDescriptor {
@@ -258,86 +249,4 @@ pub fn known_kinds() -> Vec<&'static str> {
     inventory::iter::<PluginTransportDescriptor>()
         .map(|d| d.kind)
         .collect()
-}
-
-/// One captured USB control transfer, for asserting a plugin's wire output in
-/// tests without touching hardware (mirrors [`BulkEndpoint::Recording`]).
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ControlTransfer {
-    pub bm_request_type: u8,
-    pub b_request: u8,
-    pub w_value: u16,
-    pub w_index: u16,
-    pub data: Vec<u8>,
-}
-
-/// A `ControlTransport` that records every write instead of issuing it, and
-/// returns queued canned replies for reads. Test-only backing for a
-/// [`PluginIo::Control`] endpoint.
-#[cfg(test)]
-pub struct RecordingControl {
-    writes: std::sync::Mutex<Vec<ControlTransfer>>,
-    reads: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
-}
-
-#[cfg(test)]
-impl RecordingControl {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            writes: std::sync::Mutex::new(Vec::new()),
-            reads: std::sync::Mutex::new(std::collections::VecDeque::new()),
-        })
-    }
-
-    /// Every write transfer captured so far, in order.
-    pub fn writes(&self) -> Vec<ControlTransfer> {
-        self.writes.lock().unwrap().clone()
-    }
-
-    /// Queue a canned reply to be returned by the next `read_control`.
-    pub fn queue_read(&self, reply: Vec<u8>) {
-        self.reads.lock().unwrap().push_back(reply);
-    }
-}
-
-#[cfg(test)]
-impl ControlTransport for RecordingControl {
-    fn write_control(
-        &self,
-        bm_request_type: u8,
-        b_request: u8,
-        w_value: u16,
-        w_index: u16,
-        data: &[u8],
-    ) -> Result<()> {
-        self.writes.lock().unwrap().push(ControlTransfer {
-            bm_request_type,
-            b_request,
-            w_value,
-            w_index,
-            data: data.to_vec(),
-        });
-        Ok(())
-    }
-
-    fn read_control(
-        &self,
-        _bm_request_type: u8,
-        _b_request: u8,
-        _w_value: u16,
-        _w_index: u16,
-        buf: &mut [u8],
-    ) -> Result<usize> {
-        let reply = self.reads.lock().unwrap().pop_front().unwrap_or_default();
-        let n = reply.len().min(buf.len());
-        buf[..n].copy_from_slice(&reply[..n]);
-        Ok(n)
-    }
-
-    fn rate_status(&self) -> WriteRateStatus {
-        WriteRateStatus::default()
-    }
-
-    fn set_write_rate_limit(&self, _limit: Option<halod_shared::types::WriteRateLimit>) {}
 }

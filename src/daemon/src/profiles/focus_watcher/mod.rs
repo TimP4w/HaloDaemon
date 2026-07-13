@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 use crate::profiles::usecases::profiles::switch_profile_direct;
-use crate::state::{AppState, EngineRunConfig};
+use crate::state::AppState;
 
 #[cfg(target_os = "linux")]
 pub mod gnome_shell;
@@ -21,8 +21,11 @@ pub enum FocusEvent {
 
 #[derive(Debug, Clone)]
 pub enum ControlMsg {
-    ManualSwitch { profile: String },
+    ManualSwitch {
+        profile: String,
+    },
     RulesUpdated,
+    #[allow(dead_code)] // explicit shutdown is exercised by direct event-loop users/tests
     Shutdown,
 }
 
@@ -37,15 +40,13 @@ impl FocusWatcherEngine {
 
     pub async fn start(
         self: Arc<Self>,
-        cfg_rx: watch::Receiver<EngineRunConfig>,
         ctrl_rx: mpsc::Receiver<ControlMsg>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             match spawn_platform_backend().await {
                 Ok(focus_rx) => {
                     self.app.focus.set_supported(true);
-                    if let Some(ctrl_rx) =
-                        run_event_loop(self.app.clone(), cfg_rx, ctrl_rx, focus_rx).await
+                    if let Some(ctrl_rx) = run_event_loop(self.app.clone(), ctrl_rx, focus_rx).await
                     {
                         // Backend stream closed — clear supported flag and stay alive.
                         self.app.focus.set_supported(false);
@@ -128,28 +129,14 @@ async fn apply_focus(
 /// the caller can continue with `run_idle_loop`. Returns `None` on Shutdown.
 pub async fn run_event_loop(
     app: Arc<AppState>,
-    mut cfg_rx: watch::Receiver<EngineRunConfig>,
     mut ctrl_rx: mpsc::Receiver<ControlMsg>,
     mut focus_rx: mpsc::Receiver<FocusEvent>,
 ) -> Option<mpsc::Receiver<ControlMsg>> {
     let mut baseline = app.config.read().await.active_profile.clone();
     let mut last_active_rule: Option<String> = None;
     let mut current_foreground: Option<String> = None;
-    let mut enabled = cfg_rx.borrow_and_update().enabled;
 
     loop {
-        if !enabled {
-            tokio::select! {
-                _ = cfg_rx.changed() => {
-                    enabled = cfg_rx.borrow_and_update().enabled;
-                }
-                msg = ctrl_rx.recv() => {
-                    if matches!(msg, None | Some(ControlMsg::Shutdown)) { return None; }
-                }
-            }
-            continue;
-        }
-
         tokio::select! {
             biased;
             event = focus_rx.recv() => {
@@ -177,9 +164,6 @@ pub async fn run_event_loop(
                         apply_focus(&app, current_foreground.as_deref(), &baseline, &mut last_active_rule).await;
                     }
                 }
-            }
-            _ = cfg_rx.changed() => {
-                enabled = cfg_rx.borrow_and_update().enabled;
             }
         }
     }
@@ -210,17 +194,9 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::state::AppState;
-    use crate::state::EngineRunConfig;
     use halod_shared::types::AppRule;
     use std::sync::Arc;
-    use tokio::sync::{mpsc, watch};
-
-    fn enabled_cfg() -> EngineRunConfig {
-        EngineRunConfig {
-            enabled: true,
-            tick_ms: 0,
-        }
-    }
+    use tokio::sync::mpsc;
 
     fn make_app_with_rule(
         process: &str,
@@ -242,7 +218,6 @@ mod tests {
         let (app, _cfg) = make_app_with_rule("firefox", "Web");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
-        let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
 
         focus_tx
             .send(FocusEvent::AppFocused {
@@ -253,7 +228,7 @@ mod tests {
         ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
         drop(focus_tx);
 
-        run_event_loop(app.clone(), cfg_rx, ctrl_rx, focus_rx).await;
+        run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
 
         assert_eq!(app.config.read().await.active_profile, "Web");
     }
@@ -263,7 +238,6 @@ mod tests {
         let (app, _cfg) = make_app_with_rule("firefox", "Web");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
-        let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
 
         focus_tx
             .send(FocusEvent::AppFocused {
@@ -273,7 +247,7 @@ mod tests {
             .unwrap();
         ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
 
-        run_event_loop(app.clone(), cfg_rx, ctrl_rx, focus_rx).await;
+        run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
 
         assert_eq!(app.config.read().await.active_profile, "default");
     }
@@ -283,7 +257,6 @@ mod tests {
         let (app, _cfg) = make_app_with_rule("firefox", "Web");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
-        let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
 
         focus_tx
             .send(FocusEvent::AppFocused {
@@ -294,7 +267,7 @@ mod tests {
         focus_tx.send(FocusEvent::NoApp).await.unwrap();
         ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
 
-        run_event_loop(app.clone(), cfg_rx, ctrl_rx, focus_rx).await;
+        run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
 
         assert_eq!(app.config.read().await.active_profile, "default");
     }
@@ -310,7 +283,6 @@ mod tests {
 
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
-        let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
 
         focus_tx
             .send(FocusEvent::AppFocused {
@@ -327,7 +299,7 @@ mod tests {
         focus_tx.send(FocusEvent::NoApp).await.unwrap();
         ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
 
-        run_event_loop(app.clone(), cfg_rx, ctrl_rx, focus_rx).await;
+        run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
 
         assert_eq!(app.config.read().await.active_profile, "Gaming");
     }
@@ -345,7 +317,6 @@ mod tests {
         let app = Arc::new(AppState::new(cfg));
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
-        let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
 
         focus_tx
             .send(FocusEvent::AppFocused {
@@ -355,7 +326,7 @@ mod tests {
             .unwrap();
         ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
 
-        run_event_loop(app.clone(), cfg_rx, ctrl_rx, focus_rx).await;
+        run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
 
         assert_eq!(app.config.read().await.active_profile, "default");
     }
@@ -366,7 +337,6 @@ mod tests {
         app.config.write().await.profiles.remove("Deleted");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
-        let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
 
         focus_tx
             .send(FocusEvent::AppFocused {
@@ -376,7 +346,7 @@ mod tests {
             .unwrap();
         ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
 
-        run_event_loop(app.clone(), cfg_rx, ctrl_rx, focus_rx).await;
+        run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
         assert_eq!(app.config.read().await.active_profile, "default");
     }
 
@@ -385,7 +355,6 @@ mod tests {
         let (app, _cfg) = make_app_with_rule("firefox", "Web");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
-        let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
 
         focus_tx
             .send(FocusEvent::AppFocused {
@@ -396,7 +365,7 @@ mod tests {
         ctrl_tx.send(ControlMsg::RulesUpdated).await.unwrap();
         ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
 
-        run_event_loop(app.clone(), cfg_rx, ctrl_rx, focus_rx).await;
+        run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
         assert_eq!(app.config.read().await.active_profile, "Web");
     }
 
@@ -405,7 +374,6 @@ mod tests {
         let (app, _cfg) = make_app_with_rule("firefox", "Web");
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (focus_tx, focus_rx) = mpsc::channel(8);
-        let (_cfg_tx, cfg_rx) = watch::channel(enabled_cfg());
 
         focus_tx
             .send(FocusEvent::AppFocused {
@@ -416,7 +384,7 @@ mod tests {
         ctrl_tx.send(ControlMsg::RulesUpdated).await.unwrap();
         ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
 
-        run_event_loop(app.clone(), cfg_rx, ctrl_rx, focus_rx).await;
+        run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
         assert_eq!(app.config.read().await.active_profile, "default");
     }
 

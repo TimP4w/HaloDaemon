@@ -25,6 +25,7 @@ fn open(
     handle: &DiscoveryHandle<'_>,
     _config: &HashMap<String, String>,
     granted: &[halod_shared::types::Permission],
+    limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
     if !granted.contains(&halod_shared::types::Permission::Smbus) {
         bail!("smbus transport requires the `smbus` permission");
@@ -33,6 +34,7 @@ fn open(
         bail!("smbus backend matched a non-SMBus handle");
     };
     let device = downcast_smbus_device(std::sync::Arc::clone(bus));
+    device.set_write_rate_limit(limit);
     // A running device is scoped to its own address only — pre-scan (broadcast
     // remap, candidate probing) is the sole place the wider declared set is
     // writable.

@@ -355,6 +355,7 @@ impl RgbEngine {
         had_work
     }
 
+    #[allow(clippy::too_many_arguments)] // hot-path buffers are borrowed separately to avoid allocation
     async fn canvas_pass(
         &self,
         canvas_state: &CanvasState,
@@ -1628,27 +1629,6 @@ mod tests {
         let engine = RgbEngine::new(make_app()).await;
         let _rx = engine.subscribe();
         assert!(engine.tick(0.0, 0.0, 0).await);
-    }
-
-    fn designer_def(params: &[(&str, EffectParamValue)]) -> EffectDef {
-        EffectDef {
-            effect_id: halod_shared::effect_designer::DESIGNER_PIXMAP_EFFECT_ID.to_string(),
-            name: None,
-            params: params
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.clone()))
-                .collect(),
-        }
-    }
-
-    fn sawtooth_designer_def() -> EffectDef {
-        designer_def(&[
-            ("generator", EffectParamValue::Str("sawtooth".to_string())),
-            ("speed", EffectParamValue::Float(0.0)),
-            ("sharpness", EffectParamValue::Float(0.0)),
-            ("floor", EffectParamValue::Float(0.0)),
-            ("color_mode", EffectParamValue::Str("solid".to_string())),
-        ])
     }
 
     // ── Plugin-declared effects (end-to-end through a live tick) ───────────

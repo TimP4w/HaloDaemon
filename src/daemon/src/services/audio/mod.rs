@@ -14,7 +14,6 @@ mod linux;
 mod windows;
 
 pub const BANDS: usize = 64;
-pub const WAVE_SAMPLES: usize = 512;
 
 /// Minimum interval between capture-backend spawn attempts and between
 /// in-thread session retries. Bounds (re)connect churn against the audio
@@ -38,7 +37,6 @@ pub struct SpectrumFrame {
     pub level: f32,
     pub flux: f32,
     pub beat: bool,
-    pub waveform: [f32; WAVE_SAMPLES],
     pub seq: u64,
 }
 
@@ -49,7 +47,6 @@ impl Default for SpectrumFrame {
             level: 0.0,
             flux: 0.0,
             beat: false,
-            waveform: [0.0; WAVE_SAMPLES],
             seq: 0,
         }
     }
@@ -169,7 +166,6 @@ mod tests {
         assert_eq!(f.level, 0.0);
         assert_eq!(f.flux, 0.0);
         assert!(!f.beat);
-        assert!(f.waveform.iter().all(|&w| w == 0.0));
         assert_eq!(f.seq, 0);
     }
 

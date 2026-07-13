@@ -232,11 +232,13 @@ mod tests {
     /// A mock integration root whose `resync_children` returns a scripted result
     /// (like `MockController` in the HID hotplug tests). Its `is_live` flag is
     /// settable; an `Err` script greys it, mirroring the real `LuaDevice`.
+    type ScriptedResync = Result<(Vec<Arc<dyn Device>>, Vec<String>)>;
+
     struct MockRoot {
         id: String,
         integration_id: String,
         live: Arc<AtomicBool>,
-        script: Mutex<Option<Result<(Vec<Arc<dyn Device>>, Vec<String>)>>>,
+        script: Mutex<Option<ScriptedResync>>,
     }
 
     impl MockRoot {
@@ -249,7 +251,7 @@ mod tests {
             })
         }
 
-        fn scripted(self: &Arc<Self>, result: Result<(Vec<Arc<dyn Device>>, Vec<String>)>) {
+        fn scripted(self: &Arc<Self>, result: ScriptedResync) {
             *self.script.lock().unwrap() = Some(result);
         }
     }

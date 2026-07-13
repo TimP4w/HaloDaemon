@@ -41,6 +41,7 @@ fn open(
     handle: &DiscoveryHandle<'_>,
     _config: &HashMap<String, String>,
     _granted: &[halod_shared::types::Permission],
+    limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
     let DiscoveryHandle::Hid { path, vid, pid, .. } = handle else {
         bail!("plugin '{}' matched a non-HID handle", manifest.plugin_id);
@@ -50,11 +51,11 @@ fn open(
     // the plugin builds the exact wire buffer itself (e.g. the Razer 90-byte report).
     let report_size = (hid.report_size != 0).then_some(hid.report_size);
     let transport =
-        HidTransport::open(path, report_size, hid.timeout_ms, hid.feature_report, None)?;
+        HidTransport::open(path, report_size, hid.timeout_ms, hid.feature_report, limit)?;
     Ok(PluginIo::Stream {
         transport: Arc::new(transport),
         // Lazy companion bulk endpoint (opened only if the plugin streams LCD).
-        bulk: Some(BulkEndpoint::new(*vid, *pid)),
+        bulk: Some(BulkEndpoint::new(*vid, *pid, limit)),
     })
 }
 

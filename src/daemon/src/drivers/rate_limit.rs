@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Result};
+#[cfg(test)]
+use anyhow::anyhow;
+use anyhow::{bail, Result};
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 
 /// Reject a write once more than this many seconds' worth of bytes are queued.
@@ -197,6 +199,7 @@ impl WriteRateLimiter {
     }
 
     /// Combine two statuses for a device writing through multiple transports.
+    #[cfg(test)]
     pub fn combine_status(a: WriteRateStatus, b: WriteRateStatus) -> WriteRateStatus {
         WriteRateStatus {
             limit: a.limit.or(b.limit),
@@ -293,6 +296,7 @@ impl<T> Metered<T> {
 
     /// Recovers the raw I/O, consuming the gate. `None` if other clones of
     /// this gate are still alive.
+    #[cfg(test)]
     pub fn into_inner(self) -> Option<T> {
         Arc::try_unwrap(self.inner).ok().map(|inner| inner.io)
     }
@@ -304,6 +308,7 @@ impl<T: Send + Sync + 'static> Metered<T> {
     /// ops don't know the batch total up front): runs `f` on a blocking
     /// thread with a byte tally, then meters the tallied bytes. A meter
     /// rejection takes precedence over `f`'s own result.
+    #[cfg(test)]
     pub async fn write_tallied<R, F>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&T, &AtomicUsize) -> Result<R> + Send + 'static,

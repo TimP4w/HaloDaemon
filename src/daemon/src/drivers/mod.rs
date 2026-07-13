@@ -198,6 +198,7 @@ pub trait Device: Send + Sync {
     as_capability!(as_choice, Choice, ChoiceCapability);
     as_capability!(as_boolean, Boolean, BooleanCapability);
     as_capability!(as_action, Action, ActionCapability);
+    #[cfg(test)]
     as_capability!(as_battery, Battery, BatteryCapability);
     as_capability!(as_equalizer, Equalizer, EqualizerCapability);
     as_capability!(as_dpi, Dpi, DpiCapability);

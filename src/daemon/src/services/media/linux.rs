@@ -207,6 +207,7 @@ fn resolve_vetted(host: &str, port: u16) -> std::io::Result<Vec<std::net::Socket
 /// True if the URL's host resolves to at least one vetted (non loopback/private/
 /// link-local) address. The connection itself is vetted independently by the
 /// agent resolver, so this is only a fast pre-check.
+#[cfg(test)]
 fn host_is_vetted(url: &str) -> bool {
     let Some((host, port)) = http_authority(url) else {
         return false;
@@ -312,11 +313,7 @@ fn to_media_info(state: &PlayerState) -> MediaInfo {
     MediaInfo {
         title: state.meta.title.clone(),
         artist: state.meta.artist.clone(),
-        album: state.meta.album.clone(),
         status: state.status.clone(),
-        position: state.position,
-        position_at: Some(state.position_at),
-        length: state.meta.length,
         art: state.art.clone(),
     }
 }

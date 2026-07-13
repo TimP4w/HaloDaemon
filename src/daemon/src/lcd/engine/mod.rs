@@ -5,9 +5,7 @@ pub mod video;
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use halod_shared::types::{
-    EffectParamValue, LcdEngineFrame, LcdEngineTemplateDescriptor, WireLcdEngineState,
-};
+use halod_shared::types::{EffectParamValue, LcdEngineFrame, WireLcdEngineState};
 use image::RgbaImage;
 use tokio::sync::{watch, Mutex};
 
@@ -18,7 +16,6 @@ use templates::{LcdTemplate, TemplateCtx};
 /// message. Built once per broadcast so fanning out to N clients is N cheap
 /// `Arc` clones instead of N full JSON serializations of the base64 payload.
 pub struct LcdWireFrame {
-    pub device_id: String,
     pub wire: Arc<Vec<u8>>,
 }
 
@@ -37,7 +34,6 @@ pub(crate) fn encode_wire_frame(
         &serde_json::json!({"type": "lcd_engine_frame", "data": frame}),
     )?;
     Some(Arc::new(LcdWireFrame {
-        device_id: device_id.to_string(),
         wire: Arc::new(wire),
     }))
 }
@@ -192,10 +188,6 @@ impl LcdEngine {
                 }
             }
         }
-    }
-
-    pub fn available_template_descriptors() -> Vec<LcdEngineTemplateDescriptor> {
-        templates::all_descriptors()
     }
 
     pub fn template_exists(id: &str) -> bool {
@@ -526,7 +518,6 @@ mod tests {
             watch::channel(EngineRunConfig::canvas(&Default::default())).0,
         );
         app.cooling.set_engine(
-            crate::cooling::fan_curve::FanCurveEngine::new(Arc::clone(app)),
             watch::channel(EngineRunConfig::fan_curve(&Default::default())).0,
             watch::channel(75).0,
         );
@@ -534,10 +525,6 @@ mod tests {
             Arc::clone(engine),
             video::VideoEngine::new(Arc::clone(app), engine.frame_sender()),
             watch::channel(EngineRunConfig::lcd(&Default::default())).0,
-        );
-        app.focus.set_engine(
-            crate::profiles::focus_watcher::FocusWatcherEngine::new(Arc::clone(app)),
-            watch::channel(EngineRunConfig::focus_watcher()).0,
         );
     }
 
@@ -634,7 +621,7 @@ mod tests {
             .await
             .expect("engine must wake and render after profile load")
             .expect("frame channel must stay open");
-        assert_eq!(frame.device_id, "lcd0");
+        assert!(!frame.wire.is_empty());
         handle.abort();
     }
 
@@ -828,7 +815,7 @@ mod tests {
             .await
             .expect("preview must be sent once a subscriber is present")
             .expect("channel must stay open");
-        assert_eq!(frame.device_id, "lcd5");
+        assert!(!frame.wire.is_empty());
     }
 
     /// Regression for the parked-engine leak: the render tick never runs while
