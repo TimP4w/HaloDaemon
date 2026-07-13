@@ -120,6 +120,64 @@ pub fn dialog(
     })
 }
 
+/// A modal showing a plugin issue's full detail text (monospace), with Copy and
+/// Close actions. Returns `true` when dismissed (backdrop, ×, or Close).
+pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> bool {
+    use super::button::{button, ButtonKind};
+    let copied_key = egui::Id::new((id, "copied_at"));
+    let mut close = false;
+    let dismissed = dialog(
+        ctx,
+        id,
+        title,
+        520.0,
+        |ui| {
+            ui.label(
+                egui::RichText::new(detail)
+                    .font(theme::mono(12.0))
+                    .color(theme::TEXT_DIM),
+            );
+        },
+        |ui| {
+            if button(
+                ui,
+                &t!("plugins.issue_close"),
+                ButtonKind::Primary,
+                egui::vec2(110.0, 32.0),
+            )
+            .clicked()
+            {
+                close = true;
+            }
+            ui.add_space(8.0);
+            if button(
+                ui,
+                &t!("plugins.issue_copy"),
+                ButtonKind::Ghost,
+                egui::vec2(110.0, 32.0),
+            )
+            .clicked()
+            {
+                ui.ctx().copy_text(detail.to_owned());
+                let now = ui.ctx().input(|i| i.time);
+                ui.ctx().data_mut(|d| d.insert_temp(copied_key, now));
+            }
+            let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(copied_key));
+            let now = ui.ctx().input(|i| i.time);
+            if crate::ui::screens::settings::copied_feedback_visible(copied_at, now) {
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new(t!("plugins.issue_copied"))
+                        .font(theme::semibold(12.0))
+                        .color(theme::TRAFFIC_GREEN),
+                );
+                ui.ctx().request_repaint();
+            }
+        },
+    );
+    dismissed || close
+}
+
 /// Reduce a delete/remove-confirmation modal's outcome: `Some(target)` means
 /// the action was confirmed; the pending state is cleared on any outcome.
 pub fn resolve_delete_confirm<T>(

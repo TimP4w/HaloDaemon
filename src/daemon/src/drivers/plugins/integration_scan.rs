@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use halod_shared::types::Permission;
 
+use crate::ipc::broadcast_state;
 use crate::registry::discovery::{DiscoveryHandle, TransportScanner};
 use crate::registry::usecases::registration::register_device_and_children;
 use crate::state::AppState;
@@ -85,6 +86,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
         );
         return;
     };
+    let plugin_id = manifest.plugin_id.clone();
     let granted = app.registry.granted_for(&manifest.plugin_id);
     let config =
         app.registry
@@ -122,6 +124,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
                 "integration plugin '{}' connect failed: {e:#}",
                 manifest.plugin_id
             );
+            report_connect_failure(app, &manifest, format!("{e:#}")).await;
             return;
         }
         Err(e) => {
@@ -129,6 +132,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
                 "integration plugin '{}': connect task panicked: {e}",
                 manifest.plugin_id
             );
+            report_connect_failure(app, &manifest, format!("connect task panicked: {e}")).await;
             return;
         }
     };
@@ -139,6 +143,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
                 "integration plugin '{}': root transport is not a stream",
                 manifest.plugin_id
             );
+            report_connect_failure(app, &manifest, "root transport is not a stream".into()).await;
             return;
         }
     };
@@ -166,6 +171,16 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
         dev
     });
     register_device_and_children(app, device).await;
+    app.registry.clear_connect_error(&plugin_id);
+}
+
+/// Emit a deduplicated connect-failure notification + persisted plugin issue,
+/// then push a fresh state frame so the plugin page reflects it immediately.
+async fn report_connect_failure(app: &Arc<AppState>, manifest: &PluginManifest, detail: String) {
+    app.registry
+        .report_connect_error(app, &manifest.plugin_id, &manifest.display_name(), detail)
+        .await;
+    broadcast_state(app).await;
 }
 
 async fn discover(app: Arc<AppState>) {

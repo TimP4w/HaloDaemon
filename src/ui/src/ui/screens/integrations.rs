@@ -381,6 +381,7 @@ mod tests {
             integration_enabled,
             consented: true,
             content_changed: false,
+            issue: None,
         }
     }
 

@@ -643,10 +643,16 @@ impl LuaDevice {
             return result;
         };
         match &result {
-            Ok(_) => app.registry.clear_runtime_error(&self.id),
+            Ok(_) => app.registry.clear_runtime_error(&self.plugin_id, &self.id),
             Err(e) => {
                 app.registry
-                    .report_runtime_error(&app, &self.id, &self.name, format!("{e:#}"))
+                    .report_runtime_error(
+                        &app,
+                        &self.plugin_id,
+                        &self.id,
+                        &self.name,
+                        format!("{e:#}"),
+                    )
                     .await
             }
         }

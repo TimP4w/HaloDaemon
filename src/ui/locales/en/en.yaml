@@ -37,7 +37,10 @@ notify:
     message: "%{plugin}'s files changed on disk, so it was disabled for safety. Open the Plugins screen to review and re-enable it."
   plugin_runtime_error:
     title: "Plugin error: %{plugin}"
-    message: "%{detail}"
+    message: "Something went wrong in this plugin. Open Details for the full error."
+  plugin_connect_failed:
+    title: "Plugin can't connect: %{plugin}"
+    message: "It couldn't reach its configured address. Open Details for more."
 
 tray:
   open: Open HaloDaemon

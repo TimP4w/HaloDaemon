@@ -43,7 +43,8 @@ use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use halod_shared::types::{
-    Animation, EffectParamValue, Permission, PluginInfo, PluginKind, WriteRateLimit,
+    Animation, EffectParamValue, Permission, PluginInfo, PluginIssue, PluginIssueKind, PluginKind,
+    WriteRateLimit,
 };
 
 use crate::drivers::Device;
@@ -135,6 +136,14 @@ pub struct Registry {
     /// Device ids with an outstanding runtime error, so a plugin that fails every
     /// engine tick is announced once per failure episode, not on every frame.
     failing_devices: RwLock<HashSet<String>>,
+    /// Plugin ids with an outstanding connect failure, so a persistently
+    /// unreachable integration (the reconnect watcher retries on a backoff)
+    /// alerts once per failure episode, not every tick. Keyed by plugin_id.
+    connect_failed: RwLock<HashSet<String>>,
+    /// Each plugin's most recent outstanding issue, surfaced to the GUI via
+    /// [`PluginInfo::issue`] so it persists on the plugin page and the sidebar
+    /// badge past the transient toast. Keyed by plugin_id.
+    issues: RwLock<HashMap<String, PluginIssue>>,
     /// Rejected-load warnings retained for validation tests.
     #[cfg(test)]
     load_warnings: RwLock<Vec<PluginLoadWarning>>,
@@ -390,16 +399,45 @@ fn config_values_for(state: &PluginState, manifest: &PluginManifest) -> HashMap<
 }
 
 impl Registry {
+    /// Record a plugin's most recent outstanding issue for the GUI's plugin page
+    /// / sidebar badge (last-writer-wins; one issue per plugin).
+    fn set_issue(&self, plugin_id: &str, kind: PluginIssueKind, detail: String) {
+        write_recover(&self.issues).insert(
+            plugin_id.to_owned(),
+            PluginIssue {
+                kind,
+                detail,
+                timestamp_ms: crate::util::time::now_ms(),
+            },
+        );
+    }
+
+    /// Clear a plugin's outstanding issue only when it is of `kind`, so clearing
+    /// (say) a recovered runtime error can't wipe an unrelated load warning.
+    fn clear_issue_of(&self, plugin_id: &str, kind: PluginIssueKind) {
+        let mut issues = write_recover(&self.issues);
+        if issues.get(plugin_id).is_some_and(|i| i.kind == kind) {
+            issues.remove(plugin_id);
+        }
+    }
+
+    /// The plugin's current outstanding issue, if any (for [`Registry::list`]).
+    fn issue_for(&self, plugin_id: &str) -> Option<PluginIssue> {
+        read_recover(&self.issues).get(plugin_id).cloned()
+    }
+
     /// Surface a plugin device's runtime callback failure to the user as a
     /// [`NotificationCode::PluginRuntimeError`], once per failure episode (deduped
-    /// on `device_id`). No-op if the device already has an outstanding error.
+    /// on `device_id`). The issue is also persisted per-plugin for the GUI page.
     pub(super) async fn report_runtime_error(
         &self,
         app: &Arc<crate::state::AppState>,
+        plugin_id: &str,
         device_id: &str,
         device_name: &str,
         detail: String,
     ) {
+        self.set_issue(plugin_id, PluginIssueKind::RuntimeError, detail.clone());
         if !write_recover(&self.failing_devices).insert(device_id.to_owned()) {
             return; // already reported this episode
         }
@@ -413,9 +451,56 @@ impl Registry {
         .await;
     }
 
-    /// Clear a device's outstanding-error flag after a successful call.
-    pub(super) fn clear_runtime_error(&self, device_id: &str) {
-        write_recover(&self.failing_devices).remove(device_id);
+    /// Clear a device's outstanding-error flag after a successful call. On the
+    /// failing→ok transition the plugin's persisted runtime issue is cleared too.
+    pub(super) fn clear_runtime_error(&self, plugin_id: &str, device_id: &str) {
+        if write_recover(&self.failing_devices).remove(device_id) {
+            self.clear_issue_of(plugin_id, PluginIssueKind::RuntimeError);
+        }
+    }
+
+    /// Surface a config-instantiated integration plugin's connect failure as a
+    /// [`NotificationCode::PluginConnectFailed`], once per failure episode
+    /// (deduped on `plugin_id`). The issue is also persisted for the GUI page.
+    pub(super) async fn report_connect_error(
+        &self,
+        app: &Arc<crate::state::AppState>,
+        plugin_id: &str,
+        display_name: &str,
+        detail: String,
+    ) {
+        self.set_issue(plugin_id, PluginIssueKind::ConnectFailed, detail.clone());
+        if !write_recover(&self.connect_failed).insert(plugin_id.to_owned()) {
+            return; // already reported this episode
+        }
+        crate::platform::notify::send(
+            app,
+            halod_shared::types::NotificationCode::PluginConnectFailed {
+                plugin: display_name.to_owned(),
+                detail,
+            },
+        )
+        .await;
+    }
+
+    /// Clear a plugin's outstanding connect-error flag after a successful connect.
+    pub(super) fn clear_connect_error(&self, plugin_id: &str) {
+        write_recover(&self.connect_failed).remove(plugin_id);
+        self.clear_issue_of(plugin_id, PluginIssueKind::ConnectFailed);
+    }
+
+    /// Record a non-fatal load warning (bad logo, id collision) as a persisted
+    /// plugin issue, surfaced on the plugin page / sidebar without a toast.
+    fn set_load_warning(&self, plugin_id: &str, reason: String) {
+        self.set_issue(plugin_id, PluginIssueKind::LoadWarning, reason);
+    }
+
+    /// Drop any stale load-warning issues before a reload re-derives them, so a
+    /// warning the user has since fixed doesn't linger. Runtime/connect issues
+    /// (a different `kind`) are untouched.
+    fn clear_load_warnings(&self) {
+        write_recover(&self.issues)
+            .retain(|_, i| i.kind != PluginIssueKind::LoadWarning);
     }
 
     /// A plugin's full resolved config for its Lua VM: `config_for` plus, only
@@ -686,6 +771,7 @@ impl Registry {
                     content_changed: self
                         .acknowledged_hash_for(&m.plugin_id)
                         .is_some_and(|h| h != m.content_hash()),
+                    issue: self.issue_for(&m.plugin_id),
                 }
             })
             .collect()
@@ -893,6 +979,11 @@ impl Registry {
         }
         let effects: Vec<PluginEffectEntry> =
             manifests.iter().flat_map(effect_entries_for).collect();
+        // Re-derive load-warning issues from scratch so a warning the user has
+        // since fixed doesn't linger; only surface warnings for plugins that
+        // actually loaded (the GUI lists nothing else).
+        self.clear_load_warnings();
+        let loaded: HashSet<&str> = manifests.iter().map(|m| m.plugin_id.as_str()).collect();
         for warning in &warnings {
             log::warn!(
                 "plugin '{}' rejected at {}: {}",
@@ -900,6 +991,9 @@ impl Registry {
                 warning.path,
                 warning.reason
             );
+            if loaded.contains(warning.plugin_id.as_str()) {
+                self.set_load_warning(&warning.plugin_id, warning.reason.clone());
+            }
         }
         #[cfg(test)]
         {

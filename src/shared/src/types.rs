@@ -472,8 +472,18 @@ pub enum NotificationCode {
     /// A plugin device's Lua callback failed at runtime on a background path
     /// (engine tick, sensor poll) where the error would otherwise only be
     /// logged. Deduplicated daemon-side so a persistently-failing plugin alerts
-    /// once, not every frame. `detail` is the error text, shown verbatim.
+    /// once, not every frame. `detail` is the full error text, shown in the
+    /// Details modal (the toast itself stays short).
     PluginRuntimeError {
+        plugin: String,
+        detail: String,
+    },
+    /// A config-instantiated integration plugin failed to open its connection
+    /// (blocked/non-routable address such as `127.0.0.1`, missing `network`
+    /// permission, transport error). Deduplicated daemon-side per plugin so a
+    /// persistently-unreachable integration alerts once per failure episode.
+    /// `detail` is the full error text, shown in the Details modal.
+    PluginConnectFailed {
         plugin: String,
         detail: String,
     },
@@ -498,8 +508,19 @@ impl NotificationCode {
             | FanStalled { .. }
             | PluginNeedsPermission { .. }
             | PluginContentChanged { .. }
-            | PluginRuntimeError { .. } => NotificationSeverity::Warning,
+            | PluginRuntimeError { .. }
+            | PluginConnectFailed { .. } => NotificationSeverity::Warning,
             ProfileSwitched { .. } => NotificationSeverity::Info,
+        }
+    }
+
+    /// The free-text error detail carried by codes that back a "Details" modal
+    /// (`None` for codes whose full copy already fits the toast).
+    pub fn detail(&self) -> Option<&str> {
+        use NotificationCode::*;
+        match self {
+            PluginRuntimeError { detail, .. } | PluginConnectFailed { detail, .. } => Some(detail),
+            _ => None,
         }
     }
 }
@@ -729,6 +750,28 @@ pub enum PluginSource {
     },
 }
 
+/// The category of an outstanding [`PluginIssue`], driving its localized label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginIssueKind {
+    /// A config-instantiated integration could not open its connection.
+    ConnectFailed,
+    /// A device callback failed at runtime on a background path.
+    RuntimeError,
+    /// The plugin loaded with a non-fatal warning (bad logo, id collision).
+    LoadWarning,
+}
+
+/// A plugin's most recent outstanding issue, persisted daemon-side and surfaced
+/// on the plugin's detail page (and via the sidebar badge) so it survives a
+/// transient toast the user may have missed. `detail` is the full error text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginIssue {
+    pub kind: PluginIssueKind,
+    pub detail: String,
+    pub timestamp_ms: u64,
+}
+
 /// One plugin as shown in the GUI's Plugins screen.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInfo {
@@ -810,6 +853,10 @@ pub struct PluginInfo {
     /// Drives the "this plugin was modified since you allowed it" prompt.
     #[serde(default)]
     pub content_changed: bool,
+    /// The plugin's most recent outstanding issue (connect/runtime failure or a
+    /// load warning), if any. Cleared daemon-side on recovery.
+    #[serde(default)]
+    pub issue: Option<PluginIssue>,
 }
 
 fn default_true() -> bool {
@@ -1905,6 +1952,42 @@ mod app_rule_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_detail_and_severity_for_plugin_codes() {
+        let connect = NotificationCode::PluginConnectFailed {
+            plugin: "wled".into(),
+            detail: "127.0.0.1 blocked".into(),
+        };
+        let runtime = NotificationCode::PluginRuntimeError {
+            plugin: "wled".into(),
+            detail: "lua boom".into(),
+        };
+        assert_eq!(connect.detail(), Some("127.0.0.1 blocked"));
+        assert_eq!(runtime.detail(), Some("lua boom"));
+        assert_eq!(connect.severity(), NotificationSeverity::Warning);
+        // A code that carries no modal text has no detail.
+        assert_eq!(NotificationCode::FanStalled { fan: "cpu".into() }.detail(), None);
+    }
+
+    #[test]
+    fn plugin_issue_round_trips_and_info_defaults_none() {
+        let issue = PluginIssue {
+            kind: PluginIssueKind::ConnectFailed,
+            detail: "boom".into(),
+            timestamp_ms: 42,
+        };
+        let back: PluginIssue = serde_json::from_str(&serde_json::to_string(&issue).unwrap()).unwrap();
+        assert_eq!(back, issue);
+        // The kind serializes snake_case for a stable wire form.
+        assert_eq!(serde_json::to_value(&issue).unwrap()["kind"], "connect_failed");
+        // A PluginInfo payload without `issue` deserializes to None.
+        let info: PluginInfo = serde_json::from_value(serde_json::json!({
+            "id": "p", "name": "P", "path": "", "enabled": true
+        }))
+        .unwrap();
+        assert_eq!(info.issue, None);
+    }
 
     #[test]
     fn effect_param_value_steps_round_trips_untagged() {

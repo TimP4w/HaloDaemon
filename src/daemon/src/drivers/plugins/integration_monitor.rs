@@ -161,12 +161,33 @@ async fn reconnect_offline_root(
             unregister_device_and_children(app, root.id()).await;
             integration_scan::discover_one(app, &plugin_id).await;
             failures.remove(&plugin_id);
+            app.registry.clear_connect_error(&plugin_id);
             broadcast_state(app).await;
         }
-        _ => {
-            *failures.entry(plugin_id).or_insert(0) += 1;
+        Ok(Err(e)) => {
+            *failures.entry(plugin_id.clone()).or_insert(0) += 1;
+            report_connect_failure(app, manifest, &plugin_id, format!("{e:#}")).await;
+        }
+        Err(join) => {
+            *failures.entry(plugin_id.clone()).or_insert(0) += 1;
+            report_connect_failure(app, manifest, &plugin_id, format!("probe task panicked: {join}"))
+                .await;
         }
     }
+}
+
+/// Emit a deduplicated connect-failure notification + persisted plugin issue for
+/// a reconnect attempt, then broadcast state so the plugin page reflects it.
+async fn report_connect_failure(
+    app: &Arc<AppState>,
+    manifest: &PluginManifest,
+    plugin_id: &str,
+    detail: String,
+) {
+    app.registry
+        .report_connect_error(app, plugin_id, &manifest.display_name(), detail)
+        .await;
+    broadcast_state(app).await;
 }
 
 /// The registered integration root for `plugin_id`, if any.

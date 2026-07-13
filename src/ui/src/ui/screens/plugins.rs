@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
-    AppState, PluginInfo, PluginRepoInfo, PluginSource, PluginUpdateStatus, RepoUpdateStatus,
+    AppState, PluginInfo, PluginIssue, PluginIssueKind, PluginRepoInfo, PluginSource,
+    PluginUpdateStatus, RepoUpdateStatus,
 };
 
 use crate::runtime::ipc::{self, CommandTx};
@@ -100,6 +101,9 @@ pub struct PluginsUi {
     updating: HashMap<String, f64>,
     /// "Update all" in flight → egui time it began, cleared the same way.
     updating_all: Option<f64>,
+    /// The open plugin-issue Details modal (title + detail), when the user
+    /// clicked Details on a plugin's issue banner.
+    issue_modal: Option<(String, String)>,
 }
 
 /// Failsafe: drop an update spinner after this long even if the daemon never
@@ -135,6 +139,11 @@ impl PluginsUi {
         self.delete_modal(ui.ctx(), state, cmd);
         self.repo_delete_modal(ui.ctx(), cmd);
         self.consent_modal(ui.ctx(), state, cmd);
+        if let Some((title, detail)) = &self.issue_modal {
+            if widgets::issue_modal(ui.ctx(), "plugin_issue_page", title, detail) {
+                self.issue_modal = None;
+            }
+        }
     }
 
     /// Request undeclared assets for the selected plugin and decode new bytes.
@@ -412,6 +421,7 @@ impl PluginsUi {
                                 &mut self.pending_consent,
                                 &mut self.in_flight,
                                 &mut self.updating,
+                                &mut self.issue_modal,
                                 now,
                             )
                         });
@@ -1413,6 +1423,13 @@ fn list_row(
             theme::STAT_AMBER,
         );
     }
+    if p.issue.is_some() {
+        ui.painter().circle_filled(
+            Pos2::new(tile_rect.left() + 2.0, tile_rect.top() + 2.0),
+            4.0,
+            theme::TRAFFIC_RED,
+        );
+    }
     let _ = status_dot(p); // kept for the toggle animation's initial state below
 
     // Toggle sits on top of the row; handle it before the row-select click.
@@ -1526,6 +1543,7 @@ fn detail_body(
     pending_consent: &mut Option<String>,
     in_flight: &mut HashMap<String, bool>,
     updating: &mut HashMap<String, f64>,
+    issue_modal: &mut Option<(String, String)>,
     now: f64,
 ) {
     egui::Sides::new().show(
@@ -1572,6 +1590,16 @@ fn detail_body(
 
     ui.add_space(14.0);
     status_banner(ui, p);
+
+    if let Some(issue) = &p.issue {
+        ui.add_space(14.0);
+        if issue_banner(ui, issue) {
+            *issue_modal = Some((
+                t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
+                issue.detail.clone(),
+            ));
+        }
+    }
 
     if !p.license.is_empty() || !matches!(p.source, PluginSource::Local) {
         ui.add_space(10.0);
@@ -1990,6 +2018,55 @@ fn modified_on_disk_banner(ui: &mut egui::Ui) {
                     .color(theme::TEXT_DIM),
             );
         });
+}
+
+/// The i18n label key for a plugin issue banner, by kind.
+fn issue_label_key(kind: &PluginIssueKind) -> &'static str {
+    match kind {
+        PluginIssueKind::ConnectFailed => "plugins.issue_connect_failed",
+        PluginIssueKind::RuntimeError => "plugins.issue_runtime_error",
+        PluginIssueKind::LoadWarning => "plugins.issue_load_warning",
+    }
+}
+
+/// A per-plugin issue banner with a "Details" button; returns `true` when
+/// Details is clicked. Load warnings tint amber, connect/runtime errors red.
+fn issue_banner(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
+    let accent = match issue.kind {
+        PluginIssueKind::LoadWarning => theme::STAT_AMBER,
+        _ => theme::TRAFFIC_RED,
+    };
+    let mut clicked = false;
+    egui::Frame::NONE
+        .fill(theme::a(accent, 0.10))
+        .stroke(Stroke::new(1.0, theme::a(accent, 0.35)))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 11))
+        .show(ui, |ui| {
+            egui::Sides::new().height(30.0).show(
+                ui,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(t!(issue_label_key(&issue.kind)))
+                            .font(theme::semibold(12.0))
+                            .color(accent),
+                    );
+                },
+                |ui| {
+                    if widgets::button(
+                        ui,
+                        &t!("plugins.issue_details"),
+                        ButtonKind::Ghost,
+                        Vec2::new(90.0, 30.0),
+                    )
+                    .clicked()
+                    {
+                        clicked = true;
+                    }
+                },
+            );
+        });
+    clicked
 }
 
 fn update_banner(ui: &mut egui::Ui, current: &str, available: &str, updating: bool) -> bool {
@@ -2463,6 +2540,7 @@ mod tests {
             integration_enabled: true,
             consented: true,
             content_changed: false,
+            issue: None,
         }
     }
 
@@ -2530,6 +2608,22 @@ mod tests {
         assert_eq!(
             quarantine_toasts(&[disabled, ok], &updates, &mut toasted, 0).len(),
             1
+        );
+    }
+
+    #[test]
+    fn issue_label_key_maps_each_kind() {
+        assert_eq!(
+            issue_label_key(&PluginIssueKind::ConnectFailed),
+            "plugins.issue_connect_failed"
+        );
+        assert_eq!(
+            issue_label_key(&PluginIssueKind::RuntimeError),
+            "plugins.issue_runtime_error"
+        );
+        assert_eq!(
+            issue_label_key(&PluginIssueKind::LoadWarning),
+            "plugins.issue_load_warning"
         );
     }
 

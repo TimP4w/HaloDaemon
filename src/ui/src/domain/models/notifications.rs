@@ -50,9 +50,13 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
             t!("notify.plugin_content_changed.title").to_string(),
             t!("notify.plugin_content_changed.message", plugin = plugin).to_string(),
         ),
-        PluginRuntimeError { plugin, detail } => (
+        PluginRuntimeError { plugin, detail: _ } => (
             t!("notify.plugin_runtime_error.title", plugin = plugin).to_string(),
-            t!("notify.plugin_runtime_error.message", detail = detail).to_string(),
+            t!("notify.plugin_runtime_error.message").to_string(),
+        ),
+        PluginConnectFailed { plugin, detail: _ } => (
+            t!("notify.plugin_connect_failed.title", plugin = plugin).to_string(),
+            t!("notify.plugin_connect_failed.message").to_string(),
         ),
         Generic { message } => (t!("notify.error_title").to_string(), message.clone()),
     }
@@ -97,6 +101,10 @@ mod tests {
                 plugin: "wled_udp".into(),
             },
             PluginRuntimeError {
+                plugin: "wled_udp".into(),
+                detail: "boom".into(),
+            },
+            PluginConnectFailed {
                 plugin: "wled_udp".into(),
                 detail: "boom".into(),
             },

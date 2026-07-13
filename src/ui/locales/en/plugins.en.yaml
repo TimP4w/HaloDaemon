@@ -37,6 +37,15 @@ plugins:
   update_available: Update available
   modified_on_disk: Disabled because it was modified on disk
   modified_on_disk_sub: This plugin's files changed since they were installed, so it was disabled for safety. Re-enable it to accept the change.
+  # Plugin issues (connect/runtime failures, load warnings)
+  issue_connect_failed: Can't connect
+  issue_runtime_error: Runtime error
+  issue_load_warning: Loaded with a warning
+  issue_details: Details
+  issue_modal_title: "Plugin issue: %{plugin}"
+  issue_copy: Copy
+  issue_copied: Copied!
+  issue_close: Close
   # Detail panel
   type_device: Driver
   type_effect: Effects

@@ -460,7 +460,27 @@ impl App {
         );
 
         // Toasts overlay everything, including the daemon-down scrim.
-        self.toasts.show(ctx);
+        if let Some(note) = self.toasts.show(ctx) {
+            if let Some(detail) = note.code.detail() {
+                let (title, _) =
+                    crate::domain::models::notifications::notification_text(&note.code);
+                self.plugin_issue_modal = Some(crate::app::PluginIssueModal {
+                    title,
+                    detail: detail.to_owned(),
+                });
+            }
+        }
+        if let Some(modal) = &self.plugin_issue_modal {
+            let dismissed = crate::ui::components::issue_modal(
+                ctx,
+                "plugin_issue",
+                &modal.title,
+                &modal.detail,
+            );
+            if dismissed {
+                self.plugin_issue_modal = None;
+            }
+        }
     }
 }
 

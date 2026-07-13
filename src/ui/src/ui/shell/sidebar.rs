@@ -18,15 +18,17 @@ const NAV: [(Icon, &str, Page); 6] = [
     (Icon::Settings, "Settings", Page::Settings),
 ];
 
-/// Count of plugins needing user attention: an available update, a changed
-/// on-disk hash, or a pending permission consent. Drives the sidebar badge.
+/// Count of plugins needing user attention: an outstanding issue, an available
+/// update, a changed on-disk hash, or a pending permission consent. Drives the
+/// sidebar badge.
 pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateStatus]) -> usize {
     state
         .plugins
         .plugins
         .iter()
         .filter(|p| {
-            !p.consented
+            p.issue.is_some()
+                || !p.consented
                 || p.content_changed
                 || plugin_updates.iter().any(|u| {
                     u.plugin_id == p.id
@@ -423,6 +425,7 @@ mod tests {
             integration_enabled: true,
             consented,
             content_changed,
+            issue: None,
         }
     }
 
@@ -462,6 +465,19 @@ mod tests {
         let mut state = AppState::default();
         state.plugins.plugins = vec![plugin("a", true, false), plugin("b", true, false)];
         assert_eq!(plugins_needing_action(&state, &[]), 0);
+    }
+
+    #[test]
+    fn plugins_needing_action_counts_an_outstanding_issue() {
+        let mut with_issue = plugin("failing", true, false);
+        with_issue.issue = Some(halod_shared::types::PluginIssue {
+            kind: halod_shared::types::PluginIssueKind::ConnectFailed,
+            detail: "boom".into(),
+            timestamp_ms: 0,
+        });
+        let mut state = AppState::default();
+        state.plugins.plugins = vec![with_issue, plugin("ok", true, false)];
+        assert_eq!(plugins_needing_action(&state, &[]), 1);
     }
 
     #[test]

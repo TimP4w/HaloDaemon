@@ -501,7 +501,95 @@ fn official_repo_plugin_cannot_be_shadowed_by_a_later_source() {
         "the shadow attempt must be surfaced, not silently dropped"
     );
 
+    // The warning is also persisted as a per-plugin issue for the GUI page.
+    let dup_issue = app
+        .registry
+        .list(app.secret_store.as_ref())
+        .into_iter()
+        .find(|p| p.id == "dup")
+        .and_then(|p| p.issue)
+        .expect("load warning surfaced as a plugin issue");
+    assert_eq!(dup_issue.kind, halod_shared::types::PluginIssueKind::LoadWarning);
+
     app.registry.load_all(Path::new("/nonexistent"));
+}
+
+#[tokio::test]
+async fn connect_error_toasts_once_per_episode_and_persists_issue() {
+    use tokio::sync::mpsc;
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+    set_registry(&app.registry, vec![manifest()]);
+    let pid = manifest().plugin_id;
+
+    let (tx, mut rx) = mpsc::channel::<Arc<Vec<u8>>>(16);
+    app.clients.lock().await.push(crate::ipc::ClientHandle {
+        id: 0,
+        tx,
+        subs: Arc::default(),
+    });
+
+    app.registry
+        .report_connect_error(&app, &pid, "Acme K1", "127.0.0.1 blocked".into())
+        .await;
+    assert!(rx.try_recv().is_ok(), "first failure toasts");
+    let issue = app
+        .registry
+        .list(app.secret_store.as_ref())
+        .into_iter()
+        .find(|p| p.id == pid)
+        .and_then(|p| p.issue)
+        .expect("issue persisted");
+    assert_eq!(issue.kind, PluginIssueKind::ConnectFailed);
+
+    // Same episode: deduped, no second toast.
+    app.registry
+        .report_connect_error(&app, &pid, "Acme K1", "still down".into())
+        .await;
+    assert!(rx.try_recv().is_err(), "same episode does not re-toast");
+
+    // Recovery clears the dedup + issue; a later failure re-arms.
+    app.registry.clear_connect_error(&pid);
+    assert!(app
+        .registry
+        .list(app.secret_store.as_ref())
+        .into_iter()
+        .find(|p| p.id == pid)
+        .unwrap()
+        .issue
+        .is_none());
+    app.registry
+        .report_connect_error(&app, &pid, "Acme K1", "down again".into())
+        .await;
+    assert!(rx.try_recv().is_ok(), "re-arms after recovery");
+}
+
+#[tokio::test]
+async fn runtime_error_persists_issue_and_clears_on_success() {
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+    set_registry(&app.registry, vec![manifest()]);
+    let pid = manifest().plugin_id;
+
+    app.registry
+        .report_runtime_error(&app, &pid, "dev-1", "Acme K1", "lua boom".into())
+        .await;
+    let issue = app
+        .registry
+        .list(app.secret_store.as_ref())
+        .into_iter()
+        .find(|p| p.id == pid)
+        .and_then(|p| p.issue)
+        .expect("runtime issue persisted");
+    assert_eq!(issue.kind, PluginIssueKind::RuntimeError);
+
+    app.registry.clear_runtime_error(&pid, "dev-1");
+    assert!(app
+        .registry
+        .list(app.secret_store.as_ref())
+        .into_iter()
+        .find(|p| p.id == pid)
+        .unwrap()
+        .issue
+        .is_none());
 }
 
 #[test]

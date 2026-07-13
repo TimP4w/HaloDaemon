@@ -37,6 +37,15 @@ plugins:
   update_available: Aggiornamento disponibile
   modified_on_disk: Disabilitato perché modificato su disco
   modified_on_disk_sub: I file di questo plugin sono cambiati dall'installazione, quindi è stato disabilitato per sicurezza. Riabilitalo per accettare la modifica.
+  # Problemi del plugin (errori di connessione/runtime, avvisi di caricamento)
+  issue_connect_failed: Impossibile connettersi
+  issue_runtime_error: Errore di runtime
+  issue_load_warning: Caricato con un avviso
+  issue_details: Dettagli
+  issue_modal_title: "Il plugin %{plugin} sta riscontrando un problema"
+  issue_copy: Copia
+  issue_copied: Copiato!
+  issue_close: Chiudi
   # Pannello dettagli
   type_device: Driver
   type_effect: Effetti
