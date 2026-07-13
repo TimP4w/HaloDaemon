@@ -160,46 +160,40 @@ fn leave_canvas_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         return;
     }
     let (mut confirm, mut cancel) = (false, false);
-    let dismissed = widgets::modal_frame(
+    let dismissed = widgets::dialog(
         ui.ctx(),
         "lighting_leave_canvas",
         &t!("lighting.remove_from_canvas_title"),
         420.0,
-        190.0,
         |ui| {
             ui.label(
                 egui::RichText::new(t!("lighting.remove_from_canvas_body"))
                     .font(theme::body(12.5))
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(18.0);
-            egui::Sides::new().show(
+        },
+        |ui| {
+            if widgets::button(
                 ui,
-                |ui| {
-                    if widgets::button(
-                        ui,
-                        &t!("lighting.cancel"),
-                        widgets::ButtonKind::Ghost,
-                        egui::vec2(96.0, 32.0),
-                    )
-                    .clicked()
-                    {
-                        cancel = true;
-                    }
-                },
-                |ui| {
-                    if widgets::button(
-                        ui,
-                        &t!("lighting.remove_and_apply"),
-                        widgets::ButtonKind::Primary,
-                        egui::vec2(150.0, 32.0),
-                    )
-                    .clicked()
-                    {
-                        confirm = true;
-                    }
-                },
-            );
+                &t!("lighting.remove_and_apply"),
+                widgets::ButtonKind::Primary,
+                egui::vec2(150.0, 32.0),
+            )
+            .clicked()
+            {
+                confirm = true;
+            }
+            ui.add_space(8.0);
+            if widgets::button(
+                ui,
+                &t!("lighting.cancel"),
+                widgets::ButtonKind::Ghost,
+                egui::vec2(96.0, 32.0),
+            )
+            .clicked()
+            {
+                cancel = true;
+            }
         },
     );
     if confirm {
