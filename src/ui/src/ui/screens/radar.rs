@@ -87,8 +87,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
             let fixed_height = logo_height + gap * 2.0 + status_height;
             let radius = ((full.height() - fixed_height) / 2.0)
                 .min(full.width() * 0.34)
-                .min(210.0)
-                .max(48.0);
+                .clamp(48.0, 210.0);
             let composition_height = fixed_height + radius * 2.0;
             let top = full.center().y - composition_height / 2.0;
 

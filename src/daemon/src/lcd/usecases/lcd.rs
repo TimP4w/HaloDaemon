@@ -175,7 +175,7 @@ async fn set_screen_image_inner(
         .as_lcd()
         .ok_or_else(|| anyhow!("device does not support LCD"))?;
 
-    let max_base64_len = ((halod_shared::types::MAX_LCD_IMAGE_BYTES + 2) / 3) * 4;
+    let max_base64_len = halod_shared::types::MAX_LCD_IMAGE_BYTES.div_ceil(3) * 4;
     anyhow::ensure!(
         data_b64.len() as u64 <= max_base64_len,
         "encoded image exceeds the {}-byte limit",

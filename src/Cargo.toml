@@ -24,3 +24,8 @@ async-trait = "0.1"
 items_after_test_module = "allow"
 enum_variant_names = "allow"
 doc_lazy_continuation = "allow"
+# Closure-heavy UI callbacks and driver/builder signatures legitimately carry
+# many parameters and complex closure types; kept off so the gate stays on
+# substantive issues (see the lint policy in CLAUDE.md).
+too_many_arguments = "allow"
+type_complexity = "allow"

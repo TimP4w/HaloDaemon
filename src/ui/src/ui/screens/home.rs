@@ -148,7 +148,7 @@ fn conflict_choice_for(d: &WireDevice, all_devices: &[WireDevice]) -> Option<Con
     (devices.len() > 1).then(|| ConflictChoice {
         devices,
         recommended_id: conflict.recommended_id.clone(),
-        confidence: conflict.confidence.clone(),
+        confidence: conflict.confidence,
     })
 }
 

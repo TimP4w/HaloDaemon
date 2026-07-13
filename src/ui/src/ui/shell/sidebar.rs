@@ -573,9 +573,11 @@ mod tests {
                 status: FanCurveStatus::FanStalled,
             },
         ];
-        let mut disabled = halod_shared::types::WireDevice::default();
-        disabled.id = "disabled".into();
-        disabled.active_state = halod_shared::types::VisibilityState::Disabled;
+        let disabled = halod_shared::types::WireDevice {
+            id: "disabled".into(),
+            active_state: halod_shared::types::VisibilityState::Disabled,
+            ..Default::default()
+        };
         state.devices.push(disabled);
         assert_eq!(cooling_needing_action(&state), 1);
     }
