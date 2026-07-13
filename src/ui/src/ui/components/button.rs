@@ -146,18 +146,9 @@ fn paint_button(
         ),
     };
 
-    if let Some(glow) = match kind {
-        ButtonKind::Primary => Some(theme::CYAN),
-        ButtonKind::Warn => Some(theme::STAT_AMBER),
-        _ => None,
-    } {
-        let time = ui.ctx().input(|i| i.time) as f32;
-        let pulse = 0.5 + 0.5 * (time * 2.0).sin();
-        let alpha = 0.28 + 0.10 * pulse + 0.32 * t;
-        let blur = 20.0 + 5.0 * pulse + 16.0 * t;
-        theme::halo(p, rect, 7.0, a(glow, alpha), blur);
-        ui.ctx().request_repaint();
-    }
+    // Buttons use fill, border, and hover contrast only. Animated halos made
+    // ordinary actions such as “Update all” look like alerts and competed
+    // with the content around them.
     p.rect_filled(rect, 7.0, fill);
     if stroke != Stroke::NONE {
         p.rect_stroke(rect, 7.0, stroke, egui::StrokeKind::Middle);

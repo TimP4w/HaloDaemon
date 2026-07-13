@@ -1009,7 +1009,9 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
         Stroke::new(1.0, theme::BORDER),
         egui::StrokeKind::Middle,
     );
-    icons::draw_fork(ui.painter(), icon_rect, theme::TEXT_DIM);
+    // Keep the fork comfortably inset from the holder so the glyph does not
+    // visually crowd the rounded tile at the compact row size.
+    icons::draw_fork(ui.painter(), icon_rect.shrink(5.0), theme::TEXT_DIM);
 
     let text_x = rect.left() + 40.0;
     let sha_text = match &row.remote_short {

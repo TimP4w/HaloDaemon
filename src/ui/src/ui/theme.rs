@@ -9,19 +9,19 @@ use egui::{
 };
 
 // ── Surfaces ─────────────────────────────────────────────────────────────────
-pub const BODY: Color32 = hex(0x08080c);
+pub const BODY: Color32 = hex(0x090b11);
 #[expect(dead_code, reason = "theme token reserved for native window chrome")]
 pub const WIN_TOP: Color32 = hex(0x0e0d15);
-pub const TITLE_BG: Color32 = hex(0x0b0b12);
-pub const SIDEBAR_BG: Color32 = hex(0x0a0a11);
-pub const CARD_BG: Color32 = hex(0x11111b);
-pub const INNER_BG: Color32 = hex(0x0a0a11);
-pub const ROW_ACTIVE: Color32 = hex(0x161522);
+pub const TITLE_BG: Color32 = hex(0x0b0e15);
+pub const SIDEBAR_BG: Color32 = hex(0x0c0f17);
+pub const CARD_BG: Color32 = hex(0x121823);
+pub const INNER_BG: Color32 = hex(0x0d1119);
+pub const ROW_ACTIVE: Color32 = hex(0x1d2433);
 
 // ── Borders ──────────────────────────────────────────────────────────────────
-pub const BORDER: Color32 = hex(0x1e1c2b);
-pub const BORDER_SOFT: Color32 = hex(0x171622);
-pub const BORDER_INNER: Color32 = hex(0x191824);
+pub const BORDER: Color32 = hex(0x273043);
+pub const BORDER_SOFT: Color32 = hex(0x1d2534);
+pub const BORDER_INNER: Color32 = hex(0x202938);
 /// Subtle chrome divider (title bar / sidebar edges) — barely above the bg.
 pub const DIVIDER: Color32 = hex(0x0c0b12);
 
@@ -164,7 +164,7 @@ pub fn install_fonts(ctx: &Context) {
 }
 
 /// Main content background (`window` gradient bottom stop).
-pub const MAIN_BG: Color32 = hex(0x090910);
+pub const MAIN_BG: Color32 = hex(0x090b12);
 
 /// Install fonts and the base dark visuals.
 pub fn install(ctx: &Context) {
