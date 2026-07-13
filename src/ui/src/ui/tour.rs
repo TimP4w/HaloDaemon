@@ -225,7 +225,12 @@ pub(crate) fn show(
 
     if let Some(completed) = tour::advance(st, anchor_rect.is_some(), now, btn_event) {
         st.mark_locally_seen(completed.id);
-        crate::domain::actions::system::mark_tour_seen(cmd, completed.id);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::MarkTourSeen {
+                tour: completed.id.to_string(),
+            },
+        );
     }
 
     ctx.request_repaint();

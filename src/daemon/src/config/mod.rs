@@ -27,7 +27,7 @@ pub fn load() -> Result<Config> {
     let main: MainFile = load_file(&main_config_path(), "config.yaml")?;
     let devices: DevicesFile = load_file(&devices_config_path(), "devices.yaml")?;
     let app_rules: AppRulesFile = load_file(&app_rules_config_path(), "app_rules.yaml")?;
-    let plugins: PluginsFile = load_file(&plugins_config_path(), "plugins.yaml")?;
+    let plugins: PluginPolicy = load_file(&plugins_config_path(), "plugins.yaml")?;
     let mut profiles = load_profiles()?;
     if profiles.is_empty() {
         profiles.insert(DEFAULT_PROFILE_NAME.to_string(), Profile::default());
@@ -48,12 +48,7 @@ pub fn load() -> Result<Config> {
         sensor_visibility: devices.sensor_visibility,
         device_transforms: devices.device_transforms,
         app_rules: app_rules.app_rules,
-        plugins_disabled: plugins.disabled,
-        plugin_permissions: plugins.granted,
-        plugin_config: plugins.config,
-        integrations_disabled: plugins.integrations_disabled,
-        plugin_acknowledged: plugins.acknowledged,
-        plugin_repos: plugins.repos,
+        plugins,
     })
 }
 
@@ -85,14 +80,7 @@ pub fn save(cfg: &Config) -> Result<()> {
     )?;
     atomic_write(
         &plugins_config_path(),
-        &serde_yaml::to_string(&PluginsFile {
-            disabled: cfg.plugins_disabled.clone(),
-            granted: cfg.plugin_permissions.clone(),
-            config: cfg.plugin_config.clone(),
-            integrations_disabled: cfg.integrations_disabled.clone(),
-            acknowledged: cfg.plugin_acknowledged.clone(),
-            repos: cfg.plugin_repos.clone(),
-        })?,
+        &serde_yaml::to_string(&cfg.plugins)?,
     )?;
     save_profiles(&cfg.profiles)?;
     Ok(())
@@ -332,33 +320,33 @@ struct AppRulesFile {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct PluginsFile {
+pub struct PluginPolicy {
     /// Plugin ids the user has disabled. Everything present-and-not-listed is
     /// enabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    disabled: Vec<String>,
+    pub disabled: Vec<String>,
     /// Permissions the user has granted per plugin id. A plugin's declared
     /// permissions must be a subset of its entry here before it activates.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    granted: HashMap<String, Vec<Permission>>,
+    pub granted: HashMap<String, Vec<Permission>>,
     /// Non-secure user-editable config values per plugin id (key -> value).
     /// Fields declared `secure = true` never appear here — see the encrypted
     /// secret store instead.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    config: HashMap<String, HashMap<String, String>>,
+    pub config: HashMap<String, HashMap<String, String>>,
     /// Integration plugin ids the user has disabled *as an integration* —
     /// independent of `disabled` (which governs whether the Lua may run at
     /// all). Everything present-and-not-listed is active.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    integrations_disabled: Vec<String>,
+    pub integrations_disabled: Vec<String>,
     /// Content hash (hex SHA-256) of the exact script the user consented to,
     /// per plugin id. A plugin whose current script hashes differently is
     /// treated as not-yet-consented and stays inert until re-acknowledged.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    acknowledged: HashMap<String, String>,
+    pub acknowledged: HashMap<String, String>,
     /// Registered git-repo plugin sources. See `PluginRepoRecord`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    repos: Vec<PluginRepoRecord>,
+    pub repos: Vec<PluginRepoRecord>,
 }
 
 /// A registered git-repo plugin source, pinned to a commit SHA that only an explicit "update" advances.
@@ -409,26 +397,7 @@ pub struct Config {
     pub device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_rules: Vec<AppRule>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub plugins_disabled: Vec<String>,
-    /// Permissions granted per plugin id (declared permissions must be a
-    /// subset before the plugin activates).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub plugin_permissions: HashMap<String, Vec<Permission>>,
-    /// Non-secure user-editable config values per plugin id (key -> value).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub plugin_config: HashMap<String, HashMap<String, String>>,
-    /// Integration plugin ids the user has disabled *as an integration* —
-    /// independent of `plugins_disabled`. See `PluginsFile::integrations_disabled`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub integrations_disabled: Vec<String>,
-    /// Content hash (hex SHA-256) of the script the user consented to, per
-    /// plugin id. See `PluginsFile::acknowledged`.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub plugin_acknowledged: HashMap<String, String>,
-    /// Registered git-repo plugin sources. See `PluginRepoRecord`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub plugin_repos: Vec<PluginRepoRecord>,
+    pub plugins: PluginPolicy,
 }
 
 fn default_profile_name() -> String {
@@ -451,12 +420,7 @@ impl Default for Config {
             sensor_visibility: HashMap::new(),
             device_transforms: HashMap::new(),
             app_rules: Vec::new(),
-            plugins_disabled: Vec::new(),
-            plugin_permissions: HashMap::new(),
-            plugin_config: HashMap::new(),
-            integrations_disabled: Vec::new(),
-            plugin_acknowledged: HashMap::new(),
-            plugin_repos: Vec::new(),
+            plugins: PluginPolicy::default(),
         }
     }
 }
@@ -549,31 +513,34 @@ mod tests {
         cfg.cooling.fan_failsafe_duty = 60;
         cfg.rgb.canvas_fps = 45;
         cfg.lcd.enabled = false;
-        cfg.plugins_disabled.push("nzxt_kraken".into());
-        cfg.plugin_permissions
+        cfg.plugins.disabled.push("nzxt_kraken".into());
+        cfg.plugins
+            .granted
             .insert("wled_udp".into(), vec![Permission::Network]);
-        cfg.plugin_config.insert(
+        cfg.plugins.config.insert(
             "openrgb".into(),
             HashMap::from([("host".to_string(), "127.0.0.1".to_string())]),
         );
-        cfg.plugin_acknowledged
+        cfg.plugins
+            .acknowledged
             .insert("wled_udp".into(), "abc123".into());
 
         save(&cfg).unwrap();
         let reloaded = load().unwrap();
 
-        assert_eq!(reloaded.plugins_disabled, vec!["nzxt_kraken".to_string()]);
+        assert_eq!(reloaded.plugins.disabled, vec!["nzxt_kraken".to_string()]);
         assert_eq!(
-            reloaded.plugin_permissions.get("wled_udp"),
+            reloaded.plugins.granted.get("wled_udp"),
             Some(&vec![Permission::Network])
         );
         assert_eq!(
-            reloaded.plugin_acknowledged.get("wled_udp"),
+            reloaded.plugins.acknowledged.get("wled_udp"),
             Some(&"abc123".to_string())
         );
         assert_eq!(
             reloaded
-                .plugin_config
+                .plugins
+                .config
                 .get("openrgb")
                 .and_then(|m| m.get("host")),
             Some(&"127.0.0.1".to_string())
@@ -676,9 +643,8 @@ mod tests {
     }
 
     #[test]
-    fn plugins_file_without_repos_key_still_loads() {
-        // Old config files predate `repos` — absence must default, not error.
-        let f: PluginsFile = serde_yaml::from_str("disabled: [foo]\n").unwrap();
+    fn plugin_policy_accepts_a_sparse_current_file() {
+        let f: PluginPolicy = serde_yaml::from_str("disabled: [foo]\n").unwrap();
         assert!(f.repos.is_empty());
     }
 
@@ -691,7 +657,7 @@ mod tests {
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
 
         let mut cfg = Config::default();
-        cfg.plugin_repos.push(PluginRepoRecord {
+        cfg.plugins.repos.push(PluginRepoRecord {
             url: "https://example.com/foo.git".into(),
             slug: "foo".into(),
             branch: Some("main".into()),
@@ -701,10 +667,10 @@ mod tests {
         save(&cfg).unwrap();
         let reloaded = load().unwrap();
 
-        assert_eq!(reloaded.plugin_repos.len(), 1);
-        assert_eq!(reloaded.plugin_repos[0].slug, "foo");
-        assert_eq!(reloaded.plugin_repos[0].locked_sha, "deadbeef");
-        assert_eq!(reloaded.plugin_repos[0].branch.as_deref(), Some("main"));
+        assert_eq!(reloaded.plugins.repos.len(), 1);
+        assert_eq!(reloaded.plugins.repos[0].slug, "foo");
+        assert_eq!(reloaded.plugins.repos[0].locked_sha, "deadbeef");
+        assert_eq!(reloaded.plugins.repos[0].branch.as_deref(), Some("main"));
 
         unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }

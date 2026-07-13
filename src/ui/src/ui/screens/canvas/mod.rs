@@ -124,13 +124,13 @@ impl PendingCommands {
             .collect();
         for k in due {
             if let Some((c, _)) = self.move_zones.remove(&k) {
-                crate::domain::actions::canvas::send(cmd, c);
+                crate::runtime::ipc::send(cmd, c);
             }
         }
         for slot in [&mut self.sample, &mut self.fps] {
             if let Some((c, deadline)) = slot.take() {
                 if time >= deadline {
-                    crate::domain::actions::canvas::send(cmd, c);
+                    crate::runtime::ipc::send(cmd, c);
                 } else {
                     *slot = Some((c, deadline));
                 }
@@ -138,7 +138,7 @@ impl PendingCommands {
         }
         if let Some((id, c, deadline)) = self.effect.take() {
             if time >= deadline {
-                crate::domain::actions::canvas::send(cmd, c);
+                crate::runtime::ipc::send(cmd, c);
             } else {
                 self.effect = Some((id, c, deadline));
             }
@@ -352,7 +352,13 @@ pub(crate) fn body(
     if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
         let to_remove: Vec<_> = canvas_ui.selected.drain().collect();
         for (dev, zone) in to_remove {
-            crate::domain::actions::canvas::remove_zone(cmd, &dev, &zone);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::CanvasRemoveZone {
+                    device_id: dev,
+                    zone_id: zone,
+                },
+            );
         }
     }
 

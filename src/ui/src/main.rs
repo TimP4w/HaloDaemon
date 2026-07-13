@@ -61,7 +61,10 @@ impl eframe::App for App {
             }
             CloseAction::Quit => {
                 if !self.force_quit.load(Ordering::SeqCst) {
-                    domain::actions::system::shutdown(&self.cmd);
+                    crate::runtime::ipc::send(
+                        &self.cmd,
+                        halod_shared::commands::DaemonCommand::Shutdown,
+                    );
                 }
             }
         }

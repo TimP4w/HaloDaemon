@@ -13,10 +13,7 @@ use crate::state::AppState;
 
 use halod_shared::types::RepoUpdateStatus;
 
-use super::plugins::{
-    apply_repo_plugins, mark_pending_and_broadcast, purge_plugin_state, reload_registry,
-    sanitize_slug,
-};
+use super::plugins::{apply_repo_plugins, purge_plugin_state, reload_registry, sanitize_slug};
 
 /// RFC 3339 timestamp for `PluginRepoRecord::last_sync`.
 fn now_rfc3339() -> String {
@@ -35,7 +32,7 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
     }
     {
         let cfg = app.config.read().await;
-        if cfg.plugin_repos.iter().any(|r| r.slug == slug) {
+        if cfg.plugins.repos.iter().any(|r| r.slug == slug) {
             anyhow::bail!("a repo with slug '{slug}' is already registered");
         }
     }
@@ -52,7 +49,7 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
 
     {
         let mut cfg = app.config.write().await;
-        cfg.plugin_repos.push(PluginRepoRecord {
+        cfg.plugins.repos.push(PluginRepoRecord {
             url,
             slug,
             branch,
@@ -61,8 +58,8 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
         });
     }
     app.request_config_save();
-    reload_registry(&app).await;
-    mark_pending_and_broadcast(&app).await;
+    let plugin_ids = crate::drivers::plugins::repo_plugin_ids(&dest);
+    apply_repo_plugins(app, plugin_ids).await?;
     Ok(())
 }
 
@@ -90,8 +87,9 @@ pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
         anyhow::bail!("the official plugin repository cannot be removed");
     }
     let repo_dir = crate::config::plugin_repos_dir().join(&slug);
-    for id in crate::drivers::plugins::repo_plugin_ids(&repo_dir) {
-        purge_plugin_state(&id, &app).await;
+    let plugin_ids = crate::drivers::plugins::repo_plugin_ids(&repo_dir);
+    for id in &plugin_ids {
+        purge_plugin_state(id, &app).await;
     }
 
     match std::fs::remove_dir_all(&repo_dir) {
@@ -104,17 +102,16 @@ pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
 
     {
         let mut cfg = app.config.write().await;
-        cfg.plugin_repos.retain(|r| r.slug != slug);
+        cfg.plugins.repos.retain(|r| r.slug != slug);
     }
     app.request_config_save();
-    reload_registry(&app).await;
-    mark_pending_and_broadcast(&app).await;
+    apply_repo_plugins(app, plugin_ids).await?;
     Ok(())
 }
 
 /// Fetch every registered repo's remote tip and compare to `locked_sha`; a repo whose fetch fails is logged and skipped.
 async fn compute_repo_updates(app: &Arc<AppState>) -> Vec<RepoUpdateStatus> {
-    let repos = app.config.read().await.plugin_repos.clone();
+    let repos = app.config.read().await.plugins.repos.clone();
     let mut out = Vec::with_capacity(repos.len());
     for r in repos {
         let dir = crate::config::plugin_repos_dir().join(&r.slug);
@@ -168,7 +165,8 @@ async fn compute_plugin_updates(
         .config
         .read()
         .await
-        .plugin_repos
+        .plugins
+        .repos
         .iter()
         .filter(|r| slug_filter.is_none_or(|s| s == r.slug))
         .cloned()
@@ -259,7 +257,8 @@ async fn touch_last_sync(app: &Arc<AppState>, slugs: &[String]) {
     {
         let mut cfg = app.config.write().await;
         for r in cfg
-            .plugin_repos
+            .plugins
+            .repos
             .iter_mut()
             .filter(|r| slugs.contains(&r.slug))
         {
@@ -310,7 +309,8 @@ async fn update_plugin_inner(plugin_id: String, app: &Arc<AppState>) -> Result<S
         .ok_or_else(|| anyhow::anyhow!("plugin '{plugin_id}' is not repo-sourced"))?;
     let branch = {
         let cfg = app.config.read().await;
-        cfg.plugin_repos
+        cfg.plugins
+            .repos
             .iter()
             .find(|r| r.slug == slug)
             .ok_or_else(|| anyhow::anyhow!("unknown plugin repo '{slug}'"))?
@@ -333,10 +333,9 @@ async fn update_plugin_inner(plugin_id: String, app: &Arc<AppState>) -> Result<S
             .await
             .context("checkout task panicked")??;
     }
-
     {
         let mut cfg = app.config.write().await;
-        if let Some(r) = cfg.plugin_repos.iter_mut().find(|r| r.slug == slug) {
+        if let Some(r) = cfg.plugins.repos.iter_mut().find(|r| r.slug == slug) {
             // Per-plugin updates only guarantee *this* plugin matches the tip,
             // not the whole repo — `locked_sha` is now just the latest tip
             // we've observed, not a "fully synced" marker.
@@ -417,7 +416,7 @@ async fn compute_on_disk_changes(
     app: &Arc<AppState>,
 ) -> Vec<halod_shared::types::PluginUpdateStatus> {
     use halod_shared::types::{PluginSource, PluginUpdateStatus};
-    let repos = app.config.read().await.plugin_repos.clone();
+    let repos = app.config.read().await.plugins.repos.clone();
     let plugins = app.registry.list(&*app.secret_store);
     let mut out = Vec::new();
     for r in repos {
@@ -461,11 +460,11 @@ pub async fn quarantine_changed_plugins(app: Arc<AppState>) {
     {
         let mut cfg = app.config.write().await;
         for s in &statuses {
-            if !cfg.plugins_disabled.iter().any(|x| x == &s.plugin_id) {
-                cfg.plugins_disabled.push(s.plugin_id.clone());
+            if !cfg.plugins.disabled.iter().any(|x| x == &s.plugin_id) {
+                cfg.plugins.disabled.push(s.plugin_id.clone());
             }
         }
-        app.registry.set_disabled(&cfg.plugins_disabled);
+        app.registry.replace_policy(&cfg.plugins);
     }
     app.request_config_save();
 
@@ -496,7 +495,8 @@ pub async fn check_repo_updates(app: Arc<AppState>, client: ClientHandle) -> Res
 pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     let record = {
         let cfg = app.config.read().await;
-        cfg.plugin_repos
+        cfg.plugins
+            .repos
             .iter()
             .find(|r| r.slug == slug)
             .cloned()
@@ -504,6 +504,7 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     };
 
     let dir = crate::config::plugin_repos_dir().join(&slug);
+    let mut plugin_ids = crate::drivers::plugins::repo_plugin_ids(&dir);
     let remote_sha = {
         let dir = dir.clone();
         let branch = record.branch.clone();
@@ -518,18 +519,19 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
             .await
             .context("checkout task panicked")??;
     }
+    plugin_ids.extend(crate::drivers::plugins::repo_plugin_ids(&dir));
+    plugin_ids.sort();
+    plugin_ids.dedup();
 
     {
         let mut cfg = app.config.write().await;
-        if let Some(r) = cfg.plugin_repos.iter_mut().find(|r| r.slug == slug) {
+        if let Some(r) = cfg.plugins.repos.iter_mut().find(|r| r.slug == slug) {
             r.locked_sha = remote_sha;
             r.last_sync = Some(now_rfc3339());
         }
     }
     app.request_config_save();
-    reload_registry(&app).await;
-    mark_pending_and_broadcast(&app).await;
-    Ok(())
+    apply_repo_plugins(app, plugin_ids).await
 }
 
 #[cfg(test)]
@@ -592,8 +594,8 @@ mod tests {
                 .unwrap();
 
             let cfg = app.config.read().await;
-            assert_eq!(cfg.plugin_repos.len(), 1);
-            assert_eq!(cfg.plugin_repos[0].slug, slug);
+            assert_eq!(cfg.plugins.repos.len(), 1);
+            assert_eq!(cfg.plugins.repos[0].slug, slug);
             drop(cfg);
 
             let plugins = app.registry.list(&*app.secret_store);
@@ -653,7 +655,7 @@ mod tests {
             const STALE: &str = "2000-01-01T00:00:00+00:00";
             {
                 let mut cfg = app.config.write().await;
-                for r in cfg.plugin_repos.iter_mut() {
+                for r in cfg.plugins.repos.iter_mut() {
                     r.last_sync = Some(STALE.to_owned());
                 }
             }
@@ -661,7 +663,7 @@ mod tests {
             touch_last_sync(&app, std::slice::from_ref(&slug)).await;
 
             let cfg = app.config.read().await;
-            let r = cfg.plugin_repos.iter().find(|r| r.slug == slug).unwrap();
+            let r = cfg.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
             assert_ne!(
                 r.last_sync.as_deref(),
                 Some(STALE),
@@ -687,11 +689,12 @@ mod tests {
             let hash_before = app.registry.content_hash_for(&slug).unwrap();
             {
                 let mut cfg = app.config.write().await;
-                cfg.plugin_acknowledged
+                cfg.plugins
+                    .acknowledged
                     .insert(slug.clone(), hash_before.clone());
             }
             app.registry
-                .set_acknowledged(&app.config.read().await.plugin_acknowledged);
+                .set_acknowledged(&app.config.read().await.plugins.acknowledged);
             assert!(app.registry.content_hash_for(&slug).is_some());
 
             // Advance the upstream repo with a content change.
@@ -702,7 +705,7 @@ mod tests {
             update_repo(slug.clone(), app.clone()).await.unwrap();
 
             let cfg = app.config.read().await;
-            let record = cfg.plugin_repos.iter().find(|r| r.slug == slug).unwrap();
+            let record = cfg.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
             assert_eq!(
                 record.locked_sha, second_sha,
                 "locked_sha advances to the new tip"
@@ -714,7 +717,7 @@ mod tests {
                 "content_hash must change once the script content changed"
             );
             assert_ne!(
-                cfg.plugin_acknowledged.get(&slug),
+                cfg.plugins.acknowledged.get(&slug),
                 Some(&hash_after),
                 "the pre-update acknowledgment must no longer match the new content hash"
             );
@@ -753,12 +756,6 @@ mod tests {
             });
 
             update_plugin(slug.clone(), app.clone()).await.unwrap();
-
-            assert!(
-                !app.plugins_rediscover_pending
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                "an explicit plugin update must be applied without leaving staged changes"
-            );
 
             // Drain frames until the plugin_updates one, and assert the flag cleared.
             let mut cleared = None;
@@ -834,7 +831,8 @@ mod tests {
                 app.config
                     .read()
                     .await
-                    .plugins_disabled
+                    .plugins
+                    .disabled
                     .iter()
                     .any(|x| x == &slug),
                 "a plugin changed on disk must be disabled"
@@ -853,7 +851,8 @@ mod tests {
                 !app.config
                     .read()
                     .await
-                    .plugins_disabled
+                    .plugins
+                    .disabled
                     .iter()
                     .any(|x| x == &slug),
                 "re-enabling clears the disabled flag"
@@ -908,10 +907,10 @@ mod tests {
                 .unwrap();
             {
                 let mut cfg = app.config.write().await;
-                cfg.plugins_disabled.push(slug.clone());
+                cfg.plugins.disabled.push(slug.clone());
             }
             app.registry
-                .set_disabled(&app.config.read().await.plugins_disabled);
+                .set_disabled(&app.config.read().await.plugins.disabled);
 
             let clone_dir = crate::config::plugin_repos_dir().join(&slug);
             assert!(clone_dir.exists());
@@ -920,9 +919,9 @@ mod tests {
 
             assert!(!clone_dir.exists(), "clone directory must be removed");
             let cfg = app.config.read().await;
-            assert!(cfg.plugin_repos.is_empty());
+            assert!(cfg.plugins.repos.is_empty());
             assert!(
-                !cfg.plugins_disabled.contains(&slug),
+                !cfg.plugins.disabled.contains(&slug),
                 "the removed plugin's disabled flag must be purged"
             );
             drop(cfg);
@@ -955,7 +954,7 @@ mod tests {
             // missing repo and logging a fetch failure on every cycle.
             {
                 let mut cfg = app.config.write().await;
-                cfg.plugin_repos.push(PluginRepoRecord {
+                cfg.plugins.repos.push(PluginRepoRecord {
                     url: "https://example.invalid/repo".to_owned(),
                     slug: "never-cloned".to_owned(),
                     branch: None,

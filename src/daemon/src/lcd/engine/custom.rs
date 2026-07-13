@@ -34,7 +34,7 @@ use halod_shared::types::{EffectParamValue, LcdEngineTemplateDescriptor, RgbColo
 
 use super::templates::{
     angle_cw_from_top, dim_color, draw_text_bold, load_font, load_inter_font, load_mono_font, rgba,
-    text_extent, Background, LcdTemplate, TemplateCtx,
+    text_extent, Background, TemplateCtx,
 };
 
 pub struct CustomTemplate {
@@ -60,8 +60,8 @@ pub struct CustomTemplate {
     media: Option<Arc<MediaHandle>>,
 }
 
-impl LcdTemplate for CustomTemplate {
-    fn descriptor() -> LcdEngineTemplateDescriptor {
+impl CustomTemplate {
+    pub(super) fn descriptor() -> LcdEngineTemplateDescriptor {
         LcdEngineTemplateDescriptor {
             id: "custom".to_string(),
             name: "Custom".to_string(),
@@ -70,10 +70,10 @@ impl LcdTemplate for CustomTemplate {
         }
     }
 
-    fn from_params(
+    pub(super) fn from_params(
         params: &HashMap<String, EffectParamValue>,
         images_dir: &Path,
-    ) -> Box<dyn LcdTemplate> {
+    ) -> Self {
         let def = match params.get(halod_shared::lcd_custom::WIDGETS_JSON_PARAM) {
             Some(EffectParamValue::Str(json)) => serde_json::from_str::<CustomTemplateDef>(json)
                 .unwrap_or_else(|e| {
@@ -82,10 +82,10 @@ impl LcdTemplate for CustomTemplate {
                 }),
             _ => CustomTemplateDef::default(),
         };
-        Box::new(Self::new(def, images_dir))
+        Self::new(def, images_dir)
     }
 
-    fn render(&mut self, ctx: &TemplateCtx, buf: &mut RgbaImage) -> Result<(), String> {
+    pub(super) fn render(&mut self, ctx: &TemplateCtx, buf: &mut RgbaImage) -> Result<(), String> {
         let (w, h) = (ctx.width, ctx.height);
         let accent = self.def.style.accent;
 
@@ -116,7 +116,7 @@ impl LcdTemplate for CustomTemplate {
         Ok(())
     }
 
-    fn content_signature(&self, ctx: &TemplateCtx) -> Option<u64> {
+    pub(super) fn content_signature(&self, ctx: &TemplateCtx) -> Option<u64> {
         let mut hasher = DefaultHasher::new();
         self.background_signature(ctx.t).hash(&mut hasher);
         for widget in &self.def.widgets {
@@ -2287,9 +2287,7 @@ mod tests {
 
     #[test]
     fn build_custom_succeeds() {
-        assert!(
-            super::super::templates::build("custom", &HashMap::new(), Path::new("/tmp")).is_some()
-        );
+        let _ = CustomTemplate::from_params(&HashMap::new(), Path::new("/tmp"));
     }
 
     #[test]

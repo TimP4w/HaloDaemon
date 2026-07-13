@@ -5,7 +5,6 @@
 //! re-enumerate doubling as the liveness probe. Spawned from `main`.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,9 +52,7 @@ pub(super) async fn tick_once(
     in_progress: &mut HashSet<String>,
 ) {
     // Don't fight a scoped or global rediscovery while it owns device teardown.
-    if app.discovery_filter.read().await.is_some()
-        || app.plugins_rediscover_pending.load(Ordering::Relaxed)
-    {
+    if app.discovery_filter.read().await.is_some() {
         return;
     }
 
@@ -226,7 +223,7 @@ mod tests {
     use crate::test_support::MockDevice;
     use anyhow::Result;
     use async_trait::async_trait;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 
     /// A mock integration root whose `resync_children` returns a scripted result

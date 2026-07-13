@@ -191,7 +191,12 @@ impl ksni::Tray for HalodTray {
                     options,
                     select: Box::new(|this: &mut Self, idx| {
                         if let Some(name) = this.profiles.get(idx) {
-                            crate::domain::actions::profiles::switch_profile(&this.cmd, name);
+                            crate::runtime::ipc::send(
+                                &this.cmd,
+                                halod_shared::commands::DaemonCommand::SwitchProfile {
+                                    name: name.to_string(),
+                                },
+                            );
                         }
                     }),
                 })],

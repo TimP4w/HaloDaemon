@@ -127,7 +127,10 @@ impl IntegrationsUi {
         for (plugin_id, name) in logos_to_request(plugins, plugin_assets, &self.requested_logos) {
             self.requested_logos
                 .insert(ipc::plugin_asset_cache_key(&plugin_id, &name));
-            crate::domain::actions::plugins::get_plugin_asset(cmd, plugin_id, name);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::GetPluginAsset { plugin_id, name },
+            );
         }
         decode_new_assets(ctx, plugin_assets, &mut self.logo_textures);
     }
@@ -269,20 +272,24 @@ impl IntegrationsUi {
                 seed_config_edit_if_needed(&mut self.config_edit, &p.id, &p.config_values);
                 let edits = &mut self.config_edit.as_mut().expect("just seeded above").1;
                 config_section(ui, p, edits, |values| {
-                    crate::domain::actions::integrations::set_integration_config(
+                    crate::runtime::ipc::send(
                         cmd,
-                        p.id.clone(),
-                        values,
+                        halod_shared::commands::DaemonCommand::SetIntegrationConfig {
+                            id: p.id.clone(),
+                            values,
+                        },
                     );
                 });
             }
         });
 
         if let Some(target) = toggled {
-            crate::domain::actions::integrations::set_integration_enabled(
+            crate::runtime::ipc::send(
                 cmd,
-                p.id.clone(),
-                target,
+                halod_shared::commands::DaemonCommand::SetIntegrationEnabled {
+                    id: p.id.clone(),
+                    enabled: target,
+                },
             );
             self.in_flight.insert(p.id.clone(), target);
         }

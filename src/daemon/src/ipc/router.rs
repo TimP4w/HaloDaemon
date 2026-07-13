@@ -305,14 +305,13 @@ async fn dispatch(
             registry::usecases::plugins::import(source_dir, app).await
         }
         DaemonCommand::DeletePlugin { id } => registry::usecases::plugins::delete(id, app).await,
-        DaemonCommand::SetPluginPermissions { id, granted } => {
-            registry::usecases::plugins::set_permissions(id, granted, app).await
-        }
+        DaemonCommand::SetPluginTrust {
+            id,
+            granted,
+            enabled,
+        } => registry::usecases::plugins::set_trust(id, granted, enabled, app).await,
         DaemonCommand::SetPluginConfig { id, values } => {
             registry::usecases::plugins::set_config(id, values, app).await
-        }
-        DaemonCommand::ApplyPendingPluginChanges => {
-            registry::usecases::plugins::apply_pending_changes(app).await
         }
         DaemonCommand::AddPluginRepo { url, branch } => {
             registry::usecases::repos::add_repo(url, branch, app).await

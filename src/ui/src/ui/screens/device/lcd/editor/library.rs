@@ -145,10 +145,12 @@ pub(super) fn my_templates_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Dev
         .clicked()
             && can_save
         {
-            crate::domain::actions::lcd::save_lcd_template(
+            crate::runtime::ipc::send(
                 ctx.cmd,
-                st.lcd.editor.template_name.trim(),
-                st.lcd.editor.def.clone(),
+                halod_shared::commands::DaemonCommand::SaveLcdTemplate {
+                    name: st.lcd.editor.template_name.trim().to_string(),
+                    def: st.lcd.editor.def.clone(),
+                },
             );
         }
     });
@@ -161,7 +163,10 @@ pub(super) fn my_templates_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Dev
         for name in &ctx.state.lcd.templates {
             let (load, delete) = widgets::chip_closable(ui, name);
             if load {
-                crate::domain::actions::lcd::load_lcd_template(ctx.cmd, name);
+                crate::runtime::ipc::send(
+                    ctx.cmd,
+                    halod_shared::commands::DaemonCommand::LoadLcdTemplate { name: name.clone() },
+                );
             }
             if delete {
                 st.lcd.editor.confirm_delete = Some(name.clone());
@@ -216,7 +221,10 @@ pub(super) fn delete_template_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut De
         confirm,
         cancel || dismissed,
     ) {
-        crate::domain::actions::lcd::delete_lcd_template(ctx.cmd, &name);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::DeleteLcdTemplate { name },
+        );
     }
 }
 

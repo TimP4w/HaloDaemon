@@ -278,7 +278,14 @@ fn send_def(ctx: &TabCtx, st: &mut DeviceUi, id: &str, immediate: bool) {
     params.insert(WIDGETS_JSON_PARAM.to_string(), EffectParamValue::Str(json));
     if immediate {
         st.last_edit = ctx.time;
-        crate::domain::actions::lcd::lcd_engine_set_template(ctx.cmd, id, "custom", params);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::LcdEngineSetTemplate {
+                device_id: id.to_string(),
+                template_id: "custom".to_string(),
+                params,
+            },
+        );
     } else {
         let cmd = DaemonCommand::LcdEngineSetTemplate {
             device_id: id.to_string(),

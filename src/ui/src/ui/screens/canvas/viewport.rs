@@ -203,7 +203,7 @@ pub(super) fn canvas_view(
     if resp.drag_stopped() {
         if canvas_ui.drag.is_some() {
             for (_, (c, _)) in canvas_ui.pending.move_zones.drain() {
-                crate::domain::actions::canvas::send(cmd, c);
+                crate::runtime::ipc::send(cmd, c);
             }
             // Keep drag_zones as an optimistic override; prune_drag_zones drops
             // it once the daemon broadcast reflects the new position.
@@ -216,7 +216,13 @@ pub(super) fn canvas_view(
         if let Some(norm) = ptr_norm {
             // A click on the sole selection's top-right remove badge deletes it.
             if let Some((d, z)) = badge_hit(canvas_ui, state, norm, canvas_rect) {
-                crate::domain::actions::canvas::remove_zone(cmd, &d, &z);
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::CanvasRemoveZone {
+                        device_id: d,
+                        zone_id: z,
+                    },
+                );
                 canvas_ui.selected.clear();
             } else {
                 let hit = hit_test(norm, &state.lighting.canvas.placed_zones, canvas_rect);

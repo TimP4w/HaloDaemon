@@ -354,7 +354,12 @@ fn default_effect_card(
                     }
                 });
             if selected != current {
-                crate::domain::actions::canvas::set_default_effect(cmd, selected);
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::CanvasSetDefaultEffect {
+                        instance_id: selected,
+                    },
+                );
             }
             ui.add_space(6.0);
             ui.label(
@@ -521,7 +526,7 @@ fn instance_row(
                 {
                     canvas_ui.pending.effect = None;
                 }
-                crate::domain::actions::canvas::send(
+                crate::runtime::ipc::send(
                     cmd,
                     upsert_instance_cmd(id.to_string(), def.effect_id.clone(), new_name, params),
                 );
@@ -619,7 +624,7 @@ fn instance_row(
                         .collect()
                 })
                 .unwrap_or_default();
-            crate::domain::actions::canvas::send(
+            crate::runtime::ipc::send(
                 cmd,
                 upsert_instance_cmd(id.to_string(), sel, effective_name.clone(), params),
             );
@@ -749,7 +754,12 @@ fn instance_row(
         if canvas_ui.zones_modal.as_deref() == Some(id) {
             canvas_ui.zones_modal = None;
         }
-        crate::domain::actions::canvas::remove_effect(cmd, id);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::CanvasRemoveEffect {
+                instance_id: id.to_string(),
+            },
+        );
     }
 }
 

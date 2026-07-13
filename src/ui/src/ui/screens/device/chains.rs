@@ -275,10 +275,12 @@ fn channel_header(
         ui.ctx().data_mut(|d| d.insert_temp(flash_key, true));
         ui.ctx()
             .data_mut(|d| d.insert_temp(flash_at_key, now + 2.4));
-        crate::domain::actions::lighting::rgb_chain_detect_channel(
+        crate::runtime::ipc::send(
             ctx.cmd,
-            dev_id,
-            &channel.channel_id,
+            halod_shared::commands::DaemonCommand::RgbChainDetectChannel {
+                id: dev_id.to_string(),
+                channel_id: channel.channel_id.clone(),
+            },
         );
     }
 
@@ -456,10 +458,12 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &ChainLinkInfo) {
         if resp.lost_focus() {
             let trimmed = buf.trim().to_string();
             if !trimmed.is_empty() && trimmed != link.name {
-                crate::domain::actions::devices::rename_device(
+                crate::runtime::ipc::send(
                     ctx.cmd,
-                    &link.child_device_id,
-                    &trimmed,
+                    halod_shared::commands::DaemonCommand::SetDeviceName {
+                        device_id: link.child_device_id.clone(),
+                        name: trimmed,
+                    },
                 );
             }
         }
@@ -548,11 +552,13 @@ fn editable_right(
         icon_col,
     );
     if btn_resp.clicked() {
-        crate::domain::actions::lighting::rgb_chain_remove_link(
+        crate::runtime::ipc::send(
             ctx.cmd,
-            dev_id,
-            channel_id,
-            &link.child_device_id,
+            halod_shared::commands::DaemonCommand::RgbChainRemoveLink {
+                id: dev_id.to_string(),
+                channel_id: channel_id.to_string(),
+                child_device_id: link.child_device_id.clone(),
+            },
         );
     }
 
@@ -719,13 +725,15 @@ fn add_link_panel(
                     .clicked()
                         && can_add
                     {
-                        crate::domain::actions::lighting::rgb_chain_add_link(
+                        crate::runtime::ipc::send(
                             ctx.cmd,
-                            dev_id,
-                            &channel.channel_id,
-                            name.trim(),
-                            leds,
-                            topology_from_idx(topo_idx),
+                            halod_shared::commands::DaemonCommand::RgbChainAddLink {
+                                id: dev_id.to_string(),
+                                channel_id: channel.channel_id.clone(),
+                                name: name.trim().to_string(),
+                                led_count: leds,
+                                topology: topology_from_idx(topo_idx),
+                            },
                         );
                         ui.ctx().data_mut(|d| d.insert_temp(open_key, false));
                     }

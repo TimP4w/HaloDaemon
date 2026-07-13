@@ -145,24 +145,33 @@ impl DesignerUi {
                     let name = self.name.trim().to_string();
                     if validate_effect_name(&name) {
                         let params = self.params.to_params();
-                        crate::domain::actions::lighting::save_custom_effect(
+                        crate::runtime::ipc::send(
                             cmd,
-                            &name,
-                            params.clone(),
+                            halod_shared::commands::DaemonCommand::SaveCustomEffect {
+                                name: name.clone(),
+                                params: params.clone(),
+                            },
                         );
                         if let Some(old) = &self.editing {
                             if old != &name {
-                                crate::domain::actions::lighting::delete_custom_effect(cmd, old);
+                                crate::runtime::ipc::send(
+                                    cmd,
+                                    halod_shared::commands::DaemonCommand::DeleteCustomEffect {
+                                        name: old.clone(),
+                                    },
+                                );
                             }
                         }
                         if let Some((instance_id, effect_id)) = &self.canvas_instance {
-                            crate::domain::actions::lighting::canvas_upsert_effect(
+                            crate::runtime::ipc::send(
                                 cmd,
-                                instance_id,
-                                EffectDef {
-                                    effect_id: effect_id.clone(),
-                                    name: Some(name.clone()),
-                                    params: params.clone(),
+                                halod_shared::commands::DaemonCommand::CanvasUpsertEffect {
+                                    instance_id: instance_id.clone(),
+                                    def: EffectDef {
+                                        effect_id: effect_id.clone(),
+                                        name: Some(name.clone()),
+                                        params: params.clone(),
+                                    },
                                 },
                             );
                         }
@@ -701,10 +710,12 @@ pub fn spawn_import(ctx: &egui::Context, cmd: CommandTx) {
         if let Ok(bytes) = std::fs::read(&path) {
             match parse_import(&bytes) {
                 Ok((name, params)) => {
-                    crate::domain::actions::lighting::save_custom_effect(
+                    crate::runtime::ipc::send(
                         &cmd,
-                        &name,
-                        params.to_params(),
+                        halod_shared::commands::DaemonCommand::SaveCustomEffect {
+                            name,
+                            params: params.to_params(),
+                        },
                     );
                 }
                 Err(e) => log::warn!("failed to import effect from {path:?}: {e}"),

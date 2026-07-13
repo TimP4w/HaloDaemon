@@ -156,11 +156,13 @@ pub fn show(
     if closed || confirmed {
         st.dismissed = true;
         if st.dont_show_again {
-            crate::domain::actions::system::set_ui_config(
+            crate::runtime::ipc::send(
                 cmd,
-                state.gui.close_to_tray,
-                true,
-                state.gui.hide_window_controls,
+                halod_shared::commands::DaemonCommand::SetUiConfig {
+                    close_to_tray: state.gui.close_to_tray,
+                    suppress_dependency_warning: true,
+                    hide_window_controls: state.gui.hide_window_controls,
+                },
             );
         }
     }

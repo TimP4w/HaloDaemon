@@ -580,18 +580,13 @@ pub struct HealthCheckState {
     pub ffmpeg_available: bool,
 }
 
-/// Device plugins and their pending-apply state, for the Plugins screen.
+/// Device plugins and repositories for the Plugins screen.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginsState {
     /// Device plugins discovered in the plugins directory, with their
     /// enable/disable state, for the Plugins management screen.
     #[serde(default)]
     pub plugins: Vec<PluginInfo>,
-    /// True when a plugin enable/disable/grant/import/delete has been staged
-    /// but not yet applied to live devices — the Plugins screen invites the
-    /// user to apply it explicitly rather than rediscovering on every edit.
-    #[serde(default)]
-    pub rediscover_pending: bool,
     /// Registered git-repo plugin sources, for the "Plugin Repositories" section of the Plugins screen.
     #[serde(default)]
     pub repos: Vec<PluginRepoInfo>,
@@ -1894,7 +1889,6 @@ mod app_rule_tests {
         state.lighting.config.canvas_fps = 33;
         state.lcd.config.enabled = false;
         state.health.ffmpeg_available = true;
-        state.plugins.rediscover_pending = true;
         let value = serde_json::to_value(&state).unwrap();
         let back: AppState = serde_json::from_value(value).unwrap();
         assert_eq!(back.profiles.active, "gaming");
@@ -1905,7 +1899,6 @@ mod app_rule_tests {
         assert_eq!(back.lighting.config.canvas_fps, 33);
         assert!(!back.lcd.config.enabled);
         assert!(back.health.ffmpeg_available);
-        assert!(back.plugins.rediscover_pending);
     }
 }
 

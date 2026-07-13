@@ -37,7 +37,7 @@ async fn discover(app: Arc<AppState>) -> anyhow::Result<()> {
             return Ok(None);
         };
 
-        let bus = match AmdSmnBus::open(None) {
+        let bus = match AmdSmnBus::open() {
             Ok(bus) => Arc::new(bus),
             Err(e) => {
                 log::debug!("[AMD CPU] AMDFamily17.bin not available: {e}");

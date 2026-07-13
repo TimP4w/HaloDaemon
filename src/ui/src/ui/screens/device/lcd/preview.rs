@@ -227,7 +227,13 @@ pub(super) fn display_card(
                 };
                 for r in rots {
                     if widgets::pill(ui, rot_label(r), r == lcd.rotation) && r != lcd.rotation {
-                        crate::domain::actions::lcd::set_screen_rotation(ctx.cmd, id, r);
+                        crate::runtime::ipc::send(
+                            ctx.cmd,
+                            halod_shared::commands::DaemonCommand::SetScreenRotation {
+                                id: id.to_string(),
+                                rotation: r,
+                            },
+                        );
                     }
                 }
             });
@@ -244,7 +250,10 @@ pub(super) fn display_card(
             )
             .clicked()
             {
-                crate::domain::actions::lcd::set_screen_default(ctx.cmd, id);
+                crate::runtime::ipc::send(
+                    ctx.cmd,
+                    halod_shared::commands::DaemonCommand::SetScreenDefault { id: id.to_string() },
+                );
             }
         },
     );
@@ -268,7 +277,13 @@ pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, lcd: 
         |ui| next = widgets::toggle(ui, on),
     );
     if next != on {
-        crate::domain::actions::lcd::set_screen_raw_streaming(ctx.cmd, id, next);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::SetScreenRawStreaming {
+                id: id.to_string(),
+                enabled: next,
+            },
+        );
     }
 }
 

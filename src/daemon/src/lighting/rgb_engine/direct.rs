@@ -23,20 +23,11 @@ pub trait DirectLedEffect: Send {
     fn set_sensor_value(&mut self, _value: Option<f64>) {}
 }
 
-trait DirectEffect: DirectLedEffect {
-    fn descriptor() -> Animation
-    where
-        Self: Sized;
-    fn from_params(params: &HashMap<String, EffectParamValue>) -> Box<dyn DirectLedEffect>
-    where
-        Self: Sized;
-}
-
 struct Designer {
     params: DesignerParams,
 }
 
-impl DirectEffect for Designer {
+impl Designer {
     fn descriptor() -> Animation {
         Animation {
             id: DESIGNER_EFFECT_ID.to_string(),
@@ -67,22 +58,6 @@ impl DirectLedEffect for Designer {
     }
 }
 
-struct Off;
-
-impl DirectLedEffect for Off {
-    fn led_color(&self, _p: f32, _p_ring: f32, _nx: f32, _ny: f32, _t: f32) -> LinearColor {
-        LinearColor {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-        }
-    }
-}
-
-pub fn off_effect() -> Box<dyn DirectLedEffect> {
-    Box::new(Off)
-}
-
 pub fn build_direct(
     id: &str,
     params: &HashMap<String, EffectParamValue>,
@@ -106,15 +81,6 @@ mod tests {
         assert!(build_direct(DESIGNER_EFFECT_ID, &HashMap::new()).is_some());
         assert!(build_direct("breathing", &HashMap::new()).is_none());
         assert!(build_direct("nope", &HashMap::new()).is_none());
-    }
-
-    #[test]
-    fn off_effect_is_black_everywhere() {
-        let fx = off_effect();
-        for &(p, t) in &[(0.0f32, 0.0f32), (0.5, 3.7), (1.0, 100.0)] {
-            let c = fx.led_color(p, p, p, p, t);
-            assert_eq!((c.r, c.g, c.b), (0.0, 0.0, 0.0));
-        }
     }
 
     #[test]

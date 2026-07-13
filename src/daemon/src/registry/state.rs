@@ -94,17 +94,9 @@ impl HidTracking {
         removed
     }
 
-    /// Clear all tracked HID entries and the cached id set.
-    pub async fn clear(&self) {
-        self.tracking.lock().await.clear();
-        *self.ids.write().await = HashSet::new();
-    }
-
     /// Untrack every HID key whose tracked device id(s) all appear in `ids`, so a
     /// subsequent scoped re-probe re-registers that hardware instead of skipping
-    /// it as already-open. Mirrors what [`clear`](Self::clear) does wholesale for
-    /// the full-rediscovery path; the scoped teardown uses this to prune only the
-    /// torn-down devices' keys. Returns the number of keys removed.
+    /// it as already-open. Returns the number of keys removed.
     pub async fn untrack_devices(&self, ids: &HashSet<String>) -> usize {
         let keys: Vec<String> = {
             let tracking = self.tracking.lock().await;

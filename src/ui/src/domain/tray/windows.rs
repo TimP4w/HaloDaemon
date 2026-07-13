@@ -65,7 +65,12 @@ impl PlatformTray {
             } else if ev.id == self.quit_id {
                 quit(ctx, &self.cmd, &self.force_quit, &self.hide_state);
             } else if let Some((_, name)) = self.profile_ids.iter().find(|(id, _)| *id == ev.id) {
-                crate::domain::actions::profiles::switch_profile(&self.cmd, name);
+                crate::runtime::ipc::send(
+                    &self.cmd,
+                    halod_shared::commands::DaemonCommand::SwitchProfile {
+                        name: name.to_string(),
+                    },
+                );
             }
         }
         if changed {

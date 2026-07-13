@@ -95,7 +95,7 @@ fn quit(
     hide_state: &crate::domain::state::HideState,
 ) {
     force_quit.store(true, Ordering::SeqCst);
-    crate::domain::actions::system::shutdown(cmd);
+    crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::Shutdown);
     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     ctx.request_repaint();
     // Linux: while closed to tray there is no window to receive the close, so

@@ -98,7 +98,10 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
 
     // Fetch the library once on first render of this device page.
     if !st.lcd.list_requested {
-        crate::domain::actions::lcd::list_lcd_images(ctx.cmd);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::ListLcdImages,
+        );
         st.lcd.list_requested = true;
     }
 
@@ -106,7 +109,10 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     if wants_engine_preview(st.lcd.media_tab)
         && preview_keepalive_due(&mut st.lcd.preview_keepalive_at, ctx.time)
     {
-        crate::domain::actions::lcd::lcd_engine_subscribe(ctx.cmd);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::LcdEngineSubscribe,
+        );
     }
 
     poll_picker(ui, ctx, st, &id);
@@ -160,7 +166,13 @@ fn activate_video_mode(ctx: &TabCtx, id: &str, lcd: &LcdStatus) {
     let Some(path) = lcd.video_path.clone() else {
         return;
     };
-    crate::domain::actions::lcd::set_screen_video(ctx.cmd, id, path);
+    crate::runtime::ipc::send(
+        ctx.cmd,
+        halod_shared::commands::DaemonCommand::SetScreenVideo {
+            id: id.to_string(),
+            path,
+        },
+    );
 }
 
 fn mode_header(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {

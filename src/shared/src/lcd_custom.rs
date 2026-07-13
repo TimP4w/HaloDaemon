@@ -70,16 +70,13 @@ pub struct WidgetSprite {
 /// `sprites` carries only the widgets whose content changed since the
 /// requester's `known` signatures (all of them when `known` was empty);
 /// `signatures` carries the current (id, signature) pair for every widget so
-/// the requester can tell which cached sprites are still valid. A `Vec` with
-/// empty `signatures` (from a pre-delta daemon) means legacy full-replace
-/// semantics: `sprites` is the complete set.
+/// the requester can tell which cached sprites are still valid.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LcdEditorRender {
     pub device_id: String,
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub sprites: Vec<WidgetSprite>,
-    #[serde(default)]
     pub signatures: Vec<(String, u64)>,
 }
 
@@ -935,17 +932,5 @@ mod tests {
         let json = serde_json::to_string(&render).unwrap();
         let back: LcdEditorRender = serde_json::from_str(&json).unwrap();
         assert_eq!(back, render);
-    }
-
-    #[test]
-    fn lcd_editor_render_deserializes_legacy_json_without_signatures() {
-        let legacy = serde_json::json!({
-            "device_id": "dev1",
-            "canvas_w": 240,
-            "canvas_h": 240,
-            "sprites": [],
-        });
-        let back: LcdEditorRender = serde_json::from_value(legacy).unwrap();
-        assert!(back.signatures.is_empty());
     }
 }

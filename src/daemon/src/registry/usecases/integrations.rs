@@ -41,12 +41,11 @@ async fn enable_one(app: &Arc<AppState>, id: &str) {
 pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
     {
         let mut cfg = app.config.write().await;
-        cfg.integrations_disabled.retain(|x| x != &id);
+        cfg.plugins.integrations_disabled.retain(|x| x != &id);
         if !enabled {
-            cfg.integrations_disabled.push(id.clone());
+            cfg.plugins.integrations_disabled.push(id.clone());
         }
-        app.registry
-            .set_integrations_disabled(&cfg.integrations_disabled);
+        app.registry.replace_policy(&cfg.plugins);
     }
     app.request_config_save();
 
@@ -117,7 +116,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_integration_enabled_persists_without_touching_the_global_pending_flag() {
+    async fn set_integration_enabled_persists_the_policy() {
         crate::test_support::with_tmp_config(|app| async move {
             let root = Arc::new(MockDevice::new("openrgb-root").with_integration_id("openrgb"));
             let child = Arc::new(MockDevice::new("openrgb-root_ctrl_0"));
@@ -137,13 +136,9 @@ mod tests {
                 .config
                 .read()
                 .await
+                .plugins
                 .integrations_disabled
                 .contains(&"openrgb".to_string()));
-            assert!(
-                !app.plugins_rediscover_pending.load(Ordering::Relaxed),
-                "a scoped integration toggle must not trigger the global rediscover flag"
-            );
-
             let remaining = app.devices.read().await;
             assert_eq!(
                 remaining.len(),
@@ -173,11 +168,15 @@ mod tests {
 
                 let cfg = app.config.read().await;
                 assert_eq!(
-                    cfg.plugin_config.get("inttest").and_then(|m| m.get("host")),
+                    cfg.plugins
+                        .config
+                        .get("inttest")
+                        .and_then(|m| m.get("host")),
                     Some(&"127.0.0.1".to_string())
                 );
                 assert!(
-                    !cfg.plugin_config
+                    !cfg.plugins
+                        .config
                         .get("inttest")
                         .is_some_and(|m| m.contains_key("token")),
                     "a secure value must never land in the plaintext config map"

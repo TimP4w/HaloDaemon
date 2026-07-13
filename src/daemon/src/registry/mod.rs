@@ -43,14 +43,9 @@ pub async fn initialize_app_state(app: Arc<AppState>) {
         let cfg = app.config.read().await;
         app.registry.load_all_with_repos(
             &crate::config::plugins_dir(),
-            &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugin_repos),
+            &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
         );
-        app.registry.set_disabled(&cfg.plugins_disabled);
-        app.registry.set_granted(&cfg.plugin_permissions);
-        app.registry.set_acknowledged(&cfg.plugin_acknowledged);
-        app.registry.set_config_values(&cfg.plugin_config);
-        app.registry
-            .set_integrations_disabled(&cfg.integrations_disabled);
+        app.registry.replace_policy(&cfg.plugins);
     }
     // Security: disable any plugin whose files changed on disk since checkout,
     // BEFORE discovery so a tampered plugin never activates. No network, so it
@@ -85,11 +80,12 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     {
         let mut cfg = app.config.write().await;
         if !cfg
-            .plugin_repos
+            .plugins
+            .repos
             .iter()
             .any(|r| r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
         {
-            cfg.plugin_repos.push(PluginRepoRecord {
+            cfg.plugins.repos.push(PluginRepoRecord {
                 url: url.to_owned(),
                 slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
                 branch: None,
@@ -118,7 +114,8 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
         Ok(Ok(sha)) => {
             let mut cfg = app.config.write().await;
             if let Some(r) = cfg
-                .plugin_repos
+                .plugins
+                .repos
                 .iter_mut()
                 .find(|r| r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
             {
@@ -283,7 +280,8 @@ mod official_repo_tests {
 
             let cfg = app.config.read().await;
             let record = cfg
-                .plugin_repos
+                .plugins
+                .repos
                 .iter()
                 .find(|r| r.slug == OFFICIAL_SLUG)
                 .expect("official repo record must be seeded even if the clone fails");
@@ -304,7 +302,7 @@ mod official_repo_tests {
 
             let cfg = app.config.read().await;
             assert!(
-                cfg.plugin_repos.iter().any(|r| r.slug == OFFICIAL_SLUG),
+                cfg.plugins.repos.iter().any(|r| r.slug == OFFICIAL_SLUG),
                 "the official record is seeded regardless of consent"
             );
             let clone_dir = crate::config::plugin_repos_dir().join(OFFICIAL_SLUG);
@@ -324,7 +322,8 @@ mod official_repo_tests {
 
             let cfg = app.config.read().await;
             let count = cfg
-                .plugin_repos
+                .plugins
+                .repos
                 .iter()
                 .filter(|r| r.slug == OFFICIAL_SLUG)
                 .count();

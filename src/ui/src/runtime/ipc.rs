@@ -55,8 +55,7 @@ pub struct DecodedSprite {
 
 /// The daemon's editor render: sprites for the widgets that changed since the
 /// `known` signatures this request sent, plus the current signature of every
-/// widget. Empty `signatures` means a pre-delta daemon: `sprites` is the
-/// complete set (legacy full-replace semantics).
+/// widget.
 #[derive(Clone)]
 pub struct DecodedEditorRender {
     pub device_id: String,
@@ -571,8 +570,6 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
         }
         None => return false,
     }
-    // `ScreenRotation` deserializes legacy integer degrees on its own, so no
-    // pre-pass over the JSON tree is needed here.
     let data = value.get("data").cloned().unwrap_or(value);
     match serde_json::from_value::<AppState>(data) {
         Ok(state) => {

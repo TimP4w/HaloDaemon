@@ -53,21 +53,25 @@ type DirectDevice = (
 
 struct LivePixmap {
     key: String,
-    effect: Box<dyn FrameSource>,
     pixmap: Pixmap,
-    /// Present when `key`'s effect id is a plugin-registered one. `effect`
-    /// stays a native fallback (`canvas::default_source()`) so a worker
-    /// error can drop this to `None` and the tick still renders something.
-    plugin: Option<crate::drivers::plugins::PluginEffectHandle>,
+    runtime: PixmapRuntime,
+}
+
+enum PixmapRuntime {
+    Native(Box<dyn FrameSource>),
+    Plugin(crate::drivers::plugins::PluginEffectHandle),
+    Off,
 }
 
 struct LiveDirect {
     key: String,
-    effect: Box<dyn DirectLedEffect>,
-    /// Present when `key`'s effect id is a plugin-registered one. `effect`
-    /// stays `direct::off_effect()` so a worker error can drop this to
-    /// `None` and the tick still renders something (off).
-    plugin: Option<crate::drivers::plugins::PluginEffectHandle>,
+    runtime: DirectRuntime,
+}
+
+enum DirectRuntime {
+    Native(Box<dyn DirectLedEffect>),
+    Plugin(crate::drivers::plugins::PluginEffectHandle),
+    Off,
 }
 
 pub struct RgbEngine {
@@ -104,26 +108,17 @@ fn resolve_instance(zone: &PlacedZone, cs: &CanvasState) -> (String, Option<Effe
     }
 }
 
-/// Build a pixmap instance: a native `FrameSource` when the id is a built-in
-/// effect, or a native fallback plus a live plugin worker when it's a
-/// registered plugin effect id, or just the fallback for an unknown id.
-fn build_pixmap_effect(
-    app: &Arc<AppState>,
-    def: Option<&EffectDef>,
-) -> (
-    Box<dyn FrameSource>,
-    Option<crate::drivers::plugins::PluginEffectHandle>,
-) {
+fn build_pixmap_effect(app: &Arc<AppState>, def: Option<&EffectDef>) -> PixmapRuntime {
     let Some(d) = def else {
-        return (canvas::default_source(), None);
+        return PixmapRuntime::Off;
     };
     if let Some(fx) = canvas::build(&d.effect_id, &d.params) {
-        return (fx, None);
+        return PixmapRuntime::Native(fx);
     }
-    let plugin =
-        app.registry
-            .build_pixmap_effect(app.secret_store.as_ref(), &d.effect_id, &d.params);
-    (canvas::default_source(), plugin)
+    app.registry
+        .build_pixmap_effect(app.secret_store.as_ref(), &d.effect_id, &d.params)
+        .map(PixmapRuntime::Plugin)
+        .unwrap_or(PixmapRuntime::Off)
 }
 
 /// Number of rings for per-ring motion, or 1 for non-ring / indivisible zones.
@@ -395,14 +390,13 @@ impl RgbEngine {
                     log::error!("canvas: failed to allocate pixmap for '{key}', skipping");
                     continue;
                 };
-                let (effect, plugin) = build_pixmap_effect(&self.app_state, def.as_ref());
+                let runtime = build_pixmap_effect(&self.app_state, def.as_ref());
                 live.insert(
                     key.clone(),
                     LivePixmap {
                         key: want,
-                        effect,
                         pixmap,
-                        plugin,
+                        runtime,
                     },
                 );
             }
@@ -410,10 +404,11 @@ impl RgbEngine {
         }
         for key in &built {
             let lp = live.get_mut(key).expect("instance built above");
-            if let Some(handle) = &lp.plugin {
-                match handle.render_pixmap(t, dt).await {
+            let disable = match &mut lp.runtime {
+                PixmapRuntime::Plugin(handle) => match handle.render_pixmap(t, dt).await {
                     Ok(bytes) if bytes.len() == lp.pixmap.data().len() => {
                         lp.pixmap.data_mut().copy_from_slice(&bytes);
+                        false
                     }
                     Ok(bytes) => {
                         log::warn!(
@@ -421,17 +416,27 @@ impl RgbEngine {
                             bytes.len(),
                             lp.pixmap.data().len()
                         );
-                        lp.plugin = None;
+                        true
                     }
                     Err(e) => {
                         log::warn!(
                             "plugin pixmap effect '{key}' render failed: {e:#}; disabling for this session"
                         );
-                        lp.plugin = None;
+                        true
                     }
+                },
+                PixmapRuntime::Native(effect) => {
+                    effect.render(&mut lp.pixmap, t, dt);
+                    false
                 }
-            } else {
-                lp.effect.render(&mut lp.pixmap, t, dt);
+                PixmapRuntime::Off => {
+                    lp.pixmap.fill(tiny_skia::Color::TRANSPARENT);
+                    false
+                }
+            };
+            if disable {
+                lp.runtime = PixmapRuntime::Off;
+                lp.pixmap.fill(tiny_skia::Color::TRANSPARENT);
             }
         }
 
@@ -493,33 +498,27 @@ impl RgbEngine {
             let want = format!("{id}|{}", params_key(params));
             let stale = live.get(dev.id()).map(|ld| ld.key != want).unwrap_or(true);
             if stale {
-                let (effect, plugin) = match direct::build_direct(id, params) {
-                    Some(fx) => (fx, None),
+                let runtime = match direct::build_direct(id, params) {
+                    Some(fx) => DirectRuntime::Native(fx),
                     None => match self.app_state.registry.build_direct_effect(
                         self.app_state.secret_store.as_ref(),
                         id,
                         params,
                     ) {
-                        Some(handle) => (direct::off_effect(), Some(handle)),
+                        Some(handle) => DirectRuntime::Plugin(handle),
                         None => {
                             log::warn!("Unknown direct effect id '{id}' on {}; leds off", dev.id());
-                            (direct::off_effect(), None)
+                            DirectRuntime::Off
                         }
                     },
                 };
-                live.insert(
-                    dev.id().to_string(),
-                    LiveDirect {
-                        key: want,
-                        effect,
-                        plugin,
-                    },
-                );
+                live.insert(dev.id().to_string(), LiveDirect { key: want, runtime });
             }
             let ld = live.get_mut(dev.id()).expect("built above");
             let Some(rgb) = dev.as_rgb() else { continue };
 
-            if let Some(handle) = ld.plugin.clone() {
+            if let DirectRuntime::Plugin(handle) = &ld.runtime {
+                let handle = handle.clone();
                 let sensor_value = match params.get("sensor") {
                     Some(halod_shared::types::EffectParamValue::Str(sensor_id))
                         if !sensor_id.is_empty() =>
@@ -561,7 +560,7 @@ impl RgbEngine {
                                 coords.len(),
                                 dev.id()
                             );
-                            ld.plugin = None;
+                            ld.runtime = DirectRuntime::Off;
                             continue;
                         }
                         Err(e) => {
@@ -569,7 +568,7 @@ impl RgbEngine {
                                 "plugin direct effect '{id}' failed on {}: {e:#}; disabling for this session",
                                 dev.id()
                             );
-                            ld.plugin = None;
+                            ld.runtime = DirectRuntime::Off;
                             continue;
                         }
                     };
@@ -585,7 +584,21 @@ impl RgbEngine {
                 continue;
             }
 
-            if let Some(sensor_id) = ld.effect.sensor_id().map(|s| s.to_string()) {
+            let DirectRuntime::Native(effect) = &mut ld.runtime else {
+                for rgb_zone in &rgb.descriptor().zones {
+                    let colors = vec![RgbColor { r: 0, g: 0, b: 0 }; rgb_zone.leds.len()];
+                    if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
+                        led_colors.extend(entries);
+                        pending
+                            .entry(dev.id().to_string())
+                            .or_insert_with(|| (Arc::clone(dev), Vec::new()))
+                            .1
+                            .push((rgb_zone.id.clone(), colors));
+                    }
+                }
+                continue;
+            };
+            if let Some(sensor_id) = effect.sensor_id().map(|s| s.to_string()) {
                 if sensors.is_none() {
                     sensors = Some(self.app_state.snapshot_sensors().await);
                 }
@@ -593,11 +606,11 @@ impl RgbEngine {
                     .as_ref()
                     .and_then(|m| m.get(&sensor_id))
                     .map(|s| s.value);
-                ld.effect.set_sensor_value(value);
+                effect.set_sensor_value(value);
             }
-            ld.effect.tick(t, dt);
+            effect.tick(t, dt);
             for rgb_zone in &rgb.descriptor().zones {
-                let colors = direct_zone_colors(ld.effect.as_ref(), rgb_zone, t);
+                let colors = direct_zone_colors(effect.as_ref(), rgb_zone, t);
                 if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
                     led_colors.extend(entries);
                     pending

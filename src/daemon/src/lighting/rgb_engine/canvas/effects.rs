@@ -5,26 +5,17 @@ use halod_shared::effect_designer::{self, DesignerParams};
 use halod_shared::types::{Animation, EffectParamDescriptor, EffectParamValue, ParamKind};
 
 use super::super::color::srgb_to_linear;
-use tiny_skia::{Color, Pixmap};
+use tiny_skia::Pixmap;
 
 pub trait FrameSource: Send {
     fn render(&mut self, pixmap: &mut Pixmap, t: f32, dt: f32);
-}
-
-trait Effect: Send {
-    fn descriptor() -> Animation
-    where
-        Self: Sized;
-    fn from_params(params: &HashMap<String, EffectParamValue>) -> Option<Box<dyn FrameSource>>
-    where
-        Self: Sized;
 }
 
 struct ScreenSamplerEffect {
     handle: Option<super::screen_capture::CaptureHandle>,
 }
 
-impl Effect for ScreenSamplerEffect {
+impl ScreenSamplerEffect {
     fn descriptor() -> Animation {
         let monitors = super::screen_capture::list_monitors();
         let options: Vec<String> = monitors.iter().map(|m| m.label.clone()).collect();
@@ -41,7 +32,7 @@ impl Effect for ScreenSamplerEffect {
         }
     }
 
-    fn from_params(params: &HashMap<String, EffectParamValue>) -> Option<Box<dyn FrameSource>> {
+    fn from_params(params: &HashMap<String, EffectParamValue>) -> Box<dyn FrameSource> {
         let monitors = super::screen_capture::list_monitors();
         let monitor_index = match params.get("monitor") {
             Some(EffectParamValue::Str(label)) => monitors
@@ -62,7 +53,7 @@ impl Effect for ScreenSamplerEffect {
                 None
             }
         };
-        Some(Box::new(Self { handle }))
+        Box::new(Self { handle })
     }
 }
 
@@ -128,16 +119,6 @@ fn blit_letterboxed(frame: &super::screen_capture::RawFrame, pixmap: &mut Pixmap
     }
 }
 
-/// Solid black — the fallback pixmap source for an unresolved effect id
-/// (an unknown id, or a disabled/unloaded plugin's id).
-struct OffPixmapEffect;
-
-impl FrameSource for OffPixmapEffect {
-    fn render(&mut self, pixmap: &mut Pixmap, _t: f32, _dt: f32) {
-        pixmap.fill(Color::BLACK);
-    }
-}
-
 /// Renders `DesignerParams` math across the canvas pixmap (not per-LED chain).
 struct DesignerPixmapEffect {
     params: DesignerParams,
@@ -198,7 +179,7 @@ impl FrameSource for DesignerPixmapEffect {
 
 pub fn build(id: &str, params: &HashMap<String, EffectParamValue>) -> Option<Box<dyn FrameSource>> {
     match id {
-        "screen_sampler" => ScreenSamplerEffect::from_params(params),
+        "screen_sampler" => Some(ScreenSamplerEffect::from_params(params)),
         effect_designer::DESIGNER_PIXMAP_EFFECT_ID => {
             Some(DesignerPixmapEffect::from_params(params))
         }
@@ -213,29 +194,11 @@ pub fn all_descriptors() -> Vec<Animation> {
     vec![ScreenSamplerEffect::descriptor()]
 }
 
-pub fn default_source() -> Box<dyn FrameSource> {
-    Box::new(OffPixmapEffect)
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::screen_capture::{FrameRotation, RawFrame};
     use super::*;
     use std::sync::Arc;
-
-    fn first_pixel_rgb(pixmap: &Pixmap) -> (u8, u8, u8) {
-        let d = pixmap.data();
-        (d[0], d[1], d[2])
-    }
-
-    #[test]
-    fn default_source_renders_black() {
-        let mut src = default_source();
-        let mut pixmap = Pixmap::new(4, 4).unwrap();
-        pixmap.fill(tiny_skia::Color::WHITE);
-        src.render(&mut pixmap, 0.0, 0.0);
-        assert_eq!(first_pixel_rgb(&pixmap), (0, 0, 0));
-    }
 
     #[test]
     fn build_dispatches_every_known_effect_id() {
@@ -296,15 +259,15 @@ mod tests {
     }
 
     #[test]
-    fn screen_sampler_from_params_no_params_returns_some() {
+    fn screen_sampler_from_params_no_params_builds() {
         let params = HashMap::new();
-        assert!(ScreenSamplerEffect::from_params(&params).is_some());
+        let _ = ScreenSamplerEffect::from_params(&params);
     }
 
     #[test]
     fn screen_sampler_render_with_no_handle_fills_black() {
         let params = HashMap::new();
-        let mut src = ScreenSamplerEffect::from_params(&params).unwrap();
+        let mut src = ScreenSamplerEffect::from_params(&params);
         let mut pixmap = Pixmap::new(4, 4).unwrap();
         pixmap.fill(tiny_skia::Color::WHITE);
         src.render(&mut pixmap, 0.0, 0.0);

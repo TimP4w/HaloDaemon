@@ -291,12 +291,20 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
         confirm,
         cancel || dismissed,
     ) {
-        crate::domain::actions::lcd::delete_lcd_image(ctx.cmd, &filename);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::DeleteLcdImage {
+                filename: filename.clone(),
+            },
+        );
         st.lcd.image_cache.remove(&filename);
         st.lcd.requested.remove(&filename);
         // The daemon doesn't push the library after a delete; re-list so
         // the removed tile disappears.
-        crate::domain::actions::lcd::list_lcd_images(ctx.cmd);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::ListLcdImages,
+        );
     }
 }
 
@@ -310,10 +318,18 @@ pub(super) fn select_none(
 ) {
     st.lcd.preview_pending = None;
     if active_template_id.is_some() {
-        crate::domain::actions::lcd::lcd_engine_deactivate(ctx.cmd, id);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::LcdEngineDeactivate {
+                device_id: id.to_string(),
+            },
+        );
         st.lcd.template_params.clear();
     }
-    crate::domain::actions::lcd::set_screen_default(ctx.cmd, id);
+    crate::runtime::ipc::send(
+        ctx.cmd,
+        halod_shared::commands::DaemonCommand::SetScreenDefault { id: id.to_string() },
+    );
 }
 
 /// Handle a click on an image tile: apply it directly to the device, first
@@ -332,11 +348,23 @@ pub(super) fn select_image(
         return;
     }
     if active_template_id.is_some() {
-        crate::domain::actions::lcd::lcd_engine_deactivate(ctx.cmd, id);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::LcdEngineDeactivate {
+                device_id: id.to_string(),
+            },
+        );
         st.lcd.template_params.clear();
     }
     st.lcd.preview_pending = Some(filename.to_string());
-    crate::domain::actions::lcd::set_screen_image_from_library(ctx.cmd, id, filename);
+    crate::runtime::ipc::send(
+        ctx.cmd,
+        halod_shared::commands::DaemonCommand::SetScreenImageFromLibrary {
+            id: id.to_string(),
+            filename: filename.to_string(),
+            request_id: None,
+        },
+    );
 }
 
 /// Label for the in-flight upload spinner. Falls back to a generic
@@ -395,10 +423,12 @@ pub(super) fn poll_picker(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &s
         Err(TryRecvError::Empty) => st.lcd.picker = Some((target, rx)),
         Ok(Some(path)) => match target {
             PickerTarget::Image => start_upload(ui, ctx, st, id, path),
-            PickerTarget::Video => crate::domain::actions::lcd::set_screen_video(
+            PickerTarget::Video => crate::runtime::ipc::send(
                 ctx.cmd,
-                id,
-                path.to_string_lossy().into_owned(),
+                halod_shared::commands::DaemonCommand::SetScreenVideo {
+                    id: id.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                },
             ),
         },
         Ok(None) | Err(TryRecvError::Disconnected) => {}
@@ -428,7 +458,14 @@ fn start_upload(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, path: 
             Ok(bytes) => {
                 use base64::Engine as _;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                crate::domain::actions::lcd::set_screen_image(&cmd, &device_id, b64);
+                crate::runtime::ipc::send(
+                    &cmd,
+                    halod_shared::commands::DaemonCommand::SetScreenImage {
+                        id: device_id,
+                        data_b64: b64,
+                        request_id: None,
+                    },
+                );
             }
             Err(e) => log::warn!("upload: reading {path:?} failed: {e}"),
         }

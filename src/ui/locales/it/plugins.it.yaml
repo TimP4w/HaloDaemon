@@ -37,9 +37,6 @@ plugins:
   update_available: Aggiornamento disponibile
   modified_on_disk: Disabilitato perché modificato su disco
   modified_on_disk_sub: I file di questo plugin sono cambiati dall'installazione, quindi è stato disabilitato per sicurezza. Riabilitalo per accettare la modifica.
-  # Banner modifiche in sospeso
-  pending_changes: Hai modifiche ai plugin non ancora applicate. Applicale per attivare o disattivare i dispositivi.
-  apply_changes: Applica modifiche
   # Pannello dettagli
   type_device: Driver
   type_effect: Effetti

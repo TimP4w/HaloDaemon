@@ -827,10 +827,12 @@ fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut L
         );
     });
     if persist {
-        crate::domain::actions::lighting::set_lighting_targets(
+        crate::runtime::ipc::send(
             cmd,
-            st.sel_ids.clone(),
-            st.zone_sel.clone(),
+            halod_shared::commands::DaemonCommand::SetLightingTargets {
+                device_ids: st.sel_ids.clone(),
+                zones: st.zone_sel.clone(),
+            },
         );
     }
     apply
@@ -987,14 +989,7 @@ fn device_card(
         Pos2::new(cb_rect.right() + 26.0, hdr.center().y),
         Vec2::new(30.0, 22.0),
     );
-    widgets::device_badge(
-        p,
-        badge,
-        dev.device_type,
-        theme::device_color(dev),
-        6.0,
-        1.4,
-    );
+    widgets::device_badge(p, badge, dev.device_type);
 
     // Device name (clipped to avoid overlapping zone summary).
     let name_x = badge.right() + 10.0;
@@ -1079,7 +1074,7 @@ fn apply_direct_params(
         if !st.sel_ids.contains(&dev.id) {
             continue;
         }
-        crate::domain::actions::lighting::send(
+        crate::runtime::ipc::send(
             cmd,
             DaemonCommand::RgbApply {
                 id: dev.id.clone(),
@@ -1094,7 +1089,7 @@ fn apply_direct_params(
 
 /// Stop driving a device that was just removed from the target selection
 fn release_device(cmd: &CommandTx, id: &str) {
-    crate::domain::actions::lighting::send(
+    crate::runtime::ipc::send(
         cmd,
         DaemonCommand::RgbApply {
             id: id.to_string(),
@@ -1161,7 +1156,7 @@ fn send_to_selected(state: &AppState, cmd: &CommandTx, st: &LightingUi) {
             }
         };
 
-        crate::domain::actions::lighting::send(
+        crate::runtime::ipc::send(
             cmd,
             DaemonCommand::RgbApply {
                 id: dev.id.clone(),
@@ -1301,7 +1296,10 @@ fn delete_confirm_modal(ui: &mut egui::Ui, st: &mut LightingUi, cmd: &CommandTx)
     if let Some(name) =
         widgets::resolve_delete_confirm(&mut st.confirm_delete, confirm, cancel || dismissed)
     {
-        crate::domain::actions::lighting::delete_custom_effect(cmd, &name);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::DeleteCustomEffect { name: name.clone() },
+        );
         if st.effect == format!("{CUSTOM_PREFIX}{name}") {
             st.effect = String::new();
         }

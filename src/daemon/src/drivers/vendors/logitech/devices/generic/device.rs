@@ -233,15 +233,9 @@ impl Device for LogitechDevice {
     }
 
     fn hardware_serial(&self) -> Option<String> {
-        // ID formats:
-        //   "logitech_<8CHAR_HEX>"        — canonical (serial known, same for wired + wireless)
-        //   "logitech_<PID>_<fallback>"   — no serial available
-        let parts: Vec<&str> = self.id.splitn(3, '_').collect();
-        let candidate = match parts.len() {
-            2 => parts[1], // "logitech_<serial>"
-            3 => parts[2], // "logitech_<pid>_<something>" (legacy fallback format) // TODO: remove fallback
-            _ => return None,
-        };
+        let candidate = self.id.strip_prefix("logitech_")?;
+        // Fallback ids contain a second underscore (`<pid>_<index>`) and do not
+        // represent a hardware serial.
         if candidate.len() == 8 && candidate.chars().all(|c| c.is_ascii_hexdigit()) {
             Some(candidate.to_uppercase())
         } else {

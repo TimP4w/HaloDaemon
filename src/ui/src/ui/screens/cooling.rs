@@ -211,11 +211,13 @@ fn cooler_card(
                         &preset_display_name(preset),
                         active.as_deref() == Some(&preset.id),
                     ) {
-                        crate::domain::actions::cooling::set_fan_curve_preset(
+                        crate::runtime::ipc::send(
                             cmd,
-                            &dev.id,
-                            &preset.id,
-                            sensor_id.clone(),
+                            halod_shared::commands::DaemonCommand::SetFanCurvePreset {
+                                fan_id: dev.id.clone(),
+                                preset: preset.id.clone(),
+                                sensor_id: sensor_id.clone(),
+                            },
                         );
                     }
                 }
@@ -250,13 +252,15 @@ fn cooler_card(
                     }
                 });
             if let Some(sel) = pick {
-                crate::domain::actions::cooling::set_fan_curve_points(
+                crate::runtime::ipc::send(
                     cmd,
-                    &dev.id,
-                    curve
-                        .map(|c| c.points.clone())
-                        .unwrap_or_else(default_curve),
-                    sel,
+                    halod_shared::commands::DaemonCommand::SetFanCurvePoints {
+                        fan_id: dev.id.clone(),
+                        points: curve
+                            .map(|c| c.points.clone())
+                            .unwrap_or_else(default_curve),
+                        sensor_id: sel,
+                    },
                 );
             }
         });

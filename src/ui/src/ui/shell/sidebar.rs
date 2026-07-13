@@ -376,7 +376,7 @@ fn device_row(ui: &mut egui::Ui, d: &halod_shared::types::WireDevice, active: bo
         ui.ctx().request_repaint();
     }
     let p = ui.painter();
-    crate::ui::components::device_badge(p, chip, d.device_type, theme::device_color(d), 6.0, 1.4);
+    crate::ui::components::device_badge(p, chip, d.device_type);
     // Name (truncated by clip).
     let name_clip = Rect::from_min_max(
         Pos2::new(chip.right() + 10.0, rect.top()),

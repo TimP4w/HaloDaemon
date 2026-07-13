@@ -191,12 +191,9 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
         let cfg = app.config.read().await;
         app.registry.load_all_with_repos(
             &crate::config::plugins_dir(),
-            &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugin_repos),
+            &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
         );
-        app.registry.set_disabled(&cfg.plugins_disabled);
-        app.registry.set_granted(&cfg.plugin_permissions);
-        app.registry.set_acknowledged(&cfg.plugin_acknowledged);
-        app.registry.set_config_values(&cfg.plugin_config);
+        app.registry.replace_policy(&cfg.plugins);
     }
     crate::registry::notify_ungranted_plugins(&app).await;
     crate::registry::discovery::discover_devices(Arc::clone(&app)).await;

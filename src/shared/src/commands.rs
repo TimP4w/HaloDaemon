@@ -36,12 +36,7 @@ pub enum OverrideTarget {
 }
 
 /// Typed LCD screen rotation values. Only 90° multiples are physically supported.
-///
-/// Serializes as `"r0"`..`"r270"`. Deserialization additionally accepts legacy
-/// integer degrees (`0`/`90`/`180`/`270`) so frames from an older daemon — which
-/// sent `LcdStatus::rotation` as a raw `u32` — still parse without a separate
-/// normalization pass on the UI side.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScreenRotation {
     #[default]
@@ -49,48 +44,6 @@ pub enum ScreenRotation {
     R90,
     R180,
     R270,
-}
-
-impl<'de> Deserialize<'de> for ScreenRotation {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct RotationVisitor;
-        impl serde::de::Visitor<'_> for RotationVisitor {
-            type Value = ScreenRotation;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a rotation string (\"r0\"..\"r270\") or integer degrees")
-            }
-            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<ScreenRotation, E> {
-                match s {
-                    "r0" => Ok(ScreenRotation::R0),
-                    "r90" => Ok(ScreenRotation::R90),
-                    "r180" => Ok(ScreenRotation::R180),
-                    "r270" => Ok(ScreenRotation::R270),
-                    other => Err(E::custom(format!("unknown rotation {other:?}"))),
-                }
-            }
-            fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<ScreenRotation, E> {
-                Ok(match n {
-                    90 => ScreenRotation::R90,
-                    180 => ScreenRotation::R180,
-                    270 => ScreenRotation::R270,
-                    _ => ScreenRotation::R0,
-                })
-            }
-            fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<ScreenRotation, E> {
-                self.visit_u64(n.max(0) as u64)
-            }
-            fn visit_f64<E: serde::de::Error>(self, n: f64) -> Result<ScreenRotation, E> {
-                if n.is_nan() {
-                    return Err(E::custom("NaN rotation"));
-                }
-                self.visit_u64(n.round().max(0.0) as u64)
-            }
-        }
-        deserializer.deserialize_any(RotationVisitor)
-    }
 }
 
 /// Typed IPC commands shared between the daemon and the UI.
@@ -163,8 +116,8 @@ pub enum DaemonCommand {
 
     // Misc / global
     Rediscover,
-    /// Enable or disable a device plugin by id. Staged — see
-    /// `ApplyPendingPluginChanges`.
+    /// Enable or disable a device plugin by id. Applies immediately and only
+    /// reconciles devices owned by that plugin.
     SetPluginEnabled {
         id: String,
         enabled: bool,
@@ -173,35 +126,33 @@ pub enum DaemonCommand {
     /// entry script) into the plugins directory. `source_dir` is a local
     /// filesystem path — the GUI's folder picker already runs on the same
     /// host as the daemon. The daemon validates the package before copying
-    /// it in. Staged.
+    /// it in. Applies immediately.
     ImportPlugin {
         source_dir: String,
     },
     /// Delete a user plugin script by id. Built-in plugins cannot be deleted
-    /// and the daemon rejects the request. Staged.
+    /// and the daemon rejects the request. Applies immediately.
     DeletePlugin {
         id: String,
     },
     /// Replace the set of permissions granted to a plugin. An empty `granted`
     /// revokes everything, leaving the plugin inert if it declares any
-    /// permission. Staged.
-    SetPluginPermissions {
+    /// permission. Permission and enabled state change atomically before the
+    /// plugin's devices are reconciled.
+    SetPluginTrust {
         id: String,
         granted: Vec<Permission>,
+        enabled: bool,
     },
     /// Replace a plugin's user-editable config values (see `ConfigFieldDef`).
     /// A `secure` field's key is included only when the user typed a new
     /// value; an absent secure key leaves the previously stored secret
     /// unchanged, so secrets are never round-tripped through the GUI or
-    /// cleared by accident. Staged.
+    /// cleared by accident. Applies immediately.
     SetPluginConfig {
         id: String,
         values: HashMap<String, String>,
     },
-    /// Apply every staged plugin change (`SetPluginEnabled`, `ImportPlugin`,
-    /// `DeletePlugin`, `SetPluginPermissions`, `SetPluginConfig`) by running
-    /// the actual close-everything-and-rediscover cycle once.
-    ApplyPendingPluginChanges,
     /// Register a git-repo plugin source, cloning it and pinning `locked_sha` to the checked-out commit.
     AddPluginRepo {
         url: String,
@@ -244,8 +195,7 @@ pub enum DaemonCommand {
         enabled: bool,
     },
     /// Replace a single integration's user-editable config values and
-    /// reconnect just that integration. Applies immediately — unlike
-    /// `SetPluginConfig`, this is not staged behind `ApplyPendingPluginChanges`.
+    /// reconnect just that integration. Applies immediately.
     SetIntegrationConfig {
         id: String,
         values: HashMap<String, String>,
@@ -307,7 +257,6 @@ pub enum DaemonCommand {
     },
 
     // Fan speed / curves
-    #[serde(alias = "set_pump_duty")]
     SetFanSpeed {
         id: String,
         duty: u8,
@@ -519,7 +468,6 @@ pub enum DaemonCommand {
     RenderLcdEditor {
         device_id: String,
         def: crate::lcd_custom::CustomTemplateDef,
-        #[serde(default)]
         known: HashMap<String, u64>,
     },
 
@@ -614,23 +562,11 @@ mod tests {
     }
 
     #[test]
-    fn screen_rotation_parses_string_and_legacy_integer() {
-        // Current daemon: string form.
+    fn screen_rotation_round_trips_as_string() {
         assert_eq!(
             serde_json::from_value::<ScreenRotation>(json!("r90")).unwrap(),
             ScreenRotation::R90
         );
-        // Legacy daemon: raw u32 degrees.
-        assert_eq!(
-            serde_json::from_value::<ScreenRotation>(json!(180)).unwrap(),
-            ScreenRotation::R180
-        );
-        // Unknown integer falls back to R0.
-        assert_eq!(
-            serde_json::from_value::<ScreenRotation>(json!(45)).unwrap(),
-            ScreenRotation::R0
-        );
-        // Round-trips through the string form.
         assert_eq!(
             serde_json::from_value::<ScreenRotation>(
                 serde_json::to_value(ScreenRotation::R180).unwrap()
@@ -956,20 +892,6 @@ mod tests {
     }
 
     #[test]
-    fn render_lcd_editor_deserializes_legacy_json_without_known() {
-        let legacy = json!({
-            "type": "render_lcd_editor",
-            "device_id": "dev1",
-            "def": crate::lcd_custom::CustomTemplateDef::default(),
-        });
-        let back: DaemonCommand = serde_json::from_value(legacy).unwrap();
-        match back {
-            DaemonCommand::RenderLcdEditor { known, .. } => assert!(known.is_empty()),
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
     fn save_and_delete_custom_effect_wire_format() {
         let mut params = HashMap::new();
         params.insert("speed".to_string(), EffectParamValue::Float(50.0));
@@ -1039,14 +961,6 @@ mod tests {
             v,
             json!({"type": "rename_profile", "old_name": "old", "new_name": "new"})
         );
-    }
-
-    #[test]
-    fn set_pump_duty_aliases_set_fan_speed() {
-        let cmd: DaemonCommand =
-            serde_json::from_value(json!({"type": "set_pump_duty", "id": "p", "duty": 60}))
-                .unwrap();
-        assert!(matches!(cmd, DaemonCommand::SetFanSpeed { duty: 60, .. }));
     }
 
     #[test]

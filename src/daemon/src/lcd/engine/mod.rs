@@ -10,7 +10,8 @@ use image::RgbaImage;
 use tokio::sync::{watch, Mutex};
 
 use crate::state::{AppState, EngineRunConfig};
-use templates::{LcdTemplate, TemplateCtx};
+use custom::CustomTemplate;
+use templates::TemplateCtx;
 
 /// An LCD preview frame already encoded to its framed `lcd_engine_frame` wire
 /// message. Built once per broadcast so fanning out to N clients is N cheap
@@ -53,7 +54,7 @@ fn should_trim_on_swap(had_existing_slot: bool) -> bool {
 struct DeviceSlot {
     template_id: String,
     params: HashMap<String, EffectParamValue>,
-    template: Box<dyn LcdTemplate>,
+    template: CustomTemplate,
     frame_id: u64,
     /// Consecutive `stream_frame` failures. Used to back off (and stop log
     /// flooding) when a device has gone away but hotplug hasn't removed it yet.
@@ -70,6 +71,10 @@ struct DeviceSlot {
 
 const FAIL_BACKOFF_THRESHOLD: u8 = 3;
 const BACKOFF_TICKS: u8 = 30;
+
+fn build_template(id: &str, params: &HashMap<String, EffectParamValue>) -> Option<CustomTemplate> {
+    (id == "custom").then(|| CustomTemplate::from_params(params, &crate::config::lcd_images_dir()))
+}
 
 /// Poll interval for evicting idle editor sessions; independent of the render tick.
 const EDITOR_SESSION_EVICT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
@@ -113,8 +118,7 @@ impl LcdEngine {
         template_id: &str,
         params: &HashMap<String, EffectParamValue>,
     ) {
-        if let Some(tmpl) = templates::build(template_id, params, &crate::config::lcd_images_dir())
-        {
+        if let Some(tmpl) = build_template(template_id, params) {
             let mut slots = self.device_slots.lock().await;
             let existed = slots.contains_key(device_id);
             let frame_id = slots.get(device_id).map(|s| s.frame_id).unwrap_or(0);
@@ -191,7 +195,7 @@ impl LcdEngine {
     }
 
     pub fn template_exists(id: &str) -> bool {
-        templates::build(id, &HashMap::new(), &crate::config::lcd_images_dir()).is_some()
+        id == "custom"
     }
 
     pub fn wire_state(
@@ -199,7 +203,7 @@ impl LcdEngine {
         device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
     ) -> WireLcdEngineState {
         WireLcdEngineState {
-            available_templates: templates::all_descriptors(),
+            available_templates: vec![CustomTemplate::descriptor()],
             device_templates,
             device_template_params,
         }
@@ -284,9 +288,7 @@ impl LcdEngine {
                 None => true,
             };
             if needs_insert {
-                if let Some(tmpl) =
-                    templates::build(template_id, params, &crate::config::lcd_images_dir())
-                {
+                if let Some(tmpl) = build_template(template_id, params) {
                     let existed = slots.contains_key(device_id.as_str());
                     let frame_id = slots
                         .get(device_id.as_str())

@@ -158,7 +158,7 @@ pub(super) fn zones_assign_modal(
                                 let (on, _) = modal_zone_state(placed, &inst_id, is_default);
                                 // Select all assigns the missing zones; Clear removes them all.
                                 if on == all_on {
-                                    crate::domain::actions::canvas::send(
+                                    crate::runtime::ipc::send(
                                         cmd,
                                         assign_zone_cmd(&dev.id, &z.id, assign, on, placed),
                                     );
@@ -184,7 +184,7 @@ pub(super) fn zones_assign_modal(
                             z.name.clone()
                         };
                         if widgets::pill_styled(ui, &label, on, color, theme::INNER_BG) {
-                            crate::domain::actions::canvas::send(
+                            crate::runtime::ipc::send(
                                 cmd,
                                 assign_zone_cmd(&dev.id, &z.id, assign, on, placed),
                             );
@@ -294,7 +294,7 @@ pub(super) fn new_instance_modal(
                             false,
                         ) {
                             let id = new_instance_id(effects);
-                            crate::domain::actions::canvas::send(
+                            crate::runtime::ipc::send(
                                 cmd,
                                 upsert_instance_cmd(
                                     id,

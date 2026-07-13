@@ -165,11 +165,13 @@ fn remove_confirm_modal(
     if let Some(target) =
         widgets::resolve_delete_confirm(confirm_remove, confirm, cancel || dismissed)
     {
-        crate::domain::actions::lighting::rgb_chain_remove_link(
+        crate::runtime::ipc::send(
             cmd,
-            &target.parent_id,
-            &target.channel_id,
-            &target.child_id,
+            halod_shared::commands::DaemonCommand::RgbChainRemoveLink {
+                id: target.parent_id,
+                channel_id: target.channel_id,
+                child_device_id: target.child_id,
+            },
         );
     }
 }
@@ -210,7 +212,13 @@ fn card_menu(
         });
         let trimmed = r.buf.trim().to_string();
         if save && !trimmed.is_empty() {
-            crate::domain::actions::devices::rename_device(cmd, &d.id, &trimmed);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::SetDeviceName {
+                    device_id: d.id.clone(),
+                    name: trimmed,
+                },
+            );
             *rename = None;
             ui.close();
         } else if cancel {
@@ -269,7 +277,13 @@ fn card_menu(
 }
 
 fn set_vis(ui: &mut egui::Ui, cmd: &CommandTx, id: &str, state: VisibilityState) {
-    crate::domain::actions::devices::set_device_visibility(cmd, id, state);
+    crate::runtime::ipc::send(
+        cmd,
+        halod_shared::commands::DaemonCommand::SetDeviceVisibility {
+            device_id: id.to_string(),
+            state,
+        },
+    );
     ui.close();
 }
 
@@ -572,7 +586,13 @@ fn sensor_card(
             (t!("home.hide_sensor"), VisibilityState::Hidden)
         };
         if widgets::context_menu_item(ui, &label, theme::TEXT).clicked() {
-            crate::domain::actions::devices::set_sensor_visibility(cmd, &s.id, state);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::SetSensorVisibility {
+                    sensor_id: s.id.clone(),
+                    state,
+                },
+            );
             ui.close();
         }
     });
@@ -738,7 +758,7 @@ fn draw_card_glow(ui: &egui::Ui, rect: Rect, d: &WireDevice, color: Color32, t: 
             time,
         );
     }
-    widgets::device_badge(p, chip, d.device_type, color, 8.0, 1.6);
+    widgets::device_badge(p, chip, d.device_type);
 
     if animating {
         ui.ctx().request_repaint();
@@ -746,6 +766,7 @@ fn draw_card_glow(ui: &egui::Ui, rect: Rect, d: &WireDevice, color: Color32, t: 
 }
 
 fn device_card(ui: &egui::Ui, rect: Rect, d: &WireDevice, hovered: bool) {
+    let color = theme::device_color(d);
     // Smoothly animate hover state in [0,1] for halo growth + lift.
     let t = ui
         .ctx()
@@ -753,7 +774,6 @@ fn device_card(ui: &egui::Ui, rect: Rect, d: &WireDevice, hovered: bool) {
 
     // Hover lifts the card by up to 2px (design: translateY(-2px)).
     let rect = rect.translate(Vec2::new(0.0, -2.0 * t));
-    let color = theme::device_color(d);
     // Offline, hidden and disabled devices are greyed out (via a scrim below).
     let dimmed = !d.connected || d.active_state != VisibilityState::Visible;
 
@@ -934,7 +954,6 @@ fn list(
 
 fn list_row(ui: &egui::Ui, rect: Rect, d: &WireDevice, divider: bool, hovered: bool) {
     let p = ui.painter();
-    let color = theme::device_color(d);
     if hovered {
         p.rect_filled(rect, 0.0, a(Color32::WHITE, 0.025));
     }
@@ -951,7 +970,7 @@ fn list_row(ui: &egui::Ui, rect: Rect, d: &WireDevice, divider: bool, hovered: b
         Pos2::new(rect.left() + 18.0, rect.center().y - 16.0),
         Vec2::new(46.0, 32.0),
     );
-    widgets::device_badge(p, chip, d.device_type, color, 8.0, 1.6);
+    widgets::device_badge(p, chip, d.device_type);
 
     p.text(
         Pos2::new(chip.right() + 14.0, rect.center().y - 8.0),

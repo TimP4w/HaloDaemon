@@ -53,11 +53,9 @@ pub async fn serialize_state(
         process_icons,
         plugins: PluginsState {
             plugins: app.registry.list(app.secret_store.as_ref()),
-            rediscover_pending: app
-                .plugins_rediscover_pending
-                .load(std::sync::atomic::Ordering::Relaxed),
             repos: cfg
-                .plugin_repos
+                .plugins
+                .repos
                 .iter()
                 .map(|r| PluginRepoInfo {
                     url: r.url.clone(),

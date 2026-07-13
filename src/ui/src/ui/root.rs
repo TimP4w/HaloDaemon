@@ -112,9 +112,10 @@ impl App {
             self.depcheck_grace
                 .advance(connected, time, DEPCHECK_GRACE_SECS);
         match grace_action {
-            crate::ui::screens::depcheck::GraceAction::Recheck => {
-                domain::actions::system::get_debug_info(&self.cmd)
-            }
+            crate::ui::screens::depcheck::GraceAction::Recheck => crate::runtime::ipc::send(
+                &self.cmd,
+                halod_shared::commands::DaemonCommand::GetDebugInfo,
+            ),
             crate::ui::screens::depcheck::GraceAction::RepaintAfter(secs) => {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(secs));
             }
@@ -278,12 +279,18 @@ impl App {
         ) {
             use crate::ui::screens::download_consent::Decision;
             match crate::ui::screens::download_consent::prompt(ctx, &self.cmd) {
-                Decision::Allow => {
-                    domain::actions::system::set_plugin_download_consent(&self.cmd, true)
-                }
-                Decision::Deny => {
-                    domain::actions::system::set_plugin_download_consent(&self.cmd, false)
-                }
+                Decision::Allow => crate::runtime::ipc::send(
+                    &self.cmd,
+                    halod_shared::commands::DaemonCommand::SetPluginDownloadConsent {
+                        allowed: true,
+                    },
+                ),
+                Decision::Deny => crate::runtime::ipc::send(
+                    &self.cmd,
+                    halod_shared::commands::DaemonCommand::SetPluginDownloadConsent {
+                        allowed: false,
+                    },
+                ),
                 Decision::Defer => self.consent_prompt_deferred = true,
                 Decision::Pending => {}
             }

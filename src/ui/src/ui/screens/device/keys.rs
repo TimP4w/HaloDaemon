@@ -126,7 +126,12 @@ fn button_selector_card(
             })
             .inner;
         if reset.clicked() {
-            crate::domain::actions::keys::reset_all_button_mappings(ctx.cmd, id);
+            crate::runtime::ipc::send(
+                ctx.cmd,
+                halod_shared::commands::DaemonCommand::ResetAllButtonMappings {
+                    id: id.to_string(),
+                },
+            );
         }
 
         // Header hairline
@@ -445,7 +450,7 @@ fn action_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, 
                 let (base, shifted) = layer.pair(st, new_action.clone());
                 layer.set(st, new_action);
                 st.last_edit = ctx.time;
-                crate::domain::actions::keys::send(
+                crate::runtime::ipc::send(
                     ctx.cmd,
                     DaemonCommand::SetButtonMapping {
                         id: id.to_string(),
@@ -544,7 +549,7 @@ fn direction_pills(
                 let a = make_action(dir);
                 layer.set(st, a.clone());
                 st.last_edit = ctx.time;
-                crate::domain::actions::keys::send(ctx.cmd, make_cmd(a));
+                crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
             }
         }
     });
@@ -595,7 +600,7 @@ fn params_editor(
                         let a = ButtonAction::MouseButton { btn: mbtn };
                         layer.set(st, a.clone());
                         st.last_edit = ctx.time;
-                        crate::domain::actions::keys::send(ctx.cmd, make_cmd(a));
+                        crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
                     }
                 }
             });
@@ -654,7 +659,7 @@ fn params_editor(
                         let a = ButtonAction::MomentaryDpi { dpi: preset };
                         layer.set(st, a.clone());
                         st.last_edit = ctx.time;
-                        crate::domain::actions::keys::send(ctx.cmd, make_cmd(a));
+                        crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
                     }
                 }
             });
@@ -675,7 +680,7 @@ fn params_editor(
                         let a = ButtonAction::MediaKey { key: mkey };
                         layer.set(st, a.clone());
                         st.last_edit = ctx.time;
-                        crate::domain::actions::keys::send(ctx.cmd, make_cmd(a));
+                        crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
                     }
                 }
             });
@@ -697,7 +702,7 @@ fn params_editor(
                         };
                         layer.set(st, a.clone());
                         st.last_edit = ctx.time;
-                        crate::domain::actions::keys::send(ctx.cmd, make_cmd(a));
+                        crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
                     }
                 }
             });

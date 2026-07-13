@@ -53,7 +53,7 @@ pub fn show(
     // Lazily pull a DebugInfo snapshot the first time Settings is shown while
     // connected; it feeds both the dependency panel and the diagnostics modal.
     if connected && !st.deps_requested {
-        crate::domain::actions::system::get_debug_info(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
         st.deps_requested = true;
     }
 
@@ -330,11 +330,13 @@ fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     );
     let on = state.gui.close_to_tray;
     if row_toggle(ui, rect, on, "close_to_tray") {
-        crate::domain::actions::system::set_ui_config(
+        crate::runtime::ipc::send(
             cmd,
-            !on,
-            state.gui.suppress_dependency_warning,
-            state.gui.hide_window_controls,
+            halod_shared::commands::DaemonCommand::SetUiConfig {
+                close_to_tray: !on,
+                suppress_dependency_warning: state.gui.suppress_dependency_warning,
+                hide_window_controls: state.gui.hide_window_controls,
+            },
         );
     }
     bottom_border(ui, rect);
@@ -350,7 +352,10 @@ fn plugin_downloads_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     );
     let on = state.gui.plugin_downloads == halod_shared::types::PluginDownloadConsent::Allowed;
     if row_toggle(ui, rect, on, "plugin_downloads") {
-        crate::domain::actions::system::set_plugin_download_consent(cmd, !on);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::SetPluginDownloadConsent { allowed: !on },
+        );
     }
     bottom_border(ui, rect);
 }
@@ -365,11 +370,13 @@ fn window_controls_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     );
     let on = !state.gui.hide_window_controls;
     if row_toggle(ui, rect, on, "window_controls") {
-        crate::domain::actions::system::set_ui_config(
+        crate::runtime::ipc::send(
             cmd,
-            state.gui.close_to_tray,
-            state.gui.suppress_dependency_warning,
-            on,
+            halod_shared::commands::DaemonCommand::SetUiConfig {
+                close_to_tray: state.gui.close_to_tray,
+                suppress_dependency_warning: state.gui.suppress_dependency_warning,
+                hide_window_controls: on,
+            },
         );
     }
     bottom_border(ui, rect);
@@ -385,11 +392,13 @@ fn dependency_warning_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) 
     );
     let warn_on = !state.gui.suppress_dependency_warning;
     if row_toggle(ui, rect, warn_on, "dependency_warning") {
-        crate::domain::actions::system::set_ui_config(
+        crate::runtime::ipc::send(
             cmd,
-            state.gui.close_to_tray,
-            warn_on,
-            state.gui.hide_window_controls,
+            halod_shared::commands::DaemonCommand::SetUiConfig {
+                close_to_tray: state.gui.close_to_tray,
+                suppress_dependency_warning: warn_on,
+                hide_window_controls: state.gui.hide_window_controls,
+            },
         );
     }
     bottom_border(ui, rect);
@@ -420,7 +429,7 @@ fn replay_tutorials_row(ui: &mut egui::Ui, cmd: &CommandTx) {
     )
     .clicked()
     {
-        crate::domain::actions::system::reset_tours_seen(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::ResetToursSeen);
         crate::domain::tour::request_reset(ui.ctx());
     }
     bottom_border(ui, rect);
@@ -467,7 +476,13 @@ fn lcd_engine_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         let clamped = parse_fps(&buf, lcd_fps);
         buf = clamped.to_string();
         if clamped != lcd_fps {
-            crate::domain::actions::system::set_engine_fps(cmd, EngineKind::Lcd, clamped as u64);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::set_engine_fps(
+                    EngineKind::Lcd,
+                    clamped as u64,
+                ),
+            );
         }
     }
     ui.data_mut(|d| d.insert_temp(fps_id, buf));
@@ -475,7 +490,13 @@ fn lcd_engine_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     let toggle_x = rect.right() - 36.0;
     let toggle_y = rect.top() + 17.0;
     if row_toggle_at(ui, toggle_x, toggle_y, lcd_enabled, "lcd") {
-        crate::domain::actions::system::set_engine_enabled(cmd, EngineKind::Lcd, !lcd_enabled);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::set_engine_enabled(
+                EngineKind::Lcd,
+                !lcd_enabled,
+            ),
+        );
     }
 
     bottom_border(ui, rect);
@@ -543,7 +564,7 @@ fn rediscover_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     )
     .clicked()
     {
-        crate::domain::actions::system::rediscover(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::Rediscover);
     }
 
     bottom_border(ui, rect);
@@ -576,7 +597,7 @@ fn healthcheck_section(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugI
     )
     .clicked()
     {
-        crate::domain::actions::system::get_debug_info(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
     }
     ui.add_space(4.0);
 
@@ -732,7 +753,12 @@ fn language_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         });
     if let Some(code) = picked {
         if code != current {
-            crate::domain::actions::system::set_language(cmd, code);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::SetLanguage {
+                    lang: code.to_string(),
+                },
+            );
         }
     }
 
@@ -776,7 +802,12 @@ fn log_level_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         });
     if let Some(level) = picked {
         if level != current {
-            crate::domain::actions::system::set_log_level(cmd, level);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::SetLogLevel {
+                    level: level.to_string(),
+                },
+            );
         }
     }
 
@@ -962,7 +993,7 @@ fn diagnostics_row(ui: &mut egui::Ui, cmd: &CommandTx, st: &mut SettingsUi) {
     )
     .clicked()
     {
-        crate::domain::actions::system::get_debug_info(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
         st.modal = Some(Modal::Diagnostics);
     }
     bottom_border(ui, rect);

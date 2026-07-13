@@ -652,7 +652,10 @@ pub fn title_dropdown(
     // Apply deferred actions.
     if let Some(name) = switch_to {
         st.switching_to = Some(name.clone());
-        crate::domain::actions::profiles::switch_profile(cmd, &name);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::SwitchProfile { name },
+        );
     }
     if let Some(name) = remove {
         // Defer the actual delete to a confirm dialog; close the dropdown so the
@@ -758,7 +761,12 @@ pub fn add_modal(ctx: &egui::Context, state: &AppState, cmd: &CommandTx, st: &mu
     );
 
     if (create || enter_submit) && name_available(state, st.add_name_buf.trim()) {
-        crate::domain::actions::profiles::add_profile(cmd, st.add_name_buf.trim());
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::AddProfile {
+                name: st.add_name_buf.trim().to_string(),
+            },
+        );
         st.add_modal_open = false;
         st.add_name_buf.clear();
     }
@@ -822,7 +830,10 @@ pub fn delete_confirm_modal(ctx: &egui::Context, cmd: &CommandTx, st: &mut Profi
 
     if let Some(name) = resolve_delete_confirm(&mut st.confirm_delete, confirm, cancel || dismissed)
     {
-        crate::domain::actions::profiles::remove_profile(cmd, &name);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::RemoveProfile { name },
+        );
     }
 }
 
@@ -895,8 +906,12 @@ pub fn show(
                             if te_resp.lost_focus() {
                                 let new_name = st.settings_name_buf.trim().to_string();
                                 if name_available(state, &new_name) && new_name != profile {
-                                    crate::domain::actions::profiles::rename_profile(
-                                        cmd, profile, &new_name,
+                                    crate::runtime::ipc::send(
+                                        cmd,
+                                        halod_shared::commands::DaemonCommand::RenameProfile {
+                                            old_name: profile.to_string(),
+                                            new_name: new_name.clone(),
+                                        },
                                     );
                                     // Optimistic nav; main.rs redirects to Home if the name
                                     // disappears.
@@ -945,7 +960,12 @@ pub fn show(
                             .clicked()
                             {
                                 st.switching_to = Some(profile.to_string());
-                                crate::domain::actions::profiles::switch_profile(cmd, profile);
+                                crate::runtime::ipc::send(
+                                    cmd,
+                                    halod_shared::commands::DaemonCommand::SwitchProfile {
+                                        name: profile.to_string(),
+                                    },
+                                );
                             }
                         } else {
                             widgets::button_disabled(
@@ -1106,14 +1126,19 @@ fn auto_activate_card(
         {
             let new_names = names_after_removing(&rule.process_names, &proc_name);
             if new_names.is_empty() {
-                crate::domain::actions::profiles::remove_app_rule(cmd, rule_idx);
-            } else {
-                crate::domain::actions::profiles::update_app_rule(
+                crate::runtime::ipc::send(
                     cmd,
-                    rule_idx,
-                    new_names,
-                    profile,
-                    rule.enabled,
+                    halod_shared::commands::DaemonCommand::RemoveAppRule { index: rule_idx },
+                );
+            } else {
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::UpdateAppRule {
+                        index: rule_idx,
+                        process_names: new_names,
+                        profile: profile.to_string(),
+                        enabled: rule.enabled,
+                    },
                 );
             }
         }
@@ -1124,7 +1149,7 @@ fn auto_activate_card(
         *pick_selected = all_proc_names;
         pick_filter.clear();
         *picking_for = Some(profile.to_string());
-        crate::domain::actions::profiles::list_running_apps(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::ListRunningApps);
     }
 }
 
@@ -1305,7 +1330,10 @@ fn overrides_section(
             }
 
             if let Some(target) = remove_target {
-                crate::domain::actions::profiles::remove_profile_override(cmd, target);
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::RemoveProfileOverride { target },
+                );
             }
         },
     );
@@ -1521,19 +1549,23 @@ pub fn process_picker(
                 .find(|(_, r)| r.profile == picking_profile);
             if let Some((idx, rule)) = existing_rule {
                 let merged = merge_process_names(&rule.process_names, &selected);
-                crate::domain::actions::profiles::update_app_rule(
+                crate::runtime::ipc::send(
                     cmd,
-                    idx,
-                    merged,
-                    &picking_profile,
-                    rule.enabled,
+                    halod_shared::commands::DaemonCommand::UpdateAppRule {
+                        index: idx,
+                        process_names: merged,
+                        profile: picking_profile.clone(),
+                        enabled: rule.enabled,
+                    },
                 );
             } else {
-                crate::domain::actions::profiles::add_app_rule(
+                crate::runtime::ipc::send(
                     cmd,
-                    selected,
-                    &picking_profile,
-                    true,
+                    halod_shared::commands::DaemonCommand::AddAppRule {
+                        process_names: selected,
+                        profile: picking_profile.clone(),
+                        enabled: true,
+                    },
                 );
             }
         }

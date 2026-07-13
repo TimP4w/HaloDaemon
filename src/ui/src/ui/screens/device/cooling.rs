@@ -124,11 +124,13 @@ fn top_row(
             if let Some(sel) = pick {
                 st.cooling.curve_sensor = sel;
                 st.last_edit = ctx.time;
-                crate::domain::actions::cooling::set_fan_curve_points(
+                crate::runtime::ipc::send(
                     ctx.cmd,
-                    &ctx.dev.id,
-                    st.cooling.curve.clone(),
-                    st.cooling.curve_sensor.clone(),
+                    halod_shared::commands::DaemonCommand::SetFanCurvePoints {
+                        fan_id: ctx.dev.id.clone(),
+                        points: st.cooling.curve.clone(),
+                        sensor_id: st.cooling.curve_sensor.clone(),
+                    },
                 );
             }
             ui.add_space(12.0);

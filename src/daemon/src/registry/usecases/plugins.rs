@@ -12,9 +12,7 @@ use serde_json::json;
 use crate::ipc::ClientHandle;
 use crate::state::AppState;
 
-/// Enable or disable a plugin and persist the choice. Staged — see the module
-/// docs; call [`apply_pending_changes`] to hand the device to/from its
-/// native driver.
+/// Enable or disable a plugin, persist the choice, and reconcile its devices.
 pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
     if enabled {
         // Re-enabling a plugin accepts its current on-disk content as the new
@@ -26,14 +24,13 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
     }
     {
         let mut cfg = app.config.write().await;
-        cfg.plugins_disabled.retain(|x| x != &id);
+        cfg.plugins.disabled.retain(|x| x != &id);
         if !enabled {
-            cfg.plugins_disabled.push(id.clone());
+            cfg.plugins.disabled.push(id.clone());
         }
-        app.registry.set_disabled(&cfg.plugins_disabled);
     }
     app.request_config_save();
-    mark_plugin_dirty_and_broadcast(&app, id).await;
+    reconcile_plugins(&app, &[id]).await;
     Ok(())
 }
 
@@ -58,11 +55,12 @@ async fn accept_on_disk_content(app: &Arc<AppState>, id: &str) {
 /// Replace the set of permissions granted to a plugin and persist the choice.
 /// Also records the plugin's current script hash as acknowledged: granting is
 /// an explicit consent to run *this* script, so the plugin activates and stays
-/// active only until its content changes (trust-on-first-use). Staged — see the
-/// module docs.
-pub async fn set_permissions(
+/// active only until its content changes (trust-on-first-use). The grant and
+/// enabled state are committed together before devices are reconciled.
+pub async fn set_trust(
     id: String,
     granted: Vec<Permission>,
+    enabled: bool,
     app: Arc<AppState>,
 ) -> Result<()> {
     let hash = app.registry.content_hash_for(&id);
@@ -70,34 +68,35 @@ pub async fn set_permissions(
         let mut cfg = app.config.write().await;
         if granted.is_empty() {
             // Revoke: drop the grant and its content pin, back to pristine.
-            cfg.plugin_permissions.remove(&id);
-            cfg.plugin_acknowledged.remove(&id);
+            cfg.plugins.granted.remove(&id);
+            cfg.plugins.acknowledged.remove(&id);
         } else {
-            cfg.plugin_permissions.insert(id.clone(), granted);
+            cfg.plugins.granted.insert(id.clone(), granted);
             // Pin the grant to the exact script the user is consenting to.
             match hash {
                 Some(h) => {
-                    cfg.plugin_acknowledged.insert(id.clone(), h);
+                    cfg.plugins.acknowledged.insert(id.clone(), h);
                 }
                 None => {
-                    cfg.plugin_acknowledged.remove(&id);
+                    cfg.plugins.acknowledged.remove(&id);
                 }
             }
         }
-        app.registry.set_granted(&cfg.plugin_permissions);
-        app.registry.set_acknowledged(&cfg.plugin_acknowledged);
+        cfg.plugins.disabled.retain(|x| x != &id);
+        if !enabled {
+            cfg.plugins.disabled.push(id.clone());
+        }
     }
     app.request_config_save();
-    mark_plugin_dirty_and_broadcast(&app, id).await;
+    reconcile_plugins(&app, &[id]).await;
     Ok(())
 }
 
-/// Split `values` into the plaintext `cfg.plugin_config` map and the secret
+/// Split `values` into the plaintext `cfg.plugins.config` map and the secret
 /// store (for manifest-declared `secure` fields), then re-publish the
 /// plaintext config to the plugin registry and persist. Shared by
-/// [`set_config`] (staged, applies via [`apply_pending_changes`]) and
-/// [`super::integrations::set_integration_config`] (applies immediately,
-/// scoped to one integration). An absent (or empty) secure value leaves the
+/// [`set_config`] and [`super::integrations::set_integration_config`]. An
+/// absent (or empty) secure value leaves the
 /// previously stored secret untouched, so the GUI never has to round-trip a
 /// secret to keep it.
 pub(crate) async fn persist_config_values(
@@ -111,7 +110,7 @@ pub(crate) async fn persist_config_values(
         .into_iter()
         .collect();
     let mut cfg = app.config.write().await;
-    let plaintext = cfg.plugin_config.entry(id.to_owned()).or_default();
+    let plaintext = cfg.plugins.config.entry(id.to_owned()).or_default();
     for (key, value) in values {
         if secure_keys.contains(key) {
             if !value.is_empty() {
@@ -124,9 +123,9 @@ pub(crate) async fn persist_config_values(
         }
     }
     if plaintext.is_empty() {
-        cfg.plugin_config.remove(id);
+        cfg.plugins.config.remove(id);
     }
-    app.registry.set_config_values(&cfg.plugin_config);
+    app.registry.replace_policy(&cfg.plugins);
     Ok(())
 }
 
@@ -148,8 +147,7 @@ pub async fn get_asset(
     Ok(())
 }
 
-/// Replace a plugin's user-editable config values and persist the choice.
-/// Staged — see the module docs.
+/// Replace a plugin's user-editable config values and reconcile its devices.
 pub async fn set_config(
     id: String,
     values: std::collections::HashMap<String, String>,
@@ -157,7 +155,7 @@ pub async fn set_config(
 ) -> Result<()> {
     persist_config_values(&id, &values, &app).await?;
     app.request_config_save();
-    mark_plugin_dirty_and_broadcast(&app, id).await;
+    reconcile_plugins(&app, &[id]).await;
     Ok(())
 }
 
@@ -277,8 +275,7 @@ pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
     // otherwise fire one for this exact plugin.
     app.registry.suppress_permission_notice(&manifest.plugin_id);
 
-    reload_registry(&app).await;
-    mark_plugin_dirty_and_broadcast(&app, manifest.plugin_id).await;
+    reconcile_plugins(&app, &[manifest.plugin_id]).await;
     Ok(())
 }
 
@@ -309,8 +306,7 @@ pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
         app.request_config_save();
     }
 
-    reload_registry(&app).await;
-    mark_plugin_dirty_and_broadcast(&app, id).await;
+    reconcile_plugins(&app, &[id]).await;
     Ok(())
 }
 
@@ -327,45 +323,22 @@ pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     }
 
     let mut cfg = app.config.write().await;
-    let before = cfg.plugins_disabled.len();
-    cfg.plugins_disabled.retain(|x| x != id);
-    let disabled_changed = cfg.plugins_disabled.len() != before;
-    let config_changed = cfg.plugin_config.remove(id).is_some();
-    let perms_changed = cfg.plugin_permissions.remove(id).is_some();
-    let ack_changed = cfg.plugin_acknowledged.remove(id).is_some();
-    let integ_before = cfg.integrations_disabled.len();
-    cfg.integrations_disabled.retain(|x| x != id);
-    let integ_changed = cfg.integrations_disabled.len() != integ_before;
+    let before = cfg.plugins.disabled.len();
+    cfg.plugins.disabled.retain(|x| x != id);
+    let disabled_changed = cfg.plugins.disabled.len() != before;
+    let config_changed = cfg.plugins.config.remove(id).is_some();
+    let perms_changed = cfg.plugins.granted.remove(id).is_some();
+    let ack_changed = cfg.plugins.acknowledged.remove(id).is_some();
+    let integ_before = cfg.plugins.integrations_disabled.len();
+    cfg.plugins.integrations_disabled.retain(|x| x != id);
+    let integ_changed = cfg.plugins.integrations_disabled.len() != integ_before;
 
-    if disabled_changed {
-        app.registry.set_disabled(&cfg.plugins_disabled);
+    let changed =
+        disabled_changed || config_changed || perms_changed || ack_changed || integ_changed;
+    if changed {
+        app.registry.replace_policy(&cfg.plugins);
     }
-    if config_changed {
-        app.registry.set_config_values(&cfg.plugin_config);
-    }
-    if perms_changed {
-        app.registry.set_granted(&cfg.plugin_permissions);
-    }
-    if ack_changed {
-        app.registry.set_acknowledged(&cfg.plugin_acknowledged);
-    }
-    if integ_changed {
-        app.registry
-            .set_integrations_disabled(&cfg.integrations_disabled);
-    }
-    disabled_changed || config_changed || perms_changed || ack_changed || integ_changed
-}
-
-pub async fn apply_pending_changes(app: Arc<AppState>) -> Result<()> {
-    let scope = app.take_pending_rediscover().await;
-    if scope.full || scope.plugins.is_empty() {
-        // Full flush (legacy path, also the safe default when empty).
-        rediscover_devices(app).await;
-    } else {
-        let plugins: Vec<String> = scope.plugins.into_iter().collect();
-        scoped_rediscover(&app, &plugins).await;
-    }
-    Ok(())
+    changed
 }
 
 /// Re-read the plugins directory and every configured git-repo source, and re-apply the disabled/granted sets. Shared with `repos.rs`.
@@ -373,64 +346,22 @@ pub(crate) async fn reload_registry(app: &Arc<AppState>) {
     let cfg = app.config.read().await;
     app.registry.load_all_with_repos(
         &crate::config::plugins_dir(),
-        &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugin_repos),
+        &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
     );
-    app.registry.set_disabled(&cfg.plugins_disabled);
-    app.registry.set_granted(&cfg.plugin_permissions);
-    app.registry.set_acknowledged(&cfg.plugin_acknowledged);
-    app.registry.set_config_values(&cfg.plugin_config);
-    app.registry
-        .set_integrations_disabled(&cfg.integrations_disabled);
-}
-
-/// Flag a full rediscovery as needed and push the updated plugin listing
-/// so the GUI shows it immediately. Shared with `repos.rs` — repo
-/// add/remove/update/upgrade touches an unknown set of plugins, so it
-/// must fall back to the full flush.
-pub(crate) async fn mark_pending_and_broadcast(app: &Arc<AppState>) {
-    app.mark_full_dirty().await;
-    crate::ipc::broadcast_state(app).await;
+    app.registry.replace_policy(&cfg.plugins);
 }
 
 /// Apply a repo-driven registry change immediately.
 ///
-/// Repository installs and updates are already explicit user actions. Leaving
-/// them in the generic staged-edit queue made the checkout look successful
-/// while the running daemon continued to use the old plugin, and exposed the
-/// obsolete "Apply changes" banner for an operation that should be complete.
+/// Repository installs and updates are explicit user actions, so reconcile
+/// their affected devices before returning success.
 pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<String>) -> Result<()> {
     if plugin_ids.is_empty() {
         crate::ipc::broadcast_state(&app).await;
         return Ok(());
     }
-    for id in plugin_ids {
-        app.mark_plugin_dirty(id).await;
-    }
-    apply_pending_changes(app).await
-}
-
-/// Flag a single plugin as needing scoped rediscovery and broadcast.
-async fn mark_plugin_dirty_and_broadcast(app: &Arc<AppState>, plugin_id: String) {
-    app.mark_plugin_dirty(plugin_id).await;
-    crate::ipc::broadcast_state(app).await;
-}
-
-/// Clean-slate re-discovery: close every device and re-run the startup path,
-/// then broadcast.
-async fn rediscover_devices(app: Arc<AppState>) {
-    let previous = {
-        let mut devices = app.devices.write().await;
-        std::mem::take(&mut *devices)
-    };
-    for device in &previous {
-        device.close().await;
-    }
-    drop(previous);
-
-    app.hid.clear().await;
-
-    crate::registry::initialize_app_state(app.clone()).await;
-    crate::ipc::broadcast_state(&app).await;
+    reconcile_plugins(&app, &plugin_ids).await;
+    Ok(())
 }
 
 /// Close and unregister every currently-registered device owned by one of
@@ -463,18 +394,23 @@ async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
 /// Scoped teardown + reprobe for `plugins`: only devices owned by one of
 /// these plugin ids are closed and re-discovered; every other device is
 /// left untouched.
-async fn scoped_rediscover(app: &Arc<AppState>, plugins: &[String]) {
+pub(crate) async fn reconcile_plugins(app: &Arc<AppState>, plugins: &[String]) {
     use crate::registry::discovery::DiscoveryFilter;
 
-    // 1. Refresh manifests + disabled/granted/config so match_handle
-    //    reflects the new state.
+    // Keep both sides of a manifest change in scope. Deleted/disabled plugins
+    // need their old specs so a native driver can reclaim the hardware, while
+    // newly imported or updated plugins need their new specs to claim it.
+    let mut specs = app.registry.device_specs_for(plugins);
+
+    // 1. Refresh manifests + disabled/granted/config so match_handle reflects
+    //    the new state, then add the post-change specs.
     reload_registry(app).await;
+    specs.extend(app.registry.device_specs_for(plugins));
 
     // 2. Teardown: close and unregister every device owned by a changed plugin.
     teardown_owned_devices(app, plugins).await;
 
     // 3. Set the discovery filter so re-probing only registers matching handles.
-    let specs = app.registry.device_specs_for(plugins);
     app.set_discovery_filter(Some(Arc::new(DiscoveryFilter { specs })))
         .await;
 
@@ -589,7 +525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_enabled_stages_without_touching_live_devices() {
+    async fn set_enabled_reconciles_without_touching_unrelated_devices() {
         crate::test_support::with_tmp_config(|app| async move {
             app.devices.write().await.push(std::sync::Arc::new(
                 crate::test_support::MockDevice::new("stays-open"),
@@ -599,20 +535,17 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(
-                app.plugins_rediscover_pending.load(Ordering::Relaxed),
-                "staged edit must flag a pending rediscover"
-            );
             assert_eq!(
                 app.devices.read().await.len(),
                 1,
-                "staging must not close/reopen live devices"
+                "scoped reconciliation must leave unrelated devices alone"
             );
             assert!(app
                 .config
                 .read()
                 .await
-                .plugins_disabled
+                .plugins
+                .disabled
                 .contains(&"some_plugin".to_string()));
         })
         .await;
@@ -694,41 +627,6 @@ mod tests {
             );
             assert!(app.find_device_by_id("nzxt-abc").await.is_none());
             assert!(app.find_device_by_id("nzxt-abc_acc_0_1").await.is_none());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn set_enabled_marks_only_the_toggled_plugin_dirty() {
-        crate::test_support::with_tmp_config(|app| async move {
-            set_enabled("some_plugin".into(), false, app.clone())
-                .await
-                .unwrap();
-
-            let scope = app.take_pending_rediscover().await;
-            assert!(!scope.full, "a plugin toggle must not force a full flush");
-            assert_eq!(
-                scope.plugins,
-                std::collections::HashSet::from(["some_plugin".to_string()]),
-                "only the toggled plugin is scoped for rediscovery"
-            );
-            // Draining the scope clears the pending flag the serializer reads.
-            assert!(!app.plugins_rediscover_pending.load(Ordering::Relaxed));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn mark_pending_and_broadcast_forces_a_full_flush() {
-        crate::test_support::with_tmp_config(|app| async move {
-            mark_pending_and_broadcast(&app).await;
-
-            let scope = app.take_pending_rediscover().await;
-            assert!(
-                scope.full,
-                "a repo-level change must fall back to the full flush"
-            );
-            assert!(scope.plugins.is_empty());
         })
         .await;
     }
@@ -877,18 +775,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_permissions_records_the_acknowledged_content_hash() {
+    async fn set_trust_records_the_acknowledged_content_hash() {
         crate::test_support::with_tmp_config(|app| async move {
             with_config_test_plugin(&app, || async {
-                set_permissions("cfgtest".into(), vec![Permission::Network], app.clone())
-                    .await
-                    .unwrap();
+                set_trust(
+                    "cfgtest".into(),
+                    vec![Permission::Network],
+                    true,
+                    app.clone(),
+                )
+                .await
+                .unwrap();
                 let expected = app.registry.content_hash_for("cfgtest");
                 assert!(expected.is_some());
                 let cfg = app.config.read().await;
-                assert_eq!(cfg.plugin_acknowledged.get("cfgtest"), expected.as_ref());
+                assert_eq!(cfg.plugins.acknowledged.get("cfgtest"), expected.as_ref());
                 assert_eq!(
-                    cfg.plugin_permissions.get("cfgtest"),
+                    cfg.plugins.granted.get("cfgtest"),
                     Some(&vec![Permission::Network])
                 );
             })
@@ -901,23 +804,29 @@ mod tests {
     async fn revoking_clears_both_the_grant_and_the_content_pin() {
         crate::test_support::with_tmp_config(|app| async move {
             with_config_test_plugin(&app, || async {
-                set_permissions("cfgtest".into(), vec![Permission::Network], app.clone())
-                    .await
-                    .unwrap();
+                set_trust(
+                    "cfgtest".into(),
+                    vec![Permission::Network],
+                    true,
+                    app.clone(),
+                )
+                .await
+                .unwrap();
                 assert!(app
                     .config
                     .read()
                     .await
-                    .plugin_acknowledged
+                    .plugins
+                    .acknowledged
                     .contains_key("cfgtest"));
 
                 // Empty grant = revoke: both the grant and its pin are dropped.
-                set_permissions("cfgtest".into(), vec![], app.clone())
+                set_trust("cfgtest".into(), vec![], false, app.clone())
                     .await
                     .unwrap();
                 let cfg = app.config.read().await;
-                assert!(!cfg.plugin_permissions.contains_key("cfgtest"));
-                assert!(!cfg.plugin_acknowledged.contains_key("cfgtest"));
+                assert!(!cfg.plugins.granted.contains_key("cfgtest"));
+                assert!(!cfg.plugins.acknowledged.contains_key("cfgtest"));
             })
             .await;
         })
@@ -937,11 +846,15 @@ mod tests {
 
                 let cfg = app.config.read().await;
                 assert_eq!(
-                    cfg.plugin_config.get("cfgtest").and_then(|m| m.get("host")),
+                    cfg.plugins
+                        .config
+                        .get("cfgtest")
+                        .and_then(|m| m.get("host")),
                     Some(&"127.0.0.1".to_string())
                 );
                 assert!(
-                    !cfg.plugin_config
+                    !cfg.plugins
+                        .config
                         .get("cfgtest")
                         .is_some_and(|m| m.contains_key("token")),
                     "a secure value must never land in the plaintext config map"

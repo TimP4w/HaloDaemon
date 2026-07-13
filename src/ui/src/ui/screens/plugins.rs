@@ -151,7 +151,10 @@ impl PluginsUi {
                 {
                     self.requested_assets
                         .insert(ipc::plugin_asset_cache_key(&plugin_id, &name));
-                    crate::domain::actions::plugins::get_plugin_asset(cmd, plugin_id, name);
+                    crate::runtime::ipc::send(
+                        cmd,
+                        halod_shared::commands::DaemonCommand::GetPluginAsset { plugin_id, name },
+                    );
                 }
             }
         }
@@ -209,18 +212,11 @@ impl PluginsUi {
         reconcile_in_flight(
             &mut self.in_flight,
             &state.plugins.plugins,
-            state.plugins.rediscover_pending,
             matches!(
                 state.discovery.phase,
                 halod_shared::types::DiscoveryPhase::Discovering
             ),
         );
-
-        // Banner is only for repo changes now; suppress it while a toggle applies.
-        if state.plugins.rediscover_pending && self.in_flight.is_empty() {
-            pending_changes_banner(ui, cmd);
-            ui.add_space(18.0);
-        }
 
         let now = ui.input(|i| i.time);
         self.sync_update_progress(plugin_updates, now);
@@ -229,7 +225,10 @@ impl PluginsUi {
         if due > 0 {
             if update_all_banner(ui, due, self.updating_all.is_some()) {
                 self.updating_all = Some(now);
-                crate::domain::actions::plugins::update_all_plugins(cmd);
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::UpdateAllPlugins,
+                );
             }
             ui.add_space(18.0);
         }
@@ -330,7 +329,7 @@ impl PluginsUi {
                                     let out = request_toggle(cmd, p, self.pending_consent.take());
                                     self.pending_consent = out.pending_consent;
                                     if let Some(target) = out.dispatched {
-                                        apply_and_lock(cmd, &mut self.in_flight, &p.id, target);
+                                        apply_and_lock(&mut self.in_flight, &p.id, target);
                                     }
                                 }
                                 RowAction::None => {}
@@ -463,9 +462,11 @@ impl PluginsUi {
                         prev_sync: r.last_sync.clone(),
                         started: now,
                     });
-                    crate::domain::actions::plugins::check_plugin_updates(
+                    crate::runtime::ipc::send(
                         cmd,
-                        Some(r.slug.clone()),
+                        halod_shared::commands::DaemonCommand::CheckPluginUpdates {
+                            slug: Some(r.slug.clone()),
+                        },
                     );
                 }
                 if self.checking_repo.is_some() {
@@ -614,7 +615,10 @@ impl PluginsUi {
         );
 
         if let Some(url) = fetch_url {
-            crate::domain::actions::plugins::list_repo_branches(cmd, url);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::ListRepoBranches { url },
+            );
         }
         // Keep repainting while a fetch is pending so the debounce deadline
         // fires even without further keystrokes.
@@ -633,7 +637,10 @@ impl PluginsUi {
                 } else {
                     Some(branch.to_owned())
                 };
-                crate::domain::actions::plugins::add_plugin_repo(cmd, url, branch);
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::AddPluginRepo { url, branch },
+                );
                 return;
             }
         }
@@ -694,7 +701,10 @@ impl PluginsUi {
         if let Some(id) =
             widgets::resolve_delete_confirm(&mut self.pending_delete, confirm, cancel || dismissed)
         {
-            crate::domain::actions::plugins::delete_plugin(cmd, id);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::DeletePlugin { id },
+            );
         }
     }
 
@@ -747,7 +757,10 @@ impl PluginsUi {
             confirm,
             cancel || dismissed,
         ) {
-            crate::domain::actions::plugins::remove_plugin_repo(cmd, slug);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::RemovePluginRepo { slug },
+            );
         }
     }
 
@@ -833,13 +846,16 @@ impl PluginsUi {
         );
 
         if grant {
-            crate::domain::actions::plugins::grant_and_enable(
+            crate::runtime::ipc::send(
                 cmd,
-                id.clone(),
-                p.declared_permissions.clone(),
+                halod_shared::commands::DaemonCommand::SetPluginTrust {
+                    id: id.clone(),
+                    granted: p.declared_permissions.clone(),
+                    enabled: true,
+                },
             );
             // Granting enables the plugin — apply and lock like a direct enable.
-            apply_and_lock(cmd, &mut self.in_flight, &id, true);
+            apply_and_lock(&mut self.in_flight, &id, true);
             self.pending_consent = None;
         } else if cancel || dismissed {
             self.pending_consent = None;
@@ -1281,17 +1297,28 @@ struct ToggleOutcome {
 /// immediately; a plugin needing permission opens the grant modal instead (by
 /// returning its id as the new `pending_consent`).
 fn request_toggle(cmd: &CommandTx, p: &PluginInfo, pending: Option<String>) -> ToggleOutcome {
-    use crate::domain::actions::plugins::set_plugin_enabled;
     match toggle_decision(p) {
         ToggleDecision::Disable => {
-            set_plugin_enabled(cmd, p.id.clone(), false);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::SetPluginEnabled {
+                    id: p.id.clone(),
+                    enabled: false,
+                },
+            );
             ToggleOutcome {
                 pending_consent: pending,
                 dispatched: Some(false),
             }
         }
         ToggleDecision::Enable => {
-            set_plugin_enabled(cmd, p.id.clone(), true);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::SetPluginEnabled {
+                    id: p.id.clone(),
+                    enabled: true,
+                },
+            );
             ToggleOutcome {
                 pending_consent: pending,
                 dispatched: Some(true),
@@ -1305,32 +1332,25 @@ fn request_toggle(cmd: &CommandTx, p: &PluginInfo, pending: Option<String>) -> T
 }
 
 /// Apply a just-dispatched toggle immediately and lock it at `target`.
-fn apply_and_lock(cmd: &CommandTx, in_flight: &mut HashMap<String, bool>, id: &str, target: bool) {
-    crate::domain::actions::plugins::apply_pending_plugin_changes(cmd);
+fn apply_and_lock(in_flight: &mut HashMap<String, bool>, id: &str, target: bool) {
     in_flight.insert(id.to_owned(), target);
 }
 
-/// A toggle has landed once the plugin is at the target, nothing is pending, and
-/// the re-probe scan has finished — so the toggle stays locked for the whole
+/// A toggle has landed once the plugin is at the target and the re-probe scan
+/// has finished — so the toggle stays locked for the whole
 /// (multi-second) device scan, not just until the config flag flips.
-fn plugin_toggle_landed(
-    p: &PluginInfo,
-    target: bool,
-    rediscover_pending: bool,
-    discovering: bool,
-) -> bool {
-    plugin_active(p) == target && !rediscover_pending && !discovering
+fn plugin_toggle_landed(p: &PluginInfo, target: bool, discovering: bool) -> bool {
+    plugin_active(p) == target && !discovering
 }
 
 /// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
 fn reconcile_in_flight(
     in_flight: &mut HashMap<String, bool>,
     plugins: &[PluginInfo],
-    rediscover_pending: bool,
     discovering: bool,
 ) {
     in_flight.retain(|id, target| match plugins.iter().find(|p| &p.id == id) {
-        Some(p) => !plugin_toggle_landed(p, *target, rediscover_pending, discovering),
+        Some(p) => !plugin_toggle_landed(p, *target, discovering),
         None => false,
     });
 }
@@ -1584,7 +1604,12 @@ fn detail_body(
             in_flight,
         ) {
             updating.insert(update.plugin_id.clone(), now);
-            crate::domain::actions::plugins::update_plugin(cmd, update.plugin_id.clone());
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::UpdatePlugin {
+                    plugin_id: update.plugin_id.clone(),
+                },
+            );
         }
     }
 
@@ -1657,7 +1682,7 @@ fn detail_body(
             let out = request_toggle(cmd, p, pending_consent.take());
             *pending_consent = out.pending_consent;
             if let Some(target) = out.dispatched {
-                apply_and_lock(cmd, in_flight, &p.id, target);
+                apply_and_lock(in_flight, &p.id, target);
             }
         }
         if matches!(p.source, halod_shared::types::PluginSource::Local) {
@@ -1856,43 +1881,15 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
     )
     .clicked()
     {
-        crate::domain::actions::plugins::revoke_and_disable(cmd, p.id.clone());
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::SetPluginTrust {
+                id: p.id.clone(),
+                granted: Vec::new(),
+                enabled: false,
+            },
+        );
     }
-}
-
-/// Full-width call to action shown when one or more staged plugin edits
-/// (enable/disable, grant/revoke, import, delete) haven't been applied to
-/// live devices yet.
-fn pending_changes_banner(ui: &mut egui::Ui, cmd: &CommandTx) {
-    egui::Frame::NONE
-        .fill(theme::a(theme::CYAN, 0.10))
-        .stroke(Stroke::new(1.0, theme::a(theme::CYAN, 0.35)))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(16, 12))
-        .show(ui, |ui| {
-            egui::Sides::new().show(
-                ui,
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(t!("plugins.pending_changes"))
-                            .font(theme::body(12.5))
-                            .color(theme::TEXT),
-                    );
-                },
-                |ui| {
-                    if widgets::button(
-                        ui,
-                        &t!("plugins.apply_changes"),
-                        ButtonKind::Primary,
-                        Vec2::new(160.0, 32.0),
-                    )
-                    .clicked()
-                    {
-                        crate::domain::actions::plugins::apply_pending_plugin_changes(cmd);
-                    }
-                },
-            );
-        });
 }
 
 fn status_banner(ui: &mut egui::Ui, p: &PluginInfo) {
@@ -2293,7 +2290,10 @@ fn spawn_import_plugin(ctx: &egui::Context, cmd: CommandTx) {
     std::thread::spawn(move || {
         if let Some(path) = rfd::FileDialog::new().pick_folder() {
             let source_dir = path.to_string_lossy().into_owned();
-            crate::domain::actions::plugins::import_plugin(&cmd, source_dir);
+            crate::runtime::ipc::send(
+                &cmd,
+                halod_shared::commands::DaemonCommand::ImportPlugin { source_dir },
+            );
         }
         ctx.request_repaint();
     });
@@ -2467,25 +2467,16 @@ mod tests {
     }
 
     #[test]
-    fn toggle_lands_only_when_matched_pending_clear_and_scan_done() {
+    fn toggle_lands_only_when_matched_and_scan_done() {
         let on = info("p", true);
         let off = info("p", false);
-        // Disable target (false): landed when inactive, not pending, scan done.
-        assert!(plugin_toggle_landed(&off, false, false, false));
+        assert!(plugin_toggle_landed(&off, false, false));
+        assert!(!plugin_toggle_landed(&on, false, false), "still active");
         assert!(
-            !plugin_toggle_landed(&on, false, false, false),
-            "still active"
-        );
-        assert!(
-            !plugin_toggle_landed(&off, false, true, false),
-            "still applying (pending)"
-        );
-        assert!(
-            !plugin_toggle_landed(&off, false, false, true),
+            !plugin_toggle_landed(&off, false, true),
             "scan still running"
         );
-        // Enable target (true): landed when active, not pending, scan done.
-        assert!(plugin_toggle_landed(&on, true, false, false));
+        assert!(plugin_toggle_landed(&on, true, false));
     }
 
     #[test]
@@ -2497,7 +2488,7 @@ mod tests {
         ]);
         let plugins = vec![info("keep", true), info("done", true)];
 
-        reconcile_in_flight(&mut in_flight, &plugins, false, false);
+        reconcile_in_flight(&mut in_flight, &plugins, false);
 
         assert!(in_flight.contains_key("keep"), "disable not applied yet");
         assert!(!in_flight.contains_key("done"), "enable landed → unlocked");
@@ -2505,15 +2496,10 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_keeps_all_locked_while_pending_or_scanning() {
+    fn reconcile_keeps_all_locked_while_scanning() {
         let plugins = vec![info("done", true)];
-        // Pending → locked.
         let mut in_flight = HashMap::from([("done".to_string(), true)]);
-        reconcile_in_flight(&mut in_flight, &plugins, true, false);
-        assert!(in_flight.contains_key("done"), "pending → locked");
-        // Scan still running (pending already cleared) → locked.
-        let mut in_flight = HashMap::from([("done".to_string(), true)]);
-        reconcile_in_flight(&mut in_flight, &plugins, false, true);
+        reconcile_in_flight(&mut in_flight, &plugins, true);
         assert!(in_flight.contains_key("done"), "scanning → locked");
     }
 

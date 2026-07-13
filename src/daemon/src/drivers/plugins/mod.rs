@@ -288,7 +288,19 @@ impl Registry {
         ))
     }
 
-    /// Replace the disabled-plugin set (from `config.plugins_disabled`).
+    /// Atomically replace every persisted plugin-policy field in one snapshot.
+    pub fn replace_policy(&self, policy: &crate::config::PluginPolicy) {
+        self.update(|s| {
+            s.disabled = policy.disabled.iter().cloned().collect();
+            s.integrations_disabled = policy.integrations_disabled.iter().cloned().collect();
+            s.granted = policy.granted.clone();
+            s.acknowledged = policy.acknowledged.clone();
+            s.config_values = policy.config.clone();
+        });
+    }
+
+    /// Test-only field mutation helpers for focused registry state tests.
+    #[cfg(test)]
     pub fn set_disabled(&self, ids: &[String]) {
         self.update(|s| s.disabled = ids.iter().cloned().collect());
     }
@@ -297,7 +309,7 @@ impl Registry {
         self.snapshot().disabled.contains(plugin_id)
     }
 
-    /// Replace the integration-disabled set (from `config.integrations_disabled`).
+    #[cfg(test)]
     pub fn set_integrations_disabled(&self, ids: &[String]) {
         self.update(|s| s.integrations_disabled = ids.iter().cloned().collect());
     }
@@ -306,7 +318,7 @@ impl Registry {
         self.snapshot().integrations_disabled.contains(plugin_id)
     }
 
-    /// Replace the granted-permissions map (from `config.plugin_permissions`).
+    #[cfg(test)]
     pub fn set_granted(&self, granted: &HashMap<String, Vec<Permission>>) {
         self.update(|s| s.granted = granted.clone());
     }
@@ -320,7 +332,7 @@ impl Registry {
             .unwrap_or_default()
     }
 
-    /// Replace the acknowledged-hash map (from `config.plugin_acknowledged`).
+    #[cfg(test)]
     pub fn set_acknowledged(&self, acknowledged: &HashMap<String, String>) {
         self.update(|s| s.acknowledged = acknowledged.clone());
     }
@@ -340,7 +352,7 @@ impl Registry {
             .map(|m| m.content_hash())
     }
 
-    /// Replace the plugin config-values map (from `config.plugin_config`).
+    #[cfg(test)]
     pub fn set_config_values(&self, values: &HashMap<String, HashMap<String, String>>) {
         self.update(|s| s.config_values = values.clone());
     }

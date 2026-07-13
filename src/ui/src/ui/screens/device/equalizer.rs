@@ -57,7 +57,13 @@ fn preset_list(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, eq: &Equalizer) {
     const LIST_W: f32 = 200.0;
     let select = |idx: usize| {
         if idx != eq.selected_preset {
-            crate::domain::actions::devices::set_eq_preset(ctx.cmd, id, idx);
+            crate::runtime::ipc::send(
+                ctx.cmd,
+                halod_shared::commands::DaemonCommand::SetEqPreset {
+                    id: id.to_string(),
+                    preset_index: idx,
+                },
+            );
         }
     };
     ui.allocate_ui_with_layout(
