@@ -182,6 +182,7 @@ unsafe impl Send for PipeSecurity {}
 /// `user_sid` only, with a Medium integrity label. Pure string formatting —
 /// kept separate from `PipeSecurity::new` so the ACL text is testable without
 /// the Windows security APIs.
+#[cfg(any(windows, test))]
 fn pipe_security_sddl(user_sid: &str) -> String {
     format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{user_sid})S:(ML;;NW;;;ME)")
 }
@@ -293,19 +294,28 @@ pub fn ensure_single_instance() -> Result<()> {
 
 #[cfg(unix)]
 pub fn serve(app: Arc<AppState>) -> tokio::task::JoinHandle<Result<()>> {
+    let (dir, is_fallback) = halod_shared::socket::runtime_dir();
+    serve_at(app, dir, is_fallback)
+}
+
+#[cfg(unix)]
+fn serve_at(
+    app: Arc<AppState>,
+    dir: std::path::PathBuf,
+    is_fallback: bool,
+) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
-        use halod_shared::socket::{current_uid, runtime_dir};
+        use halod_shared::socket::{current_uid, socket_path_in};
         use std::fs::Permissions;
         use std::os::unix::fs::PermissionsExt;
         use tokio::net::UnixListener;
 
-        let (dir, is_fallback) = runtime_dir();
         if is_fallback {
             std::fs::create_dir_all(&dir)?;
             std::fs::set_permissions(&dir, Permissions::from_mode(0o700))?;
         }
 
-        let path = socket_path();
+        let path = socket_path_in(&dir);
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
         // Belt-and-suspenders against umask/TOCTOU: even inside a private dir,
@@ -873,27 +883,18 @@ mod unix_tests {
     async fn serve_locks_down_fallback_dir_and_socket() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // Drive `runtime_dir()` down the fallback branch (XDG unset) while
-        // redirecting the temp base via TMPDIR. This is the only test in this
-        // crate that touches these env vars; it restores them before returning.
-        let prev_xdg = std::env::var_os("XDG_RUNTIME_DIR");
-        let prev_tmp = std::env::var_os("TMPDIR");
-        // SAFETY: single-threaded test setup, restored below.
-        unsafe {
-            std::env::remove_var("XDG_RUNTIME_DIR");
-            std::env::set_var("TMPDIR", tmp.path());
-        }
-
-        let (dir, is_fallback) = halod_shared::socket::runtime_dir();
-        assert!(is_fallback, "expected fallback dir under {:?}", tmp.path());
-        let path = socket_path();
+        let dir = tmp.path().join("halod-test");
+        let path = halod_shared::socket::socket_path_in(&dir);
 
         let app = Arc::new(AppState::new(Config::default()));
-        let handle = serve(app);
+        let handle = serve_at(app, dir.clone(), true);
 
         // serve() binds inside its spawned task; wait for the socket to appear.
         let mut waited = 0;
         while !std::path::Path::new(&path).exists() && waited < 200 {
+            if handle.is_finished() {
+                panic!("IPC server exited before binding: {:?}", handle.await);
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
             waited += 1;
         }
@@ -901,18 +902,6 @@ mod unix_tests {
 
         let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         let sock_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-
-        // SAFETY: restore env before asserting so a failure does not leak it.
-        unsafe {
-            match prev_xdg {
-                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
-            }
-            match prev_tmp {
-                Some(v) => std::env::set_var("TMPDIR", v),
-                None => std::env::remove_var("TMPDIR"),
-            }
-        }
 
         handle.abort();
 

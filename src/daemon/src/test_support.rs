@@ -224,6 +224,7 @@ impl MockDevice {
     }
 
     /// Start the device offline (`is_live() == false`), for engine liveness-gating tests.
+    #[allow(dead_code)] // shared test builder option; only some feature/target suites use it
     pub fn offline(self) -> Self {
         self.live.store(false, Ordering::SeqCst);
         self

@@ -33,6 +33,7 @@ const CUSTOM_PREFIX: &str = "custom:";
 
 /// Tab indices for the unified RGB Lighting view.
 pub(crate) const TAB_CANVAS: usize = 0;
+#[expect(dead_code, reason = "stable direct-lighting tab index")]
 pub(crate) const TAB_DIRECT: usize = 1;
 
 // ── Constants ─────────────────────────────────────────────────────────────────

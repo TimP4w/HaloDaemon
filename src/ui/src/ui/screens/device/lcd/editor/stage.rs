@@ -21,6 +21,7 @@ use crate::ui::screens::device::lcd::preview::{cover_uv, paint_image_circle, pan
 use crate::ui::theme;
 
 /// Screen distance from a selected widget's top edge to its rotation handle.
+#[expect(dead_code, reason = "editor geometry invariant shared with tests")]
 const ROTATE_DIST: f32 = 20.0;
 
 /// `egui` fonts render visually larger than the daemon's `ab_glyph` fonts

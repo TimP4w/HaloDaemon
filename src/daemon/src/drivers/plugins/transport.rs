@@ -217,6 +217,13 @@ impl RegisterBus {
 /// A plugin transport backend, registered next to the transport it wraps.
 /// `descriptor_for(kind)` resolves the declared `match.transport` string to one
 /// of these; the plugin core drives everything through it.
+type PluginOpenFn = fn(
+    &PluginManifest,
+    &DiscoveryHandle<'_>,
+    &HashMap<String, String>,
+    &[Permission],
+) -> Result<PluginIo>;
+
 pub struct PluginTransportDescriptor {
     /// The `match.transport` discriminator (e.g. "hid", "smbus").
     pub kind: &'static str,
@@ -231,12 +238,7 @@ pub struct PluginTransportDescriptor {
     /// since a config-instantiated integration has no real discovery handle.
     /// `granted` is the plugin's granted permissions — a backend that reaches
     /// off the matched device (the `tcp` backend) gates on `Permission::Network`.
-    pub open: fn(
-        &PluginManifest,
-        &DiscoveryHandle<'_>,
-        &HashMap<String, String>,
-        &[Permission],
-    ) -> Result<PluginIo>,
+    pub open: PluginOpenFn,
     /// Stable per-device id suffix from the matched handle. `None` for a
     /// config-instantiated backend, whose id is built from its config, not a handle.
     pub id_suffix: Option<fn(&DiscoveryHandle<'_>) -> String>,

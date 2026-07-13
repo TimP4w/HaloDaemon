@@ -64,6 +64,7 @@ impl UsbClaim {
         })
     }
 
+    #[expect(dead_code, reason = "explicit early release for transport owners")]
     pub fn release(self) {
         // Drop runs, releasing the interface and re-attaching the kernel driver
         // on Linux. The caller has taken ownership and wants explicit cleanup;
@@ -93,6 +94,7 @@ impl Drop for UsbClaim {
 
 /// Lets device code accept `impl BulkTransport` and be tested with a mock instead of real hardware.
 #[async_trait]
+#[expect(dead_code, reason = "plugin-facing bulk transport protocol")]
 pub trait BulkTransport: Send + Sync {
     /// Write all bytes to the bulk-OUT endpoint, looping until every byte is
     /// delivered. Returns the total number of bytes sent.
@@ -115,6 +117,7 @@ pub trait BulkTransport: Send + Sync {
 /// `UsbControlTransport` implements this trait. Device code that accepts
 /// `impl ControlTransport` (or `dyn ControlTransport`) can be tested with a
 /// mock without opening real hardware.
+#[expect(dead_code, reason = "rate-limit hook is optional transport protocol")]
 pub trait ControlTransport: Send + Sync {
     /// Issue a vendor control OUT transfer.
     fn write_control(
@@ -145,6 +148,10 @@ pub trait ControlTransport: Send + Sync {
 }
 
 #[async_trait]
+#[expect(
+    dead_code,
+    reason = "matching reads and rate limits are optional protocol hooks"
+)]
 pub trait Transport: Send + Sync {
     async fn write(&self, data: &[u8]) -> Result<()>;
     async fn read(&self, size: usize) -> Result<Vec<u8>>;

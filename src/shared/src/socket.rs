@@ -18,18 +18,35 @@ pub fn current_uid() -> u32 {
 /// world-accessible temp dir itself; the daemon must create it `0700`.
 #[cfg(unix)]
 pub fn runtime_dir() -> (PathBuf, bool) {
-    match std::env::var_os("XDG_RUNTIME_DIR") {
+    runtime_dir_from(
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::temp_dir(),
+        current_uid(),
+    )
+}
+
+/// Pure runtime-directory resolver used by startup and tests. Keeping the
+/// process environment at this boundary avoids mutating it in concurrent tests.
+#[cfg(unix)]
+pub fn runtime_dir_from(
+    xdg_runtime_dir: Option<std::ffi::OsString>,
+    temp_dir: PathBuf,
+    uid: u32,
+) -> (PathBuf, bool) {
+    match xdg_runtime_dir {
         Some(dir) if !dir.is_empty() => (PathBuf::from(dir), false),
-        _ => {
-            let uid = current_uid();
-            (std::env::temp_dir().join(format!("halod-{uid}")), true)
-        }
+        _ => (temp_dir.join(format!("halod-{uid}")), true),
     }
 }
 
 #[cfg(unix)]
 pub fn socket_path() -> String {
-    let path = runtime_dir().0.join(crate::app::SOCKET_FILENAME);
+    socket_path_in(&runtime_dir().0)
+}
+
+#[cfg(unix)]
+pub fn socket_path_in(runtime_dir: &std::path::Path) -> String {
+    let path = runtime_dir.join(crate::app::SOCKET_FILENAME);
     path.to_str()
         .expect("socket path (XDG_RUNTIME_DIR/halod.sock) contains non-UTF-8 bytes")
         .to_owned()
@@ -49,35 +66,18 @@ pub fn socket_path() -> String {
 mod tests {
     use super::*;
 
-    // Serialise all tests that touch XDG_RUNTIME_DIR so parallel test threads
-    // don't race on process-global env state.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn socket_path_is_under_runtime_dir() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let path = socket_path();
         assert!(path.ends_with("/halod.sock"), "unexpected path: {path}");
     }
 
     #[test]
     fn fallback_dir_is_per_user_when_xdg_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let prev = std::env::var_os("XDG_RUNTIME_DIR");
-        // SAFETY: ENV_LOCK ensures no other test thread reads XDG_RUNTIME_DIR
-        // concurrently; the value is restored before the lock is released.
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
-
-        let (dir, is_fallback) = runtime_dir();
-        let uid = current_uid();
+        let uid = 1234;
+        let (dir, is_fallback) = runtime_dir_from(None, PathBuf::from("/tmp"), uid);
         assert!(is_fallback);
         assert_eq!(dir.file_name().unwrap(), format!("halod-{uid}").as_str());
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
-            }
-        }
+        assert_eq!(socket_path_in(&dir), format!("/tmp/halod-{uid}/halod.sock"));
     }
 }

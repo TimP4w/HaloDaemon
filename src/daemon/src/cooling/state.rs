@@ -8,6 +8,7 @@ use crate::run_loop::EngineRunConfig;
 use halod_shared::types::FanCurveStatus;
 
 struct Engine {
+    #[expect(dead_code, reason = "handle is retained to own the running engine")]
     handle: Arc<FanCurveEngine>,
     cfg_tx: watch::Sender<EngineRunConfig>,
     /// Failsafe duty sent to the engine independently of the run config.
@@ -45,6 +46,7 @@ impl CoolingEngineState {
         });
     }
 
+    #[expect(dead_code, reason = "engine accessor is reserved for runtime control")]
     pub fn engine(&self) -> Option<&Arc<FanCurveEngine>> {
         self.engine.get().map(|e| &e.handle)
     }

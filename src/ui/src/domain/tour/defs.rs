@@ -303,6 +303,7 @@ fn build_tour(key: TourKey) -> Tour {
 }
 
 /// Every [`TourKey`] variant, for exhaustive testing/proptesting over "any tour".
+#[expect(dead_code, reason = "complete tour registry validated by tests")]
 pub const ALL_TOUR_KEYS: &[TourKey] = &[
     TourKey::PageHome,
     TourKey::PageLighting,

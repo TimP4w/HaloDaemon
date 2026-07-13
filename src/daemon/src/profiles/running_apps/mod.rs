@@ -22,7 +22,8 @@ pub fn resolve_process_icons(process_names: &[String]) -> HashMap<String, String
     if process_names.is_empty() {
         return HashMap::new();
     }
-    static CACHE: Mutex<Option<(Vec<String>, HashMap<String, String>)>> = Mutex::new(None);
+    type ProcessIconCache = Option<(Vec<String>, HashMap<String, String>)>;
+    static CACHE: Mutex<ProcessIconCache> = Mutex::new(None);
     let mut cache = CACHE.lock().unwrap();
     if let Some((names, icons)) = cache.as_ref() {
         if names.as_slice() == process_names {

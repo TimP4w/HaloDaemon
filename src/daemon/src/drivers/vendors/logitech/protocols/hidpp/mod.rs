@@ -21,6 +21,10 @@ use crate::drivers::transports::{hid::HidTransport, Transport};
 /// Only the methods actually called on the messenger through the slot path are
 /// included; all other messenger functionality stays on `HidppMessenger` directly.
 #[async_trait]
+#[expect(
+    dead_code,
+    reason = "long-report fire is part of the HID++ protocol surface"
+)]
 pub trait HidppChannel: Send + Sync {
     fn start_listener(&self);
     fn stop_listener(&self);

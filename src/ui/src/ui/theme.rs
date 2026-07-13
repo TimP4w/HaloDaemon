@@ -10,6 +10,7 @@ use egui::{
 
 // ── Surfaces ─────────────────────────────────────────────────────────────────
 pub const BODY: Color32 = hex(0x08080c);
+#[expect(dead_code, reason = "theme token reserved for native window chrome")]
 pub const WIN_TOP: Color32 = hex(0x0e0d15);
 pub const TITLE_BG: Color32 = hex(0x0b0b12);
 pub const SIDEBAR_BG: Color32 = hex(0x0a0a11);
@@ -242,6 +243,7 @@ pub fn h_gradient(painter: &egui::Painter, rect: Rect, stops: &[Color32]) {
 }
 
 /// Draw the small rounded RGB-spectrum logo mark.
+#[expect(dead_code, reason = "reusable compact logo renderer")]
 pub fn logo_mark(painter: &egui::Painter, rect: Rect) {
     h_gradient(&painter.with_clip_rect(rect), rect, &LOGO_STOPS);
 }

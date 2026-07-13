@@ -584,6 +584,7 @@ fn run_pipewire(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::AsRawFd;
 
     #[test]
     fn list_monitors_returns_exactly_one_entry() {
@@ -602,5 +603,36 @@ mod tests {
             result.is_err(),
             "start() should fail without a Tokio runtime"
         );
+    }
+
+    #[test]
+    fn mmap_cache_reuses_covering_mapping_and_remaps_when_it_grows() {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(8192).unwrap();
+        let fd = file.as_raw_fd();
+        let mut cache = MmapCache::new(std::ptr::null_mut(), 0, -1);
+
+        let first = cache.ensure(fd, 4096).unwrap();
+        assert!(!first.is_null());
+        assert_eq!(cache.len, 4096);
+        assert_eq!(cache.ensure(fd, 1024).unwrap(), first);
+        assert_eq!(cache.len, 4096, "a smaller frame must reuse the mapping");
+
+        let grown = cache.ensure(fd, 8192).unwrap();
+        assert!(!grown.is_null());
+        assert_eq!(cache.len, 8192);
+        assert_eq!(cache.fd, fd);
+
+        cache.unmap();
+        assert!(cache.ptr.is_null());
+        assert_eq!((cache.len, cache.fd), (0, -1));
+    }
+
+    #[test]
+    fn mmap_cache_rejects_an_invalid_fd_without_retaining_state() {
+        let mut cache = MmapCache::new(std::ptr::null_mut(), 0, -1);
+        assert!(cache.ensure(-1, 4096).is_err());
+        assert!(cache.ptr.is_null());
+        assert_eq!((cache.len, cache.fd), (0, -1));
     }
 }

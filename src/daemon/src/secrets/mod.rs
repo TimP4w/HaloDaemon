@@ -23,6 +23,7 @@ use anyhow::Result;
 
 /// Per-plugin secret storage. Keys are namespaced by `(plugin_id, field_key)` so
 /// one plugin's secret can never collide with, or be read as, another's.
+#[expect(dead_code, reason = "backend name is diagnostic provider metadata")]
 pub trait SecretStore: Send + Sync {
     fn set(&self, plugin_id: &str, key: &str, plaintext: &str) -> Result<()>;
     /// `Ok(None)` when nothing is stored for this key (not an error).

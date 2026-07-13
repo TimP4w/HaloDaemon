@@ -16,7 +16,7 @@ use halod_shared::types::{validate_image_filename, LcdUploadProgress, LcdUploadS
 /// changes underneath it (upload/delete), so a stale decode isn't served
 /// until an unrelated prune happens to evict it.
 fn invalidate_editor_image_cache(app: &Arc<AppState>) {
-    if let Some(session) = app.lcd.editor_session.lock().unwrap().as_ref() {
+    if let Some(session) = app.lcd.editor_session().as_ref() {
         session.invalidate_image_cache();
     }
 }
@@ -591,23 +591,22 @@ mod tests {
     async fn mode_switch_drops_editor_session_for_device() {
         use crate::lcd::engine::custom::EditorSession;
         let (app, _) = make_app_with_lcd_device("lcd_dev");
-        *app.lcd.editor_session.lock().unwrap() = Some(EditorSession::new_idle_for_test("lcd_dev"));
+        *app.lcd.editor_session() = Some(EditorSession::new_idle_for_test("lcd_dev"));
         set_screen_default("lcd_dev".into(), app.clone())
             .await
             .unwrap();
-        assert!(app.lcd.editor_session.lock().unwrap().is_none());
+        assert!(app.lcd.editor_session().is_none());
     }
 
     #[tokio::test]
     async fn mode_switch_keeps_other_devices_editor_session() {
         use crate::lcd::engine::custom::EditorSession;
         let (app, _) = make_app_with_lcd_device("lcd_dev");
-        *app.lcd.editor_session.lock().unwrap() =
-            Some(EditorSession::new_idle_for_test("other_dev"));
+        *app.lcd.editor_session() = Some(EditorSession::new_idle_for_test("other_dev"));
         set_screen_default("lcd_dev".into(), app.clone())
             .await
             .unwrap();
-        assert!(app.lcd.editor_session.lock().unwrap().is_some());
+        assert!(app.lcd.editor_session().is_some());
     }
 
     /// Selecting "None" (reset to default) must clear the tracked active image

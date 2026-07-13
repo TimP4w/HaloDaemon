@@ -16,18 +16,7 @@ anyhow     = "1"
 log        = "0.4"
 async-trait = "0.1"
 
-# Lint policy so CI can gate on `cargo clippy -- -D warnings`. A few categories
-# are intentionally relaxed:
-#   - dead_code: vendor/protocol scaffolding (constants, alt accessors, future
-#     device hooks) is deliberately kept even when not yet wired up.
-#   - type_complexity / too_many_arguments: closure-heavy UI state and driver
-#     builders legitimately carry complex signatures; factoring them hurts clarity.
-[workspace.lints.rust]
-dead_code = "allow"
-
 [workspace.lints.clippy]
-type_complexity = "allow"
-too_many_arguments = "allow"
 # Opinionated style/formatting lints kept off so the gate stays focused on
 # substantive issues: nested `mod tests` followed by sibling code, protocol enums
 # whose variants share a natural prefix (WriteByte/WriteBlock…), and doc-comment

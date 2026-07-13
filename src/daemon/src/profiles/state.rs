@@ -7,7 +7,9 @@ use crate::profiles::focus_watcher::{ControlMsg, FocusWatcherEngine};
 use crate::run_loop::EngineRunConfig;
 
 struct Engine {
+    #[expect(dead_code, reason = "handle is retained to own the watcher")]
     handle: Arc<FocusWatcherEngine>,
+    #[expect(dead_code, reason = "sender is retained for future live reconfiguration")]
     cfg_tx: watch::Sender<EngineRunConfig>,
 }
 
@@ -37,10 +39,12 @@ impl FocusState {
         let _ = self.engine.set(Engine { handle, cfg_tx });
     }
 
+    #[expect(dead_code, reason = "engine accessor is reserved for runtime control")]
     pub fn engine(&self) -> Option<&Arc<FocusWatcherEngine>> {
         self.engine.get().map(|e| &e.handle)
     }
 
+    #[expect(dead_code, reason = "config sender is reserved for runtime control")]
     pub fn cfg_tx(&self) -> Option<&watch::Sender<EngineRunConfig>> {
         self.engine.get().map(|e| &e.cfg_tx)
     }

@@ -836,8 +836,7 @@ mod tests {
     #[tokio::test]
     async fn editor_session_evictor_runs_independent_of_the_render_tick() {
         let app = Arc::new(AppState::new(Config::default()));
-        *app.lcd.editor_session.lock().unwrap() =
-            Some(custom::EditorSession::new_idle_for_test("dev1"));
+        *app.lcd.editor_session() = Some(custom::EditorSession::new_idle_for_test("dev1"));
         let engine = LcdEngine::new(Arc::clone(&app));
         assert!(
             !engine.has_active_content().await,
@@ -855,7 +854,7 @@ mod tests {
 
         tokio::time::timeout(std::time::Duration::from_millis(200), async {
             loop {
-                if app.lcd.editor_session.lock().unwrap().is_none() {
+                if app.lcd.editor_session().is_none() {
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;

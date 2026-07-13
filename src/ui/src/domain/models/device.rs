@@ -146,6 +146,7 @@ pub fn type_label(d: &WireDevice) -> std::borrow::Cow<'static, str> {
 
 /// Number of distinct accent hues a device can map to (see [`hue_index`]).
 /// Pinned against `ui::theme::DEVICE_HUES.len()` on the theme side.
+#[expect(dead_code, reason = "stable palette size validated by model tests")]
 pub const DEVICE_HUE_COUNT: usize = 10;
 
 /// Which accent hue slot (`0..DEVICE_HUE_COUNT`) a device type maps to.

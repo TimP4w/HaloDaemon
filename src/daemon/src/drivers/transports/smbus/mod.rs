@@ -270,9 +270,11 @@ struct ScanJob {
     pci_match: Vec<PciMatch>,
 }
 
+type NativePreScan = fn(Arc<SmBusDevice>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
 enum PreScan {
     None,
-    Native(fn(Arc<SmBusDevice>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>),
+    Native(NativePreScan),
     Plugin {
         plugin_id: String,
         source: String,

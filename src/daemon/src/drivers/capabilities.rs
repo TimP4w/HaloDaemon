@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[async_trait]
+#[expect(dead_code, reason = "optional controller persistence protocol")]
 pub trait Controller: Send + Sync {
     async fn discover_children(&self) -> Vec<Arc<dyn Device>> {
         vec![]
@@ -80,6 +81,7 @@ pub enum TransportMode {
 /// Devices that can hot-swap between wireless and wired transport without
 /// changing Arc identity in app.devices.
 #[async_trait]
+#[expect(dead_code, reason = "optional transport persistence protocol")]
 pub trait TransportSwitchable: Send + Sync {
     /// Switch to a new direct HID transport at `path`.
     /// Re-initializes the device through the new transport. `app` lets the device
@@ -123,6 +125,7 @@ pub struct ChainLinkSpec {
 /// Parent-side capability for managing chainable channels; the CRUD surface
 /// delegates to a shared [`chain::ChainHost`] exposed via [`ChainCapability::chain_host`].
 #[async_trait]
+#[expect(dead_code, reason = "optional chain persistence protocol")]
 pub trait ChainCapability: Send + Sync {
     /// The driver's chain host. Returning `None` is treated as "no chainable
     /// channels yet" by every default impl below.
@@ -260,6 +263,10 @@ pub trait PostRegisterHook: Send + Sync {
 /// Fan status/speed surface for chain accessory drivers with fan hardware
 /// alongside their ARGB channels; chain writes go through [`chain::ChainHub`] instead.
 #[async_trait]
+#[expect(
+    dead_code,
+    reason = "capability identity reserved for fan-hub discovery"
+)]
 pub trait FanHub: Send + Sync + 'static {
     fn id(&self) -> &str;
     async fn get_fan_rpm(&self, channel: u8) -> Result<u32>;
@@ -460,6 +467,7 @@ pub trait BooleanCapability: Send + Sync {
 }
 
 #[async_trait]
+#[expect(dead_code, reason = "optional action persistence protocol")]
 pub trait ActionCapability: Send + Sync {
     async fn trigger_action(&self, key: &str) -> Result<()>;
 
@@ -477,6 +485,7 @@ pub trait ActionCapability: Send + Sync {
 }
 
 #[async_trait]
+#[expect(dead_code, reason = "optional battery persistence protocol")]
 pub trait BatteryCapability: Send + Sync {
     async fn get_batteries(&self) -> Result<Vec<Battery>>;
 
@@ -622,6 +631,7 @@ pub trait FanCapability: Send + Sync {
 }
 
 #[async_trait]
+#[expect(dead_code, reason = "optional sensor persistence protocol")]
 pub trait SensorCapability: Send + Sync {
     async fn get_sensors(&self) -> Result<Vec<Sensor>>;
 
@@ -736,6 +746,10 @@ pub trait OnboardProfilesCapability: Send + Sync {
 }
 
 #[async_trait]
+#[expect(
+    dead_code,
+    reason = "raw-streaming getter is part of the LCD driver protocol"
+)]
 pub trait LcdCapability: Send + Sync {
     fn lcd_descriptor(&self) -> LcdDescriptor;
 
