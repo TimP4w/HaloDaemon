@@ -6,22 +6,58 @@
 //! device worker (boxed-closure jobs) and the effect worker (typed enum) share
 //! the thread/channel/reply wiring while keeping their own dispatch style.
 //!
-//! Known bound (ARCH-R1): a [`request`](LuaWorker::request) timeout *abandons* the
-//! worker (poisons the handle so later requests fail fast) but cannot *terminate*
-//! its OS thread — mlua exposes no safe preemptive kill, so a `pcall`-catching
-//! pure-compute runaway keeps one CPU-burning zombie thread alive per malicious
-//! plugin. There is also no ceiling on concurrent worker threads. Bounding this
-//! honestly is architectural, not in-VM: run plugins in a separate process that
-//! can be `SIGKILL`'d (the existing broker/hwaccess privilege split is the natural
-//! seam), and/or cap concurrent spawns. Tracked as a deliberate follow-up.
+//! Known bound: a [`request`](LuaWorker::request) timeout *abandons* the
+//! worker (transitions it to [`WorkerState::Wedged`] so later requests fail fast)
+//! but cannot *terminate* its OS thread — mlua exposes no safe preemptive kill, so
+//! a `pcall`-catching pure-compute runaway keeps one CPU-burning zombie thread
+//! alive per malicious plugin. There is also no ceiling on concurrent worker
+//! threads. Bounding this honestly is architectural, not in-VM: run plugins in a
+//! separate process that can be `SIGKILL`'d (the existing broker/hwaccess
+//! privilege split is the natural seam), and/or cap concurrent spawns. Tracked as
+//! a deliberate follow-up.
 
 use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
+
+/// Why a worker is [`WorkerState::Wedged`] — presumed alive but unresponsive
+/// (or never alive at all).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WedgeReason {
+    /// A [`request`](LuaWorker::request) exceeded `call_timeout`; the single
+    /// worker thread is presumed stuck running that job forever (mlua has no
+    /// preemptive kill — see the module doc).
+    Timeout,
+    /// The worker thread could not be spawned at all (thread ceiling or OS
+    /// spawn failure); [`LuaWorker::dead`] fabricates a worker already in this
+    /// state so the plugin is disabled instead of the daemon crashing.
+    SpawnFailed,
+}
+
+impl WedgeReason {
+    fn describe(self) -> &'static str {
+        match self {
+            WedgeReason::Timeout => "killed after a timeout",
+            WedgeReason::SpawnFailed => "failed to start",
+        }
+    }
+}
+
+/// Lifecycle of a [`LuaWorker`]'s OS thread: `Starting -> Healthy | Closed`,
+/// `Healthy -> Wedged`, `Healthy -> Closing -> Closed`. `Wedged`/`Closed` are
+/// terminal — never revived; a fresh worker is spawned instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum WorkerState {
+    Starting,
+    Healthy,
+    Wedged(WedgeReason),
+    Closing,
+    Closed,
+}
 
 /// Process-wide ceiling on concurrent Lua worker threads, so a flood of plugins
 /// (or one plugin repeatedly respawned) can't exhaust OS threads.
@@ -54,9 +90,13 @@ pub(super) struct LuaWorker<Cmd> {
     /// hang too. On timeout the worker is poisoned so those later requests fail
     /// fast instead of piling up on the wedged thread.
     call_timeout: Duration,
-    /// Set once a request times out: the worker thread is presumed wedged, so
-    /// every subsequent request short-circuits rather than enqueueing.
-    dead: Arc<AtomicBool>,
+    /// Current lifecycle state, shared with the worker thread so it can
+    /// report `Starting -> Healthy -> Closing -> Closed` as it runs.
+    state: Arc<Mutex<WorkerState>>,
+    /// Monotonic per-request counter (shared across clones of the same
+    /// worker) so a timeout or dropped-reply error can be correlated to a
+    /// specific in-flight call in logs.
+    next_req_id: Arc<AtomicU64>,
 }
 
 impl<Cmd> Clone for LuaWorker<Cmd> {
@@ -65,7 +105,8 @@ impl<Cmd> Clone for LuaWorker<Cmd> {
             tx: self.tx.clone(),
             label: self.label,
             call_timeout: self.call_timeout,
-            dead: self.dead.clone(),
+            state: self.state.clone(),
+            next_req_id: self.next_req_id.clone(),
         }
     }
 }
@@ -92,21 +133,26 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
             ));
         }
         let (tx, rx) = mpsc::channel(WORKER_QUEUE_CAP);
+        let state = Arc::new(Mutex::new(WorkerState::Starting));
+        let thread_state = state.clone();
         let spawned = std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
                 let _slot = WorkerSlot;
                 match build() {
                     Ok(ctx) => {
+                        *thread_state.lock().unwrap() = WorkerState::Healthy;
                         let mut rx = rx;
                         while let Some(cmd) = rx.blocking_recv() {
                             if handle(cmd, &ctx).is_break() {
                                 break;
                             }
                         }
+                        *thread_state.lock().unwrap() = WorkerState::Closing;
                     }
                     Err(e) => log::error!("{label} worker stopped: {e:#}"),
                 }
+                *thread_state.lock().unwrap() = WorkerState::Closed;
             });
         if let Err(e) = spawned {
             WORKER_COUNT.fetch_sub(1, Ordering::Relaxed);
@@ -116,7 +162,8 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
             tx,
             label,
             call_timeout,
-            dead: Arc::new(AtomicBool::new(false)),
+            state,
+            next_req_id: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -130,8 +177,17 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
             tx,
             label,
             call_timeout: Duration::from_secs(1),
-            dead: Arc::new(AtomicBool::new(true)),
+            state: Arc::new(Mutex::new(WorkerState::Wedged(WedgeReason::SpawnFailed))),
+            next_req_id: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Snapshot of the current lifecycle state.
+    // Only exercised by tests today; will feed the plugin runtime state
+    // machine (AD-04 phase 1c).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn state(&self) -> WorkerState {
+        self.state.lock().unwrap().clone()
     }
 
     /// Send a command carrying a `oneshot` reply sender and await the answer,
@@ -141,23 +197,36 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
         &self,
         make: impl FnOnce(oneshot::Sender<T>) -> Cmd,
     ) -> Result<T> {
-        if self.dead.load(Ordering::Relaxed) {
-            return Err(anyhow!(
-                "{} worker is wedged (killed after a timeout)",
-                self.label
-            ));
+        let req_id = self.next_req_id.fetch_add(1, Ordering::Relaxed);
+        match &*self.state.lock().unwrap() {
+            WorkerState::Wedged(reason) => {
+                return Err(anyhow!(
+                    "{} worker is wedged ({})",
+                    self.label,
+                    reason.describe()
+                ));
+            }
+            WorkerState::Closing | WorkerState::Closed => {
+                return Err(anyhow!("{} worker is gone", self.label));
+            }
+            WorkerState::Starting | WorkerState::Healthy => {}
         }
         let (reply, rx) = oneshot::channel();
         self.tx.try_send(make(reply)).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => anyhow!("{} worker is busy", self.label),
-            mpsc::error::TrySendError::Closed(_) => anyhow!("{} worker is gone", self.label),
+            mpsc::error::TrySendError::Closed(_) => {
+                *self.state.lock().unwrap() = WorkerState::Closed;
+                anyhow!("{} worker is gone", self.label)
+            }
         })?;
         match tokio::time::timeout(self.call_timeout, rx).await {
-            Ok(res) => res.map_err(|_| anyhow!("{} worker dropped the reply", self.label)),
+            Ok(res) => {
+                res.map_err(|_| anyhow!("{} worker dropped the reply (req {req_id})", self.label))
+            }
             Err(_) => {
-                self.dead.store(true, Ordering::Relaxed);
+                *self.state.lock().unwrap() = WorkerState::Wedged(WedgeReason::Timeout);
                 Err(anyhow!(
-                    "{} worker exceeded its {:?} call deadline",
+                    "{} worker exceeded its {:?} call deadline (req {req_id})",
                     self.label,
                     self.call_timeout
                 ))
@@ -234,6 +303,91 @@ mod tests {
         assert!(err.to_string().contains("wedged"), "{err}");
     }
 
+    #[test]
+    fn dead_worker_starts_wedged_with_spawn_failed_reason() {
+        let worker: LuaWorker<Job> = LuaWorker::dead("test");
+        assert_eq!(
+            worker.state(),
+            WorkerState::Wedged(WedgeReason::SpawnFailed)
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_reaches_healthy_after_a_successful_request() {
+        let worker = spawn_counter(7);
+        let got: i32 = worker
+            .request(|reply| {
+                Box::new(move |ctx: &i32| {
+                    let _ = reply.send(*ctx);
+                    ControlFlow::Continue(())
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(got, 7);
+        assert_eq!(worker.state(), WorkerState::Healthy);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_transitions_state_to_wedged_timeout() {
+        let worker = spawn_counter_with_timeout(0, Duration::from_millis(50));
+        let _ = worker
+            .request(|reply: oneshot::Sender<()>| {
+                Box::new(move |_: &i32| {
+                    std::thread::sleep(Duration::from_secs(60));
+                    let _ = reply.send(());
+                    ControlFlow::Continue(())
+                }) as Job
+            })
+            .await;
+        assert_eq!(worker.state(), WorkerState::Wedged(WedgeReason::Timeout));
+    }
+
+    #[tokio::test]
+    async fn request_ids_are_monotonic_per_worker() {
+        let worker = spawn_counter(0);
+        // A job that never sends on `reply` fails deterministically with the
+        // "dropped the reply" error, letting us read `req_id` out of it
+        // without racing a real timeout.
+        let err0 = worker
+            .request(|_reply: oneshot::Sender<()>| {
+                Box::new(|_: &i32| ControlFlow::Continue(())) as Job
+            })
+            .await
+            .unwrap_err();
+        let err1 = worker
+            .request(|_reply: oneshot::Sender<()>| {
+                Box::new(|_: &i32| ControlFlow::Continue(())) as Job
+            })
+            .await
+            .unwrap_err();
+        assert!(err0.to_string().contains("req 0"), "{err0}");
+        assert!(err1.to_string().contains("req 1"), "{err1}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handler_break_ends_the_loop_and_state_becomes_closed() {
+        let worker = spawn_counter(0);
+        worker
+            .request(|reply: oneshot::Sender<()>| {
+                Box::new(move |_: &i32| {
+                    let _ = reply.send(());
+                    ControlFlow::Break(())
+                }) as Job
+            })
+            .await
+            .unwrap();
+        // The thread transitions Closing -> Closed after returning from the
+        // loop, just after replying; poll briefly rather than racing it.
+        for _ in 0..50 {
+            if worker.state() == WorkerState::Closed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(worker.state(), WorkerState::Closed);
+    }
+
     #[tokio::test]
     async fn request_round_trips_through_the_worker() {
         let worker = spawn_counter(41);
@@ -272,7 +426,8 @@ mod tests {
             tx,
             label: "test",
             call_timeout: Duration::from_secs(5),
-            dead: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(WorkerState::Healthy)),
+            next_req_id: Arc::new(AtomicU64::new(0)),
         };
         let err = worker
             .request(|reply| {

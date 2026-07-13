@@ -809,22 +809,18 @@ mod capability_tests {
         let dev = MockDevice::new("lcd_dev").with_lcd();
         let slot = dev.lcd.as_ref().unwrap();
 
-        // Set up all 8 fields via the slot (mimicking what save_state captures)
         slot.set_brightness(80);
         slot.set_rotation(halod_shared::types::ScreenRotation::R90);
-        slot.set_mode(halod_shared::types::LcdMode::Image);
         slot.set_active_image(Some("test.png".into()));
         slot.set_raw_streaming(true);
-        slot.set_video_path(Some("/tmp/v.mp4".into()));
 
         let saved = LcdCap::save_state(&dev);
         assert_eq!(saved["brightness"], 80);
         assert_eq!(saved["rotation"], "r90");
         assert_eq!(saved["active_image"], "test.png");
         assert_eq!(saved["raw_streaming"], true);
-        assert_eq!(saved["video_path"], "/tmp/v.mp4");
+        assert_eq!(saved["video_path"], serde_json::Value::Null);
 
-        // Restore on a fresh device
         let dev2 = MockDevice::new("lcd_dev2").with_lcd();
         LcdCap::restore_state(&dev2, &saved).await;
         let slot2 = dev2.lcd.as_ref().unwrap();
@@ -834,6 +830,21 @@ mod capability_tests {
         assert!(matches!(slot2.mode(), halod_shared::types::LcdMode::Image));
         assert_eq!(slot2.active_image(), Some("test.png".into()));
         assert!(slot2.raw_streaming());
+        assert_eq!(slot2.video_path(), None);
+    }
+
+    #[tokio::test]
+    async fn lcd_restore_video_mode_is_not_clobbered_by_the_null_sibling_fields() {
+        let dev = MockDevice::new("lcd_dev").with_lcd();
+        let slot = dev.lcd.as_ref().unwrap();
+        slot.set_video_path(Some("/tmp/v.mp4".into()));
+        let saved = LcdCap::save_state(&dev);
+
+        let dev2 = MockDevice::new("lcd_dev2").with_lcd();
+        LcdCap::restore_state(&dev2, &saved).await;
+        let slot2 = dev2.lcd.as_ref().unwrap();
+
         assert_eq!(slot2.video_path(), Some("/tmp/v.mp4".into()));
+        assert!(matches!(slot2.mode(), halod_shared::types::LcdMode::Video));
     }
 }

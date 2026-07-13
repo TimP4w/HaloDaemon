@@ -256,6 +256,33 @@ impl Controls {
     }
 }
 
+/// Why a [`LuaDevice`] is [`RuntimeState::Degraded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DegradeReason {
+    /// A tracked capability call (`track`) returned `Err`.
+    CallFailed,
+    /// `resync_children` couldn't enumerate the remote's controllers.
+    EnumerateFailed,
+}
+
+/// Runtime lifecycle of an integration [`LuaDevice`] (root or child), shared
+/// by a root and all its children — one socket pool, one state. Plain device
+/// plugins have none (`LuaDevice::runtime` is `None`) and are always live.
+///
+/// Transitions: `OpeningTransport -> Initializing -> Online <-> Degraded`
+/// (`track`/`resync_children` mirror the last call, self-healing on success)
+/// `-> Closing -> Closed` (terminal — a call landing after close can't
+/// resurrect the device).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeState {
+    OpeningTransport,
+    Initializing,
+    Online,
+    Degraded(DegradeReason),
+    Closing,
+    Closed,
+}
+
 /// A device whose behaviour is defined by a plugin script rather than native
 /// Rust.
 pub struct LuaDevice {
@@ -275,9 +302,10 @@ pub struct LuaDevice {
     /// For integration roots only: the manifest each controller child is
     /// synthesized from (`child_manifest_for`).
     root_manifest: Option<Arc<PluginManifest>>,
-    /// Integration liveness, shared by a root and all its children (one socket
-    /// pool → one flag). `None` for non-integration devices (always live).
-    liveness: Option<Arc<AtomicBool>>,
+    /// Integration runtime lifecycle, shared by a root and all its children
+    /// (one socket pool → one state). `None` for non-integration devices
+    /// (always live). See [`RuntimeState`].
+    runtime: Option<Arc<Mutex<RuntimeState>>>,
 
     /// Capability sections the manifest declared, in advertised order. Drives
     /// `capabilities()` (chain also implies `Controller`; integration adds one).
@@ -365,7 +393,7 @@ impl LuaDevice {
 
     /// A plugin with capabilities, backed by a worker over `transport`.
     #[allow(clippy::too_many_arguments)]
-    pub fn with_transport(
+    pub(super) fn with_transport(
         id: String,
         manifest: &PluginManifest,
         spec: &DeviceSpec,
@@ -375,7 +403,9 @@ impl LuaDevice {
         granted: Vec<Permission>,
         config: HashMap<String, String>,
         notify: Weak<crate::state::AppState>,
+        runtime: Arc<Mutex<RuntimeState>>,
     ) -> Self {
+        *runtime.lock().unwrap() = RuntimeState::Initializing;
         Self::with_worker(
             id,
             manifest,
@@ -386,12 +416,14 @@ impl LuaDevice {
             granted,
             config,
             notify,
+            Some(runtime),
         )
     }
 
-    /// The headless root of a config-instantiated integration plugin
+    /// The headless root of a config-instantiated integration plugin. `runtime`
+    /// is handled the same way as [`Self::with_transport`]; children share it.
     #[allow(clippy::too_many_arguments)]
-    pub fn integration_root(
+    pub(super) fn integration_root(
         id: String,
         manifest: &PluginManifest,
         transport: PluginIo,
@@ -400,17 +432,27 @@ impl LuaDevice {
         granted: Vec<Permission>,
         config: HashMap<String, String>,
         notify: Weak<crate::state::AppState>,
+        runtime: Arc<Mutex<RuntimeState>>,
     ) -> Self {
         let dev_match = DevMatch {
             transport: "tcp".to_owned(),
             ..Default::default()
         };
         let mut dev = Self::with_worker(
-            id, manifest, None, dev_match, transport, handle, granted, config, notify,
+            id,
+            manifest,
+            None,
+            dev_match,
+            transport,
+            handle,
+            granted,
+            config,
+            notify,
+            Some(runtime.clone()),
         );
         dev.integration_child_worker = Some(child_worker);
         dev.root_manifest = Some(Arc::new(manifest.clone()));
-        dev.liveness = Some(Arc::new(AtomicBool::new(true)));
+        *runtime.lock().unwrap() = RuntimeState::Initializing;
         dev
     }
 
@@ -420,7 +462,7 @@ impl LuaDevice {
     /// the shared script routes each capability call to the right remote
     /// controller.
     #[allow(clippy::too_many_arguments)]
-    pub fn integration_child(
+    fn integration_child(
         id: String,
         name: String,
         vendor: String,
@@ -431,7 +473,7 @@ impl LuaDevice {
         granted: Vec<Permission>,
         config: HashMap<String, String>,
         notify: Weak<crate::state::AppState>,
-        liveness: Option<Arc<AtomicBool>>,
+        runtime: Arc<Mutex<RuntimeState>>,
     ) -> Self {
         let dev_match = DevMatch {
             transport: "tcp".to_owned(),
@@ -439,14 +481,27 @@ impl LuaDevice {
             ..Default::default()
         };
         let mut dev = Self::with_worker(
-            id, manifest, None, dev_match, transport, handle, granted, config, notify,
+            id,
+            manifest,
+            None,
+            dev_match,
+            transport,
+            handle,
+            granted,
+            config,
+            notify,
+            Some(runtime),
         );
         dev.name = name;
         dev.vendor = vendor;
-        dev.liveness = liveness;
         dev
     }
 
+    /// `runtime` is stored as-is (already `OpeningTransport`, or a shared
+    /// root state for a child) — callers own the `OpeningTransport ->
+    /// Initializing` transition, since only they know whether they're
+    /// building the owner or sharing an already-running root's state. `None`
+    /// for plain device plugins (see [`Self::with_transport`]).
     #[allow(clippy::too_many_arguments)]
     fn with_worker(
         id: String,
@@ -458,6 +513,7 @@ impl LuaDevice {
         granted: Vec<Permission>,
         config: HashMap<String, String>,
         notify: Weak<crate::state::AppState>,
+        runtime: Option<Arc<Mutex<RuntimeState>>>,
     ) -> Self {
         // Keep a handle to the (metered) transport so the device can report
         // write-rate/throughput; the worker owns the one it does I/O through.
@@ -487,6 +543,7 @@ impl LuaDevice {
             Some(rate_transport),
             notify,
         );
+        dev.runtime = runtime;
         dev.audio_registry = Some(audio_registry.clone());
         dev.audio_guard = Some(super::audio_api::AudioGuard::new(
             audio_registry,
@@ -541,7 +598,7 @@ impl LuaDevice {
             transport,
             integration_child_worker: None,
             root_manifest: None,
-            liveness: None,
+            runtime: None,
             caps: declared_caps(manifest),
             lcd_descriptor: OnceLock::new(),
             lcd_slot: LcdStateSlot::default(),
@@ -635,9 +692,17 @@ impl LuaDevice {
     /// fan duty, sensor poll) otherwise only log the failure, so a broken plugin
     /// is invisible — this turns the first failure of an episode into one toast.
     async fn track<T>(&self, result: Result<T>) -> Result<T> {
-        // A failing call greys the integration; a success self-heals it.
-        if let Some(l) = &self.liveness {
-            l.store(result.is_ok(), Ordering::Relaxed);
+        // A failing call greys the integration; a success self-heals it —
+        // unless the device already closed, which is terminal.
+        if let Some(r) = &self.runtime {
+            let mut state = r.lock().unwrap();
+            if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed) {
+                *state = if result.is_ok() {
+                    RuntimeState::Online
+                } else {
+                    RuntimeState::Degraded(DegradeReason::CallFailed)
+                };
+            }
         }
         let Some(app) = self.notify.upgrade() else {
             return result;
@@ -735,9 +800,15 @@ impl Device for LuaDevice {
     }
 
     fn is_live(&self) -> bool {
-        self.liveness
+        self.runtime
             .as_ref()
-            .is_none_or(|l| l.load(Ordering::Relaxed))
+            .is_none_or(|r| match *r.lock().unwrap() {
+                RuntimeState::OpeningTransport
+                | RuntimeState::Initializing
+                | RuntimeState::Online => true,
+                RuntimeState::Degraded(_) => self.plugin_type != PluginKind::Integration,
+                RuntimeState::Closing | RuntimeState::Closed => false,
+            })
     }
 
     async fn wire_device_connected(&self) -> bool {
@@ -748,7 +819,15 @@ impl Device for LuaDevice {
         let Some(w) = &self.worker else {
             return Ok(true);
         };
-        let outcome = w.initialize().await?;
+        let outcome = match w.initialize().await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if let Some(runtime) = &self.runtime {
+                    *runtime.lock().unwrap() = RuntimeState::Degraded(DegradeReason::CallFailed);
+                }
+                return Err(error);
+            }
+        };
         if let Some(model) = outcome.model {
             let _ = self.dynamic_model.set(model);
         }
@@ -757,6 +836,9 @@ impl Device for LuaDevice {
                 zones,
                 &self.rgb_descriptor.native_effects,
             ));
+        }
+        if let Some(runtime) = &self.runtime {
+            *runtime.lock().unwrap() = RuntimeState::Online;
         }
         if let Some(lcd) = outcome.lcd {
             self.lcd_slot.set_brightness(lcd.brightness);
@@ -793,6 +875,9 @@ impl Device for LuaDevice {
     }
 
     async fn close(&self) {
+        if let Some(r) = &self.runtime {
+            *r.lock().unwrap() = RuntimeState::Closing;
+        }
         if let Some(w) = &self.worker {
             w.close().await;
         }
@@ -800,6 +885,9 @@ impl Device for LuaDevice {
         // worker's close request failed (wedged/dead worker).
         if let Some(reg) = &self.audio_registry {
             super::audio_api::drain_and_remove(reg).await;
+        }
+        if let Some(r) = &self.runtime {
+            *r.lock().unwrap() = RuntimeState::Closed;
         }
     }
 
@@ -962,8 +1050,11 @@ impl Controller for LuaDevice {
         let detected = match self.worker()?.enumerate_controllers().await {
             Ok(d) => d,
             Err(e) => {
-                if let Some(l) = &self.liveness {
-                    l.store(false, Ordering::Relaxed);
+                if let Some(r) = &self.runtime {
+                    let mut state = r.lock().unwrap();
+                    if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed) {
+                        *state = RuntimeState::Degraded(DegradeReason::EnumerateFailed);
+                    }
                 }
                 return Err(e);
             }
@@ -1121,8 +1212,8 @@ impl LuaDevice {
     }
 
     /// Build one integration controller as a child `LuaDevice` sharing the
-    /// root's liveness flag. `None` on connect/init failure. Shared by first-time
-    /// discovery and `resync_children`.
+    /// root's [`RuntimeState`]. `None` on connect/init failure. Shared by
+    /// first-time discovery and `resync_children`.
     async fn build_child(
         &self,
         controller: &DetectedController,
@@ -1166,7 +1257,9 @@ impl LuaDevice {
                 ctx.granted.clone(),
                 ctx.config.clone(),
                 self.notify.clone(),
-                self.liveness.clone(),
+                self.runtime
+                    .clone()
+                    .expect("integration root always has runtime state"),
             );
             d.set_self_ref(weak.clone());
             d
@@ -1664,6 +1757,12 @@ mod tests {
         }
     }
 
+    /// A fresh `OpeningTransport` handle, as a caller would create before
+    /// opening a transport, for constructors under test.
+    fn opening_runtime() -> Arc<Mutex<RuntimeState>> {
+        Arc::new(Mutex::new(RuntimeState::OpeningTransport))
+    }
+
     /// Build a HID plugin device over a mock byte-stream transport.
     fn hid_device(id: &str, manifest: &PluginManifest, transport: Arc<dyn Transport>) -> LuaDevice {
         let spec = &manifest.devices[0];
@@ -1681,6 +1780,7 @@ mod tests {
             Vec::<Permission>::new(),
             HashMap::new(),
             notify,
+            opening_runtime(),
         )
     }
 
@@ -2274,6 +2374,7 @@ mod tests {
                 Vec::<Permission>::new(),
                 HashMap::new(),
                 notify,
+                opening_runtime(),
             );
             d.set_self_ref(weak.clone());
             d
@@ -2410,6 +2511,7 @@ mod tests {
                 Vec::<Permission>::new(),
                 HashMap::new(),
                 notify,
+                opening_runtime(),
             );
             d.set_self_ref(weak.clone());
             d
@@ -2431,8 +2533,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn track_flips_integration_liveness_to_last_result() {
-        // The shared root/child flag greys the integration on a failed call and
-        // self-heals on a success — `is_live()` always mirrors the last result.
+        // The shared root/child runtime state greys the integration on a failed
+        // call and self-heals on a success — `is_live()` always mirrors the
+        // last result.
         let dev = integration_device(Arc::new(MockTransport::empty()));
         assert!(dev.is_live(), "starts live");
         let _ = dev.track::<()>(Err(anyhow::anyhow!("boom"))).await;
@@ -2442,8 +2545,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_is_terminal_and_a_later_success_does_not_resurrect_it() {
+        // Closing -> Closed is terminal: a capability call that completes
+        // after close() must not flip the device back to live.
+        let dev = integration_device(Arc::new(MockTransport::empty()));
+        dev.close().await;
+        assert!(!dev.is_live(), "closed devices are not live");
+        let _ = dev.track::<()>(Ok(())).await;
+        assert!(
+            !dev.is_live(),
+            "a tracked success after close must not resurrect the device"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn non_integration_device_is_always_live() {
-        // A device with no remote backend has no liveness flag; `track` never
+        // A device with no remote backend has no runtime state; `track` never
         // greys it, so engines always drive it.
         let dev = device(Arc::new(MockTransport::empty()));
         assert!(dev.is_live());
@@ -2668,6 +2785,7 @@ mod tests {
                 Vec::<Permission>::new(),
                 HashMap::new(),
                 notify,
+                opening_runtime(),
             );
             d.set_self_ref(weak.clone());
             d
@@ -2727,6 +2845,7 @@ mod tests {
                 Vec::<Permission>::new(),
                 HashMap::new(),
                 notify,
+                opening_runtime(),
             );
             d.set_self_ref(weak.clone());
             d
@@ -2789,6 +2908,7 @@ mod tests {
             Vec::<Permission>::new(),
             HashMap::new(),
             Arc::downgrade(&app),
+            opening_runtime(),
         );
 
         let fail = || RgbState::Static {

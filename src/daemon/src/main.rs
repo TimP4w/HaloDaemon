@@ -162,8 +162,8 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
         .build();
 
     let app = Arc::new(state::AppState::new(cfg).with_secret_store(secrets::open_secret_store()));
-    let _save_worker = crate::state::start_config_save_worker(app.clone());
-    let _persist_worker = crate::state::start_persist_worker(app.clone());
+    let save_worker = crate::state::start_config_save_worker(app.clone());
+    let persist_worker = crate::state::start_persist_worker(app.clone());
 
     let buffering_logger = logger::BufferingLogger::new(env_logger, Arc::clone(&app.log_buffer));
     if let Err(e) = log::set_boxed_logger(Box::new(buffering_logger)) {
@@ -269,24 +269,27 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
         focus_watcher_handle.abort_handle(),
     ];
     let supervise = |handle, title, body| spawn_engine_supervisor(app.clone(), handle, title, body);
-    supervise(
-        fan_curve_handle,
-        "FanCurve engine exited",
-        "FanCurve engine exited unexpectedly, fan control will no longer respond to sensors.",
-    );
-    supervise(
-        rgb_handle,
-        "RGB engine exited",
-        "RGB engine exited unexpectedly, RGB animations will stop.",
-    );
-    supervise(
-        lcd_handle,
-        "LCD engine exited",
-        "LCD engine exited unexpectedly, device LCDs will stop updating.",
-    );
-    supervise(focus_watcher_handle, "FocusWatcher engine exited", "");
+    let engine_supervisors = [
+        supervise(
+            fan_curve_handle,
+            "FanCurve engine exited",
+            "FanCurve engine exited unexpectedly, fan control will no longer respond to sensors.",
+        ),
+        supervise(
+            rgb_handle,
+            "RGB engine exited",
+            "RGB engine exited unexpectedly, RGB animations will stop.",
+        ),
+        supervise(
+            lcd_handle,
+            "LCD engine exited",
+            "LCD engine exited unexpectedly, device LCDs will stop updating.",
+        ),
+        supervise(focus_watcher_handle, "FocusWatcher engine exited", ""),
+    ];
 
     // Action executor may fail to init on headless Linux.
+    let mut remap_handle = None;
     match input::action_executor::ActionExecutor::new() {
         Ok(executor) => {
             let executor = Arc::new(executor);
@@ -294,14 +297,8 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
             let remap_engine =
                 Arc::new(input::key_remap::KeyRemapEngine::new(executor, app.clone()));
             let handle = remap_engine.start();
+            remap_handle = Some(handle);
             // KeyRemapEngine has no config channel; supervise its handle.
-            tokio::spawn(async move {
-                if let Err(e) = handle.await {
-                    if !e.is_cancelled() {
-                        log::warn!("KeyRemapEngine exited unexpectedly: {e}");
-                    }
-                }
-            });
         }
         Err(e) => {
             platform::notify::send(
@@ -348,6 +345,35 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
     for abort in &engine_aborts {
         abort.abort();
     }
+    for supervisor in engine_supervisors {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), supervisor).await;
+    }
+
+    app.input.shutdown();
+    if let Some(handle) = remap_handle {
+        if tokio::time::timeout(std::time::Duration::from_secs(3), handle)
+            .await
+            .is_err()
+        {
+            log::error!("KeyRemapEngine did not finish input cleanup");
+        }
+    }
+    if let Some(executor) = app.input.executor() {
+        executor.shutdown().await;
+    }
+
+    // Persistence owns its shutdown transition and performs one final flush of
+    // the newest version before it exits. The device-state worker has no disk
+    // queue of its own and can be cancelled after engines stop producing work.
+    app.persistence.shutdown_tx.send_replace(true);
+    if tokio::time::timeout(std::time::Duration::from_secs(5), save_worker)
+        .await
+        .is_err()
+    {
+        log::error!("Config persistence worker did not finish its shutdown flush");
+    }
+    persist_worker.abort();
+    let _ = persist_worker.await;
 
     state::shutdown(app).await;
     Ok(())

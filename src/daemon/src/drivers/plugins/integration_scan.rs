@@ -105,6 +105,12 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
     let open_transport: Arc<dyn Fn() -> Result<PluginIo> + Send + Sync> =
         Arc::new(move || open_probe(&open_manifest, &open_config, &open_granted));
 
+    // Created before the transport opens, so `OpeningTransport` is real — if
+    // connect fails, this Arc is simply dropped unobserved.
+    let runtime_state = Arc::new(std::sync::Mutex::new(
+        super::device::RuntimeState::OpeningTransport,
+    ));
+
     // Drive every controller over the *one* root connection: a slot-shared
     // `Transport` serialises each controller's frame write behind the same
     // socket lock, so sibling controllers (e.g. the sticks of a DRAM kit) land
@@ -166,6 +172,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
             granted,
             config,
             notify,
+            runtime_state,
         );
         dev.set_self_ref(weak.clone());
         dev

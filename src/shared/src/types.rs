@@ -1212,6 +1212,17 @@ pub enum LcdMode {
     Video,
 }
 
+/// Orthogonal to `LcdMode`: whether the active content is actually rendering.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LcdHealth {
+    #[default]
+    Stable,
+    Starting,
+    Stopping,
+    Failed(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LcdStatus {
     pub descriptor: LcdDescriptor,
@@ -1224,6 +1235,8 @@ pub struct LcdStatus {
     pub video_path: Option<String>,
     #[serde(default)]
     pub raw_streaming: bool,
+    #[serde(default)]
+    pub health: LcdHealth,
 }
 
 /// Which layer the device's DPI is currently managed by.

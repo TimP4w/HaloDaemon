@@ -130,6 +130,7 @@ mod tests {
                 active_image: None,
                 raw_streaming: false,
                 video_path: None,
+                health: Default::default(),
             }
         }
         async fn set_image(&self, _data: &[u8]) -> anyhow::Result<()> {

@@ -271,6 +271,9 @@ fn open_device(
         manifest.permissions.clone(),
         std::collections::HashMap::new(),
         std::sync::Weak::new(),
+        Arc::new(std::sync::Mutex::new(
+            super::device::RuntimeState::OpeningTransport,
+        )),
     ));
 
     let dev_table = lua.create_table().anyhow()?;

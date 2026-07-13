@@ -5,7 +5,7 @@ use tokio::sync::{watch, Mutex, RwLock};
 
 use crate::config::Config;
 use crate::ipc::ClientHandle;
-use crate::registry::discovery::DiscoveryFilter;
+use crate::registry::discovery::DiscoveryScope;
 use halod_shared::types::{DiscoveryStatus, LogEntry};
 
 mod persistence;
@@ -56,10 +56,8 @@ pub struct AppState {
     /// Notified to request a graceful daemon shutdown (e.g. an IPC `shutdown`
     /// command from the tray on a dev/plain run).
     pub shutdown: tokio::sync::Notify,
-    /// An optional discovery gate consulted by scanners. When set, only
-    /// handles matching one of the declared `DeviceSpec`s are registered;
-    /// every other handle is silently skipped. `None` means no filter.
-    pub discovery_filter: RwLock<Option<Arc<DiscoveryFilter>>>,
+    /// Discovery gate consulted by scanners. See [`DiscoveryScope`].
+    pub discovery_scope: RwLock<DiscoveryScope>,
     /// Latest plugin update/on-disk status, replayed to each client on connect.
     pub plugin_update_status: Mutex<Vec<halod_shared::types::PluginUpdateStatus>>,
     /// The device-plugin registry (loaded manifests, consent/config, notice
@@ -90,7 +88,7 @@ impl AppState {
             ))),
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
-            discovery_filter: RwLock::new(None),
+            discovery_scope: RwLock::new(DiscoveryScope::Clean),
             plugin_update_status: Mutex::new(Vec::new()),
             registry: crate::drivers::plugins::Registry::default(),
             secret_store: Arc::new(crate::secrets::FileKeyStore::new()),
@@ -113,7 +111,9 @@ impl AppState {
     /// Signal that the config is dirty. The save worker debounces and snapshots
     /// `self.config` once when the window fires, so callers need not clone.
     pub fn request_config_save(&self) {
-        let _ = self.persistence.save_tx.send(());
+        self.persistence.save_tx.send_modify(|version| {
+            *version = version.wrapping_add(1);
+        });
     }
 
     /// Override the secret store (e.g. with `crate::secrets::open_secret_store()`
@@ -143,20 +143,19 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    /// Set the discovery filter (scoped discover will skip non-matching handles).
-    pub async fn set_discovery_filter(&self, filter: Option<Arc<DiscoveryFilter>>) {
-        *self.discovery_filter.write().await = filter;
+    pub async fn set_discovery_scope(&self, scope: DiscoveryScope) {
+        *self.discovery_scope.write().await = scope;
     }
 
-    /// True when `handle` passes the current filter (or no filter is set).
+    /// True when `handle` passes the current scope (`PluginSet`'s filter, or
+    /// unconditionally under `Clean`/`Full`).
     pub async fn handle_in_scope(
         &self,
         handle: &crate::registry::discovery::DiscoveryHandle<'_>,
     ) -> bool {
-        let guard = self.discovery_filter.read().await;
-        match guard.as_ref() {
-            Some(f) => f.matches(handle),
-            None => true,
+        match &*self.discovery_scope.read().await {
+            DiscoveryScope::PluginSet { filter, .. } => filter.matches(handle),
+            DiscoveryScope::Clean | DiscoveryScope::Full => true,
         }
     }
 }
@@ -464,18 +463,24 @@ mod tests {
             interface_number: None,
         };
 
-        // No filter set — every handle passes.
+        // Clean — every handle passes.
         assert!(app.handle_in_scope(&handle).await);
 
         let spec = serde_json::from_value(serde_json::json!({
             "vendor": "x", "model": "y", "transport": "hid", "vid": 9, "pid": 9,
         }))
         .unwrap();
-        app.set_discovery_filter(Some(Arc::new(DiscoveryFilter { specs: vec![spec] })))
-            .await;
+        app.set_discovery_scope(DiscoveryScope::PluginSet {
+            plugin_ids: ["p".to_string()].into_iter().collect(),
+            filter: Arc::new(DiscoveryFilter { specs: vec![spec] }),
+        })
+        .await;
         assert!(!app.handle_in_scope(&handle).await, "out-of-scope handle");
 
-        app.set_discovery_filter(None).await;
+        app.set_discovery_scope(DiscoveryScope::Full).await;
+        assert!(app.handle_in_scope(&handle).await, "Full is unrestricted");
+
+        app.set_discovery_scope(DiscoveryScope::Clean).await;
         assert!(app.handle_in_scope(&handle).await);
     }
 }

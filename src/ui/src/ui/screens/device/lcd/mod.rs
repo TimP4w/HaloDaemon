@@ -329,6 +329,7 @@ mod tests {
             active_image: active_image.map(str::to_string),
             video_path: None,
             raw_streaming: false,
+            health: Default::default(),
         }
     }
 

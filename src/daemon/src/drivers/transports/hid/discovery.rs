@@ -517,22 +517,22 @@ async fn add_hid_device(
         usage,
         interface_number,
     };
-    // Scoped-plugin gate: with a discovery filter active, only in-scope handles
-    // (the changed plugins' hardware) register. A scoped device otherwise goes
+    // Scoped-plugin gate: under `PluginSet`, only in-scope handles (the
+    // changed plugins' hardware) register. A scoped device otherwise goes
     // through the same register → children → track flow as a normal one, so a
     // re-enabled plugin gets its children and HID tracking too — only the
     // native-eviction below and skipping the TransportSwitchable adoption are
     // scoped-specific (a plugin HID device always registers as a new primary).
     let scoped = {
-        let filter = app.discovery_filter.read().await;
-        match filter.as_ref() {
-            Some(f) => {
-                if !f.matches(&handle) {
+        use crate::registry::discovery::DiscoveryScope;
+        match &*app.discovery_scope.read().await {
+            DiscoveryScope::PluginSet { filter, .. } => {
+                if !filter.matches(&handle) {
                     return;
                 }
                 true
             }
-            None => false,
+            DiscoveryScope::Clean | DiscoveryScope::Full => false,
         }
     };
 

@@ -15,6 +15,37 @@ use halod_shared::types::RepoUpdateStatus;
 
 use super::plugins::{apply_repo_plugins, purge_plugin_state, reload_registry, sanitize_slug};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RepoUpdateState {
+    Idle,
+    Fetching,
+    UpdateAvailable { sha: String },
+    CheckingOut,
+    Validating,
+    AwaitingConsent,
+    Ready,
+    Failed(String),
+}
+
+impl RepoUpdateState {
+    fn transition(&mut self, next: RepoUpdateState) -> Result<()> {
+        let allowed = matches!(
+            (&*self, &next),
+            (Self::Idle, Self::Fetching)
+                | (Self::Fetching, Self::UpdateAvailable { .. })
+                | (Self::UpdateAvailable { .. }, Self::CheckingOut)
+                | (Self::CheckingOut, Self::Validating)
+                | (Self::Validating, Self::AwaitingConsent | Self::Ready)
+                | (_, Self::Failed(_))
+        );
+        if !allowed {
+            anyhow::bail!("invalid plugin update transition: {self:?} -> {next:?}");
+        }
+        *self = next;
+        Ok(())
+    }
+}
+
 /// RFC 3339 timestamp for `PluginRepoRecord::last_sync`.
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -302,20 +333,25 @@ pub async fn update_plugin(plugin_id: String, app: Arc<AppState>) -> Result<()> 
     Ok(())
 }
 
+/// Steps: `Fetching` (remote tip) `-> CheckingOut` (into staging) `->
+/// Validating` `-> AwaitingConsent | Ready`, or `-> Failed`. The installed
+/// checkout is not touched until staging validation succeeds.
 async fn update_plugin_inner(plugin_id: String, app: &Arc<AppState>) -> Result<String> {
+    let mut lifecycle = RepoUpdateState::Idle;
+    lifecycle.transition(RepoUpdateState::Fetching)?;
     let (slug, subpath) = app
         .registry
         .repo_location_for(&plugin_id)
         .ok_or_else(|| anyhow::anyhow!("plugin '{plugin_id}' is not repo-sourced"))?;
     let branch = {
         let cfg = app.config.read().await;
-        cfg.plugins
+        let r = cfg
+            .plugins
             .repos
             .iter()
             .find(|r| r.slug == slug)
-            .ok_or_else(|| anyhow::anyhow!("unknown plugin repo '{slug}'"))?
-            .branch
-            .clone()
+            .ok_or_else(|| anyhow::anyhow!("unknown plugin repo '{slug}'"))?;
+        r.branch.clone()
     };
 
     let dir = crate::config::plugin_repos_dir().join(&slug);
@@ -325,6 +361,47 @@ async fn update_plugin_inner(plugin_id: String, app: &Arc<AppState>) -> Result<S
             .await
             .context("fetch task panicked")??
     };
+    lifecycle.transition(RepoUpdateState::UpdateAvailable {
+        sha: remote_sha.clone(),
+    })?;
+
+    // Validate a commit-object export before changing the installed checkout.
+    // The staging directory deliberately has the plugin id as its basename,
+    // because package validation requires directory name == manifest id.
+    lifecycle.transition(RepoUpdateState::CheckingOut)?;
+    let staging_root = dir.join(format!(".halod-validate-{}", uuid::Uuid::new_v4()));
+    let staging_plugin = staging_root.join(&plugin_id);
+    let export = {
+        let dir = dir.clone();
+        let sha = remote_sha.clone();
+        let subpath = subpath.clone();
+        let staging_plugin = staging_plugin.clone();
+        tokio::task::spawn_blocking(move || {
+            repo::export_plugin_subtree(&dir, &sha, &subpath, &staging_plugin)
+        })
+        .await
+        .context("staging checkout task panicked")?
+    };
+    if let Err(error) = export {
+        let _ = std::fs::remove_dir_all(&staging_root);
+        lifecycle.transition(RepoUpdateState::Failed(error.to_string()))?;
+        return Err(error).context("staging plugin update");
+    }
+    lifecycle.transition(RepoUpdateState::Validating)?;
+    let validation = {
+        let staging_plugin = staging_plugin.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::drivers::plugins::parse_manifest_from_dir(&staging_plugin)
+        })
+        .await
+        .context("validation task panicked")?
+    };
+    let _ = std::fs::remove_dir_all(&staging_root);
+    if let Err(error) = validation {
+        lifecycle.transition(RepoUpdateState::Failed(error.to_string()))?;
+        anyhow::bail!("updated plugin '{plugin_id}' failed validation: {error:#}");
+    }
+
     {
         let dir = dir.clone();
         let sha = remote_sha.clone();
@@ -333,6 +410,7 @@ async fn update_plugin_inner(plugin_id: String, app: &Arc<AppState>) -> Result<S
             .await
             .context("checkout task panicked")??;
     }
+
     {
         let mut cfg = app.config.write().await;
         if let Some(r) = cfg.plugins.repos.iter_mut().find(|r| r.slug == slug) {
@@ -345,6 +423,17 @@ async fn update_plugin_inner(plugin_id: String, app: &Arc<AppState>) -> Result<S
     }
     app.request_config_save();
     reload_registry(app).await;
+    let consented = app
+        .registry
+        .list(&*app.secret_store)
+        .into_iter()
+        .find(|plugin| plugin.id == plugin_id)
+        .is_some_and(|plugin| plugin.consented);
+    lifecycle.transition(if consented {
+        RepoUpdateState::Ready
+    } else {
+        RepoUpdateState::AwaitingConsent
+    })?;
     Ok(slug)
 }
 
@@ -773,6 +862,48 @@ mod tests {
                 Some(false),
                 "update_plugin must broadcast a plugin_updates frame clearing the flag"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_plugin_keeps_the_checkout_unchanged_when_validation_fails() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&file_url(src.path()));
+            let first_sha = init_source_repo(src.path(), &slug);
+            add_repo(file_url(src.path()), None, app.clone())
+                .await
+                .unwrap();
+
+            // Publish an upstream commit whose plugin.yaml id no longer matches
+            // the directory name — parse_manifest_from_dir rejects that.
+            let repo = git2::Repository::open(src.path()).unwrap();
+            std::fs::write(
+                src.path().join("plugin.yaml"),
+                "id: not-the-slug\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            )
+            .unwrap();
+            let second_sha = commit_all(&repo, "broken");
+            assert_ne!(first_sha, second_sha);
+
+            let err = update_plugin(slug.clone(), app.clone()).await.unwrap_err();
+            assert!(err.to_string().contains("failed validation"), "{err}");
+
+            let cfg = app.config.read().await;
+            let r = cfg.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
+            assert_eq!(
+                r.locked_sha, first_sha,
+                "a failed update must not advance locked_sha"
+            );
+            drop(cfg);
+
+            // Validation happened in staging, so the installed working tree was
+            // never replaced with the invalid content.
+            let dir = crate::config::plugin_repos_dir().join(&slug);
+            let manifest = crate::drivers::plugins::parse_manifest_from_dir(&dir)
+                .expect("the reverted checkout must parse again");
+            assert_eq!(manifest.plugin_id, slug);
         })
         .await;
     }

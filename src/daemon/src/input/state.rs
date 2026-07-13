@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::sync::atomic::AtomicU32;
-use std::sync::{Arc, OnceLock};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::broadcast;
 
 use crate::input::action_executor::ActionExecutor;
@@ -16,19 +16,14 @@ pub struct ButtonEvent {
     pub released: Vec<u16>,
 }
 
-/// Key-remap input plumbing: the button-event bus `KeyRemapEngine` consumes
-/// and the Layer Shift modifier state it owns.
+/// Key-remap input plumbing owned by `KeyRemapEngine`.
 pub struct InputState {
-    /// Button events emitted by diverted HID++ buttons; the sole input feed
-    /// for `KeyRemapEngine` (which is spawned standalone, not held as a
-    /// domain engine).
+    /// Sole input feed for `KeyRemapEngine`.
     pub button_event_tx: broadcast::Sender<ButtonEvent>,
-    /// Reference count of held Layer Shift buttons across all devices.
-    /// Layer Shift is active when this is > 0. Read/written only by
-    /// `KeyRemapEngine`.
-    pub layer_shift_active: AtomicU32,
-    /// Injection backend, wired at startup when it initializes successfully
-    /// (may fail on headless Linux); used by the `PlayMacro` usecase.
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// Held Layer Shift tokens, keyed by (device_id, cid); active iff non-empty.
+    layer_shift_held: Mutex<HashSet<(String, u16)>>,
+    /// Injection backend; unset on headless Linux.
     executor: OnceLock<Arc<ActionExecutor>>,
 }
 
@@ -37,7 +32,8 @@ impl InputState {
         let (button_event_tx, _) = broadcast::channel(256);
         Self {
             button_event_tx,
-            layer_shift_active: AtomicU32::new(0),
+            shutdown_tx: tokio::sync::watch::channel(false).0,
+            layer_shift_held: Mutex::new(HashSet::new()),
             executor: OnceLock::new(),
         }
     }
@@ -48,5 +44,41 @@ impl InputState {
 
     pub fn executor(&self) -> Option<Arc<ActionExecutor>> {
         self.executor.get().cloned()
+    }
+
+    pub fn layer_shift_active(&self) -> bool {
+        !self.layer_shift_held.lock().unwrap().is_empty()
+    }
+
+    /// Hold a Layer Shift token; idempotent if already held.
+    pub fn layer_shift_press(&self, device_id: &str, cid: u16) {
+        self.layer_shift_held
+            .lock()
+            .unwrap()
+            .insert((device_id.to_owned(), cid));
+    }
+
+    /// Release a Layer Shift token; a no-op if it wasn't held.
+    pub fn layer_shift_release(&self, device_id: &str, cid: u16) {
+        self.layer_shift_held
+            .lock()
+            .unwrap()
+            .remove(&(device_id.to_owned(), cid));
+    }
+
+    /// Direct disconnect cleanup, not just the synthetic-release broadcast.
+    pub fn layer_shift_clear_device(&self, device_id: &str) {
+        self.layer_shift_held
+            .lock()
+            .unwrap()
+            .retain(|(d, _)| d != device_id);
+    }
+
+    pub(crate) fn shutdown(&self) {
+        self.shutdown_tx.send_replace(true);
+    }
+
+    pub(crate) fn shutdown_rx(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
     }
 }

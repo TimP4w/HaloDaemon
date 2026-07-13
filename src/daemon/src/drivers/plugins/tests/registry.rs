@@ -102,14 +102,14 @@ fn activation_status_reports_disabled_needs_consent_and_ready() {
     app.registry.set_disabled(&["needs_network".to_string()]);
     assert!(matches!(
         app.registry.activation_status(&secrets, &m),
-        Activation::Disabled
+        ActivationState::Disabled
     ));
 
     app.registry.set_disabled(&[]);
     app.registry.set_granted(&HashMap::new());
     assert!(matches!(
         app.registry.activation_status(&secrets, &m),
-        Activation::NeedsConsent
+        ActivationState::AwaitingConsent
     ));
 
     app.registry.set_granted(&HashMap::from([(
@@ -119,7 +119,7 @@ fn activation_status_reports_disabled_needs_consent_and_ready() {
     acknowledge(&app.registry, std::slice::from_ref(&m));
     assert!(matches!(
         app.registry.activation_status(&secrets, &m),
-        Activation::Ready(_)
+        ActivationState::Ready(_)
     ));
 
     app.registry.set_granted(&HashMap::new());

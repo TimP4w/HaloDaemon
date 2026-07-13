@@ -231,6 +231,65 @@ pub fn index_plugin_content(repo_dir: &Path, subpath: &Path) -> Result<String> {
     ))
 }
 
+/// Materialize one plugin subtree from a commit into an empty staging
+/// directory. Validation can run against this copy before the installed
+/// working tree is touched.
+pub fn export_plugin_subtree(
+    repo_dir: &Path,
+    sha: &str,
+    subpath: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
+    let commit = repo
+        .find_commit(oid)
+        .with_context(|| format!("commit '{sha}' not found (fetch it first)"))?;
+    let root = commit.tree().context("reading commit tree")?;
+    let tree = if subpath.as_os_str().is_empty() {
+        root
+    } else {
+        root.get_path(subpath)
+            .with_context(|| format!("{} not found in commit tree", subpath.display()))?
+            .to_object(&repo)?
+            .peel_to_tree()?
+    };
+
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("creating {}", destination.display()))?;
+    tree.walk(git2::TreeWalkMode::PreOrder, |prefix, entry| {
+        let Some(name) = entry.name() else {
+            return git2::TreeWalkResult::Abort;
+        };
+        let path = destination.join(prefix).join(name);
+        match entry.kind() {
+            Some(git2::ObjectType::Tree) => {
+                if std::fs::create_dir_all(&path).is_err() {
+                    return git2::TreeWalkResult::Abort;
+                }
+            }
+            Some(git2::ObjectType::Blob) => {
+                // Git mode 120000 denotes a symlink; never materialize it.
+                if entry.filemode() == 0o120000 {
+                    return git2::TreeWalkResult::Abort;
+                }
+                let write = repo
+                    .find_blob(entry.id())
+                    .ok()
+                    .and_then(|blob| std::fs::write(&path, blob.content()).ok());
+                if write.is_none() {
+                    return git2::TreeWalkResult::Abort;
+                }
+            }
+            _ => return git2::TreeWalkResult::Abort,
+        }
+        git2::TreeWalkResult::Ok
+    })
+    .map_err(|error| anyhow!("exporting plugin subtree: {error}"))?;
+    reject_symlinks(destination)
+}
+
 /// Stage `subpath`'s current working-tree content into the index, making the
 /// on-disk-change baseline ([`index_plugin_content`]) match the live files —
 /// i.e. accept a local edit as the new baseline so it stops being flagged as

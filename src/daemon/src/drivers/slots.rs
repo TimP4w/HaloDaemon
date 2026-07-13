@@ -143,34 +143,146 @@ impl FanStateSlot {
     }
 }
 
+/// The single authoritative content an LCD panel shows; `mode` derives from this so it can't disagree with the active path/id.
+#[derive(Debug, Clone, Default, PartialEq)]
+enum LcdActiveContent {
+    #[default]
+    Default,
+    StaticImage {
+        filename: String,
+    },
+    TemplateEngine {
+        template_id: String,
+        params: HashMap<String, halod_shared::types::EffectParamValue>,
+    },
+    Video {
+        path: String,
+    },
+}
+
+fn is_gif_filename(name: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gif"))
+}
+
 #[derive(Default)]
 pub struct LcdStateSlot(Slot<LcdStateInner>);
 
 #[derive(Default)]
 struct LcdStateInner {
-    template_id: Option<String>,
-    params: HashMap<String, halod_shared::types::EffectParamValue>,
+    content: LcdActiveContent,
     brightness: u8,
     rotation: halod_shared::types::ScreenRotation,
-    mode: halod_shared::types::LcdMode,
-    active_image: Option<String>,
-    video_path: Option<String>,
     raw_streaming: bool,
     latches_last_frame: bool,
 }
 
 slot_accessors!(LcdStateSlot {
-    lcd_template_id / set_lcd_template_id : template_id : Option<String>,
-    lcd_template_params / set_lcd_template_params : params : HashMap<String, halod_shared::types::EffectParamValue>,
     brightness / set_brightness : brightness : u8,
     rotation / set_rotation : rotation : halod_shared::types::ScreenRotation,
-    mode / set_mode : mode : halod_shared::types::LcdMode,
-    active_image / set_active_image : active_image : Option<String>,
     raw_streaming / set_raw_streaming : raw_streaming : bool,
-    video_path / set_video_path : video_path : Option<String>,
 });
 
 impl LcdStateSlot {
+    pub fn mode(&self) -> halod_shared::types::LcdMode {
+        use halod_shared::types::LcdMode;
+        match self.0.with(|s| s.content.clone()) {
+            LcdActiveContent::Default => LcdMode::Default,
+            LcdActiveContent::StaticImage { filename } if is_gif_filename(&filename) => {
+                LcdMode::Gif
+            }
+            LcdActiveContent::StaticImage { .. } => LcdMode::Image,
+            LcdActiveContent::TemplateEngine { .. } => LcdMode::Engine,
+            LcdActiveContent::Video { .. } => LcdMode::Video,
+        }
+    }
+
+    /// Reset to `Default`, clearing whichever content was active.
+    pub fn set_mode(&self, mode: halod_shared::types::LcdMode) {
+        if matches!(mode, halod_shared::types::LcdMode::Default) {
+            self.0.update(|s| s.content = LcdActiveContent::Default);
+        }
+    }
+
+    pub fn active_image(&self) -> Option<String> {
+        match self.0.with(|s| s.content.clone()) {
+            LcdActiveContent::StaticImage { filename } => Some(filename),
+            _ => None,
+        }
+    }
+    /// Setting `Some` makes this the active content, clearing any template or video.
+    pub fn set_active_image(&self, filename: Option<String>) {
+        self.0.update(|s| {
+            s.content = match filename {
+                Some(filename) => LcdActiveContent::StaticImage { filename },
+                None => LcdActiveContent::Default,
+            };
+        });
+    }
+
+    pub fn lcd_template_id(&self) -> Option<String> {
+        match self.0.with(|s| s.content.clone()) {
+            LcdActiveContent::TemplateEngine { template_id, .. } => Some(template_id),
+            _ => None,
+        }
+    }
+    /// Setting `Some` makes this the active content (preserving existing params), clearing any image or video.
+    pub fn set_lcd_template_id(&self, id: Option<String>) {
+        self.0.update(|s| {
+            s.content = match id {
+                Some(template_id) => {
+                    let params = match &s.content {
+                        LcdActiveContent::TemplateEngine { params, .. } => params.clone(),
+                        _ => HashMap::new(),
+                    };
+                    LcdActiveContent::TemplateEngine {
+                        template_id,
+                        params,
+                    }
+                }
+                None => LcdActiveContent::Default,
+            };
+        });
+    }
+    pub fn lcd_template_params(&self) -> HashMap<String, halod_shared::types::EffectParamValue> {
+        match self.0.with(|s| s.content.clone()) {
+            LcdActiveContent::TemplateEngine { params, .. } => params,
+            _ => HashMap::new(),
+        }
+    }
+    /// A no-op unless a template is already active — params without one make no sense.
+    pub fn set_lcd_template_params(
+        &self,
+        params: HashMap<String, halod_shared::types::EffectParamValue>,
+    ) {
+        self.0.update(|s| {
+            if let LcdActiveContent::TemplateEngine { template_id, .. } = &s.content {
+                let template_id = template_id.clone();
+                s.content = LcdActiveContent::TemplateEngine {
+                    template_id,
+                    params,
+                };
+            }
+        });
+    }
+
+    pub fn video_path(&self) -> Option<String> {
+        match self.0.with(|s| s.content.clone()) {
+            LcdActiveContent::Video { path } => Some(path),
+            _ => None,
+        }
+    }
+    /// Setting `Some` makes this the active content, clearing any image or template.
+    pub fn set_video_path(&self, path: Option<String>) {
+        self.0.update(|s| {
+            s.content = match path {
+                Some(path) => LcdActiveContent::Video { path },
+                None => LcdActiveContent::Default,
+            };
+        });
+    }
+
     pub fn set_latches_last_frame(&self, value: bool) {
         self.0.update(|state| state.latches_last_frame = value);
     }
@@ -178,5 +290,62 @@ impl LcdStateSlot {
     #[cfg(test)]
     pub fn latches_last_frame(&self) -> bool {
         self.0.with(|state| state.latches_last_frame)
+    }
+}
+
+#[cfg(test)]
+mod lcd_state_tests {
+    use super::*;
+    use halod_shared::types::LcdMode;
+
+    #[test]
+    fn setting_any_mode_clears_the_others() {
+        let slot = LcdStateSlot::default();
+        slot.set_lcd_template_id(Some("t1".into()));
+        assert_eq!(slot.mode(), LcdMode::Engine);
+
+        slot.set_active_image(Some("pic.png".into()));
+        assert_eq!(slot.mode(), LcdMode::Image);
+        assert!(
+            slot.lcd_template_id().is_none(),
+            "image must clear the template"
+        );
+
+        slot.set_video_path(Some("clip.mp4".into()));
+        assert_eq!(slot.mode(), LcdMode::Video);
+        assert!(slot.active_image().is_none(), "video must clear the image");
+
+        slot.set_mode(LcdMode::Default);
+        assert_eq!(slot.mode(), LcdMode::Default);
+        assert!(slot.video_path().is_none());
+    }
+
+    #[test]
+    fn gif_extension_reports_gif_mode() {
+        let slot = LcdStateSlot::default();
+        slot.set_active_image(Some("anim.GIF".into()));
+        assert_eq!(slot.mode(), LcdMode::Gif);
+    }
+
+    #[test]
+    fn template_params_are_a_noop_without_an_active_template() {
+        let slot = LcdStateSlot::default();
+        slot.set_lcd_template_params(HashMap::from([(
+            "x".to_string(),
+            halod_shared::types::EffectParamValue::Float(1.0),
+        )]));
+        assert!(slot.lcd_template_params().is_empty());
+    }
+
+    #[test]
+    fn template_params_persist_across_reasserting_the_same_template_id() {
+        let slot = LcdStateSlot::default();
+        slot.set_lcd_template_id(Some("t1".into()));
+        slot.set_lcd_template_params(HashMap::from([(
+            "x".to_string(),
+            halod_shared::types::EffectParamValue::Float(1.0),
+        )]));
+        slot.set_lcd_template_id(Some("t1".into()));
+        assert!(!slot.lcd_template_params().is_empty());
     }
 }

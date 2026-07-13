@@ -756,6 +756,7 @@ pub trait LcdCapability: Send + Sync {
     /// Backing slot — required so all state sub-operations have defaults.
     fn lcd_state(&self) -> &LcdStateSlot;
 
+    /// `health` starts `Stable`; `registry::snapshot` overlays the real value from `VideoEngine` async.
     fn current_state(&self) -> LcdStatus {
         let slot = self.lcd_state();
         LcdStatus {
@@ -766,6 +767,7 @@ pub trait LcdCapability: Send + Sync {
             active_image: slot.active_image(),
             raw_streaming: slot.raw_streaming(),
             video_path: slot.video_path(),
+            health: Default::default(),
         }
     }
 
@@ -837,14 +839,6 @@ pub trait LcdCapability: Send + Sync {
         })
     }
     async fn restore_state(&self, v: &serde_json::Value) {
-        if let Some(id) = v.get("template_id") {
-            self.set_lcd_template_id(serde_json::from_value(id.clone()).ok().flatten());
-        }
-        if let Some(p) = v.get("params") {
-            if let Ok(params) = serde_json::from_value(p.clone()) {
-                self.set_lcd_template_params(params);
-            }
-        }
         if let Some(b) = v["brightness"].as_u64() {
             let b = u8::try_from(b).unwrap_or_else(|_| {
                 log::warn!("[lcd restore_state] brightness {b} out of range, clamping to 0");
@@ -883,20 +877,63 @@ pub trait LcdCapability: Send + Sync {
                 }
             }
         }
-        if let Some(m) = v.get("mode") {
-            if let Ok(mode) = serde_json::from_value::<halod_shared::types::LcdMode>(m.clone()) {
-                self.lcd_state().set_mode(mode);
-            }
-        }
-        if let Some(img) = v.get("active_image") {
-            self.lcd_state()
-                .set_active_image(serde_json::from_value(img.clone()).ok().flatten());
-        }
         if let Some(raw) = v["raw_streaming"].as_bool() {
             self.set_raw_streaming(raw);
         }
-        if let Some(vp) = v.get("video_path") {
-            self.set_video_path(serde_json::from_value(vp.clone()).ok().flatten());
+
+        let has = |key: &str| v.get(key).is_some_and(|x| !x.is_null());
+
+        // Content fields are mutually exclusive; `mode` (or, absent that, whichever content field is set) picks the one to restore so a stale sibling field can't clobber it.
+        use halod_shared::types::LcdMode;
+        let mode = v
+            .get("mode")
+            .and_then(|m| serde_json::from_value::<LcdMode>(m.clone()).ok())
+            .or_else(|| {
+                if has("template_id") {
+                    Some(LcdMode::Engine)
+                } else if has("active_image") {
+                    Some(LcdMode::Image)
+                } else if has("video_path") {
+                    Some(LcdMode::Video)
+                } else {
+                    None
+                }
+            });
+        match mode {
+            Some(LcdMode::Image) | Some(LcdMode::Gif) => {
+                if let Some(img) = v.get("active_image").and_then(|i| {
+                    serde_json::from_value::<Option<String>>(i.clone())
+                        .ok()
+                        .flatten()
+                }) {
+                    self.lcd_state().set_active_image(Some(img));
+                }
+            }
+            Some(LcdMode::Engine) => {
+                if let Some(id) = v.get("template_id").and_then(|i| {
+                    serde_json::from_value::<Option<String>>(i.clone())
+                        .ok()
+                        .flatten()
+                }) {
+                    self.set_lcd_template_id(Some(id));
+                    if let Some(params) = v
+                        .get("params")
+                        .and_then(|p| serde_json::from_value(p.clone()).ok())
+                    {
+                        self.set_lcd_template_params(params);
+                    }
+                }
+            }
+            Some(LcdMode::Video) => {
+                if let Some(path) = v.get("video_path").and_then(|p| {
+                    serde_json::from_value::<Option<String>>(p.clone())
+                        .ok()
+                        .flatten()
+                }) {
+                    self.set_video_path(Some(path));
+                }
+            }
+            _ => self.lcd_state().set_mode(LcdMode::Default),
         }
     }
 }

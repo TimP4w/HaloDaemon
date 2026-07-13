@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::drivers::Device;
 use crate::ipc::broadcast_state;
@@ -21,50 +21,115 @@ const BASE_TICK_SECS: u64 = 5;
 /// Backoff ceiling for a persistently-failing integration.
 const MAX_TICK_SECS: u64 = 30;
 
-/// Next-tick delay, backing off with the worst failure streak: 5,5,10,20,30,30s.
-fn tick_delay(max_failures: u32) -> Duration {
-    let secs = match max_failures {
+/// Next-tick delay, backing off with the attempt streak: 5,5,10,20,30,30s.
+fn tick_delay(attempt: u32) -> Duration {
+    let secs = match attempt {
         0 => BASE_TICK_SECS,
         n => (BASE_TICK_SECS << (n - 1).min(3)).min(MAX_TICK_SECS),
     };
     Duration::from_secs(secs)
 }
 
+/// Per-plugin reconnect state, replacing the old `failures: HashMap<_, u32>` +
+/// `in_progress: HashSet<_>` pair. Transitions: `Offline -> Connecting ->
+/// Online | Backoff`; `Backoff -> Connecting -> Online | Backoff` (attempt+1);
+/// any -> `Disabled` once no longer enabled/granted, back to `Offline` if
+/// re-enabled. A live root dropping mid-diff (Case C) doesn't transition this
+/// state — it stays `Online` until next tick's liveness check routes it
+/// through Case B, which does.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum MonitorState {
+    Offline,
+    Connecting,
+    Online,
+    Backoff { attempt: u32, deadline: Instant },
+    Disabled,
+    Stopping,
+}
+
 /// Background service driven from `main`: reconnects offline integrations, greys
 /// dropped ones, and diffs live ones for controller add/remove. Backs off
 /// exponentially while an integration stays unreachable.
 pub async fn integration_monitor(app: Arc<AppState>) {
-    let mut failures: HashMap<String, u32> = HashMap::new();
-    let mut in_progress: HashSet<String> = HashSet::new();
+    let mut states: HashMap<String, MonitorState> = HashMap::new();
+    let mut shutdown_rx = app.persistence.shutdown_tx.subscribe();
     loop {
-        let delay = tick_delay(failures.values().copied().max().unwrap_or(0));
-        tokio::time::sleep(delay).await;
-        tick_once(&app, &mut failures, &mut in_progress).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(BASE_TICK_SECS)) => {}
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    for state in states.values_mut() { *state = MonitorState::Stopping; }
+                    return;
+                }
+            }
+        }
+        tick_once(&app, &mut states).await;
+    }
+}
+
+/// Advance `plugin_id` to `Backoff`, incrementing its attempt streak.
+fn backoff(states: &mut HashMap<String, MonitorState>, plugin_id: &str, prev_attempt: u32) {
+    let attempt = prev_attempt + 1;
+    states.insert(
+        plugin_id.to_owned(),
+        MonitorState::Backoff {
+            attempt,
+            deadline: Instant::now() + tick_delay(attempt),
+        },
+    );
+}
+
+/// This plugin's current backoff attempt streak, or 0 if it isn't backing off.
+fn attempt_of(states: &HashMap<String, MonitorState>, plugin_id: &str) -> u32 {
+    match states.get(plugin_id) {
+        Some(MonitorState::Backoff { attempt, .. }) => *attempt,
+        _ => 0,
     }
 }
 
 /// One pass over every enabled integration. Factored out of the loop so tests
-/// can drive it without the sleep. `failures` tracks the per-plugin backoff
-/// streak; `in_progress` guards a plugin whose (awaited) rebuild is running.
-pub(super) async fn tick_once(
-    app: &Arc<AppState>,
-    failures: &mut HashMap<String, u32>,
-    in_progress: &mut HashSet<String>,
-) {
-    // Don't fight a scoped or global rediscovery while it owns device teardown.
-    if app.discovery_filter.read().await.is_some() {
-        return;
-    }
+/// can drive it without the sleep.
+pub(super) async fn tick_once(app: &Arc<AppState>, states: &mut HashMap<String, MonitorState>) {
+    // A full rescan touches every device — skip the whole tick. A scoped
+    // reconcile only owns its own plugins' devices — skip just those.
+    let paused: Option<HashSet<String>> = {
+        use crate::registry::discovery::DiscoveryScope;
+        match &*app.discovery_scope.read().await {
+            DiscoveryScope::Clean => None,
+            DiscoveryScope::Full => return,
+            DiscoveryScope::PluginSet { plugin_ids, .. } => Some(plugin_ids.clone()),
+        }
+    };
 
     let manifests = app.registry.integration_manifests();
-    // Drop bookkeeping for integrations no longer enabled.
     let enabled: HashSet<String> = manifests.iter().map(|m| m.plugin_id.clone()).collect();
-    failures.retain(|id, _| enabled.contains(id));
-    in_progress.retain(|id| enabled.contains(id));
+    // No longer enabled/granted — mark Disabled rather than silently dropping
+    // bookkeeping, so a toggled-off integration stays visible in state.
+    for (id, state) in states.iter_mut() {
+        if !enabled.contains(id) {
+            *state = MonitorState::Disabled;
+        }
+    }
+    // New or just re-enabled — starts Offline, advanced below.
+    for id in &enabled {
+        match states.get(id) {
+            None | Some(MonitorState::Disabled) => {
+                states.insert(id.clone(), MonitorState::Offline);
+            }
+            _ => {}
+        }
+    }
 
     for manifest in manifests {
         let plugin_id = manifest.plugin_id.clone();
-        if in_progress.contains(&plugin_id) {
+        if matches!(states.get(&plugin_id), Some(MonitorState::Connecting))
+            || paused.as_ref().is_some_and(|p| p.contains(&plugin_id))
+        {
+            continue;
+        }
+        if states.get(&plugin_id).is_some_and(|state| {
+            matches!(state, MonitorState::Backoff { deadline, .. } if *deadline > Instant::now())
+        }) {
             continue;
         }
         // Re-check membership right before acting so a just-disabled integration
@@ -77,26 +142,24 @@ pub(super) async fn tick_once(
             None => {
                 // Case A: no root registered — try to (re)connect. Idempotent:
                 // `discover_one` registers only on a successful connect.
-                in_progress.insert(plugin_id.clone());
+                let prev_attempt = attempt_of(states, &plugin_id);
+                states.insert(plugin_id.clone(), MonitorState::Connecting);
                 integration_scan::discover_one(app, &plugin_id).await;
                 let registered = find_root(app, &plugin_id).await.is_some();
-                in_progress.remove(&plugin_id);
                 if registered {
-                    failures.remove(&plugin_id);
+                    states.insert(plugin_id, MonitorState::Online);
                     broadcast_state(app).await;
                 } else {
-                    *failures.entry(plugin_id).or_insert(0) += 1;
+                    backoff(states, &plugin_id, prev_attempt);
                 }
             }
             Some(root) if root.is_live() => {
                 // Case C: alive — diff children (also detects a server drop).
-                reconcile_live_root(app, &root, failures).await;
+                reconcile_live_root(app, &root, states).await;
             }
             Some(root) => {
                 // Case B: greyed — probe, and rebuild a fresh pool on success.
-                in_progress.insert(plugin_id.clone());
-                reconnect_offline_root(app, &manifest, &root, failures).await;
-                in_progress.remove(&plugin_id);
+                reconnect_offline_root(app, &manifest, &root, states).await;
             }
         }
     }
@@ -107,7 +170,7 @@ pub(super) async fn tick_once(
 async fn reconcile_live_root(
     app: &Arc<AppState>,
     root: &Arc<dyn Device>,
-    failures: &mut HashMap<String, u32>,
+    states: &mut HashMap<String, MonitorState>,
 ) {
     let Some(ctrl) = root.as_controller() else {
         return;
@@ -116,7 +179,8 @@ async fn reconcile_live_root(
     match ctrl.resync_children(&existing).await {
         Err(e) => {
             // Server dropped mid-enumerate; `resync_children` already greyed the
-            // device. Surface the new offline state to the GUI.
+            // device. Surface the new offline state to the GUI. Next tick's
+            // liveness check routes this plugin through Case B.
             log::info!("[integration] {} dropped: {e:#}", root.id());
             broadcast_state(app).await;
         }
@@ -130,7 +194,7 @@ async fn reconcile_live_root(
                 broadcast_state(app).await;
             }
             if let Some(id) = root.integration_id() {
-                failures.remove(&id);
+                states.insert(id, MonitorState::Online);
             }
         }
     }
@@ -142,9 +206,11 @@ async fn reconnect_offline_root(
     app: &Arc<AppState>,
     manifest: &PluginManifest,
     root: &Arc<dyn Device>,
-    failures: &mut HashMap<String, u32>,
+    states: &mut HashMap<String, MonitorState>,
 ) {
     let plugin_id = manifest.plugin_id.clone();
+    let prev_attempt = attempt_of(states, &plugin_id);
+    states.insert(plugin_id.clone(), MonitorState::Connecting);
     let granted = app.registry.granted_for(&plugin_id);
     let config = app
         .registry
@@ -160,16 +226,16 @@ async fn reconnect_offline_root(
         Ok(Ok(_io)) => {
             unregister_device_and_children(app, root.id()).await;
             integration_scan::discover_one(app, &plugin_id).await;
-            failures.remove(&plugin_id);
+            states.insert(plugin_id.clone(), MonitorState::Online);
             app.registry.clear_connect_error(&plugin_id);
             broadcast_state(app).await;
         }
         Ok(Err(e)) => {
-            *failures.entry(plugin_id.clone()).or_insert(0) += 1;
+            backoff(states, &plugin_id, prev_attempt);
             report_connect_failure(app, manifest, &plugin_id, format!("{e:#}")).await;
         }
         Err(join) => {
-            *failures.entry(plugin_id.clone()).or_insert(0) += 1;
+            backoff(states, &plugin_id, prev_attempt);
             report_connect_failure(
                 app,
                 manifest,
@@ -420,14 +486,9 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn discovery_filter_makes_a_tick_a_no_op() {
+    async fn assert_tick_is_a_no_op_under(scope: crate::registry::discovery::DiscoveryScope) {
         crate::test_support::with_tmp_config(|app| async move {
-            // A scoped rediscovery is in flight.
-            app.set_discovery_filter(Some(Arc::new(
-                crate::registry::discovery::DiscoveryFilter { specs: vec![] },
-            )))
-            .await;
+            app.set_discovery_scope(scope).await;
             let root = MockRoot::new("openrgb");
             // Would report a drop if enumerated — but the tick must skip it.
             root.scripted(Err(anyhow::anyhow!("should not be called")));
@@ -436,13 +497,60 @@ mod tests {
                 .await
                 .push(root.clone() as Arc<dyn Device>);
 
-            let mut failures = HashMap::new();
-            let mut in_progress = HashSet::new();
-            tick_once(&app, &mut failures, &mut in_progress).await;
+            let mut states = HashMap::new();
+            tick_once(&app, &mut states).await;
 
             assert!(root.is_live(), "tick was skipped, so the root stays live");
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn discovery_filter_makes_a_tick_a_no_op() {
+        use crate::registry::discovery::{DiscoveryFilter, DiscoveryScope};
+        assert_tick_is_a_no_op_under(DiscoveryScope::PluginSet {
+            plugin_ids: ["openrgb".to_string()].into_iter().collect(),
+            filter: Arc::new(DiscoveryFilter { specs: vec![] }),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_scoped_reconcile_does_not_pause_an_unrelated_integration() {
+        use crate::registry::discovery::{DiscoveryFilter, DiscoveryScope};
+        crate::test_support::with_tmp_config(|app| async move {
+            // tick_once's loop is driven by integration_manifests(), not just
+            // app.devices — register one (consent-satisfied) so the mock root
+            // is actually reached.
+            register_integration(&app, "openrgb");
+
+            app.set_discovery_scope(DiscoveryScope::PluginSet {
+                plugin_ids: ["some-other-plugin".to_string()].into_iter().collect(),
+                filter: Arc::new(DiscoveryFilter { specs: vec![] }),
+            })
+            .await;
+            let root = MockRoot::new("openrgb");
+            root.scripted(Err(anyhow::anyhow!("dropped")));
+            app.devices
+                .write()
+                .await
+                .push(root.clone() as Arc<dyn Device>);
+
+            let mut states = HashMap::new();
+            tick_once(&app, &mut states).await;
+
+            assert!(
+                !root.is_live(),
+                "an unrelated plugin's scope must not pause this integration's tick"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn full_rescan_also_makes_a_tick_a_no_op() {
+        use crate::registry::discovery::DiscoveryScope;
+        assert_tick_is_a_no_op_under(DiscoveryScope::Full).await;
     }
 
     #[test]
@@ -453,5 +561,72 @@ mod tests {
         assert_eq!(tick_delay(3), Duration::from_secs(20));
         assert_eq!(tick_delay(4), Duration::from_secs(30));
         assert_eq!(tick_delay(50), Duration::from_secs(30), "caps at 30s");
+    }
+
+    #[test]
+    fn backoff_increments_the_attempt_streak_from_zero() {
+        let mut states = HashMap::new();
+        assert_eq!(attempt_of(&states, "p"), 0);
+        let prev = attempt_of(&states, "p");
+        backoff(&mut states, "p", prev);
+        assert_eq!(attempt_of(&states, "p"), 1);
+        let prev = attempt_of(&states, "p");
+        backoff(&mut states, "p", prev);
+        assert_eq!(attempt_of(&states, "p"), 2);
+    }
+
+    /// Register a consent-satisfied integration manifest for `id` in `app`'s
+    /// registry, so `tick_once`'s manifest-driven loop reaches it.
+    fn register_integration(app: &Arc<AppState>, id: &str) {
+        let manifest = crate::drivers::plugins::parse_manifest(
+            &format!(
+                r#"return {{ type = "integration", identity = {{ name = "{id}" }}, permissions = {{"network"}}, transports = {{ tcp = {{}} }} }}"#
+            ),
+            std::path::Path::new(&format!("{id}.lua")),
+        )
+        .unwrap();
+        app.registry.set_granted(&HashMap::from([(
+            id.to_string(),
+            vec![halod_shared::types::Permission::Network],
+        )]));
+        app.registry
+            .set_acknowledged(&HashMap::from([(id.to_string(), manifest.content_hash())]));
+        app.registry.update(|s| s.manifests = vec![manifest]);
+    }
+
+    #[tokio::test]
+    async fn a_plugin_no_longer_enabled_transitions_to_disabled() {
+        crate::test_support::with_tmp_config(|app| async move {
+            // No manifest registered for "gone" — it's no longer enabled.
+            let mut states = HashMap::from([(
+                "gone".to_string(),
+                MonitorState::Backoff {
+                    attempt: 3,
+                    deadline: Instant::now(),
+                },
+            )]);
+            tick_once(&app, &mut states).await;
+            assert_eq!(states.get("gone"), Some(&MonitorState::Disabled));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_reenabled_plugin_leaves_disabled_and_gets_processed() {
+        crate::test_support::with_tmp_config(|app| async move {
+            register_integration(&app, "openrgb");
+            let root = MockRoot::new("openrgb");
+            app.devices
+                .write()
+                .await
+                .push(root.clone() as Arc<dyn Device>);
+
+            let mut states = HashMap::from([("openrgb".to_string(), MonitorState::Disabled)]);
+            tick_once(&app, &mut states).await;
+
+            // Disabled -> Offline (seeded) -> Case C (root live, no-op resync) -> Online.
+            assert_eq!(states.get("openrgb"), Some(&MonitorState::Online));
+        })
+        .await;
     }
 }

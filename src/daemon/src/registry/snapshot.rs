@@ -6,9 +6,7 @@ use super::AppState;
 use crate::config::{Config, PlacedZone};
 use crate::cooling::config::FanCurveRecord;
 use crate::drivers::Device;
-use halod_shared::types::{
-    DeviceCapability, EffectParamValue, LcdMode, VisibilityState, WireDevice,
-};
+use halod_shared::types::{DeviceCapability, EffectParamValue, VisibilityState, WireDevice};
 
 /// One pass over the device registry: wire-serialize each device, apply the
 /// config/HID overlay, and collect the per-domain engine inputs the cooling,
@@ -87,7 +85,6 @@ impl AppState {
                 }
             }
 
-            let lcd_driven = lcd_templates.contains_key(&wire.id);
             let transforms = device.as_rgb().map(|r| r.zone_transforms());
 
             // A disabled device is closed — its readings are gone, so it must not
@@ -116,8 +113,10 @@ impl AppState {
 
             for cap in &mut wire.capabilities {
                 match cap {
-                    DeviceCapability::Lcd(status) if lcd_driven => {
-                        status.mode = LcdMode::Engine;
+                    DeviceCapability::Lcd(status) => {
+                        if let Some(video) = self.lcd.video() {
+                            status.health = video.health(&wire.id).await;
+                        }
                     }
                     DeviceCapability::Rgb(status) => {
                         if let Some(t) = &transforms {

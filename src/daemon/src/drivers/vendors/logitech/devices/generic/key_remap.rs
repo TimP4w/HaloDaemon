@@ -69,6 +69,9 @@ impl LogitechDevice {
             };
             (changed, held)
         };
+        if !online {
+            app.input.layer_shift_clear_device(&self.id);
+        }
         if !held.is_empty()
             && app
                 .input

@@ -88,11 +88,13 @@ struct ReadyPlugin {
 }
 
 /// Whether a plugin may activate, from [`Registry::activation_status`].
-enum Activation {
+/// `Discovered` (a manifest in [`PluginState::manifests`]) is the
+/// precondition, not a stored variant.
+enum ActivationState {
     /// The user disabled the plugin.
     Disabled,
-    /// Permissions ungranted, or the script changed since it was acknowledged.
-    NeedsConsent,
+    /// Permissions ungranted, or the script changed since acknowledged.
+    AwaitingConsent,
     /// Cleared to spawn, carrying its resolved grants + config.
     Ready(ReadyPlugin),
 }
@@ -601,26 +603,42 @@ impl Registry {
         self.acknowledged_hash_for(&manifest.plugin_id).as_deref() == Some(&manifest.content_hash())
     }
 
+    /// Why `manifest` isn't consent-satisfied: a fresh/revoked grant, or
+    /// content that changed since a prior acknowledgement. Shared by
+    /// [`Registry::activation_status`] and [`Registry::ungranted_in`] so the
+    /// distinction is computed in exactly one place.
+    fn ungranted_reason(&self, manifest: &PluginManifest) -> UngrantedReason {
+        if self
+            .acknowledged_hash_for(&manifest.plugin_id)
+            .is_some_and(|h| h != manifest.content_hash())
+        {
+            UngrantedReason::ContentChanged
+        } else {
+            UngrantedReason::NeedsPermission
+        }
+    }
+
     /// The single gate for "may this plugin activate, and with what?": disabled,
-    /// awaiting consent, or [`Ready`](Activation::Ready) with the resolved grants +
-    /// config a spawn needs. Every device spawn resolves through here and
-    /// [`build_device`](Registry::build_device) accepts only a [`ReadyPlugin`], so a
-    /// device can't be built without passing the consent gate (the ARCH-N1 class of
-    /// bug becomes unrepresentable rather than checked by convention).
+    /// awaiting consent (with the reason), or [`Ready`](ActivationState::Ready) with
+    /// the resolved grants + config a spawn needs. Every device spawn resolves
+    /// through here and [`build_device`](Registry::build_device) accepts only a
+    /// [`ReadyPlugin`], so a device can't be built without passing the consent gate
+    /// (the ARCH-N1 class of bug becomes unrepresentable rather than checked by
+    /// convention).
     fn activation_status(
         &self,
         secrets: &dyn crate::secrets::SecretStore,
         manifest: &PluginManifest,
-    ) -> Activation {
+    ) -> ActivationState {
         if self.is_disabled(&manifest.plugin_id) {
-            return Activation::Disabled;
+            return ActivationState::Disabled;
         }
         if !self.consent_satisfied(manifest) {
-            return Activation::NeedsConsent;
+            return ActivationState::AwaitingConsent;
         }
         let granted = self.granted_for(&manifest.plugin_id);
         let config = self.resolved_config_for(secrets, &manifest.plugin_id, &granted);
-        Activation::Ready(ReadyPlugin { granted, config })
+        ActivationState::Ready(ReadyPlugin { granted, config })
     }
 }
 
@@ -683,19 +701,7 @@ impl Registry {
         manifests
             .iter()
             .filter(|m| !self.consent_satisfied(m) && notified.insert(m.plugin_id.clone()))
-            .map(|m| {
-                // A no-longer-matching acknowledgment means the content changed
-                // under a previously-approved plugin, not a never-approved one.
-                let reason = if self
-                    .acknowledged_hash_for(&m.plugin_id)
-                    .is_some_and(|h| h != m.content_hash())
-                {
-                    UngrantedReason::ContentChanged
-                } else {
-                    UngrantedReason::NeedsPermission
-                };
-                (m.display_name().to_owned(), reason)
-            })
+            .map(|m| (m.display_name().to_owned(), self.ungranted_reason(m)))
             .collect()
     }
 
@@ -1180,11 +1186,15 @@ impl Registry {
         // produced this `ReadyPlugin` — reuse them rather than re-resolving.
         let ReadyPlugin { granted, config } = ready;
         let write_rate_limit = declared_write_rate_limit(spec.max_bytes_per_sec);
+        let runtime_state = Arc::new(std::sync::Mutex::new(
+            device::RuntimeState::OpeningTransport,
+        ));
         let transport = match transport::descriptor_for(&spec.transport)
             .map(|d| (d.open)(manifest, handle, &config, &granted, write_rate_limit))
         {
             Some(Ok(t)) => t,
             Some(Err(e)) => {
+                *runtime_state.lock().unwrap() = device::RuntimeState::Closed;
                 log::warn!(
                     "plugin '{}' transport open failed: {e:#}",
                     manifest.plugin_id
@@ -1218,7 +1228,16 @@ impl Registry {
         // for the chain machinery (e.g. an NZXT Kraken/Control Hub accessory fan).
         let device = Arc::new_cyclic(|weak| {
             let mut dev = LuaDevice::with_transport(
-                id, manifest, spec, dev_match, transport, runtime, granted, config, notify,
+                id,
+                manifest,
+                spec,
+                dev_match,
+                transport,
+                runtime,
+                granted,
+                config,
+                notify,
+                runtime_state,
             );
             dev.set_self_ref(weak.clone());
             dev
@@ -1244,7 +1263,7 @@ impl Registry {
             let Some(spec) = manifest.device_for(handle) else {
                 continue;
             };
-            if let Activation::Ready(ready) =
+            if let ActivationState::Ready(ready) =
                 self.activation_status(app.secret_store.as_ref(), manifest)
             {
                 return self.build_device(app, manifest, spec, handle, ready);
@@ -1269,7 +1288,7 @@ impl Registry {
             };
             // Only a `Ready` plugin (enabled + consent-satisfied) shadows a native
             // driver; a disabled/ungranted one falls through to the native path.
-            if let Activation::Ready(ready) =
+            if let ActivationState::Ready(ready) =
                 self.activation_status(app.secret_store.as_ref(), manifest)
             {
                 return self.build_device(app, manifest, spec, handle, ready);

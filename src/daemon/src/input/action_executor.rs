@@ -5,8 +5,8 @@
 /// write access (the HaloDaemon udev rules grant this via TAG+="uaccess").
 ///
 /// Windows: enigo, which drives SendInput via the Win32 API.
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
@@ -98,30 +98,88 @@ fn spawn_process(cmd: &str, args: &[String]) {
     }
 }
 
-/// Keys/buttons still held when a macro's steps end (down without a later
-/// up). `run_macro` releases these after the last step so an unbalanced
-/// sequence can't leave the virtual devices stuck.
-fn unreleased(steps: &[MacroStep]) -> (Vec<u32>, Vec<MouseBtn>) {
-    let mut keys: Vec<u32> = Vec::new();
-    let mut btns: Vec<MouseBtn> = Vec::new();
-    for step in steps {
-        match &step.kind {
-            MacroAtom::KeyDown { key } => {
-                if !keys.contains(key) {
-                    keys.push(*key);
-                }
+/// A concrete key or mouse button an in-flight macro currently holds down.
+#[derive(Debug, Clone, PartialEq)]
+enum HeldInput {
+    Key(u32),
+    Mouse(MouseBtn),
+}
+
+/// Apply one macro atom to the live held-input set: down adds, up removes.
+fn apply_held(held: &mut Vec<HeldInput>, atom: &MacroAtom) {
+    match atom {
+        MacroAtom::KeyDown { key } => {
+            let input = HeldInput::Key(*key);
+            if !held.contains(&input) {
+                held.push(input);
             }
-            MacroAtom::KeyUp { key } => keys.retain(|k| k != key),
-            MacroAtom::MouseDown { btn } => {
-                if !btns.contains(btn) {
-                    btns.push(btn.clone());
-                }
-            }
-            MacroAtom::MouseUp { btn } => btns.retain(|b| b != btn),
-            MacroAtom::Delay => {}
         }
+        MacroAtom::KeyUp { key } => held.retain(|i| *i != HeldInput::Key(*key)),
+        MacroAtom::MouseDown { btn } => {
+            let input = HeldInput::Mouse(btn.clone());
+            if !held.contains(&input) {
+                held.push(input);
+            }
+        }
+        MacroAtom::MouseUp { btn } => held.retain(|i| *i != HeldInput::Mouse(btn.clone())),
+        MacroAtom::Delay => {}
     }
-    (keys, btns)
+}
+
+/// Macro playback lifecycle. Only one macro plays at a time.
+#[derive(Debug)]
+enum MacroState {
+    Idle,
+    Running {
+        id: u64,
+        held: Vec<HeldInput>,
+        cancel: Arc<tokio::sync::Notify>,
+    },
+    Cancelling {
+        id: u64,
+        held: Vec<HeldInput>,
+    },
+}
+
+/// Claim the `Idle` slot for macro `id`, or refuse if one is already running.
+fn claim_macro_slot(state: &Mutex<MacroState>, id: u64, cancel: Arc<tokio::sync::Notify>) -> bool {
+    let mut state = state.lock().unwrap();
+    if !matches!(*state, MacroState::Idle) {
+        return false;
+    }
+    *state = MacroState::Running {
+        id,
+        held: Vec::new(),
+        cancel,
+    };
+    true
+}
+
+/// `Running -> Cancelling`, preserving `held`; a no-op when idle.
+fn cancel_macro_state(state: &Mutex<MacroState>) {
+    let mut state = state.lock().unwrap();
+    if let MacroState::Running { id, held, cancel } = &*state {
+        let (id, held, cancel) = (*id, held.clone(), cancel.clone());
+        cancel.notify_one();
+        *state = MacroState::Cancelling { id, held };
+    }
+}
+
+/// Apply one step to `state`'s live held-input set, if a macro is running.
+fn track_held(state: &Mutex<MacroState>, atom: &MacroAtom) {
+    if let MacroState::Running { held, .. } = &mut *state.lock().unwrap() {
+        apply_held(held, atom);
+    }
+}
+
+/// Drain whatever's tracked as held so the caller can release exactly that.
+fn take_held(state: &Mutex<MacroState>) -> Vec<HeldInput> {
+    match &mut *state.lock().unwrap() {
+        MacroState::Running { held, .. } | MacroState::Cancelling { held, .. } => {
+            std::mem::take(held)
+        }
+        MacroState::Idle => Vec::new(),
+    }
 }
 
 /// Press each key in `keys` via `press`, in order. On the first failure, undo
@@ -292,58 +350,65 @@ mod platform {
     pub fn run_macro(
         steps: Vec<MacroStep>,
         exec: std::sync::Arc<Backend>,
-        active: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> bool {
-        if active.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            log::debug!("ActionExecutor: macro already playing; ignoring play request");
-            return false;
-        }
+        state: std::sync::Arc<std::sync::Mutex<super::MacroState>>,
+        cancel: std::sync::Arc<tokio::sync::Notify>,
+    ) {
         tokio::spawn(async move {
-            let _guard = super::MacroGuard(active);
-            for step in &steps {
-                match &step.kind {
-                    MacroAtom::KeyDown { key } => {
-                        if let Some(k) = Backend::validate_key_code(*key) {
-                            emit(&mut *exec.kbd.lock().await, k, 1);
+            use futures_util::FutureExt;
+            let _guard = super::MacroStateGuard(state.clone());
+            let playback = async {
+                for step in &steps {
+                    match &step.kind {
+                        MacroAtom::KeyDown { key } => {
+                            if let Some(k) = Backend::validate_key_code(*key) {
+                                emit(&mut *exec.kbd.lock().await, k, 1);
+                            }
+                        }
+                        MacroAtom::KeyUp { key } => {
+                            if let Some(k) = Backend::validate_key_code(*key) {
+                                emit(&mut *exec.kbd.lock().await, k, 0);
+                            }
+                        }
+                        MacroAtom::MouseDown { btn } => {
+                            emit(&mut *exec.ptr.lock().await, mouse_btn(btn), 1);
+                        }
+                        MacroAtom::MouseUp { btn } => {
+                            emit(&mut *exec.ptr.lock().await, mouse_btn(btn), 0);
+                        }
+                        MacroAtom::Delay => {}
+                    }
+                    super::track_held(&state, &step.kind);
+                    if step.delay_after_ms > 0 {
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(step.delay_after_ms as u64)) => {}
+                            _ = cancel.notified() => break,
                         }
                     }
-                    MacroAtom::KeyUp { key } => {
-                        if let Some(k) = Backend::validate_key_code(*key) {
-                            emit(&mut *exec.kbd.lock().await, k, 0);
-                        }
-                    }
-                    MacroAtom::MouseDown { btn } => {
-                        emit(&mut *exec.ptr.lock().await, mouse_btn(btn), 1);
-                    }
-                    MacroAtom::MouseUp { btn } => {
-                        emit(&mut *exec.ptr.lock().await, mouse_btn(btn), 0);
-                    }
-                    MacroAtom::Delay => {}
                 }
-                if step.delay_after_ms > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        step.delay_after_ms as u64,
-                    ))
-                    .await;
-                }
+            };
+            if std::panic::AssertUnwindSafe(playback)
+                .catch_unwind()
+                .await
+                .is_err()
+            {
+                log::error!("ActionExecutor: macro task panicked; releasing held inputs");
             }
-            let (keys, btns) = super::unreleased(&steps);
-            if !keys.is_empty() {
+            let held = super::take_held(&state);
+            if !held.is_empty() {
                 let mut kbd = exec.kbd.lock().await;
-                for key in keys {
-                    if let Some(k) = Backend::validate_key_code(key) {
-                        emit(&mut kbd, k, 0);
-                    }
-                }
-            }
-            if !btns.is_empty() {
                 let mut ptr = exec.ptr.lock().await;
-                for btn in btns {
-                    emit(&mut ptr, mouse_btn(&btn), 0);
+                for input in held {
+                    match input {
+                        super::HeldInput::Key(key) => {
+                            if let Some(k) = Backend::validate_key_code(key) {
+                                emit(&mut kbd, k, 0);
+                            }
+                        }
+                        super::HeldInput::Mouse(btn) => emit(&mut ptr, mouse_btn(&btn), 0),
+                    }
                 }
             }
         });
-        true
     }
 
     fn mod_key(m: &ModKey) -> u16 {
@@ -484,41 +549,54 @@ mod platform {
     pub fn run_macro(
         steps: Vec<MacroStep>,
         exec: std::sync::Arc<Backend>,
-        active: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> bool {
-        if active.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            log::debug!("ActionExecutor: macro already playing; ignoring play request");
-            return false;
-        }
+        state: std::sync::Arc<std::sync::Mutex<super::MacroState>>,
+        cancel: std::sync::Arc<tokio::sync::Notify>,
+    ) {
         tokio::spawn(async move {
-            let _guard = super::MacroGuard(active);
-            for step in &steps {
-                let mut eng = exec.enigo.lock().await;
-                match &step.kind {
-                    MacroAtom::KeyDown { key } => press_key(&mut eng, *key, Direction::Press),
-                    MacroAtom::KeyUp { key } => press_key(&mut eng, *key, Direction::Release),
-                    MacroAtom::MouseDown { btn } => press_btn(&mut eng, btn, Direction::Press),
-                    MacroAtom::MouseUp { btn } => press_btn(&mut eng, btn, Direction::Release),
-                    MacroAtom::Delay => {}
+            use futures_util::FutureExt;
+            let _guard = super::MacroStateGuard(state.clone());
+            let playback = async {
+                for step in &steps {
+                    let mut eng = exec.enigo.lock().await;
+                    match &step.kind {
+                        MacroAtom::KeyDown { key } => {
+                            press_key(&mut eng, *key, Direction::Press);
+                        }
+                        MacroAtom::KeyUp { key } => {
+                            press_key(&mut eng, *key, Direction::Release);
+                        }
+                        MacroAtom::MouseDown { btn } => press_btn(&mut eng, btn, Direction::Press),
+                        MacroAtom::MouseUp { btn } => press_btn(&mut eng, btn, Direction::Release),
+                        MacroAtom::Delay => {}
+                    }
+                    drop(eng);
+                    super::track_held(&state, &step.kind);
+                    if step.delay_after_ms > 0 {
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(step.delay_after_ms as u64)) => {}
+                            _ = cancel.notified() => break,
+                        }
+                    }
                 }
-                drop(eng);
-                if step.delay_after_ms > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        step.delay_after_ms as u64,
-                    ))
-                    .await;
-                }
+            };
+            if std::panic::AssertUnwindSafe(playback)
+                .catch_unwind()
+                .await
+                .is_err()
+            {
+                log::error!("ActionExecutor: macro task panicked; releasing held inputs");
             }
-            let (keys, btns) = super::unreleased(&steps);
+            let held = super::take_held(&state);
             let mut eng = exec.enigo.lock().await;
-            for key in keys {
-                press_key(&mut eng, key, Direction::Release);
-            }
-            for btn in btns {
-                press_btn(&mut eng, &btn, Direction::Release);
+            for input in held {
+                match input {
+                    super::HeldInput::Key(key) => {
+                        press_key(&mut eng, key, Direction::Release);
+                    }
+                    super::HeldInput::Mouse(btn) => press_btn(&mut eng, &btn, Direction::Release),
+                }
             }
         });
-        true
     }
 
     fn map_btn(btn: &MouseBtn) -> Button {
@@ -541,39 +619,78 @@ mod platform {
     }
 }
 
-/// Clears the "macro playing" flag when a `run_macro` task ends, so an error
-/// or panic mid-macro can't wedge playback permanently.
-struct MacroGuard(Arc<AtomicBool>);
+/// Returns `state` to `Idle` when a `run_macro` task ends, even on panic.
+struct MacroStateGuard(Arc<Mutex<MacroState>>);
 
-impl Drop for MacroGuard {
+impl Drop for MacroStateGuard {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        let mut state = self.0.lock().unwrap();
+        let id = match &*state {
+            MacroState::Running { id, .. } | MacroState::Cancelling { id, .. } => Some(*id),
+            MacroState::Idle => None,
+        };
+        log::trace!("ActionExecutor: macro {id:?} finished");
+        *state = MacroState::Idle;
     }
 }
 
 pub struct ActionExecutor {
     inner: Arc<platform::Backend>,
-    /// Set while a macro is playing. Only one runs at a time so sequences
-    /// can't interleave key-down/up events on the shared virtual devices.
-    macro_active: Arc<AtomicBool>,
+    /// Only one macro plays at a time (shared virtual devices).
+    macro_state: Arc<Mutex<MacroState>>,
+    next_macro_id: AtomicU64,
 }
 
 impl ActionExecutor {
     pub fn new() -> Result<Self> {
         Ok(Self {
             inner: Arc::new(platform::Backend::new()?),
-            macro_active: Arc::new(AtomicBool::new(false)),
+            macro_state: Arc::new(Mutex::new(MacroState::Idle)),
+            next_macro_id: AtomicU64::new(0),
         })
+    }
+
+    /// Claim the single-flight slot and spawn `steps`; false if already playing.
+    fn spawn_macro(&self, steps: Vec<MacroStep>) -> bool {
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        let id = self.next_macro_id.fetch_add(1, Ordering::Relaxed);
+        if !claim_macro_slot(&self.macro_state, id, cancel.clone()) {
+            log::debug!("ActionExecutor: macro already playing; ignoring play request");
+            return false;
+        }
+        platform::run_macro(
+            steps,
+            Arc::clone(&self.inner),
+            Arc::clone(&self.macro_state),
+            cancel,
+        );
+        true
+    }
+
+    /// Cancel the in-flight macro, if any, releasing its held inputs.
+    pub fn cancel_macro(&self) {
+        cancel_macro_state(&self.macro_state);
+    }
+
+    /// Cancel playback and wait for its cleanup task to release every tracked
+    /// input. The timeout is a shutdown backstop, not a normal completion path.
+    pub async fn shutdown(&self) {
+        self.cancel_macro();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !matches!(*self.macro_state.lock().unwrap(), MacroState::Idle)
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        if !matches!(*self.macro_state.lock().unwrap(), MacroState::Idle) {
+            log::error!("ActionExecutor: macro cleanup did not finish before shutdown timeout");
+        }
     }
 
     /// Run a macro immediately (editor test play). Returns false if one is
     /// already playing, in which case this call is a no-op.
     pub fn play_macro(&self, steps: Vec<MacroStep>) -> bool {
-        platform::run_macro(
-            steps,
-            Arc::clone(&self.inner),
-            Arc::clone(&self.macro_active),
-        )
+        self.spawn_macro(steps)
     }
 
     /// Execute one action. `pressed` is true on button press, false on release.
@@ -613,11 +730,7 @@ impl ActionExecutor {
                 if let Err(e) = crate::input::validate::validate_macro(steps) {
                     log::warn!("ActionExecutor: refusing invalid stored macro: {e}");
                 } else {
-                    platform::run_macro(
-                        steps.clone(),
-                        Arc::clone(&self.inner),
-                        Arc::clone(&self.macro_active),
-                    );
+                    self.spawn_macro(steps.clone());
                 }
             }
 
@@ -703,25 +816,90 @@ mod tests {
         }
     }
 
-    #[test]
-    fn macro_guard_gate_admits_one_and_resets_on_drop() {
-        let flag = Arc::new(AtomicBool::new(false));
-        // First claim wins; a concurrent claim is rejected while it's held.
-        assert!(!flag.swap(true, Ordering::AcqRel));
-        {
-            let _guard = MacroGuard(Arc::clone(&flag));
-            assert!(
-                flag.swap(true, Ordering::AcqRel),
-                "second macro must be rejected"
-            );
+    /// Fold `apply_held` over `steps` (test-only; production tracks incrementally).
+    fn held_after(steps: &[MacroStep]) -> Vec<HeldInput> {
+        let mut held = Vec::new();
+        for step in steps {
+            apply_held(&mut held, &step.kind);
         }
-        // Guard drop clears the flag so the next macro can start.
-        assert!(!flag.load(Ordering::Acquire));
-        assert!(!flag.swap(true, Ordering::AcqRel));
+        held
     }
 
     #[test]
-    fn unreleased_empty_for_balanced_sequence() {
+    fn single_flight_claim_rejects_a_second_macro_while_running() {
+        let state = Arc::new(Mutex::new(MacroState::Idle));
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        assert!(claim_macro_slot(&state, 0, cancel.clone()));
+        assert!(
+            !claim_macro_slot(&state, 1, cancel),
+            "a second macro must be rejected while one is running"
+        );
+    }
+
+    #[test]
+    fn guard_drop_resets_running_to_idle_so_the_next_macro_can_start() {
+        let state = Arc::new(Mutex::new(MacroState::Idle));
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        assert!(claim_macro_slot(&state, 0, cancel.clone()));
+        drop(MacroStateGuard(Arc::clone(&state)));
+        assert!(matches!(*state.lock().unwrap(), MacroState::Idle));
+        assert!(claim_macro_slot(&state, 1, cancel));
+    }
+
+    #[test]
+    fn cancel_transitions_running_to_cancelling_and_preserves_held() {
+        let state = Arc::new(Mutex::new(MacroState::Idle));
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        claim_macro_slot(&state, 7, cancel);
+        track_held(&state, &MacroAtom::KeyDown { key: 30 });
+
+        cancel_macro_state(&state);
+
+        match &*state.lock().unwrap() {
+            MacroState::Cancelling { id, held } => {
+                assert_eq!(*id, 7);
+                assert_eq!(held, &vec![HeldInput::Key(30)]);
+            }
+            other => panic!("expected Cancelling, got {other:?}"),
+        };
+    }
+
+    #[test]
+    fn cancel_on_idle_is_a_no_op() {
+        let state = Arc::new(Mutex::new(MacroState::Idle));
+        cancel_macro_state(&state);
+        assert!(matches!(*state.lock().unwrap(), MacroState::Idle));
+    }
+
+    #[test]
+    fn take_held_drains_whether_running_or_cancelling() {
+        let state = Arc::new(Mutex::new(MacroState::Idle));
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        claim_macro_slot(&state, 0, cancel);
+        track_held(&state, &MacroAtom::KeyDown { key: 1 });
+        track_held(
+            &state,
+            &MacroAtom::MouseDown {
+                btn: MouseBtn::Left,
+            },
+        );
+
+        cancel_macro_state(&state);
+        let held = take_held(&state);
+
+        assert_eq!(
+            held,
+            vec![HeldInput::Key(1), HeldInput::Mouse(MouseBtn::Left)]
+        );
+        // Draining doesn't itself reset to Idle — that's MacroStateGuard's job.
+        assert!(matches!(
+            *state.lock().unwrap(),
+            MacroState::Cancelling { .. }
+        ));
+    }
+
+    #[test]
+    fn apply_held_empty_for_balanced_sequence() {
         let steps = vec![
             step(MacroAtom::KeyDown { key: 30 }),
             step(MacroAtom::MouseDown {
@@ -733,13 +911,11 @@ mod tests {
             }),
             step(MacroAtom::KeyUp { key: 30 }),
         ];
-        let (keys, btns) = unreleased(&steps);
-        assert!(keys.is_empty());
-        assert!(btns.is_empty());
+        assert!(held_after(&steps).is_empty());
     }
 
     #[test]
-    fn unreleased_detects_held_key_and_button() {
+    fn apply_held_detects_held_key_and_button() {
         let steps = vec![
             step(MacroAtom::KeyDown { key: 30 }),
             step(MacroAtom::KeyDown { key: 31 }),
@@ -748,9 +924,23 @@ mod tests {
                 btn: MouseBtn::Right,
             }),
         ];
-        let (keys, btns) = unreleased(&steps);
-        assert_eq!(keys, vec![31]);
-        assert_eq!(btns, vec![MouseBtn::Right]);
+        assert_eq!(
+            held_after(&steps),
+            vec![HeldInput::Key(31), HeldInput::Mouse(MouseBtn::Right)]
+        );
+    }
+
+    #[test]
+    fn apply_held_reflects_only_steps_executed_so_far() {
+        // A cancelled macro releases what it actually pressed, not a full run's tail.
+        let ran_so_far = vec![
+            step(MacroAtom::KeyDown { key: 30 }),
+            step(MacroAtom::KeyDown { key: 31 }),
+        ];
+        assert_eq!(
+            held_after(&ran_so_far),
+            vec![HeldInput::Key(30), HeldInput::Key(31)]
+        );
     }
 
     // The linux column of the shared key table must match the evdev codes the
@@ -813,10 +1003,12 @@ mod tests {
     }
 
     proptest::proptest! {
-        // Appending the releases `unreleased` reports always yields a fully
-        // balanced sequence — the trailing-release safety can't miss anything.
+        // Appending held_after's releases balances any sequence, cancelled or not.
         #[test]
-        fn unreleased_releases_balance_any_sequence(ops in proptest::collection::vec((0u8..5, 1u32..10), 0..40)) {
+        fn apply_held_releases_balance_any_sequence_or_prefix(
+            ops in proptest::collection::vec((0u8..5, 1u32..10), 0..40),
+            cancel_after in 0usize..40,
+        ) {
             let steps: Vec<MacroStep> = ops
                 .into_iter()
                 .map(|(op, n)| {
@@ -834,12 +1026,15 @@ mod tests {
                     })
                 })
                 .collect();
-            let (keys, btns) = unreleased(&steps);
-            let mut balanced = steps;
-            balanced.extend(keys.into_iter().map(|key| step(MacroAtom::KeyUp { key })));
-            balanced.extend(btns.into_iter().map(|btn| step(MacroAtom::MouseUp { btn })));
-            let (k2, b2) = unreleased(&balanced);
-            proptest::prop_assert!(k2.is_empty() && b2.is_empty());
+            // Simulate a cancel at an arbitrary point (including "ran to completion").
+            let ran = &steps[..cancel_after.min(steps.len())];
+            let held = held_after(ran);
+            let mut balanced = ran.to_vec();
+            balanced.extend(held.into_iter().map(|input| step(match input {
+                HeldInput::Key(key) => MacroAtom::KeyUp { key },
+                HeldInput::Mouse(btn) => MacroAtom::MouseUp { btn },
+            })));
+            proptest::prop_assert!(held_after(&balanced).is_empty());
         }
     }
 }

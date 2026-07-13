@@ -353,12 +353,8 @@ pub async fn set_screen_default(id: String, app: Arc<AppState>) -> Result<()> {
     stop_video_for_device(&app, lcd, device.id()).await;
     deactivate_engine_for_device(&app, lcd, device.id()).await;
     lcd.reset_to_default().await?;
-    // `reset_to_default` only resets the panel; the tracked state must be
-    // cleared here (like the image/video paths do) or the daemon keeps
-    // reporting the old active image and the GUI never deselects it.
+    // `reset_to_default` only resets the panel; clearing content here also derives mode=Default.
     lcd.set_active_image_filename(None).await;
-    lcd.lcd_state()
-        .set_mode(halod_shared::types::LcdMode::Default);
     persist_device_state(&app, device.as_ref()).await;
     Ok(())
 }
@@ -390,8 +386,6 @@ fn resolve_video_path(path: &str) -> Result<String> {
 
 /// Play a looped local video file on the panel via the video engine.
 pub async fn set_screen_video(id: String, path: String, app: Arc<AppState>) -> Result<()> {
-    use halod_shared::types::LcdMode;
-
     let device = require_device_owned_id(&id, &app).await?;
     let lcd = device
         .as_lcd()
@@ -411,9 +405,8 @@ pub async fn set_screen_video(id: String, path: String, app: Arc<AppState>) -> R
     deactivate_engine_for_device(&app, lcd, device.id()).await;
     video.start(&id, &canonical).await?;
 
-    lcd.set_active_image_filename(None).await;
+    // Also derives mode=Video, clearing any prior image/template content.
     lcd.set_video_path(Some(canonical));
-    lcd.lcd_state().set_mode(LcdMode::Video);
 
     persist_device_state(&app, device.as_ref()).await;
     Ok(())

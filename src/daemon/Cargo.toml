@@ -56,6 +56,7 @@ zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
 keyring = "4.1.4"
 # Fully vendored (libgit2/libssh2/openssl via `cc`), matching mlua's `vendored` Lua.
 git2 = { version = "0.19", default-features = false, features = ["ssh", "https", "vendored-libgit2", "vendored-openssl"] }
+futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
@@ -72,7 +73,6 @@ evdev = "0.12"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 zbus = { version = "4", default-features = false, features = ["tokio"] }
-futures-util = "0.3"
 # http(s) album art for the now-playing widget (MPRIS players like Spotify
 # expose remote art URLs, not file:// paths).
 ureq = { version = "2", default-features = false, features = ["tls"] }

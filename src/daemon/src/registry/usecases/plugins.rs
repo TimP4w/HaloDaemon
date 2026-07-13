@@ -396,7 +396,7 @@ async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
 /// these plugin ids are closed and re-discovered; every other device is
 /// left untouched.
 pub(crate) async fn reconcile_plugins(app: &Arc<AppState>, plugins: &[String]) {
-    use crate::registry::discovery::DiscoveryFilter;
+    use crate::registry::discovery::{DiscoveryFilter, DiscoveryScope};
 
     // Keep both sides of a manifest change in scope. Deleted/disabled plugins
     // need their old specs so a native driver can reclaim the hardware, while
@@ -411,21 +411,24 @@ pub(crate) async fn reconcile_plugins(app: &Arc<AppState>, plugins: &[String]) {
     // 2. Teardown: close and unregister every device owned by a changed plugin.
     teardown_owned_devices(app, plugins).await;
 
-    // 3. Set the discovery filter so re-probing only registers matching handles.
-    app.set_discovery_filter(Some(Arc::new(DiscoveryFilter { specs })))
-        .await;
+    // 3. Scope re-probing to only these plugins' hardware.
+    app.set_discovery_scope(DiscoveryScope::PluginSet {
+        plugin_ids: plugins.iter().cloned().collect(),
+        filter: Arc::new(DiscoveryFilter { specs }),
+    })
+    .await;
 
     // 4. Scoped re-probe.
     crate::registry::discovery::discover_devices(Arc::clone(app)).await;
 
-    // 5. Clear the filter, then seed known-device records and restore any
+    // 5. Clear the scope, then seed known-device records and restore any
     //    chain layout for the newly registered devices. Each new device's own
     //    profile state was already applied by `register_device` during the
     //    scoped probe, so we deliberately skip the global `load_active_profile`
     //    here — it would clear every device's LCD slot and re-load every
     //    device's state, disturbing the untouched devices this path exists to
     //    leave alone (mirroring the integration scoped path).
-    app.set_discovery_filter(None).await;
+    app.set_discovery_scope(DiscoveryScope::Clean).await;
     crate::registry::seed_known_devices(Arc::clone(app)).await;
     crate::registry::usecases::chain::restore_saved_chains(Arc::clone(app)).await;
     crate::ipc::broadcast_state(app).await;

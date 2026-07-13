@@ -8,7 +8,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::cooling;
 use crate::input;
-use crate::ipc::ClientHandle;
+use crate::ipc::{ClientHandle, LeaseState, SubscriptionTopic};
 use crate::lcd;
 use crate::lighting;
 use crate::profiles;
@@ -27,15 +27,19 @@ fn check_ipc_bounds(v: &Value) -> Result<(), String> {
     crate::util::json::check_bounds(v, IPC_MAX_DEPTH, IPC_MAX_NODES)
 }
 
-/// Lease-gated LCD preview forwarder; drops the broadcast receiver when idle.
+/// Lease-gated LCD preview forwarder; drops the broadcast receiver once the lease goes `Expired`.
 async fn lcd_preview_forward_loop(app: Arc<AppState>, client: ClientHandle) {
-    let mut keepalive = client.lcd_keepalive_rx();
+    let mut lease = client.lcd_lease_rx();
     loop {
-        // Paused: no receiver held. Wait for a keepalive or client teardown.
-        if keepalive.borrow_and_update().elapsed() >= LCD_PREVIEW_LEASE {
+        // Paused: no active lease. Wait for a keepalive (re-subscribe) or client teardown.
+        let is_live = matches!(
+            *lease.borrow_and_update(),
+            LeaseState::Active { last_keepalive } if last_keepalive.elapsed() < LCD_PREVIEW_LEASE
+        );
+        if !is_live {
             tokio::select! {
                 _ = client.tx.closed() => return,
-                c = keepalive.changed() => { if c.is_err() { return; } continue; }
+                c = lease.changed() => { if c.is_err() { return; } continue; }
             }
         }
         // Engine may not be set yet at startup — same readiness dance as
@@ -52,10 +56,13 @@ async fn lcd_preview_forward_loop(app: Arc<AppState>, client: ClientHandle) {
         };
         // Active: forward frames until the lease expires, then drop rx.
         loop {
-            let deadline = *keepalive.borrow_and_update() + LCD_PREVIEW_LEASE;
+            let deadline = match *lease.borrow_and_update() {
+                LeaseState::Active { last_keepalive } => last_keepalive + LCD_PREVIEW_LEASE,
+                LeaseState::Unsubscribed | LeaseState::Expired => break,
+            };
             tokio::select! {
                 _ = client.tx.closed() => return,
-                _ = tokio::time::sleep_until(deadline) => break,
+                _ = tokio::time::sleep_until(deadline) => { client.expire_lcd_lease(); break; }
                 res = rx.recv() => match res {
                     Ok(frame) => client.send_lcd_preview(frame.wire.clone()),
                     Err(RecvError::Lagged(n)) =>
@@ -609,12 +616,13 @@ async fn dispatch(
         DaemonCommand::CanvasSubscribe => {
             if client.try_subscribe_canvas() {
                 let c2 = client.clone();
-                tokio::spawn(engine_subscribe_loop(
+                let task = tokio::spawn(engine_subscribe_loop(
                     app,
                     c2,
                     |a| a.lighting.engine().map(|e| e.subscribe()),
                     "canvas_frame",
                 ));
+                client.track_subscription(SubscriptionTopic::Canvas, task);
             }
             Ok(())
         }
@@ -630,7 +638,8 @@ async fn dispatch(
         DaemonCommand::LcdEngineSubscribe => {
             client.touch_lcd_preview();
             if client.try_subscribe_lcd() {
-                tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
+                let task = tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
+                client.track_subscription(SubscriptionTopic::Lcd, task);
             }
             Ok(())
         }
@@ -883,6 +892,41 @@ mod tests {
         handle.abort();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn lcd_lease_state_is_observably_expired_after_the_deadline() {
+        let (app, engine) = app_with_lcd_engine();
+        let (tx, _rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(8);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        client.touch_lcd_preview();
+        assert!(matches!(
+            *client.lcd_lease_rx().borrow(),
+            LeaseState::Active { .. }
+        ));
+
+        let handle = tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
+        for _ in 0..50 {
+            if engine.frame_sender().receiver_count() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(LCD_PREVIEW_LEASE + Duration::from_millis(50)).await;
+        for _ in 0..50 {
+            if *client.lcd_lease_rx().borrow() == LeaseState::Expired {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*client.lcd_lease_rx().borrow(), LeaseState::Expired);
+
+        handle.abort();
+    }
+
     #[tokio::test]
     async fn lcd_preview_forwarder_exits_when_client_disconnects_while_paused() {
         let (app, _engine) = app_with_lcd_engine();
@@ -892,9 +936,7 @@ mod tests {
             tx,
             subs: Arc::default(),
         };
-        // Lease already stale (default keepalive is `Instant::now()` at
-        // construction, so advance past the lease before dropping the reader).
-        tokio::time::sleep(LCD_PREVIEW_LEASE + Duration::from_millis(50)).await;
+        // A default lease is `Unsubscribed` (never entered the active branch), so the loop is already paused.
         drop(rx);
 
         let handle = tokio::spawn(lcd_preview_forward_loop(app, client));

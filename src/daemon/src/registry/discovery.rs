@@ -56,9 +56,8 @@ pub struct DeviceDescriptor {
 }
 inventory::collect!(DeviceDescriptor);
 
-/// A discovery gate: when set on `AppState::discovery_filter`, only handles
-/// matching at least one of the declared `DeviceSpec`s are registered.
-/// `None` means no filter — every handle passes.
+/// A discovery gate: only handles matching at least one declared `DeviceSpec`
+/// pass. Wrapped in a [`DiscoveryScope::PluginSet`].
 pub struct DiscoveryFilter {
     pub specs: Vec<DeviceSpec>,
 }
@@ -68,6 +67,24 @@ impl DiscoveryFilter {
     pub fn matches(&self, handle: &DiscoveryHandle<'_>) -> bool {
         self.specs.iter().any(|s| s.matches(handle))
     }
+}
+
+/// `AppState::discovery_scope`. `PluginSet`/`Full` both mean "a rediscovery
+/// is touching `app.devices`" (the coarse gate, `integration_monitor`'s
+/// tick); only `PluginSet` restricts which handles register (the fine gate,
+/// `handle_in_scope`). `Clean -> PluginSet|Full -> Clean`.
+#[derive(Clone)]
+pub enum DiscoveryScope {
+    Clean,
+    /// Scoped to `plugin_ids`'s hardware. `filter` is a specs snapshot
+    /// (captured before + after `reload_registry`, since a deleted plugin's
+    /// specs aren't derivable afterwards).
+    PluginSet {
+        plugin_ids: std::collections::HashSet<String>,
+        filter: Arc<DiscoveryFilter>,
+    },
+    /// An unscoped full rescan is in flight.
+    Full,
 }
 
 /// SMBus scan configuration submitted alongside a `DeviceDescriptor`.
@@ -200,13 +217,16 @@ pub async fn discover_handle_replacing(
 }
 
 /// Convenience: find the matching descriptor, construct, and register.
-/// When a [`DiscoveryFilter`] is active on `app`, silently skips handles
-/// that don't match it — all other handles are left undisturbed.
-/// With a filter active, routes through [`discover_handle_replacing`] to
-/// evict any native device a newly enabled plugin would shadow.
+/// Under a [`DiscoveryScope::PluginSet`], silently skips handles outside it
+/// and routes through [`discover_handle_replacing`] to evict any native
+/// device a newly enabled plugin would shadow; `Clean`/`Full` register
+/// normally.
 pub async fn discover_handle(app: &Arc<crate::state::AppState>, handle: DiscoveryHandle<'_>) {
-    let filtered = app.discovery_filter.read().await.is_some();
-    if filtered {
+    let scoped = matches!(
+        *app.discovery_scope.read().await,
+        DiscoveryScope::PluginSet { .. }
+    );
+    if scoped {
         if !app.handle_in_scope(&handle).await {
             return;
         }
@@ -232,6 +252,18 @@ pub async fn set_discovery_detail(app: &Arc<AppState>, detail: impl Into<String>
 }
 
 pub async fn discover_devices(app: Arc<AppState>) {
+    // Claim `Full` only if nothing scoped this already (a `reconcile_plugins`
+    // caller owns its own `PluginSet` scope and clears it itself).
+    let owns_scope = {
+        let mut scope = app.discovery_scope.write().await;
+        if matches!(*scope, DiscoveryScope::Clean) {
+            *scope = DiscoveryScope::Full;
+            true
+        } else {
+            false
+        }
+    };
+
     {
         let mut discovery = app.discovery.lock().await;
         discovery.phase = DiscoveryPhase::Discovering;
@@ -272,6 +304,10 @@ pub async fn discover_devices(app: Arc<AppState>) {
         discovery.detail = String::new();
     }
     broadcast_state(&app).await;
+
+    if owns_scope {
+        app.set_discovery_scope(DiscoveryScope::Clean).await;
+    }
 }
 
 #[cfg(test)]
