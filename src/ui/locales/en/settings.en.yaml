@@ -11,14 +11,14 @@ settings:
   section_healthcheck: HEALTHCHECK
   start_on_boot_title: Start on boot
   start_on_boot_sub: Launch HaloDaemon in the tray when you sign in
-  start_on_boot_managed_sub: Managed by your system configuration - change it there
+  start_on_boot_managed_sub: This option is managed by your system configuration. Change it there.
   start_on_boot_managed_value: Controlled by system
   close_to_tray_title: Close to tray
   close_to_tray_sub: Hide the window instead of quitting when the close button is pressed
   plugin_downloads_title: Official plugins & updates
   plugin_downloads_sub: Allow HaloDaemon to download official plugins from GitHub and check for updates on startup
   window_controls_title: Window controls
-  window_controls_sub: Draw minimize / maximize / close in the title bar - turn off for tiling window managers
+  window_controls_sub: Show Minimize, Maximize, and Close buttons in the title bar. Turn this off when using a tiling window manager.
   startup_healthcheck_title: Startup healthcheck
   startup_healthcheck_sub: Warn on launch when a check fails
   replay_tutorials_title: Replay tutorials
@@ -35,9 +35,9 @@ settings:
   scanning_button: Scanning…
   recheck_button: Re-check
   running_healthcheck_title: Running healthcheck…
-  running_healthcheck_sub: Waiting for the daemon to report its status
+  running_healthcheck_sub: Waiting for the daemon to report the system status
   no_checks_title: No checks reported
-  no_checks_sub: The daemon returned an empty healthcheck list
+  no_checks_sub: The daemon returned an empty list of system checks
   dep_detected: "● Detected"
   dep_missing: "● Missing"
   dep_not_found: "○ Not found"
@@ -50,21 +50,21 @@ settings:
   unknown: Unknown
   open_external_button: "Open ↗"
   diagnostics_title: System & device diagnostics
-  diagnostics_sub: Show every attached HID device, what was matched, elevation state
+  diagnostics_sub: Show all connected HID devices, which ones were recognized, and the current privilege level
   open_button: Open…
-  app_tagline: Peripheral controller daemon
+  app_tagline: A daemon for controlling peripherals
   credits_button: Credits…
   third_party_title: Third-Party Licenses
   third_party_sub: Open source components used by HaloDaemon
   view_button: View…
   repository_title: Repository
-  licenses_modal_body: Open-source components bundled with or referenced by HaloDaemon, grouped by license.
+  licenses_modal_body: Open-source components included or used by HaloDaemon, grouped by license.
   credits_title: Credits
   credits_developer: "Developer:"
   credits_license: "License:"
   acknowledgments: Acknowledgments
   diagnostics_modal_title: System & Device Diagnostics
-  diagnostics_no_data: "No debug data available yet.\n\nSend GetDebugInfo from the daemon first, then open this dialog."
+  diagnostics_no_data: "No debug data is available yet.\n\nSend GetDebugInfo from the daemon, then reopen this dialog."
   copy_json_button: Copy JSON
   export_button: Export…
   copied_feedback: Copied!

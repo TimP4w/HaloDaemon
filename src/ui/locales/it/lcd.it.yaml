@@ -7,8 +7,8 @@ lcd:
   brightness: Luminosità
   rotation: ROTAZIONE
   reset_to_default: Ripristina predefinito
-  raw_streaming: Streaming raw
-  raw_streaming_hint: Invia frame non compressi al pannello (salta la codifica Q565)
+  raw_streaming: Streaming non compresso
+  raw_streaming_hint: Invia fotogrammi non compressi al pannello senza usare la codifica Q565
   media: Media
   no_video_selected: Nessun video selezionato
   choose_video: "Scegli video…"
@@ -23,7 +23,7 @@ lcd:
   none: "(nessuno)"
   widget_count: "%{n} widget"
   clear_all: Cancella tutto
-  empty_screen_hint: Schermo vuoto — trascina i widget dalla libreria qui sotto
+  empty_screen_hint: Lo schermo è vuoto. Trascina qui i widget dalla libreria in basso.
   editor_shortcuts_hint: "Canc per eliminare  ·  Alt+H / Alt+V per centrare  ·  trascina il pomello ⟳ per ruotare  ·  doppio clic sul testo per modificare"
   no_image_selected: Nessuna immagine selezionata
   widget_clock: Orologio
@@ -34,7 +34,7 @@ lcd:
   widget_debug: Debug
   widget_spectrum: Spettro
   widget_vu_meter: VU Meter
-  widget_now_playing: Now Playing
+  widget_now_playing: In riproduzione
   widget_logo: Logo
   widget_shape: Forma
   preset_stats: Statistiche
@@ -44,12 +44,12 @@ lcd:
   start_from_preset: PARTI DA UN PRESET
   widget_library: Libreria widget
   drag_onto_screen: trascina sullo schermo
-  my_templates: I MIEI MODELLI
-  template_name_hint: Nome modello
+  my_templates: I MIEI TEMPLATE
+  template_name_hint: Nome del template
   save: Salva
-  delete_template_title: Eliminare il modello?
-  delete_image_title: Eliminare l'immagine?
-  delete_confirm_body: 'Sei sicuro di voler eliminare "%{name}"? Non può essere annullato.'
+  delete_template_title: Vuoi eliminare il template?
+  delete_image_title: Vuoi eliminare l'immagine?
+  delete_confirm_body: 'Vuoi davvero eliminare "%{name}"? Non potrai annullare questa operazione.'
   cancel: Annulla
   delete: Elimina
   empty_selection_hint: "Tocca un widget sullo schermo\nper modificarne dimensioni, colore o testo."
@@ -58,7 +58,7 @@ lcd:
   type_date: Data
   type_ring_gauge: Indicatore ad anello
   type_progress_bar: Barra di avanzamento
-  type_sensor_stat: Stat sensore
+  type_sensor_stat: Valore del sensore
   type_text: Testo
   type_image: Immagine
   type_logo: Logo
@@ -67,7 +67,7 @@ lcd:
   type_spectrum: Spettro
   type_vu_bar: Barra VU
   type_vu_ring: Anello VU
-  type_now_playing: Now Playing
+  type_now_playing: In riproduzione
   type_widget: Widget
   size: Dimensione
   color: Colore
@@ -76,7 +76,7 @@ lcd:
   center: Centro
   screen_style: Stile schermo
   background: Sfondo
-  dim: Opaco
+  dim: Attenua
   bg_flow: Flusso
   bg_solid: Tinta unita
   bg_grid: Griglia
@@ -98,7 +98,7 @@ lcd:
   param_track: Colore traccia
   param_gradient: Sfumatura sul valore
   param_gradient_height: Sfumatura in altezza
-  param_gradient_high: Colore sfumatura alta
+  param_gradient_high: Colore superiore della sfumatura
   param_min: Valore minimo
   param_max: Valore massimo
   param_text: Testo

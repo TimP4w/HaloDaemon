@@ -1,12 +1,12 @@
 depcheck:
   title: Alcuni controlli richiedono la tua attenzione
-  intro: HaloDaemon ha trovato problemi che potrebbero limitare quali dispositivi o funzioni funzionano.
-  dont_show_again: Non mostrare più questo all'avvio
+  intro: HaloDaemon ha rilevato alcuni problemi che potrebbero impedire il corretto funzionamento di dispositivi o funzionalità.
+  dont_show_again: Non mostrare più questo avviso all'avvio
   got_it: Ho capito
   required: Obbligatorio
   optional: Facoltativo
   impact: Impatto
-  how_to_fix: Come correggere
+  how_to_fix: Come risolvere
   rules:
     ffmpeg:
       title: ffmpeg
@@ -22,19 +22,19 @@ depcheck:
       fix: Solo per GPU NVIDIA; incluso nel driver proprietario
     udev_rules:
       title: Regole udev
-      impact: Accesso non-root ai dispositivi HID e hwmon
+      impact: Accesso ai dispositivi HID e hwmon senza privilegi root
       fix: Installa udev/60-halod.rules, quindi ricarica udev
     i2c_access:
       title: Accesso I2C
       impact: RGB SMBus del chipset (DRAM e GPU)
       fix: Carica il modulo i2c-dev e aggiungi il tuo utente al gruppo 'i2c'
     fan_control_access:
-      title: Accesso controllo ventole
+      title: Accesso al controllo delle ventole
       impact: Controllo ventole PWM della scheda madre
       fix: "Carica il tuo modulo SuperIO (es. nct6775) e aggiungi il tuo utente al gruppo 'halod'"
     powerprofilesctl:
       title: powerprofilesctl
-      impact: Cambio del profilo energetico di sistema
+      impact: Cambio del profilo energetico del sistema
       fix: Installa power-profiles-daemon (fornisce powerprofilesctl)
     xdg_desktop_portal:
       title: xdg-desktop-portal
@@ -50,6 +50,6 @@ depcheck:
       fix: Reinstalla HaloDaemon per registrare il servizio broker con privilegi elevati (HalodBroker)
     gnome_extension:
       title: Estensione GNOME Shell
-      impact: Cambio profilo per app tramite il focus della finestra su GNOME
+      impact: Cambio del profilo in base all'app in primo piano su GNOME
       fix_disabled: "Installata ma disabilitata, abilitala nell'app Estensioni"
       fix_missing: Installa e abilita l'estensione GNOME Shell di HaloDaemon

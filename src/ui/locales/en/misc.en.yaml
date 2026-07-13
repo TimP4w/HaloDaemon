@@ -6,7 +6,7 @@ misc:
   designer_save: Save effect
   designer_invalid_name: Invalid name
   designer_reset: Reset
-  designer_subtitle: "Procedural effect · renders as canvas pixmap or per-LED direct"
+  designer_subtitle: "Procedural effect · rendered on the canvas or sent directly to individual LEDs"
   designer_name_hint: Effect name
   designer_new_effect_name: New effect
   designer_live_preview: Live preview
@@ -60,15 +60,15 @@ misc:
   radar_scan_fallback: "%{found} found · scanning…"
   radar_scan_detail: "%{found} found · Scanning %{detail}"
   # device/macro_editor.rs
-  macro_full: Sequence is full - remove steps to add more.
-  macro_unreleased: Ends with keys still held - they are auto-released after playback.
+  macro_full: The sequence is full. Remove some steps to add more.
+  macro_unreleased: Some keys are still held at the end of the sequence. They will be released automatically after playback.
   macro_stop: "■ Stop"
   macro_record: "● Record"
   macro_play: "▶ Play"
   macro_clear: Clear
-  macro_hint_recording: Recording - type keys; gaps become waits. Stop to save.
-  macro_hint_empty: "Record a sequence, or add steps below. Drag pills to reorder; drag a wait's edge to change it."
-  macro_hint_playback: "Playback presses into the focused window. Drag pills to reorder; drag a wait's edge to change it."
+  macro_hint_recording: Recording in progress. Press keys to record them; pauses will become waits. Select Stop to save.
+  macro_hint_empty: "Record a sequence or add steps below. Drag steps to reorder them; drag the edge of a wait to change its duration."
+  macro_hint_playback: "Playback sends key presses to the focused window. Drag steps to reorder them; drag the edge of a wait to change its duration."
   macro_click_to_record: Click in here to record mouse buttons
   macro_add_step: ADD STEP
   macro_press_key: "press a key…"

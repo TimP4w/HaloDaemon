@@ -9,12 +9,12 @@ home:
   enable_device: Abilita dispositivo
   remove_device: Rimuovi dispositivo
   remove: Rimuovi
-  remove_device_title: Rimuovi dispositivo
-  remove_device_confirm: "Rimuovere %{name} dalla catena? Il dispositivo verrà scollegato e non apparirà più qui."
+  remove_device_title: Vuoi rimuovere il dispositivo?
+  remove_device_confirm: "Vuoi rimuovere %{name} dalla catena? Il dispositivo verrà scollegato e non comparirà più qui."
   devices_connected: "%{online} di %{total} dispositivi connessi"
   devices_connected_attention: "%{online} di %{total} dispositivi connessi · %{attention} richiedono attenzione"
-  hide_hidden: Nascondi nascosti
-  show_hidden: Mostra nascosti
+  hide_hidden: Nascondi dispositivi nascosti
+  show_hidden: Mostra dispositivi nascosti
   search_devices: Cerca dispositivi
   grid: Griglia
   list: Elenco

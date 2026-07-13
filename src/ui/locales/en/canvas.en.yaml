@@ -1,6 +1,6 @@
 canvas:
   title: Effects Canvas
-  subtitle: Create instances with different effects and assign device light zones to them
+  subtitle: Create different effects and assign them to device lighting zones
   playing: playing
   paused: paused
   drag_hint: drag to reposition · scroll to zoom
@@ -23,21 +23,21 @@ canvas:
   overflow_more: "+%{n} more"
   assign_zones_title: "Assign zones · %{name}"
   assign_zones_sub: "%{eff} · %{n} %{zones} assigned"
-  reassign_hint: Zones marked ● are used by another instance - click to reassign here.
+  reassign_hint: Zones marked ● are used by another instance. Select one to reassign it here.
   new_instance_title: New effect instance
   fps_title: Canvas frame rate
   fps_desc: How often the canvas engine samples and pushes frames.
   frame_rate: Frame rate
   sampling: Sampling
-  sampling_desc: Area around each LED averaged from the canvas.
+  sampling_desc: Area around each LED used to calculate its average color.
   sampling_area: Sampling area
   roll_zone: Roll zone
   unroll_zone: Unroll zone
   effect_instances: Effect instances
   new_button: "+ New"
-  no_instances: 'No instances - add one with “+ New”.'
+  no_instances: 'No instances yet. Select "+ New" to add one.'
   default_effect_title: Default / fallback effect
-  default_effect_hint: Zones with no explicit instance fall back to this.
+  default_effect_hint: Zones that are not assigned to an instance use this effect.
   edit_zones: Edit zones →
   add_zones: "+ Add zones to this instance"
   edit_in_designer: Edit in designer

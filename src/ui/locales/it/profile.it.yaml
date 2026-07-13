@@ -1,7 +1,7 @@
 capability:
   rgb: RGB
   dpi: DPI
-  fan_curve: Curva ventola
+  fan_curve: Curva della ventola
   lcd: LCD
   key_remap: Rimappatura tasti
   equalizer: Equalizzatore
@@ -18,20 +18,20 @@ profile:
   name_taken: "Esiste già un profilo con questo nome."
   create: "Crea"
   cancel: "Annulla"
-  delete_title: "Eliminare il profilo?"
-  delete_confirm: 'Sei sicuro di voler eliminare "%{name}"? Non può essere annullato.'
+  delete_title: "Vuoi eliminare il profilo?"
+  delete_confirm: 'Vuoi davvero eliminare "%{name}"? Non potrai annullare questa operazione.'
   delete: "Elimina"
   back: "← Indietro"
   active: "Attivo"
   set_active: "Imposta come attivo"
-  default_desc: "Il profilo predefinito è sempre attivo quando nessuna regola applicazione corrisponde."
+  default_desc: "Il profilo predefinito resta attivo quando nessuna regola associata alle applicazioni corrisponde."
   profile_desc: "Le impostazioni di questo profilo vengono applicate quando è attivo."
   auto_activate_title: "ATTIVAZIONE AUTOMATICA"
   auto_activate_desc: "Passa automaticamente a questo profilo quando una di queste app è in primo piano."
   add_processes: "+ Aggiungi processi"
   overrides_title: "OVERRIDE"
-  overrides_inactive: "Rendi attivo questo profilo per vedere i suoi override per dispositivo."
-  overrides_empty: "Nessun override ancora. Le modifiche che fai mentre questo profilo è attivo vengono salvate qui."
+  overrides_inactive: "Attiva questo profilo per visualizzare le impostazioni specifiche di ogni dispositivo."
+  overrides_empty: "Non ci sono ancora impostazioni specifiche. Le modifiche che apporti mentre il profilo è attivo verranno salvate qui."
   canvas_effects: "Effetti canvas"
   revert: "Ripristina"
   select_processes_title: "Seleziona processi"

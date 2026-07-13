@@ -1,19 +1,19 @@
 device:
-  # keys.rs — Scheda Tasti/Pulsanti
-  keys_host_mode_required: "È richiesta la modalità host — la rimappatura viene applicata mentre il daemon controlla questo dispositivo."
+  # keys.rs - Scheda Tasti/Pulsanti
+  keys_host_mode_required: "È richiesta la modalità host. La rimappatura viene applicata mentre il daemon controlla il dispositivo."
   keys_tab_buttons: Pulsanti
   keys_tab_keys: Tasti
   keys_select_button_hint: Seleziona un pulsante per rimapparlo
   keys_reset_all: Ripristina tutto
   keys_layer_normal: Normale
-  keys_layer_shift: Shift layer
+  keys_layer_shift: Livello alternativo
   keys_assign_action: Assegna azione
   keys_editing: MODIFICA
-  keys_assign_hint: "Scegli cosa fa il pulsante %{button} quando premuto e mentre il tasto shift layer è tenuto premuto."
+  keys_assign_hint: "Scegli cosa deve fare il pulsante %{button} quando lo premi, sia normalmente sia mentre tieni premuto il tasto del livello alternativo."
   keys_select_button_prompt: Seleziona un pulsante a sinistra per configurarne l'azione.
-  keys_no_params_native: Invia il suo input predefinito. Nessun parametro da configurare.
-  keys_no_params_disable: Questo pulsante è disabilitato e non fa nulla quando premuto.
-  keys_no_params_layer_shift: Attiva lo shift layer mentre è tenuto premuto. Nessun parametro da configurare.
+  keys_no_params_native: Invia il comando predefinito. Non ci sono parametri da configurare.
+  keys_no_params_disable: Questo pulsante è disabilitato e non esegue alcuna azione quando lo premi.
+  keys_no_params_layer_shift: Attiva il livello alternativo finché tieni premuto il pulsante. Non ci sono parametri da configurare.
   keys_no_params: Nessun parametro da configurare.
   keys_direction: DIREZIONE
   keys_dir_up: Su
@@ -25,15 +25,15 @@ device:
   keys_mouse_back: Indietro
   keys_mouse_forward: Avanti
   keys_dpi_value: VALORE DPI
-  keys_sniper_dpi: DPI Cecchino
+  keys_sniper_dpi: DPI di precisione
   keys_presets: PRESET
   keys_media_key: TASTO MEDIA
   keys_media_play: Riproduci / Pausa
   keys_media_next: Brano successivo
   keys_media_prev: Brano precedente
-  keys_media_mute: Muto
-  keys_media_volume_up: Alza volume
-  keys_media_volume_down: Abbassa volume
+  keys_media_mute: Disattiva audio
+  keys_media_volume_up: Aumenta volume
+  keys_media_volume_down: Riduci volume
   keys_axis: ASSE
   keys_axis_vertical: Verticale
   keys_axis_horizontal: Orizzontale
@@ -65,7 +65,7 @@ device:
   keys_type_dpi_cycle: Ciclo DPI
   keys_type_profile_cycle: Ciclo profilo
   keys_type_momentary_dpi: DPI momentaneo
-  keys_type_layer_shift: Shift layer
+  keys_type_layer_shift: Livello alternativo
   keys_type_macro: Macro
   keys_type_open_app: Apri app
   keys_type_command: Comando
@@ -74,19 +74,19 @@ device:
   keys_label_profile_dir: "Profilo %{direction}"
   keys_label_dpi: "DPI %{dpi}"
 
-  # chains.rs — Scheda catene LED
+  # chains.rs - Scheda catene LED
   chains_topo_linear: Lineare
   chains_topo_ring: Anello
   chains_topo_rings: "Anelli ×%{count}"
   chains_topo_grid: Griglia
   chains_topo_keyboard: Tastiera
   chains_title: Catene LED
-  chains_summary: "%{leds} LED · %{headers} header"
-  chains_subtitle: "Collega strisce indirizzabili a ogni header. I collegamenti rilevati sono bloccati; puoi aggiungere, rinominare e rimuovere i tuoi."
+  chains_summary: "%{leds} LED · %{headers} connettori"
+  chains_subtitle: "Collega gli elementi indirizzabili a ogni connettore. Quelli rilevati automaticamente sono bloccati, mentre puoi aggiungere, rinominare e rimuovere quelli creati da te."
   chains_flashing: "Lampeggio…"
   chains_discover: Rileva
   chains_usage: "%{used} / %{max} LED"
-  chains_no_links: Nessuna striscia collegata a questo header
+  chains_no_links: Nessun elemento collegato a questo connettore
   chains_discovered: RILEVATO
   chains_led_count: "%{count} LED"
   chains_add_link: Aggiungi striscia
@@ -97,9 +97,9 @@ device:
   chains_cancel: Annulla
   chains_add: Aggiungi
 
-  # children.rs — Schede Dispositivi e Accoppiamento
+  # children.rs - Schede Dispositivi e Accoppiamento
   children_connected_devices: Dispositivi connessi
-  children_no_child_devices: Nessun dispositivo figlio
+  children_no_child_devices: Nessun dispositivo associato
   children_receiver: RICEVITORE
   children_hold_pair_button: "Tieni premuto il pulsante di accoppiamento del dispositivo…"
   children_cancel: Annulla

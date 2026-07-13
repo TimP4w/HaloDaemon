@@ -1,8 +1,8 @@
 integrations:
   title: Integrations
-  subtitle: Bridge HALO to third-party applications. Active integrations expose their devices to the workspace.
+  subtitle: Connect HALO to other applications. Devices from active integrations become available in the workspace.
   empty_title: No integrations available
-  empty_hint: You don't currently have any integrations.
+  empty_hint: You don't have any integrations yet.
   configure: Configure
   hide_configure: Hide
   status_connected: Connected

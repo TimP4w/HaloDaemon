@@ -1,6 +1,6 @@
 device:
-  # keys.rs — Keys/Buttons tab
-  keys_host_mode_required: "Host mode required - remapping is applied while the daemon drives this device."
+  # keys.rs - Keys/Buttons tab
+  keys_host_mode_required: "Host mode is required. Remapping is applied while the daemon controls this device."
   keys_tab_buttons: Buttons
   keys_tab_keys: Keys
   keys_select_button_hint: Select a button to remap it
@@ -9,11 +9,11 @@ device:
   keys_layer_shift: Layer shift
   keys_assign_action: Assign action
   keys_editing: EDITING
-  keys_assign_hint: "Choose what the %{button} button does when pressed, and while the layer-shift key is held."
+  keys_assign_hint: "Choose what the %{button} button does normally and while you hold the layer-shift key."
   keys_select_button_prompt: Select a button on the left to configure its action.
   keys_no_params_native: Sends its default input. No parameters to configure.
-  keys_no_params_disable: This button is disabled and does nothing when pressed.
-  keys_no_params_layer_shift: Activates the shift layer while held. No parameters to configure.
+  keys_no_params_disable: This button is disabled and does nothing when you press it.
+  keys_no_params_layer_shift: Activates the shift layer while you hold the button. No parameters to configure.
   keys_no_params: No parameters to configure.
   keys_direction: DIRECTION
   keys_dir_up: Up
@@ -74,7 +74,7 @@ device:
   keys_label_profile_dir: "Profile %{direction}"
   keys_label_dpi: "DPI %{dpi}"
 
-  # chains.rs — LED chains tab
+  # chains.rs - LED chains tab
   chains_topo_linear: Linear
   chains_topo_ring: Ring
   chains_topo_rings: "Rings ×%{count}"
@@ -82,11 +82,11 @@ device:
   chains_topo_keyboard: Keyboard
   chains_title: LED chains
   chains_summary: "%{leds} LEDs · %{headers} headers"
-  chains_subtitle: "Attach addressable links to each header. Discovered links are locked; you can add, rename, and remove your own."
+  chains_subtitle: "Connect addressable components to each header. Automatically detected components are locked, but you can add, rename, and remove your own."
   chains_flashing: "Flashing…"
   chains_discover: Discover
   chains_usage: "%{used} / %{max} LEDs"
-  chains_no_links: No links attached to this header
+  chains_no_links: No components connected to this header
   chains_discovered: DISCOVERED
   chains_led_count: "%{count} LED"
   chains_add_link: Add link
@@ -97,7 +97,7 @@ device:
   chains_cancel: Cancel
   chains_add: Add
 
-  # children.rs — Devices & Pairing tabs
+  # children.rs - Devices & Pairing tabs
   children_connected_devices: Connected devices
   children_no_child_devices: No child devices
   children_receiver: RECEIVER

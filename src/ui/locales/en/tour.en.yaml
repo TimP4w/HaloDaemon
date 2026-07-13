@@ -11,32 +11,32 @@ tour:
       body: "Right-click a card to rename, hide, or disable a device."
     hidden_devices:
       title: "Hidden devices"
-      body: "Hidden devices are tucked away here. Toggle this to bring them back."
+      body: "Use this option to show or hide devices that you marked as hidden."
     sidebar_home:
       title: "Sidebar: Home"
-      body: "The Home page lists all your connected devices. Search, hide, or right-click a card to manage it."
+      body: "The Home page lists all your connected devices. Search for them, hide them, or right-click a card to manage its device."
     sidebar_lighting:
       title: "Sidebar: RGB Lighting"
-      body: "Apply a single colour or effect to every RGB device at once. Create, import, and manage custom effects here."
+      body: "Apply one color or effect to every RGB device at once. Create, import, and manage custom effects here."
     sidebar_cooling:
       title: "Sidebar: Cooling"
       body: "View fan and pump curves, sensor readings, and cooling presets across all devices."
     sidebar_canvas:
       title: "Sidebar: Effects Canvas"
-      body: "Compose layered effects across multiple devices on a shared pixmap canvas. Drag zones, stack effects, and tune sampling."
+      body: "Combine effects across multiple devices on a shared canvas. Move zones, layer effects, and adjust sampling."
     sidebar_settings:
       title: "Sidebar: Settings"
-      body: "Application preferences, engine toggles, and close-to-tray behaviour live here."
+      body: "Configure application preferences, engine controls, and close-to-tray behavior here."
     switch_profiles:
       title: "Switch profiles"
-      body: "Click the profile pill in the title bar to switch profiles or manage your saved configurations."
+      body: "Select the profile control in the title bar to switch profiles or manage your saved configurations."
   page_lighting:
     pick_effect:
       title: "Pick an effect"
       body: "Choose a lighting effect to apply across your devices."
     create_effect:
       title: "Create an effect"
-      body: "Build your own custom effect with the designer: mix layers, colours, and animations."
+      body: "Build a custom effect with the designer by combining layers, colors, and animations."
     import_effect:
       title: "Import an effect"
       body: "Load a saved effect file from another machine or a shared preset."
@@ -50,14 +50,14 @@ tour:
   page_canvas:
     create_instance:
       title: "Create an effect instance"
-      body: "Add an instance here, then expand it and click a zone chip to assign it."
+      body: "Add an instance, expand it, and select a zone label to assign that zone."
     arrange_remove:
       title: "Arrange and remove"
       body: "Drag a zone to reposition it; select one and press Delete to remove it."
   page_settings:
     application:
       title: "Application preferences"
-      body: "Close-to-tray, startup checks, and other app-wide preferences live here."
+      body: "Configure close-to-tray behavior, startup checks, and other application-wide preferences here."
     engines:
       title: "Engines"
       body: "Turn the fan-curve, canvas, and LCD engines on or off and tune their rates."
@@ -70,7 +70,7 @@ tour:
       body: "Add processes so this profile automatically becomes active when a matching app is in focus."
     overrides:
       title: "Per-device overrides"
-      body: "Any device setting you change while this profile is active is saved as an override here. Revert individual overrides or check back later as you tweak devices."
+      body: "Device settings you change while this profile is active are saved here. Revert individual changes or return later to refine them."
   page_device:
     back:
       title: "Back to all devices"
@@ -80,7 +80,7 @@ tour:
       body: "Click the pencil next to the name to rename this device."
     tabs:
       title: "Capability tabs"
-      body: "Each tab exposes a capability this device supports."
+      body: "Each tab contains one of the features supported by this device."
   tab_devices:
     connected:
       title: "Connected devices"
@@ -88,10 +88,10 @@ tour:
   tab_lighting:
     choose_effect:
       title: "Choose an effect"
-      body: "Pick from Static, Paint, or native and engine effects. Each applies a different lighting behaviour."
+      body: "Choose Static, Paint, a native effect, or an engine effect. Each option produces different lighting behavior."
     paint:
       title: "Paint LEDs manually"
-      body: "Paint mode lets you click or drag individual LEDs to set a custom colour per diode."
+      body: "Paint mode lets you click or drag across individual LEDs to give each one a custom color."
     place_canvas:
       title: "Place on canvas"
       body: "Send this device to the Effects Canvas, where you can compose layered effects across multiple devices."
@@ -104,17 +104,17 @@ tour:
       body: "This device has addressable LED headers. Each header can drive a chain of strips, rings, or grids. Define them here so the daemon knows what is connected."
     discover:
       title: "Discover links"
-      body: "Click Discover to scan the header for already-connected ARGB devices. Discovered links are locked."
+      body: "Select Discover to scan the header for connected ARGB devices. Automatically detected links cannot be edited."
     add_link:
       title: "Add a link manually"
-      body: "Use Add link to define a new strip or ring: pick a name, topology, and LED count, then wire it up."
+      body: "Use Add link to configure a new strip or ring. Choose its name, topology, and LED count, then connect it."
   tab_cooling:
     pick_sensor:
       title: "Pick a sensor"
-      body: "Choose which temperature sensor drives this fan or pump curve. The live reading is shown below."
+      body: "Choose the temperature sensor that controls this fan or pump curve. Its live reading appears below."
     apply_preset:
       title: "Apply a preset"
-      body: "Load a pre-defined curve shape from the preset picker to get started quickly."
+      body: "Load a predefined curve from the preset picker to get started quickly."
     edit_curve:
       title: "Edit the curve"
       body: "Drag points to shape the temperature-to-duty response. Click empty space to add a point; right-click a point to remove it."
@@ -124,7 +124,7 @@ tour:
       body: "Image mode displays a static picture or GIF; Video mode streams a media file (requires ffmpeg); Editor mode lets you build a custom template with drag-and-drop widgets."
     preview:
       title: "Preview & settings"
-      body: "The live preview shows what the device displays. Use the controls below to adjust brightness, rotation, and other display settings."
+      body: "The live preview shows what appears on the device. Use the controls below to adjust brightness, rotation, and other display settings."
   tab_equalizer:
     equalizer:
       title: "Equalizer"
@@ -146,7 +146,7 @@ tour:
   tab_controls:
     device_controls:
       title: "Device controls"
-      body: "Vendor-specific switches and settings for this device live here."
+      body: "Configure vendor-specific controls and settings for this device here."
   tab_onboard:
     onboard_profiles:
       title: "Onboard profiles"
@@ -164,7 +164,7 @@ tour:
       body: "Drag placed widgets to position them and select one to edit its settings."
     variant:
       title: "Variants & parameters"
-      body: "Each widget offers variants. For example a gauge can show a sensor value or audio level. Plus size, colour, and other parameters."
+      body: "Each widget offers multiple variants. For example, a gauge can show a sensor value or audio level. You can also adjust its size, color, and other parameters."
   page_effect_designer:
     save:
       title: "Save your effect"
@@ -174,4 +174,4 @@ tour:
       body: "See how your effect looks on different layouts: strip, ring, matrix, and fan hub. Changes update in real time."
     tune:
       title: "Tune the parameters"
-      body: "Pick a generator, adjust colours and speed, then shape the brightness curve. Each control feeds into the procedural formula shown above the graph."
+      body: "Choose a generator, adjust the colors and speed, then shape the brightness curve. Each control changes the procedural formula shown above the graph."

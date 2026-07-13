@@ -66,14 +66,14 @@ devtabs:
   diagnostics: Diagnostics
   copy_json: Copy JSON
   copied: Copied!
-  fetching_debug: "Fetching debug snapshot…"
+  fetching_debug: "Fetching debug data…"
 
   equalizer: Equalizer
   eq_presets: Presets
 
-  onboard_intro: Profiles saved to the device's onboard memory work without the engine running.
+  onboard_intro: Profiles saved to the device's onboard memory work even when the engine is not running.
   host_mode: Host mode
-  host_mode_desc: Let the app drive this device. Turn off to run the onboard profiles standalone.
+  host_mode_desc: Let HaloDaemon control this device. Turn this off to use its onboard profiles independently.
   slot_n: "Slot %{n}"
   restore_to_rom: Restore to ROM
   switch: Switch
@@ -82,6 +82,6 @@ devtabs:
 
   dpi_stages: DPI stages
   add_stage: "+ Add stage"
-  dpi_help: Drag a node along the axis, or type an exact value. The active stage is what the mouse uses now.
+  dpi_help: Drag a node along the axis or enter an exact value. The mouse currently uses the active stage.
   stage_n_current: "Stage %{n} · current"
   stage_n: "Stage %{n}"

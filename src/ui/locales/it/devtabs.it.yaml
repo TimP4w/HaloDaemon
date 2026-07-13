@@ -39,8 +39,8 @@ devtabs:
   connected: Collegato
   info_transport: Trasporto
 
-  capabilities: Capacità
-  cap_children: Dispositivi figlio
+  capabilities: Funzionalità
+  cap_children: Dispositivi associati
   cap_pairing: Accoppiamento
   cap_settings: Impostazioni
   cap_ranges: Intervalli
@@ -66,16 +66,16 @@ devtabs:
   diagnostics: Diagnostica
   copy_json: Copia JSON
   copied: Copiato!
-  fetching_debug: "Recupero snapshot debug…"
+  fetching_debug: "Recupero dei dati di debug…"
 
   equalizer: Equalizzatore
   eq_presets: Preset
 
-  onboard_intro: I profili salvati nella memoria onboard del dispositivo funzionano senza che halod sia in esecuzione.
+  onboard_intro: I profili salvati nella memoria interna del dispositivo funzionano anche quando halod non è in esecuzione.
   host_mode: Modalità host
-  host_mode_desc: Lascia che halodaemon gestisca questo dispositivo. Disattiva per usare i profili onboard in autonomia.
+  host_mode_desc: Consenti a HaloDaemon di gestire questo dispositivo. Disattiva questa opzione per usare autonomamente i profili salvati sul dispositivo.
   slot_n: "Slot %{n}"
-  restore_to_rom: Ripristina a ROM
+  restore_to_rom: Ripristina dalla ROM
   switch: Cambia
   remove: Elimina
   create: Crea

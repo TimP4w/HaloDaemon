@@ -17,12 +17,12 @@ plugins:
   repos_branch_enter_url: Enter a URL first
   repos_add: Add
   repos_add_title: Add repository
-  repos_add_sub: Point HALO at a Git remote to browse, install, and update its plugins.
+  repos_add_sub: Connect HALO to a remote Git repository to browse, install, and update its plugins.
   repos_empty: No plugin repositories registered.
   repos_update: Update
   repos_remove: Remove repository
   repos_remove_title: Remove repository?
-  repos_remove_body: This unregisters %{name} and uninstalls every plugin it provides.
+  repos_remove_body: This removes %{name} and uninstalls every plugin provided by the repository.
   repo_source: SOURCE
   repo_last_sync: LAST SYNC
   repo_never_synced: never
@@ -35,10 +35,10 @@ plugins:
   update_all: Update all
   updating: Updating…
   update_available: Update available
-  modified_on_disk: Disabled — modified on disk
+  modified_on_disk: Disabled because it was modified on disk
   modified_on_disk_sub: This plugin's files changed since they were installed, so it was disabled for safety. Re-enable it to accept the change.
   # Pending changes banner
-  pending_changes: You have unapplied plugin changes. Apply them to hand devices to or from their plugin.
+  pending_changes: You have unapplied plugin changes. Apply them to update which plugins control your devices.
   apply_changes: Apply changes
   # Detail panel
   type_device: Driver
@@ -54,10 +54,10 @@ plugins:
   enable: Enable
   disable: Disable
   delete: Delete script
-  repo_sourced_note: Provided by a repository — remove the repository to uninstall
+  repo_sourced_note: This plugin is provided by a repository. Remove the repository to uninstall it.
   # Permissions
   permissions: PERMISSIONS
-  permissions_pending: This plugin needs permissions you haven't granted yet — it stays inactive until you decide.
+  permissions_pending: This plugin needs permissions you have not granted yet. It will remain inactive until you decide.
   permissions_not_granted_tag: Not granted
   permissions_enable_hint: Enabling this plugin will request the permissions above.
   permissions_granted: Granted
@@ -68,10 +68,10 @@ plugins:
   permission_secure_storage: Secure storage
   permission_smbus: SMBus
   permission_audio_routing: Audio routing
-  permission_network_desc: Opens network connections (e.g. to a local SDK/server). A malicious script could send data off this machine.
-  permission_os_desc: Reads the system clock (os.time / os.clock). Low risk - no file or process access is ever granted.
+  permission_network_desc: Opens network connections, such as to a local SDK or server. A malicious script could send data from this computer.
+  permission_os_desc: Reads the system clock (os.time / os.clock). This is low risk and does not grant access to files or processes.
   permission_secure_storage_desc: Reads this plugin's own saved secret values (e.g. an API token) in clear text while it runs.
-  permission_smbus_desc: Scans, reads, and writes SMBus/I2C devices. This reaches every device on the bus, not just this plugin's own hardware, so a bad write can destabilise other devices.
+  permission_smbus_desc: Scans, reads, and writes SMBus/I2C devices. This reaches every device on the bus, not just this plugin's own hardware, so a bad write can destabilize other devices.
   permission_audio_routing_desc: Creates and routes host audio sinks. A malicious script could spawn audio modules or capture/redirect audio on this machine.
   # Config fields
   settings: SETTINGS
@@ -80,8 +80,8 @@ plugins:
   # Permission consent dialog (shown when enabling a plugin that declares permissions)
   consent_title: Grant permissions
   consent_body: "%{name} needs the following to run."
-  consent_warning: Permissions are granted as a package. You can revoke them anytime — which disables the plugin.
-  consent_modified: This plugin's script changed since you last allowed it — review the permissions again.
+  consent_warning: Permissions are granted together. You can revoke them at any time, which will disable the plugin.
+  consent_modified: This plugin's script changed after you last approved it. Review the permissions again.
   consent_permission_added: An update to this plugin added a new permission that must be granted before it can run again. Review what it now requires below.
   consent_grant_enable: Grant & enable
   consent_cancel: Cancel
@@ -94,10 +94,10 @@ plugins:
   download_consent_deny: Don't allow
   # Add dialog
   add_title: Add a plugin
-  add_sub: Install a plugin package — a folder containing plugin.yaml and its entry script.
+  add_sub: Install a plugin package, which is a folder containing plugin.yaml and its entry script.
   choose_folder: Choose folder…
   upload_hint: Choose a plugin package folder
-  upload_sub: It is copied into your plugins folder.
+  upload_sub: The package will be copied into your plugins folder.
   cancel: Cancel
   # Delete confirmation
   delete_title: Delete script?

@@ -17,17 +17,17 @@ lighting:
   master_brightness: Master brightness
   saturation: Saturation
   target_devices_zones: Target devices & zones
-  targets_subtitle: Choose which devices and zones this lighting applies to. Pick a device to expand its zones.
+  targets_subtitle: Choose which devices and zones use this lighting. Select a device to view its zones.
   deselect_all: Deselect all
   select_all: Select all
   zones_count: "%{sel}/%{total} zones"
   none: "(none)"
   delete_effect_title: Delete effect?
-  delete_confirm: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
+  delete_confirm: 'Do you want to delete "%{name}"? You cannot undo this action.'
   no_zones_title: No lighting zones reported
-  no_zones_subtitle: This device didn't expose any addressable RGB zones
+  no_zones_subtitle: This device did not report any addressable RGB zones
   remove_from_canvas_title: Remove from canvas?
-  remove_from_canvas_body: This device is currently on the canvas. Applying this effect removes it from the canvas.
+  remove_from_canvas_body: This device is on the canvas. Applying this effect will remove it from the canvas.
   remove_and_apply: Remove & apply
   lighting_preview: Lighting preview
   mode_static: STATIC

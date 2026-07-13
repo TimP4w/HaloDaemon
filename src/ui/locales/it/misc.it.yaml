@@ -1,26 +1,26 @@
 misc:
   # effect_designer.rs
-  designer_back_canvas: Canvas Effetti
+  designer_back_canvas: Canvas degli effetti
   designer_back_lighting: Illuminazione RGB
-  designer_title: Designer Effetti
+  designer_title: Designer degli effetti
   designer_save: Salva effetto
   designer_invalid_name: Nome non valido
   designer_reset: Ripristina
-  designer_subtitle: "Effetto procedurale · renderizzato come pixmap canvas o direttamente per-LED"
+  designer_subtitle: "Effetto procedurale · generato come immagine sul canvas o direttamente sui singoli LED"
   designer_name_hint: Nome effetto
   designer_new_effect_name: Nuovo effetto
   designer_live_preview: Anteprima in tempo reale
   designer_rig_strip: Striscia 40 LED
   designer_rig_ring: Anello 32 LED
   designer_rig_matrix: Matrice 8×4
-  designer_rig_triple: "Anello triplo · hub ventola (vedi Ambito anello sotto)"
+  designer_rig_triple: "Anello triplo · hub per ventole (vedi Ambito dell'anello in basso)"
   designer_brightness_formula: "Luminosità · b(p)"
   designer_generator: Generatore
   designer_motion: Movimento
   designer_direction: Direzione
   designer_speed: Velocità
   designer_repeats: Ripetizioni
-  designer_ring_scope: "Ambito anello · zone multi-anello (es. ventole triple)"
+  designer_ring_scope: "Ambito dell'anello · zone con più anelli, ad esempio ventole triple"
   designer_shape: Forma
   designer_decay: Decadimento
   designer_width: Larghezza
@@ -44,7 +44,7 @@ misc:
   designer_cmode_solid: Tinta unita
   designer_cmode_gradient: Sfumatura
   designer_cmode_spectrum: Spettro
-  designer_ring_whole: Anello intero
+  designer_ring_whole: Intera zona
   designer_ring_separate: Anelli separati
   designer_color_cycle_speed: Velocità ciclo colore
   designer_phase_spread: Sfasamento
@@ -58,15 +58,15 @@ misc:
   radar_checking_updates: "Controllo aggiornamenti plugin…"
   radar_scanning: "Scansione dispositivi…"
   radar_scan_fallback: "%{found} trovati · scansione…"
-  radar_scan_detail: "%{found} trovati · Scansione %{detail}"
+  radar_scan_detail: "%{found} trovati · scansione di %{detail}"
   # device/macro_editor.rs
-  macro_full: Sequenza piena — rimuovi passaggi per aggiungerne altri.
-  macro_unreleased: La sequenza termina con tasti premuti — vengono rilasciati automaticamente dopo la riproduzione.
+  macro_full: La sequenza è completa. Rimuovi alcuni passaggi per aggiungerne altri.
+  macro_unreleased: Al termine della sequenza alcuni tasti risultano ancora premuti. Verranno rilasciati automaticamente dopo la riproduzione.
   macro_stop: "■ Stop"
   macro_record: "● Registra"
   macro_play: "▶ Riproduci"
   macro_clear: Cancella
-  macro_hint_recording: In registrazione — premi i tasti; le pause diventano attese. Premi Stop per salvare.
+  macro_hint_recording: Registrazione in corso. Premi i tasti; le pause verranno inserite come attese. Premi Stop per salvare.
   macro_hint_empty: "Registra una sequenza oppure aggiungi passaggi qui sotto. Trascina i blocchi per riordinarli; trascina il bordo di un'attesa per modificarla."
   macro_hint_playback: "La riproduzione invia i tasti alla finestra attiva. Trascina i blocchi per riordinarli; trascina il bordo di un'attesa per modificarla."
   macro_click_to_record: Clicca qui per registrare i pulsanti del mouse

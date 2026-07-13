@@ -8,7 +8,7 @@ lcd:
   rotation: ROTATION
   reset_to_default: Reset to default
   raw_streaming: Raw streaming
-  raw_streaming_hint: Stream uncompressed frames to the panel (bypasses Q565 encoding)
+  raw_streaming_hint: Send uncompressed frames to the panel without using Q565 encoding
   media: Media
   no_video_selected: No video selected
   choose_video: "Choose Video…"
@@ -23,7 +23,7 @@ lcd:
   none: "(none)"
   widget_count: "%{n} widgets"
   clear_all: Clear all
-  empty_screen_hint: Empty screen - drag widgets from the library below
+  empty_screen_hint: The screen is empty. Drag widgets here from the library below.
   editor_shortcuts_hint: "Del delete  ·  Alt+H / Alt+V center  ·  drag ⟳ handle to rotate  ·  double-click text to edit"
   no_image_selected: No image selected
   widget_clock: Clock
@@ -49,10 +49,10 @@ lcd:
   save: Save
   delete_template_title: Delete template?
   delete_image_title: Delete image?
-  delete_confirm_body: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
+  delete_confirm_body: 'Do you want to delete "%{name}"? You cannot undo this action.'
   cancel: Cancel
   delete: Delete
-  empty_selection_hint: "Tap a widget on the screen\nto change its size, color or text."
+  empty_selection_hint: "Select a widget on the screen\nto change its size, color, or text."
   selected_caption: "SELECTED · %{kind}"
   type_clock: Clock
   type_date: Date

@@ -10,7 +10,7 @@ home:
   remove_device: Remove device
   remove: Remove
   remove_device_title: Remove device
-  remove_device_confirm: "Remove %{name} from its chain? This unlinks the device and it will no longer appear here."
+  remove_device_confirm: "Do you want to remove %{name} from its chain? This will disconnect the device, and it will no longer appear here."
   devices_connected: "%{online} of %{total} devices connected"
   devices_connected_attention: "%{online} of %{total} devices connected · %{attention} need attention"
   hide_hidden: Hide hidden
@@ -22,6 +22,6 @@ home:
   hide_sensor: Hide sensor
   offline: Offline
   no_matching: No matching devices
-  no_matching_sub: No connected device matches your search
+  no_matching_sub: None of your connected devices match this search
   no_devices: No devices connected
   no_devices_sub: Plug in a peripheral or check that halod is running

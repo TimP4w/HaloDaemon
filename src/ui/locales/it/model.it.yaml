@@ -1,5 +1,5 @@
 device_type:
-  aio: Raffreddatore CPU
+  aio: Dissipatore CPU
   fan: Ventola
   hub: Controller
   dongle: Ricevitore

@@ -8,19 +8,19 @@ settings:
   section_advanced: AVANZATE
   section_debug: DEBUG
   section_about: INFORMAZIONI
-  section_healthcheck: CONTROLLO SALUTE
+  section_healthcheck: VERIFICA DEL SISTEMA
   start_on_boot_title: Avvia all'accesso
-  start_on_boot_sub: Avvia HaloDaemon nella barra delle applicazioni quando accedi
-  start_on_boot_managed_sub: Gestito dalla configurazione di sistema — modificalo da lì
+  start_on_boot_sub: Avvia HaloDaemon nell'area di notifica quando accedi
+  start_on_boot_managed_sub: Questa opzione è gestita dalla configurazione di sistema. Modificala da lì.
   start_on_boot_managed_value: Controllato dal sistema
-  close_to_tray_title: Riduci a icona nella barra
-  close_to_tray_sub: Nascondi la finestra invece di chiudere quando premi il pulsante di chiusura
+  close_to_tray_title: Chiudi nell'area di notifica
+  close_to_tray_sub: Quando premi il pulsante di chiusura, nascondi la finestra senza uscire dall'applicazione
   plugin_downloads_title: Plugin ufficiali e aggiornamenti
   plugin_downloads_sub: Consenti a HaloDaemon di scaricare plugin ufficiali da GitHub e controllare gli aggiornamenti all'avvio
   window_controls_title: Controlli finestra
-  window_controls_sub: Mostra minimizza / massimizza / chiudi nella barra del titolo — disattiva per i window manager a piastrelle
-  startup_healthcheck_title: Controllo salute all'avvio
-  startup_healthcheck_sub: Avvisa al lancio quando un controllo fallisce
+  window_controls_sub: Mostra i pulsanti Riduci a icona, Ingrandisci e Chiudi nella barra del titolo. Disattiva questa opzione se usi un window manager tiling.
+  startup_healthcheck_title: Verifica del sistema all'avvio
+  startup_healthcheck_sub: Avvisami all'avvio se una verifica non riesce
   replay_tutorials_title: Ripeti i tutorial
   replay_tutorials_sub: Mostra di nuovo il tour introduttivo la prossima volta che visiti ogni pagina
   replay_button: Ripeti
@@ -34,10 +34,10 @@ settings:
   scan_now_button: Scansiona ora
   scanning_button: Scansione…
   recheck_button: Ricontrolla
-  running_healthcheck_title: Controllo salute in corso…
-  running_healthcheck_sub: In attesa che il daemon riporti il suo stato
-  no_checks_title: Nessun controllo riportato
-  no_checks_sub: Il daemon ha restituito una lista di controllo vuota
+  running_healthcheck_title: Verifica del sistema in corso…
+  running_healthcheck_sub: In attesa dello stato comunicato dal daemon
+  no_checks_title: Nessun risultato disponibile
+  no_checks_sub: Il daemon ha restituito un elenco di verifiche vuoto
   dep_detected: "● Rilevato"
   dep_missing: "● Mancante"
   dep_not_found: "○ Non trovato"
@@ -50,21 +50,21 @@ settings:
   unknown: Sconosciuto
   open_external_button: "Apri ↗"
   diagnostics_title: Diagnostica di sistema e dispositivi
-  diagnostics_sub: Mostra tutti i dispositivi HID collegati, quali sono stati riconosciuti, stato dei privilegi
+  diagnostics_sub: Mostra tutti i dispositivi HID collegati, quelli riconosciuti e lo stato dei privilegi
   open_button: Apri…
-  app_tagline: Daemon controller per periferiche
+  app_tagline: Daemon per il controllo delle periferiche
   credits_button: Crediti…
   third_party_title: Licenze di terze parti
   third_party_sub: Componenti open source usati da HaloDaemon
   view_button: Visualizza…
   repository_title: Repository
-  licenses_modal_body: Componenti open source integrati o referenziati da HaloDaemon, raggruppati per licenza.
+  licenses_modal_body: Componenti open source inclusi o utilizzati da HaloDaemon, raggruppati per licenza.
   credits_title: Crediti
   credits_developer: "Sviluppatore:"
   credits_license: "Licenza:"
   acknowledgments: Riconoscimenti
   diagnostics_modal_title: Diagnostica di sistema e dispositivi
-  diagnostics_no_data: "Nessun dato di debug ancora disponibile.\n\nInvia GetDebugInfo dal daemon, poi apri questa finestra."
+  diagnostics_no_data: "Non sono ancora disponibili dati di debug.\n\nInvia GetDebugInfo dal daemon, quindi riapri questa finestra."
   copy_json_button: Copia JSON
   export_button: Esporta…
   copied_feedback: Copiato!

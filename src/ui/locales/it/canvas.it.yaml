@@ -1,9 +1,9 @@
 canvas:
-  title: Canvas Effetti
-  subtitle: Crea istanze con effetti diversi e assegna loro zone di illuminazione dei dispositivi che vuoi sincronizzare
+  title: Canvas degli effetti
+  subtitle: Crea effetti diversi e assegnali alle zone di illuminazione dei dispositivi
   playing: in esecuzione
   paused: in pausa
-  drag_hint: trascina per spostare · scroll per ingrandire
+  drag_hint: trascina per spostare · usa la rotellina per ingrandire
   mode_frame: Fotogramma
   mode_leds: LED
   done: Fatto
@@ -20,23 +20,23 @@ canvas:
   unit_zones: zone
   unit_device: dispositivo
   unit_devices: dispositivi
-  overflow_more: "+%{n} altri"
+  overflow_more: "+ altri %{n}"
   assign_zones_title: "Assegna zone · %{name}"
   assign_zones_sub: "%{eff} · %{n} %{zones} assegnate"
-  reassign_hint: Le zone contrassegnate con ● sono usate da un'altra istanza — clicca per riassegnarle qui.
-  new_instance_title: Nuova istanza effetto
-  fps_title: Frame rate del canvas
-  fps_desc: Ogni quanto il motore canvas campiona e invia i fotogrammi.
-  frame_rate: Frame rate
+  reassign_hint: Le zone contrassegnate con ● sono usate da un'altra istanza. Clicca per riassegnarle qui.
+  new_instance_title: Nuova istanza dell'effetto
+  fps_title: Frequenza dei fotogrammi del canvas
+  fps_desc: Frequenza con cui il motore del canvas campiona e invia i fotogrammi.
+  frame_rate: Frequenza dei fotogrammi
   sampling: Campionamento
-  sampling_desc: Area attorno a ciascun LED mediata dal canvas.
+  sampling_desc: Area attorno a ogni LED di cui il canvas calcola il colore medio.
   sampling_area: Area di campionamento
   roll_zone: Avvolgi zona
   unroll_zone: Svolgi zona
-  effect_instances: Istanze effetto
+  effect_instances: Istanze degli effetti
   new_button: "+ Nuova"
   no_instances: 'Nessuna istanza: aggiungine una con "+ Nuova".'
-  default_effect_title: Effetto predefinito / di riserva
+  default_effect_title: Effetto predefinito o di riserva
   default_effect_hint: Le zone senza un'istanza esplicita usano questo effetto.
   edit_zones: Modifica zone →
   add_zones: "+ Aggiungi zone a questa istanza"

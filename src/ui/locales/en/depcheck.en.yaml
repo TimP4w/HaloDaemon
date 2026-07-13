@@ -1,6 +1,6 @@
 depcheck:
   title: Some checks need your attention
-  intro: HaloDaemon found problems that may limit which devices or features work.
+  intro: HaloDaemon found problems that may prevent some devices or features from working correctly.
   dont_show_again: Don't show this again on startup
   got_it: Got it
   required: Required
@@ -19,10 +19,10 @@ depcheck:
     nvidia_smi:
       title: nvidia-smi
       impact: NVIDIA GPU temperature monitoring
-      fix: Only for NVIDIA GPUs; ships with the proprietary driver
+      fix: This is only required for NVIDIA GPUs and is included with the proprietary driver
     udev_rules:
       title: udev rules
-      impact: Non-root access to HID and hwmon devices
+      impact: Access to HID and hwmon devices without root privileges
       fix: Install udev/60-halod.rules, then reload udev
     i2c_access:
       title: I2C access
@@ -50,6 +50,6 @@ depcheck:
       fix: Reinstall HaloDaemon so the elevated broker service (HalodBroker) is registered
     gnome_extension:
       title: GNOME Shell extension
-      impact: Per-app profile switching via window focus on GNOME
+      impact: Profile switching based on the app in focus on GNOME
       fix_disabled: "Installed but disabled, enable it in the Extensions app"
       fix_missing: Install and enable the HaloDaemon GNOME Shell extension

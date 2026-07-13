@@ -1,34 +1,34 @@
 settings:
-  log_level: Livello di Log
+  log_level: Livello di log
   language: Lingua
 
 notify:
   error_title: Errore
   unknown_error: Errore sconosciuto
   engine_stopped:
-    title: Motore fermato
+    title: Motore arrestato
     message: "%{detail}"
   key_remap_unavailable:
     title: Rimappatura tasti non disponibile
-    message: "Impossibile inizializzare l'esecutore azioni: %{detail}"
+    message: "Impossibile inizializzare il sistema di esecuzione delle azioni: %{detail}"
   wireless_reinit_failed:
     title: Il dispositivo non è tornato wireless
-    message: "%{device} non è tornato online dopo 6 tentativi di re-init wireless."
+    message: "%{device} non è tornato online dopo 6 tentativi di reinizializzazione della connessione wireless."
   device_reconnect_failed:
     title: Il dispositivo non si è riconnesso
-    message: "%{device} non è diventato pronto dopo 6 tentativi di riconnessione."
+    message: "%{device} non è risultato disponibile dopo 6 tentativi di riconnessione."
   profile_switched:
     title: Profilo cambiato
     message: "Ora usi '%{profile}'"
   chain_link_restore_failed:
-    title: "Impossibile ripristinare il collegamento catena \"%{name}\""
-    message: "%{detail}, rimosso dal layout salvato."
+    title: "Impossibile ripristinare il collegamento \"%{name}\" della catena"
+    message: "%{detail}. Il collegamento è stato rimosso dalla disposizione salvata."
   device_init_failed:
     title: "Impossibile inizializzare %{device}"
     message: "%{detail}"
   fan_stalled:
-    title: "Ventola bloccata — %{fan}"
-    message: "La ventola non gira (0 RPM) mentre è applicato il ciclo di servizio. Controlla i cavi della ventola o sostituiscila."
+    title: "Ventola bloccata: %{fan}"
+    message: "La ventola non gira (0 RPM) mentre viene applicato il ciclo di lavoro. Controlla i cavi della ventola o sostituiscila."
   plugin_needs_permission:
     title: Il plugin richiede permessi
     message: "%{plugin} richiede permessi non ancora concessi. Apri la schermata Plugin per concederli o rimuovere il plugin."
@@ -36,7 +36,7 @@ notify:
     title: Plugin modificato su disco
     message: "I file di %{plugin} sono cambiati su disco, quindi è stato disabilitato per sicurezza. Apri la schermata Plugin per rivederlo e riabilitarlo."
   plugin_runtime_error:
-    title: "Errore del plugin — %{plugin}"
+    title: "Errore del plugin: %{plugin}"
     message: "%{detail}"
 
 tray:

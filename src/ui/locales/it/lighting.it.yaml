@@ -1,8 +1,8 @@
 lighting:
   title: Illuminazione RGB
-  subtitle: Applica un colore o un effetto a tutti i dispositivi in un colpo solo
-  tab_canvas: Canvas Effetti
-  tab_direct: Effetti Diretti
+  subtitle: Applica contemporaneamente un colore o un effetto a tutti i dispositivi
+  tab_canvas: Canvas degli effetti
+  tab_direct: Effetti diretti
   static: Statico
   paint: Dipingi
   edit: Modifica
@@ -16,18 +16,18 @@ lighting:
   effect_settings: Impostazioni effetto
   master_brightness: Luminosità master
   saturation: Saturazione
-  target_devices_zones: Dispositivi e zone di destinazione
-  targets_subtitle: Scegli a quali dispositivi e zone applicare questa illuminazione. Seleziona un dispositivo per espandere le sue zone.
+  target_devices_zones: Dispositivi e zone interessati
+  targets_subtitle: Scegli a quali dispositivi e zone applicare l'illuminazione. Seleziona un dispositivo per visualizzarne le zone.
   deselect_all: Deseleziona tutto
   select_all: Seleziona tutto
   zones_count: "%{sel}/%{total} zone"
   none: "(nessuna)"
-  delete_effect_title: Eliminare l'effetto?
-  delete_confirm: 'Sei sicuro di voler eliminare "%{name}"? Non può essere annullato.'
+  delete_effect_title: Vuoi eliminare l'effetto?
+  delete_confirm: 'Vuoi davvero eliminare "%{name}"? Non potrai annullare questa operazione.'
   no_zones_title: Nessuna zona di illuminazione rilevata
-  no_zones_subtitle: Questo dispositivo non ha esposto zone RGB indirizzabili
-  remove_from_canvas_title: Rimuovere dal canvas?
-  remove_from_canvas_body: Questo dispositivo è attualmente sul canvas. Applicare questo effetto lo rimuoverà dal canvas.
+  no_zones_subtitle: Il dispositivo non segnala alcuna zona RGB indirizzabile
+  remove_from_canvas_title: Vuoi rimuovere il dispositivo dal canvas?
+  remove_from_canvas_body: Il dispositivo si trova sul canvas. Se applichi questo effetto, verrà rimosso dal canvas.
   remove_and_apply: Rimuovi e applica
   lighting_preview: Anteprima illuminazione
   mode_static: STATICO
@@ -48,6 +48,6 @@ lighting:
   reset: Ripristina
   rotate: Ruota
   effect: Effetto
-  place_on_canvas: "Metti sul Canvas →"
+  place_on_canvas: "Aggiungi al canvas →"
   brush_color: Colore pennello
   color: Colore
