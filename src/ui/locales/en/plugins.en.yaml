@@ -3,7 +3,7 @@ plugins:
   subtitle: Device plugins add hardware support without rebuilding the daemon.
   counts: "%{count} scripts · %{active} active"
   empty_title: No plugins installed
-  empty_hint: Add a Lua plugin script to extend HALO with new devices.
+  empty_hint: Add a Lua plugin script to extend HaloDaemon with new devices.
   add: Add plugin
   # Plugin repositories
   repos_title: Repositories
@@ -17,7 +17,7 @@ plugins:
   repos_branch_enter_url: Enter a URL first
   repos_add: Add
   repos_add_title: Add repository
-  repos_add_sub: Connect HALO to a remote Git repository to browse, install, and update its plugins.
+  repos_add_sub: Connect HaloDaemon to a remote Git repository to browse, install, and update its plugins.
   repos_empty: No plugin repositories registered.
   repos_update: Update
   repos_remove: Remove repository

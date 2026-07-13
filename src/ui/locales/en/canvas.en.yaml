@@ -33,13 +33,13 @@ canvas:
   sampling_area: Sampling area
   roll_zone: Roll zone
   unroll_zone: Unroll zone
-  effect_instances: Effect instances
-  new_button: "+ New"
-  no_instances: 'No instances yet. Select "+ New" to add one.'
-  default_effect_title: Default / fallback effect
-  default_effect_hint: Zones that are not assigned to an instance use this effect.
+  effect_instances: Effect layers
+  new_button: "+ Add layer"
+  no_instances: 'No effect layers yet. Add one to start building your lighting scene.'
+  default_effect_title: Base layer
+  default_effect_hint: Zones without a specific layer use this effect.
   edit_zones: Edit zones →
-  add_zones: "+ Add zones to this instance"
+  add_zones: "+ Add zones to this layer"
   edit_in_designer: Edit in designer
   delete_instance: Delete instance
   effect_param_speed: Speed

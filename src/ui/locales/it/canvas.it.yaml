@@ -33,13 +33,13 @@ canvas:
   sampling_area: Area di campionamento
   roll_zone: Avvolgi zona
   unroll_zone: Svolgi zona
-  effect_instances: Istanze degli effetti
-  new_button: "+ Nuova"
-  no_instances: 'Nessuna istanza: aggiungine una con "+ Nuova".'
-  default_effect_title: Effetto predefinito o di riserva
-  default_effect_hint: Le zone senza un'istanza esplicita usano questo effetto.
+  effect_instances: Livelli effetti
+  new_button: "+ Aggiungi livello"
+  no_instances: 'Nessun livello effetti: aggiungine uno per iniziare.'
+  default_effect_title: Livello base
+  default_effect_hint: Le zone senza un livello specifico usano questo effetto.
   edit_zones: Modifica zone →
-  add_zones: "+ Aggiungi zone a questa istanza"
+  add_zones: "+ Aggiungi zone a questo livello"
   edit_in_designer: Modifica nel designer
   delete_instance: Elimina istanza
   effect_param_speed: Velocità

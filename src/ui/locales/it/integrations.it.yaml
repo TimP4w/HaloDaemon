@@ -1,6 +1,6 @@
 integrations:
   title: Integrazioni
-  subtitle: Collega HALO ad altre applicazioni. I dispositivi delle integrazioni attive saranno disponibili nell'area di lavoro.
+  subtitle: Collega HaloDaemon ad altre applicazioni. I dispositivi delle integrazioni attive saranno disponibili nell'area di lavoro.
   empty_title: Nessuna integrazione disponibile
   empty_hint: Al momento non hai integrazioni.
   configure: Configura
