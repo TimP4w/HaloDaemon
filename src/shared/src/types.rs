@@ -115,7 +115,7 @@ pub const DEFAULT_LOG_LEVEL: &str = "info";
 pub const DEFAULT_LANGUAGE: &str = "en";
 /// UI language codes both sides agree on. The GUI has a catalog for each and
 /// the daemon accepts only these in `SetLanguage`; add a code here when adding
-/// a set of `locales/*.<code>.yaml` catalogs.
+/// a set of `locales/<code>/` catalogs.
 pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "it"];
 /// Default for the per-engine enable toggles.
 pub const DEFAULT_ENGINE_ENABLED: bool = true;
