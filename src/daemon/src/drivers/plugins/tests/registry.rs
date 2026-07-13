@@ -509,7 +509,10 @@ fn official_repo_plugin_cannot_be_shadowed_by_a_later_source() {
         .find(|p| p.id == "dup")
         .and_then(|p| p.issue)
         .expect("load warning surfaced as a plugin issue");
-    assert_eq!(dup_issue.kind, halod_shared::types::PluginIssueKind::LoadWarning);
+    assert_eq!(
+        dup_issue.kind,
+        halod_shared::types::PluginIssueKind::LoadWarning
+    );
 
     app.registry.load_all(Path::new("/nonexistent"));
 }

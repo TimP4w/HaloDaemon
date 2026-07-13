@@ -296,7 +296,11 @@ mod tests {
     fn plugin_detail_codes_are_sticky_and_show_details() {
         let n = plugin_error();
         assert!(shows_details(&n.code));
-        assert_eq!(toast_timeout(&n.code), None, "detail toasts stay until dismissed");
+        assert_eq!(
+            toast_timeout(&n.code),
+            None,
+            "detail toasts stay until dismissed"
+        );
         assert_eq!(details_extra_height(&n), DETAILS_ROW_H);
         // A no-detail warning is neither sticky nor gets a Details row.
         let w = note(NotificationSeverity::Warning);

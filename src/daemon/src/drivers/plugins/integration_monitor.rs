@@ -170,8 +170,13 @@ async fn reconnect_offline_root(
         }
         Err(join) => {
             *failures.entry(plugin_id.clone()).or_insert(0) += 1;
-            report_connect_failure(app, manifest, &plugin_id, format!("probe task panicked: {join}"))
-                .await;
+            report_connect_failure(
+                app,
+                manifest,
+                &plugin_id,
+                format!("probe task panicked: {join}"),
+            )
+            .await;
         }
     }
 }

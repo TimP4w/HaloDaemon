@@ -1967,7 +1967,10 @@ mod tests {
         assert_eq!(runtime.detail(), Some("lua boom"));
         assert_eq!(connect.severity(), NotificationSeverity::Warning);
         // A code that carries no modal text has no detail.
-        assert_eq!(NotificationCode::FanStalled { fan: "cpu".into() }.detail(), None);
+        assert_eq!(
+            NotificationCode::FanStalled { fan: "cpu".into() }.detail(),
+            None
+        );
     }
 
     #[test]
@@ -1977,10 +1980,14 @@ mod tests {
             detail: "boom".into(),
             timestamp_ms: 42,
         };
-        let back: PluginIssue = serde_json::from_str(&serde_json::to_string(&issue).unwrap()).unwrap();
+        let back: PluginIssue =
+            serde_json::from_str(&serde_json::to_string(&issue).unwrap()).unwrap();
         assert_eq!(back, issue);
         // The kind serializes snake_case for a stable wire form.
-        assert_eq!(serde_json::to_value(&issue).unwrap()["kind"], "connect_failed");
+        assert_eq!(
+            serde_json::to_value(&issue).unwrap()["kind"],
+            "connect_failed"
+        );
         // A PluginInfo payload without `issue` deserializes to None.
         let info: PluginInfo = serde_json::from_value(serde_json::json!({
             "id": "p", "name": "P", "path": "", "enabled": true

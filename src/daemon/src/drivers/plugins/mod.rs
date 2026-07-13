@@ -499,8 +499,7 @@ impl Registry {
     /// warning the user has since fixed doesn't linger. Runtime/connect issues
     /// (a different `kind`) are untouched.
     fn clear_load_warnings(&self) {
-        write_recover(&self.issues)
-            .retain(|_, i| i.kind != PluginIssueKind::LoadWarning);
+        write_recover(&self.issues).retain(|_, i| i.kind != PluginIssueKind::LoadWarning);
     }
 
     /// A plugin's full resolved config for its Lua VM: `config_for` plus, only
