@@ -14,7 +14,7 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use crate::server;
 
@@ -87,13 +87,16 @@ pub fn install() -> Result<()> {
         Err(e) => return Err(anyhow!("creating service '{SERVICE_NAME}': {e}")),
     }
 
-    // Let the non-elevated worker start/stop the service without a UAC prompt.
-    grant_user_service_control();
+    // Let only the installing coordinator account start/query the service.
+    // This also removes broad Interactive Users ACEs left by older releases.
+    let (coordinator_sid, _) = halod_hwaccess::winsec::current_process_identity()
+        .context("resolving the coordinator SID for the service ACL")?;
+    grant_coordinator_service_control(&coordinator_sid)?;
     Ok(())
 }
 
-/// Allow interactive (non-elevated) users to start the broker service on demand
-/// and query its state. Best-effort.
+/// Allow only the concrete coordinator user to start the broker service on
+/// demand and query its state.
 ///
 /// The grant is deliberately **start + query only** (no SERVICE_STOP): the
 /// broker self-stops once idle, so no unprivileged caller needs to stop it, and
@@ -101,45 +104,74 @@ pub fn install() -> Result<()> {
 /// in-use broker (a cross-user denial of service). Which user is served is
 /// enforced at the pipe, not here: even a user who starts the service cannot
 /// connect unless they are the bound coordinator (see `clientauth`).
-fn grant_user_service_control() {
-    // Interactive Users: SERVICE_START (RP) + query (LC). No SERVICE_STOP (WP).
-    const ACE: &str = "(A;;RPLC;;;IU)";
+fn grant_coordinator_service_control(coordinator_sid: &str) -> Result<()> {
+    halod_hwaccess::winsec::validate_sid_string(coordinator_sid)?;
+    // SERVICE_START (RP) + query status/config (LC). No SERVICE_STOP (WP).
+    let ace = format!("(A;;RPLC;;;{coordinator_sid})");
 
     let shown = Command::new("sc.exe")
         .args(["sdshow", SERVICE_NAME])
         .output();
     let current = match shown {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-        _ => {
-            println!("could not read the service security descriptor; skipping user grant");
-            return;
-        }
+        Ok(o) => bail!(
+            "sc.exe sdshow failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => return Err(anyhow!("running sc.exe sdshow: {e}")),
     };
     let current: String = current.split_whitespace().collect();
 
-    let Some(updated) = insert_dacl_ace(&current, ACE) else {
-        return;
-    };
+    let updated = replace_coordinator_ace(&current, coordinator_sid, &ace)
+        .ok_or_else(|| anyhow!("service security descriptor has no DACL"))?;
     match Command::new("sc.exe")
         .args(["sdset", SERVICE_NAME, &updated])
         .status()
     {
         Ok(s) if s.success() => {
-            println!("granted interactive users start/stop control of the broker service")
+            println!("restricted broker service start/query rights to {coordinator_sid}");
+            Ok(())
         }
-        _ => println!("could not update the service security descriptor"),
+        Ok(s) => Err(anyhow!("sc.exe sdset failed with status {s}")),
+        Err(e) => Err(anyhow!("running sc.exe sdset: {e}")),
     }
 }
 
-/// Insert `ace` at the head of the DACL of a service SDDL string. Returns
-/// `None` when the descriptor has no `D:` DACL or already contains `ace`.
-fn insert_dacl_ace(sddl: &str, ace: &str) -> Option<String> {
+/// Replace every old Interactive Users or coordinator ACE in the DACL with one
+/// exact start/query ACE. Owner/group fields and the SACL are preserved.
+fn replace_coordinator_ace(sddl: &str, coordinator_sid: &str, ace: &str) -> Option<String> {
     let sddl = sddl.trim();
     let d_pos = sddl.find("D:")?;
-    if sddl.contains(ace) {
-        return None;
+    let dacl_start = d_pos + 2;
+    let dacl_end = sddl[dacl_start..]
+        .find("S:")
+        .map_or(sddl.len(), |offset| dacl_start + offset);
+    let dacl = &sddl[dacl_start..dacl_end];
+    let first_ace = dacl.find('(').unwrap_or(dacl.len());
+    let mut kept = String::from(&dacl[..first_ace]);
+    let mut rest = &dacl[first_ace..];
+    while let Some(open) = rest.find('(') {
+        kept.push_str(&rest[..open]);
+        let candidate = &rest[open..];
+        let Some(close) = candidate.find(')') else {
+            kept.push_str(candidate);
+            rest = "";
+            break;
+        };
+        let candidate = &candidate[..=close];
+        let is_interactive = candidate.ends_with(";;;IU)");
+        let is_coordinator = candidate.ends_with(&format!(";;;{coordinator_sid})"));
+        if !is_interactive && !is_coordinator {
+            kept.push_str(candidate);
+        }
+        rest = &rest[open + close + 1..];
     }
-    Some(format!("D:{ace}{}", &sddl[d_pos + 2..]))
+    kept.push_str(rest);
+    Some(format!(
+        "{}{ace}{kept}{}",
+        &sddl[..dacl_start],
+        &sddl[dacl_end..]
+    ))
 }
 
 /// Stop and remove the `HalodBroker` service. Idempotent.
@@ -195,8 +227,15 @@ pub fn run() -> Result<()> {
 
 windows_service::define_windows_service!(ffi_service_main, service_main);
 
-fn service_main(_arguments: Vec<OsString>) {
-    if let Err(e) = run_service() {
+fn service_main(arguments: Vec<OsString>) {
+    let arguments: Vec<String> = arguments
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let result = server::auth_config_from_args(&arguments)
+        .and_then(server::configure)
+        .and_then(|()| run_service());
+    if let Err(e) = result {
         log::error!("[broker] service fatal: {e:#}");
     }
 }
@@ -270,32 +309,35 @@ fn run_service() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::insert_dacl_ace;
+    use super::replace_coordinator_ace;
+
+    const SID: &str = "S-1-5-21-1-2-3-1001";
+    const ACE: &str = "(A;;RPLC;;;S-1-5-21-1-2-3-1001)";
 
     #[test]
-    fn insert_dacl_ace_prepends_into_the_dacl() {
+    fn coordinator_ace_replaces_all_interactive_aces() {
         let sddl = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWLOCRRC;;;IU)S:(AU;FA;CCDCLC;;;WD)";
-        let out = insert_dacl_ace(sddl, "(A;;RPWPLC;;;IU)").expect("ace inserted");
+        let out = replace_coordinator_ace(sddl, SID, ACE).expect("DACL");
         assert_eq!(
             out,
-            "D:(A;;RPWPLC;;;IU)(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWLOCRRC;;;IU)S:(AU;FA;CCDCLC;;;WD)"
+            "D:(A;;RPLC;;;S-1-5-21-1-2-3-1001)(A;;CCLCSWRPWPDTLOCRRC;;;SY)S:(AU;FA;CCDCLC;;;WD)"
         );
     }
 
     #[test]
-    fn insert_dacl_ace_is_idempotent() {
-        let sddl = "D:(A;;RPWPLC;;;IU)(A;;CCLC;;;SY)";
-        assert!(insert_dacl_ace(sddl, "(A;;RPWPLC;;;IU)").is_none());
+    fn coordinator_ace_is_idempotent() {
+        let sddl = format!("D:{ACE}(A;;CCLC;;;SY)");
+        assert_eq!(replace_coordinator_ace(&sddl, SID, ACE).unwrap(), sddl);
     }
 
     #[test]
-    fn insert_dacl_ace_rejects_a_descriptor_without_a_dacl() {
-        assert!(insert_dacl_ace("S:(AU;FA;CCDCLC;;;WD)", "(A;;RPWPLC;;;IU)").is_none());
+    fn coordinator_ace_rejects_a_descriptor_without_a_dacl() {
+        assert!(replace_coordinator_ace("S:(AU;FA;CCDCLC;;;WD)", SID, ACE).is_none());
     }
 
     #[test]
-    fn insert_dacl_ace_tolerates_surrounding_whitespace() {
-        let out = insert_dacl_ace("  D:(A;;CC;;;SY)\n", "(A;;RPWPLC;;;IU)").expect("trimmed");
-        assert_eq!(out, "D:(A;;RPWPLC;;;IU)(A;;CC;;;SY)");
+    fn coordinator_ace_tolerates_surrounding_whitespace() {
+        let out = replace_coordinator_ace("  D:(A;;CC;;;SY)\n", SID, ACE).expect("trimmed");
+        assert_eq!(out, format!("D:{ACE}(A;;CC;;;SY)"));
     }
 }

@@ -82,8 +82,8 @@ pub struct SmBusDevice {
 }
 
 impl SmBusDevice {
-    pub fn open(info: &BusInfo) -> Result<Arc<Self>> {
-        let inner = super::register_ops::open_smbus(info)?;
+    pub fn open(info: &BusInfo, addresses: &[u8]) -> Result<Arc<Self>> {
+        let inner = super::register_ops::open_smbus(info, addresses)?;
         Ok(Arc::new(Self {
             io: Metered::new(Mutex::new(inner), None),
         }))
@@ -390,7 +390,13 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
                 continue;
             };
             crate::registry::discovery::set_discovery_detail(&app, bus_scan_label(bus_info)).await;
-            let bus = match SmBusDevice::open(bus_info) {
+            let mut allowed_addresses = job.addresses.clone();
+            if let PreScan::Plugin { scope, .. } = &job.pre_scan {
+                allowed_addresses.extend_from_slice(scope);
+            }
+            allowed_addresses.sort_unstable();
+            allowed_addresses.dedup();
+            let bus = match SmBusDevice::open(bus_info, &allowed_addresses) {
                 Ok(b) => b,
                 Err(e) => {
                     if open_warned {

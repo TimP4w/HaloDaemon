@@ -1,11 +1,10 @@
 name: Create Release
 
 # Triggered manually to cut a new release in the correct order:
-#   1. test        — test on both Linux and Windows, then build release
-#   2. commit      — bump the version, then pin PKGBUILD to that commit
-#   3. tag         — create a vX.Y.Z tag on the version commit
-#   4. package     — produce the Windows installer + Linux packages
-#   5. publish     — create the GitHub release with all artifacts
+#   1. commit      — create and push the immutable version commit
+#   2. test/build  — checkout that exact SHA on Linux and Windows
+#   3. package     — package only binaries built from that SHA
+#   4. tag/publish — tag the tested SHA and attach all artifacts
 
 on:
   workflow_dispatch:
@@ -59,10 +58,12 @@ jobs:
   # Run the full test suite + clippy first (fail fast), then build the
   # release binaries and cache them for the tarball packaging step.
   test-linux:
-    needs: version
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -79,25 +80,6 @@ jobs:
       - name: Install cargo-about
         run: cargo install --locked --features cli cargo-about
 
-      - name: Bump version locally before build
-        run: |
-          v="${{ needs.version.outputs.new_version }}"
-          python3 - "$v" <<'PY'
-          import pathlib, re, sys
-          version = sys.argv[1]
-          toml = pathlib.Path("src/Cargo.toml")
-          text, n = re.subn(
-              r'(\[workspace\.package\]\nversion = ")[^"]*(")',
-              lambda m: f'{m.group(1)}{version}{m.group(2)}',
-              toml.read_text(),
-              count=1,
-          )
-          if n == 0:
-              sys.exit("Failed to patch workspace version in src/Cargo.toml")
-          toml.write_text(text)
-          print(f"Bumped src/Cargo.toml to {version}")
-          PY
-
       - name: Test + clippy
         working-directory: src
         run: |
@@ -108,7 +90,7 @@ jobs:
         working-directory: src
         env:
           HALOD_REQUIRE_LICENSES: "1"
-        run: cargo build --release -p halod -p halod-gui
+        run: cargo build --release --workspace
 
       - name: Upload release binaries
         uses: actions/upload-artifact@v7.0.1
@@ -123,10 +105,12 @@ jobs:
   # binaries (daemon + egui UI + elevated broker) and cache them for the
   # installer step.
   test-windows:
-    needs: version
+    needs: prepare
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - name: Set up MSYS2 (UCRT64)
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 #v2.32.0
@@ -141,26 +125,6 @@ jobs:
             mingw-w64-ucrt-x86_64-cargo-about
             mingw-w64-ucrt-x86_64-python
 
-      - name: Bump version locally before build
-        shell: msys2 {0}
-        run: |
-          v="${{ needs.version.outputs.new_version }}"
-          python3 - "$v" <<'PY'
-          import pathlib, re, sys
-          version = sys.argv[1]
-          toml = pathlib.Path("src/Cargo.toml")
-          text, n = re.subn(
-              r'(\[workspace\.package\]\nversion = ")[^"]*(")',
-              lambda m: f'{m.group(1)}{version}{m.group(2)}',
-              toml.read_text(),
-              count=1,
-          )
-          if n == 0:
-              sys.exit("Failed to patch workspace version in src/Cargo.toml")
-          toml.write_text(text)
-          print(f"Bumped src/Cargo.toml to {version}")
-          PY
-
       - name: Test + clippy
         shell: msys2 {0}
         run: |
@@ -174,7 +138,7 @@ jobs:
           HALOD_REQUIRE_LICENSES: "1"
         run: |
           cd src
-          cargo build --release -p halod -p halod-gui -p halod-broker
+          cargo build --release --workspace
 
       - name: Upload release binaries
         uses: actions/upload-artifact@v7.0.1
@@ -186,9 +150,9 @@ jobs:
             src/target/release/halod-broker.exe
 
   # ── Prepare ──────────────────────────────────────────────────────
-  # Version bump commit + tag. Only runs after both test jobs pass.
+  # Create the immutable release source commit before any build starts.
   prepare:
-    needs: [version, test-linux, test-windows]
+    needs: version
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ needs.version.outputs.new_version }}
@@ -274,12 +238,6 @@ jobs:
           git commit -m "chore: pin Arch package for v${v}"
           git push origin HEAD:main
 
-      - name: Tag release
-        run: |
-          v="${{ needs.version.outputs.new_version }}"
-          git tag "v${v}" "${{ steps.release_commit.outputs.sha }}"
-          git push origin "v${v}"
-
   # ── Windows installer ────────────────────────────────────────────
   # Takes the already-built Windows binaries from the test phase and
   # packages them into an Inno Setup installer. No Rust rebuild.
@@ -288,6 +246,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - name: Download Windows release binaries
         uses: actions/download-artifact@v8.0.1
@@ -337,6 +297,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - name: Download Linux release binaries
         uses: actions/download-artifact@v8.0.1
@@ -398,7 +360,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
         with:
-          ref: main
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       # dtolnay/rust-toolchain has no versioned releases: `@stable` is a rolling
       # ref by design (tracks current stable Rust). Intentionally left unpinned;
@@ -439,7 +401,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
         with:
-          ref: main
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -475,11 +437,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8.0.1
         with:
           path: artifacts
+
+      - name: Tag tested release commit
+        run: |
+          v="${{ needs.prepare.outputs.new_version }}"
+          git tag "v${v}" "${{ needs.prepare.outputs.release_sha }}"
+          git push origin "v${v}"
 
       - name: Compute SHA-256 and build release notes
         run: |

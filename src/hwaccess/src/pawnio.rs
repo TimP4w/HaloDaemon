@@ -202,9 +202,7 @@ impl PawnioModule {
         let api = api()?;
         let mut handle: *mut c_void = ptr::null_mut();
         let hr = unsafe { (api.open)(&mut handle) };
-        if hr != 0 {
-            return Err(anyhow!("pawnio_open: HRESULT=0x{:08x}", hr as u32));
-        }
+        validate_open_result(hr, handle)?;
 
         let mut last_err: Option<anyhow::Error> = None;
         for name in blob_names {
@@ -257,15 +255,38 @@ impl PawnioModule {
                 &mut ret,
             )
         };
-        if hr != 0 {
-            return Err(anyhow!(
-                "pawnio_execute({}): HRESULT=0x{:08x}",
-                func.to_str().unwrap_or("?"),
-                hr as u32
-            ));
-        }
-        Ok(ret)
+        validate_execute_result(hr, ret, output.len(), func.to_str().unwrap_or("?"))
     }
+}
+
+fn validate_open_result(hr: i32, handle: *mut c_void) -> Result<()> {
+    if hr != 0 {
+        return Err(anyhow!("pawnio_open: HRESULT=0x{:08x}", hr as u32));
+    }
+    if handle.is_null() {
+        return Err(anyhow!("pawnio_open succeeded but returned a null handle"));
+    }
+    Ok(())
+}
+
+fn validate_execute_result(
+    hr: i32,
+    returned: usize,
+    capacity: usize,
+    function: &str,
+) -> Result<usize> {
+    if hr != 0 {
+        return Err(anyhow!(
+            "pawnio_execute({function}): HRESULT=0x{:08x}",
+            hr as u32
+        ));
+    }
+    if returned > capacity {
+        return Err(anyhow!(
+            "pawnio_execute({function}) reported {returned} output words for a {capacity}-word buffer"
+        ));
+    }
+    Ok(returned)
 }
 
 impl Drop for PawnioModule {
@@ -274,5 +295,31 @@ impl Drop for PawnioModule {
         unsafe {
             (self.api.close)(handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_execute_result, validate_open_result};
+
+    #[test]
+    fn rejects_successful_open_with_null_handle() {
+        assert!(validate_open_result(0, std::ptr::null_mut()).is_err());
+    }
+
+    #[test]
+    fn accepts_non_null_open_handle() {
+        assert!(validate_open_result(0, std::ptr::dangling_mut()).is_ok());
+    }
+
+    #[test]
+    fn execute_rejects_driver_count_beyond_buffer() {
+        assert!(validate_execute_result(0, 5, 4, "ioctl_test").is_err());
+    }
+
+    #[test]
+    fn execute_propagates_hresult_before_using_count() {
+        let error = validate_execute_result(-1, usize::MAX, 4, "ioctl_test").unwrap_err();
+        assert!(error.to_string().contains("HRESULT"));
     }
 }

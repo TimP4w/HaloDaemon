@@ -45,14 +45,18 @@ reach register buses and nothing else.
 The daemon↔broker protocol ([hwaccess/src/proto.rs](../src/hwaccess/src/proto.rs))
 is deliberately just the register-bus primitives:
 
-- SMBus: enumerate controllers, open a bus, and the byte/word/block
+- SMBus: open an enumerated controller and use the byte/word/block
   read/write ops — each addressed by a broker-side **handle** returned at open.
 - PawnIO: open a module into a handle, then execute a named function against
   that handle.
 
 There is **no** filesystem op, process-spawn, or generic "run this" verb. Frames
 are a `u32` length prefix + JSON, capped at `MAX_FRAME_LEN` (64 KiB) so a hostile
-length prefix cannot force a huge allocation.
+length prefix cannot force a huge allocation. Before any operation, a connection
+must exchange the per-process bootstrap secret for a short-lived,
+connection-bound capability. An SMBus capability names one exact enumerated bus
+and address set. A PawnIO capability names one hard-allowlisted module and exact
+function set. Both carry request-rate and total-operation ceilings.
 
 ## Trust boundaries
 
@@ -65,24 +69,17 @@ length prefix cannot force a huge allocation.
 
 Two consequences follow, and they are the crux of the model:
 
-1. **The daemon and the broker trust each other.** They are indistinguishable at
-   the RPC layer — a request that reached the pipe came from a process running as
-   the coordinating user, which is exactly what the daemon is. The split is about
-   *surface area and auditability* (a small, logged, elevated binary), **not** a
-   boundary against a fully compromised daemon. So the broker does not, and
-   cannot usefully, re-authorize individual operations: any allowlist the daemon
-   *sent* would be worthless (a compromised daemon sends a permissive one), and
-   the legitimate set of buses/addresses lives in the daemon's device+plugin
-   layer, which the broker intentionally does not link.
+1. **A fully compromised daemon remains trusted.** It owns the bootstrap secret
+   and can request new capabilities within the broker's hard protocol surface.
+   The split limits elevated code and prevents unrelated processes/users from
+   reaching it; it is not a sandbox for the daemon itself.
 
-2. **Plugins are the untrusted code, and they are constrained at the daemon, not
-   the broker.** A plugin that wants SMBus access must hold the `smbus`
-   permission, and its manifest declares the buses/addresses it uses. Tightening
-   that further (broker-enforced per-address capabilities) was considered and
-   **deliberately not done** — it would duplicate the device layer into the
-   elevated process, still could not cover plugin-declared addresses, and buys
-   nothing given (1). If the plugin permission model ever needs to become a hard
-   boundary, that work belongs in the daemon's plugin host.
+2. **Plugins are untrusted.** A plugin must hold the daemon-layer `smbus`
+   permission and declare its addresses. The daemon turns the scan job's exact
+   addresses and pre-scan scope into the broker capability. The broker therefore
+   rejects an accidental or confused-deputy request outside that scope, while a
+   daemon compromise can still request a different capability as described in
+   (1).
 
 The boundary the **broker** actually enforces is the last row: keeping a
 *different* interactive user off the elevated pipe.
@@ -91,32 +88,32 @@ The boundary the **broker** actually enforces is the last row: keeping a
 
 The broker's named pipe is protected two ways, in depth.
 
-### 1. DACL
+### 1. Exact-principal DACL
 
-The pipe is created with the protected DACL `D:P(A;;GA;;;IU)(A;;GA;;;SY)`
-([hwaccess/src/winsec.rs](../src/hwaccess/src/winsec.rs)) — `GENERIC_ALL` to the
-well-known **Interactive** group (`IU`) and LocalSystem (`SY`), and nobody else.
-`S-1-5-4` (Interactive) appears only in an interactive-logon token, never in a
-session-0 service token or a network/batch logon, so this alone keeps out
-session-0 and remote/network callers. It does **not**, by itself, distinguish
-one interactive user from another.
+The daemon resolves its concrete user SID before starting the broker. The pipe
+uses the protected DACL `D:P(A;;GA;;;<coordinator SID>)(A;;GA;;;SY)`
+([hwaccess/src/winsec.rs](../src/hwaccess/src/winsec.rs)). There is no `IU`,
+`AU`, or world ACE, so another interactive account cannot open the pipe at all.
 
-### 2. Coordinator binding (per-connection authentication)
+### 2. Coordinator identity and capability authentication
 
-Because `IU` grants *every* interactive user, on a multi-session box
-(fast-user-switching, RDP) a second logged-in user could otherwise connect to
-the elevated pipe and issue raw register writes. To close that, the broker
-authenticates every connection
-([broker/src/clientauth.rs](../src/broker/src/clientauth.rs)):
+The daemon supplies its SID, Windows session id, and a cryptographically random
+32-byte bootstrap secret as transient service-start arguments (or as arguments
+to the UAC foreground broker). The broker authenticates every connection
+([broker/src/clientauth.rs](../src/broker/src/clientauth.rs),
+[broker/src/server.rs](../src/broker/src/server.rs)):
 
 1. On accept, it `ImpersonateNamedPipeClient`s the caller, reads the token's
    **user SID** and **logon-session id**, then `RevertToSelf`.
-2. The **first** identity seen becomes "the coordinator" and is bound.
-3. Every later connection must match that SID **and** session, or it is refused
-   (its stream is dropped, disconnecting it) and logged.
-4. When the last connection drops (the daemon has exited and the broker is
-   idle), the binding is released, so a broker started fresh later can be claimed
-   by whichever user's daemon next brings it up.
+2. The identity must match the startup SID **and** session; a first-client race
+   can never claim an unbound broker.
+3. The first RPC frame must carry the startup secret and an exact operation
+   scope. The secret comparison is constant-time. Authentication returns a
+   random, short-lived capability bound to that connection.
+4. Every later operation must be inside the scope and its rate/operation limits,
+   or it is refused. Renewal requires the current capability id.
+5. A wrong identity disconnects. A wrong secret, expired capability, or
+   out-of-scope operation is rejected without executing privileged work.
 
 The impersonate→read→revert FFI is kept small; the admission decision itself is a
 pure function so its coordinator/cap invariants are unit-tested without a live
@@ -125,12 +122,12 @@ pipe.
 ### 3. Service-control grant
 
 So the non-elevated daemon can start the on-demand service without a UAC prompt,
-the installer grants interactive users **SERVICE_START + query only**
-(`(A;;RPLC;;;IU)`, [broker/src/service.rs](../src/broker/src/service.rs)) — not
-`SERVICE_STOP`. The broker self-stops when idle, so no unprivileged caller needs
-to stop it, and withholding STOP prevents one interactive user from stopping
-another's in-use broker. Even a user permitted to *start* the service still
-cannot *connect* unless they are the bound coordinator.
+the installer grants only the installing user's concrete SID
+**SERVICE_START + query only** (`(A;;RPLC;;;<SID>)`,
+[broker/src/service.rs](../src/broker/src/service.rs)) — not `SERVICE_STOP`.
+Installation and upgrades remove every legacy `IU` ACE before adding the exact
+principal. The broker self-stops when idle, so no unprivileged caller needs to
+stop it.
 
 ## Resource bounds
 
@@ -138,15 +135,17 @@ A LocalSystem service must not let a peer exhaust it
 ([broker/src/server.rs](../src/broker/src/server.rs)):
 
 - **Connections** are capped (`MAX_CLIENTS`); excess accepts are refused.
+- **Named-pipe instances** use the same finite cap; no unlimited-instance pipe
+  is created.
+- **Worker threads** are retained and joined after completion rather than
+  detached and forgotten.
 - **Per-connection handles** (open buses / PawnIO modules) are capped
   (`MAX_HANDLES_PER_KIND`), so one connection cannot grow its handle maps without
   bound.
 - **Handle-id allocation** is checked (`checked_add`), never wrapping.
+- **Operations** are limited per second and per capability; scope values are
+  clamped to hard protocol ceilings.
+- **Idle clients** are disconnected after `CLIENT_IDLE_TIMEOUT`, releasing all
+  connection-owned bus/module handles.
 - **Idle self-stop:** with no live connection for a grace period the service
   stops, so the elevated helper never lingers after its worker is gone.
-
-Per-request rate limiting and per-connection idle timeouts are intentionally
-**not** applied: the daemon holds its bus handles open for the whole session and
-streams RGB at a high rate by design, and it is trusted,
-so those would throttle or sever legitimate traffic while adding nothing against
-the one untrusted principal the pipe already refuses.

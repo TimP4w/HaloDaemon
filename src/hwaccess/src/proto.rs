@@ -28,10 +28,51 @@ pub const PIPE_NAME: &str = r"\\.\pipe\halod-broker";
 /// (register) and the daemon (start) agree on one string.
 pub const BROKER_SERVICE_NAME: &str = "HalodBroker";
 
+/// Lifetime of one connection-bound authorization. Clients renew before it
+/// expires; the bootstrap secret itself exists only for one broker process.
+pub const CAPABILITY_TTL_MS: u64 = 60_000;
+
+/// Hard protocol bounds. The broker may clamp a requested scope further, but
+/// never permits a caller to raise these ceilings.
+pub const MAX_SCOPE_ADDRESSES: usize = 64;
+pub const MAX_PAWNIO_FUNCTIONS: usize = 16;
+pub const MAX_PAWNIO_ARGS: usize = 16;
+pub const MAX_OPERATIONS_PER_SECOND: u32 = 2_000;
+pub const MAX_OPERATIONS_PER_CAPABILITY: u32 = 100_000;
+
+/// Exact elevated surface requested for one named-pipe connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CapabilityScope {
+    Smbus {
+        bus: BusInfo,
+        addresses: Vec<u8>,
+        max_operations_per_second: u32,
+        max_operations: u32,
+    },
+    Pawnio {
+        module: String,
+        functions: Vec<String>,
+        max_operations_per_second: u32,
+        max_operations: u32,
+    },
+}
+
 /// A request from the daemon to the broker. `bus` fields carry a broker-side
 /// bus handle id previously returned by [`Response::Opened`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
+    /// First frame on a connection. The bootstrap secret is delivered through
+    /// the SCM start arguments (or the dev-run UAC command line), never over a
+    /// shared persistent channel. The returned capability is bound to this
+    /// connection, identity, scope, and a short expiry.
+    Authenticate {
+        bootstrap_token: String,
+        scope: CapabilityScope,
+    },
+    /// Extend an authenticated connection's short-lived capability.
+    Renew {
+        capability: String,
+    },
     /// Enumerate chipset SMBus controllers.
     Enumerate,
     /// Enumerate GPU SMBus/i2c controllers.
@@ -94,6 +135,10 @@ pub enum Request {
 /// [`Response::Error`], carrying the broker-side error string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
+    Authorized {
+        capability: String,
+        expires_in_ms: u64,
+    },
     Buses(Vec<BusInfo>),
     Opened(u32),
     Byte(u8),
@@ -174,6 +219,21 @@ mod tests {
 
     fn arb_request() -> impl Strategy<Value = Request> {
         prop_oneof![
+            (
+                ".*",
+                arb_bus_info(),
+                prop::collection::vec(any::<u8>(), 0..8)
+            )
+                .prop_map(|(bootstrap_token, bus, addresses)| Request::Authenticate {
+                    bootstrap_token,
+                    scope: CapabilityScope::Smbus {
+                        bus,
+                        addresses,
+                        max_operations_per_second: 100,
+                        max_operations: 1_000,
+                    },
+                }),
+            ".*".prop_map(|capability| Request::Renew { capability }),
             Just(Request::Enumerate),
             Just(Request::EnumerateGpu),
             arb_bus_info().prop_map(|info| Request::OpenBus { info }),
@@ -226,6 +286,10 @@ mod tests {
 
     fn arb_response() -> impl Strategy<Value = Response> {
         prop_oneof![
+            ".*".prop_map(|capability| Response::Authorized {
+                capability,
+                expires_in_ms: CAPABILITY_TTL_MS,
+            }),
             prop::collection::vec(arb_bus_info(), 0..4).prop_map(Response::Buses),
             any::<u32>().prop_map(Response::Opened),
             any::<u8>().prop_map(Response::Byte),

@@ -3,7 +3,7 @@
 //!
 //! The only HaloDaemon process that runs elevated (LocalSystem). It does exactly
 //! one thing: serve the register-bus primitives from `halod-hwaccess` (SMBus +
-//! PawnIO) over a named pipe locked to interactive-logon users, logging every
+//! PawnIO) over a named pipe locked to one coordinator SID/session, logging every
 //! operation. It never launches or supervises anything, and cannot run Lua — it
 //! links `halod-hwaccess` + `windows` only.
 //!
@@ -49,6 +49,7 @@ fn main() -> anyhow::Result<()> {
 
     // Dev / UAC path: run the RPC server directly, exiting once idle so a
     // dev-run broker goes away when its daemon does.
+    server::configure(server::auth_config_from_args(&args)?)?;
     log::info!(
         "[broker] starting (foreground); serving {}",
         halod_hwaccess::proto::PIPE_NAME

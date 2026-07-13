@@ -45,5 +45,4 @@ impl AmdSmnBus {
         };
         Ok((first & 0xFFFF_FFFF) as u32)
     }
-
 }

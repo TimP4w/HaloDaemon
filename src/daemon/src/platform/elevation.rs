@@ -79,7 +79,11 @@ pub(crate) fn is_elevated() -> bool {
 /// prompt is surfaced as an error by the caller (register-bus devices become
 /// unavailable, HID/network keep working).
 #[cfg(windows)]
-pub(crate) fn spawn_broker_elevated() -> anyhow::Result<()> {
+pub(crate) fn spawn_broker_elevated(
+    bootstrap_token: &str,
+    coordinator_sid: &str,
+    coordinator_session: u32,
+) -> anyhow::Result<()> {
     use anyhow::{anyhow, Context};
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
@@ -100,12 +104,23 @@ pub(crate) fn spawn_broker_elevated() -> anyhow::Result<()> {
     let verb = wide("runas");
     let file = wide_path(&broker);
     let dir_w = wide_path(dir);
+    let parameters = [
+        format!("--bootstrap-token={bootstrap_token}"),
+        format!("--coordinator-sid={coordinator_sid}"),
+        format!("--coordinator-session={coordinator_session}"),
+    ]
+    .iter()
+    .map(|argument| quote_arg(argument))
+    .collect::<Vec<_>>()
+    .join(" ");
+    let parameters = wide(&parameters);
 
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOASYNC,
         lpVerb: PCWSTR(verb.as_ptr()),
         lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(parameters.as_ptr()),
         lpDirectory: PCWSTR(dir_w.as_ptr()),
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
@@ -126,9 +141,7 @@ use crate::platform::win32::{wide, wide_path};
 /// - Wrap in double quotes if the argument is empty or contains spaces/tabs/quotes.
 /// - Backslashes before a `"` (or the closing quote) are doubled.
 ///
-/// Currently exercised only by tests — `spawn_broker_elevated` passes no
-/// parameters — so it is compiled in test builds only until a caller needs it.
-#[cfg(all(windows, test))]
+#[cfg(windows)]
 pub(crate) fn quote_arg(arg: &str) -> String {
     let needs_quoting = arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
     if !needs_quoting {

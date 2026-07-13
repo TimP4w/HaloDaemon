@@ -52,11 +52,11 @@ mod win_client;
 
 /// Open the register bus described by `info`, returning ops the caller can
 /// meter and lock behind a `SmBusDevice` exactly as before.
-pub fn open_smbus(info: &BusInfo) -> Result<Box<dyn SmBusSyncOps + Send>> {
+pub fn open_smbus(info: &BusInfo, addresses: &[u8]) -> Result<Box<dyn SmBusSyncOps + Send>> {
     match backend() {
         Backend::Direct => halod_hwaccess::smbus::open_bus(info),
         #[cfg(target_os = "windows")]
-        Backend::Broker => win_client::open_bus(info),
+        Backend::Broker => win_client::open_bus(info, addresses),
         // On non-Windows `backend()` never returns `Broker`.
         #[cfg(not(target_os = "windows"))]
         Backend::Broker => unreachable!("broker backend is Windows-only"),

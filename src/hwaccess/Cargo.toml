@@ -27,5 +27,7 @@ wmi        = "0.18.4"
 libloading = "0.8"
 windows    = { version = "0.62.2", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_System_Threading",
 ] }

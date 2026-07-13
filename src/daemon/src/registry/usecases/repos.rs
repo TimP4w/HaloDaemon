@@ -23,6 +23,10 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+fn repo_cloned(dir: &std::path::Path) -> bool {
+    dir.join(".git").exists()
+}
+
 /// Register a git-repo plugin source: clone it, pin `locked_sha`, persist, and rediscover.
 pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -> Result<()> {
     let slug = sanitize_slug(&url);
@@ -114,6 +118,9 @@ async fn compute_repo_updates(app: &Arc<AppState>) -> Vec<RepoUpdateStatus> {
     let mut out = Vec::with_capacity(repos.len());
     for r in repos {
         let dir = crate::config::plugin_repos_dir().join(&r.slug);
+        if !repo_cloned(&dir) {
+            continue;
+        }
         let branch = r.branch.clone();
         let result =
             tokio::task::spawn_blocking(move || repo::fetch_remote_sha(&dir, branch.as_deref()))
@@ -172,6 +179,9 @@ async fn compute_plugin_updates(
     let mut reached = Vec::new();
     for r in repos {
         let dir = crate::config::plugin_repos_dir().join(&r.slug);
+        if !repo_cloned(&dir) {
+            continue;
+        }
         let branch = r.branch.clone();
         let remote_sha = {
             let dir = dir.clone();
@@ -932,6 +942,43 @@ mod tests {
             .await
             .unwrap_err();
             assert!(err.to_string().contains("cannot be removed"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_check_skips_a_repo_that_was_never_cloned() {
+        crate::test_support::with_tmp_config(|app| async move {
+            // Seed a repo record whose clone dir was never created (e.g. an
+            // offline first launch where the initial clone failed). Background
+            // update checks must skip it silently instead of trying to open a
+            // missing repo and logging a fetch failure on every cycle.
+            {
+                let mut cfg = app.config.write().await;
+                cfg.plugin_repos.push(PluginRepoRecord {
+                    url: "https://example.invalid/repo".to_owned(),
+                    slug: "never-cloned".to_owned(),
+                    branch: None,
+                    locked_sha: String::new(),
+                    last_sync: None,
+                });
+            }
+
+            let statuses = compute_repo_updates(&app).await;
+            assert!(
+                !statuses.iter().any(|s| s.slug == "never-cloned"),
+                "an uncloned repo must be skipped by the repo update check"
+            );
+
+            let (plugin_statuses, reached) = compute_plugin_updates(&app, None).await;
+            assert!(
+                !reached.iter().any(|s| s == "never-cloned"),
+                "an uncloned repo must not be reported as reached"
+            );
+            assert!(
+                plugin_statuses.iter().all(|s| s.slug != "never-cloned"),
+                "an uncloned repo yields no plugin update statuses"
+            );
         })
         .await;
     }

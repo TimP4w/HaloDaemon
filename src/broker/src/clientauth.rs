@@ -7,10 +7,8 @@
 //! RDP) a second logged-in user could otherwise connect to the elevated broker
 //! and issue raw register writes. To close that, the broker impersonates each
 //! connecting client, reads its token's SID + logon-session id, and admits only
-//! the **first** identity it sees ("the coordinator"). Every later connection
-//! from a different SID/session is refused. The binding is released once the
-//! broker goes fully idle (the daemon has exited), so a later user can claim a
-//! freshly-started broker.
+//! the concrete identity supplied through the authenticated broker bootstrap.
+//! No caller can claim an unbound broker by winning a connection race.
 //!
 //! The FFI (impersonate → read token → revert) is kept small; the admission
 //! decision itself is a pure function ([`decide`]) so it can be unit-tested
@@ -48,16 +46,12 @@ pub enum Admission {
 /// Broker-side gate state: the bound coordinator (if any) and the live count.
 #[derive(Debug, Default)]
 pub struct Gate {
-    owner: Option<ClientIdentity>,
     active: usize,
 }
 
 impl Gate {
     pub const fn new() -> Self {
-        Gate {
-            owner: None,
-            active: 0,
-        }
+        Gate { active: 0 }
     }
 
     pub fn active(&self) -> usize {
@@ -65,30 +59,27 @@ impl Gate {
     }
 }
 
-/// Decide whether to admit `id`, binding the gate to it when it is the first
-/// client, and incrementing the live count on admission. Pure: no I/O, so the
-/// coordinator/cap invariants are exercised directly in tests.
-pub fn decide(gate: &mut Gate, id: &ClientIdentity, max_clients: usize) -> Admission {
+/// Admit only the exact coordinator identity configured at broker startup.
+pub fn decide(
+    gate: &mut Gate,
+    id: &ClientIdentity,
+    expected: &ClientIdentity,
+    max_clients: usize,
+) -> Admission {
     if gate.active >= max_clients {
         return Admission::TooMany;
     }
-    match &gate.owner {
-        None => gate.owner = Some(id.clone()),
-        Some(owner) if owner == id => {}
-        Some(_) => return Admission::WrongUser,
+    if id != expected {
+        return Admission::WrongUser;
     }
     gate.active += 1;
     Admission::Ok
 }
 
-/// Record a served connection ending. When the last one drops, the coordinator
-/// binding is released so a newly-started broker can be claimed by whoever's
-/// daemon next brings it up.
+/// Record a served connection ending. The configured coordinator remains fixed
+/// for the whole broker process lifetime.
 pub fn release(gate: &mut Gate) {
     gate.active = gate.active.saturating_sub(1);
-    if gate.active == 0 {
-        gate.owner = None;
-    }
 }
 
 /// Impersonate the client connected on `pipe`, read its token, and return its
@@ -101,9 +92,7 @@ pub fn pipe_client_identity(pipe: HANDLE) -> Result<ClientIdentity> {
     let result = read_impersonated_identity();
     // SAFETY: paired with the impersonation above; failure here would leave the
     // thread impersonating, so it is logged rather than ignored.
-    if let Err(e) = unsafe { RevertToSelf() } {
-        log::error!("[broker] RevertToSelf failed after client auth: {e}");
-    }
+    unsafe { RevertToSelf() }.map_err(|e| anyhow!("RevertToSelf after client auth: {e}"))?;
     result
 }
 
@@ -199,13 +188,12 @@ mod tests {
     }
 
     #[test]
-    fn first_client_is_bound_as_coordinator() {
+    fn configured_coordinator_is_admitted() {
         let mut gate = Gate::new();
         let a = id("S-1-5-21-1", 1);
-        assert_eq!(decide(&mut gate, &a, 4), Admission::Ok);
+        assert_eq!(decide(&mut gate, &a, &a, 4), Admission::Ok);
         assert_eq!(gate.active(), 1);
-        // The same identity reconnecting is admitted again.
-        assert_eq!(decide(&mut gate, &a, 4), Admission::Ok);
+        assert_eq!(decide(&mut gate, &a, &a, 4), Admission::Ok);
         assert_eq!(gate.active(), 2);
     }
 
@@ -214,8 +202,11 @@ mod tests {
         let mut gate = Gate::new();
         let owner = id("S-1-5-21-1", 1);
         let intruder = id("S-1-5-21-2", 2);
-        assert_eq!(decide(&mut gate, &owner, 4), Admission::Ok);
-        assert_eq!(decide(&mut gate, &intruder, 4), Admission::WrongUser);
+        assert_eq!(decide(&mut gate, &owner, &owner, 4), Admission::Ok);
+        assert_eq!(
+            decide(&mut gate, &intruder, &owner, 4),
+            Admission::WrongUser
+        );
         // A refusal does not count against the connection cap.
         assert_eq!(gate.active(), 1);
     }
@@ -223,9 +214,10 @@ mod tests {
     #[test]
     fn same_user_different_session_is_refused() {
         let mut gate = Gate::new();
-        assert_eq!(decide(&mut gate, &id("S-1-5-21-1", 1), 4), Admission::Ok);
+        let expected = id("S-1-5-21-1", 1);
+        assert_eq!(decide(&mut gate, &expected, &expected, 4), Admission::Ok);
         assert_eq!(
-            decide(&mut gate, &id("S-1-5-21-1", 2), 4),
+            decide(&mut gate, &id("S-1-5-21-1", 2), &expected, 4),
             Admission::WrongUser
         );
     }
@@ -234,21 +226,20 @@ mod tests {
     fn connection_cap_refuses_excess_clients() {
         let mut gate = Gate::new();
         let a = id("S-1-5-21-1", 1);
-        assert_eq!(decide(&mut gate, &a, 2), Admission::Ok);
-        assert_eq!(decide(&mut gate, &a, 2), Admission::Ok);
-        assert_eq!(decide(&mut gate, &a, 2), Admission::TooMany);
+        assert_eq!(decide(&mut gate, &a, &a, 2), Admission::Ok);
+        assert_eq!(decide(&mut gate, &a, &a, 2), Admission::Ok);
+        assert_eq!(decide(&mut gate, &a, &a, 2), Admission::TooMany);
     }
 
     #[test]
-    fn binding_releases_when_last_client_drops() {
+    fn release_does_not_allow_a_different_identity() {
         let mut gate = Gate::new();
         let a = id("S-1-5-21-1", 1);
-        assert_eq!(decide(&mut gate, &a, 4), Admission::Ok);
+        assert_eq!(decide(&mut gate, &a, &a, 4), Admission::Ok);
         release(&mut gate);
         assert_eq!(gate.active(), 0);
-        // Now a different user can claim the freshly-idle broker.
         let b = id("S-1-5-21-2", 2);
-        assert_eq!(decide(&mut gate, &b, 4), Admission::Ok);
+        assert_eq!(decide(&mut gate, &b, &a, 4), Admission::WrongUser);
     }
 
     #[test]

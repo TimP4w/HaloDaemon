@@ -3,6 +3,7 @@
 //! instance factory and a blocking `Read`/`Write` stream over one connection.
 
 use std::io::{self, Read, Write};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use windows::core::PCWSTR;
@@ -11,11 +12,12 @@ use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSe
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe, PIPE_READMODE_BYTE,
+    PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 
 const PIPE_BUFFER: u32 = 64 * 1024;
+const MAX_PIPE_INSTANCES: u32 = 32;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -65,8 +67,7 @@ impl Drop for PipeSecurity {
 }
 
 /// Create one instance of the named pipe with the given security. Byte-mode,
-/// blocking, unlimited instances so many worker connections can be served
-/// concurrently (one pipe instance per connection).
+/// blocking, with an explicit instance cap matching the server admission cap.
 pub fn create_instance(name: &str, sec: &PipeSecurity) -> Result<HANDLE> {
     let sa = sec.attributes();
     // SAFETY: `name_w` and `sa` outlive the call.
@@ -75,7 +76,7 @@ pub fn create_instance(name: &str, sec: &PipeSecurity) -> Result<HANDLE> {
             PCWSTR(wide(name).as_ptr()),
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            PIPE_UNLIMITED_INSTANCES,
+            MAX_PIPE_INSTANCES,
             PIPE_BUFFER,
             PIPE_BUFFER,
             0,
@@ -115,6 +116,26 @@ unsafe impl Send for PipeStream {}
 impl PipeStream {
     pub fn new(handle: HANDLE) -> Self {
         Self(handle)
+    }
+
+    /// Wait until at least one request byte is available without letting an
+    /// authenticated but silent client retain broker resources forever.
+    pub fn wait_readable(&self, timeout: Duration) -> io::Result<bool> {
+        let started = Instant::now();
+        loop {
+            let mut available = 0u32;
+            // SAFETY: this only queries the owned pipe handle and writes one
+            // stack `u32`; no data buffer is supplied.
+            unsafe { PeekNamedPipe(self.0, None, 0, None, Some(&mut available), None) }
+                .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e))?;
+            if available != 0 {
+                return Ok(true);
+            }
+            if started.elapsed() >= timeout {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -160,7 +181,7 @@ mod tests {
         // The real broker DACL round-trips through the parser; the descriptor is
         // non-null and freed on drop without a double-free (run under the alloc
         // checks the test harness applies).
-        let sec = PipeSecurity::from_sddl("D:P(A;;GA;;;IU)(A;;GA;;;SY)")
+        let sec = PipeSecurity::from_sddl("D:P(A;;GA;;;S-1-5-21-1-2-3-1001)(A;;GA;;;SY)")
             .expect("valid SDDL should parse");
         assert!(!sec.sd.0.is_null());
         let sa = sec.attributes();
