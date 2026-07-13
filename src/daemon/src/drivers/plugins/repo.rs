@@ -163,6 +163,8 @@ struct MetaEntryVersion {
     entry: Option<String>,
     #[serde(default)]
     version: Option<String>,
+    #[serde(default)]
+    compatibility: Option<super::manifest::PluginCompatibility>,
 }
 
 /// A plugin package's content hash + declared version at a specific commit,
@@ -176,7 +178,7 @@ pub fn remote_plugin_content(
     repo_dir: &Path,
     sha: &str,
     subpath: &Path,
-) -> Result<(String, String)> {
+) -> Result<(String, String, Option<super::manifest::PluginCompatibility>)> {
     let repo = git2::Repository::open(repo_dir)
         .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
     let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
@@ -194,7 +196,7 @@ pub fn remote_plugin_content(
 
     let hash = super::manifest::plugin_content_hash(&yaml_bytes, &entry_bytes);
 
-    Ok((hash, meta.version.unwrap_or_default()))
+    Ok((hash, meta.version.unwrap_or_default(), meta.compatibility))
 }
 
 /// A plugin package's content hash from the git *index* (what the working tree
@@ -344,7 +346,7 @@ mod tests {
         let repo = git2::Repository::init(dir).unwrap();
         fs::write(
             dir.join("plugin.yaml"),
-            "id: demo\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: demo\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
         )
         .unwrap();
         fs::write(dir.join("main.lua"), "return {}").unwrap();
@@ -523,7 +525,7 @@ mod tests {
             fs::create_dir_all(&plugin_dir).unwrap();
             fs::write(
                 plugin_dir.join("plugin.yaml"),
-                format!("id: {id}\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"),
+                format!("id: {id}\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"),
             )
             .unwrap();
             fs::write(plugin_dir.join("main.lua"), "return {}").unwrap();
@@ -541,7 +543,7 @@ mod tests {
         let local_manifest: PluginManifest =
             parse_manifest_from_dir(&src.path().join("plugins").join("alpha")).unwrap();
 
-        let (remote_hash, _version) = remote_plugin_content(
+        let (remote_hash, _version, _compatibility) = remote_plugin_content(
             src.path(),
             &repo_head_sha(src.path()),
             Path::new("plugins/alpha"),
@@ -559,9 +561,9 @@ mod tests {
     fn remote_plugin_content_changes_only_for_the_modified_plugin() {
         let src = tempfile::tempdir().unwrap();
         let first_sha = init_repo_with_two_plugins(src.path());
-        let (alpha_before, _) =
+        let (alpha_before, _, _) =
             remote_plugin_content(src.path(), &first_sha, Path::new("plugins/alpha")).unwrap();
-        let (beta_before, _) =
+        let (beta_before, _, _) =
             remote_plugin_content(src.path(), &first_sha, Path::new("plugins/beta")).unwrap();
 
         fs::write(
@@ -572,9 +574,9 @@ mod tests {
         let repo = git2::Repository::open(src.path()).unwrap();
         let second_sha = commit_all(&repo, "change alpha only");
 
-        let (alpha_after, _) =
+        let (alpha_after, _, _) =
             remote_plugin_content(src.path(), &second_sha, Path::new("plugins/alpha")).unwrap();
-        let (beta_after, _) =
+        let (beta_after, _, _) =
             remote_plugin_content(src.path(), &second_sha, Path::new("plugins/beta")).unwrap();
 
         assert_ne!(alpha_before, alpha_after, "modified plugin's hash changes");

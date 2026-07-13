@@ -868,12 +868,27 @@ the stock effect library — it ships every pixmap/direct effect except
 ## Packaging & the official repo
 
 Every plugin is a **directory package**: a folder containing `plugin.yaml`
-(the manifest — `id`, `type`, identity fields, `entry`, `permissions`,
+(the manifest — `id`, `compatibility`, `type`, identity fields, `entry`, `permissions`,
 `devices`, `transports`, optional `logo`/`effects` asset references) plus its
 entry Lua file (`main.lua` by default) and an optional `assets/` subdirectory
 for the logo/effect thumbnails. `plugin.yaml`'s `id` **must equal the
 directory name**. There is no single-file plugin format and nothing is
 compiled into the daemon binary.
+
+Every manifest must declare both the HaloDaemon release range and the exact
+plugin API generation it targets:
+
+```yaml
+compatibility:
+  halod: ">=0.2.0"
+  plugin_api: 1
+```
+
+`halod` uses Cargo-style SemVer requirement syntax. Both checks must pass: a
+plugin is rejected when the daemon version is outside the declared range or
+when `plugin_api` differs from the API generation implemented by the daemon.
+The same checks are applied to repository updates, so an incompatible remote
+plugin is neither marked as updatable nor checked out by an explicit update.
 
 ### Manifest validation and limits
 

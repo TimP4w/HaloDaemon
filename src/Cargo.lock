@@ -2500,6 +2500,7 @@ dependencies = [
  "resvg",
  "rusb",
  "rustfft",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",

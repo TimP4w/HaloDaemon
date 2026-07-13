@@ -596,6 +596,43 @@ pub struct EffectAssetRef {
     pub thumbnail: String,
 }
 
+/// Host compatibility declared by every directory plugin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginCompatibility {
+    /// SemVer requirement matched against the HaloDaemon package version.
+    pub halod: String,
+    /// Exact generation of the Lua plugin API expected by this plugin.
+    pub plugin_api: u32,
+}
+
+/// Lua/plugin manifest API implemented by this daemon build.
+pub const PLUGIN_API_VERSION: u32 = 1;
+
+impl PluginCompatibility {
+    /// Reject malformed requirements and hosts that cannot safely run the plugin.
+    pub fn ensure_supported(&self) -> Result<()> {
+        let requirement = semver::VersionReq::parse(&self.halod)
+            .with_context(|| format!("invalid HaloDaemon version requirement '{}'", self.halod))?;
+        let daemon_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+            .context("parsing this HaloDaemon build's version")?;
+        if !requirement.matches(&daemon_version) {
+            bail!(
+                "requires HaloDaemon '{}', but this daemon is {}",
+                self.halod,
+                daemon_version
+            );
+        }
+        if self.plugin_api != PLUGIN_API_VERSION {
+            bail!(
+                "requires plugin API {}, but this daemon provides plugin API {}",
+                self.plugin_api,
+                PLUGIN_API_VERSION
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Plugin-level metadata only — vendor/model live on each [`DeviceSpec`] instead.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Identity {
@@ -635,6 +672,9 @@ pub struct PluginManifest {
     /// Raw bytes of `plugin.yaml`, folded into [`Self::content_hash`]; empty otherwise.
     #[serde(skip)]
     pub manifest_bytes: Vec<u8>,
+    /// Required for directory plugins; built-in test manifests have no package metadata.
+    #[serde(skip)]
+    pub compatibility: Option<PluginCompatibility>,
     #[serde(rename = "devices", default, deserialize_with = "de_device_specs")]
     pub devices: Vec<DeviceSpec>,
     #[serde(default)]
@@ -697,6 +737,8 @@ pub struct PluginManifest {
 pub struct PluginMeta {
     /// Required; must equal the plugin's directory name.
     pub id: String,
+    /// Host versions and plugin API generation this package can run against.
+    pub compatibility: Option<PluginCompatibility>,
     #[serde(rename = "type", default)]
     pub plugin_type: PluginKind,
     #[serde(default)]
@@ -1098,6 +1140,13 @@ fn validate_entry_path(entry: &str) -> Result<()> {
 
 /// Cross-field validation, gated by `plugin_type`.
 pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
+    if !manifest.plugin_dir.as_os_str().is_empty() {
+        manifest
+            .compatibility
+            .as_ref()
+            .ok_or_else(|| anyhow!("plugin.yaml must declare compatibility"))?
+            .ensure_supported()?;
+    }
     check_count("devices", manifest.devices.len(), MAX_PLUGIN_DEVICES)?;
     check_count("effects", manifest.effects.len(), MAX_PLUGIN_EFFECTS)?;
     check_count(
@@ -1700,6 +1749,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
     // plugin.yaml overlays the entry Lua's table for these fields.
     let mut manifest = eval_manifest_table(&source)?;
     manifest.plugin_type = meta.plugin_type;
+    manifest.compatibility = meta.compatibility;
     manifest.devices = meta.devices;
     manifest.transports = meta.transports;
     manifest.permissions = meta.permissions;
@@ -2462,7 +2512,13 @@ mod tests {
     fn write_plugin_dir(root: &Path, id: &str, yaml_extra: &str, lua: &str) -> PathBuf {
         let dir = root.join(id);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("plugin.yaml"), format!("id: {id}\n{yaml_extra}")).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!(
+                "id: {id}\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\n{yaml_extra}"
+            ),
+        )
+        .unwrap();
         std::fs::write(dir.join("main.lua"), lua).unwrap();
         dir
     }
@@ -2483,6 +2539,66 @@ mod tests {
         assert!(
             m.rgb.is_some(),
             "entry Lua's capability sections still apply"
+        );
+        let compatibility = m.compatibility.as_ref().unwrap();
+        assert_eq!(compatibility.halod, ">=0.2.0, <0.3.0");
+        assert_eq!(compatibility.plugin_api, PLUGIN_API_VERSION);
+    }
+
+    #[test]
+    fn directory_plugin_requires_compatibility() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("missing_compatibility");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: missing_compatibility\ntype: integration\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), "return { type = 'integration' }").unwrap();
+
+        let error = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(
+            error.to_string().contains("must declare compatibility"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn directory_plugin_rejects_incompatible_daemon_and_plugin_api() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon_dir = write_plugin_dir(
+            tmp.path(),
+            "future_daemon",
+            "type: integration\n",
+            "return { type = 'integration' }",
+        );
+        std::fs::write(
+            daemon_dir.join("plugin.yaml"),
+            "id: future_daemon\ncompatibility:\n  halod: '>=999.0.0'\n  plugin_api: 1\ntype: integration\n",
+        )
+        .unwrap();
+        let error = parse_manifest_from_dir(&daemon_dir).unwrap_err();
+        assert!(
+            error.to_string().contains("requires HaloDaemon"),
+            "{error:#}"
+        );
+
+        let api_dir = write_plugin_dir(
+            tmp.path(),
+            "future_api",
+            "type: integration\n",
+            "return { type = 'integration' }",
+        );
+        std::fs::write(
+            api_dir.join("plugin.yaml"),
+            "id: future_api\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 2\ntype: integration\n",
+        )
+        .unwrap();
+        let error = parse_manifest_from_dir(&api_dir).unwrap_err();
+        assert!(
+            error.to_string().contains("requires plugin API 2"),
+            "{error:#}"
         );
     }
 

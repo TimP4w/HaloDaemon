@@ -249,15 +249,21 @@ async fn compute_plugin_updates(
                 .await
             };
             match result {
-                Ok(Ok((remote_hash, remote_version))) => {
+                Ok(Ok((remote_hash, remote_version, compatibility))) => {
                     let local_hash = app.registry.content_hash_for(&p.id);
                     // Compare the checked-out baseline (not the live file) to the
                     // remote, so a local edit isn't mistaken for an update.
                     let index_hash = plugin_index_content(&dir, &subpath).await;
-                    let update_available = match &index_hash {
+                    let content_update_available = match &index_hash {
                         Some(ih) => *ih != remote_hash,
                         None => local_hash.as_deref() != Some(remote_hash.as_str()),
                     };
+                    // Missing, malformed, or unsupported compatibility metadata
+                    // must never turn into an actionable update.
+                    let compatible = compatibility
+                        .as_ref()
+                        .is_some_and(|c| c.ensure_supported().is_ok());
+                    let update_available = compatible && content_update_available;
                     let on_disk_changed = match (&local_hash, &index_hash) {
                         (Some(local), Some(index)) => local != index,
                         _ => false,
@@ -642,7 +648,7 @@ mod tests {
         std::fs::write(
             dir.join("plugin.yaml"),
             format!(
-                "id: {id}\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
+                "id: {id}\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
             ),
         )
         .unwrap();
@@ -904,6 +910,39 @@ mod tests {
             let manifest = crate::drivers::plugins::parse_manifest_from_dir(&dir)
                 .expect("the reverted checkout must parse again");
             assert_eq!(manifest.plugin_id, slug);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn incompatible_remote_plugin_is_not_updatable_or_installed() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&file_url(src.path()));
+            let first_sha = init_source_repo(src.path(), &slug);
+            add_repo(file_url(src.path()), None, app.clone())
+                .await
+                .unwrap();
+
+            let repo = git2::Repository::open(src.path()).unwrap();
+            std::fs::write(
+                src.path().join("plugin.yaml"),
+                format!(
+                    "id: {slug}\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 2\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
+                ),
+            )
+            .unwrap();
+            commit_all(&repo, "requires future plugin API");
+
+            let (statuses, _) = compute_plugin_updates(&app, Some(&slug)).await;
+            let status = statuses.iter().find(|s| s.plugin_id == slug).unwrap();
+            assert!(!status.update_available);
+
+            let error = update_plugin(slug.clone(), app.clone()).await.unwrap_err();
+            assert!(error.to_string().contains("failed validation"), "{error:#}");
+            let config = app.config.read().await;
+            let record = config.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
+            assert_eq!(record.locked_sha, first_sha);
         })
         .await;
     }
