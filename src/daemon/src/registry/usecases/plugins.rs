@@ -513,6 +513,38 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
+    #[tokio::test]
+    async fn reload_registry_keeps_the_development_repository_as_the_priority_source() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let development_repo = tempfile::tempdir().unwrap();
+            let package = development_repo.path().join("devplug");
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(
+                package.join("plugin.yaml"),
+                "id: devplug\nname: Development Plugin\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Example\n    model: Device\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678 }\n",
+            )
+            .unwrap();
+            std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
+            *app.development_plugin_repo.write().await =
+                Some(development_repo.path().to_path_buf());
+
+            reload_registry(&app).await;
+
+            let plugin = app
+                .registry
+                .list(app.secret_store.as_ref())
+                .into_iter()
+                .find(|plugin| plugin.id == "devplug")
+                .expect("development package must remain loaded after a registry reload");
+            assert_eq!(
+                plugin.provenance,
+                halod_shared::types::PluginProvenance::LocalDevelopment
+            );
+            assert!(plugin.path.starts_with(development_repo.path().to_string_lossy().as_ref()));
+        })
+        .await;
+    }
+
     #[test]
     fn import_guard_serializes_same_id() {
         let _a = ImportGuard::acquire("dup-id").unwrap();
