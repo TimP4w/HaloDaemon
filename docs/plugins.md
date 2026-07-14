@@ -83,6 +83,10 @@ worker and its transport handles. `initialize`, capability calls, `children`,
 `on_event`, and `close` run through that worker; receiver children use opaque
 keys and route through their root rather than creating a multiplexer.
 
+`initialize` supplies device-specific RGB zones/effects, controls, DPI bounds
+and steps, LCD policy, and fan-channel identity. Those values are never static
+package catalog fields.
+
 Transports are scoped by catalog declaration:
 
 - HID uses matched endpoints and bounded event queues.
