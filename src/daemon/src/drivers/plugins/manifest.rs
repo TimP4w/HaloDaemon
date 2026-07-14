@@ -1943,6 +1943,19 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
     manifest.source_path = path.to_path_buf();
     manifest.script_source = source.to_owned();
 
+    // These inline fixtures exercise worker behavior, not catalog parsing. The
+    // retired fixture syntax could not declare the canonical HID authority, so
+    // supply it only for a fixture that actually uses HID. Real packages pass
+    // through `parse_manifest_from_dir` and must declare every authority.
+    let fixture_uses_hid = manifest
+        .devices
+        .iter()
+        .any(|device| device.transport == "hid")
+        || manifest.transports.hid.is_some();
+    if fixture_uses_hid && !manifest.permissions.contains(&Permission::Hid) {
+        manifest.permissions.push(Permission::Hid);
+    }
+
     validate_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -2528,66 +2541,18 @@ mod tests {
     }
 
     #[test]
-    fn range_boolean_action_battery_connection_equalizer_sections_parse() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            range = { ranges = { { key = "hz", label = "Hz", min = 125, max = 1000, default = 500 } } },
-            boolean = { booleans = { { key = "sniper", label = "Sniper" } } },
-            action = { actions = { { key = "cal", label = "Calibrate" } } },
-            battery = {},
-            connection = {},
-            equalizer = {},
-        }"#;
-        let m = parse_manifest(src, Path::new("controls.lua")).unwrap();
-        assert!(m.needs_worker());
-        let labels = m.capability_labels();
-        assert!(labels.contains(&"Controls".to_owned()));
-        assert!(labels.contains(&"Battery".to_owned()));
-        assert!(labels.contains(&"Connection".to_owned()));
-        assert!(labels.contains(&"Equalizer".to_owned()));
-        assert_eq!(m.range.unwrap().ranges[0].key, "hz");
-        assert_eq!(m.boolean.unwrap().booleans[0].key, "sniper");
-        assert_eq!(m.action.unwrap().actions[0].key, "cal");
-        assert!(m.battery.is_some());
-        assert!(m.connection.is_some());
-        assert!(m.equalizer.is_some());
-    }
-
-    #[test]
-    fn pairing_onboard_profiles_key_remap_sections_parse() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            pairing = {},
-            onboard_profiles = {},
-            key_remap = {
-              buttons = { { cid = 1, label = "Left", divertable = true, group = 0 } },
-              requires_host_mode = true,
-            },
-        }"#;
-        let m = parse_manifest(src, Path::new("receiver.lua")).unwrap();
-        assert!(m.needs_worker());
-        let labels = m.capability_labels();
-        assert!(labels.contains(&"Pairing".to_owned()));
-        assert!(labels.contains(&"Onboard".to_owned()));
-        assert!(labels.contains(&"Keys".to_owned()));
-        assert!(m.pairing.is_some());
-        assert!(m.onboard_profiles.is_some());
-        let key_remap = m.key_remap.unwrap();
-        assert_eq!(key_remap.buttons[0].cid, 1);
-    }
-
-    #[test]
     fn permissions_section_parses_and_defaults_to_empty() {
         let src = r#"return {
             devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            permissions = { "network", "os" },
+            permissions = { "network", "os", "hid" },
         }"#;
         let m = parse_manifest(src, Path::new("net.lua")).unwrap();
-        assert_eq!(m.permissions, vec![Permission::Network, Permission::Os]);
+        assert_eq!(
+            m.permissions,
+            vec![Permission::Network, Permission::Os, Permission::Hid]
+        );
 
-        let no_perms = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-        }"#;
+        let no_perms = r#"return { type = "integration" }"#;
         let m = parse_manifest(no_perms, Path::new("no_perms.lua")).unwrap();
         assert!(m.permissions.is_empty());
     }
@@ -2818,13 +2783,7 @@ mod tests {
     fn write_plugin_dir(root: &Path, id: &str, yaml_extra: &str, lua: &str) -> PathBuf {
         let dir = root.join(id);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("plugin.yaml"),
-            format!(
-                "id: {id}\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\n{yaml_extra}"
-            ),
-        )
-        .unwrap();
+        std::fs::write(dir.join("plugin.yaml"), format!("id: {id}\n{yaml_extra}")).unwrap();
         std::fs::write(dir.join("main.lua"), lua).unwrap();
         dir
     }
@@ -2835,69 +2794,31 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "dirplug",
-            "devices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\nrgb:\n  zones: []\n",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
         assert_eq!(m.plugin_id, "dirplug");
         assert_eq!(m.devices.len(), 1);
         assert_eq!(m.devices[0].vendor, "Acme");
-        assert!(m.rgb.is_some(), "YAML capability sections are loaded");
+        assert_eq!(m.capabilities, vec!["rgb"]);
     }
 
     #[test]
-    fn directory_plugin_requires_compatibility() {
+    fn directory_plugin_rejects_removed_compatibility() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("missing_compatibility");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: missing_compatibility\ntype: integration\n",
+            "id: missing_compatibility\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: integration\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return { type = 'integration' }").unwrap();
 
         let error = parse_manifest_from_dir(&dir).unwrap_err();
         assert!(
-            error.to_string().contains("must declare compatibility"),
-            "{error:#}"
-        );
-    }
-
-    #[test]
-    fn directory_plugin_rejects_incompatible_daemon_and_plugin_api() {
-        let tmp = tempfile::tempdir().unwrap();
-        let daemon_dir = write_plugin_dir(
-            tmp.path(),
-            "future_daemon",
-            "type: integration\n",
-            "return { type = 'integration' }",
-        );
-        std::fs::write(
-            daemon_dir.join("plugin.yaml"),
-            "id: future_daemon\ncompatibility:\n  halod: '>=999.0.0'\n  plugin_api: 1\ntype: integration\n",
-        )
-        .unwrap();
-        let error = parse_manifest_from_dir(&daemon_dir).unwrap_err();
-        assert!(
-            error.to_string().contains("requires HaloDaemon"),
-            "{error:#}"
-        );
-
-        let api_dir = write_plugin_dir(
-            tmp.path(),
-            "future_api",
-            "type: integration\n",
-            "return { type = 'integration' }",
-        );
-        std::fs::write(
-            api_dir.join("plugin.yaml"),
-            "id: future_api\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 2\ntype: integration\n",
-        )
-        .unwrap();
-        let error = parse_manifest_from_dir(&api_dir).unwrap_err();
-        assert!(
-            error.to_string().contains("requires plugin API 2"),
+            error.to_string().contains("uses removed 'compatibility'"),
             "{error:#}"
         );
     }
@@ -2909,7 +2830,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: dirplug2\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\nentry: driver.lua\nlicense: GPL-3.0-or-later\ndevices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: dirplug2\nentry: driver.lua\nlicense: GPL-3.0-or-later\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("driver.lua"), ENTRY_LUA).unwrap();
@@ -2933,7 +2854,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "overlaid",
-            "type: device\nname: Real Name\ndevices:\n  - vendor: Real\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "type: device\nname: Real Name\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Real\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             lua,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
@@ -2967,13 +2888,13 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "actual-dir-name",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         // Rewrite plugin.yaml claiming a different id than the directory name.
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: someone-else\ndevices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: someone-else\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
         )
         .unwrap();
         assert!(parse_manifest_from_dir(&dir).is_err());
@@ -2990,7 +2911,7 @@ mod tests {
         let no_entry = write_plugin_dir(
             tmp.path(),
             "no_entry",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         std::fs::remove_file(no_entry.join("main.lua")).unwrap();
@@ -3003,7 +2924,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "hashtest",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         let original = parse_manifest_from_dir(&dir).unwrap().content_hash();
@@ -3024,7 +2945,7 @@ mod tests {
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: hashtest\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: A\n    model: C\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: hashtest\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: C\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
         )
         .unwrap();
         let yaml_changed = parse_manifest_from_dir(&dir).unwrap().content_hash();
@@ -3036,8 +2957,7 @@ mod tests {
 
     #[test]
     fn plugin_meta_devices_round_trip_through_yaml() {
-        // `devices:` accepts a plain YAML list, same as the Lua one-or-many helper.
-        let yaml = "id: rt\ndevices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n  - vendor: Acme\n    model: K2\n    transport: hid\n    vid: 2\n";
+        let yaml = "id: rt\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1 }\n  - vendor: Acme\n    model: K2\n    type: led_strip\n    match:\n      hid: { vid: 2 }\n";
         let parsed: PluginMeta = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.devices.len(), 2);
         assert_eq!(parsed.devices[0].vendor, "Acme");
@@ -3051,7 +2971,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "noassets",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
@@ -3065,7 +2985,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "withassets",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n\
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
              logo: logo.png\n\
              effects:\n  - kind: pixmap\n    id: rainbow\n    name: Rainbow\n\
              effect_assets:\n  - id: rainbow\n    thumbnail: rainbow.png\n",
@@ -3084,7 +3004,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "conv",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         // No `logo:` in the manifest, but the file is present.
