@@ -353,7 +353,77 @@ pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<Strin
     // before reconciliation so workers use the newly accepted code rather
     // than stale manifest/source snapshots.
     reload_registry(&app).await;
+    // An explicit update is allowed to replace code, but not to silently widen
+    // a plugin's authority. Compare the new inert manifest against the exact
+    // snapshot accepted through the enable modal and disable only affected
+    // plugins. Packages with no v2 snapshot are legacy state and remain under
+    // the existing permission policy until their next explicit enable.
+    let expanded: Vec<String> = {
+        let mut cfg = app.config.write().await;
+        let mut expanded = Vec::new();
+        for id in &plugin_ids {
+            let Some(accepted) = cfg.plugins.accepted_authorities.get(id) else {
+                continue;
+            };
+            let Some(current) = app.registry.authority_for(id) else {
+                continue;
+            };
+            if !current.is_subset_of(accepted) {
+                if !cfg.plugins.disabled.contains(id) {
+                    cfg.plugins.disabled.push(id.clone());
+                }
+                expanded.push(id.clone());
+            }
+        }
+        if !expanded.is_empty() {
+            app.registry.replace_policy(&cfg.plugins);
+        }
+        expanded
+    };
+    if !expanded.is_empty() {
+        app.request_config_save();
+        log::warn!(
+            "plugin update expanded authority; disabled pending fresh consent: {}",
+            expanded.join(", ")
+        );
+    }
     reconcile_plugins(&app, &plugin_ids).await;
+    Ok(())
+}
+
+/// Enable a plugin only when the caller confirmed the exact authority that is
+/// currently declared by its inert manifest.  The runtime still receives the
+/// permission projection, while the complete snapshot is retained for later
+/// repository-update authority comparisons.
+pub async fn confirm_enable(
+    id: String,
+    authority: halod_shared::types::PluginAuthority,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let current = app
+        .registry
+        .authority_for(&id)
+        .ok_or_else(|| anyhow::anyhow!("unknown plugin '{id}'"))?;
+    if authority.normalized() != current {
+        bail!("plugin '{id}' authority changed; reopen the enable confirmation");
+    }
+    {
+        let mut cfg = app.config.write().await;
+        cfg.plugins.disabled.retain(|plugin| plugin != &id);
+        cfg.plugins
+            .accepted_authorities
+            .insert(id.clone(), current.clone());
+        if current.permissions.is_empty() {
+            cfg.plugins.granted.remove(&id);
+        } else {
+            cfg.plugins
+                .granted
+                .insert(id.clone(), current.permissions.clone());
+        }
+        app.registry.replace_policy(&cfg.plugins);
+    }
+    app.request_config_save();
+    reconcile_plugins(&app, &[id]).await;
     Ok(())
 }
 

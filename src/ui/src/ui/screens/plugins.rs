@@ -1020,10 +1020,9 @@ impl PluginsUi {
         if grant {
             crate::runtime::ipc::send(
                 cmd,
-                halod_shared::commands::DaemonCommand::SetPluginTrust {
+                halod_shared::commands::DaemonCommand::ConfirmPluginEnable {
                     id: id.clone(),
-                    granted: p.declared_permissions.clone(),
-                    enabled: true,
+                    authority: p.authority.clone(),
                 },
             );
             // Granting enables the plugin — apply and lock like a direct enable.
@@ -1486,21 +1485,18 @@ fn plugin_active(p: &PluginInfo) -> bool {
 enum ToggleDecision {
     /// Active → turn it off.
     Disable,
-    /// Off and consent-satisfied → turn it on.
-    Enable,
-    /// Off and declares ungranted permissions → open the grant modal first.
+    /// Every disabled-to-enabled transition opens the authority review modal.
     NeedsConsent,
 }
 
-/// Pure toggle logic: an active plugin turns off; a permission-free (or already
-/// granted) one turns on; one needing permission must be granted first.
+/// Every enable is an explicit, current authority confirmation. This applies
+/// to permission-free plugins too: transports and supported-device scope are
+/// still meaningful authority for the user to review.
 fn toggle_decision(p: &PluginInfo) -> ToggleDecision {
     if plugin_active(p) {
         ToggleDecision::Disable
-    } else if plugin_needs_permission(p) {
-        ToggleDecision::NeedsConsent
     } else {
-        ToggleDecision::Enable
+        ToggleDecision::NeedsConsent
     }
 }
 
@@ -1528,19 +1524,6 @@ fn request_toggle(cmd: &CommandTx, p: &PluginInfo, pending: Option<String>) -> T
             ToggleOutcome {
                 pending_consent: pending,
                 dispatched: Some(false),
-            }
-        }
-        ToggleDecision::Enable => {
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::SetPluginEnabled {
-                    id: p.id.clone(),
-                    enabled: true,
-                },
-            );
-            ToggleOutcome {
-                pending_consent: pending,
-                dispatched: Some(true),
             }
         }
         ToggleDecision::NeedsConsent => ToggleOutcome {
@@ -2193,9 +2176,8 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
     {
         crate::runtime::ipc::send(
             cmd,
-            halod_shared::commands::DaemonCommand::SetPluginTrust {
+            halod_shared::commands::DaemonCommand::SetPluginEnabled {
                 id: p.id.clone(),
-                granted: Vec::new(),
                 enabled: false,
             },
         );
@@ -2949,6 +2931,8 @@ mod tests {
             source: Default::default(),
             provenance: Default::default(),
             declared_permissions: vec![],
+            authority: Default::default(),
+            accepted_authority: None,
             granted_permissions: vec![],
             config_fields: vec![],
             config_values: Default::default(),
@@ -3344,9 +3328,9 @@ mod tests {
     #[test]
     fn toggle_decision_routes_through_the_consent_gate() {
         use halod_shared::types::Permission;
-        // Permission-free, off → straight enable.
+        // Permission-free, off → authority review.
         let mut p = info("a", false);
-        assert_eq!(toggle_decision(&p), ToggleDecision::Enable);
+        assert_eq!(toggle_decision(&p), ToggleDecision::NeedsConsent);
 
         // Permission-free, on → disable.
         p.enabled = true;

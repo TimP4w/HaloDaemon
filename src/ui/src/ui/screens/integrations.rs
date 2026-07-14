@@ -453,6 +453,8 @@ mod tests {
             source: Default::default(),
             provenance: Default::default(),
             declared_permissions: vec![],
+            authority: Default::default(),
+            accepted_authority: None,
             granted_permissions: vec![],
             config_fields: vec![],
             config_values: Default::default(),

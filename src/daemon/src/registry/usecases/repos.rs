@@ -37,6 +37,47 @@ async fn package_disk_hash(
         .ok()
 }
 
+/// Build and validate an immutable executable revision from fetched Git
+/// objects. The active checkout is never modified; only a fully validated
+/// staging directory is renamed into `revisions/<sha>`.
+fn materialize_revision(
+    repo_dir: &std::path::Path,
+    sha: &str,
+    official: bool,
+) -> Result<repo::RepositoryManifest> {
+    let revisions = repo_dir.join("revisions");
+    let final_dir = revisions.join(sha);
+    let validate = |dir: &std::path::Path| {
+        if official {
+            repo::verify_official_repository(dir)
+        } else {
+            repo::read_repository_manifest(dir)
+        }
+    };
+    if final_dir.is_dir() {
+        return validate(&final_dir);
+    }
+    std::fs::create_dir_all(&revisions)
+        .with_context(|| format!("creating revision store {}", revisions.display()))?;
+    let staging = revisions.join(format!(".{sha}.staging-{}", uuid::Uuid::new_v4()));
+    repo::materialize_commit(repo_dir, sha, &staging)?;
+    let manifest = match validate(&staging) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error).context("validating materialized repository revision");
+        }
+    };
+    std::fs::rename(&staging, &final_dir).with_context(|| {
+        format!(
+            "activating immutable revision {} from {}",
+            final_dir.display(),
+            staging.display()
+        )
+    })?;
+    Ok(manifest)
+}
+
 /// Register a git-repo plugin source: clone it, pin `locked_sha`, persist, and rediscover.
 pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -> Result<()> {
     let slug = sanitize_slug(&url);
@@ -66,14 +107,17 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
             .context("clone task panicked")??
     };
 
-    let packages = {
+    let manifest = {
         let dest = dest.clone();
+        let sha = locked_sha.clone();
         tokio::task::spawn_blocking(move || {
-            repo::read_repository_manifest(&dest).map(|manifest| manifest.packages)
+            materialize_revision(&dest, &sha, false)
         })
         .await
         .context("repository manifest validation task panicked")??
     };
+    let packages = manifest.packages;
+    let active_revision = locked_sha.clone();
     let plugin_ids: Vec<String> = packages.iter().map(|package| package.id.clone()).collect();
 
     {
@@ -83,6 +127,8 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
             slug,
             branch,
             locked_sha,
+            active_revision: Some(active_revision),
+            previous_verified_sha: None,
             last_sync: Some(now_rfc3339()),
         });
         for plugin_id in &plugin_ids {
@@ -471,45 +517,24 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
             .await
             .context("fetch task panicked")??
     };
-    let manifest = if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
+    let official = slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
+    let manifest = {
         let dir = dir.clone();
         let sha = remote_sha.clone();
-        let previous_sha = record.locked_sha.clone();
-        tokio::task::spawn_blocking(move || {
-            repo::checkout_sha(&dir, &sha)?;
-            if let Err(error) = repo::verify_official_repository(&dir) {
-                if !previous_sha.is_empty() {
-                    let _ = repo::checkout_sha(&dir, &previous_sha);
-                }
-                return Err(error).context("verifying signed official repository update");
-            }
-            repo::verify_official_repository(&dir)
-        })
-        .await
-        .context("official repository verification task panicked")??
-    } else {
-        let dir = dir.clone();
-        let sha = remote_sha.clone();
-        let previous_sha = record.locked_sha.clone();
-        tokio::task::spawn_blocking(move || {
-            repo::checkout_sha(&dir, &sha)?;
-            if let Err(error) = repo::read_repository_manifest(&dir) {
-                if !previous_sha.is_empty() {
-                    let _ = repo::checkout_sha(&dir, &previous_sha);
-                }
-                return Err(error).context("validating repository update");
-            }
-            repo::read_repository_manifest(&dir)
-        })
-        .await
-        .context("repository validation task panicked")??
+        tokio::task::spawn_blocking(move || materialize_revision(&dir, &sha, official))
+            .await
+            .context("repository revision materialization task panicked")??
     };
     let plugin_ids: Vec<String> = manifest.packages.iter().map(|p| p.id.clone()).collect();
 
     {
         let mut cfg = app.config.write().await;
         if let Some(r) = cfg.plugins.repos.iter_mut().find(|r| r.slug == slug) {
-            r.locked_sha = remote_sha;
+            if official && !r.locked_sha.is_empty() {
+                r.previous_verified_sha = Some(r.locked_sha.clone());
+            }
+            r.locked_sha = remote_sha.clone();
+            r.active_revision = Some(remote_sha);
             r.last_sync = Some(now_rfc3339());
         }
         for package in &manifest.packages {
@@ -1229,6 +1254,8 @@ mod tests {
                     slug: "never-cloned".to_owned(),
                     branch: None,
                     locked_sha: String::new(),
+                    active_revision: None,
+                    previous_verified_sha: None,
                     last_sync: None,
                 });
             }

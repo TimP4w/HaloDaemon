@@ -135,6 +135,12 @@ struct PluginState {
     /// plugin — built-in or not — must be granted its permissions through
     /// consent; nothing is auto-granted.
     granted: HashMap<String, Vec<Permission>>,
+    /// Last complete authority snapshot accepted through the enable flow.
+    accepted_authorities: HashMap<String, halod_shared::types::PluginAuthority>,
+    /// Loader-established provenance.  This cannot be inferred from a package
+    /// path for an explicit development repository because it intentionally
+    /// lives outside the managed repository directory.
+    provenance: HashMap<String, halod_shared::types::PluginProvenance>,
     /// Installed package hashes are update metadata, not an execution gate.
     installed_hashes: HashMap<String, String>,
     /// Non-secure config values the user set per plugin. Secure values never
@@ -222,6 +228,33 @@ fn consent_satisfied_in(state: &PluginState, manifest: &PluginManifest) -> bool 
         .permissions
         .iter()
         .all(|permission| granted.contains(permission))
+}
+
+/// Convert the statically declared transport surface into stable scope labels
+/// suitable for consent comparison and UI display. Device transport names are
+/// included even when their configuration is implicit (for example HID), while
+/// configured endpoints contribute their own names. Future scoped transports
+/// can extend this function without changing persisted authority semantics.
+fn authority_for_manifest(manifest: &PluginManifest) -> halod_shared::types::PluginAuthority {
+    let mut scopes: Vec<String> = manifest
+        .devices
+        .iter()
+        .map(|device| device.transport.clone())
+        .collect();
+    if manifest.transports.hid.is_some() {
+        scopes.push("hid".to_owned());
+    }
+    if manifest.transports.tcp.is_some() {
+        scopes.push("tcp".to_owned());
+    }
+    if manifest.transports.usb_control.is_some() {
+        scopes.push("usb_control".to_owned());
+    }
+    halod_shared::types::PluginAuthority {
+        permissions: manifest.permissions.clone(),
+        transport_scopes: scopes,
+    }
+    .normalized()
 }
 
 fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
@@ -340,6 +373,7 @@ impl Registry {
             s.disabled = policy.disabled.iter().cloned().collect();
             s.integrations_disabled = policy.integrations_disabled.iter().cloned().collect();
             s.granted = policy.granted.clone();
+            s.accepted_authorities = policy.accepted_authorities.clone();
             s.installed_hashes = policy.installed_hashes.clone();
             s.config_values = policy.config.clone();
         });
@@ -382,6 +416,26 @@ impl Registry {
             .find(|m| m.plugin_id == plugin_id)
             .map(|m| m.permissions.clone())
             .unwrap_or_default()
+    }
+
+    /// Current authority from inert manifest data. This must stay independent
+    /// of Lua so the user can inspect exactly what will run before enabling it.
+    pub(crate) fn authority_for(
+        &self,
+        plugin_id: &str,
+    ) -> Option<halod_shared::types::PluginAuthority> {
+        self.snapshot()
+            .manifests
+            .iter()
+            .find(|m| m.plugin_id == plugin_id)
+            .map(authority_for_manifest)
+    }
+
+    pub(crate) fn accepted_authority_for(
+        &self,
+        plugin_id: &str,
+    ) -> Option<halod_shared::types::PluginAuthority> {
+        self.snapshot().accepted_authorities.get(plugin_id).cloned()
     }
 
     /// Effective permissions granted to `plugin_id`'s Lua sandbox: persisted user
@@ -980,20 +1034,14 @@ impl Registry {
                 })
                 .collect(),
             source: plugin_source_for(&m.plugin_dir),
-            provenance: match plugin_source_for(&m.plugin_dir) {
-                halod_shared::types::PluginSource::Repo { ref slug }
-                    if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG =>
-                {
-                    halod_shared::types::PluginProvenance::VerifiedOfficial
-                }
-                halod_shared::types::PluginSource::Repo { .. } => {
-                    halod_shared::types::PluginProvenance::UnsignedRepository
-                }
-                halod_shared::types::PluginSource::Local => {
-                    halod_shared::types::PluginProvenance::LocalUnsigned
-                }
-            },
+            provenance: state
+                .provenance
+                .get(&m.plugin_id)
+                .copied()
+                .unwrap_or(halod_shared::types::PluginProvenance::LocalUnsigned),
             declared_permissions: m.permissions.clone(),
+            authority: authority_for_manifest(m),
+            accepted_authority: state.accepted_authorities.get(&m.plugin_id).cloned(),
             granted_permissions: self.granted_for(&m.plugin_id),
             config_fields: m.config_fields().iter().map(Into::into).collect(),
             config_values: config_values_for(state, m),
@@ -1207,7 +1255,7 @@ pub fn repo_plugin_ids(repo_dir: &Path) -> Vec<String> {
 pub fn repo_plugin_dirs(repos: &[crate::config::PluginRepoRecord]) -> Vec<std::path::PathBuf> {
     repos
         .iter()
-        .map(|r| crate::config::plugin_repos_dir().join(&r.slug))
+        .map(repo::active_revision_dir)
         .collect()
 }
 
@@ -1263,6 +1311,32 @@ impl Registry {
         }
         let effects: Vec<PluginEffectEntry> =
             scan.manifests.iter().flat_map(effect_entries_for).collect();
+        let provenance = scan
+            .manifests
+            .iter()
+            .map(|manifest| {
+                let provenance = if priority_repo
+                    .is_some_and(|root| manifest.plugin_dir.starts_with(root))
+                {
+                    halod_shared::types::PluginProvenance::LocalDevelopment
+                } else {
+                    match plugin_source_for(&manifest.plugin_dir) {
+                        halod_shared::types::PluginSource::Repo { ref slug }
+                            if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG =>
+                        {
+                            halod_shared::types::PluginProvenance::VerifiedOfficial
+                        }
+                        halod_shared::types::PluginSource::Repo { .. } => {
+                            halod_shared::types::PluginProvenance::UnsignedRepository
+                        }
+                        halod_shared::types::PluginSource::Local => {
+                            halod_shared::types::PluginProvenance::LocalUnsigned
+                        }
+                    }
+                };
+                (manifest.plugin_id.clone(), provenance)
+            })
+            .collect();
         // Re-derive load-warning issues from scratch so a warning the user has
         // since fixed doesn't linger; only surface warnings for plugins that
         // actually loaded (the GUI lists nothing else).
@@ -1307,6 +1381,7 @@ impl Registry {
         self.update(|s| {
             s.manifests = scan.manifests;
             s.effects = effects;
+            s.provenance = provenance;
         });
     }
 

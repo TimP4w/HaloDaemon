@@ -959,6 +959,12 @@ pub struct PluginInfo {
     /// Privileged capabilities the manifest declares.
     #[serde(default)]
     pub declared_permissions: Vec<Permission>,
+    /// Complete authority snapshot rendered by the enable modal.
+    #[serde(default)]
+    pub authority: PluginAuthority,
+    /// The snapshot accepted during the last successful enable, if any.
+    #[serde(default)]
+    pub accepted_authority: Option<PluginAuthority>,
     /// Subset of `declared_permissions` the user has granted. A plugin whose
     /// declared permissions aren't fully granted is inert (discovered but not
     /// activated) until the user accepts them.

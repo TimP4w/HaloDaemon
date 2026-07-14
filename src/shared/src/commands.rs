@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use crate::types::{
-    ButtonMapping, EffectDef, EffectParamValue, MacroStep, Permission, RgbState, SamplingMode,
+    ButtonMapping, EffectDef, EffectParamValue, MacroStep, Permission, PluginAuthority, RgbState, SamplingMode,
     VisibilityState, ZoneTopology,
 };
 use crate::zone_transform::ZoneContentTransform;
@@ -143,6 +143,13 @@ pub enum DaemonCommand {
         id: String,
         granted: Vec<Permission>,
         enabled: bool,
+    },
+    /// Confirm the exact manifest-derived authority currently displayed in the
+    /// enable modal, then enable the plugin. The daemon rejects stale snapshots
+    /// so an update cannot race a user's confirmation.
+    ConfirmPluginEnable {
+        id: String,
+        authority: PluginAuthority,
     },
     /// Replace a plugin's user-editable config values (see `ConfigFieldDef`).
     /// A `secure` field's key is included only when the user typed a new

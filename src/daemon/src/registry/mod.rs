@@ -65,8 +65,16 @@ pub async fn initialize_app_state_with_dev_repo(
         let cfg = app.config.read().await;
         let mut repo_dirs = crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos);
         if dev_plugin_repo.is_none() {
-            let official_dir =
-                crate::config::plugin_repos_dir().join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
+            let official_dir = cfg
+                .plugins
+                .repos
+                .iter()
+                .find(|repo| repo.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+                .map(crate::drivers::plugins::repo::active_revision_dir)
+                .unwrap_or_else(|| {
+                    crate::config::plugin_repos_dir()
+                        .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+                });
             if official_dir.is_dir() {
                 match crate::drivers::plugins::repo::verify_official_repository(&official_dir) {
                     Ok(manifest) => discovered_hashes.extend(
@@ -146,6 +154,8 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
                 slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
                 branch: None,
                 locked_sha: String::new(),
+                active_revision: None,
+                previous_verified_sha: None,
                 last_sync: None,
             });
             app.request_config_save();
@@ -168,9 +178,40 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     let dest2 = dest.clone();
     match tokio::task::spawn_blocking(move || repo::clone(&url, &dest2, None)).await {
         Ok(Ok(sha)) => {
-            if let Err(e) = repo::verify_official_repository(&dest) {
-                log::warn!("official plugin signature verification failed: {e:#}");
-                return;
+            let revision = dest.join("revisions").join(&sha);
+            let materialized = {
+                let dest = dest.clone();
+                let sha = sha.clone();
+                let revision = revision.clone();
+                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    if !revision.is_dir() {
+                        let staging = revision
+                            .parent()
+                            .expect("revision always has a parent")
+                            .join(format!(".{sha}.staging-bootstrap"));
+                        std::fs::create_dir_all(
+                            staging.parent().expect("staging always has a parent"),
+                        )?;
+                        repo::materialize_commit(&dest, &sha, &staging)?;
+                        repo::verify_official_repository(&staging)?;
+                        std::fs::rename(&staging, &revision)?;
+                    } else {
+                        repo::verify_official_repository(&revision)?;
+                    }
+                    Ok(())
+                })
+                .await
+            };
+            match materialized {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    log::warn!("official plugin signature verification failed: {e:#}");
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("official plugin revision materialization panicked: {e:#}");
+                    return;
+                }
             }
             let mut cfg = app.config.write().await;
             if let Some(r) = cfg
@@ -180,6 +221,8 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
                 .find(|r| r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
             {
                 r.locked_sha = sha;
+                r.active_revision = Some(r.locked_sha.clone());
+                r.previous_verified_sha = None;
                 r.last_sync = Some(chrono::Utc::now().to_rfc3339());
             }
             app.request_config_save();

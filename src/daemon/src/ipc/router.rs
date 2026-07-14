@@ -394,6 +394,9 @@ async fn dispatch(
             granted,
             enabled,
         } => registry::usecases::plugins::set_trust(id, granted, enabled, app).await,
+        DaemonCommand::ConfirmPluginEnable { id, authority } => {
+            registry::usecases::plugins::confirm_enable(id, authority, app).await
+        }
         DaemonCommand::SetPluginConfig { id, values } => {
             registry::usecases::plugins::set_config(id, values, app).await
         }

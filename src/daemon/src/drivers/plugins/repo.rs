@@ -454,6 +454,67 @@ pub fn checkout_sha(repo_dir: &Path, sha: &str) -> Result<()> {
     reject_symlinks(repo_dir)
 }
 
+/// Materialize one fetched commit into a fresh regular-file directory without
+/// changing the Git worktree. The caller validates the directory and atomically
+/// renames it into the immutable revision store before selecting it for plugin
+/// execution.
+pub fn materialize_commit(repo_dir: &Path, sha: &str, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        bail!("revision destination already exists: {}", dest.display());
+    }
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
+    let tree = repo
+        .find_commit(oid)
+        .with_context(|| format!("commit '{sha}' not found"))?
+        .tree()
+        .context("reading commit tree")?;
+    std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    materialize_tree(&repo, &tree, dest)
+}
+
+fn materialize_tree(repo: &git2::Repository, tree: &git2::Tree<'_>, dest: &Path) -> Result<()> {
+    for entry in tree {
+        let name = entry
+            .name()
+            .ok_or_else(|| anyhow!("repository tree contains a non-UTF-8 filename"))?;
+        let target = dest.join(name);
+        match entry.kind() {
+            Some(git2::ObjectType::Tree) => {
+                std::fs::create_dir(&target)
+                    .with_context(|| format!("creating {}", target.display()))?;
+                let child = repo.find_tree(entry.id())?;
+                materialize_tree(repo, &child, &target)?;
+            }
+            Some(git2::ObjectType::Blob) => {
+                // A Git symlink is stored as a blob with link file mode. It
+                // must never be materialized as a host symlink or followed by
+                // later package validation.
+                if entry.filemode() == 0o120000 {
+                    bail!("repository contains a symlink: {}", target.display());
+                }
+                let blob = repo.find_blob(entry.id())?;
+                std::fs::write(&target, blob.content())
+                    .with_context(|| format!("writing {}", target.display()))?;
+            }
+            _ => bail!("repository contains unsupported tree entry: {}", target.display()),
+        }
+    }
+    Ok(())
+}
+
+/// The immutable directory selected for a repository record. Legacy records
+/// without an active revision retain the old checkout location until the next
+/// explicit installation migrates them.
+pub fn active_revision_dir(record: &crate::config::PluginRepoRecord) -> PathBuf {
+    let root = crate::config::plugin_repos_dir().join(&record.slug);
+    match &record.active_revision {
+        Some(sha) => root.join("revisions").join(sha),
+        None => root,
+    }
+}
+
 /// Bail if any symlink exists under `root` (skipping `.git`). A commit can carry
 /// a symlink and `checkout_*` writes it verbatim; the daemon later reads
 /// `plugin.yaml`/`main.lua` with symlink-following `std::fs`, so a link like

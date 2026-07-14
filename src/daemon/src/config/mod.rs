@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::Result;
-use halod_shared::types::{AppRule, Permission, VisibilityState, DEFAULT_PROFILE_NAME};
+use halod_shared::types::{
+    AppRule, Permission, PluginAuthority, VisibilityState, DEFAULT_PROFILE_NAME,
+};
 // Types shared with wire protocol; re-exported for backward-compat.
 pub use halod_shared::types::{
     CanvasState, CoolingConfig, GuiConfig, LcdConfig, PlacedZone, RgbConfig,
@@ -330,6 +332,11 @@ struct AppRulesFile {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginPolicy {
+    /// Authority snapshots accepted through the enable modal.  They are kept
+    /// separately from the runtime permission projection so repository updates
+    /// can decide whether a changed manifest expands authority.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub accepted_authorities: HashMap<String, PluginAuthority>,
     /// Plugin ids the user has disabled. Everything present-and-not-listed is
     /// enabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -374,6 +381,14 @@ pub struct PluginRepoRecord {
     pub branch: Option<String>,
     /// Commit SHA the checked-out working tree is pinned to.
     pub locked_sha: String,
+    /// Immutable revision directory currently selected for execution. Older
+    /// configs fall back to the Git checkout and are upgraded on their next
+    /// explicit install/update.
+    #[serde(default)]
+    pub active_revision: Option<String>,
+    /// Last verified official revision retained for rollback diagnostics.
+    #[serde(default)]
+    pub previous_verified_sha: Option<String>,
     /// When this repo's clone directory was last cloned/fetched/checked out
     /// (RFC 3339), for the GUI's repo detail panel. `None` until the first sync.
     #[serde(default)]
@@ -692,6 +707,8 @@ mod tests {
             slug: "foo".into(),
             branch: Some("main".into()),
             locked_sha: "deadbeef".into(),
+            active_revision: Some("deadbeef".into()),
+            previous_verified_sha: None,
             last_sync: None,
         });
         save(&cfg).unwrap();
