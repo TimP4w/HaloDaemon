@@ -32,7 +32,7 @@ use super::manifest::{
     PluginManifest, RangeDef, RgbManifest,
 };
 use super::transport::PluginIo;
-use super::worker::{DetectedController, DevMatch, InitLcd, InitZone, PluginHandle};
+use super::worker::{DetectedController, DevMatch, InitControls, InitLcd, InitZone, PluginHandle};
 use std::collections::{HashMap, HashSet};
 
 /// Host-side DPI step-cycle state (the plugin only writes the chosen value).
@@ -198,6 +198,16 @@ impl Controls {
         }
     }
 
+    fn from_runtime(runtime: InitControls) -> Self {
+        Self {
+            choices: runtime.choices,
+            ranges: runtime.ranges,
+            booleans: runtime.booleans,
+            actions: runtime.actions,
+            ..Default::default()
+        }
+    }
+
     /// Wire snapshot of the choice controls (cache overrides each default), or
     /// `None` when none are declared.
     fn choices_wire(&self) -> Option<DeviceCapability> {
@@ -354,6 +364,7 @@ pub struct LuaDevice {
 
     /// Declared choice/range/boolean/action controls + their value caches.
     controls: Controls,
+    dynamic_controls: OnceLock<Controls>,
 
     /// Last equalizer snapshot read, backing `EqualizerCapability::current_state`
     /// (and therefore save/restore) between explicit `get_equalizer` calls.
@@ -656,6 +667,7 @@ impl LuaDevice {
                 _ => DpiMode::Host,
             },
             controls: Controls::from_manifest(manifest),
+            dynamic_controls: OnceLock::new(),
             eq_cache: Mutex::new(None),
             key_remap_buttons: manifest
                 .key_remap
@@ -778,6 +790,10 @@ impl LuaDevice {
         self.worker
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("plugin '{}' has no worker", self.plugin_id))
+    }
+
+    fn active_controls(&self) -> &Controls {
+        self.dynamic_controls.get().unwrap_or(&self.controls)
     }
 }
 
@@ -906,16 +922,19 @@ impl Device for LuaDevice {
                 .collect();
             let _ = self.dynamic_chain_channels.set(descriptors);
         }
+        if let Some(controls) = outcome.controls {
+            let _ = self.dynamic_controls.set(Controls::from_runtime(controls));
+        }
         // Seed the host range/choice caches with the values the device reported,
         // so the UI shows live hardware state rather than manifest defaults.
         if let Some(ranges) = outcome.ranges {
             for (key, value) in ranges {
-                self.controls.range_cache.record(&key, value);
+                self.active_controls().range_cache.record(&key, value);
             }
         }
         if let Some(choices) = outcome.choices {
             for (key, selected) in choices {
-                self.controls.choice_cache.record(&key, selected);
+                self.active_controls().choice_cache.record(&key, selected);
             }
         }
         if outcome.ok {
@@ -1575,15 +1594,15 @@ impl DpiCapability for LuaDevice {
 #[async_trait]
 impl ChoiceCapability for LuaDevice {
     fn choice_cache(&self) -> &ChoiceStateCache {
-        &self.controls.choice_cache
+        &self.active_controls().choice_cache
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
-        self.controls.choices_wire()
+        self.active_controls().choices_wire()
     }
 
     async fn set_choice(&self, key: &str, selected: usize) -> Result<()> {
-        self.controls.record_choice(key, selected)?;
+        self.active_controls().record_choice(key, selected)?;
         self.worker()?.choice_set(key, selected).await
     }
 }
@@ -1591,15 +1610,15 @@ impl ChoiceCapability for LuaDevice {
 #[async_trait]
 impl RangeCapability for LuaDevice {
     fn range_cache(&self) -> &RangeStateCache {
-        &self.controls.range_cache
+        &self.active_controls().range_cache
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
-        self.controls.ranges_wire()
+        self.active_controls().ranges_wire()
     }
 
     async fn set_range(&self, key: &str, value: i32) -> Result<()> {
-        let value = self.controls.record_range(key, value)?;
+        let value = self.active_controls().record_range(key, value)?;
         self.worker()?.range_set(key, value).await
     }
 }
@@ -1608,31 +1627,31 @@ impl RangeCapability for LuaDevice {
 impl BooleanCapability for LuaDevice {
     async fn get_booleans(&self) -> Result<Vec<Boolean>> {
         let mut live = self.worker()?.boolean_get().await?;
-        self.controls.backfill_booleans(&mut live);
+        self.active_controls().backfill_booleans(&mut live);
         Ok(live)
     }
 
     async fn set_boolean(&self, key: &str, value: bool) -> Result<()> {
-        self.controls.bool_cache.record(key, value);
+        self.active_controls().bool_cache.record(key, value);
         self.worker()?.boolean_set(key, value).await
     }
 
     fn bool_cache(&self) -> Option<&BoolStateCache> {
-        Some(&self.controls.bool_cache)
+        Some(&self.active_controls().bool_cache)
     }
 }
 
 #[async_trait]
 impl ActionCapability for LuaDevice {
     async fn trigger_action(&self, key: &str) -> Result<()> {
-        if !self.controls.has_action(key) {
+        if !self.active_controls().has_action(key) {
             anyhow::bail!("unknown action key: {key}");
         }
         self.worker()?.action_trigger(key).await
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
-        self.controls.actions_wire()
+        self.active_controls().actions_wire()
     }
 }
 

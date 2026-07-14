@@ -27,10 +27,10 @@ use halod_shared::types::{
 use super::bytebuf::ByteBuf;
 use super::ffi::to_lua_err;
 use super::manifest::{
-    check_lcd_dims, check_led_count, check_zone_count, topology_from, ActionManifest,
-    BatteryManifest, BooleanManifest, ChainManifest, ChoiceManifest, ConnectionManifest,
-    DpiManifest, EqualizerManifest, FanManifest, KeyRemapManifest, LcdManifest,
-    OnboardProfilesManifest, PairingManifest, RangeManifest, RgbManifest, SensorManifest,
+    check_lcd_dims, check_led_count, check_zone_count, topology_from, ActionDef, ActionManifest,
+    BatteryManifest, BooleanDef, BooleanManifest, ChainManifest, ChoiceDef, ChoiceManifest,
+    ConnectionManifest, DpiManifest, EqualizerManifest, FanManifest, KeyRemapManifest, LcdManifest,
+    OnboardProfilesManifest, PairingManifest, RangeDef, RangeManifest, RgbManifest, SensorManifest,
 };
 use super::sandbox;
 use super::transport::{AddrScope, CommandExecutor, PluginIo, RegisterBus};
@@ -222,6 +222,21 @@ pub struct InitChainChannel {
     pub max_leds: u32,
 }
 
+/// Runtime control descriptors. They replace the removed static manifest
+/// control sections and are validated independently from the rest of an
+/// initialize result.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct InitControls {
+    #[serde(default)]
+    pub choices: Vec<ChoiceDef>,
+    #[serde(default)]
+    pub ranges: Vec<RangeDef>,
+    #[serde(default)]
+    pub booleans: Vec<BooleanDef>,
+    #[serde(default)]
+    pub actions: Vec<ActionDef>,
+}
+
 /// What `initialize` returns: a bare bool, or a table with dynamic device info
 /// discovered from the hardware (firmware/model, RGB zones, LCD panel, and the
 /// live range/choice values read back from the device to seed the host caches).
@@ -235,6 +250,7 @@ pub struct InitOutcome {
     /// is read from the device's config table), for a plugin that declares a
     /// `chain` capability but reports its channels dynamically rather than statically.
     pub chain: Option<Vec<InitChainChannel>>,
+    pub controls: Option<InitControls>,
     /// Current range-control values keyed by control key, seeding the host's
     /// range cache so the UI reflects the device instead of manifest defaults.
     pub ranges: Option<HashMap<String, i32>>,
@@ -255,6 +271,8 @@ struct InitTable {
     lcd: Option<InitLcd>,
     #[serde(default)]
     chain: Option<Vec<InitChainChannel>>,
+    #[serde(default)]
+    controls: Option<InitControls>,
     #[serde(default)]
     ranges: Option<HashMap<String, i32>>,
     #[serde(default)]
@@ -475,12 +493,16 @@ impl PluginHandle {
                             check_led_count(&c.id, c.max_leds)?;
                         }
                     }
+                    if let Some(controls) = &t.controls {
+                        validate_runtime_controls(controls)?;
+                    }
                     Ok(InitOutcome {
                         ok: t.ok,
                         model: t.model,
                         zones: t.zones,
                         lcd: t.lcd,
                         chain: t.chain,
+                        controls: t.controls,
                         ranges: t.ranges,
                         choices: t.choices,
                     })
@@ -891,6 +913,32 @@ impl PluginHandle {
     }
 }
 
+fn validate_runtime_controls(controls: &InitControls) -> Result<()> {
+    let mut keys = std::collections::HashSet::new();
+    for key in controls
+        .choices
+        .iter()
+        .map(|control| &control.key)
+        .chain(controls.ranges.iter().map(|control| &control.key))
+        .chain(controls.booleans.iter().map(|control| &control.key))
+        .chain(controls.actions.iter().map(|control| &control.key))
+    {
+        if key.is_empty() || !keys.insert(key) {
+            bail!("runtime control keys must be non-empty and unique");
+        }
+    }
+    for range in &controls.ranges {
+        if range.min > range.max
+            || range.step <= 0
+            || range.default < range.min
+            || range.default > range.max
+        {
+            bail!("runtime range '{}' has invalid bounds", range.key);
+        }
+    }
+    Ok(())
+}
+
 /// Build the worker's VM context on the worker thread. Runs once at spawn; the
 /// [`LuaWorker`] loop then drives jobs against the returned [`WorkerCtx`].
 #[allow(clippy::too_many_arguments)]
@@ -1100,6 +1148,45 @@ mod tests {
             transport: Arc::new(MockTransport::empty()),
             bulk: None,
         }
+    }
+
+    #[test]
+    fn runtime_controls_reject_duplicate_keys_and_invalid_ranges() {
+        let duplicate = InitControls {
+            choices: vec![ChoiceDef {
+                key: "mode".to_owned(),
+                label: "Mode".to_owned(),
+                category: String::new(),
+                display: Default::default(),
+                options: vec![],
+                default: 0,
+            }],
+            actions: vec![ActionDef {
+                key: "mode".to_owned(),
+                label: "Reset".to_owned(),
+                category: String::new(),
+            }],
+            ..Default::default()
+        };
+        assert!(validate_runtime_controls(&duplicate).is_err());
+
+        let invalid_range = InitControls {
+            ranges: vec![RangeDef {
+                key: "brightness".to_owned(),
+                label: "Brightness".to_owned(),
+                min: 10,
+                max: 1,
+                step: 1,
+                read_only: false,
+                category: String::new(),
+                start_label: None,
+                end_label: None,
+                display: Default::default(),
+                default: 1,
+            }],
+            ..Default::default()
+        };
+        assert!(validate_runtime_controls(&invalid_range).is_err());
     }
 
     /// Spawn a worker from inline Lua `source`, with `granted` permissions. The
