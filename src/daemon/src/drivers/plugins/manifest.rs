@@ -1099,28 +1099,9 @@ fn parse_legacy_lua_fixture_inner(source: &str) -> Result<PluginManifest> {
         .map_err(|e| anyhow!("manifest table is malformed: {e}"))
 }
 
-/// Upper bound on a plugin-declared LED count for one zone/accessory/channel.
-/// Plugins return these as `u32`; the daemon turns each into a native LED-position
-/// table and per-frame color buffer, so an unbounded value like `u32::MAX` drives a
-/// multi-gigabyte allocation in the root daemon. Rejected (not clamped) so a
-/// misdeclaring plugin fails loudly instead of silently truncating.
 pub const MAX_PLUGIN_LEDS: u32 = 4_096;
-
-/// Upper bound on a plugin-declared LCD panel dimension. Matches the image-decoder
-/// limit in [`crate::util::image`]; bounds the `width * height * 4` host buffers the
-/// LCD path allocates from a dynamically-reported panel size.
 pub const MAX_PLUGIN_LCD_DIM: u32 = 8_192;
-
-/// Upper bound on the number of RGB zones one device/controller may declare. Each
-/// zone's `led_count` is capped, but the daemon builds one native LED-position table
-/// *per zone* **after** the plugin VM's memory cap no longer applies, so an unbounded
-/// zone count multiplies `MAX_PLUGIN_LEDS` into a multi-gigabyte host allocation.
 pub const MAX_PLUGIN_ZONES: usize = 256;
-
-/// Upper bound on the number of controllers one integration may enumerate. Each
-/// controller becomes a child device with its own transport connection, VM, and
-/// worker thread, so an unbounded count is a memory/connection/thread-exhaustion
-/// vector (the deeper thread-ceiling / process-isolation fix is tracked as ARCH-R1).
 pub const MAX_PLUGIN_CONTROLLERS: usize = 256;
 
 const MAX_PLUGIN_DEVICES: usize = 256;

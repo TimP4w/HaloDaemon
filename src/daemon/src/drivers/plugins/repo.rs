@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 /// Embedded public keys are intentionally keyed by stable release key id so a
 /// later Halo build can accept a rotated official key without treating the
 /// repository URL as a trust signal.
+/// TODO: move to constants
 const OFFICIAL_PUBLIC_KEYS: &[(&str, &str)] = &[(
     "halodaemon-official-2026",
     "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=",
