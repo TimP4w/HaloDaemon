@@ -56,15 +56,6 @@ pub fn tkl_key_positions(spec: &KeyLayoutSpec<'_>) -> Vec<LedPosition> {
     key_positions(spec, 18.0)
 }
 
-/// Generate `LedPosition` entries for a full-size (100%) keyboard zone.
-///
-/// Same as [`tkl_key_positions`] but normalized to the wider full-size grid
-/// (`col ∈ [0, 22.5]`) to accommodate the numpad columns.
-#[cfg(test)]
-pub fn full_size_key_positions(spec: &KeyLayoutSpec<'_>) -> Vec<LedPosition> {
-    key_positions(spec, 23.0)
-}
-
 /// Swap the `layout` field on a `Keyboard` topology variant, leaving other topology variants unchanged.
 pub fn override_keyboard_layout(topology: ZoneTopology, layout: &KeyboardLayout) -> ZoneTopology {
     match topology {

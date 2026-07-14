@@ -183,7 +183,7 @@ fn verify_official_signature(yaml: &[u8], sig_bytes: &[u8]) -> Result<()> {
         .context("decoding repository signature")?
         .try_into()
         .map_err(|_| anyhow!("repository signature is not 64 bytes"))?;
-    key.verify(&yaml, &Signature::from_bytes(&raw_signature))
+    key.verify(yaml, &Signature::from_bytes(&raw_signature))
         .map_err(|_| anyhow!("repository signature does not match repository.yaml"))
 }
 

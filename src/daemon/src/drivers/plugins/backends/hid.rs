@@ -29,7 +29,7 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     } else {
         spec.pids.contains(pid)
     };
-    spec.vid == Some(*vid)
+    (spec.generic_hid || spec.vid == Some(*vid))
         && pid_ok
         && spec.usage_page.is_none_or(|u| u == *usage_page)
         && spec.usage.is_none_or(|u| u == *usage)
@@ -70,7 +70,7 @@ fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {
 }
 
 fn validate(spec: &DeviceSpec) -> Result<()> {
-    if spec.vid.is_none() {
+    if !spec.generic_hid && spec.vid.is_none() {
         bail!("hid match requires a `vid`");
     }
     Ok(())

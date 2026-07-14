@@ -38,10 +38,6 @@ pub async fn seed_known_devices(app: Arc<AppState>) {
     }
 }
 
-pub async fn initialize_app_state(app: Arc<AppState>) {
-    initialize_app_state_with_dev_repo(app, None).await;
-}
-
 /// Initialize devices using an optional development checkout in place of the
 /// managed official repository. The override is process-local and never
 /// persists in config.

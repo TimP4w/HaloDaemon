@@ -501,10 +501,15 @@ pub struct DeviceSpec {
     /// Display-name override; defaults to `model`.
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "type", alias = "device_type")]
     pub device_type: Option<DeviceType>,
 
+    #[serde(default)]
     pub transport: String,
+    /// Nested transport matcher. It is normalized into the runtime matcher
+    /// fields while worker interfaces are being replaced.
+    #[serde(default, rename = "match")]
+    pub r#match: DeviceMatch,
 
     // ── HID ──────────────────────────────────────────────────────────────
     #[serde(default)]
@@ -521,6 +526,8 @@ pub struct DeviceSpec {
     pub usage: Option<u16>,
     #[serde(default)]
     pub interface: Option<i32>,
+    #[serde(skip)]
+    pub generic_hid: bool,
 
     // ── SMBus (match + scan declaration in one) ──────────────────────────
     /// Bus family to scan/match: "chipset" or "gpu".
@@ -547,6 +554,70 @@ pub struct DeviceSpec {
     /// empty. See [`PciMatch`] and the smbus backend's `validate`.
     #[serde(default)]
     pub pci_match: Vec<PciMatch>,
+}
+
+/// Device matcher. A device declares exactly one transport key; unknown
+/// transport matchers are rejected during normalization instead of being
+/// ignored by serde and accidentally becoming broad matches.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviceMatch {
+    #[serde(default)]
+    pub hid: Option<HidMatch>,
+    #[serde(default)]
+    pub smbus: Option<SmbusMatch>,
+    #[serde(default)]
+    pub hwmon: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub command: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub amd_smn: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub lpcio: Option<serde_yaml::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SmbusMatch {
+    pub bus: String,
+    pub addresses: Vec<u8>,
+    #[serde(default)]
+    pub extra_addresses: Vec<u8>,
+    #[serde(default)]
+    pub max_bytes_per_sec: Option<u32>,
+    #[serde(default)]
+    pub pre_scan: bool,
+    #[serde(default)]
+    pub probe: ProbeMode,
+    #[serde(default)]
+    pub pci_match: Vec<PciMatch>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HidMatch {
+    #[serde(default)]
+    pub any: bool,
+    #[serde(default)]
+    pub vid: Option<u16>,
+    #[serde(default)]
+    pub pid: Option<u16>,
+    #[serde(default)]
+    pub pids: Vec<u16>,
+    #[serde(default)]
+    pub usage_page: Option<u16>,
+    #[serde(default)]
+    pub usage: Option<u16>,
+    #[serde(default)]
+    pub interface: Option<i32>,
+}
+
+impl DeviceMatch {
+    fn count(&self) -> usize {
+        usize::from(self.hid.is_some())
+            + usize::from(self.smbus.is_some())
+            + usize::from(self.hwmon.is_some())
+            + usize::from(self.command.is_some())
+            + usize::from(self.amd_smn.is_some())
+            + usize::from(self.lpcio.is_some())
+    }
 }
 
 /// Deserialize `devices` as either a single device table or an array of them.
@@ -597,43 +668,6 @@ pub struct EffectAssetRef {
     pub thumbnail: String,
 }
 
-/// Host compatibility declared by every directory plugin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginCompatibility {
-    /// SemVer requirement matched against the HaloDaemon package version.
-    pub halod: String,
-    /// Exact generation of the Lua plugin API expected by this plugin.
-    pub plugin_api: u32,
-}
-
-/// Lua/plugin manifest API implemented by this daemon build.
-pub const PLUGIN_API_VERSION: u32 = 1;
-
-impl PluginCompatibility {
-    /// Reject malformed requirements and hosts that cannot safely run the plugin.
-    pub fn ensure_supported(&self) -> Result<()> {
-        let requirement = semver::VersionReq::parse(&self.halod)
-            .with_context(|| format!("invalid HaloDaemon version requirement '{}'", self.halod))?;
-        let daemon_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
-            .context("parsing this HaloDaemon build's version")?;
-        if !requirement.matches(&daemon_version) {
-            bail!(
-                "requires HaloDaemon '{}', but this daemon is {}",
-                self.halod,
-                daemon_version
-            );
-        }
-        if self.plugin_api != PLUGIN_API_VERSION {
-            bail!(
-                "requires plugin API {}, but this daemon provides plugin API {}",
-                self.plugin_api,
-                PLUGIN_API_VERSION
-            );
-        }
-        Ok(())
-    }
-}
-
 /// Plugin-level metadata only — vendor/model live on each [`DeviceSpec`] instead.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Identity {
@@ -673,9 +707,6 @@ pub struct PluginManifest {
     /// Raw bytes of `plugin.yaml`, folded into [`Self::content_hash`]; empty otherwise.
     #[serde(skip)]
     pub manifest_bytes: Vec<u8>,
-    /// Required for directory plugins; built-in test manifests have no package metadata.
-    #[serde(skip)]
-    pub compatibility: Option<PluginCompatibility>,
     #[serde(rename = "devices", default, deserialize_with = "de_device_specs")]
     pub devices: Vec<DeviceSpec>,
     #[serde(default)]
@@ -752,8 +783,6 @@ pub struct PluginManifest {
 pub struct PluginMeta {
     /// Required; must equal the plugin's directory name.
     pub id: String,
-    /// Host versions and plugin API generation this package can run against.
-    pub compatibility: Option<PluginCompatibility>,
     #[serde(rename = "type", default)]
     pub plugin_type: PluginKind,
     #[serde(default)]
@@ -1163,13 +1192,6 @@ fn validate_entry_path(entry: &str) -> Result<()> {
 
 /// Cross-field validation, gated by `plugin_type`.
 pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
-    if !manifest.plugin_dir.as_os_str().is_empty() {
-        manifest
-            .compatibility
-            .as_ref()
-            .ok_or_else(|| anyhow!("plugin.yaml must declare compatibility"))?
-            .ensure_supported()?;
-    }
     check_count("devices", manifest.devices.len(), MAX_PLUGIN_DEVICES)?;
     check_count("effects", manifest.effects.len(), MAX_PLUGIN_EFFECTS)?;
     check_count(
@@ -1179,6 +1201,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     )?;
     validate_identity(&manifest.identity)?;
     validate_v2_catalog(manifest)?;
+    validate_device_identifiers(manifest)?;
     validate_effects(&manifest.effects, "effect")?;
     validate_effect_assets(manifest)?;
     validate_transports(manifest)?;
@@ -1256,6 +1279,9 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 if spec.transport == "smbus" && !manifest.permissions.contains(&Permission::Smbus) {
                     bail!("a device using the smbus transport must declare the `smbus` permission");
                 }
+                if spec.transport == "hid" && !manifest.permissions.contains(&Permission::Hid) {
+                    bail!("a device using the hid transport must declare the `hid` permission");
+                }
             }
         }
         PluginKind::Effect => {
@@ -1289,6 +1315,68 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         bail!("a tcp transport requires the 'network' permission to be declared");
     }
     validate_component("plugin id", &manifest.plugin_id)?;
+    Ok(())
+}
+
+fn normalize_device_matches(manifest: &mut PluginManifest) -> Result<()> {
+    for device in &mut manifest.devices {
+        let count = device.r#match.count();
+        if count == 0 {
+            continue;
+        }
+        if count != 1 || !device.transport.is_empty() {
+            bail!("a device must declare exactly one nested match and no `transport`");
+        }
+        if let Some(hid) = &device.r#match.hid {
+            if hid.any && (hid.vid.is_some() || hid.pid.is_some() || !hid.pids.is_empty()) {
+                bail!("generic hid match cannot also declare identifiers");
+            }
+            if !hid.any && hid.vid.is_none() {
+                bail!("hid match requires a `vid` or explicit `any`");
+            }
+            device.transport = "hid".to_owned();
+            device.vid = hid.vid;
+            device.pid = hid.pid;
+            device.pids = hid.pids.clone();
+            device.usage_page = hid.usage_page;
+            device.usage = hid.usage;
+            device.interface = hid.interface;
+            device.generic_hid = hid.any;
+        } else if let Some(smbus) = &device.r#match.smbus {
+            device.transport = "smbus".to_owned();
+            device.bus = Some(smbus.bus.clone());
+            device.addresses = Some(smbus.addresses.clone());
+            device.extra_addresses = Some(smbus.extra_addresses.clone());
+            device.max_bytes_per_sec = smbus.max_bytes_per_sec;
+            device.pre_scan = smbus.pre_scan;
+            device.probe = smbus.probe;
+            device.pci_match = smbus.pci_match.clone();
+        } else {
+            bail!("the declared transport match is not implemented by this daemon build");
+        }
+    }
+    Ok(())
+}
+
+fn validate_device_identifiers(manifest: &PluginManifest) -> Result<()> {
+    let mut hid_identifiers = HashSet::new();
+    for device in &manifest.devices {
+        if device.transport != "hid" || device.generic_hid {
+            continue;
+        }
+        for pid in device.pids.iter().copied().chain(device.pid) {
+            let Some(vid) = device.vid else { continue };
+            if !hid_identifiers.insert((
+                vid,
+                pid,
+                device.usage_page,
+                device.usage,
+                device.interface,
+            )) {
+                bail!("duplicate concrete HID match {vid:04x}:{pid:04x}");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1789,6 +1877,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
     check_package_file(&meta_path, MAX_ENTRY_BYTES)?;
     let manifest_bytes =
         std::fs::read(&meta_path).with_context(|| format!("reading {}", meta_path.display()))?;
+    reject_legacy_manifest_shape(&manifest_bytes, &meta_path)?;
     let meta: PluginMeta = serde_yaml::from_slice(&manifest_bytes)
         .with_context(|| format!("parsing {}", meta_path.display()))?;
     let mut manifest: PluginManifest = serde_yaml::from_slice(&manifest_bytes)
@@ -1805,13 +1894,13 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         );
     }
 
+    normalize_device_matches(&mut manifest)?;
     validate_entry_path(&meta.entry)?;
     let entry_path = dir.join(&meta.entry);
     check_package_file(&entry_path, MAX_ENTRY_BYTES)?;
     let source = std::fs::read_to_string(&entry_path)
         .with_context(|| format!("reading {}", entry_path.display()))?;
 
-    manifest.compatibility = meta.compatibility;
     manifest.identity = Identity {
         name: meta.name,
         id: Some(meta.id.clone()),
@@ -1837,6 +1926,80 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
     manifest.manifest_bytes = manifest_bytes;
 
     Ok(manifest)
+}
+
+/// Reject the superseded package contract at the parsing boundary. Keeping
+/// implementation fields during the runtime migration is not a compatibility
+/// promise: old manifests must fail rather than being interpreted alongside
+/// the canonical catalog.
+fn reject_legacy_manifest_shape(bytes: &[u8], path: &Path) -> Result<()> {
+    let value: serde_yaml::Value =
+        serde_yaml::from_slice(bytes).with_context(|| format!("parsing {}", path.display()))?;
+    let root = value
+        .as_mapping()
+        .ok_or_else(|| anyhow!("{} must contain a YAML mapping", path.display()))?;
+    for key in [
+        "compatibility",
+        "rgb",
+        "fan",
+        "sensor",
+        "lcd",
+        "dpi",
+        "choice",
+        "range",
+        "boolean",
+        "action",
+        "battery",
+        "connection",
+        "equalizer",
+        "pairing",
+        "onboard_profiles",
+        "key_remap",
+        "poll",
+        "chain",
+    ] {
+        if root.contains_key(serde_yaml::Value::String(key.to_owned())) {
+            bail!(
+                "{} uses removed '{key}' manifest data; declare catalog capabilities and return runtime descriptors from Lua",
+                path.display()
+            );
+        }
+    }
+    if let Some(devices) = root.get(serde_yaml::Value::String("devices".to_owned())) {
+        let devices = devices
+            .as_sequence()
+            .ok_or_else(|| anyhow!("{} devices must be a list", path.display()))?;
+        for device in devices {
+            let device = device
+                .as_mapping()
+                .ok_or_else(|| anyhow!("{} device must be a mapping", path.display()))?;
+            for key in [
+                "transport",
+                "vid",
+                "pid",
+                "pids",
+                "usage_page",
+                "usage",
+                "interface",
+                "bus",
+                "addresses",
+                "extra_addresses",
+                "max_bytes_per_sec",
+                "pre_scan",
+                "probe",
+                "pci_match",
+                "device_type",
+            ] {
+                if device.contains_key(serde_yaml::Value::String(key.to_owned())) {
+                    bail!(
+                        "{} uses removed device field '{key}'; use the nested `match` object",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2592,9 +2755,6 @@ mod tests {
         assert_eq!(m.devices.len(), 1);
         assert_eq!(m.devices[0].vendor, "Acme");
         assert!(m.rgb.is_some(), "YAML capability sections are loaded");
-        let compatibility = m.compatibility.as_ref().unwrap();
-        assert_eq!(compatibility.halod, ">=0.2.0, <0.3.0");
-        assert_eq!(compatibility.plugin_api, PLUGIN_API_VERSION);
     }
 
     #[test]
@@ -2854,6 +3014,42 @@ mod tests {
         let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
         assert!(m.logo.is_none());
         assert!(m.effect_thumbnails.is_empty());
+    }
+
+    #[test]
+    fn directory_plugin_uses_nested_hid_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("nested_match");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: nested_match\nname: Nested Match\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: mouse\n    match:\n      hid:\n        vid: 0x1234\n        pid: 0x5678\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
+
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(manifest.devices[0].transport, "hid");
+        assert_eq!(manifest.devices[0].vid, Some(0x1234));
+        assert_eq!(manifest.devices[0].pid, Some(0x5678));
+    }
+
+    #[test]
+    fn directory_plugin_uses_nested_smbus_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("nested_smbus");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: nested_smbus\npermissions: [smbus]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: DRAM\n    type: ram\n    match:\n      smbus:\n        bus: chipset\n        addresses: [0x50]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
+
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(manifest.devices[0].transport, "smbus");
+        assert_eq!(manifest.devices[0].bus.as_deref(), Some("chipset"));
+        assert_eq!(manifest.devices[0].addresses.as_deref(), Some(&[0x50][..]));
     }
 
     #[test]

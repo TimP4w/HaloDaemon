@@ -1070,15 +1070,7 @@ mod tests {
             let record = config.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
             assert_eq!(record.locked_sha, tip_sha);
             assert_ne!(record.locked_sha, first_sha);
-            drop(config);
-            let manifest = crate::drivers::plugins::parse_manifest_from_dir(
-                &crate::config::plugin_repos_dir().join(&slug),
-            )
-            .unwrap();
-            assert_eq!(
-                manifest.compatibility.unwrap().plugin_api,
-                1
-            );
+            assert_eq!(record.active_revision.as_deref(), Some(tip_sha.as_str()));
         })
         .await;
     }
