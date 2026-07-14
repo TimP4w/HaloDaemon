@@ -578,21 +578,27 @@ mod tests {
     /// Register a consent-satisfied integration manifest for `id` in `app`'s
     /// registry, so `tick_once`'s manifest-driven loop reaches it.
     fn register_integration(app: &Arc<AppState>, id: &str) {
-        let manifest = crate::drivers::plugins::parse_manifest(
-            &format!(
-                r#"return {{ type = "integration", identity = {{ name = "{id}" }}, permissions = {{"network"}}, transports = {{ tcp = {{}} }} }}"#
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(id);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!(
+                "id: {id}\ntype: integration\npermissions: [network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: text\n    - key: port\n      label: Port\n      kind: number\n"
             ),
-            std::path::Path::new(&format!("{id}.lua")),
         )
         .unwrap();
+        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+        let manifest = crate::drivers::plugins::parse_manifest_from_dir(&dir).unwrap();
         app.registry
             .update(|s| s.manifests = vec![manifest.clone()]);
-        app.registry.set_granted(&HashMap::from([(
-            id.to_string(),
-            vec![halod_shared::types::Permission::Network],
-        )]));
-        app.registry
-            .set_acknowledged(&HashMap::from([(id.to_string(), manifest.content_hash())]));
+        let mut policy = crate::config::PluginPolicy::default();
+        policy.enabled.push(id.to_string());
+        policy.integrations_enabled.push(id.to_string());
+        policy
+            .accepted_authorities
+            .insert(id.to_string(), app.registry.authority_for(id).unwrap());
+        app.registry.replace_policy(&policy);
     }
 
     #[tokio::test]

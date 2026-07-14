@@ -136,23 +136,20 @@ inventory::submit!(PluginTransportDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::plugins::manifest::parse_manifest;
-    use std::path::Path;
 
-    fn manifest_with_tcp() -> PluginManifest {
-        // The device spec only satisfies parse_manifest's guard; `open` reads host/port from `config`.
-        // `allow_private` so the loopback-host tests below exercise the port/connect
-        // paths rather than tripping the SSRF guard (which has its own tests).
-        let src = r#"return {
-            permissions = {"network"},
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            config = { fields = {
-              { key = "host", label = "Host" },
-              { key = "port", label = "Port" },
-            } },
-            transports = { tcp = { timeout_ms = 200, allow_private = true } },
-        }"#;
-        parse_manifest(src, Path::new("tcptest.lua")).unwrap()
+    fn manifest_with_tcp(allow_private: bool) -> PluginManifest {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("tcptest");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!(
+                "id: tcptest\npermissions: [hid, network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 200\n    allow_private: {allow_private}\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: text\n    - key: port\n      label: Port\n      kind: number\ndevices:\n  - vendor: Test\n    model: TCP\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+        crate::drivers::plugins::parse_manifest_from_dir(&dir).unwrap()
     }
 
     const NET: &[Permission] = &[Permission::Network];
@@ -181,7 +178,7 @@ mod tests {
 
     #[test]
     fn open_errors_when_host_field_is_unset() {
-        let manifest = manifest_with_tcp();
+        let manifest = manifest_with_tcp(true);
         let config = HashMap::from([("port".to_string(), "6742".to_string())]);
         let err = match open(&manifest, &hid(), &config, NET, None) {
             Err(e) => e,
@@ -192,7 +189,7 @@ mod tests {
 
     #[test]
     fn open_errors_on_an_invalid_port() {
-        let manifest = manifest_with_tcp();
+        let manifest = manifest_with_tcp(true);
         let config = HashMap::from([
             ("host".to_string(), "127.0.0.1".to_string()),
             ("port".to_string(), "not-a-number".to_string()),
@@ -206,7 +203,7 @@ mod tests {
 
     #[test]
     fn open_errors_when_nothing_is_listening() {
-        let manifest = manifest_with_tcp();
+        let manifest = manifest_with_tcp(true);
         let config = HashMap::from([
             ("host".to_string(), "127.0.0.1".to_string()),
             ("port".to_string(), "1".to_string()),
@@ -219,7 +216,7 @@ mod tests {
 
     #[test]
     fn open_requires_the_network_permission() {
-        let manifest = manifest_with_tcp();
+        let manifest = manifest_with_tcp(true);
         let config = HashMap::from([
             ("host".to_string(), "127.0.0.1".to_string()),
             ("port".to_string(), "6742".to_string()),
@@ -230,14 +227,7 @@ mod tests {
 
     #[test]
     fn open_blocks_ssrf_hosts_without_allow_private() {
-        // A manifest that does NOT opt into private targets.
-        let src = r#"return {
-            permissions = {"network"},
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            config = { fields = { { key = "host", label = "Host" }, { key = "port", label = "Port" } } },
-            transports = { tcp = { timeout_ms = 200 } },
-        }"#;
-        let manifest = parse_manifest(src, Path::new("tcptest.lua")).unwrap();
+        let manifest = manifest_with_tcp(false);
         for host in ["127.0.0.1", "169.254.169.254", "10.0.0.1", "::1"] {
             let config = HashMap::from([
                 ("host".to_string(), host.to_string()),

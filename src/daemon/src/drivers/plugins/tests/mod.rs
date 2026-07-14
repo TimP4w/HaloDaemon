@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Generic plugin-machinery tests (loader/manifest/permission/repo), against
-//! synthetic fixtures. Vendor-specific equivalence tests moved to the
-//! official plugin repo's own `halod plugin-test` CI run.
+//! Generic plugin-machinery tests. Vendor-specific equivalence tests live in
+//! the official plugin repository's `halod plugin-test` CI run.
 
-mod registry;
+// Registry coverage uses real directory packages beside the production loader.
+// The former inline-Lua manifest fixture suite was removed with the legacy
+// manifest format rather than preserved through a test-only compatibility path.
 
 #[test]
 fn declared_write_rate_limit_preserves_manifest_value() {

@@ -397,55 +397,12 @@ impl Registry {
         });
     }
 
-    /// Test-only field mutation helpers for focused registry state tests.
-    #[cfg(test)]
-    pub fn set_disabled(&self, ids: &[String]) {
-        self.update(|s| {
-            s.disabled = ids.iter().cloned().collect();
-        });
-    }
-
     fn is_disabled(&self, plugin_id: &str) -> bool {
         self.snapshot().disabled.contains(plugin_id)
     }
 
-    #[cfg(test)]
-    pub fn set_integrations_disabled(&self, ids: &[String]) {
-        self.update(|s| s.integrations_disabled = ids.iter().cloned().collect());
-    }
-
     fn is_integration_disabled(&self, plugin_id: &str) -> bool {
         self.snapshot().integrations_disabled.contains(plugin_id)
-    }
-
-    #[cfg(test)]
-    pub fn set_granted(&self, granted: &HashMap<String, Vec<Permission>>) {
-        self.update(|s| {
-            // Inline Lua runtime fixtures predate explicit HID authority. Keep
-            // their test setup focused on the capability under test while the
-            // production policy path always receives an exact authority
-            // snapshot from the enable confirmation.
-            s.granted = granted
-                .iter()
-                .map(|(id, permissions)| {
-                    let mut permissions = permissions.clone();
-                    if s.manifests
-                        .iter()
-                        .find(|manifest| manifest.plugin_id == *id)
-                        .is_some_and(|manifest| {
-                            manifest
-                                .devices
-                                .iter()
-                                .any(|device| device.transport == "hid")
-                        })
-                        && !permissions.contains(&Permission::Hid)
-                    {
-                        permissions.push(Permission::Hid);
-                    }
-                    (id.clone(), permissions)
-                })
-                .collect();
-        });
     }
 
     /// Current authority from inert manifest data. This must stay independent
@@ -480,30 +437,19 @@ impl Registry {
             .collect()
     }
 
-    #[cfg(test)]
-    pub fn set_acknowledged(&self, hashes: &HashMap<String, String>) {
-        self.update(|s| s.installed_hashes = hashes.clone());
-    }
-
     /// The installed package hash for `plugin_id`, if any.
     fn installed_hash_for(&self, plugin_id: &str) -> Option<String> {
         self.snapshot().installed_hashes.get(plugin_id).cloned()
     }
 
-    /// The current on-disk content hash for `plugin_id` from the loaded registry,
-    /// for recording an acknowledgment when the user consents. `None` if unknown.
+    /// Current package content hash, used by repository update-detection tests.
     #[cfg(test)]
     pub fn content_hash_for(&self, plugin_id: &str) -> Option<String> {
         self.snapshot()
             .manifests
             .iter()
             .find(|m| m.plugin_id == plugin_id)
-            .map(|m| m.content_hash())
-    }
-
-    #[cfg(test)]
-    pub fn set_config_values(&self, values: &HashMap<String, HashMap<String, String>>) {
-        self.update(|s| s.config_values = values.clone());
+            .map(PluginManifest::content_hash)
     }
 
     /// A plugin's resolved non-secure config: every declared field defaults to its
@@ -1286,13 +1232,6 @@ pub fn repo_plugin_dirs(repos: &[crate::config::PluginRepoRecord]) -> Vec<std::p
 }
 
 impl Registry {
-    /// Every load warning recorded during the most recent `load_all_with_repos`,
-    /// draining the set so a later poll doesn't repeat it.
-    #[cfg(test)]
-    pub fn take_plugin_load_warnings(&self) -> Vec<PluginLoadWarning> {
-        std::mem::take(&mut write_recover(&self.load_warnings))
-    }
-
     /// [`Registry::load_all_with_repos`] with no configured repos.
     #[cfg(test)]
     pub fn load_all(&self, dir: &Path) {
@@ -1542,28 +1481,6 @@ impl Registry {
             device.install_chain_host(host);
         }
         Some(device as Arc<dyn Device>)
-    }
-
-    /// Match a handle against a given manifest slice (consent checked against
-    /// this registry's granted/acknowledged state). Used by tests.
-    #[cfg(test)]
-    pub fn match_in(
-        &self,
-        app: &Arc<crate::state::AppState>,
-        manifests: &[PluginManifest],
-        handle: &DiscoveryHandle<'_>,
-    ) -> Option<Arc<dyn Device>> {
-        for manifest in manifests {
-            let Some(spec) = manifest.device_for(handle) else {
-                continue;
-            };
-            if let ActivationState::Ready(ready) =
-                self.activation_status(app.secret_store.as_ref(), manifest)
-            {
-                return self.build_device(app, manifest, spec, handle, ready);
-            }
-        }
-        None
     }
 
     /// Match a discovery handle against every loaded plugin. Consulted by
