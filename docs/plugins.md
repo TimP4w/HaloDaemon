@@ -871,24 +871,20 @@ Known permissions:
 - `audio_routing` — exposes `dev.audio` so the plugin can create and route
   host-managed virtual audio sinks.
 
-A plugin with any declared permission loads but stays
-**inert** — discovered, listed in the Plugins screen, but never matched
-against hardware (or, for an integration plugin, never connected) — until the
-user grants it. Manually importing such a plugin (Add plugin) prompts for
-consent immediately; one found by a directory scan instead gets a toast
-notification. Revoking a grant reverts the plugin to inert on the next
-rediscovery.
+A plugin remains **inert** until the user explicitly enables it through the
+authority modal. This applies even to permissionless and verified-official
+packages, and every disabled-to-enabled transition opens the modal again.
+Disabling is immediate. The accepted normalized authority is retained only to
+evaluate later repository updates; it is not an evergreen enablement grant.
 
 SMBus declarations are contributed to discovery only after the plugin is
-enabled, every declared permission is granted, and the acknowledged content
-hash still matches. `pre_scan` also checks the effective `smbus` grant at its
+enabled and its declared authority is accepted. `pre_scan` also checks the effective `smbus` grant at its
 transport-injection boundary. PCI gates, address scope, rate limits, VM limits,
 and the 5-second timeout remain additional constraints.
 
 Nothing is auto-granted: official, community, local, device, integration, and
-effect packages all use the same gate. Permissionless plugins need no consent;
-permissioned plugins require every declared permission plus acknowledgement of
-their current content hash before any Lua worker is created.
+effect packages all use the same enable-confirmation gate before any Lua worker
+is created.
 
 ## RGB effects
 
@@ -944,17 +940,17 @@ the stock effect library — it ships every pixmap/direct effect except
 ## Packaging & the official repo
 
 Every plugin is a **directory package**: a folder containing `plugin.yaml`
-(the complete declarative manifest — `id`, `compatibility`, `type`, identity,
+(the complete declarative manifest — `id`, `type`, identity, `platforms`,
 permissions, devices, transports, capabilities, config, and effects) plus its
 callback-only entry Lua file (`main.lua` by default) and an optional `assets/` subdirectory
 for the logo/effect thumbnails. `plugin.yaml`'s `id` **must equal the
 directory name**. There is no single-file plugin format and nothing is
 compiled into the daemon binary.
 
-### Compatibility
+### Repository compatibility
 
-Every manifest must declare both the HaloDaemon release range and the exact
-plugin API generation it targets:
+Managed repositories declare the HaloDaemon release range and exact plugin API
+generation once in their root `repository.yaml`:
 
 ```yaml
 compatibility:
@@ -965,8 +961,8 @@ compatibility:
 `halod` uses Cargo-style SemVer requirement syntax. Both checks must pass: a
 plugin is rejected when the daemon version is outside the declared range or
 when `plugin_api` differs from the API generation implemented by the daemon.
-The same checks are applied to repository updates, so an incompatible remote
-plugin is neither marked as updatable nor checked out by an explicit update.
+The same checks apply to the complete proposed repository revision. Halo never
+searches Git history for a compatible package revision.
 
 ### Manifest validation and limits
 
@@ -1016,14 +1012,12 @@ a small square tile and letterboxed to preserve aspect. A logo that's absent,
 undecodable, or out of bounds is dropped at load (the plugin still loads; a
 warning is surfaced and the GUI falls back to an initials tile).
 
-A plugin's **content hash** is SHA-256 over the CRLF-normalized
-`plugin.yaml` bytes followed by the CRLF-normalized entry-script bytes. For a
-permissioned plugin, granting its declared permissions records this hash;
-editing either file makes the plugin inert until the user reviews and approves
-the new content. Permissionless plugins do not have a consent gate, so their
-hash does not block activation. Display assets and `test.lua` are not included
-in this hash; changing security-relevant behavior therefore requires changing
-`plugin.yaml` or the entry script.
+Repository package hashes are deterministic SHA-256 digests of every sorted
+regular file in the package. They identify repository updates and dirty
+revisions; they are not consent records. An enabled plugin remains enabled
+after an update only when the new normalized authority is a subset of the
+authority it accepted. An authority expansion disables that plugin and requires
+a new enable confirmation.
 
 Plugins install from three sources:
 
@@ -1052,15 +1046,11 @@ then local, then other repos in registration order — so a community repo can
 never shadow an existing plugin id; a collision is rejected and surfaced to
 the user rather than silently dropped.
 
-**Updates are per-plugin and never automatic.** The daemon compares a
-repo-sourced plugin's content hash against its repo's fetched remote tip
-(read straight from git's object database, no working-tree checkout) and
-flags it in the Plugins screen when they differ — independent of whether the
-containing repo as a whole is "behind", since a repo can have unrelated
-commits while a given plugin's own files are unchanged. Accepting an update
-checks out only that plugin's files, leaving sibling plugins in the same repo
-untouched. A permissioned plugin then requires consent for the new content;
-a permissionless plugin can activate immediately.
+**Updates are repository-scoped and never automatic.** The daemon fetches Git
+objects without touching executable files, validates the indexed proposed
+revision in a staging directory, and atomically switches to its immutable
+revision directory only after complete validation. The Plugins screen reports
+added, changed, and removed packages; repair rematerializes a whole revision.
 
 **Testing a package without hardware.** A package may ship a `test.lua`
 alongside its `plugin.yaml`, which the daemon can run directly:

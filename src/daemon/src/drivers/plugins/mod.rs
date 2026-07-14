@@ -431,13 +431,6 @@ impl Registry {
             .map(authority_for_manifest)
     }
 
-    pub(crate) fn accepted_authority_for(
-        &self,
-        plugin_id: &str,
-    ) -> Option<halod_shared::types::PluginAuthority> {
-        self.snapshot().accepted_authorities.get(plugin_id).cloned()
-    }
-
     /// Effective permissions granted to `plugin_id`'s Lua sandbox: persisted user
     /// grants intersected with the current manifest declaration. This is the
     /// authoritative capability boundary even if persisted config was edited or an
@@ -469,6 +462,7 @@ impl Registry {
 
     /// The current on-disk content hash for `plugin_id` from the loaded registry,
     /// for recording an acknowledgment when the user consents. `None` if unknown.
+    #[cfg(test)]
     pub fn content_hash_for(&self, plugin_id: &str) -> Option<String> {
         self.snapshot()
             .manifests
@@ -913,10 +907,8 @@ fn plugin_source_for(plugin_dir: &Path) -> halod_shared::types::PluginSource {
     }
 }
 
-/// For a repo-sourced plugin, its repo slug and path within that repo's clone
-/// (`""` for a root-level plugin, `plugins/<id>` for a subdir one) — the same
-/// pair [`crate::drivers::plugins::repo::remote_plugin_content`] and
-/// `checkout_subtree` need. `None` for an unknown or `Local` plugin.
+/// For a repo-sourced plugin, its repository slug and path within the selected
+/// immutable revision. `None` for an unknown or local plugin.
 impl Registry {
     pub fn repo_location_for(&self, plugin_id: &str) -> Option<(String, std::path::PathBuf)> {
         let state = self.snapshot();

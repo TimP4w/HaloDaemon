@@ -166,22 +166,18 @@ There are no plugins compiled into the daemon binary. At startup the daemon seed
 a non-removable **official plugin repo** record and clones it over the network
 (`registry::ensure_official_repo`) — a clone failure (e.g. no network on first
 launch) is logged and never fails boot, so the daemon simply has no official
-plugins until a later successful clone. Official plugins use the same gate as
-all other sources: permissionless packages activate directly, while permissioned
-packages require every declared grant and current-content acknowledgement. A plugin id
+plugins until a later successful clone. Official plugins use the same
+enable-confirmation gate as all other sources. A plugin id
 is owned by whichever source loads it first (official repo, then local
 `plugins/`, then other repos in config order — see `load_all_with_repos`), so a
 community repo can never shadow an existing plugin id; a collision is rejected
 and surfaced via `take_plugin_load_warnings` rather than silently dropped.
 
-Repo-sourced plugins support **per-plugin update detection**: `repo::remote_plugin_content`
-reads a plugin's `plugin.yaml` + entry script straight out of git's object
-database at the repo's fetched remote tip (no working-tree checkout) and
-compares its content hash to the loaded manifest's — finer-grained than a
-whole-repo SHA compare, since a repo can be behind while a given plugin's own
-files are unchanged. Accepting an update (`repo::checkout_subtree`) checks out
-only that plugin's subtree, leaving sibling plugins in the same repo untouched;
-updates are never automatic.
+Repo updates are atomic and repository-scoped. Git object storage is separate
+from immutable executable revisions: Halo fetches, verifies the root index and
+official signature, materializes and validates a proposed revision, then atomically
+selects it. Update checks never modify executable files, and a failed update
+leaves the previously selected revision running.
 
 ## IPC and usecases — the daemon's public API
 
