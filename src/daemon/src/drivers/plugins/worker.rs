@@ -238,6 +238,18 @@ pub struct InitControls {
     pub actions: Vec<ActionDef>,
 }
 
+/// Runtime DPI descriptor. DPI bounds and stored steps belong to the physical
+/// device/profile, not the inert package catalog.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InitDpi {
+    pub min: u16,
+    pub max: u16,
+    #[serde(default)]
+    pub steps: Vec<u16>,
+    #[serde(default)]
+    pub onboard: bool,
+}
+
 /// What `initialize` returns: a bare bool, or a table with dynamic device info
 /// discovered from the hardware (firmware/model, RGB zones, LCD panel, and the
 /// live range/choice values read back from the device to seed the host caches).
@@ -256,6 +268,7 @@ pub struct InitOutcome {
     pub chain: Option<Vec<InitChainChannel>>,
     pub accessories: Option<Vec<AccessoryManifest>>,
     pub controls: Option<InitControls>,
+    pub dpi: Option<InitDpi>,
     /// Current range-control values keyed by control key, seeding the host's
     /// range cache so the UI reflects the device instead of manifest defaults.
     pub ranges: Option<HashMap<String, i32>>,
@@ -282,6 +295,8 @@ struct InitTable {
     accessories: Option<Vec<AccessoryManifest>>,
     #[serde(default)]
     controls: Option<InitControls>,
+    #[serde(default)]
+    dpi: Option<InitDpi>,
     #[serde(default)]
     ranges: Option<HashMap<String, i32>>,
     #[serde(default)]
@@ -505,6 +520,15 @@ impl PluginHandle {
                     if let Some(controls) = &t.controls {
                         validate_runtime_controls(controls)?;
                     }
+                    if let Some(dpi) = &t.dpi {
+                        anyhow::ensure!(dpi.min <= dpi.max, "DPI minimum exceeds maximum");
+                        anyhow::ensure!(
+                            dpi.steps
+                                .iter()
+                                .all(|step| *step >= dpi.min && *step <= dpi.max),
+                            "DPI steps must stay within the declared bounds"
+                        );
+                    }
                     Ok(InitOutcome {
                         ok: t.ok,
                         model: t.model,
@@ -514,6 +538,7 @@ impl PluginHandle {
                         chain: t.chain,
                         accessories: t.accessories,
                         controls: t.controls,
+                        dpi: t.dpi,
                         ranges: t.ranges,
                         choices: t.choices,
                     })
@@ -1382,5 +1407,20 @@ mod tests {
         );
         let err = h.rgb_apply(static_state()).await.unwrap_err();
         assert!(err.to_string().contains("boom"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn initialize_reports_runtime_dpi_descriptor() {
+        let h = spawn(
+            r#"return { initialize = function(dev)
+                return { dpi = { min = 100, max = 3200, steps = { 400, 800, 1600 }, onboard = true } }
+            end }"#,
+            vec![],
+        );
+        let dpi = h.initialize().await.unwrap().dpi.expect("dpi descriptor");
+        assert_eq!(
+            (dpi.min, dpi.max, dpi.steps, dpi.onboard),
+            (100, 3200, vec![400, 800, 1600], true)
+        );
     }
 }

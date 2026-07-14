@@ -181,9 +181,6 @@ pub struct DpiManifest {
     pub max: u16,
     /// Ordered DPI steps the step-cycle walks.
     pub steps: Vec<u16>,
-    /// `true` = steps live in the device's onboard profile; default host-managed.
-    #[serde(default)]
-    pub onboard: bool,
 }
 
 /// One choice control the device exposes (e.g. a polling-rate selector).

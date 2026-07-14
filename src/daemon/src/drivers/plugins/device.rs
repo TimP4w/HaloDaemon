@@ -28,11 +28,13 @@ use crate::drivers::{
 
 use super::chain_leaf::ChainLeaf;
 use super::manifest::{
-    topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DeviceSpec, DpiManifest,
-    PluginManifest, RangeDef, RgbManifest,
+    topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DeviceSpec, PluginManifest,
+    RangeDef, RgbManifest,
 };
 use super::transport::PluginIo;
-use super::worker::{DetectedController, DevMatch, InitControls, InitLcd, InitZone, PluginHandle};
+use super::worker::{
+    DetectedController, DevMatch, InitControls, InitDpi, InitLcd, InitZone, PluginHandle,
+};
 use std::collections::{HashMap, HashSet};
 
 /// Host-side DPI step-cycle state (the plugin only writes the chosen value).
@@ -40,6 +42,13 @@ struct DpiState {
     steps: Vec<u16>,
     index: usize,
     current: u16,
+}
+
+#[derive(Clone, Copy)]
+struct DpiConfig {
+    min: u16,
+    max: u16,
+    mode: DpiMode,
 }
 use crate::drivers::vendors::generic::devices::common::{
     linear_rgb_zone, ring_led_positions, transformed_zone_frame,
@@ -327,9 +336,7 @@ pub struct LuaDevice {
     caps: Vec<Cap>,
 
     dpi_state: Mutex<DpiState>,
-    dpi_min: u16,
-    dpi_max: u16,
-    dpi_mode: DpiMode,
+    dpi_config: Mutex<DpiConfig>,
 
     /// Declared choice/range/boolean/action controls + their value caches.
     controls: Controls,
@@ -632,13 +639,16 @@ impl LuaDevice {
                 .as_ref()
                 .map(|l| l.needs_rgb_restore)
                 .unwrap_or(false),
-            dpi_state: Mutex::new(build_dpi_state(manifest.dpi.as_ref())),
-            dpi_min: manifest.dpi.as_ref().map(|d| d.min).unwrap_or(0),
-            dpi_max: manifest.dpi.as_ref().map(|d| d.max).unwrap_or(0),
-            dpi_mode: match manifest.dpi.as_ref().map(|d| d.onboard) {
-                Some(true) => DpiMode::Onboard,
-                _ => DpiMode::Host,
-            },
+            dpi_state: Mutex::new(DpiState {
+                steps: Vec::new(),
+                index: 0,
+                current: 0,
+            }),
+            dpi_config: Mutex::new(DpiConfig {
+                min: 0,
+                max: 0,
+                mode: DpiMode::Host,
+            }),
             controls: Controls::from_manifest(manifest),
             dynamic_controls: OnceLock::new(),
             eq_cache: Mutex::new(None),
@@ -883,6 +893,18 @@ impl Device for LuaDevice {
         }
         if let Some(controls) = outcome.controls {
             let _ = self.dynamic_controls.set(Controls::from_runtime(controls));
+        }
+        if let Some(dpi) = outcome.dpi {
+            *self.dpi_config.lock().unwrap() = DpiConfig {
+                min: dpi.min,
+                max: dpi.max,
+                mode: if dpi.onboard {
+                    DpiMode::Onboard
+                } else {
+                    DpiMode::Host
+                },
+            };
+            *self.dpi_state.lock().unwrap() = dpi_state_from_runtime(&dpi);
         }
         // Seed the host range/choice caches with the values the device reported,
         // so the UI shows live hardware state rather than manifest defaults.
@@ -1485,14 +1507,12 @@ impl LcdCapability for LuaDevice {
     }
 }
 
-/// Initial DPI state from the manifest: mid-step selected, like the native driver.
-fn build_dpi_state(dpi: Option<&DpiManifest>) -> DpiState {
-    let steps: Vec<u16> = dpi.map(|d| d.steps.clone()).unwrap_or_default();
+/// Install a runtime DPI descriptor, selecting its midpoint like the native
+/// driver. This is called after the worker has validated `initialize` output.
+fn dpi_state_from_runtime(dpi: &InitDpi) -> DpiState {
+    let steps = dpi.steps.clone();
     let index = steps.len() / 2;
-    let current = steps
-        .get(index)
-        .copied()
-        .unwrap_or_else(|| dpi.map(|d| d.min).unwrap_or(0));
+    let current = steps.get(index).copied().unwrap_or(dpi.min);
     DpiState {
         steps,
         index,
@@ -1502,7 +1522,8 @@ fn build_dpi_state(dpi: Option<&DpiManifest>) -> DpiState {
 
 impl LuaDevice {
     fn clamp_dpi(&self, dpi: u16) -> u16 {
-        dpi.clamp(self.dpi_min, self.dpi_max)
+        let config = self.dpi_config.lock().unwrap();
+        dpi.clamp(config.min, config.max)
     }
 }
 
@@ -1510,12 +1531,13 @@ impl LuaDevice {
 impl DpiCapability for LuaDevice {
     async fn dpi_status(&self) -> DpiStatus {
         let dpi = self.dpi_state.lock().unwrap();
+        let config = *self.dpi_config.lock().unwrap();
         DpiStatus {
             steps: dpi.steps.clone(),
             current_index: dpi.index,
             current_dpi: dpi.current,
-            available_dpis: (self.dpi_min..=self.dpi_max).step_by(100).collect(),
-            mode: self.dpi_mode,
+            available_dpis: (config.min..=config.max).step_by(100).collect(),
+            mode: config.mode,
         }
     }
 
