@@ -141,7 +141,7 @@ pub(super) struct RgbCacheState {
     pub(super) rgb_state: Option<RgbState>,
     pub(super) rgb_static_slots: Vec<u8>, // static effect slot index per zone
     pub(super) rgb_wire: RgbWire,         // which protocol to use (set once at init)
-    pub(super) pk_led_ids: Vec<u8>,       // mouse per-key LED IDs from bitmap (0 < id < 32)
+    pub(super) pk_led_ids: Vec<u8>,       // addressable per-key LED IDs from GetInfo pages
     /// Last per-key colours streamed to each zone, keyed by zone id, used to
     /// diff successive `write_frame` calls.
     pub(super) pk_frame_cache: HashMap<String, PkFrameCache>,

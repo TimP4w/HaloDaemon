@@ -26,6 +26,9 @@ notify:
   device_init_failed:
     title: "Impossibile inizializzare %{device}"
     message: "%{detail}"
+  device_write_failed:
+    title: "Errore durante la scrittura sul dispositivo %{device}"
+    message: "Apri Dettagli per visualizzare l'errore completo."
   fan_stalled:
     title: "Ventola bloccata: %{fan}"
     message: "La ventola non gira (0 RPM) mentre viene applicato il ciclo di lavoro. Controlla i cavi della ventola o sostituiscila."

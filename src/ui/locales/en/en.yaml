@@ -26,6 +26,9 @@ notify:
   device_init_failed:
     title: "Failed to initialize %{device}"
     message: "%{detail}"
+  device_write_failed:
+    title: "Error writing to device %{device}"
+    message: "Open Details for the full error."
   fan_stalled:
     title: "Fan stalled: %{fan}"
     message: "Fan is not spinning (0 RPM) while the curve duty is applied. Check fan connections or replace the fan."

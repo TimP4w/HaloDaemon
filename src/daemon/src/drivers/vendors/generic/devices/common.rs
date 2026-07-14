@@ -60,6 +60,7 @@ pub fn tkl_key_positions(spec: &KeyLayoutSpec<'_>) -> Vec<LedPosition> {
 ///
 /// Same as [`tkl_key_positions`] but normalized to the wider full-size grid
 /// (`col ∈ [0, 22.5]`) to accommodate the numpad columns.
+#[cfg(test)]
 pub fn full_size_key_positions(spec: &KeyLayoutSpec<'_>) -> Vec<LedPosition> {
     key_positions(spec, 23.0)
 }

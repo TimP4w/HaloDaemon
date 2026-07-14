@@ -304,6 +304,16 @@ mod tests {
         }
     }
 
+    fn device_write_error() -> Notification {
+        Notification {
+            code: NotificationCode::DeviceWriteFailed {
+                device: "keyboard".into(),
+                detail: "HID++ rejected write".into(),
+            },
+            timestamp_ms: 0,
+        }
+    }
+
     #[test]
     fn errors_are_sticky_others_time_out() {
         assert_eq!(toast_timeout(&note(NotificationSeverity::Error).code), None);
@@ -312,15 +322,16 @@ mod tests {
     }
 
     #[test]
-    fn plugin_detail_codes_are_sticky_and_show_details() {
-        let n = plugin_error();
-        assert!(shows_details(&n.code));
-        assert_eq!(
-            toast_timeout(&n.code),
-            None,
-            "detail toasts stay until dismissed"
-        );
-        assert_eq!(details_extra_height(&n), DETAILS_ROW_H);
+    fn detail_codes_are_sticky_and_show_details() {
+        for n in [plugin_error(), device_write_error()] {
+            assert!(shows_details(&n.code));
+            assert_eq!(
+                toast_timeout(&n.code),
+                None,
+                "detail toasts stay until dismissed"
+            );
+            assert_eq!(details_extra_height(&n), DETAILS_ROW_H);
+        }
         // A no-detail warning is neither sticky nor gets a Details row.
         let w = note(NotificationSeverity::Warning);
         assert!(!shows_details(&w.code));

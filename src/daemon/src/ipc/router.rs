@@ -149,6 +149,7 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
     // command. Global commands run inline in read order.
     match command_target(&typed) {
         Some(id) => {
+            let writes_device = command_writes_device(&typed);
             let id = id.to_string();
             let cmd = cmd.to_string();
             let req_id = req_id.map(str::to_string);
@@ -156,7 +157,28 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
                 let lock = app.device_lock(&id).await;
                 let _guard = lock.lock().await;
                 if let Err(e) = dispatch(typed, client.clone(), Arc::clone(&app)).await {
-                    reply_error(&client, &cmd, req_id.as_deref(), e);
+                    let plugin_handled = e
+                        .downcast_ref::<crate::drivers::plugins::SurfacedPluginError>()
+                        .is_some();
+                    if writes_device && !plugin_handled {
+                        let device = {
+                            let devices = app.devices.read().await;
+                            devices
+                                .iter()
+                                .find(|device| device.id() == id)
+                                .map(|device| device.name().to_string())
+                                .unwrap_or_else(|| id.clone())
+                        };
+                        crate::platform::notify::send(
+                            &app,
+                            halod_shared::types::NotificationCode::DeviceWriteFailed {
+                                device,
+                                detail: format!("{e:#}"),
+                            },
+                        )
+                        .await;
+                    }
+                    reply_error_with_handled(&client, &cmd, req_id.as_deref(), e, writes_device);
                 }
             });
         }
@@ -171,10 +193,21 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
 /// Send an `error` reply frame for a failed command, echoing `request_id` when
 /// the client supplied one so it can correlate the failure.
 fn reply_error(client: &ClientHandle, cmd: &str, req_id: Option<&str>, e: anyhow::Error) {
+    reply_error_with_handled(client, cmd, req_id, e, false);
+}
+
+fn reply_error_with_handled(
+    client: &ClientHandle,
+    cmd: &str,
+    req_id: Option<&str>,
+    e: anyhow::Error,
+    handled: bool,
+) {
     log::warn!("command '{cmd}' failed: {e}");
     let mut reply = json!({"type": "error", "message": e.to_string()});
-    if e.downcast_ref::<crate::drivers::plugins::SurfacedPluginError>()
-        .is_some()
+    if handled
+        || e.downcast_ref::<crate::drivers::plugins::SurfacedPluginError>()
+            .is_some()
     {
         reply["handled"] = true.into();
     }
@@ -182,6 +215,44 @@ fn reply_error(client: &ClientHandle, cmd: &str, req_id: Option<&str>, e: anyhow
         reply["request_id"] = req_id.into();
     }
     client.send_json(&reply);
+}
+
+/// Whether failure means a requested hardware write did not reach the device.
+/// Device-scoped configuration-only commands deliberately stay on the generic
+/// error path.
+fn command_writes_device(cmd: &DaemonCommand) -> bool {
+    use DaemonCommand::*;
+    matches!(
+        cmd,
+        SetChoice { .. }
+            | SetRange { .. }
+            | SetBoolean { .. }
+            | TriggerAction { .. }
+            | ResetAllButtonMappings { .. }
+            | ResetButtonMapping { .. }
+            | SetEqPreset { .. }
+            | SetEqBands { .. }
+            | SetDpiSteps { .. }
+            | SetFanSpeed { .. }
+            | RgbApply { .. }
+            | RgbChainDetectChannel { .. }
+            | SetButtonMapping { .. }
+            | SetSoftwareDpiSteps { .. }
+            | OnboardProfileSwitch { .. }
+            | OnboardProfileRestore { .. }
+            | OnboardProfileSetEnabled { .. }
+            | SetScreenImage { .. }
+            | SetScreenImageFromLibrary { .. }
+            | SetScreenRotation { .. }
+            | SetScreenBrightness { .. }
+            | SetScreenDefault { .. }
+            | SetScreenRawStreaming { .. }
+            | SetScreenVideo { .. }
+            | ReceiverStartPairing { .. }
+            | ReceiverStopPairing { .. }
+            | ReceiverUnpair { .. }
+            | SetKeyboardLayout { .. }
+    )
 }
 
 /// The device id a command targets, or `None` for global commands (profiles,
@@ -784,6 +855,71 @@ mod tests {
         let reply: Value = serde_json::from_slice(&frame[5..]).unwrap();
         assert_eq!(reply["type"], "error");
         assert_eq!(reply["request_id"], "req-42");
+    }
+
+    #[tokio::test]
+    async fn failed_device_write_sends_detail_notification_and_handled_error() {
+        let (tx, mut rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(8);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: std::sync::Arc::default(),
+        };
+        let app = Arc::new(AppState::new(Config::default()));
+        app.clients.lock().await.push(client.clone());
+
+        handle_message(
+            json!({
+                "type": "rgb_apply",
+                "id": "missing-device",
+                "state": {"mode": "static", "color": {"r": 1, "g": 2, "b": 3}},
+                "request_id": "write-1"
+            }),
+            client,
+            app,
+        )
+        .await;
+
+        let mut notification = None;
+        let mut error = None;
+        for _ in 0..2 {
+            let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .expect("response timed out")
+                .expect("response channel closed");
+            let value: Value = serde_json::from_slice(&frame[5..]).unwrap();
+            match value["type"].as_str() {
+                Some("notification") => notification = Some(value),
+                Some("error") => error = Some(value),
+                other => panic!("unexpected frame type: {other:?}"),
+            }
+        }
+
+        let notification = notification.expect("device-write notification");
+        assert_eq!(notification["data"]["code"], "device_write_failed");
+        assert_eq!(notification["data"]["device"], "missing-device");
+        assert!(notification["data"]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("missing-device")));
+
+        let error = error.expect("correlated error reply");
+        assert_eq!(error["request_id"], "write-1");
+        assert_eq!(error["handled"], true);
+    }
+
+    #[test]
+    fn only_hardware_commands_are_classified_as_device_writes() {
+        use halod_shared::types::{RgbColor, RgbState};
+        assert!(command_writes_device(&DaemonCommand::RgbApply {
+            id: "kbd".into(),
+            state: RgbState::Static {
+                color: RgbColor { r: 1, g: 2, b: 3 },
+            },
+        }));
+        assert!(!command_writes_device(&DaemonCommand::SetDeviceName {
+            device_id: "kbd".into(),
+            name: "Desk keyboard".into(),
+        }));
     }
 
     #[test]

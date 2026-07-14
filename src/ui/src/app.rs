@@ -18,9 +18,8 @@ use crate::domain::{
 use crate::runtime::ipc::{self, CommandTx, UiRx};
 use crate::ui;
 
-/// A plugin-issue Details modal's contents: a translated title and the full
-/// error detail to show (and copy).
-pub struct PluginIssueModal {
+/// A notification Details modal's translated title and full error text.
+pub struct IssueDetailsModal {
     pub title: String,
     pub detail: String,
 }
@@ -69,9 +68,8 @@ pub struct App {
     pub(crate) tour: domain::tour::TourState,
     pub(crate) tray: domain::tray::Tray,
     pub(crate) toasts: ui::components::toast::Toasts,
-    /// Open plugin-issue Details modal (title + full detail text), set when a
-    /// toast's Details button is clicked. Outlives the toast that spawned it.
-    pub(crate) plugin_issue_modal: Option<PluginIssueModal>,
+    /// Open notification Details modal. Outlives the toast that spawned it.
+    pub(crate) issue_details_modal: Option<IssueDetailsModal>,
     /// Set by the tray "Quit" so a close request bypasses "close to tray" and
     /// actually exits instead of hiding the window.
     pub(crate) force_quit: Arc<AtomicBool>,
@@ -145,7 +143,7 @@ impl App {
             tour: domain::tour::TourState::default(),
             tray,
             toasts: ui::components::toast::Toasts::default(),
-            plugin_issue_modal: None,
+            issue_details_modal: None,
             force_quit,
             pending_lcd_template: None,
             lcd_editor_render_cache: None,
