@@ -73,6 +73,11 @@ plugins:
   disable: Disattiva
   delete: Elimina script
   repo_sourced_note: Questo plugin proviene da un repository. Rimuovi il repository per disinstallarlo.
+  provenance_official: Ufficiale verificato
+  provenance_repository: Repository non firmato
+  provenance_development: Sorgente di sviluppo
+  provenance_local: Pacchetto locale
+  provenance_invalid: Firma non valida
   # Permessi
   permissions: PERMESSI
   permissions_pending: Questo plugin richiede permessi che non hai ancora concesso. Resterà inattivo finché non deciderai se concederli.

@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Plugins page — a master–detail view of the Lua device plugins found in the
-//! plugins directory (plus built-ins). The left column lists every plugin with
-//! an enable toggle; the right column shows the selected plugin's detail. User
-//! scripts can be added (upload a `.lua` file or paste source) and deleted;
-//! built-ins can be toggled but not deleted.
+//! Plugins page — a master–detail view of canonical plugin packages. The left
+//! column lists every plugin with an enable toggle; the right column shows the
+//! manifest catalog, authority, and provenance. Packages may be imported or
+//! supplied by repositories; only standalone local packages can be deleted.
 
 use std::collections::{HashMap, HashSet};
 
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
-    AppState, PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginRepoInfo,
-    PluginSource, PluginUpdateStatus, RepoUpdateStatus,
+    AppState, PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
+    PluginRepoInfo, PluginSource, PluginUpdateStatus, RepoUpdateStatus,
 };
 
 use crate::runtime::ipc::{self, CommandTx};
@@ -1803,7 +1802,9 @@ fn detail_body(
         // update may be the only way to make it compatible again. Keep that
         // recovery action available even when the checked-out files also count
         // as modified on disk.
-        if let Some(update) = update.filter(|u| u.update_available) {
+        if let Some(update) = update
+            .filter(|u| u.update_available && p.provenance != PluginProvenance::LocalDevelopment)
+        {
             ui.add_space(14.0);
             let in_flight = updating.contains_key(&update.plugin_id);
             if update_banner(
@@ -1851,6 +1852,7 @@ fn detail_body(
             if let PluginSource::Repo { slug } = &p.source {
                 widgets::chip(ui, slug);
             }
+            widgets::chip(ui, &provenance_label(p.provenance));
         });
     }
 
@@ -1863,7 +1865,9 @@ fn detail_body(
     if update.is_some_and(|u| u.on_disk_changed) && !plugin_active(p) {
         ui.add_space(14.0);
         modified_on_disk_banner(ui);
-    } else if let Some(update) = update.filter(|u| u.update_available) {
+    } else if let Some(update) =
+        update.filter(|u| u.update_available && p.provenance != PluginProvenance::LocalDevelopment)
+    {
         ui.add_space(14.0);
         let in_flight = updating.contains_key(&update.plugin_id);
         if update_banner(
@@ -1986,6 +1990,16 @@ fn plugin_type_color(kind: halod_shared::types::PluginKind) -> egui::Color32 {
         PluginKind::Device => theme::STAT_CYAN,
         PluginKind::Effect => theme::STAT_PURPLE,
         PluginKind::Integration => theme::STAT_GREEN,
+    }
+}
+
+fn provenance_label(provenance: PluginProvenance) -> std::borrow::Cow<'static, str> {
+    match provenance {
+        PluginProvenance::VerifiedOfficial => t!("plugins.provenance_official"),
+        PluginProvenance::UnsignedRepository => t!("plugins.provenance_repository"),
+        PluginProvenance::LocalDevelopment => t!("plugins.provenance_development"),
+        PluginProvenance::LocalUnsigned => t!("plugins.provenance_local"),
+        PluginProvenance::InvalidSignature => t!("plugins.provenance_invalid"),
     }
 }
 

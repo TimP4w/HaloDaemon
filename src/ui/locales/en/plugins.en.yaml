@@ -73,6 +73,11 @@ plugins:
   disable: Disable
   delete: Delete script
   repo_sourced_note: This plugin is provided by a repository. Remove the repository to uninstall it.
+  provenance_official: Verified official
+  provenance_repository: Unsigned repository
+  provenance_development: Development source
+  provenance_local: Local package
+  provenance_invalid: Invalid signature
   # Permissions
   permissions: PERMISSIONS
   permissions_pending: This plugin needs permissions you have not granted yet. It will remain inactive until you decide.
