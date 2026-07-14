@@ -14,14 +14,6 @@ use crate::state::AppState;
 
 /// Enable or disable a plugin, persist the choice, and reconcile its devices.
 pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
-    if enabled {
-        // Re-enabling a plugin accepts its current on-disk content as the new
-        // baseline (stage it into the index), so a plugin that was quarantined
-        // for a local edit — or that the user is intentionally editing — isn't
-        // re-disabled on the next startup tamper check. No-op for a pristine or
-        // non-repo plugin.
-        accept_on_disk_content(&app, &id).await;
-    }
     {
         let mut cfg = app.config.write().await;
         cfg.plugins.disabled.retain(|x| x != &id);
@@ -48,36 +40,15 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
     Ok(())
 }
 
-/// Stage a repo plugin's working-tree files into its git index, making the
-/// tamper-check baseline match what's on disk. Local, best-effort: a failure
-/// (or a non-repo plugin) is logged and ignored.
-async fn accept_on_disk_content(app: &Arc<AppState>, id: &str) {
-    let Some((slug, subpath)) = app.registry.repo_location_for(id) else {
-        return;
-    };
-    let dir = crate::config::plugin_repos_dir().join(&slug);
-    if let Err(e) = tokio::task::spawn_blocking(move || {
-        crate::drivers::plugins::repo::stage_subtree(&dir, &subpath)
-    })
-    .await
-    .unwrap_or_else(|e| Err(anyhow::anyhow!("stage task panicked: {e}")))
-    {
-        log::warn!("accepting on-disk content for plugin '{id}': {e:#}");
-    }
-}
-
 /// Replace the set of permissions granted to a plugin and persist the choice.
-/// Also records the plugin's current script hash as acknowledged: granting is
-/// an explicit consent to run *this* script, so the plugin activates and stays
-/// active only until its content changes (trust-on-first-use). The grant and
-/// enabled state are committed together before devices are reconciled.
+/// The grant and enabled state are committed together before devices are
+/// reconciled. Package hashes are update metadata and never affect this gate.
 pub async fn set_trust(
     id: String,
     granted: Vec<Permission>,
     enabled: bool,
     app: Arc<AppState>,
 ) -> Result<()> {
-    let hash = app.registry.content_hash_for(&id);
     let declared = app.registry.declared_permissions_for(&id);
     let effective: Vec<Permission> = granted
         .iter()
@@ -94,20 +65,10 @@ pub async fn set_trust(
     {
         let mut cfg = app.config.write().await;
         if effective.is_empty() {
-            // Revoke: drop the grant and its content pin, back to pristine.
+            // Revoke the authority grant.
             cfg.plugins.granted.remove(&id);
-            cfg.plugins.acknowledged.remove(&id);
         } else {
             cfg.plugins.granted.insert(id.clone(), effective);
-            // Pin the grant to the exact script the user is consenting to.
-            match hash {
-                Some(h) => {
-                    cfg.plugins.acknowledged.insert(id.clone(), h);
-                }
-                None => {
-                    cfg.plugins.acknowledged.remove(&id);
-                }
-            }
         }
         cfg.plugins.disabled.retain(|x| x != &id);
         if !enabled {
@@ -339,7 +300,7 @@ pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
 }
 
 /// Purge every id-keyed piece of plugin state — secret, disabled flag, plaintext
-/// config, granted permissions, acknowledged content hash, and integration
+/// config, granted permissions, installed content hash, and integration
 /// disable — returning whether config changed. Shared by [`delete`] and
 /// `repos::remove_repo`, so a reinstall of identical content can't inherit an
 /// old grant or acknowledgement.
@@ -356,13 +317,13 @@ pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     let disabled_changed = cfg.plugins.disabled.len() != before;
     let config_changed = cfg.plugins.config.remove(id).is_some();
     let perms_changed = cfg.plugins.granted.remove(id).is_some();
-    let ack_changed = cfg.plugins.acknowledged.remove(id).is_some();
+    let hash_changed = cfg.plugins.installed_hashes.remove(id).is_some();
     let integ_before = cfg.plugins.integrations_disabled.len();
     cfg.plugins.integrations_disabled.retain(|x| x != id);
     let integ_changed = cfg.plugins.integrations_disabled.len() != integ_before;
 
     let changed =
-        disabled_changed || config_changed || perms_changed || ack_changed || integ_changed;
+        disabled_changed || config_changed || perms_changed || hash_changed || integ_changed;
     if changed {
         app.registry.replace_policy(&cfg.plugins);
     }
@@ -388,6 +349,21 @@ pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<Strin
         crate::ipc::broadcast_state(&app).await;
         return Ok(());
     }
+    // A repository update has changed files on disk. Rebuild the registry
+    // before reconciliation so workers use the newly accepted code rather
+    // than stale manifest/source snapshots.
+    reload_registry(&app).await;
+    {
+        let mut cfg = app.config.write().await;
+        for plugin_id in &plugin_ids {
+            if let Some(hash) = app.registry.content_hash_for(plugin_id) {
+                cfg.plugins.installed_hashes.insert(plugin_id.clone(), hash);
+            } else {
+                cfg.plugins.installed_hashes.remove(plugin_id);
+            }
+        }
+    }
+    app.request_config_save();
     reconcile_plugins(&app, &plugin_ids).await;
     Ok(())
 }
@@ -851,7 +827,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_trust_records_the_acknowledged_content_hash() {
+    async fn set_trust_records_only_declared_permissions() {
         crate::test_support::with_tmp_config(|app| async move {
             with_config_test_plugin(&app, || async {
                 set_trust(
@@ -862,10 +838,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let expected = app.registry.content_hash_for("cfgtest");
-                assert!(expected.is_some());
                 let cfg = app.config.read().await;
-                assert_eq!(cfg.plugins.acknowledged.get("cfgtest"), expected.as_ref());
                 assert_eq!(
                     cfg.plugins.granted.get("cfgtest"),
                     Some(&vec![Permission::Network])
@@ -907,7 +880,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoking_clears_both_the_grant_and_the_content_pin() {
+    async fn revoking_clears_the_grant_without_touching_update_metadata() {
         crate::test_support::with_tmp_config(|app| async move {
             with_config_test_plugin(&app, || async {
                 set_trust(
@@ -918,21 +891,12 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                assert!(app
-                    .config
-                    .read()
-                    .await
-                    .plugins
-                    .acknowledged
-                    .contains_key("cfgtest"));
-
-                // Empty grant = revoke: both the grant and its pin are dropped.
+                // Empty grant = revoke.
                 set_trust("cfgtest".into(), vec![], false, app.clone())
                     .await
                     .unwrap();
                 let cfg = app.config.read().await;
                 assert!(!cfg.plugins.granted.contains_key("cfgtest"));
-                assert!(!cfg.plugins.acknowledged.contains_key("cfgtest"));
             })
             .await;
         })

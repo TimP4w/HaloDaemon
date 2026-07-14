@@ -38,11 +38,9 @@ fn set_registry(reg: &Registry, manifests: Vec<PluginManifest>) {
         s.manifests = manifests;
         s.effects = effects;
     });
-    reg.update(advance_activation);
 }
 
-/// Acknowledge every manifest's current content, as user consent would, so
-/// `consent_satisfied` treats them as consented.
+/// Record every manifest's current content as installed update metadata.
 fn acknowledge(reg: &Registry, manifests: &[PluginManifest]) {
     let map = manifests
         .iter()
@@ -91,7 +89,7 @@ fn device_id_falls_back_to_index_without_serial() {
 #[test]
 fn activation_status_reports_disabled_needs_consent_and_ready() {
     // The single activation gate distinguishes the three states, and only yields a
-    // `ReadyPlugin` once the plugin is enabled, granted, and content-acknowledged.
+    // `ReadyPlugin` once the plugin is enabled and its permissions are granted.
     let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let secrets = FakeSecretStore::default();
     let src = r#"
@@ -105,7 +103,7 @@ fn activation_status_reports_disabled_needs_consent_and_ready() {
 
     assert!(matches!(
         app.registry.activation_status(&secrets, &m),
-        ActivationState::Discovered
+        ActivationState::AwaitingConsent
     ));
 
     app.registry.set_disabled(&["needs_network".to_string()]);
@@ -756,10 +754,8 @@ fn invalid_plugin_lists_as_load_failed_and_malformed_is_skipped() {
 }
 
 #[test]
-fn permission_gate_is_inert_until_granted_then_satisfied_once_acknowledged() {
-    // Demonstrates the consent gate uniformly: declared-but-ungranted is
-    // unsatisfied; fully granted + acknowledged is satisfied. This applies
-    // to every plugin now — no source is exempt.
+fn permission_gate_is_inert_until_granted() {
+    // Declared-but-ungranted is inert; grants alone satisfy the gate.
     let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"return {
         devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
@@ -770,8 +766,6 @@ fn permission_gate_is_inert_until_granted_then_satisfied_once_acknowledged() {
     assert_eq!(m.permissions, vec![Permission::Os]);
     assert!(m.needs_worker());
 
-    // Acknowledged, so this isolates the permission gate (not the consent gate).
-    acknowledge(&app.registry, std::slice::from_ref(&m));
     app.registry.set_granted(&HashMap::new());
     assert!(
         !app.registry.consent_satisfied(&m),
@@ -783,7 +777,6 @@ fn permission_gate_is_inert_until_granted_then_satisfied_once_acknowledged() {
     app.registry.set_granted(&granted);
     assert!(app.registry.consent_satisfied(&m));
     app.registry.set_granted(&HashMap::new());
-    app.registry.set_acknowledged(&HashMap::new());
 }
 
 #[test]
@@ -800,9 +793,6 @@ fn list_reports_enabled_only_once_permissions_are_granted() {
     set_registry(&app.registry, vec![m.clone()]);
     app.registry.set_disabled(&[]);
     app.registry.set_granted(&HashMap::new());
-    // Acknowledged so only the permission grant — not the content gate —
-    // decides consent here.
-    acknowledge(&app.registry, std::slice::from_ref(&m));
 
     let secrets = FakeSecretStore::default();
     let enabled_of = |secrets: &FakeSecretStore| {
@@ -834,7 +824,6 @@ fn list_reports_enabled_only_once_permissions_are_granted() {
 
     app.registry.set_disabled(&[]);
     app.registry.set_granted(&HashMap::new());
-    app.registry.set_acknowledged(&HashMap::new());
     set_registry(&app.registry, Vec::new());
 }
 
@@ -876,11 +865,9 @@ fn logo_rejection_blocks_traversal_names_before_any_read() {
 }
 
 #[test]
-fn effect_activation_honours_the_consent_gate() {
-    // An effect plugin with a permission must clear the same consent gate as a
-    // device: granted *and* content-acknowledged. Editing the script (a stale
-    // pin) hides its effects until re-acknowledged — matching the device path,
-    // so effects can't spawn new code under an old grant.
+fn effect_activation_honours_the_permission_gate() {
+    // Effects follow the same permission gate as device plugins; content hashes
+    // are update metadata and never change activation.
     let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"return {
         type = "effect",
@@ -896,20 +883,20 @@ fn effect_activation_honours_the_consent_gate() {
         vec![Permission::Network],
     )]));
 
-    // Granted but not acknowledged → effect hidden.
+    // A stale installed hash must not hide an otherwise granted effect.
     app.registry.set_acknowledged(&HashMap::new());
-    assert!(app.registry.effect_entry("fx:plasma").is_none());
-    assert!(app.registry.pixmap_effect_descriptors().is_empty());
+    assert!(app.registry.effect_entry("fx:plasma").is_some());
+    assert_eq!(app.registry.pixmap_effect_descriptors().len(), 1);
 
-    // Acknowledged current content → visible.
+    // Recording the current hash changes update metadata only.
     acknowledge(&app.registry, &manifests);
     assert!(app.registry.effect_entry("fx:plasma").is_some());
     assert_eq!(app.registry.pixmap_effect_descriptors().len(), 1);
 
-    // Since-edited script (stale pin) → hidden again.
+    // A stale hash still does not alter activation.
     app.registry
         .set_acknowledged(&HashMap::from([("fx".to_string(), "deadbeef".to_string())]));
-    assert!(app.registry.effect_entry("fx:plasma").is_none());
+    assert!(app.registry.effect_entry("fx:plasma").is_some());
 
     set_registry(&app.registry, Vec::new());
 }

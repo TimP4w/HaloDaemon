@@ -2,10 +2,218 @@
 //! Thin `git2` wrapper for git-repo plugin sources: pure git in, `Result` out, no daemon/registry knowledge.
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use git2::build::RepoBuilder;
-#[cfg(test)]
 use git2::ResetType;
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+/// The first official plugin repository signing key. The signing private key
+/// is intentionally never present in this repository.
+const OFFICIAL_KEY_ID: &str = "halodaemon-official-2026";
+const OFFICIAL_PUBLIC_KEY_B64: &str = "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=";
+const REPOSITORY_SCHEMA: u32 = 1;
+const PLUGIN_API: u32 = 1;
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RepositoryManifest {
+    pub schema: u32,
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub compatibility: RepositoryCompatibility,
+    pub packages: Vec<RepositoryPackage>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RepositoryCompatibility {
+    pub halod: String,
+    pub plugin_api: u32,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RepositoryPackage {
+    pub id: String,
+    pub path: PathBuf,
+    pub version: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RepositorySignature {
+    schema: u32,
+    algorithm: String,
+    key_id: String,
+    signature: String,
+}
+
+/// Parse and structurally validate a repository manifest from a working tree.
+/// This deliberately does not require a signature, so it can also validate
+/// third-party repositories and the explicit development override.
+pub fn read_repository_manifest(repo_dir: &Path) -> Result<RepositoryManifest> {
+    let path = repo_dir.join("repository.yaml");
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let manifest: RepositoryManifest = serde_yaml::from_slice(&bytes)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    validate_repository_manifest(repo_dir, &manifest)?;
+    Ok(manifest)
+}
+
+/// Verify the official detached signature and every package digest in a
+/// checked-out repository. The signature covers exact `repository.yaml` bytes,
+/// matching the standalone `repo-sign` tool.
+pub fn verify_official_repository(repo_dir: &Path) -> Result<RepositoryManifest> {
+    let yaml_path = repo_dir.join("repository.yaml");
+    let yaml = std::fs::read(&yaml_path).with_context(|| format!("reading {}", yaml_path.display()))?;
+    let manifest: RepositoryManifest = serde_yaml::from_slice(&yaml)
+        .with_context(|| format!("parsing {}", yaml_path.display()))?;
+    validate_repository_manifest(repo_dir, &manifest)?;
+
+    let sig_path = repo_dir.join("repository.sig");
+    let sig_bytes = std::fs::read(&sig_path).with_context(|| format!("reading {}", sig_path.display()))?;
+    let signature: RepositorySignature = serde_yaml::from_slice(&sig_bytes)
+        .with_context(|| format!("parsing {}", sig_path.display()))?;
+    if signature.schema != REPOSITORY_SCHEMA {
+        bail!("unsupported repository signature schema {}", signature.schema);
+    }
+    if signature.algorithm != "ed25519" {
+        bail!("unsupported repository signature algorithm '{}'", signature.algorithm);
+    }
+    if signature.key_id != OFFICIAL_KEY_ID {
+        bail!("unknown official repository signing key '{}'", signature.key_id);
+    }
+    let public: [u8; 32] = B64
+        .decode(OFFICIAL_PUBLIC_KEY_B64)
+        .context("decoding embedded official plugin signing key")?
+        .try_into()
+        .map_err(|_| anyhow!("embedded official plugin signing key is not 32 bytes"))?;
+    let key = VerifyingKey::from_bytes(&public).context("constructing official plugin verifying key")?;
+    let raw_signature: [u8; 64] = B64
+        .decode(signature.signature.trim())
+        .context("decoding repository signature")?
+        .try_into()
+        .map_err(|_| anyhow!("repository signature is not 64 bytes"))?;
+    key.verify(&yaml, &Signature::from_bytes(&raw_signature))
+        .map_err(|_| anyhow!("repository signature does not match repository.yaml"))?;
+
+    for package in &manifest.packages {
+        let actual = package_hash(&repo_dir.join(&package.path))?;
+        if !actual.eq_ignore_ascii_case(&package.sha256) {
+            bail!(
+                "package '{}' hash mismatch: expected {}, got {}",
+                package.id,
+                package.sha256,
+                actual
+            );
+        }
+    }
+    Ok(manifest)
+}
+
+fn validate_repository_manifest(repo_dir: &Path, manifest: &RepositoryManifest) -> Result<()> {
+    if manifest.schema != REPOSITORY_SCHEMA {
+        bail!("unsupported repository manifest schema {}", manifest.schema);
+    }
+    if manifest.id.trim().is_empty() || manifest.name.trim().is_empty() || manifest.version.trim().is_empty() {
+        bail!("repository manifest id, name, and version must be non-empty");
+    }
+    if manifest.compatibility.plugin_api != PLUGIN_API {
+        bail!(
+            "repository requires plugin API {}, but Halo supports {}",
+            manifest.compatibility.plugin_api,
+            PLUGIN_API
+        );
+    }
+    let requirement = semver::VersionReq::parse(&manifest.compatibility.halod)
+        .context("parsing repository compatibility.halod")?;
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .context("parsing Halo package version")?;
+    if !requirement.matches(&current) {
+        bail!(
+            "repository requires Halo '{}', current Halo is {}",
+            manifest.compatibility.halod,
+            current
+        );
+    }
+
+    let mut ids = HashSet::new();
+    let mut paths = HashSet::new();
+    for package in &manifest.packages {
+        if package.id.trim().is_empty() || package.version.trim().is_empty() {
+            bail!("repository package id and version must be non-empty");
+        }
+        if !ids.insert(&package.id) {
+            bail!("repository package id '{}' is declared more than once", package.id);
+        }
+        if package.path.is_absolute()
+            || package.path.as_os_str().is_empty()
+            || package.path.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)))
+        {
+            bail!("repository package '{}' has an invalid path '{}'", package.id, package.path.display());
+        }
+        if !paths.insert(&package.path) {
+            bail!("repository package path '{}' is declared more than once", package.path.display());
+        }
+        if package.sha256.len() != 64 || !package.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("repository package '{}' has an invalid sha256 digest", package.id);
+        }
+        let dir = repo_dir.join(&package.path);
+        if !dir.is_dir() {
+            bail!("repository package '{}' directory is missing: {}", package.id, dir.display());
+        }
+        let meta: MetaEntryVersion = serde_yaml::from_slice(
+            &std::fs::read(dir.join("plugin.yaml")).with_context(|| format!("reading package '{}' manifest", package.id))?,
+        )
+        .with_context(|| format!("parsing package '{}' manifest", package.id))?;
+        if meta.id.as_deref() != Some(package.id.as_str()) {
+            bail!("repository package '{}' does not match its plugin.yaml id", package.id);
+        }
+        if meta.version.as_deref().unwrap_or_default() != package.version {
+            bail!("repository package '{}' does not match its plugin.yaml version", package.id);
+        }
+    }
+    Ok(())
+}
+
+/// Deterministic SHA-256 over a package's sorted relative regular-file paths,
+/// file lengths, and bytes. Symlinks are rejected before hashing.
+pub fn package_hash(package_dir: &Path) -> Result<String> {
+    reject_symlinks(package_dir)?;
+    let mut files = Vec::new();
+    collect_package_files(package_dir, package_dir, &mut files)?;
+    files.sort();
+    let mut hasher = Sha256::new();
+    for relative in files {
+        let bytes = std::fs::read(package_dir.join(&relative))
+            .with_context(|| format!("reading package file {}", relative.display()))?;
+        let name = relative.to_string_lossy().replace('\\', "/");
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_package_files(root: &Path, current: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(current).with_context(|| format!("reading {}", current.display()))? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            bail!("repo contains a symlink: {}", entry.path().display());
+        }
+        if file_type.is_dir() {
+            collect_package_files(root, &entry.path(), out)?;
+        } else if file_type.is_file() {
+            out.push(entry.path().strip_prefix(root).expect("walk remains under root").to_path_buf());
+        } else {
+            bail!("package contains a non-regular file: {}", entry.path().display());
+        }
+    }
+    Ok(())
+}
 
 /// URL schemes a plugin repo may use. `file://` is a local clone (dev/test and
 /// the official-repo bootstrap); remote sources must be `https`/`ssh`.
@@ -110,7 +318,6 @@ pub fn fetch_remote_sha(repo_dir: &Path, branch: Option<&str>) -> Result<String>
 }
 
 /// Hard-reset the working tree at `repo_dir` to `sha` (must already be fetched or cloned).
-#[cfg(test)]
 pub fn checkout_sha(repo_dir: &Path, sha: &str) -> Result<()> {
     let repo = git2::Repository::open(repo_dir)
         .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
@@ -475,6 +682,44 @@ mod tests {
         url::Url::from_file_path(path)
             .expect("temporary repository path must be absolute")
             .into()
+    }
+
+    fn write_repository_manifest(root: &Path, digest: &str) {
+        fs::write(
+            root.join("repository.yaml"),
+            format!(
+                "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {digest}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn repository_manifest_accepts_an_indexed_package() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("plugins").join("demo");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("plugin.yaml"), "id: demo\nversion: 1.0.0\n").unwrap();
+        fs::write(package.join("main.lua"), "return {}\n").unwrap();
+        let digest = package_hash(&package).unwrap();
+        write_repository_manifest(root.path(), &digest);
+
+        let manifest = read_repository_manifest(root.path()).unwrap();
+        assert_eq!(manifest.packages.len(), 1);
+        assert_eq!(manifest.packages[0].id, "demo");
+    }
+
+    #[test]
+    fn package_hash_changes_when_any_package_file_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        fs::create_dir_all(package.join("lib")).unwrap();
+        fs::write(package.join("plugin.yaml"), "id: demo\n").unwrap();
+        fs::write(package.join("lib").join("protocol.lua"), "return 1\n").unwrap();
+        let before = package_hash(&package).unwrap();
+        fs::write(package.join("lib").join("protocol.lua"), "return 2\n").unwrap();
+        let after = package_hash(&package).unwrap();
+        assert_ne!(before, after);
     }
 
     #[test]

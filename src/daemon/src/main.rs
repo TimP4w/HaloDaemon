@@ -26,15 +26,16 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::drivers::transports::hid;
-use crate::registry::initialize_app_state;
+use crate::registry::initialize_app_state_with_dev_repo;
 use crate::state::EngineRunConfig;
 
 /// How this process was invoked, decided purely from argv.
 ///
 /// The daemon is always a plain user process now — Windows service registration
 /// and the elevated register-bus broker live in `halod-broker.exe`, and the GUI
-/// launches this daemon directly. The only knob is `--headless`, which opts out
-/// of idle-shutdown (see [`crate::lifecycle`]) for a frontend-less deployment.
+/// launches this daemon directly. `--headless` opts out of idle-shutdown (see
+/// [`crate::lifecycle`]); `--dev-plugin-repo <DIR>` replaces the official
+/// plugin checkout with a directly loaded working tree for this process.
 ///
 /// `plugin-test <package-dir>` (behind the `plugin-test` cargo feature) is a
 /// separate mode entirely: it drives one plugin package's `test.lua` against
@@ -45,6 +46,7 @@ use crate::state::EngineRunConfig;
 enum ProcessRole {
     Server {
         headless: bool,
+        dev_plugin_repo: Option<std::path::PathBuf>,
     },
     #[cfg(feature = "plugin-test")]
     PluginTest {
@@ -65,8 +67,25 @@ fn process_role(args: &[String]) -> ProcessRole {
         return ProcessRole::PluginTest { package };
     }
     let has = |flag: &str| args.iter().any(|a| a == flag);
+    let mut dev_plugin_repo = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--dev-plugin-repo" {
+            let Some(path) = args.get(i + 1) else {
+                eprintln!("usage: halod [--headless] [--dev-plugin-repo <DIR>]");
+                std::process::exit(2);
+            };
+            if dev_plugin_repo.replace(std::path::PathBuf::from(path)).is_some() {
+                eprintln!("--dev-plugin-repo may only be provided once");
+                std::process::exit(2);
+            }
+            i += 1;
+        }
+        i += 1;
+    }
     ProcessRole::Server {
         headless: has(halod_shared::lifecycle::HEADLESS_ARG),
+        dev_plugin_repo,
     }
 }
 
@@ -85,7 +104,14 @@ fn main() -> Result<()> {
         std::process::exit(exit_code);
     }
 
-    let headless = matches!(role, ProcessRole::Server { headless: true });
+    let (headless, dev_plugin_repo) = match role {
+        ProcessRole::Server {
+            headless,
+            dev_plugin_repo,
+        } => (headless, dev_plugin_repo),
+        #[cfg(feature = "plugin-test")]
+        ProcessRole::PluginTest { .. } => unreachable!("handled above"),
+    };
 
     // Before the runtime starts (still single-threaded, no env-reader race).
     #[cfg(target_os = "linux")]
@@ -114,13 +140,17 @@ fn main() -> Result<()> {
         .worker_threads(4)
         .enable_all()
         .build()?;
-    runtime.block_on(run_daemon(headless, cfg))
+    runtime.block_on(run_daemon(headless, dev_plugin_repo, cfg))
 }
 
 /// The actual device server — always a plain, unprivileged user process.
 /// On Windows, register-bus access is delegated to the elevated `halod-broker`
 /// on demand (see `drivers::transports::register_ops`); nothing here elevates.
-async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
+async fn run_daemon(
+    headless: bool,
+    dev_plugin_repo: Option<std::path::PathBuf>,
+    cfg: crate::config::Config,
+) -> Result<()> {
     let initial_level: log::LevelFilter =
         cfg.gui.log_level.parse().unwrap_or(log::LevelFilter::Info);
 
@@ -161,7 +191,7 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
     services::audio::sink::cleanup_orphaned_sinks().await;
 
     log::info!("Discovering devices...");
-    initialize_app_state(app.clone()).await;
+    initialize_app_state_with_dev_repo(app.clone(), dev_plugin_repo).await;
     log::info!("Device discovery complete");
 
     // Started only once startup is done — the grace clock must not elapse
@@ -387,7 +417,7 @@ mod tests {
     fn no_args_runs_a_plain_server() {
         assert_eq!(
             process_role(&argv(&[])),
-            ProcessRole::Server { headless: false }
+            ProcessRole::Server { headless: false, dev_plugin_repo: None }
         );
     }
 
@@ -395,7 +425,7 @@ mod tests {
     fn headless_flag_marks_a_headless_server() {
         assert_eq!(
             process_role(&argv(&["--headless"])),
-            ProcessRole::Server { headless: true }
+            ProcessRole::Server { headless: true, dev_plugin_repo: None }
         );
     }
 
@@ -411,7 +441,7 @@ mod tests {
         ] {
             assert_eq!(
                 process_role(&argv(&[flag])),
-                ProcessRole::Server { headless: false },
+                ProcessRole::Server { headless: false, dev_plugin_repo: None },
                 "{flag} should be ignored",
             );
         }
@@ -421,7 +451,18 @@ mod tests {
     fn unknown_arguments_are_ignored() {
         assert_eq!(
             process_role(&argv(&["--frobnicate", "foo"])),
-            ProcessRole::Server { headless: false }
+            ProcessRole::Server { headless: false, dev_plugin_repo: None }
+        );
+    }
+
+    #[test]
+    fn development_plugin_repository_is_parsed() {
+        assert_eq!(
+            process_role(&argv(&["--dev-plugin-repo", "C:/plugins"])),
+            ProcessRole::Server {
+                headless: false,
+                dev_plugin_repo: Some("C:/plugins".into()),
+            }
         );
     }
 }

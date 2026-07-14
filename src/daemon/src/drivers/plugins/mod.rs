@@ -105,24 +105,13 @@ struct ReadyPlugin {
 }
 
 /// Whether a plugin may activate, from [`Registry::activation_status`].
-/// `Discovered` is persisted when a manifest enters [`PluginState::manifests`];
-/// policy application then advances it to exactly one terminal activation phase.
 enum ActivationState {
-    Discovered,
     /// The user disabled the plugin.
     Disabled,
-    /// Permissions ungranted, or the script changed since acknowledged.
+    /// Declared permissions have not been granted.
     AwaitingConsent,
     /// Cleared to spawn, carrying its resolved grants + config.
     Ready(ReadyPlugin),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActivationPhase {
-    Discovered,
-    AwaitingConsent,
-    Disabled,
-    Ready,
 }
 
 /// Immutable snapshot of every piece of registry state a reader needs. Readers
@@ -135,7 +124,6 @@ enum ActivationPhase {
 struct PluginState {
     manifests: Vec<PluginManifest>,
     effects: Vec<PluginEffectEntry>,
-    activation: HashMap<String, ActivationPhase>,
     /// Plugin ids the user disabled. `match_handle` skips these, so a disabled
     /// plugin no longer shadows its native driver.
     disabled: HashSet<String>,
@@ -147,9 +135,8 @@ struct PluginState {
     /// plugin — built-in or not — must be granted its permissions through
     /// consent; nothing is auto-granted.
     granted: HashMap<String, Vec<Permission>>,
-    /// Content hash (hex SHA-256) the user consented to per plugin. A disk
-    /// plugin is consent-satisfied only when its script still hashes to this.
-    acknowledged: HashMap<String, String>,
+    /// Installed package hashes are update metadata, not an execution gate.
+    installed_hashes: HashMap<String, String>,
     /// Non-secure config values the user set per plugin. Secure values never
     /// live here — see the secret store.
     config_values: HashMap<String, HashMap<String, String>>,
@@ -218,18 +205,6 @@ impl Registry {
         let mut guard = write_recover(&self.plugins);
         let mut next = (**guard).clone();
         f(&mut next);
-        let loaded: HashSet<_> = next
-            .manifests
-            .iter()
-            .map(|manifest| manifest.plugin_id.clone())
-            .collect();
-        next.activation
-            .retain(|plugin_id, _| loaded.contains(plugin_id));
-        for plugin_id in loaded {
-            next.activation
-                .entry(plugin_id)
-                .or_insert(ActivationPhase::Discovered);
-        }
         *guard = Arc::new(next);
     }
 }
@@ -247,20 +222,6 @@ fn consent_satisfied_in(state: &PluginState, manifest: &PluginManifest) -> bool 
         .permissions
         .iter()
         .all(|permission| granted.contains(permission))
-        && state.acknowledged.get(&manifest.plugin_id) == Some(&manifest.content_hash())
-}
-
-fn advance_activation(state: &mut PluginState) {
-    for manifest in &state.manifests {
-        let phase = if state.disabled.contains(&manifest.plugin_id) {
-            ActivationPhase::Disabled
-        } else if !consent_satisfied_in(state, manifest) {
-            ActivationPhase::AwaitingConsent
-        } else {
-            ActivationPhase::Ready
-        };
-        state.activation.insert(manifest.plugin_id.clone(), phase);
-    }
 }
 
 fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
@@ -278,13 +239,14 @@ fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
 }
 
 impl Registry {
-    /// Whether the plugin owning an effect has satisfied consent (permissions
-    /// granted *and* the acknowledged content-hash still matches). The
-    /// device/integration paths gate on [`consent_satisfied`]; effects must too,
-    /// or an edited-but-previously-granted plugin would spawn its *new* effect code
-    /// under the *old* grant without re-acknowledgement.
+    /// Whether the plugin owning an effect has granted all of its declared
+    /// permissions. Installed content hashes intentionally do not gate code.
     fn effect_consent_ok(state: &PluginState, plugin_id: &str) -> bool {
-        state.activation.get(plugin_id) == Some(&ActivationPhase::Ready)
+        state
+            .manifests
+            .iter()
+            .find(|m| m.plugin_id == plugin_id)
+            .is_some_and(|m| !state.disabled.contains(plugin_id) && consent_satisfied_in(state, m))
     }
 
     /// Every enabled, consent-satisfied plugin's declared descriptors of one effect
@@ -378,9 +340,8 @@ impl Registry {
             s.disabled = policy.disabled.iter().cloned().collect();
             s.integrations_disabled = policy.integrations_disabled.iter().cloned().collect();
             s.granted = policy.granted.clone();
-            s.acknowledged = policy.acknowledged.clone();
+            s.installed_hashes = policy.installed_hashes.clone();
             s.config_values = policy.config.clone();
-            advance_activation(s);
         });
     }
 
@@ -389,7 +350,6 @@ impl Registry {
     pub fn set_disabled(&self, ids: &[String]) {
         self.update(|s| {
             s.disabled = ids.iter().cloned().collect();
-            advance_activation(s);
         });
     }
 
@@ -410,7 +370,6 @@ impl Registry {
     pub fn set_granted(&self, granted: &HashMap<String, Vec<Permission>>) {
         self.update(|s| {
             s.granted = granted.clone();
-            advance_activation(s);
         });
     }
 
@@ -445,16 +404,13 @@ impl Registry {
     }
 
     #[cfg(test)]
-    pub fn set_acknowledged(&self, acknowledged: &HashMap<String, String>) {
-        self.update(|s| {
-            s.acknowledged = acknowledged.clone();
-            advance_activation(s);
-        });
+    pub fn set_acknowledged(&self, hashes: &HashMap<String, String>) {
+        self.update(|s| s.installed_hashes = hashes.clone());
     }
 
-    /// The content hash the user acknowledged for `plugin_id`, if any.
-    fn acknowledged_hash_for(&self, plugin_id: &str) -> Option<String> {
-        self.snapshot().acknowledged.get(plugin_id).cloned()
+    /// The installed package hash for `plugin_id`, if any.
+    fn installed_hash_for(&self, plugin_id: &str) -> Option<String> {
+        self.snapshot().installed_hashes.get(plugin_id).cloned()
     }
 
     /// The current on-disk content hash for `plugin_id` from the loaded registry,
@@ -773,27 +729,18 @@ impl Registry {
         Ok(())
     }
 
-    /// True when the plugin's consent gate is satisfied (permissions granted and
-    /// the acknowledged content-hash still matches). Being consent-satisfied is
+    /// True when the plugin's declared permissions have all been granted. Being
+    /// permission-satisfied is
     /// necessary but not sufficient to activate — see [`Registry::activation_status`],
     /// which also accounts for the disabled set.
     fn consent_satisfied(&self, manifest: &PluginManifest) -> bool {
         consent_satisfied_in(&self.snapshot(), manifest)
     }
 
-    /// Why `manifest` isn't consent-satisfied: a fresh/revoked grant, or
-    /// content that changed since a prior acknowledgement. Shared by
-    /// [`Registry::activation_status`] and [`Registry::ungranted_in`] so the
-    /// distinction is computed in exactly one place.
+    /// Why `manifest` is not permission-satisfied.
     fn ungranted_reason(&self, manifest: &PluginManifest) -> UngrantedReason {
-        if self
-            .acknowledged_hash_for(&manifest.plugin_id)
-            .is_some_and(|h| h != manifest.content_hash())
-        {
-            UngrantedReason::ContentChanged
-        } else {
-            UngrantedReason::NeedsPermission
-        }
+        let _ = manifest;
+        UngrantedReason::NeedsPermission
     }
 
     /// The single gate for "may this plugin activate, and with what?": disabled,
@@ -808,21 +755,14 @@ impl Registry {
         secrets: &dyn crate::secrets::SecretStore,
         manifest: &PluginManifest,
     ) -> ActivationState {
-        match self
-            .snapshot()
-            .activation
-            .get(&manifest.plugin_id)
-            .copied()
-            .unwrap_or(ActivationPhase::Discovered)
-        {
-            ActivationPhase::Discovered => ActivationState::Discovered,
-            ActivationPhase::Disabled => ActivationState::Disabled,
-            ActivationPhase::AwaitingConsent => ActivationState::AwaitingConsent,
-            ActivationPhase::Ready => {
-                let granted = self.granted_for(&manifest.plugin_id);
-                let config = self.resolved_config_for(secrets, &manifest.plugin_id, &granted);
-                ActivationState::Ready(ReadyPlugin { granted, config })
-            }
+        if self.is_disabled(&manifest.plugin_id) {
+            ActivationState::Disabled
+        } else if !self.consent_satisfied(manifest) {
+            ActivationState::AwaitingConsent
+        } else {
+            let granted = self.granted_for(&manifest.plugin_id);
+            let config = self.resolved_config_for(secrets, &manifest.plugin_id, &granted);
+            ActivationState::Ready(ReadyPlugin { granted, config })
         }
     }
 }
@@ -840,7 +780,8 @@ impl Registry {
             .filter(|m| {
                 m.plugin_type == PluginKind::Integration
                     && !state.integrations_disabled.contains(&m.plugin_id)
-                    && state.activation.get(&m.plugin_id) == Some(&ActivationPhase::Ready)
+                    && !state.disabled.contains(&m.plugin_id)
+                    && consent_satisfied_in(&state, m)
             })
             .cloned()
             .collect()
@@ -1050,7 +991,7 @@ impl Registry {
             integration_enabled: !self.is_integration_disabled(&m.plugin_id),
             consented,
             content_changed: self
-                .acknowledged_hash_for(&m.plugin_id)
+                .installed_hash_for(&m.plugin_id)
                 .is_some_and(|h| h != m.content_hash()),
             issue,
             integration_issue,
@@ -1234,6 +1175,12 @@ fn scan_plugin_subdirs(root: &Path, scan: &mut LoadScan) {
 /// immediate sibling subdirectories of `repo_dir`, and/or nested under a
 /// `plugins/` subdirectory — a repo may use any combination of the three.
 fn scan_repo(repo_dir: &Path, scan: &mut LoadScan) {
+    if let Ok(repository) = repo::read_repository_manifest(repo_dir) {
+        for package in repository.packages {
+            try_load_plugin_dir(&repo_dir.join(package.path), scan);
+        }
+        return;
+    }
     try_load_plugin_dir(repo_dir, scan);
     scan_plugin_subdirs(repo_dir, scan);
     scan_plugin_subdirs(&repo_dir.join("plugins"), scan);
@@ -1274,16 +1221,34 @@ impl Registry {
     /// whichever source provides it first and no later source can shadow it (see
     /// [`try_load_plugin_dir`]'s collision handling).
     pub fn load_all_with_repos(&self, dir: &Path, repo_dirs: &[std::path::PathBuf]) {
+        self.load_all_with_priority_repo(dir, None, repo_dirs);
+    }
+
+    /// Load a directly supplied development repository ahead of the normal
+    /// local and configured sources. It is intentionally not required to live
+    /// under Halo's managed repository directory.
+    pub fn load_all_with_priority_repo(
+        &self,
+        dir: &Path,
+        priority_repo: Option<&Path>,
+        repo_dirs: &[std::path::PathBuf],
+    ) {
         let mut scan = LoadScan::default();
         let is_official = |d: &std::path::PathBuf| {
             d.file_name().and_then(|n| n.to_str())
                 == Some(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
         };
-        for repo_dir in repo_dirs.iter().filter(|d| is_official(d)) {
+        if let Some(repo_dir) = priority_repo {
             scan_repo(repo_dir, &mut scan);
+        } else {
+            for repo_dir in repo_dirs.iter().filter(|d| is_official(d)) {
+                scan_repo(repo_dir, &mut scan);
+            }
         }
         scan_plugin_subdirs(dir, &mut scan);
-        for repo_dir in repo_dirs.iter().filter(|d| !is_official(d)) {
+        for repo_dir in repo_dirs.iter().filter(|d| {
+            !is_official(d) && priority_repo.is_none_or(|priority| d.as_path() != priority)
+        }) {
             scan_repo(repo_dir, &mut scan);
         }
         let effects: Vec<PluginEffectEntry> =
@@ -1332,11 +1297,6 @@ impl Registry {
         self.update(|s| {
             s.manifests = scan.manifests;
             s.effects = effects;
-            s.activation = s
-                .manifests
-                .iter()
-                .map(|manifest| (manifest.plugin_id.clone(), ActivationPhase::Discovered))
-                .collect();
         });
     }
 

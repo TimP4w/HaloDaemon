@@ -673,7 +673,23 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
             .await
             .context("fetch task panicked")??
     };
-    let compatible_ids = {
+    let compatible_ids = if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
+        let dir = dir.clone();
+        let sha = remote_sha.clone();
+        let previous_sha = record.locked_sha.clone();
+        tokio::task::spawn_blocking(move || {
+            repo::checkout_sha(&dir, &sha)?;
+            if let Err(error) = repo::verify_official_repository(&dir) {
+                if !previous_sha.is_empty() {
+                    let _ = repo::checkout_sha(&dir, &previous_sha);
+                }
+                return Err(error).context("verifying signed official repository update");
+            }
+            Ok(Vec::new())
+        })
+        .await
+        .context("official repository verification task panicked")??
+    } else {
         let dir = dir.clone();
         let sha = remote_sha.clone();
         tokio::task::spawn_blocking(move || checkout_latest_compatible_plugins(&dir, &sha))
@@ -966,7 +982,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_repo_advances_locked_sha_and_invalidates_stale_consent() {
+    async fn update_repo_advances_locked_sha_without_revoking_permissions() {
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -976,16 +992,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Consent to the plugin as it stands right after add_repo.
             let hash_before = app.registry.content_hash_for(&slug).unwrap();
-            {
-                let mut cfg = app.config.write().await;
-                cfg.plugins
-                    .acknowledged
-                    .insert(slug.clone(), hash_before.clone());
-            }
-            app.registry
-                .set_acknowledged(&app.config.read().await.plugins.acknowledged);
             assert!(app.registry.content_hash_for(&slug).is_some());
 
             // Advance the upstream repo with a content change.
@@ -1006,11 +1013,6 @@ mod tests {
             assert_ne!(
                 hash_before, hash_after,
                 "content_hash must change once the script content changed"
-            );
-            assert_ne!(
-                cfg.plugins.acknowledged.get(&slug),
-                Some(&hash_after),
-                "the pre-update acknowledgment must no longer match the new content hash"
             );
         })
         .await;

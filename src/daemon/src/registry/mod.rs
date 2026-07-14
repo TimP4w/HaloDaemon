@@ -39,12 +39,48 @@ pub async fn seed_known_devices(app: Arc<AppState>) {
 }
 
 pub async fn initialize_app_state(app: Arc<AppState>) {
-    ensure_official_repo(&app).await;
+    initialize_app_state_with_dev_repo(app, None).await;
+}
+
+/// Initialize devices using an optional development checkout in place of the
+/// managed official repository. The override is process-local and never
+/// persists in config.
+pub async fn initialize_app_state_with_dev_repo(
+    app: Arc<AppState>,
+    dev_plugin_repo: Option<std::path::PathBuf>,
+) {
+    let dev_plugin_repo = dev_plugin_repo.map(|dir| {
+        std::fs::canonicalize(&dir).unwrap_or_else(|e| {
+            panic!("invalid --dev-plugin-repo '{}': {e}", dir.display())
+        })
+    });
+    if let Some(dir) = &dev_plugin_repo {
+        crate::drivers::plugins::repo::read_repository_manifest(dir).unwrap_or_else(|e| {
+            panic!("invalid --dev-plugin-repo '{}': {e:#}", dir.display())
+        });
+        log::warn!("Using development plugin repository at {}", dir.display());
+    } else {
+        ensure_official_repo(&app).await;
+    }
     {
         let cfg = app.config.read().await;
-        app.registry.load_all_with_repos(
+        let mut repo_dirs = crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos);
+        if dev_plugin_repo.is_none() {
+            let official_dir = crate::config::plugin_repos_dir()
+                .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
+            if official_dir.is_dir() {
+                if let Err(e) = crate::drivers::plugins::repo::verify_official_repository(&official_dir) {
+                    log::warn!(
+                        "official plugin repository is not signed or failed verification: {e:#}"
+                    );
+                    repo_dirs.retain(|dir| dir != &official_dir);
+                }
+            }
+        }
+        app.registry.load_all_with_priority_repo(
             &crate::config::plugins_dir(),
-            &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
+            dev_plugin_repo.as_deref(),
+            &repo_dirs,
         );
         app.registry.replace_policy(&cfg.plugins);
     }
@@ -52,9 +88,13 @@ pub async fn initialize_app_state(app: Arc<AppState>) {
     // BEFORE discovery so a tampered plugin never activates. No network, so it
     // runs regardless of GitHub consent. Suppresses the ungranted notice for
     // those it handles, so it must precede `notify_ungranted_plugins`.
-    usecases::repos::quarantine_changed_plugins(app.clone()).await;
+    if dev_plugin_repo.is_none() {
+        usecases::repos::quarantine_changed_plugins(app.clone()).await;
+    }
     notify_ungranted_plugins(&app).await;
-    start_update_check(app.clone()).await;
+    if dev_plugin_repo.is_none() {
+        start_update_check(app.clone()).await;
+    }
     discovery::discover_devices(app.clone()).await;
     seed_known_devices(app.clone()).await;
     usecases::chain::restore_saved_chains(app.clone()).await;
@@ -113,20 +153,9 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     let dest2 = dest.clone();
     match tokio::task::spawn_blocking(move || repo::clone(&url, &dest2, None)).await {
         Ok(Ok(sha)) => {
-            let compatible_checkout = {
-                let dest = dest.clone();
-                let tip = sha.clone();
-                tokio::task::spawn_blocking(move || {
-                    usecases::repos::checkout_latest_compatible_plugins(&dest, &tip)
-                })
-                .await
-            };
-            match compatible_checkout {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    log::warn!("official plugin compatibility checkout failed: {e:#}")
-                }
-                Err(e) => log::warn!("official plugin compatibility task panicked: {e:#}"),
+            if let Err(e) = repo::verify_official_repository(&dest) {
+                log::warn!("official plugin signature verification failed: {e:#}");
+                return;
             }
             let mut cfg = app.config.write().await;
             if let Some(r) = cfg

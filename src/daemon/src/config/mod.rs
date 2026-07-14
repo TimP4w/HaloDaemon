@@ -348,11 +348,16 @@ pub struct PluginPolicy {
     /// all). Everything present-and-not-listed is active.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub integrations_disabled: Vec<String>,
-    /// Content hash (hex SHA-256) of the exact script the user consented to,
-    /// per plugin id. A plugin whose current script hashes differently is
-    /// treated as not-yet-consented and stays inert until re-acknowledged.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub acknowledged: HashMap<String, String>,
+    /// Content hash (hex SHA-256) of the installed plugin package, keyed by
+    /// plugin id. This identifies updates and modified checkouts; it is never
+    /// used as a consent gate. `acknowledged` is accepted while loading older
+    /// configurations and is rewritten under the new name on the next save.
+    #[serde(
+        default,
+        alias = "acknowledged",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub installed_hashes: HashMap<String, String>,
     /// Registered git-repo plugin sources. See `PluginRepoRecord`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<PluginRepoRecord>,
@@ -543,7 +548,7 @@ mod tests {
             HashMap::from([("host".to_string(), "127.0.0.1".to_string())]),
         );
         cfg.plugins
-            .acknowledged
+            .installed_hashes
             .insert("wled_udp".into(), "abc123".into());
 
         save(&cfg).unwrap();
@@ -555,7 +560,7 @@ mod tests {
             Some(&vec![Permission::Network])
         );
         assert_eq!(
-            reloaded.plugins.acknowledged.get("wled_udp"),
+            reloaded.plugins.installed_hashes.get("wled_udp"),
             Some(&"abc123".to_string())
         );
         assert_eq!(
