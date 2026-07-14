@@ -508,6 +508,7 @@ mod tests {
             content_changed,
             issue: None,
             integration_issue: None,
+            health: Default::default(),
         }
     }
 

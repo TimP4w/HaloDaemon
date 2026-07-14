@@ -466,6 +466,7 @@ mod tests {
             content_changed: false,
             issue: None,
             integration_issue: None,
+            health: Default::default(),
         }
     }
 

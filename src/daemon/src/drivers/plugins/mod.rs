@@ -44,8 +44,8 @@ use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use halod_shared::types::{
-    Animation, EffectParamValue, Permission, PluginInfo, PluginIssue, PluginIssueKind, PluginKind,
-    SkippedPlugin, WriteRateLimit,
+    Animation, EffectParamValue, HealthState, HealthStatus, Permission, PluginInfo, PluginIssue,
+    PluginIssueKind, PluginKind, SkippedPlugin, WriteRateLimit,
 };
 
 use crate::drivers::Device;
@@ -162,17 +162,10 @@ pub struct Registry {
     /// Plugin ids already surfaced via a "needs permission" notice (see
     /// [`Registry::take_newly_ungranted_plugins`]).
     notified: RwLock<HashSet<String>>,
-    /// Device ids with an outstanding runtime error, so a plugin that fails every
-    /// engine tick is announced once per failure episode, not on every frame.
-    failing_devices: RwLock<HashSet<String>>,
-    /// Plugin ids with an outstanding connect failure, so a persistently
-    /// unreachable integration (the reconnect watcher retries on a backoff)
-    /// alerts once per failure episode, not every tick. Keyed by plugin_id.
-    connect_failed: RwLock<HashSet<String>>,
-    /// Each plugin's most recent outstanding issue, surfaced to the GUI via
-    /// [`PluginInfo::issue`] so it persists on the plugin page and the sidebar
-    /// badge past the transient toast. Keyed by plugin_id.
-    issues: RwLock<HashMap<String, PluginIssue>>,
+    /// Health episodes keyed by a plugin id or by `plugin_id::device_id`.
+    /// Keeping device failures separate makes recovery and one-shot
+    /// notifications precise while `health_for` derives the plugin aggregate.
+    health: RwLock<HashMap<String, HealthState>>,
     invalid_manifests: RwLock<Vec<(PluginManifest, PluginIssue)>>,
     skipped: RwLock<Vec<SkippedPlugin>>,
     /// Rejected-load warnings retained for validation tests.
@@ -558,31 +551,68 @@ fn validate_config_value(field: &manifest::ConfigFieldDef, value: &str) -> anyho
 }
 
 impl Registry {
-    /// Record a plugin's most recent outstanding issue for the GUI's plugin page
-    /// / sidebar badge (last-writer-wins; one issue per plugin).
-    fn set_issue(&self, plugin_id: &str, kind: PluginIssueKind, detail: String) {
-        write_recover(&self.issues).insert(
-            plugin_id.to_owned(),
-            PluginIssue {
-                kind,
-                detail,
-                timestamp_ms: crate::util::time::now_ms(),
+    fn device_health_scope(plugin_id: &str, device_id: &str) -> String {
+        format!("{plugin_id}::{device_id}")
+    }
+
+    /// Update a scoped failure episode. Equivalent repeat failures update the
+    /// visible detail but preserve `notification_sent`; callers notify only on
+    /// the returned `true` transition.
+    fn set_health(&self, scope: &str, kind: PluginIssueKind, detail: String) -> bool {
+        let status = match kind {
+            PluginIssueKind::ConnectFailed | PluginIssueKind::RuntimeError => HealthStatus::Failed,
+            PluginIssueKind::LoadFailed | PluginIssueKind::LoadWarning => HealthStatus::Degraded,
+        };
+        let mut health = write_recover(&self.health);
+        let notification_sent = health
+            .get(scope)
+            .is_some_and(|state| state.notification_sent);
+        health.insert(
+            scope.to_owned(),
+            HealthState {
+                status,
+                issue: Some(PluginIssue {
+                    kind,
+                    detail,
+                    timestamp_ms: crate::util::time::now_ms(),
+                }),
+                notification_sent: true,
             },
         );
+        !notification_sent
     }
 
-    /// Clear a plugin's outstanding issue only when it is of `kind`, so clearing
-    /// (say) a recovered runtime error can't wipe an unrelated load warning.
-    fn clear_issue_of(&self, plugin_id: &str, kind: PluginIssueKind) {
-        let mut issues = write_recover(&self.issues);
-        if issues.get(plugin_id).is_some_and(|i| i.kind == kind) {
-            issues.remove(plugin_id);
+    fn clear_health(&self, scope: &str) {
+        write_recover(&self.health).remove(scope);
+    }
+
+    /// Aggregate direct plugin and per-device health records. Failed wins over
+    /// degraded; the newest issue at that severity is retained for display.
+    fn health_for(&self, plugin_id: &str) -> HealthState {
+        let prefix = format!("{plugin_id}::");
+        let mut aggregate = HealthState::default();
+        let severity = |status| match status {
+            HealthStatus::Healthy => 0,
+            HealthStatus::Degraded => 1,
+            HealthStatus::Failed => 2,
+        };
+        for (scope, state) in read_recover(&self.health).iter() {
+            if scope != plugin_id && !scope.starts_with(&prefix) {
+                continue;
+            }
+            if severity(state.status) > severity(aggregate.status)
+                || (state.status == aggregate.status
+                    && state.issue.as_ref().is_some_and(|issue| {
+                        aggregate
+                            .issue
+                            .as_ref()
+                            .is_none_or(|old| issue.timestamp_ms > old.timestamp_ms)
+                    }))
+            {
+                aggregate = state.clone();
+            }
         }
-    }
-
-    /// The plugin's current outstanding issue, if any (for [`Registry::list`]).
-    fn issue_for(&self, plugin_id: &str) -> Option<PluginIssue> {
-        read_recover(&self.issues).get(plugin_id).cloned()
+        aggregate
     }
 
     /// Surface a plugin device's runtime callback failure to the user as a
@@ -601,21 +631,21 @@ impl Registry {
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
             return;
         }
-        self.set_issue(plugin_id, PluginIssueKind::RuntimeError, detail.clone());
+        let scope = Self::device_health_scope(plugin_id, device_id);
+        let notify = self.set_health(&scope, PluginIssueKind::RuntimeError, detail.clone());
         // Close the check/write race: if disable landed between the first
         // policy read and `set_issue`, remove the stale write before anything
         // can observe or broadcast it. If disable starts after this check, its
         // own cleanup runs later and wins instead.
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
-            self.clear_issue_of(plugin_id, PluginIssueKind::RuntimeError);
+            self.clear_health(&scope);
             return;
         }
-        if !write_recover(&self.failing_devices).insert(device_id.to_owned()) {
+        if !notify {
             return; // already reported this episode
         }
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
-            write_recover(&self.failing_devices).remove(device_id);
-            self.clear_issue_of(plugin_id, PluginIssueKind::RuntimeError);
+            self.clear_health(&scope);
             return;
         }
         crate::platform::notify::send(
@@ -631,9 +661,7 @@ impl Registry {
     /// Clear a device's outstanding-error flag after a successful call. On the
     /// failing→ok transition the plugin's persisted runtime issue is cleared too.
     pub(super) fn clear_runtime_error(&self, plugin_id: &str, device_id: &str) {
-        if write_recover(&self.failing_devices).remove(device_id) {
-            self.clear_issue_of(plugin_id, PluginIssueKind::RuntimeError);
-        }
+        self.clear_health(&Self::device_health_scope(plugin_id, device_id));
     }
 
     /// Surface a config-instantiated integration plugin's connect failure as a
@@ -652,17 +680,16 @@ impl Registry {
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
             return;
         }
-        self.set_issue(plugin_id, PluginIssueKind::ConnectFailed, detail.clone());
+        let notify = self.set_health(plugin_id, PluginIssueKind::ConnectFailed, detail.clone());
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
-            self.clear_issue_of(plugin_id, PluginIssueKind::ConnectFailed);
+            self.clear_health(plugin_id);
             return;
         }
-        if !write_recover(&self.connect_failed).insert(plugin_id.to_owned()) {
+        if !notify {
             return; // already reported this episode
         }
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
-            write_recover(&self.connect_failed).remove(plugin_id);
-            self.clear_issue_of(plugin_id, PluginIssueKind::ConnectFailed);
+            self.clear_health(plugin_id);
             return;
         }
         crate::platform::notify::send(
@@ -677,8 +704,7 @@ impl Registry {
 
     /// Clear a plugin's outstanding connect-error flag after a successful connect.
     pub(super) fn clear_connect_error(&self, plugin_id: &str) {
-        write_recover(&self.connect_failed).remove(plugin_id);
-        self.clear_issue_of(plugin_id, PluginIssueKind::ConnectFailed);
+        self.clear_health(plugin_id);
     }
 
     /// Clear all operational error state when a plugin or integration is
@@ -686,35 +712,33 @@ impl Registry {
     /// report a genuinely fresh failure, while clearing the persisted issue
     /// immediately removes its card/sidebar warning.
     pub(crate) fn clear_operational_errors(&self, plugin_id: &str, device_ids: &[String]) {
-        write_recover(&self.connect_failed).remove(plugin_id);
-        {
-            let mut failing = write_recover(&self.failing_devices);
-            for device_id in device_ids {
-                failing.remove(device_id);
-            }
-        }
-        let mut issues = write_recover(&self.issues);
-        if issues.get(plugin_id).is_some_and(|issue| {
-            matches!(
-                issue.kind,
-                PluginIssueKind::ConnectFailed | PluginIssueKind::RuntimeError
-            )
-        }) {
-            issues.remove(plugin_id);
-        }
+        let prefix = format!("{plugin_id}::");
+        let devices: HashSet<_> = device_ids.iter().collect();
+        write_recover(&self.health).retain(|scope, _| {
+            scope != plugin_id
+                && !(scope.starts_with(&prefix)
+                    && devices
+                        .iter()
+                        .any(|device| scope == &Self::device_health_scope(plugin_id, device)))
+        });
     }
 
     /// Record a non-fatal load warning (bad logo, id collision) as a persisted
     /// plugin issue, surfaced on the plugin page / sidebar without a toast.
     fn set_load_warning(&self, plugin_id: &str, reason: String) {
-        self.set_issue(plugin_id, PluginIssueKind::LoadWarning, reason);
+        self.set_health(plugin_id, PluginIssueKind::LoadWarning, reason);
     }
 
     /// Drop any stale load-warning issues before a reload re-derives them, so a
     /// warning the user has since fixed doesn't linger. Runtime/connect issues
     /// (a different `kind`) are untouched.
     fn clear_load_warnings(&self) {
-        write_recover(&self.issues).retain(|_, i| i.kind != PluginIssueKind::LoadWarning);
+        write_recover(&self.health).retain(|_, state| {
+            state
+                .issue
+                .as_ref()
+                .is_none_or(|issue| issue.kind != PluginIssueKind::LoadWarning)
+        });
     }
 
     /// A plugin's full resolved config for its Lua VM: `config_for` plus, only
@@ -947,6 +971,11 @@ impl Registry {
             info.integration_enabled = false;
             info.issue = Some(issue.clone());
             info.integration_issue = None;
+            info.health = HealthState {
+                status: HealthStatus::Degraded,
+                issue: Some(issue.clone()),
+                notification_sent: false,
+            };
             infos.push(info);
         }
         infos
@@ -978,7 +1007,8 @@ impl Registry {
             })
             .collect();
         let consented = self.consent_satisfied(m);
-        let stored_issue = self.issue_for(&m.plugin_id);
+        let health = self.health_for(&m.plugin_id);
+        let stored_issue = health.issue.clone();
         let integration_issue = stored_issue.clone().filter(|issue| {
             issue.kind == PluginIssueKind::ConnectFailed
                 || (m.plugin_type == PluginKind::Integration
@@ -1039,6 +1069,7 @@ impl Registry {
                 .is_some_and(|h| h != m.content_hash()),
             issue,
             integration_issue,
+            health,
         }
     }
 

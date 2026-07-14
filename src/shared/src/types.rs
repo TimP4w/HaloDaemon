@@ -914,6 +914,30 @@ pub struct PluginIssue {
     pub timestamp_ms: u64,
 }
 
+/// Operational severity for a plugin or one of its devices. Health records are
+/// scoped by the daemon; identical failures update an existing episode without
+/// producing another notification.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    #[default]
+    Healthy,
+    Degraded,
+    Failed,
+}
+
+/// A scoped health episode. A successful operation resets it to `Healthy` and
+/// clears `notification_sent`, allowing the next failure episode to notify once.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthState {
+    #[serde(default)]
+    pub status: HealthStatus,
+    #[serde(default)]
+    pub issue: Option<PluginIssue>,
+    #[serde(default)]
+    pub notification_sent: bool,
+}
+
 /// One plugin as shown in the GUI's Plugins screen.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInfo {
@@ -1020,6 +1044,10 @@ pub struct PluginInfo {
     /// Integrations page rather than as a plugin package problem.
     #[serde(default)]
     pub integration_issue: Option<PluginIssue>,
+    /// Aggregate operational health for this plugin. Device-specific records
+    /// remain scoped in the daemon registry and may be added to wire devices.
+    #[serde(default)]
+    pub health: HealthState,
 }
 
 fn default_true() -> bool {
