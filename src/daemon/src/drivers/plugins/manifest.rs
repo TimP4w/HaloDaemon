@@ -1477,7 +1477,8 @@ fn validate_device_identifiers(manifest: &PluginManifest) -> Result<()> {
     Ok(())
 }
 
-const V2_CAPABILITIES: &[&str] = &[
+/// Capability identifiers accepted by the canonical package contract.
+const SUPPORTED_CAPABILITIES: &[&str] = &[
     "rgb",
     "fan",
     "sensors",
@@ -1506,7 +1507,7 @@ fn validate_v2_catalog(manifest: &PluginManifest) -> Result<()> {
     }
     let mut capabilities = HashSet::new();
     for capability in &manifest.capabilities {
-        if !V2_CAPABILITIES.contains(&capability.as_str()) {
+        if !SUPPORTED_CAPABILITIES.contains(&capability.as_str()) {
             bail!("unknown advertised capability '{capability}'");
         }
         if !capabilities.insert(capability) {

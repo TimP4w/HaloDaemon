@@ -20,8 +20,8 @@ use tokio::sync::oneshot;
 
 use super::lua_worker::LuaWorker;
 use halod_shared::types::{
-    Battery, Boolean, ButtonMapping, ConnectionStatus, Equalizer, OnboardProfiles, PairingStatus,
-    Permission, RgbColor, RgbDescriptor, RgbState, RgbZone, Sensor, ZoneTopology,
+    Battery, Boolean, ButtonMapping, ConnectionStatus, Equalizer, NativeEffect, OnboardProfiles,
+    PairingStatus, Permission, RgbColor, RgbDescriptor, RgbState, RgbZone, Sensor, ZoneTopology,
 };
 
 use super::bytebuf::ByteBuf;
@@ -246,6 +246,9 @@ pub struct InitOutcome {
     pub ok: bool,
     pub model: Option<String>,
     pub zones: Option<Vec<InitZone>>,
+    /// Device-native RGB effect metadata. This is runtime information because
+    /// supported effects may differ by firmware and controller revision.
+    pub native_effects: Option<Vec<NativeEffect>>,
     pub lcd: Option<InitLcd>,
     /// Chainable channels discovered at runtime (e.g. ARGB headers whose capacity
     /// is read from the device's config table), for a plugin that declares a
@@ -269,6 +272,8 @@ struct InitTable {
     model: Option<String>,
     #[serde(default)]
     zones: Option<Vec<InitZone>>,
+    #[serde(default)]
+    native_effects: Option<Vec<NativeEffect>>,
     #[serde(default)]
     lcd: Option<InitLcd>,
     #[serde(default)]
@@ -504,6 +509,7 @@ impl PluginHandle {
                         ok: t.ok,
                         model: t.model,
                         zones: t.zones,
+                        native_effects: t.native_effects,
                         lcd: t.lcd,
                         chain: t.chain,
                         accessories: t.accessories,

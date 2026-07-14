@@ -756,10 +756,9 @@ impl LuaDevice {
 
 /// Build an `RgbDescriptor` from `initialize`-reported zones, computing LED
 /// positions from the declared topology + count (as static accessory zones do).
-/// Native effects carry over from the static manifest descriptor.
 fn build_dynamic_descriptor(
     zones: Vec<InitZone>,
-    native_effects: &[NativeEffect],
+    native_effects: Vec<NativeEffect>,
 ) -> RgbDescriptor {
     let zones = zones
         .into_iter()
@@ -781,7 +780,7 @@ fn build_dynamic_descriptor(
         .collect();
     RgbDescriptor {
         zones,
-        native_effects: native_effects.to_vec(),
+        native_effects,
     }
 }
 
@@ -854,7 +853,7 @@ impl Device for LuaDevice {
         if let Some(zones) = outcome.zones {
             let _ = self.dynamic_rgb_descriptor.set(build_dynamic_descriptor(
                 zones,
-                &self.rgb_descriptor.native_effects,
+                outcome.native_effects.unwrap_or_default(),
             ));
         }
         if let Some(runtime) = &self.runtime {
