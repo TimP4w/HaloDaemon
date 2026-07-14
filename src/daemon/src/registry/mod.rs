@@ -104,10 +104,9 @@ pub async fn initialize_app_state_with_dev_repo(
         app.registry.replace_policy(&cfg.plugins);
         app.request_config_save();
     }
-    // Security: disable any plugin whose files changed on disk since checkout,
-    // BEFORE discovery so a tampered plugin never activates. No network, so it
-    // runs regardless of GitHub consent. Suppresses the ungranted notice for
-    // those it handles, so it must precede `notify_ungranted_plugins`.
+    // Surface packages whose active revision differs from its installed digest.
+    // This is dirty-update metadata, not a consent or activation gate, and it
+    // runs without network access.
     if dev_plugin_repo.is_none() {
         usecases::repos::quarantine_changed_plugins(app.clone()).await;
     }
