@@ -52,6 +52,14 @@ struct RepoCheck {
     started: f64,
 }
 
+/// A malformed repo package selected for a scoped remote restore.
+#[derive(Clone)]
+struct PendingRepoRepair {
+    slug: String,
+    subpath: String,
+    name: String,
+}
+
 /// What the detail column shows: a plugin, a repo, or nothing (empty state).
 #[derive(Default, Clone, PartialEq, Eq, Debug)]
 enum Selection {
@@ -74,6 +82,8 @@ pub struct PluginsUi {
     pending_delete: Option<String>,
     /// Repo slug pending a remove confirmation, when the dialog is open.
     pending_repo_delete: Option<String>,
+    /// Malformed repo package pending a scoped recovery confirmation.
+    pending_repo_repair: Option<PendingRepoRepair>,
     /// The repo whose "check for updates" is currently in flight, if any.
     checking_repo: Option<RepoCheck>,
     /// Id pending a permission consent decision, when the dialog is open.
@@ -138,6 +148,7 @@ impl PluginsUi {
         self.add_repo_modal(ui.ctx(), cmd, repo_branches);
         self.delete_modal(ui.ctx(), state, cmd);
         self.repo_delete_modal(ui.ctx(), cmd);
+        self.repo_repair_modal(ui.ctx(), cmd);
         self.consent_modal(ui.ctx(), state, cmd);
         if let Some((title, detail)) = &self.issue_modal {
             if widgets::issue_modal(ui.ctx(), "plugin_issue_page", title, detail) {
@@ -429,6 +440,25 @@ impl PluginsUi {
                     });
                 },
                 |ui| {
+                    if let Some((slug, subpath)) =
+                        skipped_repo_location(&s.path, &state.plugins.repos)
+                    {
+                        if widgets::button(
+                            ui,
+                            &t!("plugins.repos_repair"),
+                            ButtonKind::Danger,
+                            Vec2::new(70.0, 26.0),
+                        )
+                        .clicked()
+                        {
+                            self.pending_repo_repair = Some(PendingRepoRepair {
+                                slug,
+                                subpath,
+                                name: name.to_owned(),
+                            });
+                        }
+                        ui.add_space(6.0);
+                    }
                     if widgets::button(
                         ui,
                         &t!("plugins.issue_details"),
@@ -844,6 +874,68 @@ impl PluginsUi {
         }
     }
 
+    /// Confirm restoring only the malformed package directory, leaving every
+    /// sibling path in the repository untouched.
+    fn repo_repair_modal(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
+        let Some(pending) = self.pending_repo_repair.clone() else {
+            return;
+        };
+
+        let mut confirm = false;
+        let mut cancel = false;
+        let dismissed = widgets::dialog(
+            ctx,
+            "repair_plugin_repo",
+            &t!("plugins.repos_repair_title"),
+            440.0,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(t!(
+                        "plugins.repos_repair_body",
+                        name = pending.name.clone()
+                    ))
+                    .font(theme::body(12.5))
+                    .color(theme::TEXT_DIM),
+                );
+            },
+            |ui| {
+                if widgets::button(
+                    ui,
+                    &t!("plugins.repos_repair"),
+                    ButtonKind::Danger,
+                    Vec2::new(130.0, 34.0),
+                )
+                .clicked()
+                {
+                    confirm = true;
+                }
+                if widgets::button(
+                    ui,
+                    &t!("plugins.cancel"),
+                    ButtonKind::Ghost,
+                    Vec2::new(90.0, 34.0),
+                )
+                .clicked()
+                {
+                    cancel = true;
+                }
+            },
+        );
+        if let Some(pending) = widgets::resolve_delete_confirm(
+            &mut self.pending_repo_repair,
+            confirm,
+            cancel || dismissed,
+        ) {
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::RepairPluginRepoDir {
+                    slug: pending.slug,
+                    subpath: pending.subpath,
+                },
+            );
+        }
+    }
+
     /// Grant-permission prompt: shown when the user turns on a plugin that
     /// declares permissions (or right after importing one). Lists each
     /// permission with what it lets the plugin do; "Grant & Enable" accepts and
@@ -941,6 +1033,32 @@ impl PluginsUi {
             self.pending_consent = None;
         }
     }
+}
+
+/// Map a skipped absolute path back to one of the package layouts accepted by
+/// the daemon's repo scanner: `<repo>/<package>` or `<repo>/plugins/<package>`.
+fn skipped_repo_location(path: &str, repos: &[PluginRepoInfo]) -> Option<(String, String)> {
+    let parts: Vec<String> = std::path::Path::new(path)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    for repo in repos {
+        for i in 0..parts.len().saturating_sub(1) {
+            if !parts[i].eq_ignore_ascii_case("plugin_repos")
+                || !parts[i + 1].eq_ignore_ascii_case(&repo.slug)
+            {
+                continue;
+            }
+            let relative = &parts[i + 2..];
+            let valid = relative.len() == 1
+                || (relative.len() == 2 && relative[0].eq_ignore_ascii_case("plugins"));
+            if valid {
+                let subpath: std::path::PathBuf = relative.iter().collect();
+                return Some((repo.slug.clone(), subpath.display().to_string()));
+            }
+        }
+    }
+    None
 }
 
 // ── Plugin repository rows ──────────────────────────────────────────────────

@@ -340,6 +340,9 @@ async fn dispatch(
         DaemonCommand::UpdatePluginRepo { slug } => {
             registry::usecases::repos::update_repo(slug, app).await
         }
+        DaemonCommand::RepairPluginRepoDir { slug, subpath } => {
+            registry::usecases::repos::repair_plugin_dir(slug, subpath, app).await
+        }
         DaemonCommand::CheckPluginUpdates { slug } => {
             registry::usecases::repos::check_plugin_updates(slug, app, client).await
         }

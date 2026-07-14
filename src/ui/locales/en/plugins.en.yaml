@@ -21,6 +21,9 @@ plugins:
   repos_add_sub: Connect HaloDaemon to a remote Git repository to browse, install, and update its plugins.
   repos_empty: No plugin repositories registered.
   repos_update: Update
+  repos_repair: Force pull
+  repos_repair_title: Force pull plugin?
+  repos_repair_body: This fetches the repository and restores only the %{name} directory from the remote version. Local changes inside that plugin directory will be lost; sibling plugins are untouched.
   repos_remove: Remove repository
   repos_remove_title: Remove repository?
   repos_remove_body: This removes %{name} and uninstalls every plugin provided by the repository.

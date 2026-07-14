@@ -113,6 +113,21 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     let dest2 = dest.clone();
     match tokio::task::spawn_blocking(move || repo::clone(&url, &dest2, None)).await {
         Ok(Ok(sha)) => {
+            let compatible_checkout = {
+                let dest = dest.clone();
+                let tip = sha.clone();
+                tokio::task::spawn_blocking(move || {
+                    usecases::repos::checkout_latest_compatible_plugins(&dest, &tip)
+                })
+                .await
+            };
+            match compatible_checkout {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    log::warn!("official plugin compatibility checkout failed: {e:#}")
+                }
+                Err(e) => log::warn!("official plugin compatibility task panicked: {e:#}"),
+            }
             let mut cfg = app.config.write().await;
             if let Some(r) = cfg
                 .plugins

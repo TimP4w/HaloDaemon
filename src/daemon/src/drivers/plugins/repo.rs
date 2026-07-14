@@ -2,7 +2,9 @@
 //! Thin `git2` wrapper for git-repo plugin sources: pure git in, `Result` out, no daemon/registry knowledge.
 
 use anyhow::{anyhow, bail, Context, Result};
-use git2::{build::RepoBuilder, ResetType};
+use git2::build::RepoBuilder;
+#[cfg(test)]
+use git2::ResetType;
 use std::path::Path;
 
 /// URL schemes a plugin repo may use. `file://` is a local clone (dev/test and
@@ -108,6 +110,7 @@ pub fn fetch_remote_sha(repo_dir: &Path, branch: Option<&str>) -> Result<String>
 }
 
 /// Hard-reset the working tree at `repo_dir` to `sha` (must already be fetched or cloned).
+#[cfg(test)]
 pub fn checkout_sha(repo_dir: &Path, sha: &str) -> Result<()> {
     let repo = git2::Repository::open(repo_dir)
         .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
@@ -160,11 +163,104 @@ fn read_blob_at(repo: &git2::Repository, tree: &git2::Tree, path: &Path) -> Resu
 #[derive(serde::Deserialize, Default)]
 struct MetaEntryVersion {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     entry: Option<String>,
     #[serde(default)]
     version: Option<String>,
     #[serde(default)]
     compatibility: Option<super::manifest::PluginCompatibility>,
+}
+
+/// Plugin packages present at `sha`, using the same three layouts as the
+/// runtime scanner: the repo root, immediate child directories, and children
+/// of `plugins/`. Reading the commit tree (rather than the working tree) also
+/// finds packages whose checked-out tip is incompatible with this daemon.
+pub fn plugin_packages_at_commit(
+    repo_dir: &Path,
+    sha: &str,
+) -> Result<Vec<(String, std::path::PathBuf)>> {
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
+    let tree = repo
+        .find_commit(oid)
+        .with_context(|| format!("commit '{sha}' not found (fetch it first)"))?
+        .tree()
+        .context("reading commit tree")?;
+
+    let mut candidates = vec![std::path::PathBuf::new()];
+    for entry in tree
+        .iter()
+        .filter(|entry| entry.kind() == Some(git2::ObjectType::Tree))
+    {
+        if let Some(name) = entry.name() {
+            candidates.push(std::path::PathBuf::from(name));
+        }
+    }
+    if let Ok(plugins_entry) = tree.get_path(Path::new("plugins")) {
+        if let Ok(plugins_tree) = plugins_entry
+            .to_object(&repo)
+            .and_then(|o| o.peel_to_tree())
+        {
+            for entry in plugins_tree
+                .iter()
+                .filter(|entry| entry.kind() == Some(git2::ObjectType::Tree))
+            {
+                if let Some(name) = entry.name() {
+                    candidates.push(Path::new("plugins").join(name));
+                }
+            }
+        }
+    }
+
+    let mut packages = Vec::new();
+    for subpath in candidates {
+        let yaml_path = subpath.join("plugin.yaml");
+        let Ok(yaml) = read_blob_at(&repo, &tree, &yaml_path) else {
+            continue;
+        };
+        let Ok(meta) = serde_yaml::from_slice::<MetaEntryVersion>(&yaml) else {
+            continue;
+        };
+        if let Some(id) = meta.id.filter(|id| !id.is_empty()) {
+            packages.push((id, subpath));
+        }
+    }
+    packages.sort_by(|a, b| a.1.cmp(&b.1));
+    packages.dedup_by(|a, b| a.1 == b.1);
+    Ok(packages)
+}
+
+/// Walk history newest-first from `tip_sha` and return the newest revision at
+/// which `subpath` declares compatibility with this daemon and plugin API.
+/// Missing/deleted packages and malformed manifests are skipped. This lets an
+/// older Halo release use the last compatible plugin instead of blindly using
+/// an incompatible branch tip.
+pub fn latest_compatible_plugin_sha(
+    repo_dir: &Path,
+    tip_sha: &str,
+    subpath: &Path,
+) -> Result<Option<String>> {
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let tip = git2::Oid::from_str(tip_sha).with_context(|| format!("parsing sha '{tip_sha}'"))?;
+    let mut walk = repo.revwalk().context("creating revision walk")?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
+    walk.push(tip)
+        .with_context(|| format!("walking history from '{tip_sha}'"))?;
+
+    for oid in walk {
+        let oid = oid.context("walking plugin history")?;
+        let sha = oid.to_string();
+        let Ok((_, _, Some(compatibility))) = remote_plugin_content(repo_dir, &sha, subpath) else {
+            continue;
+        };
+        if compatibility.ensure_supported().is_ok() {
+            return Ok(Some(sha));
+        }
+    }
+    Ok(None)
 }
 
 /// A plugin package's content hash + declared version at a specific commit,
@@ -583,6 +679,60 @@ mod tests {
         assert_eq!(
             beta_before, beta_after,
             "untouched sibling's hash is stable"
+        );
+    }
+
+    #[test]
+    fn latest_compatible_plugin_sha_falls_back_from_an_incompatible_tip() {
+        let src = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(src.path()).unwrap();
+        fs::write(
+            src.path().join("plugin.yaml"),
+            "id: demo\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+        )
+        .unwrap();
+        fs::write(src.path().join("main.lua"), "return {}").unwrap();
+        let compatible_sha = commit_all(&repo, "compatible");
+
+        fs::write(
+            src.path().join("plugin.yaml"),
+            "id: demo\nversion: 2.0.0\ncompatibility:\n  halod: '>=0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+        )
+        .unwrap();
+        let tip_sha = commit_all(&repo, "requires newer Halo");
+
+        assert_eq!(
+            latest_compatible_plugin_sha(
+                src.path(),
+                &tip_sha,
+                Path::new("plugin.yaml").parent().unwrap()
+            )
+            .unwrap(),
+            Some(compatible_sha)
+        );
+    }
+
+    #[test]
+    fn plugin_packages_are_discovered_from_a_commit_tree() {
+        let src = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(src.path()).unwrap();
+        for (subpath, id) in [("plugins/alpha", "alpha"), ("beta", "beta")] {
+            let dir = src.path().join(subpath);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("plugin.yaml"), format!("id: {id}\n")).unwrap();
+            fs::write(dir.join("main.lua"), "return {}").unwrap();
+        }
+        let sha = commit_all(&repo, "packages");
+
+        assert_eq!(
+            plugin_packages_at_commit(src.path(), &sha).unwrap(),
+            vec![
+                ("beta".to_owned(), std::path::PathBuf::from("beta")),
+                (
+                    "alpha".to_owned(),
+                    std::path::PathBuf::from("plugins/alpha")
+                ),
+            ]
         );
     }
 

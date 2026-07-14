@@ -173,6 +173,12 @@ pub enum DaemonCommand {
     UpdatePluginRepo {
         slug: String,
     },
+    /// Fetch a repository and restore one skipped plugin directory from the
+    /// remote tip. Unlike `UpdatePluginRepo`, sibling paths are untouched.
+    RepairPluginRepoDir {
+        slug: String,
+        subpath: String,
+    },
     /// Check repo-sourced plugins for a per-plugin content update, replying
     /// with `plugin_updates`. `slug` scopes the check to one repo; `None`
     /// checks every repo. Finer-grained than `CheckPluginRepoUpdates`.
@@ -759,6 +765,18 @@ mod tests {
     fn update_plugin_repo_wire_format() {
         let v = roundtrip(&DaemonCommand::UpdatePluginRepo { slug: "foo".into() });
         assert_eq!(v, json!({"type": "update_plugin_repo", "slug": "foo"}));
+    }
+
+    #[test]
+    fn repair_plugin_repo_dir_wire_format() {
+        let v = roundtrip(&DaemonCommand::RepairPluginRepoDir {
+            slug: "official".into(),
+            subpath: "nzxt_kraken".into(),
+        });
+        assert_eq!(
+            v,
+            json!({"type": "repair_plugin_repo_dir", "slug": "official", "subpath": "nzxt_kraken"})
+        );
     }
 
     #[test]
