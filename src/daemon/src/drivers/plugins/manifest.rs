@@ -329,10 +329,6 @@ pub struct OnboardProfilesManifest {}
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct KeyRemapManifest {
     pub buttons: Vec<ButtonDescriptor>,
-    /// True when remapping only takes effect in the device's host mode (as for
-    /// Logitech HID++); the GUI shows a "requires host mode" notice.
-    #[serde(default)]
-    pub requires_host_mode: bool,
     /// Out-of-the-box mappings, seeded on first run and restored by the reset
     /// callbacks.
     #[serde(default)]
@@ -2576,7 +2572,6 @@ mod tests {
         assert!(m.onboard_profiles.is_some());
         let key_remap = m.key_remap.unwrap();
         assert_eq!(key_remap.buttons[0].cid, 1);
-        assert!(key_remap.requires_host_mode);
     }
 
     #[test]

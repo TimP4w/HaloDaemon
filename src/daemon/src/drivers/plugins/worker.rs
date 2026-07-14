@@ -20,8 +20,9 @@ use tokio::sync::oneshot;
 
 use super::lua_worker::LuaWorker;
 use halod_shared::types::{
-    Battery, Boolean, ButtonMapping, ConnectionStatus, Equalizer, NativeEffect, OnboardProfiles,
-    PairingStatus, Permission, RgbColor, RgbDescriptor, RgbState, RgbZone, Sensor, ZoneTopology,
+    Battery, Boolean, ButtonDescriptor, ButtonMapping, ConnectionStatus, Equalizer, NativeEffect,
+    OnboardProfiles, PairingStatus, Permission, RgbColor, RgbDescriptor, RgbState, RgbZone, Sensor,
+    ZoneTopology,
 };
 
 use super::bytebuf::ByteBuf;
@@ -262,6 +263,18 @@ pub struct InitFan {
     pub channel: u8,
 }
 
+/// Runtime key-remap descriptor. Button CIDs and host-mode policy are reported
+/// by the device after its active profile has been discovered.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct InitKeyRemap {
+    #[serde(default)]
+    pub buttons: Vec<ButtonDescriptor>,
+    #[serde(default)]
+    pub requires_host_mode: bool,
+    #[serde(default)]
+    pub default_mappings: Vec<ButtonMapping>,
+}
+
 /// What `initialize` returns: a bare bool, or a table with dynamic device info
 /// discovered from the hardware (firmware/model, RGB zones, LCD panel, and the
 /// live range/choice values read back from the device to seed the host caches).
@@ -282,6 +295,7 @@ pub struct InitOutcome {
     pub controls: Option<InitControls>,
     pub dpi: Option<InitDpi>,
     pub fan: Option<InitFan>,
+    pub key_remap: Option<InitKeyRemap>,
     /// Current range-control values keyed by control key, seeding the host's
     /// range cache so the UI reflects the device instead of manifest defaults.
     pub ranges: Option<HashMap<String, i32>>,
@@ -312,6 +326,8 @@ struct InitTable {
     dpi: Option<InitDpi>,
     #[serde(default)]
     fan: Option<InitFan>,
+    #[serde(default)]
+    key_remap: Option<InitKeyRemap>,
     #[serde(default)]
     ranges: Option<HashMap<String, i32>>,
     #[serde(default)]
@@ -555,6 +571,7 @@ impl PluginHandle {
                         controls: t.controls,
                         dpi: t.dpi,
                         fan: t.fan,
+                        key_remap: t.key_remap,
                         ranges: t.ranges,
                         choices: t.choices,
                     })

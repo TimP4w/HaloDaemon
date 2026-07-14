@@ -5,7 +5,7 @@
 //! manifest — Halo owns the capability taxonomy; the script only fills it in.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -49,6 +49,13 @@ struct DpiConfig {
     min: u16,
     max: u16,
     mode: DpiMode,
+}
+
+#[derive(Clone, Default)]
+struct KeyRemapDescriptor {
+    buttons: Vec<ButtonDescriptor>,
+    requires_host_mode: bool,
+    default_mappings: Vec<ButtonMapping>,
 }
 use crate::drivers::vendors::generic::devices::common::{
     linear_rgb_zone, ring_led_positions, transformed_zone_frame,
@@ -349,9 +356,7 @@ pub struct LuaDevice {
     /// (and therefore save/restore) between explicit `get_equalizer` calls.
     eq_cache: Mutex<Option<Equalizer>>,
 
-    key_remap_buttons: Vec<ButtonDescriptor>,
-    key_remap_requires_host_mode: bool,
-    key_remap_default_mappings: Vec<ButtonMapping>,
+    key_remap: RwLock<KeyRemapDescriptor>,
     /// Host-cached mappings that differ from `ButtonAction::Native`.
     key_remap_mappings: Mutex<HashMap<u16, ButtonMapping>>,
 
@@ -651,21 +656,7 @@ impl LuaDevice {
             controls: Controls::default(),
             dynamic_controls: OnceLock::new(),
             eq_cache: Mutex::new(None),
-            key_remap_buttons: manifest
-                .key_remap
-                .as_ref()
-                .map(|k| k.buttons.clone())
-                .unwrap_or_default(),
-            key_remap_requires_host_mode: manifest
-                .key_remap
-                .as_ref()
-                .map(|k| k.requires_host_mode)
-                .unwrap_or(false),
-            key_remap_default_mappings: manifest
-                .key_remap
-                .as_ref()
-                .map(|k| k.default_mappings.clone())
-                .unwrap_or_default(),
+            key_remap: RwLock::new(KeyRemapDescriptor::default()),
             key_remap_mappings: Mutex::new(HashMap::new()),
             rgb_descriptor: RgbDescriptor {
                 zones: Vec::new(),
@@ -909,6 +900,13 @@ impl Device for LuaDevice {
         }
         if let Some(fan) = outcome.fan {
             self.fan_channel.store(fan.channel, Ordering::Relaxed);
+        }
+        if let Some(key_remap) = outcome.key_remap {
+            *self.key_remap.write().unwrap() = KeyRemapDescriptor {
+                buttons: key_remap.buttons,
+                requires_host_mode: key_remap.requires_host_mode,
+                default_mappings: key_remap.default_mappings,
+            };
         }
         // Seed the host range/choice caches with the values the device reported,
         // so the UI shows live hardware state rather than manifest defaults.
@@ -1732,6 +1730,7 @@ impl OnboardProfilesCapability for LuaDevice {
 #[async_trait]
 impl KeyRemapCapability for LuaDevice {
     async fn get_key_remap_status(&self) -> KeyRemapStatus {
+        let descriptor = self.key_remap.read().unwrap().clone();
         let mappings: Vec<ButtonMapping> = self
             .key_remap_mappings
             .lock()
@@ -1744,15 +1743,15 @@ impl KeyRemapCapability for LuaDevice {
             None => false,
         };
         KeyRemapStatus {
-            buttons: self.key_remap_buttons.clone(),
+            buttons: descriptor.buttons,
             mappings,
-            requires_host_mode: self.key_remap_requires_host_mode,
+            requires_host_mode: descriptor.requires_host_mode,
             host_mode_active,
         }
     }
 
     async fn set_button_mapping(&self, mapping: ButtonMapping) -> Result<()> {
-        crate::input::validate::validate_cid(&self.key_remap_buttons, &mapping)?;
+        crate::input::validate::validate_cid(&self.key_remap.read().unwrap().buttons, &mapping)?;
         self.worker()?
             .key_remap_set_mapping(mapping.clone())
             .await?;
@@ -1778,7 +1777,7 @@ impl KeyRemapCapability for LuaDevice {
     }
 
     async fn default_mappings(&self) -> Vec<ButtonMapping> {
-        self.key_remap_default_mappings.clone()
+        self.key_remap.read().unwrap().default_mappings.clone()
     }
 }
 
