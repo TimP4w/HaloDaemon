@@ -1,9 +1,9 @@
 plugins:
   title: Plugins
   subtitle: Device plugins add hardware support without rebuilding the daemon.
-  counts: "%{count} scripts · %{active} active"
+  counts: "%{count} packages · %{active} active"
   empty_title: No plugins installed
-  empty_hint: Add a Lua plugin script to extend HaloDaemon with new devices.
+  empty_hint: Add a plugin package to extend HaloDaemon with new devices.
   add: Add plugin
   # Plugin repositories
   repos_title: Repositories
@@ -22,8 +22,8 @@ plugins:
   repos_empty: No plugin repositories registered.
   repos_update: Update
   repos_repair: Force pull
-  repos_repair_title: Force pull plugin?
-  repos_repair_body: This fetches the repository and restores only the %{name} directory from the remote version. Local changes inside that plugin directory will be lost; sibling plugins are untouched.
+  repos_repair_title: Repair repository?
+  repos_repair_body: This restores the repository's active revision from its verified source. Any local changes within that repository will be lost.
   repos_remove: Remove repository
   repos_remove_title: Remove repository?
   repos_remove_body: This removes %{name} and uninstalls every plugin provided by the repository.

@@ -35,7 +35,8 @@ pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateSt
                         // from the plugin snapshot while quarantine is active.
                         || (u.on_disk_changed && !p.enabled))
             });
-            p.health.issue.is_some()
+            (p.plugin_type != halod_shared::types::PluginKind::Integration
+                && p.health.issue.is_some())
                 || crate::ui::screens::plugins::plugin_requires_regrant(p)
                 || update_available
         })
@@ -61,11 +62,12 @@ pub fn integrations_needing_action(state: &AppState) -> usize {
 /// the same red severity color as their plugin issue banner.
 fn plugins_have_errors(state: &AppState) -> bool {
     state.plugins.plugins.iter().any(|plugin| {
-        plugin
-            .health
-            .issue
-            .as_ref()
-            .is_some_and(|issue| issue.kind != PluginIssueKind::LoadWarning)
+        plugin.plugin_type != halod_shared::types::PluginKind::Integration
+            && plugin
+                .health
+                .issue
+                .as_ref()
+                .is_some_and(|issue| issue.kind != PluginIssueKind::LoadWarning)
     })
 }
 
@@ -579,6 +581,7 @@ mod tests {
     #[test]
     fn integration_runtime_issues_are_routed_to_integrations() {
         let mut with_issue = plugin("failing", true, false);
+        with_issue.plugin_type = halod_shared::types::PluginKind::Integration;
         with_issue.health.issue = Some(halod_shared::types::PluginIssue {
             kind: halod_shared::types::PluginIssueKind::ConnectFailed,
             detail: "boom".into(),

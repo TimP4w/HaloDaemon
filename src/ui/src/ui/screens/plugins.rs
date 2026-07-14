@@ -55,7 +55,6 @@ struct RepoCheck {
 #[derive(Clone)]
 struct PendingRepoRepair {
     slug: String,
-    name: String,
 }
 
 /// What the detail column shows: a plugin, a repo, or nothing (empty state).
@@ -80,7 +79,7 @@ pub struct PluginsUi {
     pending_delete: Option<String>,
     /// Repo slug pending a remove confirmation, when the dialog is open.
     pending_repo_delete: Option<String>,
-    /// Malformed repo package pending a scoped recovery confirmation.
+    /// Repository pending a whole-repository recovery confirmation.
     pending_repo_repair: Option<PendingRepoRepair>,
     /// The repo whose "check for updates" is currently in flight, if any.
     checking_repo: Option<RepoCheck>,
@@ -447,10 +446,7 @@ impl PluginsUi {
                         )
                         .clicked()
                         {
-                            self.pending_repo_repair = Some(PendingRepoRepair {
-                                slug,
-                                name: name.to_owned(),
-                            });
+                            self.pending_repo_repair = Some(PendingRepoRepair { slug });
                         }
                         ui.add_space(6.0);
                     }
@@ -867,12 +863,12 @@ impl PluginsUi {
         }
     }
 
-    /// Confirm restoring only the malformed package directory, leaving every
-    /// sibling path in the repository untouched.
+    /// Confirm restoring the active immutable repository revision. Recovery
+    /// is repository-scoped: packages are never repaired in isolation.
     fn repo_repair_modal(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
-        let Some(pending) = self.pending_repo_repair.clone() else {
+        if self.pending_repo_repair.is_none() {
             return;
-        };
+        }
 
         let mut confirm = false;
         let mut cancel = false;
@@ -883,12 +879,9 @@ impl PluginsUi {
             440.0,
             |ui| {
                 ui.label(
-                    egui::RichText::new(t!(
-                        "plugins.repos_repair_body",
-                        name = pending.name.clone()
-                    ))
-                    .font(theme::body(12.5))
-                    .color(theme::TEXT_DIM),
+                    egui::RichText::new(t!("plugins.repos_repair_body"))
+                        .font(theme::body(12.5))
+                        .color(theme::TEXT_DIM),
                 );
             },
             |ui| {
