@@ -40,8 +40,11 @@ pub(crate) const TAB_DIRECT: usize = 1;
 
 /// Collapsed device target card height.
 const CARD_BASE_H: f32 = 58.0;
-/// Extra height added when zone pills are expanded.
-const CARD_ZONE_H: f32 = 56.0;
+/// Vertical padding above the first / below the last zone-pill row.
+const ZONE_PAD_TOP: f32 = 10.0;
+const ZONE_PAD_BOTTOM: f32 = 14.0;
+/// Gap between wrapped zone pills (both axes).
+const ZONE_PILL_GAP: f32 = 6.0;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -788,7 +791,7 @@ fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut L
                 .iter()
                 .map(|d| {
                     if st.expanded_id.as_deref() == Some(d.id.as_str()) {
-                        CARD_BASE_H + CARD_ZONE_H
+                        CARD_BASE_H + expanded_zone_height(ui, d, col_w)
                     } else {
                         CARD_BASE_H
                     }
@@ -854,6 +857,64 @@ struct CardResult {
     zone_changed: bool,
 }
 
+/// The `(zone id, zone name)` pairs a device exposes via its `Rgb` capability.
+fn rgb_zone_pairs(dev: &WireDevice) -> Vec<(String, String)> {
+    dev.capabilities
+        .iter()
+        .find_map(|c| match c {
+            DeviceCapability::Rgb(r) => Some(
+                r.descriptor
+                    .zones
+                    .iter()
+                    .map(|z| (z.id.clone(), z.name.clone()))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Allocated width of a zone pill for `label` (matches [`widgets::pill`]).
+fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
+    ui.fonts(|f| {
+        f.layout_no_wrap(label.to_string(), theme::body(12.0), Color32::WHITE)
+            .size()
+            .x
+    }) + 24.0
+}
+
+/// Number of rows `pill_widths` wrap into within `avail_w`, matching egui's
+/// `main_wrap` layout: the first pill on a row is always placed, and a pill
+/// wraps when it (plus the inter-pill `gap`) would exceed `avail_w`.
+fn wrapped_rows(pill_widths: &[f32], avail_w: f32, gap: f32) -> usize {
+    let mut rows = 0usize;
+    let mut x = 0.0f32;
+    for &w in pill_widths {
+        if rows == 0 || x + gap + w > avail_w {
+            rows += 1;
+            x = w;
+        } else {
+            x += gap + w;
+        }
+    }
+    rows
+}
+
+/// Extra height an expanded device card needs to hold its zone pills, sized to
+/// however many rows they wrap into. `0.0` for a device with no zones.
+fn expanded_zone_height(ui: &egui::Ui, dev: &WireDevice, card_w: f32) -> f32 {
+    let pairs = rgb_zone_pairs(dev);
+    if pairs.is_empty() {
+        return 0.0;
+    }
+    let widths: Vec<f32> = pairs.iter().map(|(_, name)| pill_width(ui, name)).collect();
+    let rows = wrapped_rows(&widths, card_w - 28.0, ZONE_PILL_GAP);
+    ZONE_PAD_TOP
+        + rows as f32 * widgets::PILL_H
+        + rows.saturating_sub(1) as f32 * ZONE_PILL_GAP
+        + ZONE_PAD_BOTTOM
+}
+
 fn device_card(
     ui: &mut egui::Ui,
     dev: &WireDevice,
@@ -869,20 +930,7 @@ fn device_card(
         zone_changed: false,
     };
 
-    let zone_pairs: Vec<(String, String)> = dev
-        .capabilities
-        .iter()
-        .find_map(|c| match c {
-            DeviceCapability::Rgb(r) => Some(
-                r.descriptor
-                    .zones
-                    .iter()
-                    .map(|z| (z.id.clone(), z.name.clone()))
-                    .collect(),
-            ),
-            _ => None,
-        })
-        .unwrap_or_default();
+    let zone_pairs = rgb_zone_pairs(dev);
     let all_zone_ids: Vec<String> = zone_pairs.iter().map(|(id, _)| id.clone()).collect();
     let sel_zones = st
         .zone_sel
@@ -1028,15 +1076,18 @@ fn device_card(
             Stroke::new(1.0, theme::BORDER_SOFT),
         );
         let zone_area = Rect::from_min_size(
-            Pos2::new(rect.left() + 14.0, div_y + 10.0),
-            Vec2::new(rect.width() - 28.0, CARD_ZONE_H - 12.0),
+            Pos2::new(rect.left() + 14.0, div_y + ZONE_PAD_TOP),
+            Vec2::new(
+                rect.width() - 28.0,
+                (rect.bottom() - ZONE_PAD_BOTTOM - (div_y + ZONE_PAD_TOP)).max(0.0),
+            ),
         );
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(zone_area)
                 .layout(egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true)),
         );
-        child.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        child.spacing_mut().item_spacing = egui::vec2(ZONE_PILL_GAP, ZONE_PILL_GAP);
         for (zone_id, zone_name) in &zone_pairs {
             let active = sel_zones.contains(zone_id);
             if widgets::pill(&mut child, zone_name, active) {
@@ -1920,6 +1971,23 @@ mod tests {
         assert_eq!(deadline, None);
         // No further flush without a new change.
         assert!(!debounce_apply(&mut deadline, false, 10.0));
+    }
+
+    #[test]
+    fn wrapped_rows_counts_rows_like_egui_main_wrap() {
+        // Empty → no rows.
+        assert_eq!(wrapped_rows(&[], 100.0, 6.0), 0);
+        // A single pill wider than the row still occupies one row (first pill on
+        // a row is always placed).
+        assert_eq!(wrapped_rows(&[200.0], 100.0, 6.0), 1);
+        // Three 40-wide pills + 6 gaps in a 100-wide row: 40, 40+6+40=86 fit,
+        // the third (86+6+40=132) wraps → 2 rows.
+        assert_eq!(wrapped_rows(&[40.0, 40.0, 40.0], 100.0, 6.0), 2);
+        // Exact fit stays on one row: 40+6+40+6+40 = 132 <= 132.
+        assert_eq!(wrapped_rows(&[40.0, 40.0, 40.0], 132.0, 6.0), 1);
+        // 24 equal pills in a narrow row → many rows, height grows with them
+        // (the bug: fixed height clipped everything past the first row).
+        assert!(wrapped_rows(&[80.0; 24], 300.0, 6.0) >= 7);
     }
 
     #[test]
