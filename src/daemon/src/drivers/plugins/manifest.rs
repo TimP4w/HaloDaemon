@@ -732,10 +732,11 @@ pub struct Identity {
     pub description: Option<String>,
 }
 
-/// A parsed, validated plugin, built by [`parse_manifest`] or [`parse_manifest_from_dir`].
+/// A parsed, validated plugin package built from its canonical directory
+/// catalog. The inline-Lua helper exists only for isolated runtime tests.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
-    /// Unique per plugin: the directory name, or the script file stem for a built-in.
+    /// Unique package id, equal to its directory name for external packages.
     #[serde(skip)]
     pub plugin_id: String,
     #[serde(skip)]
@@ -743,10 +744,11 @@ pub struct PluginManifest {
     /// Full entry-script text, re-executed by the worker to build its own VM.
     #[serde(skip)]
     pub script_source: String,
-    /// Directory a plugin was loaded from; empty for a built-in / single-file import.
+    /// Directory a plugin package was loaded from; empty only for an internal
+    /// test fixture.
     #[serde(skip)]
     pub plugin_dir: PathBuf,
-    /// Raw bytes of `plugin.yaml`, folded into [`Self::content_hash`]; empty otherwise.
+    /// Raw bytes of `plugin.yaml`, folded into [`Self::content_hash`].
     #[serde(skip)]
     pub manifest_bytes: Vec<u8>,
     #[serde(rename = "devices", default, deserialize_with = "de_device_specs")]
