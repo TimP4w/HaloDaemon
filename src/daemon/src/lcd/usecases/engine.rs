@@ -32,7 +32,6 @@ pub async fn set_template(
         video.stop(&device_id).await;
     }
     if let Some(lcd_engine) = app.lcd.engine() {
-        slot.set_video_path(None);
         lcd_engine
             .set_template_active(&device_id, &template_id, &params)
             .await;
@@ -196,6 +195,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dev.lcd.lcd_template_id().as_deref(), Some("custom"));
+    }
+
+    #[tokio::test]
+    async fn set_template_keeps_template_active_when_engine_is_installed() {
+        let dev = MockLcdDevice::new("dev0");
+        let app = make_app(dev.clone());
+        let engine = LcdEngine::new(Arc::clone(&app));
+        app.lcd.set_engine(
+            Arc::clone(&engine),
+            crate::lcd::engine::video::VideoEngine::new(Arc::clone(&app), engine.frame_sender()),
+            tokio::sync::watch::channel(crate::state::EngineRunConfig::lcd(&Default::default())).0,
+        );
+
+        set_template("dev0".into(), "custom".into(), HashMap::new(), app)
+            .await
+            .unwrap();
+
+        assert_eq!(dev.lcd.mode(), LcdMode::Engine);
+        assert_eq!(dev.lcd.lcd_template_id().as_deref(), Some("custom"));
+        assert!(engine.has_slot("dev0").await);
     }
 
     #[tokio::test]

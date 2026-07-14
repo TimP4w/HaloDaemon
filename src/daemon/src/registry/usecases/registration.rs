@@ -72,6 +72,22 @@ pub async fn register_if_disabled(app: &Arc<AppState>, device: &Arc<dyn Device>)
     true
 }
 
+/// Seed a keyboard device's layout slot from persisted config before
+/// `initialize()`, so the device resolves the right variant/language and LED
+/// positions on its first init. No-op for devices without the slot.
+pub async fn seed_keyboard_layout(app: &Arc<AppState>, device: &Arc<dyn Device>) {
+    let Some(slot) = device.keyboard_layout_slot() else {
+        return;
+    };
+    let selection = {
+        let cfg = app.config.read().await;
+        cfg.keyboard_layouts.get(device.id()).copied()
+    };
+    if let Some(selection) = selection {
+        slot.set_selection(selection);
+    }
+}
+
 /// Run `device.initialize()` and surface failures as a user-visible error notification.
 /// Returns the original result so callers keep existing Ok/Err branching.
 pub async fn init_device(app: &Arc<AppState>, device: &Arc<dyn Device>) -> Result<bool> {
@@ -139,6 +155,7 @@ pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bo
         finish_registration(app, &device_id).await;
         return true;
     }
+    seed_keyboard_layout(app, &device).await;
     match init_device(app, &device).await {
         Ok(true) => {}
         _ => {
@@ -447,6 +464,26 @@ mod tests {
             load.load(Ordering::SeqCst),
             "load_state must be called when saved state exists"
         );
+    }
+
+    #[tokio::test]
+    async fn register_device_seeds_keyboard_layout_before_init() {
+        use halod_shared::keyboard::{KeyVariant, KeyboardLayoutSelection};
+        use halod_shared::types::KeyboardLayout;
+        let app = make_app();
+        app.config.write().await.keyboard_layouts.insert(
+            "kbd".into(),
+            KeyboardLayoutSelection {
+                variant: Some(KeyVariant::Iso),
+                language: Some(KeyboardLayout::CH),
+            },
+        );
+        let mock = Arc::new(MockDevice::new("kbd").with_keyboard_layout());
+        register_device(&app, mock.clone() as Arc<dyn Device>).await;
+
+        let sel = mock.keyboard_layout.as_ref().unwrap().selection();
+        assert_eq!(sel.variant, Some(KeyVariant::Iso));
+        assert_eq!(sel.language, Some(KeyboardLayout::CH));
     }
 
     #[tokio::test]

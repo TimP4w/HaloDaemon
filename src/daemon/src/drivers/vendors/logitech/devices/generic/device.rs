@@ -12,10 +12,12 @@ use tokio::sync::Mutex;
 
 use crate::drivers::vendors::logitech::protocols::hidpp::feature;
 use crate::drivers::{
+    effective_layout,
     vendors::generic::devices::common::TaskHandle,
     vendors::logitech::devices::generic::onboard::start_dpi_watcher,
     vendors::logitech::devices::generic::profile::{
-        build_device_id, find_profile, LogitechDeviceProfile, LOGITECH_VID, WIRED_HIDPP_INTERFACE,
+        build_device_id, find_profile, LogitechDeviceProfile, LogitechKeyboardSpec, LOGITECH_VID,
+        WIRED_HIDPP_INTERFACE,
     },
     vendors::logitech::devices::generic::state::LogitechDeviceState,
     vendors::logitech::protocols::hidpp::{
@@ -23,11 +25,14 @@ use crate::drivers::{
         v2::{FeatureTable, Hidpp20},
         HidppChannel, PkWriteCoordinator, RECEIVER_DEVNUM,
     },
-    CapabilityRef, ChoiceStateCache, ConnectionCapability, Device, RangeStateCache, RgbStateSlot,
-    TransportMode, TransportSwitchable, VisibilitySlot,
+    CapabilityRef, ChoiceStateCache, ConnectionCapability, Device, KeyboardLayoutCapability,
+    KeyboardLayoutSlot, RangeStateCache, RgbStateSlot, TransportMode, TransportSwitchable,
+    VisibilitySlot,
 };
+use halod_shared::keyboard::{KeyVariant, KeyboardLayoutStatus, VisualKey};
 use halod_shared::types::{
-    ConnectionStatus, ConnectionType, DeviceType, OnboardProfiles, RgbDescriptor,
+    ConnectionStatus, ConnectionType, DeviceType, KeyboardLayout, OnboardProfiles, RgbDescriptor,
+    ZoneTopology,
 };
 
 /// Active transport for a LogitechDevice. Swapped atomically when the device
@@ -63,6 +68,8 @@ pub struct LogitechDevice {
     transport_hook: std::sync::Mutex<Option<TransportHook>>,
     pub(super) rgb: RgbStateSlot,
     pub(super) visibility: VisibilitySlot,
+    /// Keyboard layout selection + firmware-detected language (keyboards only).
+    pub(super) keyboard_layout: KeyboardLayoutSlot,
     /// Choice (report rate) state cache — required by `ChoiceCapability`.
     pub(super) choice_cache: ChoiceStateCache,
     /// Range (sidetone) state cache — required by `RangeCapability`.
@@ -78,6 +85,45 @@ impl LogitechDevice {
         self.profile
             .map(|p| matches!(p.device_type, DeviceType::Keyboard))
             .unwrap_or(false)
+    }
+
+    /// The per-variant keyboard spec for this model, if it declares one.
+    pub(super) fn keyboard_spec(&self) -> Option<&'static LogitechKeyboardSpec> {
+        self.profile.and_then(|p| p.keyboard)
+    }
+
+    /// Whether this device offers runtime keyboard-layout selection.
+    fn exposes_keyboard_layout(&self) -> bool {
+        self.is_keyboard() && self.keyboard_spec().is_some()
+    }
+
+    /// The profile's static default keyboard language (from the keyboard zone's
+    /// declared layout), used when no override or firmware detection applies.
+    fn default_keyboard_language(&self) -> KeyboardLayout {
+        self.profile
+            .map(|p| p.zones)
+            .unwrap_or(&[])
+            .iter()
+            .find_map(|z| match z.topology {
+                ZoneTopology::Keyboard { layout, .. } => Some(layout),
+                _ => None,
+            })
+            .unwrap_or(KeyboardLayout::US)
+    }
+
+    /// Resolve the slot's selection + firmware-detected language into the
+    /// effective `(variant, language)` for this keyboard.
+    pub(super) fn effective_keyboard_layout(
+        &self,
+        detected: KeyboardLayout,
+    ) -> (KeyVariant, KeyboardLayout) {
+        let iso_supported = self.keyboard_spec().is_some_and(|k| k.iso.is_some());
+        effective_layout(
+            self.keyboard_layout.selection(),
+            detected,
+            self.default_keyboard_language(),
+            iso_supported,
+        )
     }
 
     /// Assemble a device from its id, optional profile, and ready transport.
@@ -101,6 +147,7 @@ impl LogitechDevice {
             transport_hook: std::sync::Mutex::new(None),
             rgb: RgbStateSlot::default(),
             visibility: VisibilitySlot::default(),
+            keyboard_layout: KeyboardLayoutSlot::default(),
             choice_cache: ChoiceStateCache::default(),
             range_cache: RangeStateCache::default(),
             poll_task: Mutex::new(None),
@@ -295,8 +342,12 @@ impl Device for LogitechDevice {
         self.init_reprog_controls(&features, &mut state).await;
         self.init_bitmap_buttons(&features, &mut state).await;
         self.seed_default_button_mappings(&mut state);
-        let keyboard_layout = self.init_keyboard_layout(&features).await;
-        self.init_rgb(&features, &keyboard_layout, &mut state).await;
+        let detected = self.init_keyboard_layout(&features).await;
+        self.keyboard_layout.set_detected(detected);
+        let (variant, language) = self.effective_keyboard_layout(detected);
+        let key_layout = self.profile.and_then(|p| p.led_spec(variant));
+        self.init_rgb(&features, key_layout, &language, &mut state)
+            .await;
         self.init_audio(&features, &mut state).await;
         self.init_hires_wheel(&features, &mut state).await;
         self.init_fn_inversion(&features, &mut state).await;
@@ -425,7 +476,7 @@ impl Device for LogitechDevice {
         // List every supported capability; each to_wire() gates on live state and
         // returns None when absent, so panels appear as state populates rather than
         // being frozen at the end of initialize().
-        vec![
+        let mut caps = vec![
             CapabilityRef::TransportSwitchable(self),
             CapabilityRef::Battery(self),
             CapabilityRef::Connection(self),
@@ -437,11 +488,20 @@ impl Device for LogitechDevice {
             CapabilityRef::KeyRemap(self),
             CapabilityRef::Range(self),
             CapabilityRef::Equalizer(self),
-        ]
+        ];
+        if self.exposes_keyboard_layout() {
+            caps.push(CapabilityRef::KeyboardLayout(self));
+        }
+        caps
     }
 
     fn visibility_slot(&self) -> Option<&VisibilitySlot> {
         Some(&self.visibility)
+    }
+
+    fn keyboard_layout_slot(&self) -> Option<&KeyboardLayoutSlot> {
+        self.exposes_keyboard_layout()
+            .then_some(&self.keyboard_layout)
     }
 
     fn write_rate_status(&self) -> Option<halod_shared::types::WriteRateStatus> {
@@ -632,6 +692,55 @@ impl ConnectionCapability for LogitechDevice {
     }
 }
 
+/// Build the renderable key list for a resolved layout: every key that maps
+/// through the LED `cid_map` (its `led_id`), optionally carrying a KeyRemap cid.
+fn build_visual_keys(
+    spec: &halod_shared::keyboard::KeyLayoutSpec,
+    remap_cids: &[(halod_shared::keyboard::KeyId, u16)],
+) -> Vec<VisualKey> {
+    spec.resolve()
+        .iter()
+        .filter_map(|cell| {
+            let led_id = spec
+                .cid_map
+                .iter()
+                .find(|(_, kid)| *kid == cell.id)
+                .map(|(fid, _)| *fid)?;
+            let remap_cid = remap_cids
+                .iter()
+                .find(|(kid, _)| *kid == cell.id)
+                .map(|(_, cid)| *cid);
+            Some(VisualKey {
+                led_id,
+                remap_cid,
+                cell: *cell,
+            })
+        })
+        .collect()
+}
+
+#[async_trait]
+impl KeyboardLayoutCapability for LogitechDevice {
+    async fn keyboard_layout_status(&self) -> KeyboardLayoutStatus {
+        let spec = self.keyboard_spec();
+        let detected = self.keyboard_layout.detected();
+        let selection = self.keyboard_layout.selection();
+        let (variant, language) = self.effective_keyboard_layout(detected);
+        let keys = spec
+            .map(|kb| build_visual_keys(kb.spec_for(variant), kb.remap_cids))
+            .unwrap_or_default();
+        KeyboardLayoutStatus {
+            keys,
+            variant,
+            language,
+            detected_language: detected,
+            selection,
+            iso_supported: spec.is_some_and(|kb| kb.iso.is_some()),
+            languages: spec.map(|kb| kb.languages.to_vec()).unwrap_or_default(),
+        }
+    }
+}
+
 pub(super) fn clear_active_slot_in_host_mode(profiles: &mut OnboardProfiles, host_mode: bool) {
     if !host_mode {
         return;
@@ -675,6 +784,28 @@ mod tests {
         assert!(is_wireless_capable(true, true, false)); // has wpid
         assert!(is_wireless_capable(false, false, false)); // currently wireless
         assert!(is_wireless_capable(false, true, true)); // advertises WDS
+    }
+
+    #[test]
+    fn build_visual_keys_maps_led_and_remap_ids() {
+        use halod_shared::keyboard::{KeyId, KeyLayoutSpec, StandardLayout};
+        static EDITS: &[halod_shared::keyboard::KeyEdit] = &[];
+        static CID_MAP: &[(u32, KeyId)] = &[(1, KeyId::A), (7, KeyId::B)];
+        let spec = KeyLayoutSpec {
+            base: StandardLayout::Tkl,
+            edits: EDITS,
+            cid_map: CID_MAP,
+        };
+        let remap = [(KeyId::A, 0x50u16)];
+        let keys = build_visual_keys(&spec, &remap);
+        // Only A and B map through the cid_map; the rest of the TKL base is skipped.
+        assert_eq!(keys.len(), 2);
+        let a = keys.iter().find(|k| k.cell.id == KeyId::A).unwrap();
+        assert_eq!(a.led_id, 1);
+        assert_eq!(a.remap_cid, Some(0x50));
+        let b = keys.iter().find(|k| k.cell.id == KeyId::B).unwrap();
+        assert_eq!(b.led_id, 7);
+        assert_eq!(b.remap_cid, None, "B has no remap mapping");
     }
 
     #[test]

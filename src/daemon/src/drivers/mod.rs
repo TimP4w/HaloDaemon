@@ -36,6 +36,7 @@ pub enum CapabilityRef<'a> {
     OnboardProfiles(&'a dyn OnboardProfilesCapability),
     Lcd(&'a dyn LcdCapability),
     KeyRemap(&'a dyn KeyRemapCapability),
+    KeyboardLayout(&'a dyn KeyboardLayoutCapability),
     Chain(&'a dyn ChainCapability),
     Controller(&'a dyn Controller),
     Pairing(&'a dyn PairingCapability),
@@ -82,7 +83,7 @@ macro_rules! capability_dispatch {
 
 capability_dispatch!(
     persisting: [Fan, Rgb, Range, Choice, Boolean, Equalizer, Dpi, Lcd, KeyRemap, OnboardProfiles],
-    wire_only:  [Sensor, Action, Battery, Connection, Chain, Controller, Pairing, TransportSwitchable],
+    wire_only:  [Sensor, Action, Battery, Connection, KeyboardLayout, Chain, Controller, Pairing, TransportSwitchable],
 );
 
 macro_rules! as_capability {
@@ -223,6 +224,7 @@ pub trait Device: Send + Sync {
     );
     as_capability!(as_lcd, Lcd, LcdCapability);
     as_capability!(as_key_remap, KeyRemap, KeyRemapCapability);
+    as_capability!(as_keyboard_layout, KeyboardLayout, KeyboardLayoutCapability);
     as_capability!(as_chain, Chain, ChainCapability);
     as_capability!(as_controller, Controller, Controller);
     as_capability!(as_pairing, Pairing, PairingCapability);
@@ -233,6 +235,13 @@ pub trait Device: Send + Sync {
     );
 
     fn visibility_slot(&self) -> Option<&VisibilitySlot> {
+        None
+    }
+
+    /// Keyboard devices that support runtime layout selection return their slot
+    /// here; the daemon seeds `selection` from config before `initialize()` and
+    /// the device records the firmware-detected language into it during init.
+    fn keyboard_layout_slot(&self) -> Option<&KeyboardLayoutSlot> {
         None
     }
 

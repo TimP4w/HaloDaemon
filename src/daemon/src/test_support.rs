@@ -5,8 +5,8 @@
 use crate::drivers::{
     ActionCapability, BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache, Device,
     DpiCapability, EqualizerCapability, FanCapability, FanStateSlot, KeyRemapCapability,
-    LcdCapability, LcdStateSlot, RangeCapability, RangeStateCache, RgbCapability, RgbStateSlot,
-    SensorCapability, VisibilitySlot,
+    KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot, RangeCapability,
+    RangeStateCache, RgbCapability, RgbStateSlot, SensorCapability, VisibilitySlot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -87,6 +87,8 @@ pub struct MockDevice {
     pub vendor: String,
     pub model: String,
     pub visibility: VisibilitySlot,
+    /// `Some` when the device opts into runtime keyboard-layout selection.
+    pub keyboard_layout: Option<KeyboardLayoutSlot>,
     /// Use builder methods (`ok_false`, `fail`, `init_panics`).
     init_behavior: InitBehavior,
     /// Set to `true` by the default `load_state()` override when tracking is enabled.
@@ -147,6 +149,7 @@ impl MockDevice {
             vendor: "mock".to_string(),
             model: "mock".to_string(),
             visibility: VisibilitySlot::default(),
+            keyboard_layout: None,
             init_behavior: InitBehavior::OkTrue,
             load_called: Arc::new(AtomicBool::new(false)),
             closed: Arc::new(AtomicBool::new(false)),
@@ -315,6 +318,12 @@ impl MockDevice {
         self
     }
 
+    /// Add a KeyboardLayoutCapability backed by a seedable slot.
+    pub fn with_keyboard_layout(mut self) -> Self {
+        self.keyboard_layout = Some(KeyboardLayoutSlot::default());
+        self
+    }
+
     /// Add a SensorCapability with the given sensor values.
     pub fn with_sensor(mut self, sensors: Vec<Sensor>) -> Self {
         self.sensors = Some(Mutex::new(sensors));
@@ -417,11 +426,39 @@ impl Device for MockDevice {
         if self.eq_state.is_some() {
             caps.push(CapabilityRef::Equalizer(self));
         }
+        if self.keyboard_layout.is_some() {
+            caps.push(CapabilityRef::KeyboardLayout(self));
+        }
         caps
     }
 
     fn visibility_slot(&self) -> Option<&VisibilitySlot> {
         Some(&self.visibility)
+    }
+
+    fn keyboard_layout_slot(&self) -> Option<&KeyboardLayoutSlot> {
+        self.keyboard_layout.as_ref()
+    }
+}
+
+#[async_trait]
+impl KeyboardLayoutCapability for MockDevice {
+    async fn keyboard_layout_status(&self) -> halod_shared::keyboard::KeyboardLayoutStatus {
+        use halod_shared::keyboard::{KeyVariant, KeyboardLayoutStatus};
+        use halod_shared::types::KeyboardLayout;
+        let slot = self
+            .keyboard_layout
+            .as_ref()
+            .expect("MockDevice: keyboard_layout slot not present — call .with_keyboard_layout()");
+        KeyboardLayoutStatus {
+            keys: vec![],
+            variant: KeyVariant::Ansi,
+            language: KeyboardLayout::US,
+            detected_language: slot.detected(),
+            selection: slot.selection(),
+            iso_supported: true,
+            languages: vec![KeyboardLayout::US, KeyboardLayout::CH],
+        }
     }
 }
 

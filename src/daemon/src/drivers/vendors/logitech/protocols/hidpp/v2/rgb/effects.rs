@@ -192,17 +192,18 @@ pub fn parse_rgb_effect_table_entry(reply: &[u8]) -> Option<u16> {
 
 // ── PER_KEY_LIGHTING LED-bitmap parser ─────────────────────────────────────────
 
-/// Scan a PER_KEY_LIGHTING LED bitmap (3 pages × 13 bytes = 39 bytes) for the
-/// low-range firmware LED IDs (codes 1..31). A code is present when its bit is
-/// set: byte `code / 8`, bit `code % 8`.
-pub fn parse_pk_led_bitmap(bitmap: &[u8]) -> Vec<u8> {
-    (1u16..32)
-        .filter(|&code| {
-            let byte_idx = code as usize / 8;
-            let bit = (code % 8) as u8;
-            bitmap.get(byte_idx).copied().unwrap_or(0) & (1 << bit) != 0
+/// Decode one PER_KEY_LIGHTING GetInfo page. Each page contains 112 zone bits;
+/// Set* commands address zones with a u8, so page-2 entries above 255 are not
+/// usable and are ignored.
+pub fn parse_pk_led_bitmap_page(page: u8, bitmap: &[u8]) -> Vec<u8> {
+    (0u16..112)
+        .filter_map(|bit_in_page| {
+            let byte_idx = bit_in_page as usize / 8;
+            let bit = (bit_in_page % 8) as u8;
+            let is_set = bitmap.get(byte_idx).copied().unwrap_or(0) & (1 << bit) != 0;
+            let id = page as u16 * 112 + bit_in_page;
+            (is_set && id != 0 && id <= u8::MAX as u16).then_some(id as u8)
         })
-        .map(|code| code as u8)
         .collect()
 }
 
@@ -297,14 +298,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_pk_led_bitmap_decodes_set_bits() {
+    fn parse_pk_led_bitmap_page_decodes_set_bits() {
         let bitmap = [0x02, 0x01, 0x00, 0x80];
-        assert_eq!(parse_pk_led_bitmap(&bitmap), vec![1, 8, 31]);
+        assert_eq!(parse_pk_led_bitmap_page(0, &bitmap), vec![1, 8, 31]);
     }
 
     #[test]
-    fn parse_pk_led_bitmap_handles_short_input_without_panic() {
-        assert_eq!(parse_pk_led_bitmap(&[]), Vec::<u8>::new());
-        assert_eq!(parse_pk_led_bitmap(&[0x02]), vec![1]);
+    fn parse_pk_led_bitmap_page_applies_page_offset_and_wire_limit() {
+        let mut bitmap = [0u8; 14];
+        bitmap[0] = 0x01;
+        bitmap[13] = 0x80;
+        assert_eq!(parse_pk_led_bitmap_page(1, &bitmap), vec![112, 223]);
+        assert_eq!(parse_pk_led_bitmap_page(2, &bitmap), vec![224]);
+    }
+
+    #[test]
+    fn parse_pk_led_bitmap_page_handles_short_input_without_panic() {
+        assert_eq!(parse_pk_led_bitmap_page(0, &[]), Vec::<u8>::new());
+        assert_eq!(parse_pk_led_bitmap_page(0, &[0x02]), vec![1]);
     }
 }

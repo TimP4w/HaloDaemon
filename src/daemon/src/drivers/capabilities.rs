@@ -6,11 +6,14 @@
 use super::*;
 use anyhow::Result;
 use async_trait::async_trait;
+use halod_shared::keyboard::{
+    is_iso_language, KeyVariant, KeyboardLayoutSelection, KeyboardLayoutStatus,
+};
 use halod_shared::types::{
     Battery, Boolean, ButtonMapping, ChainableChannelInfo, ConnectionStatus, DeviceCapability,
-    DpiStatus, EffectParamValue, Equalizer, FanStatus, KeyRemapStatus, LcdDescriptor, LcdStatus,
-    RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType, SensorUnit, VisibilityState,
-    ZoneTopology,
+    DpiStatus, EffectParamValue, Equalizer, FanStatus, KeyRemapStatus, KeyboardLayout,
+    LcdDescriptor, LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType,
+    SensorUnit, VisibilityState, ZoneTopology,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 use std::collections::HashMap;
@@ -989,6 +992,127 @@ pub trait KeyRemapCapability: Send + Sync {
         serde_json::Value::Null
     }
     async fn restore_state(&self, _: &serde_json::Value) {}
+}
+
+/// Resolve a user selection, firmware-detected language, and the profile's
+/// static default language into the effective `(variant, language)` a keyboard
+/// should render and address LEDs with.
+///
+/// - Language: explicit override wins; else the firmware-detected language when
+///   known; else the profile default.
+/// - Variant: explicit override always wins; on Auto it derives from whether
+///   the effective language is an ISO language, gated by device ISO support.
+pub fn effective_layout(
+    sel: KeyboardLayoutSelection,
+    detected: KeyboardLayout,
+    default_lang: KeyboardLayout,
+    iso_supported: bool,
+) -> (KeyVariant, KeyboardLayout) {
+    let language = sel.language.unwrap_or(match detected {
+        KeyboardLayout::Unknown => default_lang,
+        d => d,
+    });
+    let variant = sel.variant.unwrap_or({
+        if iso_supported && is_iso_language(language) {
+            KeyVariant::Iso
+        } else {
+            KeyVariant::Ansi
+        }
+    });
+    (variant, language)
+}
+
+/// Keyboard layout (variant + language) selection, surfaced to both GUI tabs.
+/// Wire-only: the selection itself is persisted in `Config::keyboard_layouts`,
+/// not in the per-capability device state blob.
+#[async_trait]
+pub trait KeyboardLayoutCapability: Send + Sync {
+    async fn keyboard_layout_status(&self) -> KeyboardLayoutStatus;
+
+    /// Re-apply any hardware state that depends on the layout after the slot's
+    /// selection changed (e.g. a physical-layout setup burst), without a full
+    /// device re-registration. Default no-op for devices whose layout is purely
+    /// a rendering hint. `keyboard_layout_status` already reflects the new slot.
+    async fn apply_layout(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        Some(DeviceCapability::KeyboardLayout(
+            self.keyboard_layout_status().await,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod effective_layout_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn any_language() -> impl Strategy<Value = KeyboardLayout> {
+        prop_oneof![
+            Just(KeyboardLayout::US),
+            Just(KeyboardLayout::CH),
+            Just(KeyboardLayout::IT),
+            Just(KeyboardLayout::DE),
+            Just(KeyboardLayout::FR),
+            Just(KeyboardLayout::UK),
+            Just(KeyboardLayout::Unknown),
+        ]
+    }
+
+    #[test]
+    fn auto_with_unknown_detected_falls_back_to_default() {
+        let (variant, language) = effective_layout(
+            KeyboardLayoutSelection::default(),
+            KeyboardLayout::Unknown,
+            KeyboardLayout::CH,
+            true,
+        );
+        assert_eq!(language, KeyboardLayout::CH);
+        assert_eq!(variant, KeyVariant::Iso, "CH is an ISO language");
+    }
+
+    #[test]
+    fn auto_prefers_detected_over_default() {
+        let (variant, language) = effective_layout(
+            KeyboardLayoutSelection::default(),
+            KeyboardLayout::US,
+            KeyboardLayout::CH,
+            true,
+        );
+        assert_eq!(language, KeyboardLayout::US);
+        assert_eq!(variant, KeyVariant::Ansi, "US is an ANSI language");
+    }
+
+    #[test]
+    fn auto_variant_stays_ansi_when_iso_unsupported() {
+        let (variant, _) = effective_layout(
+            KeyboardLayoutSelection::default(),
+            KeyboardLayout::CH,
+            KeyboardLayout::US,
+            false,
+        );
+        assert_eq!(variant, KeyVariant::Ansi);
+    }
+
+    proptest! {
+        /// An explicit selection on an axis always wins over detection/default.
+        #[test]
+        fn override_always_wins(
+            detected in any_language(),
+            default_lang in any_language(),
+            iso_supported in any::<bool>(),
+        ) {
+            let sel = KeyboardLayoutSelection {
+                variant: Some(KeyVariant::Iso),
+                language: Some(KeyboardLayout::DE),
+            };
+            let (variant, language) = effective_layout(sel, detected, default_lang, iso_supported);
+            prop_assert_eq!(variant, KeyVariant::Iso);
+            prop_assert_eq!(language, KeyboardLayout::DE);
+        }
+    }
 }
 
 #[cfg(test)]

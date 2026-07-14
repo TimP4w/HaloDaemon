@@ -16,6 +16,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../Cargo.lock");
     println!("cargo:rerun-if-changed=../about.toml");
     println!("cargo:rerun-if-changed=../about_licenses.hbs");
+    println!("cargo:rerun-if-changed=../assets/fonts");
+    println!("cargo:rerun-if-changed=assets/icons");
+    println!("cargo:rerun-if-changed=../../LICENSES");
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let workspace = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
@@ -149,8 +152,17 @@ fn license_failure(
 
 fn scan_protocol_references(workspace: &std::path::Path) -> String {
     let mut by_license: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let daemon_src = workspace.join("daemon/src");
-    for path in walk_rs_files(&daemon_src) {
+    let source_roots = [
+        "broker/src",
+        "daemon/src",
+        "hwaccess/src",
+        "shared/src",
+        "ui/src",
+    ];
+    for path in source_roots
+        .iter()
+        .flat_map(|root| walk_rs_files(&workspace.join(root)))
+    {
         // Per-file so an edited SPDX header (not just an added/removed file)
         // triggers regeneration.
         println!("cargo:rerun-if-changed={}", path.display());
@@ -245,13 +257,48 @@ fn append_bundled_asset_licenses(workspace: &std::path::Path, buf: &mut Vec<u8>)
             "  {name}\n    Copyright: {copyright}\n    License: OFL-1.1\n    URL: {url}\n\n"
         ));
     }
+    header.push_str(
+        "  Material Design Icons (selected SVG glyphs)\n\
+           Copyright: Pictogrammers\n\
+           License: Apache-2.0\n\
+           URL: https://pictogrammers.com/library/mdi/\n\n\
+         Google Material Icons (selected SVG glyphs)\n\
+           Copyright: Google LLC\n\
+           License: Apache-2.0\n\
+           URL: https://fonts.google.com/icons\n\n",
+    );
     buf.extend_from_slice(header.as_bytes());
-    let license_path = workspace.join("assets/fonts/NotoSans-Regular-LICENSE.txt");
-    match std::fs::read(&license_path) {
-        Ok(text) => buf.extend_from_slice(&text),
+
+    let licenses = workspace
+        .parent()
+        .expect("workspace must be below repository root")
+        .join("LICENSES");
+    append_license_text(buf, &licenses, "OFL-1.1", "OFL-1.1.txt");
+    append_license_text(buf, &licenses, "Apache-2.0", "Apache-2.0.txt");
+
+    buf.extend_from_slice(format!("\n{sep}\nINCORPORATED SOURCE LICENSES\n{sep}\n\n").as_bytes());
+    for (id, file) in [
+        ("GPL-2.0-or-later", "GPL-2.0-or-later.txt"),
+        ("MPL-2.0", "MPL-2.0.txt"),
+        ("MIT", "MIT.txt"),
+    ] {
+        append_license_text(buf, &licenses, id, file);
+    }
+}
+
+fn append_license_text(buf: &mut Vec<u8>, licenses_dir: &std::path::Path, id: &str, file: &str) {
+    buf.extend_from_slice(format!("\n--- {id} ---\n\n").as_bytes());
+    let path = licenses_dir.join(file);
+    match std::fs::read(&path) {
+        Ok(text) => {
+            buf.extend_from_slice(&text);
+            if !text.ends_with(b"\n") {
+                buf.push(b'\n');
+            }
+        }
         Err(e) => {
-            println!("cargo:warning=could not read OFL-1.1 font license ({e})");
-            buf.extend_from_slice(b"[OFL-1.1 font license file not found]\n");
+            println!("cargo:warning=could not read {id} license text ({e})");
+            buf.extend_from_slice(format!("[{id} license file not found]\n").as_bytes());
         }
     }
 }

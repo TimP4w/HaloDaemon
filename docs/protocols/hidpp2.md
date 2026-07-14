@@ -237,7 +237,7 @@ For a **native firmware effect** the block is the effect's 15-byte `base` (byte 
 
 | Function | Bytes sent | Params | Notes |
 |----------|-----------|--------|-------|
-| getInfo / LED bitmap (`0x00`) | `11 dd fi 01 00 00 <page> ··` | `[0x00,0x00,page]`, pages 0..3 | 3 pages × 13 bytes; set bits = firmware LED IDs 1..31 (`parse_pk_led_bitmap`) |
+| getInfo / LED bitmap (`0x00`) | `11 dd fi 01 00 <page> 00 ··` | `[0x00,page,0x00]`, pages 0..2 | 3 pages × 14 bytes; zone ID = `page*112 + bit`, capped at the u8 wire limit (`parse_pk_led_bitmap_page`) |
 | setIndividual (`0x10`) | `11 dd fi 11 <k r g b ×4>` | up to 4 × `(key,r,g,b)` | `encode_individual_pairs`; unused entries zero |
 | setConsecutive (`0x20`) | `11 dd fi 21 <firstId> <r g b ×5>` | run start + ≤5 colours | streaming-frame run-length (`encode_frame`) |
 | setRange (`0x50`) | `11 dd fi 51 00 FF r g b ··` | `[0x00,0xFF,r,g,b]` | paints whole key range |

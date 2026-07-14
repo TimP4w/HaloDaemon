@@ -485,22 +485,22 @@ impl App {
             if let Some(detail) = note.code.detail() {
                 let (title, _) =
                     crate::domain::models::notifications::notification_text(&note.code);
-                self.plugin_issue_modal = Some(crate::app::PluginIssueModal {
+                self.issue_details_modal = Some(crate::app::IssueDetailsModal {
                     title,
                     detail: detail.to_owned(),
                 });
             }
         }
         if !domain::tour::is_active(&self.tour) && !download_prompt {
-            if let Some(modal) = &self.plugin_issue_modal {
+            if let Some(modal) = &self.issue_details_modal {
                 let dismissed = crate::ui::components::issue_modal(
                     ctx,
-                    "plugin_issue",
+                    "issue_details",
                     &modal.title,
                     &modal.detail,
                 );
                 if dismissed {
-                    self.plugin_issue_modal = None;
+                    self.issue_details_modal = None;
                 }
             }
         }

@@ -132,15 +132,60 @@ foreach ($line in $out) {
     }
 }
 $copied = 0
+$runtimeFiles = [System.Collections.Generic.List[string]]::new()
+[void]$runtimeFiles.Add("ffmpeg.exe")
 foreach ($name in $dllNames) {
     $src = Join-Path $ucrtBin $name
     if (Test-Path $src) {
         Copy-Item $src -Destination $StagingDir -Force
         $copied++
+        [void]$runtimeFiles.Add($name)
     }
 }
 if ($copied -eq 0) { Fail "no ffmpeg runtime DLLs collected — ntldd walk produced nothing" }
 Write-Host "  dlls  $copied runtime DLL(s) from UCRT64 for ffmpeg"
+
+# Record the exact MSYS2 packages that supplied ffmpeg.exe and every staged DLL,
+# and carry any license directories installed by those packages.  FFmpeg pulls in
+# many separately licensed codec/runtime libraries; treating the entire DLL set as
+# if it were only FFmpeg would hide those notices from recipients.
+$msysRoot = Split-Path $Ucrt64 -Parent
+$pacman = Join-Path $msysRoot "usr\bin\pacman.exe"
+if (-not (Test-Path $pacman)) { Fail "pacman not found: $pacman" }
+$packages = @{}
+foreach ($name in $runtimeFiles) {
+    $owner = (& $pacman -Qo "/ucrt64/bin/$name" 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $owner -notmatch ' is owned by (\S+) (\S+)$') {
+        Fail "cannot determine the MSYS2 package owning $name"
+    }
+    $packages[$Matches[1]] = $Matches[2]
+}
+
+$thirdPartyDir = Join-Path $StagingDir "ThirdPartyLicenses\MSYS2"
+New-Item -ItemType Directory -Force -Path $thirdPartyDir | Out-Null
+$manifest = [System.Collections.Generic.List[string]]::new()
+$manifest.Add("MSYS2 runtime packages bundled for FFmpeg")
+$manifest.Add("==========================================")
+$manifest.Add("")
+$manifest.Add("Package details and source archives: https://packages.msys2.org/")
+$manifest.Add("FFmpeg build and source: https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-ffmpeg")
+$manifest.Add("")
+foreach ($package in ($packages.Keys | Sort-Object)) {
+    $version = $packages[$package]
+    $manifest.Add("$package $version")
+    $shortName = $package -replace '^mingw-w64-ucrt-x86_64-', ''
+    $licenseDir = Join-Path $Ucrt64 "share\licenses\$shortName"
+    if (Test-Path $licenseDir) {
+        Copy-Item $licenseDir -Destination (Join-Path $thirdPartyDir $shortName) -Recurse -Force
+    } else {
+        $manifest.Add("  (the installed MSYS2 package contains no share/licenses/$shortName directory)")
+    }
+}
+$manifest.Add("")
+$manifest.Add("FFmpeg configure/build identification:")
+$manifest.Add($ffConfig.Trim())
+$manifest | Set-Content -Encoding UTF8 (Join-Path $thirdPartyDir "MSYS2-PACKAGES.txt")
+Write-Host "  asset ThirdPartyLicenses\MSYS2 ($($packages.Count) package records)"
 
 $size = "{0:N1} MB" -f ((Get-ChildItem $StagingDir -Recurse -File |
     Measure-Object -Property Length -Sum).Sum / 1MB)

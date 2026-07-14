@@ -114,16 +114,16 @@ When you port or adapt third-party code:
 1. Add an SPDX header to the top of the file, e.g.
 
    ```rust
-   // SPDX-License-Identifier: GPL-3.0-or-later
-   // SPDX-FileCopyrightText: liquidctl contributors <https://github.com/liquidctl/liquidctl>
+   // SPDX-License-Identifier: GPL-2.0-or-later
+   // SPDX-FileCopyrightText: Adam Honse (CalcProgrammer1) — OpenRGB project
    ```
 
-   Use the upstream's actual license/copyright and a link to the source. See [drivers/vendors/nzxt/protocols/nzxt_kraken.rs](src/daemon/src/drivers/vendors/nzxt/protocols/nzxt_kraken.rs) for the pattern.
+   Use the upstream's actual license/copyright and a link to the source. See [drivers/transports/smbus/mod.rs](src/daemon/src/drivers/transports/smbus/mod.rs) for the pattern.
 2. If the upstream license text isn't already in `LICENSES/`, add the matching `<SPDX-id>.txt` file there.
 
 Rust crate dependency licenses are tracked separately by cargo-about ([src/about.toml](src/about.toml) + [src/about_licenses.hbs](src/about_licenses.hbs)); regenerate with the command at the top of `about.toml` when dependencies change.
 
-[docs/licenses.md](docs/licenses.md) is the full map of how licensing/attribution is discovered and shipped across every layer — REUSE/SPDX, cargo-about, bundled fonts, PawnIO blobs, FFmpeg, and the Windows installer. Read it before touching `REUSE.toml`, `about.toml`, or the installer.
+[docs/licenses.md](docs/licenses.md) is the full map of how licensing/attribution is discovered and shipped across every layer — REUSE/SPDX, cargo-about, bundled fonts/icons, PawnIO blobs, FFmpeg, and the Windows installer. Read it before touching `REUSE.toml`, `about.toml`, or the installer.
 
 ## Lint policy
 

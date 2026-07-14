@@ -230,22 +230,40 @@ impl Hidpp20 {
         Ok(())
     }
 
-    /// Discover a mouse's per-key LED ids by reading the 3-page (×13 byte)
-    /// PER_KEY_LIGHTING bitmap. Returns the low-range firmware ids (1..31).
+    /// Paint a static colour through PER_KEY_LIGHTING without assuming a
+    /// device class. Try the whole-range command first; devices with sparse
+    /// ranges can reject it and fall back to their discovered firmware IDs.
+    pub async fn per_key_set_static(&self, color: RgbColor, led_ids: &[u8]) -> Result<()> {
+        match self.per_key_set_all(color).await {
+            Ok(()) => Ok(()),
+            Err(range_err) if !led_ids.is_empty() => {
+                let pairs: Vec<_> = led_ids
+                    .iter()
+                    .map(|&id| (id, color.r, color.g, color.b))
+                    .collect();
+                self.write_per_key_pairs(&pairs).await.map_err(|e| {
+                    e.context(format!(
+                        "PER_KEY set-all failed ({range_err}); individual fallback failed"
+                    ))
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Discover addressable per-key LED IDs from the three GetInfo bitmap pages.
     pub async fn read_pk_led_ids(&self) -> Vec<u8> {
         let Some(pk) = self.idx(feature::PER_KEY_LIGHTING_V2) else {
             return Vec::new();
         };
-        let mut bitmap = vec![0u8; 39]; // 3 pages × 13 bytes
+        let mut ids = Vec::new();
         for page in 0u8..3 {
-            if let Ok(r) = self.call(pk, RGB_GET_INFO, &[0x00, 0x00, page]).await {
-                if r.len() >= 15 {
-                    let start = page as usize * 13;
-                    bitmap[start..start + 13].copy_from_slice(&r[2..15]);
-                }
+            if let Ok(r) = self.call(pk, RGB_GET_INFO, &[0x00, page, 0x00]).await {
+                let bitmap = r.get(2..16).unwrap_or_else(|| r.get(2..).unwrap_or(&[]));
+                ids.extend(effects::parse_pk_led_bitmap_page(page, bitmap));
             }
         }
-        effects::parse_pk_led_bitmap(&bitmap)
+        ids
     }
 
     /// Encode a streaming per-key animation frame (diffed against `cache`).
@@ -283,5 +301,68 @@ impl Hidpp20 {
     /// coordinator to key concurrent posts.
     pub fn devnum(&self) -> u8 {
         self.devnum
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::drivers::vendors::logitech::protocols::hidpp::test_util::MockHidppChannel;
+
+    fn hidpp_with(funcs: HashMap<u8, VecDeque<std::result::Result<Vec<u8>, String>>>) -> Hidpp20 {
+        let channel = Arc::new(MockHidppChannel::new(funcs));
+        Hidpp20::new(
+            channel,
+            0xff,
+            HashMap::from([(feature::PER_KEY_LIGHTING_V2, 0x01)]),
+        )
+    }
+
+    #[tokio::test]
+    async fn read_pk_led_ids_combines_all_bitmap_pages() {
+        let reply = |byte: usize, mask: u8| {
+            let mut data = vec![0u8; 16];
+            data[2 + byte] = mask;
+            Ok(data)
+        };
+        let funcs = HashMap::from([(
+            RGB_GET_INFO,
+            VecDeque::from([reply(0, 0x02), reply(0, 0x01), reply(0, 0x01)]),
+        )]);
+        assert_eq!(hidpp_with(funcs).read_pk_led_ids().await, vec![1, 112, 224]);
+    }
+
+    #[tokio::test]
+    async fn per_key_static_uses_range_when_device_accepts_it() {
+        let funcs = HashMap::from([
+            (0x50, VecDeque::from([Ok(vec![])])),
+            (0x70, VecDeque::from([Ok(vec![])])),
+        ]);
+        hidpp_with(funcs)
+            .per_key_set_static(RgbColor { r: 1, g: 2, b: 3 }, &[])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn per_key_static_falls_back_to_discovered_ids_after_range_rejection() {
+        let funcs = HashMap::from([(0x50, VecDeque::from([Err("INVALID_ARGUMENT".to_string())]))]);
+        hidpp_with(funcs)
+            .per_key_set_static(RgbColor { r: 1, g: 2, b: 3 }, &[4, 7, 11])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn per_key_static_surfaces_range_rejection_without_discovered_ids() {
+        let funcs = HashMap::from([(0x50, VecDeque::from([Err("INVALID_ARGUMENT".to_string())]))]);
+        let err = hidpp_with(funcs)
+            .per_key_set_static(RgbColor { r: 1, g: 2, b: 3 }, &[])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("INVALID_ARGUMENT"));
     }
 }

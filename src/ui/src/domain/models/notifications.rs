@@ -38,6 +38,10 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
             t!("notify.device_init_failed.title", device = device).to_string(),
             t!("notify.device_init_failed.message", detail = detail).to_string(),
         ),
+        DeviceWriteFailed { device, detail: _ } => (
+            t!("notify.device_write_failed.title", device = device).to_string(),
+            t!("notify.device_write_failed.message").to_string(),
+        ),
         FanStalled { fan } => (
             t!("notify.fan_stalled.title", fan = fan).to_string(),
             t!("notify.fan_stalled.message").to_string(),
@@ -90,6 +94,10 @@ mod tests {
                 detail: "boom".into(),
             },
             DeviceInitFailed {
+                device: "Kraken".into(),
+                detail: "boom".into(),
+            },
+            DeviceWriteFailed {
                 device: "Kraken".into(),
                 detail: "boom".into(),
             },

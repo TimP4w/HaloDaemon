@@ -59,9 +59,52 @@ pub(super) struct LogitechDeviceProfile {
     /// remap config) and restored by "reset". `None` → every button stays Native.
     /// Only CIDs the device actually exposes are seeded.
     pub(super) default_buttons: Option<&'static [(u16, ButtonAction)]>,
-    /// Keyboard layout for this model (`None` for mice). The driver resolves it
-    /// and maps each key through its `cid_map` to build per-key LED positions.
-    pub(super) key_layout: Option<&'static KeyLayoutSpec<'static>>,
+    /// Fixed LED cid_map for a non-keyboard device (mice): orders the PER_KEY
+    /// bitmap LEDs. Keyboards leave this `None` and declare `keyboard` instead.
+    pub(super) led_layout: Option<&'static KeyLayoutSpec<'static>>,
+    /// Per-variant keyboard layouts + language selection (keyboards only).
+    pub(super) keyboard: Option<&'static LogitechKeyboardSpec>,
+}
+
+impl LogitechDeviceProfile {
+    /// The effective LED `KeyLayoutSpec` for a resolved variant: a keyboard's
+    /// selected-variant layout, else a mouse's fixed `led_layout`.
+    pub(super) fn led_spec(
+        &self,
+        variant: halod_shared::keyboard::KeyVariant,
+    ) -> Option<&'static KeyLayoutSpec<'static>> {
+        match self.keyboard {
+            Some(kb) => Some(kb.spec_for(variant)),
+            None => self.led_layout,
+        }
+    }
+}
+
+/// A keyboard model's variant-specific key layouts plus the language/remap
+/// metadata the GUI selector needs. `iso: Some(..)` *is* the ISO-support
+/// declaration; a fixed-ANSI board (or a mouse) sets it to `None`.
+pub(super) struct LogitechKeyboardSpec {
+    pub(super) ansi: KeyLayoutSpec<'static>,
+    pub(super) iso: Option<KeyLayoutSpec<'static>>,
+    /// Languages the GUI offers for this model.
+    pub(super) languages: &'static [KeyboardLayout],
+    /// Grid `KeyId` → KeyRemap control id, for the clickable Keys-tab widget.
+    /// Empty when no mapping is established (clicks disabled).
+    pub(super) remap_cids: &'static [(KeyId, u16)],
+}
+
+impl LogitechKeyboardSpec {
+    /// The `KeyLayoutSpec` for a resolved variant. Falls back to ANSI when the
+    /// variant is ISO but the model declares no ISO layout.
+    pub(super) fn spec_for(
+        &self,
+        variant: halod_shared::keyboard::KeyVariant,
+    ) -> &KeyLayoutSpec<'static> {
+        match variant {
+            halod_shared::keyboard::KeyVariant::Iso => self.iso.as_ref().unwrap_or(&self.ansi),
+            halod_shared::keyboard::KeyVariant::Ansi => &self.ansi,
+        }
+    }
 }
 
 /// G502 X Plus MOUSE_BUTTON_SPY button labels, keyed by synthetic CID (bitmap
@@ -104,6 +147,8 @@ static G502X_PLUS_DEFAULT_BUTTONS: &[(u16, ButtonAction)] = &[
     (13, ButtonAction::MomentaryDpi { dpi: 400 }),
 ];
 
+/// G502 X Plus LED reorder map — a fixed cid_map used only to order the PER_KEY
+/// bitmap LEDs. A mouse, so it declares `led_layout` (below), not a `keyboard`.
 static G502X_PLUS_LED_LAYOUT: KeyLayoutSpec<'static> = KeyLayoutSpec {
     base: StandardLayout::Tkl,
     edits: &[],
@@ -169,7 +214,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         bitmap_button_labels: Some(G502X_PLUS_BITMAP_BUTTONS),
         bitmap_button_prefix: "Button",
         default_buttons: Some(G502X_PLUS_DEFAULT_BUTTONS),
-        key_layout: Some(&G502X_PLUS_LED_LAYOUT),
+        led_layout: Some(&G502X_PLUS_LED_LAYOUT),
+        keyboard: None,
     },
     LogitechDeviceProfile {
         wpid: None,
@@ -183,7 +229,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         bitmap_button_labels: Some(G502_HERO_BITMAP_BUTTONS),
         bitmap_button_prefix: "Button",
         default_buttons: Some(G502_HERO_DEFAULT_BUTTONS),
-        key_layout: None,
+        led_layout: None,
+        keyboard: None,
     },
     LogitechDeviceProfile {
         wpid: Some(WPID_GPROX_TKL),
@@ -204,7 +251,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         bitmap_button_labels: None,
         bitmap_button_prefix: "G",
         default_buttons: None,
-        key_layout: Some(&GPROX_TKL_LAYOUT),
+        led_layout: None,
+        keyboard: Some(&GPROX_TKL_KB_SPEC),
     },
     // ── LIGHTSPEED headsets ──────────────────────────────────────────────────
     LogitechDeviceProfile {
@@ -219,7 +267,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         bitmap_button_labels: None,
         bitmap_button_prefix: "",
         default_buttons: None,
-        key_layout: None,
+        led_layout: None,
+        keyboard: None,
     },
     LogitechDeviceProfile {
         wpid: None,
@@ -233,7 +282,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         bitmap_button_labels: None,
         bitmap_button_prefix: "",
         default_buttons: None,
-        key_layout: None,
+        led_layout: None,
+        keyboard: None,
     },
     LogitechDeviceProfile {
         wpid: None,
@@ -247,7 +297,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         bitmap_button_labels: None,
         bitmap_button_prefix: "",
         default_buttons: None,
-        key_layout: None,
+        led_layout: None,
+        keyboard: None,
     },
     LogitechDeviceProfile {
         wpid: None,
@@ -261,7 +312,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         bitmap_button_labels: None,
         bitmap_button_prefix: "",
         default_buttons: None,
-        key_layout: None,
+        led_layout: None,
+        keyboard: None,
     },
     LogitechDeviceProfile {
         wpid: None,
@@ -275,7 +327,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         bitmap_button_labels: None,
         bitmap_button_prefix: "",
         default_buttons: None,
-        key_layout: None,
+        led_layout: None,
+        keyboard: None,
     },
     LogitechDeviceProfile {
         wpid: None,
@@ -289,7 +342,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         bitmap_button_labels: None,
         bitmap_button_prefix: "",
         default_buttons: None,
-        key_layout: None,
+        led_layout: None,
+        keyboard: None,
     },
     LogitechDeviceProfile {
         wpid: None,
@@ -303,7 +357,8 @@ pub(super) static DEVICE_PROFILES: &[LogitechDeviceProfile] = &[
         bitmap_button_labels: None,
         bitmap_button_prefix: "",
         default_buttons: None,
-        key_layout: None,
+        led_layout: None,
+        keyboard: None,
     },
 ];
 
@@ -428,19 +483,42 @@ const KEY_FN: u16 = 111;
 const KEY_COPY: u16 = 98;
 const KEY_ISO_HASH: u16 = 47;
 
-/// Device-specific keys layered over the standard TKL base. `col`/`row` use the
-/// same grid units as `StandardLayout::Tkl` (the media row sits above the
-/// function row at `row = -1.5`).
-static GPROX_TKL_EDITS: &[KeyEdit] = &[
+/// Device-specific keys common to both variants: the media row above the
+/// function row (`row = -1.5`), plus `Fn` and `COPY` on the modifier row.
+/// `col` is the key's left edge, matching `StandardLayout` grid units.
+static GPROX_TKL_ANSI_EDITS: &[KeyEdit] = &[
     KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_MEDIA_BRIGHTNESS), 5.0, -1.5)),
     KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_MEDIA_BACK), 11.0, -1.5)),
     KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_MEDIA_PLAY), 12.0, -1.5)),
     KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_MEDIA_FWD), 13.0, -1.5)),
     KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_MEDIA_MUTE), 14.0, -1.5)),
-    // ISO `$` key — right of `'`, inside the Enter notch.
-    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_ISO_HASH), 12.875, 4.5)),
-    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_FN), 11.25, 7.5)),
-    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_COPY), 12.25, 7.5)),
+    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_FN), 11.25, 5.5)),
+    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_COPY), 12.25, 5.5)),
+    KeyEdit::Remove(KeyId::IsoExtra),
+];
+
+/// ISO variant: the common device keys, plus the Logitech `$`/`#` key
+/// (firmware zone 47) replacing the standard home-row Backslash.
+static GPROX_TKL_ISO_EDITS: &[KeyEdit] = &[
+    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_MEDIA_BRIGHTNESS), 5.0, -1.5)),
+    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_MEDIA_BACK), 11.0, -1.5)),
+    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_MEDIA_PLAY), 12.0, -1.5)),
+    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_MEDIA_FWD), 13.0, -1.5)),
+    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_MEDIA_MUTE), 14.0, -1.5)),
+    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_FN), 11.25, 5.5)),
+    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_COPY), 12.25, 5.5)),
+    // ISO `$` key sits where the standard ISO home-row Backslash is.
+    KeyEdit::Add(KeyCell::new(KeyId::Custom(KEY_ISO_HASH), 12.75, 3.5)),
+    KeyEdit::Remove(KeyId::Backslash),
+];
+
+static GPROX_TKL_LANGUAGES: &[KeyboardLayout] = &[
+    KeyboardLayout::US,
+    KeyboardLayout::CH,
+    KeyboardLayout::IT,
+    KeyboardLayout::DE,
+    KeyboardLayout::FR,
+    KeyboardLayout::UK,
 ];
 
 /// Logitech firmware zone ID → device-neutral `KeyId`. Covers every key in the
@@ -552,10 +630,19 @@ static GPROX_TKL_CID_MAP: &[(u32, KeyId)] = &[
     (KEY_ISO_HASH as u32, KeyId::Custom(KEY_ISO_HASH)),
 ];
 
-static GPROX_TKL_LAYOUT: KeyLayoutSpec<'static> = KeyLayoutSpec {
-    base: StandardLayout::Tkl,
-    edits: GPROX_TKL_EDITS,
-    cid_map: GPROX_TKL_CID_MAP,
+static GPROX_TKL_KB_SPEC: LogitechKeyboardSpec = LogitechKeyboardSpec {
+    ansi: KeyLayoutSpec {
+        base: StandardLayout::Tkl,
+        edits: GPROX_TKL_ANSI_EDITS,
+        cid_map: GPROX_TKL_CID_MAP,
+    },
+    iso: Some(KeyLayoutSpec {
+        base: StandardLayout::TklIso,
+        edits: GPROX_TKL_ISO_EDITS,
+        cid_map: GPROX_TKL_CID_MAP,
+    }),
+    languages: GPROX_TKL_LANGUAGES,
+    remap_cids: &[],
 };
 
 #[cfg(test)]
@@ -596,18 +683,65 @@ mod tests {
 
     // ── TKL key layout ───────────────────────────────────────────────────────
 
+    fn resolved_ids(spec: &KeyLayoutSpec) -> Vec<KeyId> {
+        spec.resolve().iter().map(|c| c.id).collect()
+    }
+
     #[test]
-    fn tkl_layout_includes_iso_extra_keys() {
-        let ids: Vec<u32> = tkl_key_positions(&GPROX_TKL_LAYOUT)
+    fn ansi_variant_has_backslash_and_no_iso_keys() {
+        let ids = resolved_ids(&GPROX_TKL_KB_SPEC.ansi);
+        assert!(ids.contains(&KeyId::Backslash), "ANSI keeps Backslash");
+        assert!(!ids.contains(&KeyId::IsoExtra), "ANSI drops <> key");
+        assert!(
+            !ids.contains(&KeyId::Custom(KEY_ISO_HASH)),
+            "ANSI has no $ key"
+        );
+    }
+
+    #[test]
+    fn iso_variant_has_iso_keys_and_no_backslash() {
+        let iso = GPROX_TKL_KB_SPEC.iso.as_ref().expect("declares ISO");
+        let cells = iso.resolve();
+        let ids: Vec<KeyId> = cells.iter().map(|c| c.id).collect();
+        assert!(ids.contains(&KeyId::IsoExtra), "ISO has <> key");
+        assert!(ids.contains(&KeyId::Custom(KEY_ISO_HASH)), "ISO has $ key");
+        assert!(!ids.contains(&KeyId::Backslash), "ISO drops Backslash");
+        let row = |id| cells.iter().find(|c| c.id == id).unwrap().row;
+        assert_eq!(
+            row(KeyId::Enter),
+            row(KeyId::Q),
+            "ISO Enter LED sits in the QWERTY row"
+        );
+    }
+
+    #[test]
+    fn every_resolved_key_of_both_variants_maps_through_cid_map() {
+        let map = GPROX_TKL_CID_MAP;
+        for variant in [
+            &GPROX_TKL_KB_SPEC.ansi,
+            GPROX_TKL_KB_SPEC.iso.as_ref().unwrap(),
+        ] {
+            for cell in variant.resolve() {
+                assert!(
+                    map.iter().any(|(_, kid)| *kid == cell.id),
+                    "resolved key {:?} has no cid_map entry",
+                    cell.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tkl_led_positions_include_device_specific_keys() {
+        let ids: Vec<u32> = tkl_key_positions(&GPROX_TKL_KB_SPEC.ansi)
             .iter()
             .map(|p| p.id)
             .collect();
-        // <> (97), COPY (98) and the media row (150, 152-155) were recovered
-        // from HID++ 0x08/0x5E per-LED captures — see rev_eng notes.
-        for id in [97u32, 98, 150, 152, 153, 154, 155] {
+        // COPY (98) and the media row (150, 152-155) were recovered from HID++
+        // 0x08/0x5E per-LED captures — see rev_eng notes. (97/<> is ANSI-absent.)
+        for id in [98u32, 150, 152, 153, 154, 155] {
             assert!(ids.contains(&id), "missing zone id {id}");
         }
-        // A duplicate zone ID would shadow an LED in the row-major grid.
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();

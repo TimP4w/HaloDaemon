@@ -501,6 +501,12 @@ pub enum NotificationCode {
         device: String,
         detail: String,
     },
+    /// A user-requested hardware write failed. The toast stays concise while
+    /// `detail` carries the complete error chain for the Details modal.
+    DeviceWriteFailed {
+        device: String,
+        detail: String,
+    },
     FanStalled {
         fan: String,
     },
@@ -549,6 +555,7 @@ impl NotificationCode {
             EngineStopped { .. }
             | ChainLinkRestoreFailed { .. }
             | DeviceInitFailed { .. }
+            | DeviceWriteFailed { .. }
             | Generic { .. } => NotificationSeverity::Error,
             KeyRemapUnavailable { .. }
             | WirelessReinitFailed { .. }
@@ -567,7 +574,9 @@ impl NotificationCode {
     pub fn detail(&self) -> Option<&str> {
         use NotificationCode::*;
         match self {
-            PluginRuntimeError { detail, .. } | PluginConnectFailed { detail, .. } => Some(detail),
+            DeviceWriteFailed { detail, .. }
+            | PluginRuntimeError { detail, .. }
+            | PluginConnectFailed { detail, .. } => Some(detail),
             _ => None,
         }
     }
@@ -1215,6 +1224,7 @@ pub enum DeviceCapability {
     OnboardProfiles(OnboardProfiles),
     Lcd(LcdStatus),
     KeyRemap(KeyRemapStatus),
+    KeyboardLayout(crate::keyboard::KeyboardLayoutStatus),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1370,12 +1380,15 @@ pub enum KeyboardFormFactor {
     Compact60,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyboardLayout {
     CH,
     IT,
     US,
+    DE,
+    FR,
+    UK,
     Unknown,
 }
 
@@ -1947,6 +1960,11 @@ impl WireDevice {
     find_cap!(dpi, Dpi, DpiStatus);
     find_cap!(onboard_profiles, OnboardProfiles, OnboardProfiles);
     find_cap!(key_remap, KeyRemap, KeyRemapStatus);
+    find_cap!(
+        keyboard_layout,
+        KeyboardLayout,
+        crate::keyboard::KeyboardLayoutStatus
+    );
     find_cap!(equalizer, Equalizer, Equalizer);
     find_cap!(children, Children, Vec<WireDevice>);
     find_cap!(pairing, Pairing, PairingStatus);
@@ -2077,7 +2095,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notification_detail_and_severity_for_plugin_codes() {
+    fn notification_detail_and_severity_for_detail_codes() {
         let connect = NotificationCode::PluginConnectFailed {
             plugin: "wled".into(),
             detail: "127.0.0.1 blocked".into(),
@@ -2086,8 +2104,14 @@ mod tests {
             plugin: "wled".into(),
             detail: "lua boom".into(),
         };
+        let device = NotificationCode::DeviceWriteFailed {
+            device: "keyboard".into(),
+            detail: "HID++ rejected write".into(),
+        };
         assert_eq!(connect.detail(), Some("127.0.0.1 blocked"));
         assert_eq!(runtime.detail(), Some("lua boom"));
+        assert_eq!(device.detail(), Some("HID++ rejected write"));
+        assert_eq!(device.severity(), NotificationSeverity::Error);
         assert_eq!(connect.severity(), NotificationSeverity::Warning);
         // A code that carries no modal text has no detail.
         assert_eq!(
@@ -2289,6 +2313,10 @@ mod tests {
                 detail: "e".into(),
             },
             DeviceInitFailed {
+                device: "d".into(),
+                detail: "e".into(),
+            },
+            DeviceWriteFailed {
                 device: "d".into(),
                 detail: "e".into(),
             },

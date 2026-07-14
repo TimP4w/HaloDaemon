@@ -19,6 +19,7 @@ use crate::drivers::vendors::logitech::protocols::hidpp::feature;
 use crate::drivers::vendors::logitech::protocols::hidpp::v2::rgb::find_native_effect;
 use crate::drivers::vendors::logitech::protocols::hidpp::v2::Hidpp20;
 use crate::drivers::{RgbCapability, RgbStateSlot};
+use halod_shared::keyboard::KeyLayoutSpec;
 use halod_shared::types::{
     DeviceCapability, EffectParamValue, KeyboardLayout, NativeEffect, RgbColor, RgbDescriptor,
     RgbState, RgbZone, ZoneTopology,
@@ -30,35 +31,27 @@ use halod_shared::zone_transform::build_permutation;
 /// IDs — keyboards get those from their static layout, mice only once PK
 /// discovery has populated `pk_led_ids`. Anything else stays on whole-zone
 /// `RgbEffects`, which `write_frame` collapses to `colors.first()`.
-fn rgb_effects_wire(is_keyboard: bool, has_per_key: bool, pk_leds_discovered: bool) -> RgbWire {
-    if has_per_key && (is_keyboard || pk_leds_discovered) {
+fn rgb_effects_wire(has_per_key: bool, pk_leds_discovered: bool) -> RgbWire {
+    if has_per_key && pk_leds_discovered {
         RgbWire::PerKey
     } else {
         RgbWire::RgbEffects
     }
 }
 
-/// Remap the streaming `wire` to the wire a one-shot static fill should use.
-/// PerKey drives per-LED animation; a static colour is better served by the
-/// device's hardware effect table (RGB_EFFECTS / COLOR_LED) when it has one,
-/// falling back to the per-key path only for pure per-key devices.
-fn static_effect_wire(wire: RgbWire, has_rgb_effects: bool, has_color_led: bool) -> RgbWire {
-    match wire {
-        RgbWire::PerKey if has_rgb_effects => RgbWire::RgbEffects,
-        RgbWire::PerKey if has_color_led => RgbWire::ColorLedEffects,
-        other => other,
-    }
+fn is_engine_exit(previous: Option<&RgbState>, next: &RgbState) -> bool {
+    matches!(
+        previous,
+        Some(RgbState::Engine | RgbState::DirectEffect { .. })
+    ) && !matches!(next, RgbState::Engine | RgbState::DirectEffect { .. })
 }
 
-/// Build `setIndividual` pairs painting every id in `led_ids` a single colour.
-/// Used for a mouse static apply on the PerKey wire, where the keyboard-style
-/// `SET_RANGE 0x00..0xFF` of `per_key_set_all` is rejected (INVALID_ARGUMENT)
-/// because only the discovered firmware ids are valid.
-fn pk_uniform_pairs(led_ids: &[u8], color: RgbColor) -> Vec<(u8, u8, u8, u8)> {
-    led_ids
-        .iter()
-        .map(|&id| (id, color.r, color.g, color.b))
-        .collect()
+fn finish_rgb_apply(write_result: Result<()>, suppress_pre_drain_error: bool) -> Result<()> {
+    if suppress_pre_drain_error && write_result.is_err() {
+        Ok(())
+    } else {
+        write_result
+    }
 }
 
 fn collect_pairs(
@@ -88,21 +81,14 @@ impl LogitechDevice {
     // ── RGB write helpers ─────────────────────────────────────────────────────
 
     pub(super) async fn rgb_set_static(&self, color: RgbColor) -> Result<()> {
-        let (zones, static_slots, wire, has_rgb_effects, has_color_led) = {
+        let (zones, static_slots, wire) = {
             let state = self.state.lock().await;
             (
                 state.rgb.rgb_zones.clone(),
                 state.rgb.rgb_static_slots.clone(),
                 state.rgb.rgb_wire,
-                state.features.contains_key(&feature::RGB_EFFECTS),
-                state.features.contains_key(&feature::COLOR_LED_EFFECTS),
             )
         };
-        // PerKey is a per-LED *streaming* wire; a one-shot static fill belongs on
-        // the hardware effect table when the device exposes one. per_key_set_all's
-        // whole-range paint is rejected (INVALID_ARGUMENT) by devices whose valid
-        // ids are sparse, and it would clobber the persistent hardware effect.
-        let wire = static_effect_wire(wire, has_rgb_effects, has_color_led);
         let hidpp = self.hidpp2().await;
 
         log::debug!(
@@ -116,23 +102,14 @@ impl LogitechDevice {
 
         match wire {
             RgbWire::PerKey => {
-                // Reached only by a pure per-key device (no effect table).
-                // Keyboards accept the whole-range `SET_RANGE 0x00..0xFF`; mice
-                // only accept their discovered firmware ids, so paint those
-                // explicitly to avoid an INVALID_ARGUMENT rejection.
-                if self.is_keyboard() {
-                    hidpp.per_key_set_all(color).await.map_err(|e| {
-                        log::warn!("[{}] PER_KEY set-all failed: {e}", self.id);
+                let pk_led_ids = { self.state.lock().await.rgb.pk_led_ids.clone() };
+                hidpp
+                    .per_key_set_static(color, &pk_led_ids)
+                    .await
+                    .map_err(|e| {
+                        log::warn!("[{}] PER_KEY static failed: {e}", self.id);
                         e
                     })?;
-                } else {
-                    let pk_led_ids = { self.state.lock().await.rgb.pk_led_ids.clone() };
-                    let pairs = pk_uniform_pairs(&pk_led_ids, color);
-                    hidpp.write_per_key_pairs(&pairs).await.map_err(|e| {
-                        log::warn!("[{}] PER_KEY set-all (mouse) failed: {e}", self.id);
-                        e
-                    })?;
-                }
             }
             RgbWire::ColorLedEffects => {
                 let mut last_err = None;
@@ -386,7 +363,8 @@ impl LogitechDevice {
     fn init_rgb_pk_fallback(
         &self,
         pk_idx: u8,
-        keyboard_layout: &KeyboardLayout,
+        key_layout: Option<&KeyLayoutSpec>,
+        language: &KeyboardLayout,
         state: &mut LogitechDeviceState,
     ) {
         let zone_info = self.profile.map(|p| p.zones).unwrap_or(&[]).first();
@@ -395,9 +373,8 @@ impl LogitechDevice {
             zone_info
                 .map(|z| z.topology.clone())
                 .unwrap_or(ZoneTopology::Linear),
-            keyboard_layout,
+            language,
         );
-        let key_layout = self.profile.and_then(|p| p.key_layout);
         let leds = zone_info
             .map(|zi| leds_for_zone_info(zi, key_layout))
             .unwrap_or_default();
@@ -423,7 +400,8 @@ impl LogitechDevice {
         &self,
         hidpp: &Hidpp20,
         zone_count: u8,
-        keyboard_layout: &KeyboardLayout,
+        key_layout: Option<&KeyLayoutSpec<'_>>,
+        language: &KeyboardLayout,
     ) -> (Vec<RgbZone>, Vec<u8>) {
         let mut zones = Vec::new();
         let mut static_slots = Vec::new();
@@ -457,10 +435,10 @@ impl LogitechDevice {
                     zone_info
                         .map(|zi| zi.topology.clone())
                         .unwrap_or(ZoneTopology::Linear),
-                    keyboard_layout,
+                    language,
                 ),
                 leds: zone_info
-                    .map(|zi| leds_for_zone_info(zi, self.profile.and_then(|p| p.key_layout)))
+                    .map(|zi| leds_for_zone_info(zi, key_layout))
                     .unwrap_or_default(),
             });
         }
@@ -468,44 +446,44 @@ impl LogitechDevice {
         (zones, static_slots)
     }
 
-    /// For non-keyboard devices: discover the firmware LED IDs from the
-    /// PER_KEY_LIGHTING bitmap. If more than one ID is found, the first zone's
-    /// LED positions are rebuilt to match and the IDs stored for RGB writes.
-    async fn rgb_discover_mouse_pk_leds(
+    /// Discover firmware LED IDs from PER_KEY_LIGHTING. A static layout, when
+    /// available, orders and filters the bitmap to LEDs represented by the zone.
+    async fn rgb_discover_pk_leds(
         &self,
         hidpp: &Hidpp20,
+        key_layout: Option<&KeyLayoutSpec<'_>>,
         zones: &mut [RgbZone],
         state: &mut LogitechDeviceState,
     ) {
-        let mut low_ids = hidpp.read_pk_led_ids().await;
-        log::debug!("[{}] PK bitmap low_ids: {:?}", self.id, low_ids);
+        let mut ids = hidpp.read_pk_led_ids().await;
+        log::debug!("[{}] PK bitmap ids: {:?}", self.id, ids);
 
-        if let Some(layout) = self.profile.and_then(|p| p.key_layout) {
+        if let Some(layout) = key_layout {
             let ordered: Vec<u8> = layout
                 .cid_map
                 .iter()
                 .filter_map(|(fid, _)| {
-                    let id = *fid as u8;
-                    low_ids.contains(&id).then_some(id)
+                    let id = u8::try_from(*fid).ok()?;
+                    ids.contains(&id).then_some(id)
                 })
                 .collect();
-            if ordered.len() == low_ids.len() {
-                low_ids = ordered;
+            if !ordered.is_empty() {
+                ids = ordered;
                 log::debug!(
                     "[{}] PK bitmap reordered via key_layout: {:?}",
                     self.id,
-                    low_ids
+                    ids
                 );
             }
         }
 
-        if low_ids.len() > 1 && zones.len() <= 1 {
-            let leds = super::led_positions::led_strip_from_ids(&low_ids);
+        if ids.len() > 1 && zones.len() <= 1 && zones.first().is_some_and(|z| z.leds.is_empty()) {
+            let leds = super::led_positions::led_strip_from_ids(&ids);
             if let Some(zone) = zones.get_mut(0) {
                 zone.leds = leds;
             }
-            state.rgb.pk_led_ids = low_ids;
         }
+        state.rgb.pk_led_ids = ids;
     }
 
     /// Build zones via COLOR_LED_EFFECTS (0x8070) — same shape as
@@ -515,7 +493,8 @@ impl LogitechDevice {
         &self,
         hidpp: &Hidpp20,
         zone_count: u8,
-        keyboard_layout: &KeyboardLayout,
+        key_layout: Option<&KeyLayoutSpec<'_>>,
+        language: &KeyboardLayout,
     ) -> (Vec<RgbZone>, Vec<u8>) {
         use crate::drivers::vendors::logitech::protocols::hidpp::v2::rgb::color_led::color_led_location_name;
 
@@ -554,10 +533,10 @@ impl LogitechDevice {
                     zone_info
                         .map(|zi| zi.topology.clone())
                         .unwrap_or(ZoneTopology::Linear),
-                    keyboard_layout,
+                    language,
                 ),
                 leds: zone_info
-                    .map(|zi| leds_for_zone_info(zi, self.profile.and_then(|p| p.key_layout)))
+                    .map(|zi| leds_for_zone_info(zi, key_layout))
                     .unwrap_or_else(|| super::led_positions::mouse_led_positions(1)),
             });
         }
@@ -568,7 +547,8 @@ impl LogitechDevice {
     pub(super) async fn init_rgb(
         &self,
         features: &HashMap<u16, u8>,
-        keyboard_layout: &KeyboardLayout,
+        key_layout: Option<&KeyLayoutSpec<'_>>,
+        language: &KeyboardLayout,
         state: &mut LogitechDeviceState,
     ) {
         let has_rgb = features.contains_key(&feature::RGB_EFFECTS);
@@ -590,14 +570,14 @@ impl LogitechDevice {
                 }
 
                 let (zones, static_slots) = self
-                    .color_led_build_zones(&hidpp, zone_count, keyboard_layout)
+                    .color_led_build_zones(&hidpp, zone_count, key_layout, language)
                     .await;
 
                 state.rgb.rgb_static_slots = static_slots;
                 state.rgb.rgb_wire = RgbWire::ColorLedEffects;
                 self.commit_rgb_descriptor(zones, state);
             } else if let Some(pk) = pk_idx {
-                self.init_rgb_pk_fallback(pk, keyboard_layout, state);
+                self.init_rgb_pk_fallback(pk, key_layout, language, state);
             } else {
                 log::debug!("[{}] No RGB feature found", self.id);
             }
@@ -616,19 +596,17 @@ impl LogitechDevice {
         }
 
         let (mut zones, static_slots) = self
-            .rgb_build_zones(&hidpp, zone_count, keyboard_layout)
+            .rgb_build_zones(&hidpp, zone_count, key_layout, language)
             .await;
 
-        // For mice: overlay the PK bitmap to get exact per-LED firmware IDs.
-        if !self.is_keyboard() && pk_idx.is_some() {
-            self.rgb_discover_mouse_pk_leds(&hidpp, &mut zones, state)
+        if pk_idx.is_some() {
+            self.rgb_discover_pk_leds(&hidpp, key_layout, &mut zones, state)
                 .await;
         }
 
         state.rgb.rgb_static_slots = static_slots;
         let pk_leds_discovered = !state.rgb.pk_led_ids.is_empty();
-        state.rgb.rgb_wire =
-            rgb_effects_wire(self.is_keyboard(), pk_idx.is_some(), pk_leds_discovered);
+        state.rgb.rgb_wire = rgb_effects_wire(pk_idx.is_some(), pk_leds_discovered);
         self.commit_rgb_descriptor(zones, state);
     }
 }
@@ -706,6 +684,10 @@ impl RgbCapability for LogitechDevice {
     }
 
     async fn apply(&self, new_state: RgbState) -> Result<()> {
+        let suppress_pre_drain_error = {
+            let state = self.state.lock().await;
+            is_engine_exit(state.rgb.rgb_state.as_ref(), &new_state)
+        };
         // Static/PerLed/NativeEffect overwrite the hardware LEDs directly, so the
         // next streamed frame must be sent in full rather than diffed against a
         // now-stale cache.
@@ -731,7 +713,10 @@ impl RgbCapability for LogitechDevice {
         };
         // Record the requested state even when the hardware write failed.
         self.state.lock().await.rgb.rgb_state = Some(new_state);
-        write_result
+        // rgb_apply waits for the effect stream to drain and writes an engine
+        // exit state again. That post-drain write remains authoritative and
+        // any failure from it is returned to the GUI.
+        finish_rgb_apply(write_result, suppress_pre_drain_error)
     }
 
     fn current_state(&self) -> Option<RgbState> {
@@ -853,68 +838,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keyboard_with_per_key_streams_per_led() {
-        // Keyboard LEDs always carry real firmware IDs, so discovery is moot.
-        assert_eq!(rgb_effects_wire(true, true, false), RgbWire::PerKey);
-        assert_eq!(rgb_effects_wire(true, true, true), RgbWire::PerKey);
+    fn discovered_per_key_ids_select_per_key_wire() {
+        assert_eq!(rgb_effects_wire(true, true), RgbWire::PerKey);
     }
 
     #[test]
-    fn keyboard_without_per_key_stays_rgb_effects() {
-        assert_eq!(rgb_effects_wire(true, false, false), RgbWire::RgbEffects);
+    fn missing_per_key_feature_stays_rgb_effects() {
+        assert_eq!(rgb_effects_wire(false, false), RgbWire::RgbEffects);
     }
 
     #[test]
-    fn mouse_streams_per_led_only_once_leds_are_discovered() {
-        // Discovered PK LED IDs are real firmware IDs — safe to stream per-LED.
-        assert_eq!(rgb_effects_wire(false, true, true), RgbWire::PerKey);
-        // Not discovered: LEDs carry synthetic IDs, so stay whole-zone.
-        assert_eq!(rgb_effects_wire(false, true, false), RgbWire::RgbEffects);
+    fn per_key_wire_requires_discovered_ids() {
+        assert_eq!(rgb_effects_wire(true, true), RgbWire::PerKey);
+        assert_eq!(rgb_effects_wire(true, false), RgbWire::RgbEffects);
     }
 
     #[test]
-    fn no_per_key_feature_always_stays_rgb_effects() {
-        assert_eq!(rgb_effects_wire(false, false, true), RgbWire::RgbEffects);
-        assert_eq!(rgb_effects_wire(true, false, true), RgbWire::RgbEffects);
+    fn discovered_ids_without_per_key_feature_stay_rgb_effects() {
+        assert_eq!(rgb_effects_wire(false, true), RgbWire::RgbEffects);
     }
 
     #[test]
-    fn static_fill_prefers_effect_table_over_per_key() {
-        // A keyboard/mouse that also has an effect table must not paint a static
-        // colour via per_key_set_all's whole-range write (rejected on real hw).
-        assert_eq!(
-            static_effect_wire(RgbWire::PerKey, true, false),
-            RgbWire::RgbEffects
-        );
-        assert_eq!(
-            static_effect_wire(RgbWire::PerKey, false, true),
-            RgbWire::ColorLedEffects
-        );
-        // Pure per-key device (no effect table) stays on the per-key path.
-        assert_eq!(
-            static_effect_wire(RgbWire::PerKey, false, false),
-            RgbWire::PerKey
-        );
-        // Non-PerKey wires are untouched.
-        assert_eq!(
-            static_effect_wire(RgbWire::RgbEffects, true, true),
-            RgbWire::RgbEffects
-        );
-        assert_eq!(
-            static_effect_wire(RgbWire::ColorLedEffects, true, true),
-            RgbWire::ColorLedEffects
-        );
+    fn only_engine_exit_has_a_provisional_pre_drain_write() {
+        let static_state = RgbState::Static {
+            color: RgbColor { r: 1, g: 2, b: 3 },
+        };
+        let direct = RgbState::DirectEffect {
+            id: "rainbow".into(),
+            params: HashMap::new(),
+        };
+
+        assert!(is_engine_exit(Some(&direct), &static_state));
+        assert!(is_engine_exit(Some(&RgbState::Engine), &static_state));
+        assert!(!is_engine_exit(Some(&static_state), &static_state));
+        assert!(!is_engine_exit(Some(&direct), &RgbState::Engine));
+        assert!(!is_engine_exit(None, &static_state));
     }
 
     #[test]
-    fn pk_uniform_pairs_paints_only_discovered_ids() {
-        // A mouse static apply must target its real firmware ids, not the
-        // keyboard 0x00..0xFF range that firmware rejects.
-        let color = RgbColor { r: 1, g: 2, b: 3 };
-        assert_eq!(
-            pk_uniform_pairs(&[4, 7, 11], color),
-            vec![(4, 1, 2, 3), (7, 1, 2, 3), (11, 1, 2, 3)]
-        );
-        assert!(pk_uniform_pairs(&[], color).is_empty());
+    fn provisional_failure_is_suppressed_but_authoritative_failure_is_not() {
+        assert!(finish_rgb_apply(Err(anyhow::anyhow!("busy")), true).is_ok());
+        assert!(finish_rgb_apply(Err(anyhow::anyhow!("busy")), false).is_err());
+        assert!(finish_rgb_apply(Ok(()), true).is_ok());
     }
 }
