@@ -168,9 +168,6 @@ pub struct Registry {
     health: RwLock<HashMap<String, HealthState>>,
     invalid_manifests: RwLock<Vec<(PluginManifest, PluginIssue)>>,
     skipped: RwLock<Vec<SkippedPlugin>>,
-    /// Rejected-load warnings retained for validation tests.
-    #[cfg(test)]
-    load_warnings: RwLock<Vec<PluginLoadWarning>>,
 }
 
 /// Recover the guard if a panicked plugin poisoned the lock, so one bad plugin
@@ -1339,10 +1336,6 @@ impl Registry {
             .collect();
         *write_recover(&self.invalid_manifests) = invalid;
         *write_recover(&self.skipped) = scan.skipped;
-        #[cfg(test)]
-        {
-            *write_recover(&self.load_warnings) = scan.warnings;
-        }
         self.update(|s| {
             s.manifests = scan.manifests;
             s.effects = effects;
