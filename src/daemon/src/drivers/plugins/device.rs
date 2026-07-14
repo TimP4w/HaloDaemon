@@ -541,11 +541,9 @@ impl LuaDevice {
         // Keep a handle to the (metered) transport so the device can report
         // write-rate/throughput; the worker owns the one it does I/O through.
         let rate_transport = transport.clone();
-        let zones: Vec<RgbZone> = manifest
-            .rgb
-            .as_ref()
-            .map(|r| r.zones.clone())
-            .unwrap_or_default();
+        // Canonical packages report physical zones from initialize. Do not
+        // seed the worker from the removed static RGB catalog section.
+        let zones = Vec::new();
         let audio_registry: super::audio_api::SinkRegistry =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let worker = PluginHandle::spawn(
@@ -664,10 +662,10 @@ impl LuaDevice {
                 .map(|k| k.default_mappings.clone())
                 .unwrap_or_default(),
             key_remap_mappings: Mutex::new(HashMap::new()),
-            rgb_descriptor: manifest.rgb_descriptor().unwrap_or(RgbDescriptor {
+            rgb_descriptor: RgbDescriptor {
                 zones: Vec::new(),
                 native_effects: Vec::new(),
-            }),
+            },
             dynamic_rgb_descriptor: OnceLock::new(),
             rgb_slot: RgbStateSlot::default(),
             fan_slot: FanStateSlot::default(),

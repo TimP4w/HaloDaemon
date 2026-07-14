@@ -929,37 +929,13 @@ impl PluginManifest {
             .collect()
     }
 
-    /// The RGB descriptor a matched device advertises, if it has RGB.
-    pub fn rgb_descriptor(&self) -> Option<RgbDescriptor> {
-        self.rgb.as_ref().map(|r| RgbDescriptor {
-            zones: r.zones.clone(),
-            native_effects: r.native_effects.clone(),
-        })
-    }
-
     /// True when the plugin declares any capability that needs a live transport
     /// + worker. Device-only plugins skip the worker.
     pub fn needs_worker(&self) -> bool {
         // An integration plugin declares no capability section (it isn't a
         // capability-bearing device itself), but its root always needs a live
         // transport + Lua worker for `enumerate_controllers`/frame writes.
-        self.plugin_type == PluginKind::Integration
-            || self.rgb.is_some()
-            || self.fan.is_some()
-            || self.sensor.is_some()
-            || self.lcd.is_some()
-            || self.dpi.is_some()
-            || self.choice.is_some()
-            || self.range.is_some()
-            || self.boolean.is_some()
-            || self.action.is_some()
-            || self.battery.is_some()
-            || self.connection.is_some()
-            || self.equalizer.is_some()
-            || self.pairing.is_some()
-            || self.onboard_profiles.is_some()
-            || self.key_remap.is_some()
-            || self.chain.is_some()
+        self.plugin_type == PluginKind::Integration || !self.capabilities.is_empty()
     }
 
     /// Whether this package may execute on the current host. Unsupported
