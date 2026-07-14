@@ -15,9 +15,10 @@ use std::path::{Path, PathBuf};
 /// Embedded public keys are intentionally keyed by stable release key id so a
 /// later Halo build can accept a rotated official key without treating the
 /// repository URL as a trust signal.
-const OFFICIAL_PUBLIC_KEYS: &[(&str, &str)] = &[
-    ("halodaemon-official-2026", "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ="),
-];
+const OFFICIAL_PUBLIC_KEYS: &[(&str, &str)] = &[(
+    "halodaemon-official-2026",
+    "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=",
+)];
 const REPOSITORY_SCHEMA: u32 = 1;
 const PLUGIN_API: u32 = 1;
 
@@ -148,8 +149,8 @@ pub fn verify_official_repository(repo_dir: &Path) -> Result<RepositoryManifest>
 /// a fetched object, and avoids accidentally reserializing YAML before
 /// signature validation.
 fn verify_official_signature(yaml: &[u8], sig_bytes: &[u8]) -> Result<()> {
-    let signature: RepositorySignature = serde_yaml::from_slice(sig_bytes)
-        .context("parsing repository signature")?;
+    let signature: RepositorySignature =
+        serde_yaml::from_slice(sig_bytes).context("parsing repository signature")?;
     if signature.schema != REPOSITORY_SCHEMA {
         bail!(
             "unsupported repository signature schema {}",
@@ -165,7 +166,12 @@ fn verify_official_signature(yaml: &[u8], sig_bytes: &[u8]) -> Result<()> {
     let key_b64 = OFFICIAL_PUBLIC_KEYS
         .iter()
         .find_map(|(key_id, key)| (*key_id == signature.key_id).then_some(*key))
-        .ok_or_else(|| anyhow!("unknown official repository signing key '{}'", signature.key_id))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "unknown official repository signing key '{}'",
+                signature.key_id
+            )
+        })?;
     let public: [u8; 32] = B64
         .decode(key_b64)
         .context("decoding embedded official plugin signing key")?
@@ -194,6 +200,8 @@ fn validate_repository_manifest(repo_dir: &Path, manifest: &RepositoryManifest) 
                 dir.display()
             );
         }
+        reject_symlinks(&dir)
+            .with_context(|| format!("checking package '{}' for symlinks", package.id))?;
         let meta: MetaEntryVersion = serde_yaml::from_slice(
             &std::fs::read(dir.join("plugin.yaml"))
                 .with_context(|| format!("reading package '{}' manifest", package.id))?,
@@ -247,6 +255,7 @@ fn validate_repository_index(manifest: &RepositoryManifest) -> Result<()> {
 
     let mut ids = HashSet::new();
     let mut paths = HashSet::new();
+    let mut previous_id: Option<&str> = None;
     for package in &manifest.packages {
         if package.id.trim().is_empty() || package.version.trim().is_empty() {
             bail!("repository package id and version must be non-empty");
@@ -257,6 +266,16 @@ fn validate_repository_index(manifest: &RepositoryManifest) -> Result<()> {
                 package.id
             );
         }
+        if let Some(previous) = previous_id {
+            if previous >= package.id.as_str() {
+                bail!(
+                    "repository packages must be sorted by id: '{}' precedes '{}'",
+                    previous,
+                    package.id
+                );
+            }
+        }
+        previous_id = Some(&package.id);
         if package.path.is_absolute()
             || package.path.as_os_str().is_empty()
             || package.path.components().any(|c| {
@@ -498,7 +517,10 @@ fn materialize_tree(repo: &git2::Repository, tree: &git2::Tree<'_>, dest: &Path)
                 std::fs::write(&target, blob.content())
                     .with_context(|| format!("writing {}", target.display()))?;
             }
-            _ => bail!("repository contains unsupported tree entry: {}", target.display()),
+            _ => bail!(
+                "repository contains unsupported tree entry: {}",
+                target.display()
+            ),
         }
     }
     Ok(())

@@ -317,13 +317,18 @@ pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     let disabled_changed = cfg.plugins.disabled.len() != before;
     let config_changed = cfg.plugins.config.remove(id).is_some();
     let perms_changed = cfg.plugins.granted.remove(id).is_some();
+    let authority_changed = cfg.plugins.accepted_authorities.remove(id).is_some();
     let hash_changed = cfg.plugins.installed_hashes.remove(id).is_some();
     let integ_before = cfg.plugins.integrations_disabled.len();
     cfg.plugins.integrations_disabled.retain(|x| x != id);
     let integ_changed = cfg.plugins.integrations_disabled.len() != integ_before;
 
-    let changed =
-        disabled_changed || config_changed || perms_changed || hash_changed || integ_changed;
+    let changed = disabled_changed
+        || config_changed
+        || perms_changed
+        || authority_changed
+        || hash_changed
+        || integ_changed;
     if changed {
         app.registry.replace_policy(&cfg.plugins);
     }
@@ -345,10 +350,6 @@ pub(crate) async fn reload_registry(app: &Arc<AppState>) {
 /// Repository installs and updates are explicit user actions, so reconcile
 /// their affected devices before returning success.
 pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<String>) -> Result<()> {
-    if plugin_ids.is_empty() {
-        crate::ipc::broadcast_state(&app).await;
-        return Ok(());
-    }
     // A repository update has changed files on disk. Rebuild the registry
     // before reconciliation so workers use the newly accepted code rather
     // than stale manifest/source snapshots.
@@ -387,7 +388,11 @@ pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<Strin
             expanded.join(", ")
         );
     }
-    reconcile_plugins(&app, &plugin_ids).await;
+    if plugin_ids.is_empty() {
+        crate::ipc::broadcast_state(&app).await;
+    } else {
+        reconcile_plugins(&app, &plugin_ids).await;
+    }
     Ok(())
 }
 

@@ -725,6 +725,16 @@ pub struct PluginManifest {
     /// Privileged capabilities this plugin needs, gated by user consent.
     #[serde(default)]
     pub permissions: Vec<Permission>,
+    /// Platforms on which this package may execute. An omitted list means all
+    /// platforms, allowing catalog visibility without making platform support
+    /// an implicit runtime failure.
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// The complete capability vocabulary this package may return at runtime.
+    /// Runtime descriptors remain device-specific; this is the inert catalog
+    /// and authority boundary used before Lua is started.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default)]
     pub poll: Option<PollManifest>,
     #[serde(default)]
@@ -877,8 +887,21 @@ impl PluginManifest {
             || self.chain.is_some()
     }
 
+    /// Whether this package may execute on the current host. Unsupported
+    /// packages remain catalog-visible but discovery must leave them inert.
+    pub fn supports_current_platform(&self) -> bool {
+        self.platforms.is_empty()
+            || self
+                .platforms
+                .iter()
+                .any(|platform| platform == std::env::consts::OS)
+    }
+
     /// Human-readable capability labels for the management UI.
     pub fn capability_labels(&self) -> Vec<String> {
+        if !self.capabilities.is_empty() {
+            return self.capabilities.clone();
+        }
         let mut labels = Vec::new();
         if self.rgb.is_some() {
             labels.push("RGB".to_owned());
@@ -1155,6 +1178,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         MAX_PLUGIN_EFFECTS,
     )?;
     validate_identity(&manifest.identity)?;
+    validate_v2_catalog(manifest)?;
     validate_effects(&manifest.effects, "effect")?;
     validate_effect_assets(manifest)?;
     validate_transports(manifest)?;
@@ -1265,6 +1289,44 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         bail!("a tcp transport requires the 'network' permission to be declared");
     }
     validate_component("plugin id", &manifest.plugin_id)?;
+    Ok(())
+}
+
+const V2_CAPABILITIES: &[&str] = &[
+    "rgb",
+    "fan",
+    "sensors",
+    "battery",
+    "connection",
+    "dpi",
+    "report_rate",
+    "key_remap",
+    "onboard_profiles",
+    "lcd",
+    "equalizer",
+    "pairing",
+    "controls",
+];
+
+fn validate_v2_catalog(manifest: &PluginManifest) -> Result<()> {
+    let mut platforms = HashSet::new();
+    for platform in &manifest.platforms {
+        if !matches!(platform.as_str(), "linux" | "windows" | "macos") {
+            bail!("unsupported plugin platform '{platform}'");
+        }
+        if !platforms.insert(platform) {
+            bail!("plugin platform '{platform}' is declared more than once");
+        }
+    }
+    let mut capabilities = HashSet::new();
+    for capability in &manifest.capabilities {
+        if !V2_CAPABILITIES.contains(&capability.as_str()) {
+            bail!("unknown advertised capability '{capability}'");
+        }
+        if !capabilities.insert(capability) {
+            bail!("advertised capability '{capability}' is declared more than once");
+        }
+    }
     Ok(())
 }
 

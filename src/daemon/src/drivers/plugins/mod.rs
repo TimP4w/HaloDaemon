@@ -809,7 +809,11 @@ impl Registry {
         secrets: &dyn crate::secrets::SecretStore,
         manifest: &PluginManifest,
     ) -> ActivationState {
-        if self.is_disabled(&manifest.plugin_id) {
+        if !manifest.supports_current_platform() {
+            // Catalog-visible but inert: it must neither request consent nor
+            // shadow an otherwise applicable native driver.
+            ActivationState::Disabled
+        } else if self.is_disabled(&manifest.plugin_id) {
             ActivationState::Disabled
         } else if !self.consent_satisfied(manifest) {
             ActivationState::AwaitingConsent
@@ -833,6 +837,7 @@ impl Registry {
             .iter()
             .filter(|m| {
                 m.plugin_type == PluginKind::Integration
+                    && m.supports_current_platform()
                     && !state.integrations_disabled.contains(&m.plugin_id)
                     && !state.disabled.contains(&m.plugin_id)
                     && consent_satisfied_in(&state, m)
@@ -876,7 +881,11 @@ impl Registry {
     ) -> Vec<(String, UngrantedReason)> {
         manifests
             .iter()
-            .filter(|m| !self.consent_satisfied(m) && notified.insert(m.plugin_id.clone()))
+            .filter(|m| {
+                m.supports_current_platform()
+                    && !self.consent_satisfied(m)
+                    && notified.insert(m.plugin_id.clone())
+            })
             .map(|m| (m.display_name().to_owned(), self.ungranted_reason(m)))
             .collect()
     }
@@ -1007,8 +1016,10 @@ impl Registry {
             path: m.source_path.display().to_string(),
             plugin_type: m.plugin_type,
             capabilities: m.capability_labels(),
+            platforms: m.platforms.clone(),
+            platform_supported: m.supports_current_platform(),
             effect_names: m.effects.iter().map(|e| e.name.clone()).collect(),
-            enabled: !self.is_disabled(&m.plugin_id) && consented,
+            enabled: m.supports_current_platform() && !self.is_disabled(&m.plugin_id) && consented,
             author: m.author().to_owned(),
             version: m.version().to_owned(),
             license: m.license().to_owned(),
@@ -1253,10 +1264,7 @@ pub fn repo_plugin_ids(repo_dir: &Path) -> Vec<String> {
 
 /// Every configured repo's checked-out clone directory, for [`Registry::load_all_with_repos`].
 pub fn repo_plugin_dirs(repos: &[crate::config::PluginRepoRecord]) -> Vec<std::path::PathBuf> {
-    repos
-        .iter()
-        .map(repo::active_revision_dir)
-        .collect()
+    repos.iter().map(repo::active_revision_dir).collect()
 }
 
 impl Registry {
@@ -1315,25 +1323,24 @@ impl Registry {
             .manifests
             .iter()
             .map(|manifest| {
-                let provenance = if priority_repo
-                    .is_some_and(|root| manifest.plugin_dir.starts_with(root))
-                {
-                    halod_shared::types::PluginProvenance::LocalDevelopment
-                } else {
-                    match plugin_source_for(&manifest.plugin_dir) {
-                        halod_shared::types::PluginSource::Repo { ref slug }
-                            if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG =>
-                        {
-                            halod_shared::types::PluginProvenance::VerifiedOfficial
+                let provenance =
+                    if priority_repo.is_some_and(|root| manifest.plugin_dir.starts_with(root)) {
+                        halod_shared::types::PluginProvenance::LocalDevelopment
+                    } else {
+                        match plugin_source_for(&manifest.plugin_dir) {
+                            halod_shared::types::PluginSource::Repo { ref slug }
+                                if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG =>
+                            {
+                                halod_shared::types::PluginProvenance::VerifiedOfficial
+                            }
+                            halod_shared::types::PluginSource::Repo { .. } => {
+                                halod_shared::types::PluginProvenance::UnsignedRepository
+                            }
+                            halod_shared::types::PluginSource::Local => {
+                                halod_shared::types::PluginProvenance::LocalUnsigned
+                            }
                         }
-                        halod_shared::types::PluginSource::Repo { .. } => {
-                            halod_shared::types::PluginProvenance::UnsignedRepository
-                        }
-                        halod_shared::types::PluginSource::Local => {
-                            halod_shared::types::PluginProvenance::LocalUnsigned
-                        }
-                    }
-                };
+                    };
                 (manifest.plugin_id.clone(), provenance)
             })
             .collect();
@@ -1566,7 +1573,11 @@ impl Registry {
         state
             .manifests
             .iter()
-            .filter(|m| !state.disabled.contains(&m.plugin_id) && self.consent_satisfied(m))
+            .filter(|m| {
+                m.supports_current_platform()
+                    && !state.disabled.contains(&m.plugin_id)
+                    && self.consent_satisfied(m)
+            })
             .any(|m| m.device_for(handle).is_some())
     }
 
@@ -1577,7 +1588,7 @@ impl Registry {
         state
             .manifests
             .iter()
-            .filter(|m| plugin_ids.contains(&m.plugin_id))
+            .filter(|m| m.supports_current_platform() && plugin_ids.contains(&m.plugin_id))
             .flat_map(|m| m.devices.clone())
             .collect()
     }

@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::types::{
-    ButtonMapping, EffectDef, EffectParamValue, MacroStep, Permission, PluginAuthority, RgbState, SamplingMode,
-    VisibilityState, ZoneTopology,
+    ButtonMapping, EffectDef, EffectParamValue, MacroStep, Permission, PluginAuthority, RgbState,
+    SamplingMode, VisibilityState, ZoneTopology,
 };
 use crate::zone_transform::ZoneContentTransform;
 use serde::{Deserialize, Serialize};

@@ -482,6 +482,8 @@ mod tests {
             path: String::new(),
             plugin_type: Default::default(),
             capabilities: vec![],
+            platforms: vec![],
+            platform_supported: true,
             effect_names: vec![],
             enabled: true,
             author: String::new(),

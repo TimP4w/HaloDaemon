@@ -152,6 +152,7 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
             cfg.plugins.repos.push(PluginRepoRecord {
                 url: url.to_owned(),
                 slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
+                repository_id: None,
                 branch: None,
                 locked_sha: String::new(),
                 active_revision: None,

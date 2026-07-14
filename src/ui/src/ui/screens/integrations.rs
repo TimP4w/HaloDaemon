@@ -440,6 +440,8 @@ mod tests {
             path: String::new(),
             plugin_type: PluginKind::Integration,
             capabilities: vec![],
+            platforms: vec![],
+            platform_supported: true,
             effect_names: vec![],
             enabled,
             author: String::new(),

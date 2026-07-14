@@ -687,8 +687,14 @@ pub struct PluginRepoInfo {
     pub url: String,
     pub slug: String,
     #[serde(default)]
+    pub repository_id: Option<String>,
+    #[serde(default)]
     pub branch: Option<String>,
     pub locked_sha: String,
+    #[serde(default)]
+    pub active_revision: Option<String>,
+    #[serde(default)]
+    pub previous_verified_sha: Option<String>,
     /// When this repo was last cloned/fetched/checked out (RFC 3339), if ever.
     #[serde(default)]
     pub last_sync: Option<String>,
@@ -921,6 +927,12 @@ pub struct PluginInfo {
     /// Human-readable capability labels the plugin declares (e.g. "RGB", "Fan").
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Platforms declared by the package; an empty list means all platforms.
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// False when the catalog is visible on this host but must stay inert.
+    #[serde(default = "default_true")]
+    pub platform_supported: bool,
     /// Display names of the RGB effects the plugin declares (device plugins
     /// may bundle effects alongside their hardware capabilities).
     #[serde(default)]

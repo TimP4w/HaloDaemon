@@ -2918,6 +2918,8 @@ mod tests {
             path: format!("/home/u/.config/halod/plugins/{id}.lua"),
             plugin_type: halod_shared::types::PluginKind::Device,
             capabilities: vec!["RGB".into()],
+            platforms: vec![],
+            platform_supported: true,
             effect_names: vec![],
             enabled,
             author: "Someone".into(),
@@ -3135,8 +3137,11 @@ mod tests {
         PluginRepoInfo {
             url: format!("https://example.com/{slug}.git"),
             slug: slug.to_owned(),
+            repository_id: None,
             branch: None,
             locked_sha: locked_sha.to_owned(),
+            active_revision: None,
+            previous_verified_sha: None,
             last_sync: None,
             official: false,
         }

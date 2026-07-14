@@ -81,8 +81,15 @@ fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
                 let Some(path) = args.get(i + 1) else {
                     return Err("--dev-plugin-repo requires a directory".to_owned());
                 };
-                if path.starts_with('-') || dev_plugin_repo.replace(std::path::PathBuf::from(path)).is_some() {
-                    return Err("--dev-plugin-repo requires one directory and may only be provided once".to_owned());
+                if path.starts_with('-')
+                    || dev_plugin_repo
+                        .replace(std::path::PathBuf::from(path))
+                        .is_some()
+                {
+                    return Err(
+                        "--dev-plugin-repo requires one directory and may only be provided once"
+                            .to_owned(),
+                    );
                 }
                 i += 1;
             }

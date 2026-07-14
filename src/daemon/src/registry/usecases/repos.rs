@@ -110,11 +110,9 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
     let manifest = {
         let dest = dest.clone();
         let sha = locked_sha.clone();
-        tokio::task::spawn_blocking(move || {
-            materialize_revision(&dest, &sha, false)
-        })
-        .await
-        .context("repository manifest validation task panicked")??
+        tokio::task::spawn_blocking(move || materialize_revision(&dest, &sha, false))
+            .await
+            .context("repository manifest validation task panicked")??
     };
     let packages = manifest.packages;
     let active_revision = locked_sha.clone();
@@ -125,6 +123,7 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
         cfg.plugins.repos.push(PluginRepoRecord {
             url,
             slug,
+            repository_id: Some(manifest.id.clone()),
             branch,
             locked_sha,
             active_revision: Some(active_revision),
@@ -170,8 +169,20 @@ pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
         anyhow::bail!("the official plugin repository cannot be removed");
     }
+    let record = {
+        let cfg = app.config.read().await;
+        cfg.plugins
+            .repos
+            .iter()
+            .find(|record| record.slug == slug)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown plugin repo '{slug}'"))?
+    };
     let repo_dir = crate::config::plugin_repos_dir().join(&slug);
-    let plugin_ids = crate::drivers::plugins::repo_plugin_ids(&repo_dir);
+    // The Git worktree is object storage only.  Read the selected immutable
+    // revision before removing it so a stale/mutated worktree cannot decide
+    // which persisted plugin state is purged.
+    let plugin_ids = crate::drivers::plugins::repo_plugin_ids(&repo::active_revision_dir(&record));
     for id in &plugin_ids {
         purge_plugin_state(id, &app).await;
     }
@@ -286,18 +297,25 @@ async fn compute_plugin_updates(
             Ok(Ok(manifest)) => {
                 for package in manifest.packages {
                     let installed_hash = policy.installed_hashes.get(&package.id);
-                    let loaded = plugins.iter().find(|p| p.id == package.id);
-                    let local_hash = match app.registry.repo_location_for(&package.id) {
-                        Some((_, path)) => package_disk_hash(&dir, &path).await,
-                        None => None,
-                    };
+                    let active_dir = repo::active_revision_dir(&r);
+                    let local_hash = package_disk_hash(&active_dir, &package.path).await;
+                    let loaded = plugins.iter().find(|plugin| {
+                        plugin.id == package.id
+                            && matches!(
+                                &plugin.source,
+                                halod_shared::types::PluginSource::Repo { slug }
+                                    if slug == &r.slug
+                            )
+                    });
                     out.push(PluginUpdateStatus {
                         plugin_id: package.id.clone(),
                         slug: r.slug.clone(),
                         update_available: installed_hash != Some(&package.sha256),
                         on_disk_changed: installed_hash
                             .is_some_and(|hash| local_hash.as_deref() != Some(hash.as_str())),
-                        current_version: loaded.map(|p| p.version.clone()).unwrap_or_default(),
+                        current_version: loaded
+                            .map(|plugin| plugin.version.clone())
+                            .unwrap_or_default(),
                         available_version: package.version,
                     });
                 }
@@ -431,32 +449,47 @@ pub async fn check_updates_broadcast(app: Arc<AppState>) {
 async fn compute_on_disk_changes(
     app: &Arc<AppState>,
 ) -> Vec<halod_shared::types::PluginUpdateStatus> {
-    use halod_shared::types::{PluginSource, PluginUpdateStatus};
+    use halod_shared::types::PluginUpdateStatus;
     let policy = app.config.read().await.plugins.clone();
     let repos = policy.repos.clone();
-    let plugins = app.registry.list(&*app.secret_store);
     let mut out = Vec::new();
     for r in repos {
-        let dir = crate::config::plugin_repos_dir().join(&r.slug);
-        for p in plugins
-            .iter()
-            .filter(|p| matches!(&p.source, PluginSource::Repo { slug } if *slug == r.slug))
+        let active_dir = repo::active_revision_dir(&r);
+        let manifest = match tokio::task::spawn_blocking({
+            let active_dir = active_dir.clone();
+            move || repo::read_repository_manifest(&active_dir)
+        })
+        .await
         {
-            let local_hash = match app.registry.repo_location_for(&p.id) {
-                Some((_, path)) => package_disk_hash(&dir, &path).await,
-                None => None,
-            };
+            Ok(Ok(manifest)) => manifest,
+            Ok(Err(error)) => {
+                log::warn!(
+                    "reading active repository index for '{}': {error:#}",
+                    r.slug
+                );
+                continue;
+            }
+            Err(error) => {
+                log::warn!(
+                    "active repository index task for '{}' panicked: {error:#}",
+                    r.slug
+                );
+                continue;
+            }
+        };
+        for package in manifest.packages {
+            let local_hash = package_disk_hash(&active_dir, &package.path).await;
             let changed = policy
                 .installed_hashes
-                .get(&p.id)
+                .get(&package.id)
                 .is_some_and(|installed| local_hash.as_deref() != Some(installed.as_str()));
             if changed {
                 out.push(PluginUpdateStatus {
-                    plugin_id: p.id.clone(),
+                    plugin_id: package.id,
                     slug: r.slug.clone(),
                     update_available: false,
                     on_disk_changed: true,
-                    current_version: p.version.clone(),
+                    current_version: package.version,
                     available_version: String::new(),
                 });
             }
@@ -510,6 +543,21 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     };
 
     let dir = crate::config::plugin_repos_dir().join(&slug);
+    let old_plugin_ids = {
+        let active_dir = repo::active_revision_dir(&record);
+        tokio::task::spawn_blocking(move || repo::read_repository_manifest(&active_dir))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|manifest| {
+                manifest
+                    .packages
+                    .into_iter()
+                    .map(|package| package.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
     let remote_sha = {
         let dir = dir.clone();
         let branch = record.branch.clone();
@@ -525,11 +573,28 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
             .await
             .context("repository revision materialization task panicked")??
     };
+    if let Some(expected_id) = &record.repository_id {
+        if manifest.id != *expected_id {
+            anyhow::bail!(
+                "repository '{}' changed its identity from '{}' to '{}'",
+                slug,
+                expected_id,
+                manifest.id
+            );
+        }
+    }
     let plugin_ids: Vec<String> = manifest.packages.iter().map(|p| p.id.clone()).collect();
+    let removed_plugin_ids: Vec<String> = old_plugin_ids
+        .into_iter()
+        .filter(|id| !plugin_ids.contains(id))
+        .collect();
 
     {
         let mut cfg = app.config.write().await;
         if let Some(r) = cfg.plugins.repos.iter_mut().find(|r| r.slug == slug) {
+            if r.repository_id.is_none() {
+                r.repository_id = Some(manifest.id.clone());
+            }
             if official && !r.locked_sha.is_empty() {
                 r.previous_verified_sha = Some(r.locked_sha.clone());
             }
@@ -542,6 +607,9 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
                 .installed_hashes
                 .insert(package.id.clone(), package.sha256.clone());
         }
+    }
+    for plugin_id in &removed_plugin_ids {
+        purge_plugin_state(plugin_id, &app).await;
     }
     app.request_config_save();
     apply_repo_plugins(app, plugin_ids).await
@@ -1252,6 +1320,7 @@ mod tests {
                 cfg.plugins.repos.push(PluginRepoRecord {
                     url: "https://example.invalid/repo".to_owned(),
                     slug: "never-cloned".to_owned(),
+                    repository_id: None,
                     branch: None,
                     locked_sha: String::new(),
                     active_revision: None,

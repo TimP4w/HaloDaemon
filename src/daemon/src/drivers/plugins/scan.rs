@@ -44,7 +44,10 @@ impl super::Registry {
         let state = self.snapshot();
         let mut out = Vec::new();
         for m in state.manifests.iter() {
-            if state.disabled.contains(&m.plugin_id) || !super::consent_satisfied_in(&state, m) {
+            if !m.supports_current_platform()
+                || state.disabled.contains(&m.plugin_id)
+                || !super::consent_satisfied_in(&state, m)
+            {
                 continue;
             }
             for spec in m.smbus_devices() {

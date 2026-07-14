@@ -377,6 +377,10 @@ pub struct PluginRepoRecord {
     /// Directory name under `plugin_repos_dir()`, derived from the URL at `add_repo` time
     /// (fixed to `constants::OFFICIAL_PLUGIN_REPO_SLUG` for the seeded official repo).
     pub slug: String,
+    /// Stable identity declared by `repository.yaml`.  Pinning this prevents a
+    /// URL or branch from silently becoming a different repository.
+    #[serde(default)]
+    pub repository_id: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
     /// Commit SHA the checked-out working tree is pinned to.
@@ -705,6 +709,7 @@ mod tests {
         cfg.plugins.repos.push(PluginRepoRecord {
             url: "https://example.com/foo.git".into(),
             slug: "foo".into(),
+            repository_id: None,
             branch: Some("main".into()),
             locked_sha: "deadbeef".into(),
             active_revision: Some("deadbeef".into()),
