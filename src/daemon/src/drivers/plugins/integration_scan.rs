@@ -142,6 +142,12 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
             return;
         }
     };
+    // The user may have disabled the integration while the blocking connect
+    // was in flight. Drop the newly-opened transport and never register a root
+    // from that stale activation attempt.
+    if app.registry.integration_manifest(&plugin_id).is_none() {
+        return;
+    }
     let shared: Arc<dyn Transport> = match &transport {
         PluginIo::Stream { transport, .. } => transport.clone(),
         _ => {

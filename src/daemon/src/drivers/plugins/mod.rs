@@ -577,9 +577,28 @@ impl Registry {
         device_id: &str,
         detail: String,
     ) {
+        // A callback may finish after either toggle was switched off. Its
+        // result belongs to the old activation episode and must not resurrect
+        // an issue that the disable path just cleared.
+        if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
+            return;
+        }
         self.set_issue(plugin_id, PluginIssueKind::RuntimeError, detail.clone());
+        // Close the check/write race: if disable landed between the first
+        // policy read and `set_issue`, remove the stale write before anything
+        // can observe or broadcast it. If disable starts after this check, its
+        // own cleanup runs later and wins instead.
+        if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
+            self.clear_issue_of(plugin_id, PluginIssueKind::RuntimeError);
+            return;
+        }
         if !write_recover(&self.failing_devices).insert(device_id.to_owned()) {
             return; // already reported this episode
+        }
+        if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
+            write_recover(&self.failing_devices).remove(device_id);
+            self.clear_issue_of(plugin_id, PluginIssueKind::RuntimeError);
+            return;
         }
         crate::platform::notify::send(
             app,
@@ -609,9 +628,24 @@ impl Registry {
         display_name: &str,
         detail: String,
     ) {
+        // The blocking connect may complete after the integration/plugin was
+        // disabled. Discard that stale completion instead of restoring its
+        // cleared card/sidebar warning.
+        if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
+            return;
+        }
         self.set_issue(plugin_id, PluginIssueKind::ConnectFailed, detail.clone());
+        if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
+            self.clear_issue_of(plugin_id, PluginIssueKind::ConnectFailed);
+            return;
+        }
         if !write_recover(&self.connect_failed).insert(plugin_id.to_owned()) {
             return; // already reported this episode
+        }
+        if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
+            write_recover(&self.connect_failed).remove(plugin_id);
+            self.clear_issue_of(plugin_id, PluginIssueKind::ConnectFailed);
+            return;
         }
         crate::platform::notify::send(
             app,

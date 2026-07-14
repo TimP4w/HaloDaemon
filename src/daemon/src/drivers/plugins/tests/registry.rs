@@ -636,6 +636,24 @@ async fn connect_error_toasts_once_per_episode_and_persists_issue() {
         .report_connect_error(&app, &pid, "Acme K1", "down again".into())
         .await;
     assert!(rx.try_recv().is_ok(), "re-arms after recovery");
+
+    // A connect attempt that completes after the integration was disabled is
+    // stale: it must not recreate the cleared issue or toast.
+    app.registry.clear_operational_errors(&pid, &[]);
+    app.registry
+        .set_integrations_disabled(std::slice::from_ref(&pid));
+    app.registry
+        .report_connect_error(&app, &pid, "Acme K1", "late failure".into())
+        .await;
+    assert!(rx.try_recv().is_err(), "late disabled failure is ignored");
+    assert!(app
+        .registry
+        .list(app.secret_store.as_ref())
+        .into_iter()
+        .find(|p| p.id == pid)
+        .unwrap()
+        .integration_issue
+        .is_none());
 }
 
 #[tokio::test]
@@ -658,6 +676,21 @@ async fn runtime_error_persists_issue_and_clears_on_success() {
 
     app.registry
         .clear_operational_errors(&pid, &["dev-1".to_owned()]);
+    assert!(app
+        .registry
+        .list(app.secret_store.as_ref())
+        .into_iter()
+        .find(|p| p.id == pid)
+        .unwrap()
+        .issue
+        .is_none());
+
+    // Likewise, a callback already running when the plugin was disabled must
+    // not recreate its runtime issue.
+    app.registry.set_disabled(std::slice::from_ref(&pid));
+    app.registry
+        .report_runtime_error(&app, &pid, "dev-1", "late lua boom".into())
+        .await;
     assert!(app
         .registry
         .list(app.secret_store.as_ref())
