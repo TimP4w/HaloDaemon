@@ -313,8 +313,8 @@ pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<Strin
     // An explicit update is allowed to replace code, but not to silently widen
     // a plugin's authority. Compare the new inert manifest against the exact
     // snapshot accepted through the enable modal and disable only affected
-    // plugins. Packages with no v2 snapshot are legacy state and remain under
-    // the existing permission policy until their next explicit enable.
+    // plugins. A package without an accepted snapshot is inert until the user
+    // explicitly enables it.
     let expanded: Vec<String> = {
         let mut cfg = app.config.write().await;
         let mut expanded = Vec::new();
