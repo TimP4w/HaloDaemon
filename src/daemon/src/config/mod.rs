@@ -330,6 +330,7 @@ struct AppRulesFile {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginPolicy {
     /// Authority snapshots accepted through the enable modal.  They are kept
     /// separately from the runtime permission projection so repository updates
@@ -688,9 +689,11 @@ mod tests {
     }
 
     #[test]
-    fn plugin_policy_accepts_a_sparse_current_file() {
-        let f: PluginPolicy = serde_yaml::from_str("disabled: [foo]\n").unwrap();
-        assert!(f.repos.is_empty());
+    fn plugin_policy_rejects_retired_fields() {
+        let current: PluginPolicy = serde_yaml::from_str("enabled: [foo]\n").unwrap();
+        assert_eq!(current.enabled, ["foo"]);
+        assert!(serde_yaml::from_str::<PluginPolicy>("disabled: [foo]\n").is_err());
+        assert!(serde_yaml::from_str::<PluginPolicy>("acknowledged: {}\n").is_err());
     }
 
     #[test]
