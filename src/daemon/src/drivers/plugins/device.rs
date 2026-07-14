@@ -566,14 +566,18 @@ impl LuaDevice {
             handle.clone(),
         ));
 
-        // The status poll loop stays host-side (not in the single-threaded VM):
-        // a ticker enqueues one poll per interval, run serially by the worker.
+        // Sensor/fan refresh stays host-side (not in the serialized VM): a
+        // daemon-cadence ticker enqueues one status read at a time.
         // Start paused and let initialize() release it. This matters because a
         // plugin device is constructed before central registration checks the
         // persisted Disabled state.
-        if let Some(poll) = &manifest.poll {
+        if dev
+            .caps
+            .iter()
+            .any(|cap| matches!(cap, Cap::Sensor | Cap::Fan))
+        {
             dev.poll_paused.store(true, Ordering::Relaxed);
-            let interval = Duration::from_millis(poll.interval_ms.max(1));
+            let interval = Duration::from_secs(1);
             let paused = dev.poll_paused.clone();
             dev.poll_task = Some(handle.spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
@@ -2075,8 +2079,8 @@ mod tests {
         const POLL_SCRIPT: &str = r#"
             return {
               devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
-              sensor = {},
-              poll = { interval_ms = 60000 },
+              permissions = { "hid" },
+              capabilities = { "sensors" },
               read_status = function(dev)
                 local b = halod.buffer(dev.transport:read_nonblocking(1))
                 return { temp = b:get_u8(0) }
