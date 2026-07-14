@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
-    AppState, PluginInfo, PluginIssue, PluginIssueKind, PluginRepoInfo, PluginSource,
-    PluginUpdateStatus, RepoUpdateStatus,
+    AppState, PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginRepoInfo,
+    PluginSource, PluginUpdateStatus, RepoUpdateStatus,
 };
 
 use crate::runtime::ipc::{self, CommandTx};
@@ -516,6 +516,7 @@ impl PluginsUi {
                     .checking_repo
                     .as_ref()
                     .is_some_and(|c| c.slug == r.slug);
+                let updates_enabled = plugin_updates_enabled(state.gui.plugin_downloads);
 
                 let mut select_plugin = None;
                 let mut start_check = false;
@@ -529,6 +530,7 @@ impl PluginsUi {
                                 &state.plugins.plugins,
                                 &mut self.pending_repo_delete,
                                 checking,
+                                updates_enabled,
                                 &mut start_check,
                             );
                         });
@@ -2064,6 +2066,14 @@ fn status_banner(ui: &mut egui::Ui, p: &PluginInfo) {
         });
 }
 
+fn updates_available_key(count: usize) -> &'static str {
+    if count == 1 {
+        "plugins.updates_available"
+    } else {
+        "plugins.updates_available_plural"
+    }
+}
+
 fn update_all_banner(ui: &mut egui::Ui, count: usize, updating: bool) -> bool {
     let mut clicked = false;
     egui::Frame::NONE
@@ -2080,7 +2090,7 @@ fn update_all_banner(ui: &mut egui::Ui, count: usize, updating: bool) -> bool {
                     ui.painter()
                         .circle_filled(r.center(), 3.5, theme::STAT_AMBER);
                     ui.label(
-                        egui::RichText::new(t!("plugins.updates_available", count = count))
+                        egui::RichText::new(t!(updates_available_key(count), count = count))
                             .font(theme::body(12.5))
                             .color(theme::TEXT),
                     );
@@ -2310,6 +2320,34 @@ fn repo_no_drivers_box(ui: &mut egui::Ui) {
     );
 }
 
+/// Repository update checks only run when the user has allowed the daemon to
+/// contact GitHub; any other consent state (unset or denied) leaves them off.
+fn plugin_updates_enabled(consent: PluginDownloadConsent) -> bool {
+    matches!(consent, PluginDownloadConsent::Allowed)
+}
+
+/// A muted info band explaining that update checks are turned off, shown above
+/// the greyed-out "Check for updates" button when downloads are not allowed.
+fn updates_disabled_note(ui: &mut egui::Ui) {
+    egui::Frame::NONE
+        .fill(theme::a(theme::TEXT_MUT, 0.08))
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 11))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                ui.painter()
+                    .circle_filled(dot.center(), 3.5, theme::TEXT_FAINT);
+                ui.label(
+                    egui::RichText::new(t!("plugins.repos_updates_disabled"))
+                        .font(theme::body(12.0))
+                        .color(theme::TEXT_MUT),
+                );
+            });
+        });
+}
+
 /// The repo detail panel: header, stat boxes, "Check for updates", the list
 /// of plugins it provides, and Remove (hidden for the official repo). Returns
 /// a clicked plugin id, if any, so the caller can switch the selection to it.
@@ -2319,6 +2357,7 @@ fn repo_detail_body(
     plugins: &[PluginInfo],
     pending_repo_delete: &mut Option<String>,
     checking: bool,
+    updates_enabled: bool,
     start_check: &mut bool,
 ) -> Option<String> {
     egui::Sides::new().show(
@@ -2385,7 +2424,16 @@ fn repo_detail_body(
     });
 
     ui.add_space(14.0);
-    if checking {
+    if !updates_enabled {
+        updates_disabled_note(ui);
+        ui.add_space(10.0);
+        widgets::button_disabled(
+            ui,
+            &t!("plugins.repos_check_updates"),
+            ButtonKind::Primary,
+            Vec2::new(180.0, 32.0),
+        );
+    } else if checking {
         ui.horizontal(|ui| {
             ui.add(egui::Spinner::new().size(18.0).color(theme::CYAN));
             ui.add_space(6.0);
@@ -2540,6 +2588,20 @@ mod tests {
             current_version: "1.0.0".to_owned(),
             available_version: "1.1.0".to_owned(),
         }
+    }
+
+    #[test]
+    fn updates_available_key_picks_singular_only_for_one() {
+        assert_eq!(updates_available_key(1), "plugins.updates_available");
+        assert_eq!(updates_available_key(0), "plugins.updates_available_plural");
+        assert_eq!(updates_available_key(9), "plugins.updates_available_plural");
+    }
+
+    #[test]
+    fn plugin_updates_enabled_only_when_downloads_are_allowed() {
+        assert!(plugin_updates_enabled(PluginDownloadConsent::Allowed));
+        assert!(!plugin_updates_enabled(PluginDownloadConsent::Denied));
+        assert!(!plugin_updates_enabled(PluginDownloadConsent::Unset));
     }
 
     #[test]

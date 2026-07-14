@@ -9,6 +9,7 @@ plugins:
   repos_title: Repositories
   repos_check_updates: Check for updates
   repos_checking: Checking for updates…
+  repos_updates_disabled: Update checks are off. Turn on plugin downloads in Settings to check for updates.
   repos_url_hint: Git URL (https://...)
   repos_branch_hint: Branch (optional)
   repos_branch_label: BRANCH
@@ -36,6 +37,7 @@ plugins:
   repo_no_drivers: No drivers installed from this repository yet.
   # Per-plugin updates
   updates_available: "%{count} plugin update available"
+  updates_available_plural: "%{count} plugin updates available"
   update_all: Update all
   updating: Updating…
   update_available: Update available

@@ -9,6 +9,7 @@ plugins:
   repos_title: Repository
   repos_check_updates: Controlla aggiornamenti
   repos_checking: Controllo aggiornamenti…
+  repos_updates_disabled: Il controllo aggiornamenti è disattivato. Attiva il download dei plugin nelle Impostazioni per cercare aggiornamenti.
   repos_url_hint: URL Git (https://...)
   repos_branch_hint: Branch (opzionale)
   repos_branch_label: BRANCH
@@ -36,6 +37,7 @@ plugins:
   repo_no_drivers: Nessun driver installato da questo repository.
   # Aggiornamenti per plugin
   updates_available: "%{count} aggiornamento plugin disponibile"
+  updates_available_plural: "%{count} aggiornamenti plugin disponibili"
   update_all: Aggiorna tutto
   updating: Aggiornamento…
   update_available: Aggiornamento disponibile
