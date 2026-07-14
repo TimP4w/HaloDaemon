@@ -76,10 +76,45 @@ enum Cap {
     Chain,
 }
 
-/// Which capability sections the manifest declares, in advertised order. Mirrors
-/// `PluginManifest::needs_worker` / `capability_labels`, but yields the typed
-/// `Cap` list the device stores.
+/// Typed runtime capabilities permitted by the inert catalog. Descriptors and
+/// initial values still come from `initialize`; the catalog never supplies
+/// static runtime sections.
 fn declared_caps(manifest: &PluginManifest) -> Vec<Cap> {
+    if manifest.capabilities.is_empty() {
+        return legacy_declared_caps(manifest);
+    }
+    let mut caps = Vec::new();
+    let mut push = |name: &str, cap: Cap| {
+        if manifest
+            .capabilities
+            .iter()
+            .any(|declared| declared == name)
+        {
+            caps.push(cap);
+        }
+    };
+    push("rgb", Cap::Rgb);
+    push("fan", Cap::Fan);
+    push("sensors", Cap::Sensor);
+    push("lcd", Cap::Lcd);
+    push("dpi", Cap::Dpi);
+    push("controls", Cap::Choice);
+    push("controls", Cap::Range);
+    push("controls", Cap::Boolean);
+    push("controls", Cap::Action);
+    push("battery", Cap::Battery);
+    push("connection", Cap::Connection);
+    push("equalizer", Cap::Equalizer);
+    push("pairing", Cap::Pairing);
+    push("onboard_profiles", Cap::OnboardProfiles);
+    push("key_remap", Cap::KeyRemap);
+    caps
+}
+
+/// Inline test manifests still construct the old in-memory representation; it
+/// is never accepted from a directory package. Keep that test fixture adapter
+/// separate from the canonical catalog path above.
+fn legacy_declared_caps(manifest: &PluginManifest) -> Vec<Cap> {
     let mut caps = Vec::new();
     let mut push = |present: bool, cap: Cap| {
         if present {
@@ -1825,6 +1860,7 @@ mod tests {
     const SCRIPT: &str = r#"
         return {
           devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
+          permissions = { "hid" },
           transports = { hid = { report_size = 8 } },
           rgb = { zones = { {
               id = "z", name = "Z", topology = { type = "linear" },
