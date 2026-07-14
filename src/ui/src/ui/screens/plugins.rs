@@ -2018,6 +2018,11 @@ fn plugin_type_color(kind: halod_shared::types::PluginKind) -> egui::Color32 {
 fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'static, str> {
     use halod_shared::types::Permission;
     match perm {
+        Permission::Hid => "HID device access".into(),
+        Permission::Hwmon => "Hardware monitoring".into(),
+        Permission::Lpcio => "LPC/SuperIO access".into(),
+        Permission::AmdSmn => "AMD SMN access".into(),
+        Permission::Command => "Run approved commands".into(),
         Permission::Network => t!("plugins.permission_network"),
         Permission::Os => t!("plugins.permission_os"),
         Permission::SecureStorage => t!("plugins.permission_secure_storage"),
@@ -2031,6 +2036,11 @@ fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'
 fn permission_description(perm: halod_shared::types::Permission) -> std::borrow::Cow<'static, str> {
     use halod_shared::types::Permission;
     match perm {
+        Permission::Hid => "Lets the plugin communicate with the matching HID device and receive its input reports.".into(),
+        Permission::Hwmon => "Lets the plugin access the selected Linux hardware-monitoring device, including approved fan controls.".into(),
+        Permission::Lpcio => "Lets the plugin use the typed broker interface for motherboard SuperIO hardware.".into(),
+        Permission::AmdSmn => "Lets the plugin read supported AMD SMN registers through the broker.".into(),
+        Permission::Command => "Lets the plugin run only the executable names declared in its manifest, without a shell.".into(),
         Permission::Network => t!("plugins.permission_network_desc"),
         Permission::Os => t!("plugins.permission_os_desc"),
         Permission::SecureStorage => t!("plugins.permission_secure_storage_desc"),
@@ -2937,6 +2947,7 @@ mod tests {
             logo: None,
             effect_thumbnails: vec![],
             source: Default::default(),
+            provenance: Default::default(),
             declared_permissions: vec![],
             granted_permissions: vec![],
             config_fields: vec![],

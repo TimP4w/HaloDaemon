@@ -980,6 +980,19 @@ impl Registry {
                 })
                 .collect(),
             source: plugin_source_for(&m.plugin_dir),
+            provenance: match plugin_source_for(&m.plugin_dir) {
+                halod_shared::types::PluginSource::Repo { ref slug }
+                    if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG =>
+                {
+                    halod_shared::types::PluginProvenance::VerifiedOfficial
+                }
+                halod_shared::types::PluginSource::Repo { .. } => {
+                    halod_shared::types::PluginProvenance::UnsignedRepository
+                }
+                halod_shared::types::PluginSource::Local => {
+                    halod_shared::types::PluginProvenance::LocalUnsigned
+                }
+            },
             declared_permissions: m.permissions.clone(),
             granted_permissions: self.granted_for(&m.plugin_id),
             config_fields: m.config_fields().iter().map(Into::into).collect(),

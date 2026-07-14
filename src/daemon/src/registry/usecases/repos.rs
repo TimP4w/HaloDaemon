@@ -223,11 +223,16 @@ async fn compute_plugin_updates(
         };
         reached.push(r.slug.clone());
 
+        let official = r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
         let result = {
             let dir = dir.clone();
             let remote_sha = remote_sha.clone();
             tokio::task::spawn_blocking(move || {
-                repo::read_repository_manifest_at_commit(&dir, &remote_sha)
+                if official {
+                    repo::verify_official_repository_at_commit(&dir, &remote_sha)
+                } else {
+                    repo::read_repository_manifest_at_commit(&dir, &remote_sha)
+                }
             })
             .await
         };

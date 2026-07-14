@@ -52,47 +52,58 @@ enum ProcessRole {
     PluginTest { package: std::path::PathBuf },
 }
 
-fn process_role(args: &[String]) -> ProcessRole {
+const USAGE: &str = "usage: halod [--headless] [--dev-plugin-repo <DIR>]";
+
+fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
     #[cfg(feature = "plugin-test")]
     if args.first().map(String::as_str) == Some("plugin-test") {
         let package = args
             .get(1)
-            .unwrap_or_else(|| {
-                eprintln!("usage: halod plugin-test <package-dir>");
-                std::process::exit(2);
-            })
+            .ok_or_else(|| "usage: halod plugin-test <package-dir>".to_owned())?
             .into();
-        return ProcessRole::PluginTest { package };
+        if args.len() != 2 {
+            return Err("usage: halod plugin-test <package-dir>".to_owned());
+        }
+        return Ok(ProcessRole::PluginTest { package });
     }
-    let has = |flag: &str| args.iter().any(|a| a == flag);
+    let mut headless = false;
     let mut dev_plugin_repo = None;
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--dev-plugin-repo" {
-            let Some(path) = args.get(i + 1) else {
-                eprintln!("usage: halod [--headless] [--dev-plugin-repo <DIR>]");
-                std::process::exit(2);
-            };
-            if dev_plugin_repo
-                .replace(std::path::PathBuf::from(path))
-                .is_some()
-            {
-                eprintln!("--dev-plugin-repo may only be provided once");
-                std::process::exit(2);
+        match args[i].as_str() {
+            "--headless" => {
+                if headless {
+                    return Err("--headless may only be provided once".to_owned());
+                }
+                headless = true;
             }
-            i += 1;
+            "--dev-plugin-repo" => {
+                let Some(path) = args.get(i + 1) else {
+                    return Err("--dev-plugin-repo requires a directory".to_owned());
+                };
+                if path.starts_with('-') || dev_plugin_repo.replace(std::path::PathBuf::from(path)).is_some() {
+                    return Err("--dev-plugin-repo requires one directory and may only be provided once".to_owned());
+                }
+                i += 1;
+            }
+            _ => {
+                return Err(format!("unknown argument '{}'", args[i]));
+            }
         }
         i += 1;
     }
-    ProcessRole::Server {
-        headless: has(halod_shared::lifecycle::HEADLESS_ARG),
+    Ok(ProcessRole::Server {
+        headless,
         dev_plugin_repo,
-    }
+    })
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let role = process_role(&args);
+    let role = process_role(&args).unwrap_or_else(|error| {
+        eprintln!("{error}\n{USAGE}");
+        std::process::exit(2);
+    });
 
     #[cfg(feature = "plugin-test")]
     if let ProcessRole::PluginTest { package } = &role {
@@ -428,7 +439,7 @@ mod tests {
     #[test]
     fn no_args_runs_a_plain_server() {
         assert_eq!(
-            process_role(&argv(&[])),
+            process_role(&argv(&[])).unwrap(),
             ProcessRole::Server {
                 headless: false,
                 dev_plugin_repo: None
@@ -439,7 +450,7 @@ mod tests {
     #[test]
     fn headless_flag_marks_a_headless_server() {
         assert_eq!(
-            process_role(&argv(&["--headless"])),
+            process_role(&argv(&["--headless"])).unwrap(),
             ProcessRole::Server {
                 headless: true,
                 dev_plugin_repo: None
@@ -448,45 +459,26 @@ mod tests {
     }
 
     #[test]
-    fn former_service_and_worker_flags_are_now_ignored() {
-        // Service registration + the elevated broker moved to halod-broker.exe;
-        // these flags no longer mean anything to the daemon.
-        for flag in [
-            "--service",
-            "--install-service",
-            "--uninstall-service",
-            "--worker",
-        ] {
-            assert_eq!(
-                process_role(&argv(&[flag])),
-                ProcessRole::Server {
-                    headless: false,
-                    dev_plugin_repo: None
-                },
-                "{flag} should be ignored",
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_arguments_are_ignored() {
-        assert_eq!(
-            process_role(&argv(&["--frobnicate", "foo"])),
-            ProcessRole::Server {
-                headless: false,
-                dev_plugin_repo: None
-            }
-        );
-    }
-
-    #[test]
     fn development_plugin_repository_is_parsed() {
         assert_eq!(
-            process_role(&argv(&["--dev-plugin-repo", "C:/plugins"])),
+            process_role(&argv(&["--dev-plugin-repo", "C:/plugins"])).unwrap(),
             ProcessRole::Server {
                 headless: false,
                 dev_plugin_repo: Some("C:/plugins".into()),
             }
         );
+    }
+
+    #[test]
+    fn invalid_server_arguments_return_usage_errors() {
+        for args in [
+            vec!["--unknown"],
+            vec!["--headless", "--headless"],
+            vec!["--dev-plugin-repo"],
+            vec!["--dev-plugin-repo", "--headless"],
+            vec!["--dev-plugin-repo", "one", "--dev-plugin-repo", "two"],
+        ] {
+            assert!(process_role(&argv(&args)).is_err(), "{args:?}");
+        }
     }
 }

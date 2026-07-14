@@ -42,7 +42,7 @@ pub struct LcdUploadProgress {
     pub percent: Option<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LcdUploadStage {
     /// Decoding / resizing the uploaded file (GIFs report per-frame percent).
@@ -763,9 +763,19 @@ pub struct AppState {
 /// A privileged capability a plugin must declare before the daemon grants it —
 /// the enforcement boundary between "trusted to talk to its matched device"
 /// (every plugin) and "trusted to reach outside it".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
+    /// Open a matched HID endpoint and receive its input reports.
+    Hid,
+    /// Enumerate and access the scoped Linux hwmon handle selected by discovery.
+    Hwmon,
+    /// Access the typed, broker-backed LPC/SuperIO operations.
+    Lpcio,
+    /// Access the typed, read-only AMD SMN broker operations.
+    AmdSmn,
+    /// Spawn one of the executable names advertised by the command transport.
+    Command,
     /// Open network connections (e.g. a TCP client to a local SDK server).
     Network,
     /// Reach OS-level primitives beyond pure computation (currently: clock
@@ -782,6 +792,63 @@ pub enum Permission {
     /// registry. Gates `AudioApi` so plugins cannot spawn host audio modules
     /// without consent.
     AudioRouting,
+}
+
+/// Provenance established for a loaded plugin package.  It is deliberately
+/// separate from [`PluginSource`]: source describes where the bytes live while
+/// provenance describes what Halo was able to verify about them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginProvenance {
+    /// A package from the official repository whose signed index and digest
+    /// both verify against an embedded Halo key.
+    VerifiedOfficial,
+    /// A configured third-party repository with no official signature claim.
+    UnsignedRepository,
+    /// A directly loaded repository supplied through `--dev-plugin-repo`.
+    LocalDevelopment,
+    /// A standalone package copied in through the import flow.
+    #[default]
+    LocalUnsigned,
+    /// A package associated with the official repository that failed signature
+    /// or digest verification. It is visible for repair but never executable.
+    InvalidSignature,
+}
+
+/// The authority a plugin asks the user to approve.  Transport scopes are
+/// canonical display/enforcement strings (for example `command:nvidia-smi`)
+/// and are sorted before persistence, making equality and subset checks stable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginAuthority {
+    #[serde(default)]
+    pub permissions: Vec<Permission>,
+    #[serde(default)]
+    pub transport_scopes: Vec<String>,
+}
+
+impl PluginAuthority {
+    pub fn normalized(mut self) -> Self {
+        self.permissions.sort_unstable();
+        self.permissions.dedup();
+        self.transport_scopes.sort();
+        self.transport_scopes.dedup();
+        self
+    }
+
+    /// `self` is safe under a previous acceptance when every requested
+    /// permission and transport scope was already approved.
+    pub fn is_subset_of(&self, accepted: &Self) -> bool {
+        let requested = self.clone().normalized();
+        let accepted = accepted.clone().normalized();
+        requested
+            .permissions
+            .iter()
+            .all(|permission| accepted.permissions.binary_search(permission).is_ok())
+            && requested
+                .transport_scopes
+                .iter()
+                .all(|scope| accepted.transport_scopes.binary_search(scope).is_ok())
+    }
 }
 
 /// Which discovery path a plugin registers into.
@@ -886,6 +953,9 @@ pub struct PluginInfo {
     /// Where this plugin came from (local disk vs. a registered git repo).
     #[serde(default)]
     pub source: PluginSource,
+    /// The verification status of the package currently selected for loading.
+    #[serde(default)]
+    pub provenance: PluginProvenance,
     /// Privileged capabilities the manifest declares.
     #[serde(default)]
     pub declared_permissions: Vec<Permission>,

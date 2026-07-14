@@ -12,8 +12,12 @@ use std::path::{Path, PathBuf};
 
 /// The first official plugin repository signing key. The signing private key
 /// is intentionally never present in this repository.
-const OFFICIAL_KEY_ID: &str = "halodaemon-official-2026";
-const OFFICIAL_PUBLIC_KEY_B64: &str = "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=";
+/// Embedded public keys are intentionally keyed by stable release key id so a
+/// later Halo build can accept a rotated official key without treating the
+/// repository URL as a trust signal.
+const OFFICIAL_PUBLIC_KEYS: &[(&str, &str)] = &[
+    ("halodaemon-official-2026", "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ="),
+];
 const REPOSITORY_SCHEMA: u32 = 1;
 const PLUGIN_API: u32 = 1;
 
@@ -83,6 +87,31 @@ pub fn read_repository_manifest_at_commit(
     Ok(manifest)
 }
 
+/// Verify the official detached signature directly from fetched Git objects.
+/// This is intentionally lighter than [`verify_official_repository`]: update
+/// discovery must not touch the active checkout, while installation performs
+/// the complete package-digest validation after materializing the revision.
+pub fn verify_official_repository_at_commit(
+    repo_dir: &Path,
+    sha: &str,
+) -> Result<RepositoryManifest> {
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
+    let tree = repo
+        .find_commit(oid)
+        .with_context(|| format!("commit '{sha}' not found"))?
+        .tree()
+        .context("reading commit tree")?;
+    let yaml = read_blob_at(&repo, &tree, Path::new("repository.yaml"))?;
+    let manifest: RepositoryManifest =
+        serde_yaml::from_slice(&yaml).context("parsing repository.yaml from commit")?;
+    validate_repository_index(&manifest)?;
+    let signature = read_blob_at(&repo, &tree, Path::new("repository.sig"))?;
+    verify_official_signature(&yaml, &signature)?;
+    Ok(manifest)
+}
+
 /// Verify the official detached signature and every package digest in a
 /// checked-out repository. The signature covers exact `repository.yaml` bytes,
 /// matching the standalone `repo-sign` tool.
@@ -97,40 +126,8 @@ pub fn verify_official_repository(repo_dir: &Path) -> Result<RepositoryManifest>
     let sig_path = repo_dir.join("repository.sig");
     let sig_bytes =
         std::fs::read(&sig_path).with_context(|| format!("reading {}", sig_path.display()))?;
-    let signature: RepositorySignature = serde_yaml::from_slice(&sig_bytes)
-        .with_context(|| format!("parsing {}", sig_path.display()))?;
-    if signature.schema != REPOSITORY_SCHEMA {
-        bail!(
-            "unsupported repository signature schema {}",
-            signature.schema
-        );
-    }
-    if signature.algorithm != "ed25519" {
-        bail!(
-            "unsupported repository signature algorithm '{}'",
-            signature.algorithm
-        );
-    }
-    if signature.key_id != OFFICIAL_KEY_ID {
-        bail!(
-            "unknown official repository signing key '{}'",
-            signature.key_id
-        );
-    }
-    let public: [u8; 32] = B64
-        .decode(OFFICIAL_PUBLIC_KEY_B64)
-        .context("decoding embedded official plugin signing key")?
-        .try_into()
-        .map_err(|_| anyhow!("embedded official plugin signing key is not 32 bytes"))?;
-    let key =
-        VerifyingKey::from_bytes(&public).context("constructing official plugin verifying key")?;
-    let raw_signature: [u8; 64] = B64
-        .decode(signature.signature.trim())
-        .context("decoding repository signature")?
-        .try_into()
-        .map_err(|_| anyhow!("repository signature is not 64 bytes"))?;
-    key.verify(&yaml, &Signature::from_bytes(&raw_signature))
-        .map_err(|_| anyhow!("repository signature does not match repository.yaml"))?;
+    verify_official_signature(&yaml, &sig_bytes)
+        .with_context(|| format!("verifying {}", sig_path.display()))?;
 
     for package in &manifest.packages {
         let actual = package_hash(&repo_dir.join(&package.path))?;
@@ -144,6 +141,45 @@ pub fn verify_official_repository(repo_dir: &Path) -> Result<RepositoryManifest>
         }
     }
     Ok(manifest)
+}
+
+/// Verify a detached official signature over the exact repository YAML bytes.
+/// Keeping this byte-oriented makes verification identical for a checkout and
+/// a fetched object, and avoids accidentally reserializing YAML before
+/// signature validation.
+fn verify_official_signature(yaml: &[u8], sig_bytes: &[u8]) -> Result<()> {
+    let signature: RepositorySignature = serde_yaml::from_slice(sig_bytes)
+        .context("parsing repository signature")?;
+    if signature.schema != REPOSITORY_SCHEMA {
+        bail!(
+            "unsupported repository signature schema {}",
+            signature.schema
+        );
+    }
+    if signature.algorithm != "ed25519" {
+        bail!(
+            "unsupported repository signature algorithm '{}'",
+            signature.algorithm
+        );
+    }
+    let key_b64 = OFFICIAL_PUBLIC_KEYS
+        .iter()
+        .find_map(|(key_id, key)| (*key_id == signature.key_id).then_some(*key))
+        .ok_or_else(|| anyhow!("unknown official repository signing key '{}'", signature.key_id))?;
+    let public: [u8; 32] = B64
+        .decode(key_b64)
+        .context("decoding embedded official plugin signing key")?
+        .try_into()
+        .map_err(|_| anyhow!("embedded official plugin signing key is not 32 bytes"))?;
+    let key =
+        VerifyingKey::from_bytes(&public).context("constructing official plugin verifying key")?;
+    let raw_signature: [u8; 64] = B64
+        .decode(signature.signature.trim())
+        .context("decoding repository signature")?
+        .try_into()
+        .map_err(|_| anyhow!("repository signature is not 64 bytes"))?;
+    key.verify(&yaml, &Signature::from_bytes(&raw_signature))
+        .map_err(|_| anyhow!("repository signature does not match repository.yaml"))
 }
 
 fn validate_repository_manifest(repo_dir: &Path, manifest: &RepositoryManifest) -> Result<()> {

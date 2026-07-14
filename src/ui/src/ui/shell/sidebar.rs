@@ -493,6 +493,7 @@ mod tests {
             logo: None,
             effect_thumbnails: vec![],
             source: Default::default(),
+            provenance: Default::default(),
             declared_permissions: vec![],
             granted_permissions: vec![],
             config_fields: vec![],
