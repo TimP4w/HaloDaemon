@@ -1945,18 +1945,19 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
 
     // These inline fixtures exercise worker behavior, not catalog parsing. The
     // retired fixture syntax could not declare the canonical HID authority, so
-    // supply it only for a fixture that actually uses HID. Real packages pass
-    // through `parse_manifest_from_dir` and must declare every authority.
+    // validate a temporary copy with that authority. The returned fixture keeps
+    // its original runtime permissions; real packages pass through
+    // `parse_manifest_from_dir` and must declare every authority.
     let fixture_uses_hid = manifest
         .devices
         .iter()
         .any(|device| device.transport == "hid")
         || manifest.transports.hid.is_some();
-    if fixture_uses_hid && !manifest.permissions.contains(&Permission::Hid) {
-        manifest.permissions.push(Permission::Hid);
+    let mut validation_manifest = manifest.clone();
+    if fixture_uses_hid && !validation_manifest.permissions.contains(&Permission::Hid) {
+        validation_manifest.permissions.push(Permission::Hid);
     }
-
-    validate_manifest(&manifest)?;
+    validate_manifest(&validation_manifest)?;
     Ok(manifest)
 }
 
@@ -2544,13 +2545,10 @@ mod tests {
     fn permissions_section_parses_and_defaults_to_empty() {
         let src = r#"return {
             devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            permissions = { "network", "os", "hid" },
+            permissions = { "network", "os" },
         }"#;
         let m = parse_manifest(src, Path::new("net.lua")).unwrap();
-        assert_eq!(
-            m.permissions,
-            vec![Permission::Network, Permission::Os, Permission::Hid]
-        );
+        assert_eq!(m.permissions, vec![Permission::Network, Permission::Os]);
 
         let no_perms = r#"return { type = "integration" }"#;
         let m = parse_manifest(no_perms, Path::new("no_perms.lua")).unwrap();

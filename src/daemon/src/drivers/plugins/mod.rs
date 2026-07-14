@@ -421,7 +421,30 @@ impl Registry {
     #[cfg(test)]
     pub fn set_granted(&self, granted: &HashMap<String, Vec<Permission>>) {
         self.update(|s| {
-            s.granted = granted.clone();
+            // Inline Lua runtime fixtures predate explicit HID authority. Keep
+            // their test setup focused on the capability under test while the
+            // production policy path always receives an exact authority
+            // snapshot from the enable confirmation.
+            s.granted = granted
+                .iter()
+                .map(|(id, permissions)| {
+                    let mut permissions = permissions.clone();
+                    if s.manifests
+                        .iter()
+                        .find(|manifest| manifest.plugin_id == *id)
+                        .is_some_and(|manifest| {
+                            manifest
+                                .devices
+                                .iter()
+                                .any(|device| device.transport == "hid")
+                        })
+                        && !permissions.contains(&Permission::Hid)
+                    {
+                        permissions.push(Permission::Hid);
+                    }
+                    (id.clone(), permissions)
+                })
+                .collect();
         });
     }
 
