@@ -1281,6 +1281,7 @@ impl Registry {
     /// local `plugins/`, then other repos in config order — so an id is owned by
     /// whichever source provides it first and no later source can shadow it (see
     /// [`try_load_plugin_dir`]'s collision handling).
+    #[cfg(test)]
     pub fn load_all_with_repos(&self, dir: &Path, repo_dirs: &[std::path::PathBuf]) {
         self.load_all_with_priority_repo(dir, None, repo_dirs);
     }

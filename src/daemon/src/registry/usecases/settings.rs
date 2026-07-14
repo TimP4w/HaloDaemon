@@ -185,16 +185,10 @@ pub async fn reset_tours_seen(app: Arc<AppState>) -> Result<()> {
 
 pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     log::info!("Rediscovery triggered via UI");
-    // Re-read the plugins directory so a freshly-dropped script is picked up by
-    // a "Scan now" without restarting the daemon.
-    {
-        let cfg = app.config.read().await;
-        app.registry.load_all_with_repos(
-            &crate::config::plugins_dir(),
-            &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
-        );
-        app.registry.replace_policy(&cfg.plugins);
-    }
+    // Re-read all sources so a freshly-dropped package is picked up by a
+    // "Scan now" without restarting the daemon. This must use the shared
+    // reload path to retain a process-local development repository.
+    super::plugins::reload_registry(&app).await;
     crate::registry::notify_ungranted_plugins(&app).await;
     crate::registry::usecases::plugins::reconcile_full(&app).await;
 
