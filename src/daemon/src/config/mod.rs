@@ -337,7 +337,7 @@ pub struct PluginPolicy {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub accepted_authorities: HashMap<String, PluginAuthority>,
     /// Plugin ids explicitly enabled through the authority confirmation flow.
-    /// An absent id is inert, which makes a fresh v2 consent decision required.
+    /// An absent id is inert, which makes a fresh consent decision required.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enabled: Vec<String>,
     /// Non-secure user-editable config values per plugin id (key -> value).
@@ -350,13 +350,8 @@ pub struct PluginPolicy {
     pub integrations_enabled: Vec<String>,
     /// Content hash (hex SHA-256) of the installed plugin package, keyed by
     /// plugin id. This identifies updates and modified checkouts; it is never
-    /// used as a consent gate. `acknowledged` is accepted while loading older
-    /// configurations and is rewritten under the new name on the next save.
-    #[serde(
-        default,
-        alias = "acknowledged",
-        skip_serializing_if = "HashMap::is_empty"
-    )]
+    /// used as a consent gate.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub installed_hashes: HashMap<String, String>,
     /// Registered git-repo plugin sources. See `PluginRepoRecord`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
