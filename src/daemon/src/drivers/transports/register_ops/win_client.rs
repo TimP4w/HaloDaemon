@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use halod_hwaccess::proto::{
     self, CapabilityScope, Request, Response, BROKER_SERVICE_NAME, MAX_OPERATIONS_PER_CAPABILITY,
@@ -188,7 +188,44 @@ struct AuthorizedPipe {
     renew_at: Instant,
 }
 
+#[derive(Debug)]
+struct BrokerSessionLost(String);
+
+impl std::fmt::Display for BrokerSessionLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BrokerSessionLost {}
+
 impl AuthorizedPipe {
+    fn reauthenticate(&mut self, scope: &CapabilityScope) -> Result<()> {
+        let auth = broker_auth()?;
+        proto::write_frame(
+            &mut self.pipe,
+            &Request::Authenticate {
+                bootstrap_token: auth.token.clone(),
+                scope: scope.clone(),
+            },
+        )
+        .map_err(|e| anyhow!("broker reauthentication send: {e}"))?;
+        match proto::read_frame(&mut self.pipe)
+            .map_err(|e| anyhow!("broker reauthentication receive: {e}"))?
+        {
+            Response::Authorized {
+                capability,
+                expires_in_ms,
+            } => {
+                self.capability = capability;
+                self.renew_at = Instant::now() + Duration::from_millis(expires_in_ms / 2);
+                Ok(())
+            }
+            Response::Error(error) => bail!("broker reauthentication failed: {error}"),
+            other => bail!("unexpected broker reauthentication reply: {other:?}"),
+        }
+    }
+
     fn request(&mut self, req: &Request) -> Result<Response> {
         if Instant::now() >= self.renew_at {
             proto::write_frame(
@@ -197,9 +234,9 @@ impl AuthorizedPipe {
                     capability: self.capability.clone(),
                 },
             )
-            .map_err(|e| anyhow!("broker capability renewal send: {e}"))?;
+            .map_err(|e| BrokerSessionLost(format!("broker capability renewal send: {e}")))?;
             match proto::read_frame(&mut self.pipe)
-                .map_err(|e| anyhow!("broker capability renewal receive: {e}"))?
+                .map_err(|e| BrokerSessionLost(format!("broker capability renewal receive: {e}")))?
             {
                 Response::Authorized {
                     capability,
@@ -208,8 +245,18 @@ impl AuthorizedPipe {
                     self.capability = capability;
                     self.renew_at = Instant::now() + Duration::from_millis(expires_in_ms / 2);
                 }
-                Response::Error(e) => bail!("broker capability renewal failed: {e}"),
-                other => bail!("unexpected broker capability renewal reply: {other:?}"),
+                Response::Error(e) => {
+                    return Err(BrokerSessionLost(format!(
+                        "broker capability renewal failed: {e}"
+                    ))
+                    .into());
+                }
+                other => {
+                    return Err(BrokerSessionLost(format!(
+                        "unexpected broker capability renewal reply: {other:?}"
+                    ))
+                    .into());
+                }
             }
         }
         proto::write_frame(&mut self.pipe, req).map_err(|e| anyhow!("broker send: {e}"))?;
@@ -230,25 +277,63 @@ fn expect_opened(resp: Response, what: &str) -> Result<u32> {
 struct BrokerBus {
     pipe: AuthorizedPipe,
     bus_id: u32,
+    scope: CapabilityScope,
+    info: BusInfo,
     /// Cached at open time so `supports_block_write(&self)` needs no round trip.
     supports_block: bool,
 }
 
 impl BrokerBus {
-    fn request(&mut self, req: &Request) -> Result<Response> {
-        self.pipe.request(req)
+    fn reconnect(&mut self) -> Result<()> {
+        match self.pipe.reauthenticate(&self.scope) {
+            Ok(()) => {
+                let (bus_id, supports_block) = open_bus_on_pipe(&mut self.pipe, &self.info)?;
+                self.bus_id = bus_id;
+                self.supports_block = supports_block;
+                Ok(())
+            }
+            Err(error) => {
+                log::debug!(
+                    "[register_ops] broker pipe could not be reauthenticated ({error:#}); \
+                     opening a new connection"
+                );
+                let (pipe, bus_id, supports_block) = connect_broker_bus(&self.scope, &self.info)?;
+                self.pipe = pipe;
+                self.bus_id = bus_id;
+                self.supports_block = supports_block;
+                Ok(())
+            }
+        }
     }
 
-    fn byte(&mut self, req: Request) -> Result<u8> {
-        match self.request(&req)? {
+    fn request(&mut self, make_request: impl Fn(u32) -> Request) -> Result<Response> {
+        let first = self.pipe.request(&make_request(self.bus_id));
+        let reason = match first {
+            Ok(Response::Error(ref error)) if error == "capability expired" => {
+                format!("broker capability expired: {error}")
+            }
+            Err(ref error) if error.is::<BrokerSessionLost>() => format!("{error:#}"),
+            _ => return first,
+        };
+
+        log::info!("[register_ops] SMBus broker session lost; reconnecting ({reason})");
+        self.reconnect()
+            .with_context(|| format!("recover SMBus broker session after {reason}"))?;
+        self.pipe
+            .request(&make_request(self.bus_id))
+            .context("retry SMBus request after broker session recovery")
+    }
+
+    fn byte(&mut self, make_request: impl Fn(u32) -> Request) -> Result<u8> {
+        match self.request(make_request)? {
             Response::Byte(b) => Ok(b),
             Response::Error(e) => bail!("broker: {e}"),
             other => bail!("unexpected broker reply: {other:?}"),
         }
     }
 
-    fn unit(&mut self, req: Request) -> Result<()> {
-        match self.request(&req)? {
+    fn unit(&mut self, make_request: impl Fn(u32) -> Request) -> Result<()> {
+        match self.request(make_request)? {
             Response::Unit => Ok(()),
             Response::Error(e) => bail!("broker: {e}"),
             other => bail!("unexpected broker reply: {other:?}"),
@@ -258,47 +343,37 @@ impl BrokerBus {
 
 impl SmBusSyncOps for BrokerBus {
     fn read_byte(&mut self, addr: u8) -> Result<u8> {
-        self.byte(Request::ReadByte {
-            bus: self.bus_id,
-            addr,
-        })
+        self.byte(|bus| Request::ReadByte { bus, addr })
     }
     fn read_byte_data(&mut self, addr: u8, cmd: u8) -> Result<u8> {
-        self.byte(Request::ReadByteData {
-            bus: self.bus_id,
-            addr,
-            cmd,
-        })
+        self.byte(|bus| Request::ReadByteData { bus, addr, cmd })
     }
     fn write_quick(&mut self, addr: u8) -> Result<bool> {
-        match self.request(&Request::WriteQuick {
-            bus: self.bus_id,
-            addr,
-        })? {
+        match self.request(|bus| Request::WriteQuick { bus, addr })? {
             Response::Bool(b) => Ok(b),
             Response::Error(e) => bail!("broker: {e}"),
             other => bail!("unexpected broker reply: {other:?}"),
         }
     }
     fn write_byte_data(&mut self, addr: u8, cmd: u8, val: u8) -> Result<()> {
-        self.unit(Request::WriteByteData {
-            bus: self.bus_id,
+        self.unit(|bus| Request::WriteByteData {
+            bus,
             addr,
             cmd,
             val,
         })
     }
     fn write_word_data(&mut self, addr: u8, cmd: u8, val: u16) -> Result<()> {
-        self.unit(Request::WriteWordData {
-            bus: self.bus_id,
+        self.unit(|bus| Request::WriteWordData {
+            bus,
             addr,
             cmd,
             val,
         })
     }
     fn write_block_data(&mut self, addr: u8, cmd: u8, data: &[u8]) -> Result<()> {
-        self.unit(Request::WriteBlockData {
-            bus: self.bus_id,
+        self.unit(|bus| Request::WriteBlockData {
+            bus,
             addr,
             cmd,
             data: data.to_vec(),
@@ -316,7 +391,27 @@ pub fn open_bus(info: &BusInfo, addresses: &[u8]) -> Result<Box<dyn SmBusSyncOps
         max_operations_per_second: MAX_OPERATIONS_PER_SECOND,
         max_operations: MAX_OPERATIONS_PER_CAPABILITY,
     };
-    let mut pipe = connect_or_spawn(&scope)?;
+    let (pipe, bus_id, supports_block) = connect_broker_bus(&scope, info)?;
+
+    Ok(Box::new(BrokerBus {
+        pipe,
+        bus_id,
+        scope,
+        info: info.clone(),
+        supports_block,
+    }))
+}
+
+fn connect_broker_bus(
+    scope: &CapabilityScope,
+    info: &BusInfo,
+) -> Result<(AuthorizedPipe, u32, bool)> {
+    let mut pipe = connect_or_spawn(scope)?;
+    let (bus_id, supports_block) = open_bus_on_pipe(&mut pipe, info)?;
+    Ok((pipe, bus_id, supports_block))
+}
+
+fn open_bus_on_pipe(pipe: &mut AuthorizedPipe, info: &BusInfo) -> Result<(u32, bool)> {
     let bus_id = expect_opened(
         pipe.request(&Request::OpenBus { info: info.clone() })?,
         "smbus",
@@ -331,11 +426,7 @@ pub fn open_bus(info: &BusInfo, addresses: &[u8]) -> Result<Box<dyn SmBusSyncOps
         }
     };
 
-    Ok(Box::new(BrokerBus {
-        pipe,
-        bus_id,
-        supports_block,
-    }))
+    Ok((bus_id, supports_block))
 }
 
 // ── Typed AMD SMN and LPC RPC clients ──────────────────────────────────────
