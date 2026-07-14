@@ -76,6 +76,12 @@ loaded directly via `--dev-plugin-repo`; imported standalone packages are local
 unsigned packages. Invalid official content stays visible for repair but never
 loads or shadows native discovery.
 
+`--dev-plugin-repo` is a process-local official-source replacement, not an
+additional checkout. Halo canonicalizes and displays its package paths, keeps
+third-party repositories available, and never fetches, checks, updates, or
+repairs the managed official repository for that daemon process. Restart
+without the flag to return to the installed official revision.
+
 ## Runtime and containment
 
 `discover(host)` creates physical roots. Each root owns one serialized Lua
