@@ -26,6 +26,13 @@ fn repo_cloned(dir: &std::path::Path) -> bool {
     dir.join(".git").exists()
 }
 
+/// The direct development source replaces the official checkout for the life
+/// of this process. Never fetch, update, or otherwise mutate the inactive
+/// official repository while that override is selected.
+async fn official_repo_is_overridden(app: &AppState) -> bool {
+    app.development_plugin_repo.read().await.is_some()
+}
+
 async fn package_disk_hash(
     repo_dir: &std::path::Path,
     subpath: &std::path::Path,
@@ -203,8 +210,12 @@ pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
 /// Fetch every registered repo's remote tip and compare to `locked_sha`; a repo whose fetch fails is logged and skipped.
 async fn compute_repo_updates(app: &Arc<AppState>) -> Vec<RepoUpdateStatus> {
     let repos = app.config.read().await.plugins.repos.clone();
+    let official_overridden = official_repo_is_overridden(app).await;
     let mut out = Vec::with_capacity(repos.len());
     for r in repos {
+        if official_overridden && r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
+            continue;
+        }
         let dir = crate::config::plugin_repos_dir().join(&r.slug);
         if !repo_cloned(&dir) {
             continue;
@@ -240,10 +251,14 @@ async fn compute_plugin_updates(
     use halod_shared::types::PluginUpdateStatus;
 
     let policy = app.config.read().await.plugins.clone();
+    let official_overridden = official_repo_is_overridden(app).await;
     let repos: Vec<_> = policy
         .repos
         .iter()
-        .filter(|r| slug_filter.is_none_or(|s| s == r.slug))
+        .filter(|r| {
+            slug_filter.is_none_or(|s| s == r.slug)
+                && !(official_overridden && r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+        })
         .cloned()
         .collect();
 
@@ -496,6 +511,13 @@ pub async fn check_repo_updates(app: Arc<AppState>, client: ClientHandle) -> Res
 /// Fetch and install a repository as one unit. The complete checkout is
 /// validated before its package digests become the new installed baselines.
 pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
+    if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG
+        && official_repo_is_overridden(&app).await
+    {
+        anyhow::bail!(
+            "the official plugin repository is disabled while --dev-plugin-repo is active"
+        );
+    }
     let record = {
         let cfg = app.config.read().await;
         cfg.plugins
@@ -582,6 +604,23 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn development_override_blocks_official_updates() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let dev = tempfile::tempdir().unwrap();
+            *app.development_plugin_repo.write().await = Some(dev.path().to_path_buf());
+
+            let error = update_repo(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(), app)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("--dev-plugin-repo is active"),
+                "{error:#}"
+            );
+        })
+        .await;
+    }
 
     /// A `file://` URL for a local path — `add_repo`/`clone` now require an
     /// explicit scheme, so tests clone local source repos through one.
