@@ -113,6 +113,15 @@ pub struct UsbControlConfig {
     pub endpoints: Vec<UsbControlEndpoint>,
 }
 
+/// Executables a command plugin may launch. Names are deliberately bare
+/// program names: a path, shell fragment, or argument belongs to runtime data
+/// and is rejected before a process is spawned.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommandConfig {
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransportsConfig {
     #[serde(default)]
@@ -121,11 +130,16 @@ pub struct TransportsConfig {
     pub tcp: Option<TcpConfig>,
     #[serde(default)]
     pub usb_control: Option<UsbControlConfig>,
+    #[serde(default)]
+    pub command: Option<CommandConfig>,
 }
 
 impl TransportsConfig {
     fn is_empty(&self) -> bool {
-        self.hid.is_none() && self.tcp.is_none() && self.usb_control.is_none()
+        self.hid.is_none()
+            && self.tcp.is_none()
+            && self.usb_control.is_none()
+            && self.command.is_none()
     }
 }
 
@@ -566,13 +580,56 @@ pub struct DeviceMatch {
     #[serde(default)]
     pub smbus: Option<SmbusMatch>,
     #[serde(default)]
-    pub hwmon: Option<serde_yaml::Value>,
+    pub hwmon: Option<HwmonMatch>,
     #[serde(default)]
-    pub command: Option<serde_yaml::Value>,
+    pub command: Option<CommandMatch>,
     #[serde(default)]
-    pub amd_smn: Option<serde_yaml::Value>,
+    pub amd_smn: Option<AmdSmnMatch>,
     #[serde(default)]
-    pub lpcio: Option<serde_yaml::Value>,
+    pub lpcio: Option<LpcioMatch>,
+}
+
+/// The deliberately broad hwmon discovery declaration. Generic matching is an
+/// explicit opt-in so a missing identifier cannot turn into a catch-all.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HwmonMatch {
+    #[serde(default)]
+    pub any: bool,
+}
+
+/// A command-backed device is identified by the exact executable that reports
+/// it. The executable must also appear in `transports.command.commands`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CommandMatch {
+    Name(String),
+    Detail { command: String },
+}
+
+impl CommandMatch {
+    fn command(&self) -> &str {
+        match self {
+            Self::Name(command) | Self::Detail { command } => command,
+        }
+    }
+}
+
+/// AMD SMN is intentionally a generic family probe. Concrete CPU families are
+/// validated from the runtime descriptors returned after a scoped read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AmdSmnMatch {
+    #[serde(default)]
+    pub any: bool,
+}
+
+/// LPCIO matching requires concrete chip identifiers unless a package
+/// deliberately declares a generic catch-all.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LpcioMatch {
+    #[serde(default)]
+    pub any: bool,
+    #[serde(default)]
+    pub chip_ids: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1282,6 +1339,21 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 if spec.transport == "hid" && !manifest.permissions.contains(&Permission::Hid) {
                     bail!("a device using the hid transport must declare the `hid` permission");
                 }
+                let required_permission = match spec.transport.as_str() {
+                    "hwmon" => Some(Permission::Hwmon),
+                    "command" => Some(Permission::Command),
+                    "amd_smn" => Some(Permission::AmdSmn),
+                    "lpcio" => Some(Permission::Lpcio),
+                    _ => None,
+                };
+                if let Some(permission) = required_permission {
+                    if !manifest.permissions.contains(&permission) {
+                        bail!(
+                            "a device using the {} transport requires its matching permission",
+                            spec.transport
+                        );
+                    }
+                }
             }
         }
         PluginKind::Effect => {
@@ -1351,6 +1423,26 @@ fn normalize_device_matches(manifest: &mut PluginManifest) -> Result<()> {
             device.pre_scan = smbus.pre_scan;
             device.probe = smbus.probe;
             device.pci_match = smbus.pci_match.clone();
+        } else if let Some(hwmon) = &device.r#match.hwmon {
+            if !hwmon.any {
+                bail!("hwmon match must explicitly declare `any: true`");
+            }
+            device.transport = "hwmon".to_owned();
+        } else if let Some(command) = &device.r#match.command {
+            if command.command().is_empty() {
+                bail!("command match must name an executable");
+            }
+            device.transport = "command".to_owned();
+        } else if let Some(amd_smn) = &device.r#match.amd_smn {
+            if !amd_smn.any {
+                bail!("amd_smn match must explicitly declare `any: true`");
+            }
+            device.transport = "amd_smn".to_owned();
+        } else if let Some(lpcio) = &device.r#match.lpcio {
+            if lpcio.any == lpcio.chip_ids.is_empty() {
+                bail!("lpcio match must declare chip_ids or explicit `any: true`");
+            }
+            device.transport = "lpcio".to_owned();
         } else {
             bail!("the declared transport match is not implemented by this daemon build");
         }
@@ -1654,6 +1746,37 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
                 );
             }
         }
+    }
+    if let Some(command) = &manifest.transports.command {
+        if !manifest.permissions.contains(&Permission::Command) {
+            bail!("a command transport requires the 'command' permission");
+        }
+        if command.commands.is_empty() {
+            bail!("command transport must declare at least one executable");
+        }
+        let mut names = HashSet::new();
+        for name in &command.commands {
+            validate_component("command executable", name)?;
+            if !names.insert(name.as_str()) {
+                bail!("command executable '{name}' is declared more than once");
+            }
+        }
+        for device in &manifest.devices {
+            if let Some(command_match) = &device.r#match.command {
+                if !names.contains(command_match.command()) {
+                    bail!(
+                        "command match '{}' is not declared by transports.command",
+                        command_match.command()
+                    );
+                }
+            }
+        }
+    } else if manifest
+        .devices
+        .iter()
+        .any(|device| device.r#match.command.is_some())
+    {
+        bail!("a command match requires a transports.command declaration");
     }
     Ok(())
 }

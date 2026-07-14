@@ -250,6 +250,14 @@ fn authority_for_manifest(manifest: &PluginManifest) -> halod_shared::types::Plu
     if manifest.transports.usb_control.is_some() {
         scopes.push("usb_control".to_owned());
     }
+    if let Some(command) = &manifest.transports.command {
+        scopes.extend(
+            command
+                .commands
+                .iter()
+                .map(|name| format!("command:{name}")),
+        );
+    }
     halod_shared::types::PluginAuthority {
         permissions: manifest.permissions.clone(),
         transport_scopes: scopes,
