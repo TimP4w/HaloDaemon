@@ -1216,7 +1216,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         MAX_PLUGIN_EFFECTS,
     )?;
     validate_identity(&manifest.identity)?;
-    validate_v2_catalog(manifest)?;
+    validate_catalog(manifest)?;
     validate_device_identifiers(manifest)?;
     validate_effects(&manifest.effects, "effect")?;
     validate_effect_assets(manifest)?;
@@ -1457,7 +1457,7 @@ const SUPPORTED_CAPABILITIES: &[&str] = &[
     "chain",
 ];
 
-fn validate_v2_catalog(manifest: &PluginManifest) -> Result<()> {
+fn validate_catalog(manifest: &PluginManifest) -> Result<()> {
     let mut platforms = HashSet::new();
     for platform in &manifest.platforms {
         if !matches!(platform.as_str(), "linux" | "windows" | "macos") {
