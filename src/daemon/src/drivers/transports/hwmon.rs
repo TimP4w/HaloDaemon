@@ -33,15 +33,36 @@ impl HwmonIo {
         self.io.read_access()
     }
 
-    /// Reads `dir/rel`; `None` if the file doesn't exist or isn't readable.
-    pub fn read_attr(&self, rel: &str) -> Option<String> {
-        std::fs::read_to_string(self.dir().join(rel)).ok()
+    /// Resolve a single sysfs attribute inside this chip's directory.  Plugin
+    /// callers never receive a filesystem path; accepting only a basename
+    /// prevents `..`, separators, and platform-specific escape forms from
+    /// reaching a neighbouring hwmon device.
+    fn attr_path(&self, attr: &str) -> Result<PathBuf> {
+        anyhow::ensure!(
+            !attr.is_empty()
+                && attr.len() <= 128
+                && !attr.contains(['/', '\\', '\0'])
+                && attr != "."
+                && attr != "..",
+            "hwmon attribute must be a contained attribute name"
+        );
+        Ok(self.dir().join(attr))
     }
 
-    /// Metered write of `value` to `dir/rel`.
+    /// Reads a contained chip attribute; `None` if it is invalid, unavailable,
+    /// or unreadable.
+    pub fn read_attr(&self, rel: &str) -> Option<String> {
+        std::fs::read_to_string(self.attr_path(rel).ok()?).ok()
+    }
+
+    /// Metered write of `value` to a contained chip attribute.
     pub async fn write_attr(&self, rel: &str, value: &str) -> Result<()> {
+        let path = self.attr_path(rel)?;
         let dir = self.io.write_access(value.len()).await?;
-        let path = dir.join(rel);
+        anyhow::ensure!(
+            path.starts_with(dir),
+            "hwmon attribute escapes the chip directory"
+        );
         tokio::fs::write(&path, value)
             .await
             .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))
@@ -54,6 +75,23 @@ impl HwmonIo {
     #[cfg(test)]
     pub fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
         self.io.set_limit(limit);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HwmonIo;
+
+    #[test]
+    fn rejects_attribute_path_escapes() {
+        let io = HwmonIo::new(std::path::PathBuf::from("/sys/class/hwmon/hwmon0"), None);
+        for invalid in ["../pwm1", "subdir/pwm1", r"subdir\pwm1", "", ".", ".."] {
+            assert!(
+                io.attr_path(invalid).is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
+        assert!(io.attr_path("pwm1_enable").is_ok());
     }
 }
 
