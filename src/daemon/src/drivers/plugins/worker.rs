@@ -550,6 +550,69 @@ impl PluginHandle {
         .await
     }
 
+    pub async fn rgb_write_frame_batch(&self, zones: &[(String, Vec<RgbColor>)]) -> Result<()> {
+        let zones = zones.to_vec();
+        self.run(move |ctx| {
+            let index = ctx.controller_index;
+            let batch_callback = if index.is_some() {
+                "write_controller_frame_batch"
+            } else {
+                "write_frame_batch"
+            };
+
+            if let Some(f) = func(&ctx.manifest, batch_callback) {
+                let frames = ctx
+                    .lua
+                    .create_table()
+                    .map_err(|e| lua_err("write_frame_batch arg", e))?;
+                for (i, (zone_id, colors)) in zones.iter().enumerate() {
+                    let frame = ctx
+                        .lua
+                        .create_table()
+                        .map_err(|e| lua_err("write_frame_batch arg", e))?;
+                    frame
+                        .set("zone_id", zone_id.as_str())
+                        .map_err(|e| lua_err("write_frame_batch arg", e))?;
+                    frame
+                        .set(
+                            "colors",
+                            ctx.lua
+                                .to_value(colors)
+                                .map_err(|e| lua_err("write_frame_batch arg", e))?,
+                        )
+                        .map_err(|e| lua_err("write_frame_batch arg", e))?;
+                    frames
+                        .set(i + 1, frame)
+                        .map_err(|e| lua_err("write_frame_batch arg", e))?;
+                }
+                return match index {
+                    Some(index) => f.call::<()>((ctx.dev.clone(), index, frames)),
+                    None => f.call::<()>((ctx.dev.clone(), frames)),
+                }
+                .map_err(|e| lua_err(batch_callback, e));
+            }
+
+            let (callback, index) = match index {
+                Some(index) => ("write_controller_frame", Some(index)),
+                None => ("write_frame", None),
+            };
+            let f = required(&ctx.manifest, callback)?;
+            for (zone, colors) in &zones {
+                let colors_v = ctx
+                    .lua
+                    .to_value(colors)
+                    .map_err(|e| lua_err("write_frame arg", e))?;
+                match index {
+                    Some(index) => f.call::<()>((ctx.dev.clone(), index, zone.as_str(), colors_v)),
+                    None => f.call::<()>((ctx.dev.clone(), zone.as_str(), colors_v)),
+                }
+                .map_err(|e| lua_err(callback, e))?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn fan_get_duty(&self) -> Result<u8> {
         self.call("get_duty", ()).await
     }
@@ -1143,6 +1206,49 @@ mod tests {
         h.rgb_write_frame("zone-1", &[RgbColor { r: 1, g: 2, b: 3 }])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn integration_controller_batches_all_zones_in_one_callback() {
+        let source = r#"return {
+            write_controller_frame_batch = function(dev, index, frames)
+                assert(index == 7)
+                assert(#frames == 2)
+                assert(frames[1].zone_id == "zone-1")
+                assert(#frames[1].colors == 1)
+                assert(frames[1].colors[1].r == 1)
+                assert(frames[2].zone_id == "zone-2")
+                assert(frames[2].colors[1].b == 6)
+            end,
+        }"#;
+        let h = spawn_controller(source, 7);
+
+        h.rgb_write_frame_batch(&[
+            ("zone-1".into(), vec![RgbColor { r: 1, g: 2, b: 3 }]),
+            ("zone-2".into(), vec![RgbColor { r: 4, g: 5, b: 6 }]),
+        ])
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn frame_batch_falls_back_to_per_zone_callback() {
+        let source = r#"local calls = 0
+        return {
+            write_controller_frame = function(dev, index, zone, colors)
+                calls = calls + 1
+                assert(index == 7)
+                assert(zone == "zone-" .. calls)
+            end,
+        }"#;
+        let h = spawn_controller(source, 7);
+
+        h.rgb_write_frame_batch(&[
+            ("zone-1".into(), vec![RgbColor { r: 1, g: 2, b: 3 }]),
+            ("zone-2".into(), vec![RgbColor { r: 4, g: 5, b: 6 }]),
+        ])
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

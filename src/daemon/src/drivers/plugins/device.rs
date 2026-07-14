@@ -967,6 +967,16 @@ impl RgbCapability for LuaDevice {
         self.track(r).await
     }
 
+    async fn write_frame_batch(&self, zones: &[(String, Vec<RgbColor>)]) -> Result<()> {
+        for (zone_id, _) in zones {
+            if !self.descriptor().zones.iter().any(|z| z.id == *zone_id) {
+                anyhow::bail!("unknown zone: {zone_id}");
+            }
+        }
+        let r = self.worker()?.rgb_write_frame_batch(zones).await;
+        self.track(r).await
+    }
+
     fn rgb_state(&self) -> &RgbStateSlot {
         &self.rgb_slot
     }

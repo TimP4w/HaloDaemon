@@ -287,6 +287,16 @@ pub trait RgbCapability: Send + Sync {
     /// LEDs in "engine" mode — never call it to set persisted state.
     async fn write_frame(&self, zone_id: &str, colors: &[RgbColor]) -> Result<()>;
 
+    /// Write all zones belonging to one device frame. Drivers that can commit a
+    /// controller atomically should override this; the safe default preserves
+    /// the existing per-zone behavior.
+    async fn write_frame_batch(&self, zones: &[(String, Vec<RgbColor>)]) -> Result<()> {
+        for (zone_id, colors) in zones {
+            self.write_frame(zone_id, colors).await?;
+        }
+        Ok(())
+    }
+
     /// Backing slot — required so all state sub-operations have defaults.
     fn rgb_state(&self) -> &RgbStateSlot;
 

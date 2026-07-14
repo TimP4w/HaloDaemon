@@ -744,10 +744,8 @@ impl RgbEngine {
                     return;
                 }
                 let Some(rgb) = dev.as_rgb() else { return };
-                for (zone_id, colors) in zones {
-                    if let Err(e) = rgb.write_frame(&zone_id, &colors).await {
-                        log::warn!("write_frame failed for {}/{}: {e}", dev.id(), zone_id);
-                    }
+                if let Err(e) = rgb.write_frame_batch(&zones).await {
+                    log::warn!("write_frame_batch failed for {}: {e}", dev.id());
                 }
             });
             slots.insert(id, handle);
@@ -799,6 +797,7 @@ mod tests {
         descriptor: RgbDescriptor,
         fail_write: bool,
         write_count: AtomicUsize,
+        batch_count: AtomicUsize,
         last_frame: StdMutex<Vec<RgbColor>>,
         rgb: RgbStateSlot,
         rgb_state: StdMutex<Option<RgbState>>,
@@ -832,6 +831,7 @@ mod tests {
                 },
                 fail_write,
                 write_count: AtomicUsize::new(0),
+                batch_count: AtomicUsize::new(0),
                 last_frame: StdMutex::new(Vec::new()),
                 rgb: RgbStateSlot::default(),
                 rgb_state: StdMutex::new(None),
@@ -922,6 +922,13 @@ mod tests {
             *self.last_frame.lock().unwrap() = colors.to_vec();
             if self.fail_write {
                 anyhow::bail!("simulated write error");
+            }
+            Ok(())
+        }
+        async fn write_frame_batch(&self, zones: &[(String, Vec<RgbColor>)]) -> Result<()> {
+            self.batch_count.fetch_add(1, Ordering::SeqCst);
+            for (zone_id, colors) in zones {
+                self.write_frame(zone_id, colors).await?;
             }
             Ok(())
         }
@@ -1575,6 +1582,7 @@ mod tests {
         );
         engine.dispatch_writes(pending);
         engine.drain_writes().await;
+        assert_eq!(dev.batch_count.load(Ordering::SeqCst), 1);
         assert_eq!(dev.write_count.load(Ordering::SeqCst), 1);
         assert_eq!(dev.last_frame.lock().unwrap().len(), 3);
     }
