@@ -783,7 +783,7 @@ mod tests {
 
     /// Every declaration lives in YAML; the Lua entry contains callbacks only.
     const CONFIG_TEST_PLUGIN_YAML: &str =
-        "id: cfgtest\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\npermissions:\n  - network\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
+        "id: cfgtest\npermissions: [network, hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
 
     fn write_config_test_plugin(root: &std::path::Path) {
         let dir = root.join("cfgtest");
@@ -829,7 +829,7 @@ mod tests {
         std::fs::create_dir_all(plugin_dir.join("assets")).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: assetplug\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n\
+            "id: assetplug\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
              logo: logo.png\n",
         )
         .unwrap();
@@ -945,7 +945,7 @@ mod tests {
             std::fs::create_dir_all(&pdir).unwrap();
             std::fs::write(
                 pdir.join("plugin.yaml"),
-                "id: numcfg\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\nconfig:\n  fields:\n    - key: hz\n      label: Hz\n      kind: number\n      min: 1\n      max: 100\n",
+                "id: numcfg\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: hz\n      label: Hz\n      kind: number\n      min: 1\n      max: 100\n",
             )
             .unwrap();
             std::fs::write(

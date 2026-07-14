@@ -106,7 +106,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: inttest\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: integration\npermissions:\n  - network\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\nconfig:\n  fields:\n    - key: host\n      label: Host\n      default: 127.0.0.1\n    - key: port\n      label: Port\n      default: '12345'\n    - key: token\n      label: Token\n      secure: true\n",
+            "id: inttest\ntype: integration\npermissions: [network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\nconfig:\n  fields:\n    - key: host\n      label: Host\n      default: 127.0.0.1\n    - key: port\n      label: Port\n      default: '12345'\n    - key: token\n      label: Token\n      secure: true\n",
         )
         .unwrap();
         std::fs::write(plugin_dir.join("main.lua"), INTEGRATION_CONFIG_TEST_PLUGIN).unwrap();
