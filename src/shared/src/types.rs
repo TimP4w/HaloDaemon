@@ -516,10 +516,9 @@ pub enum NotificationCode {
     PluginNeedsPermission {
         plugin: String,
     },
-    /// A plugin's on-disk content hash changed since it was last acknowledged,
-    /// without going through the update flow (e.g. a manual edit). Emitted for
-    /// plugins that declare no permissions, so the change is still surfaced —
-    /// permission-declaring plugins are covered by `PluginNeedsPermission`.
+    /// A plugin's on-disk content hash differs from the installed package
+    /// revision, for example after a manual edit. This is dirty-update
+    /// metadata, not a consent decision.
     PluginContentChanged {
         plugin: String,
     },

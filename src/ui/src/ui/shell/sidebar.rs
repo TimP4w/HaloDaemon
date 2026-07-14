@@ -481,7 +481,7 @@ mod tests {
     use super::*;
     use halod_shared::types::PluginInfo;
 
-    fn plugin(id: &str, consented: bool, _content_changed: bool) -> PluginInfo {
+    fn plugin(id: &str, consented: bool) -> PluginInfo {
         PluginInfo {
             id: id.into(),
             name: id.into(),
@@ -536,40 +536,45 @@ mod tests {
     fn plugins_needing_action_counts_updates_and_security_blocks_only() {
         let mut state = AppState::default();
         state.plugins.plugins = vec![
-            plugin("ok", true, false),           // fine — not counted
-            plugin("unconsented", false, false), // first-time consent is contextual
+            plugin("ok", true),           // fine — not counted
+            plugin("unconsented", false), // first-time consent is contextual
             {
-                let mut changed = plugin("changed", true, true);
+                let mut changed = plugin("changed", true);
                 changed.enabled = false;
                 changed
             },
-            plugin("has_update", true, false),
+            plugin("has_update", true),
         ];
-        let updates = vec![update("has_update", true), update("ok", false)];
+        let updates = vec![
+            update("has_update", true),
+            on_disk_change("changed"),
+            update("ok", false),
+        ];
         assert_eq!(plugins_needing_action(&state, &updates), 2);
     }
 
     #[test]
     fn plugins_needing_action_is_zero_when_all_clear() {
         let mut state = AppState::default();
-        state.plugins.plugins = vec![plugin("a", true, false), plugin("b", true, false)];
+        state.plugins.plugins = vec![plugin("a", true), plugin("b", true)];
         assert_eq!(plugins_needing_action(&state, &[]), 0);
     }
 
     #[test]
     fn plugins_needing_action_counts_new_permission_only_after_prior_approval() {
-        let mut p = plugin("permission", true, false);
+        let mut p = plugin("permission", true);
         p.enabled = false;
         p.accepted_authority = Some(halod_shared::types::PluginAuthority { permissions: vec![halod_shared::types::Permission::Os], transport_scopes: vec![] });
         p.declared_permissions = vec![
             halod_shared::types::Permission::Os,
             halod_shared::types::Permission::Network,
         ];
+        p.authority.permissions = p.declared_permissions.clone();
         let mut state = AppState::default();
         state.plugins.plugins = vec![p];
         assert_eq!(plugins_needing_action(&state, &[]), 1);
 
-        let mut first_run = plugin("first-run", false, false);
+        let mut first_run = plugin("first-run", false);
         first_run.enabled = false;
         first_run.declared_permissions = vec![halod_shared::types::Permission::Network];
         state.plugins.plugins = vec![first_run];
@@ -578,7 +583,7 @@ mod tests {
 
     #[test]
     fn integration_runtime_issues_are_routed_to_integrations() {
-        let mut with_issue = plugin("failing", true, false);
+        let mut with_issue = plugin("failing", true);
         with_issue.plugin_type = halod_shared::types::PluginKind::Integration;
         with_issue.health.issue = Some(halod_shared::types::PluginIssue {
             kind: halod_shared::types::PluginIssueKind::ConnectFailed,
@@ -586,14 +591,14 @@ mod tests {
             timestamp_ms: 0,
         });
         let mut state = AppState::default();
-        state.plugins.plugins = vec![with_issue, plugin("ok", true, false)];
+        state.plugins.plugins = vec![with_issue, plugin("ok", true)];
         assert_eq!(plugins_needing_action(&state, &[]), 0);
         assert_eq!(integrations_needing_action(&state), 1);
     }
 
     #[test]
     fn plugin_badge_is_red_for_errors_but_not_load_warnings() {
-        let mut affected = plugin("affected", true, false);
+        let mut affected = plugin("affected", true);
         affected.health.issue = Some(halod_shared::types::PluginIssue {
             kind: PluginIssueKind::LoadWarning,
             detail: "warning".into(),
@@ -611,7 +616,7 @@ mod tests {
     #[test]
     fn plugins_needing_action_ignores_skipped_plugins() {
         let mut state = AppState::default();
-        state.plugins.plugins = vec![plugin("ok", true, false)];
+        state.plugins.plugins = vec![plugin("ok", true)];
         state.plugins.skipped = vec![halod_shared::types::SkippedPlugin {
             path: "/a/broken".into(),
             reason: "bad yaml".into(),
@@ -654,7 +659,7 @@ mod tests {
     #[test]
     fn on_disk_change_counts_only_while_the_plugin_is_disabled() {
         // Quarantined (disabled) → needs action.
-        let mut disabled = plugin("edited", true, false);
+        let mut disabled = plugin("edited", true);
         disabled.enabled = false;
         let mut state = AppState::default();
         state.plugins.plugins = vec![disabled];
@@ -665,7 +670,7 @@ mod tests {
 
         // Re-enabled (risk accepted) → no longer counted, even if a stale
         // on-disk-change status lingers until the next check.
-        let mut enabled = plugin("edited", true, false);
+        let mut enabled = plugin("edited", true);
         enabled.enabled = true;
         let mut state = AppState::default();
         state.plugins.plugins = vec![enabled];
