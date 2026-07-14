@@ -150,6 +150,9 @@ fn wire_group<T, U>(
 }
 
 impl Controls {
+    /// Legacy fixture adapter. Production package loading never calls this:
+    /// canonical controls are supplied by `initialize`.
+    #[cfg(test)]
     fn from_manifest(manifest: &PluginManifest) -> Self {
         Self {
             choices: manifest
@@ -643,7 +646,9 @@ impl LuaDevice {
                 max: 0,
                 mode: DpiMode::Host,
             }),
-            controls: Controls::from_manifest(manifest),
+            // Canonical package controls are runtime descriptors returned by
+            // initialize. Keep the pre-initialize surface empty.
+            controls: Controls::default(),
             dynamic_controls: OnceLock::new(),
             eq_cache: Mutex::new(None),
             key_remap_buttons: manifest
@@ -1916,6 +1921,7 @@ mod tests {
     async fn chain_advertises_controller_and_chain() {
         let src = r#"return {
             devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+            permissions = { "hid" },
             transports = { hid = { report_size = 8 } },
             chain = { channels = { { id = "c1", name = "Port 1", max_leds = 30 } } },
         }"#;
@@ -1947,6 +1953,7 @@ mod tests {
     fn controls_wire_and_validate_round_trip() {
         let src = r#"return {
             devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
+            permissions = { "hid" },
             choice = { choices = { { key = "mode", label = "Mode",
                 options = { { id = "a", label = "A" }, { id = "b", label = "B" } }, default = 0 } } },
             range = { ranges = { { key = "hz", label = "Hz", min = 100, max = 1000, default = 500 } } },
