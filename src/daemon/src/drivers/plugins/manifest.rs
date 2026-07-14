@@ -578,6 +578,8 @@ pub struct DeviceMatch {
     #[serde(default)]
     pub hid: Option<HidMatch>,
     #[serde(default)]
+    pub usb_control: Option<UsbControlMatch>,
+    #[serde(default)]
     pub smbus: Option<SmbusMatch>,
     #[serde(default)]
     pub hwmon: Option<HwmonMatch>,
@@ -595,6 +597,16 @@ pub struct DeviceMatch {
 pub struct HwmonMatch {
     #[serde(default)]
     pub any: bool,
+}
+
+/// USB vendor-control hardware identity. The transport configuration declares
+/// endpoint behavior; this match only selects the primary physical device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsbControlMatch {
+    pub vid: u16,
+    pub pid: u16,
+    #[serde(default)]
+    pub interface: u8,
 }
 
 /// A command-backed device is identified by the exact executable that reports
@@ -669,6 +681,7 @@ pub struct HidMatch {
 impl DeviceMatch {
     fn count(&self) -> usize {
         usize::from(self.hid.is_some())
+            + usize::from(self.usb_control.is_some())
             + usize::from(self.smbus.is_some())
             + usize::from(self.hwmon.is_some())
             + usize::from(self.command.is_some())
@@ -1414,6 +1427,14 @@ fn normalize_device_matches(manifest: &mut PluginManifest) -> Result<()> {
             device.usage = hid.usage;
             device.interface = hid.interface;
             device.generic_hid = hid.any;
+        } else if let Some(usb_control) = &device.r#match.usb_control {
+            if usb_control.vid == 0 || usb_control.pid == 0 {
+                bail!("usb_control match requires non-zero vid and pid");
+            }
+            device.transport = "usb_control".to_owned();
+            device.vid = Some(usb_control.vid);
+            device.pid = Some(usb_control.pid);
+            device.interface = Some(usb_control.interface.into());
         } else if let Some(smbus) = &device.r#match.smbus {
             device.transport = "smbus".to_owned();
             device.bus = Some(smbus.bus.clone());
@@ -3173,6 +3194,22 @@ mod tests {
         assert_eq!(manifest.devices[0].transport, "smbus");
         assert_eq!(manifest.devices[0].bus.as_deref(), Some("chipset"));
         assert_eq!(manifest.devices[0].addresses.as_deref(), Some(&[0x50][..]));
+    }
+
+    #[test]
+    fn directory_plugin_uses_nested_usb_control_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("nested_usb");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: nested_usb\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: Panel\n    type: monitor\n    match:\n      usb_control: { vid: 0x1234, pid: 0x5678 }\ntransports:\n  usb_control: { interface: 0 }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(manifest.devices[0].transport, "usb_control");
+        assert_eq!(manifest.devices[0].vid, Some(0x1234));
     }
 
     #[test]
