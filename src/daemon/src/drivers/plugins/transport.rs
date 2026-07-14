@@ -13,7 +13,10 @@
 //! plugin core (`manifest`/`worker`/`mod`) never grows a per-bus branch.
 
 use std::collections::HashMap;
+use std::io::Read;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use halod_shared::types::{Permission, WriteRateStatus};
@@ -92,6 +95,7 @@ pub enum PluginIo {
     /// Ambiglow LED controller) declares the extra ones in its manifest and
     /// reaches them by name.
     Control(ControlEndpoints),
+    Command(CommandExecutor),
 }
 
 impl PluginIo {
@@ -101,7 +105,96 @@ impl PluginIo {
             PluginIo::Stream { transport, .. } => transport.rate_status(),
             PluginIo::Register(r) => r.rate_status(),
             PluginIo::Control(c) => c.rate_status(),
+            PluginIo::Command(_) => WriteRateStatus::default(),
         }
+    }
+}
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_COMMAND_ARGS: usize = 64;
+const MAX_COMMAND_ARG_BYTES: usize = 4096;
+const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
+
+/// Direct, allowlisted process execution for command-backed plugins. No shell
+/// is involved: the manifest grants only bare executable names and Lua supplies
+/// a bounded argv vector.
+#[derive(Clone)]
+pub struct CommandExecutor {
+    allowed: Arc<[String]>,
+}
+
+impl CommandExecutor {
+    pub fn new(commands: impl IntoIterator<Item = String>) -> Self {
+        let mut allowed: Vec<String> = commands.into_iter().collect();
+        allowed.sort();
+        allowed.dedup();
+        Self {
+            allowed: allowed.into(),
+        }
+    }
+
+    pub fn run(&self, executable: &str, args: &[String]) -> Result<Vec<u8>> {
+        if !self.allowed.iter().any(|name| name == executable) {
+            anyhow::bail!("command '{executable}' is outside the declared transport scope");
+        }
+        if args.len() > MAX_COMMAND_ARGS
+            || args
+                .iter()
+                .any(|arg| arg.len() > MAX_COMMAND_ARG_BYTES || arg.contains('\0'))
+        {
+            anyhow::bail!("command arguments exceed the declared execution limits");
+        }
+        let mut child = Command::new(executable)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("spawning '{executable}' failed: {e}"))?;
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let read = |pipe: std::process::ChildStdout| -> Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            pipe.take((MAX_COMMAND_OUTPUT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            Ok(bytes)
+        };
+        let out = std::thread::spawn(move || read(stdout));
+        let err = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr
+                .take((MAX_COMMAND_OUTPUT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            Result::<Vec<u8>>::Ok(bytes)
+        });
+        let started = Instant::now();
+        loop {
+            if child.try_wait()?.is_some() {
+                break;
+            }
+            if started.elapsed() >= COMMAND_TIMEOUT {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("command '{executable}' exceeded its execution timeout");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let stdout = out
+            .join()
+            .map_err(|_| anyhow::anyhow!("command stdout reader panicked"))??;
+        let stderr = err
+            .join()
+            .map_err(|_| anyhow::anyhow!("command stderr reader panicked"))??;
+        if stdout.len() > MAX_COMMAND_OUTPUT_BYTES || stderr.len() > MAX_COMMAND_OUTPUT_BYTES {
+            anyhow::bail!("command '{executable}' exceeded its output limit");
+        }
+        if !stderr.is_empty() {
+            log::debug!(
+                "plugin command {executable} stderr: {}",
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        Ok(stdout)
     }
 }
 
@@ -249,4 +342,18 @@ pub fn known_kinds() -> Vec<&'static str> {
     inventory::iter::<PluginTransportDescriptor>()
         .map(|d| d.kind)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CommandExecutor;
+
+    #[test]
+    fn command_executor_rejects_undeclared_executable() {
+        let commands = CommandExecutor::new(["nvidia-smi".to_owned()]);
+        let error = commands.run("sh", &[]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("outside the declared transport scope"));
+    }
 }

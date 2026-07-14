@@ -25,6 +25,7 @@ use halod_shared::types::{
 };
 
 use super::bytebuf::ByteBuf;
+use super::ffi::to_lua_err;
 use super::manifest::{
     check_lcd_dims, check_led_count, check_zone_count, topology_from, ActionManifest,
     BatteryManifest, BooleanManifest, ChainManifest, ChoiceManifest, ConnectionManifest,
@@ -32,7 +33,7 @@ use super::manifest::{
     OnboardProfilesManifest, PairingManifest, RangeManifest, RgbManifest, SensorManifest,
 };
 use super::sandbox;
-use super::transport::{AddrScope, PluginIo, RegisterBus};
+use super::transport::{AddrScope, CommandExecutor, PluginIo, RegisterBus};
 use super::transport_api::TransportApi;
 use crate::drivers::transports::smbus::SmBusDevice;
 use crate::drivers::vendors::generic::devices::common::{linear_rgb_zone, ring_led_positions};
@@ -919,12 +920,19 @@ fn build_ctx(
     // The `dev` argument every callback receives: exposes the transport and the
     // matched-spec identity (`dev.match`).
     let dev = lua.create_table().map_err(|e| lua_err("dev table", e))?;
+    let command = match &transport {
+        PluginIo::Command(command) => Some(command.clone()),
+        _ => None,
+    };
     let api = TransportApi::new(transport, handle.clone());
     let api_ud = lua
         .create_userdata(api)
         .map_err(|e| lua_err("transport userdata", e))?;
     dev.set("transport", api_ud)
         .map_err(|e| lua_err("dev.transport", e))?;
+    if let Some(command) = command {
+        install_command_api(&lua, command)?;
+    }
     dev.set("match", build_match_table(&lua, &dev_match)?)
         .map_err(|e| lua_err("dev.match", e))?;
 
@@ -955,6 +963,23 @@ fn build_ctx(
         controller_index,
         budget,
     })
+}
+
+fn install_command_api(lua: &Lua, command: CommandExecutor) -> Result<()> {
+    let api = lua
+        .create_table()
+        .map_err(|e| lua_err("command table", e))?;
+    let run = lua
+        .create_function(move |lua, (executable, args): (String, Vec<String>)| {
+            let output = command.run(&executable, &args).map_err(to_lua_err)?;
+            lua.create_string(&output)
+        })
+        .map_err(|e| lua_err("command.run", e))?;
+    api.set("run", run).map_err(|e| lua_err("command.run", e))?;
+    lua.globals()
+        .set("command", api)
+        .map_err(|e| lua_err("command", e))?;
+    Ok(())
 }
 
 /// Run a plugin's `pre_scan(dev)` callback against a freshly opened SMBus bus,

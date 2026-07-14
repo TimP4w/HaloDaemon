@@ -22,7 +22,9 @@ use crate::drivers::transports::Transport;
 
 use super::bytebuf::check_alloc;
 use super::ffi::{bytes_from, to_lua_err};
-use super::transport::{AddrScope, BulkEndpoint, ControlEndpoints, PluginIo, RegisterBus};
+use super::transport::{
+    AddrScope, BulkEndpoint, CommandExecutor, ControlEndpoints, PluginIo, RegisterBus,
+};
 
 /// Lua userdata wrapping one transport. Rate limiting is inherited: this holds
 /// the real (metered) transport, so a script cannot outrun the hardware.
@@ -72,6 +74,15 @@ impl TransportApi {
             _ => Err(mlua::Error::RuntimeError(
                 "this transport is not a USB control bus; use transport:control_write/control_read"
                     .into(),
+            )),
+        }
+    }
+
+    fn command(&self) -> mlua::Result<&CommandExecutor> {
+        match &self.io {
+            PluginIo::Command(command) => Ok(command),
+            _ => Err(mlua::Error::RuntimeError(
+                "this transport cannot execute commands".into(),
             )),
         }
     }
@@ -136,6 +147,17 @@ impl UserData for TransportApi {
             let bytes = bytes_from(&data)?;
             this.bulk()?.write(&bytes).map_err(to_lua_err)
         });
+
+        methods.add_method(
+            "run",
+            |lua, this, (executable, args): (String, Vec<String>)| {
+                let output = this
+                    .command()?
+                    .run(&executable, &args)
+                    .map_err(to_lua_err)?;
+                lua.create_string(&output)
+            },
+        );
 
         // ── USB vendor control (DDC/CI, ENE RGB) ─────────────────────────
         // `endpoint` names which bundled device to talk to: "" is the matched

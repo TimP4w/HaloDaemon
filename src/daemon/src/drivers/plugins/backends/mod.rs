@@ -3,6 +3,7 @@
 //! `inventory`, so adding a bus is a new file here rather than a per-bus branch
 //! in the plugin core.
 
+mod command;
 mod hid;
 mod smbus;
 pub(crate) mod tcp;
