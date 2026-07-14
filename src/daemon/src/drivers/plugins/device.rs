@@ -73,16 +73,12 @@ enum Cap {
     Pairing,
     OnboardProfiles,
     KeyRemap,
-    Chain,
 }
 
 /// Typed runtime capabilities permitted by the inert catalog. Descriptors and
 /// initial values still come from `initialize`; the catalog never supplies
 /// static runtime sections.
 fn declared_caps(manifest: &PluginManifest) -> Vec<Cap> {
-    if manifest.capabilities.is_empty() {
-        return legacy_declared_caps(manifest);
-    }
     let mut caps = Vec::new();
     let mut push = |name: &str, cap: Cap| {
         if manifest
@@ -108,35 +104,6 @@ fn declared_caps(manifest: &PluginManifest) -> Vec<Cap> {
     push("pairing", Cap::Pairing);
     push("onboard_profiles", Cap::OnboardProfiles);
     push("key_remap", Cap::KeyRemap);
-    caps
-}
-
-/// Inline test manifests still construct the old in-memory representation; it
-/// is never accepted from a directory package. Keep that test fixture adapter
-/// separate from the canonical catalog path above.
-fn legacy_declared_caps(manifest: &PluginManifest) -> Vec<Cap> {
-    let mut caps = Vec::new();
-    let mut push = |present: bool, cap: Cap| {
-        if present {
-            caps.push(cap);
-        }
-    };
-    push(manifest.rgb.is_some(), Cap::Rgb);
-    push(manifest.fan.is_some(), Cap::Fan);
-    push(manifest.sensor.is_some(), Cap::Sensor);
-    push(manifest.lcd.is_some(), Cap::Lcd);
-    push(manifest.dpi.is_some(), Cap::Dpi);
-    push(manifest.choice.is_some(), Cap::Choice);
-    push(manifest.range.is_some(), Cap::Range);
-    push(manifest.boolean.is_some(), Cap::Boolean);
-    push(manifest.action.is_some(), Cap::Action);
-    push(manifest.battery.is_some(), Cap::Battery);
-    push(manifest.connection.is_some(), Cap::Connection);
-    push(manifest.equalizer.is_some(), Cap::Equalizer);
-    push(manifest.pairing.is_some(), Cap::Pairing);
-    push(manifest.onboard_profiles.is_some(), Cap::OnboardProfiles);
-    push(manifest.key_remap.is_some(), Cap::KeyRemap);
-    push(manifest.chain.is_some(), Cap::Chain);
     caps
 }
 
@@ -987,10 +954,6 @@ impl Device for LuaDevice {
                 Cap::Pairing => caps.push(CapabilityRef::Pairing(self)),
                 Cap::OnboardProfiles => caps.push(CapabilityRef::OnboardProfiles(self)),
                 Cap::KeyRemap => caps.push(CapabilityRef::KeyRemap(self)),
-                Cap::Chain => {
-                    caps.push(CapabilityRef::Controller(self));
-                    caps.push(CapabilityRef::Chain(self));
-                }
             }
         }
         if self.plugin_type == PluginKind::Integration {
@@ -1880,6 +1843,7 @@ mod tests {
         return {
           devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
           permissions = { "hid" },
+          capabilities = { "rgb", "fan", "sensors" },
           transports = { hid = { report_size = 8 } },
           rgb = { zones = { {
               id = "z", name = "Z", topology = { type = "linear" },
