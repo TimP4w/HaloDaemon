@@ -7,7 +7,8 @@ use std::{
 
 use base64::Engine as _;
 use halod_shared::types::{
-    Animation, CanvasFrame, EffectDef, LedFrameEntry, RgbColor, RgbState, RgbZone, ZoneTopology,
+    Animation, CanvasFrame, EffectDef, LedFrameEntry, RgbColor, RgbState, RgbZone, VisibilityState,
+    ZoneTopology,
 };
 use halod_shared::zone_transform::ring_slice;
 use std::time::Duration;
@@ -638,7 +639,7 @@ impl RgbEngine {
         // Skip offline devices so the engine never queues a frame for a dead socket.
         let placed_zones: Vec<PlacedZone> = devices_guard
             .iter()
-            .filter(|d| d.is_live())
+            .filter(|d| d.is_live() && d.active_state() != VisibilityState::Disabled)
             .filter_map(|d| d.as_rgb())
             .flat_map(|s| s.canvas_zones())
             .collect();
@@ -656,7 +657,7 @@ impl RgbEngine {
 
         let direct_devices: Vec<DirectDevice> = devices_guard
             .iter()
-            .filter(|d| d.is_live())
+            .filter(|d| d.is_live() && d.active_state() != VisibilityState::Disabled)
             .filter_map(|d| match d.as_rgb()?.current_state() {
                 Some(RgbState::DirectEffect { id, params }) => Some((Arc::clone(d), id, params)),
                 _ => None,
@@ -686,6 +687,10 @@ impl RgbEngine {
         let devices = self.app_state.devices.read().await.clone();
         let mut intent = self.engine_mode_intent.lock().await;
         for device in &devices {
+            if device.active_state() == VisibilityState::Disabled {
+                intent.remove(device.id());
+                continue;
+            }
             let Some(rgb) = device.as_rgb() else { continue };
             let should_engine = engine_ids.contains(device.id());
 
@@ -728,13 +733,16 @@ impl RgbEngine {
         let mut slots = self.write_slots.lock().expect("write slots poisoned");
         for (id, (dev, zones)) in pending {
             // Skip a device that went offline between state sync and dispatch.
-            if !dev.is_live() {
+            if !dev.is_live() || dev.active_state() == VisibilityState::Disabled {
                 continue;
             }
             if slots.get(&id).is_some_and(|h| !h.is_finished()) {
                 continue;
             }
             let handle = tokio::spawn(async move {
+                if dev.active_state() == VisibilityState::Disabled {
+                    return;
+                }
                 let Some(rgb) = dev.as_rgb() else { return };
                 for (zone_id, colors) in zones {
                     if let Err(e) = rgb.write_frame(&zone_id, &colors).await {
@@ -777,7 +785,7 @@ impl RgbEngine {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::drivers::{CapabilityRef, RgbCapability, RgbStateSlot};
+    use crate::drivers::{CapabilityRef, RgbCapability, RgbStateSlot, VisibilitySlot};
     use anyhow::Result;
     use async_trait::async_trait;
     use halod_shared::types::{
@@ -799,6 +807,7 @@ mod tests {
         skip_record_on_fail: AtomicBool,
         last_colors: StdMutex<Option<Vec<RgbColor>>>,
         live: AtomicBool,
+        visibility: VisibilitySlot,
     }
 
     impl MockRgbDevice {
@@ -831,6 +840,7 @@ mod tests {
                 skip_record_on_fail: AtomicBool::new(false),
                 last_colors: StdMutex::new(None),
                 live: AtomicBool::new(true),
+                visibility: VisibilitySlot::default(),
             })
         }
 
@@ -877,6 +887,9 @@ mod tests {
         }
         fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
             vec![CapabilityRef::Rgb(self)]
+        }
+        fn visibility_slot(&self) -> Option<&VisibilitySlot> {
+            Some(&self.visibility)
         }
     }
 
@@ -1259,6 +1272,36 @@ mod tests {
         let (_, _, direct) = engine.sync_tick_state().await;
         assert_eq!(direct.len(), 1);
         assert_eq!(direct[0].1, "breathing");
+    }
+
+    #[tokio::test]
+    async fn disabled_direct_effect_device_is_never_collected_or_written() {
+        let app = make_app();
+        let dev = MockRgbDevice::new("dev0", "ring", 3, false);
+        *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+            id: "breathing".into(),
+            params: HashMap::new(),
+        });
+        dev.set_active_state(VisibilityState::Disabled);
+        app.devices
+            .write()
+            .await
+            .push(dev.clone() as Arc<dyn Device>);
+
+        let engine = RgbEngine::new(app).await;
+        let (_, _, direct) = engine.sync_tick_state().await;
+        assert!(
+            direct.is_empty(),
+            "disabled device must not enter direct pass"
+        );
+
+        engine.tick(0.1, 0.05, 0).await;
+        engine.drain_writes().await;
+        assert_eq!(
+            dev.write_count.load(Ordering::SeqCst),
+            0,
+            "disabled device must receive no engine frames"
+        );
     }
 
     #[tokio::test]

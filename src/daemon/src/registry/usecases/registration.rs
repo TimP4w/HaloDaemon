@@ -7,7 +7,8 @@ use crate::state::AppState;
 use halod_shared::types::{VisibilityState, DEFAULT_PROFILE_NAME};
 
 /// Load the device's effective saved state, then re-apply its per-zone RGB
-/// transforms (which `load_state` does not cover). Shared by both register paths.
+/// transforms (which `load_state` does not cover). Active devices only: state
+/// restoration may perform hardware I/O and must never run for a disabled one.
 pub(super) async fn restore_saved_state(app: &Arc<AppState>, device: &Arc<dyn Device>) {
     let saved = {
         let cfg = app.config.read().await;
@@ -60,8 +61,8 @@ pub async fn register_if_disabled(app: &Arc<AppState>, device: &Arc<dyn Device>)
         return false;
     }
     device.set_active_state(VisibilityState::Disabled);
-    restore_saved_state(app, device).await;
-    // clear any engine slots restored by load_state
+    // Constructors may seed participation slots even though saved state is not
+    // restored here. Keep the disabled placeholder inert for every engine.
     clear_engine_slots(device);
     log::info!(
         "[{}] registered as disabled, skipping initialize()",
@@ -222,6 +223,9 @@ pub async fn register_device_and_children(app: &Arc<AppState>, device: Arc<dyn D
     if !register_device(app, device.clone()).await {
         return false;
     }
+    if device.active_state() == VisibilityState::Disabled {
+        return true;
+    }
     if let Some(ctrl) = device.as_controller() {
         for child in ctrl.discover_children().await {
             register_device(app, child).await;
@@ -367,16 +371,37 @@ mod tests {
                     active_state: VisibilityState::Disabled,
                 },
             );
+            cfg.active_profile_data_mut().device_states.insert(
+                "dev-1".into(),
+                serde_json::json!({
+                    "rgb": {
+                        "state": {
+                            "mode": "static",
+                            "color": {"r": 255, "g": 0, "b": 0}
+                        }
+                    }
+                }),
+            );
         }
-        // .fail() makes initialize() Err: if it were called, result would be false.
-        let device = Arc::new(MockDevice::new("dev-1").fail());
-        let result = register_device(&app, device as Arc<dyn Device>).await;
+        let device = Arc::new(MockDevice::new("dev-1").with_rgb().init_panics());
+        let result = register_device(&app, device.clone() as Arc<dyn Device>).await;
 
         assert!(result, "disabled device should return true");
         assert_eq!(
             app.devices.read().await.len(),
             1,
             "disabled device must be pushed"
+        );
+        assert!(
+            !device.load_called.load(std::sync::atomic::Ordering::SeqCst),
+            "disabled registration must not restore state"
+        );
+        assert_eq!(
+            device
+                .rgb_apply_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "saved RGB state must not be sent to disabled hardware"
         );
     }
 

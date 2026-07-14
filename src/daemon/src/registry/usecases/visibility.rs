@@ -22,6 +22,12 @@ pub async fn set_device_visibility(
     let prev_state = device.as_ref().map(|d| d.active_state());
 
     if let Some(device) = &device {
+        // Gate engines and command lookups before awaiting close, so no new
+        // hardware work can start during the teardown window.
+        if new_state == VisibilityState::Disabled {
+            device.set_active_state(VisibilityState::Disabled);
+        }
+
         // Clear slots before state change (gates check active_state == Visible).
         if new_state != VisibilityState::Visible {
             crate::registry::usecases::registration::clear_engine_slots(device);
@@ -31,7 +37,9 @@ pub async fn set_device_visibility(
             device.close().await;
         }
 
-        device.set_active_state(new_state.clone());
+        if new_state != VisibilityState::Disabled {
+            device.set_active_state(new_state.clone());
+        }
 
         // Persist device state for Visible/Hidden transitions only — a disabled
         // device has no live hardware state worth saving.

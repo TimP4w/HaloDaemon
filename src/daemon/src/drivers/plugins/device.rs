@@ -23,7 +23,7 @@ use crate::drivers::{
     ChainCapability, ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, Device,
     DpiCapability, EqualizerCapability, FanCapability, FanHub, FanStateSlot, KeyRemapCapability,
     LcdCapability, LcdStateSlot, OnboardProfilesCapability, PairingCapability, RangeCapability,
-    RangeStateCache, RgbCapability, RgbStateSlot, SensorCapability,
+    RangeStateCache, RgbCapability, RgbStateSlot, SensorCapability, VisibilitySlot,
 };
 
 use super::chain_leaf::ChainLeaf;
@@ -293,6 +293,7 @@ pub struct LuaDevice {
     plugin_id: String,
     plugin_type: PluginKind,
     device_type: DeviceType,
+    visibility: VisibilitySlot,
     transport_kind: &'static str,
     dynamic_model: OnceLock<String>,
     worker: Option<PluginHandle>,
@@ -552,7 +553,11 @@ impl LuaDevice {
 
         // The status poll loop stays host-side (not in the single-threaded VM):
         // a ticker enqueues one poll per interval, run serially by the worker.
+        // Start paused and let initialize() release it. This matters because a
+        // plugin device is constructed before central registration checks the
+        // persisted Disabled state.
         if let Some(poll) = &manifest.poll {
+            dev.poll_paused.store(true, Ordering::Relaxed);
             let interval = Duration::from_millis(poll.interval_ms.max(1));
             let paused = dev.poll_paused.clone();
             dev.poll_task = Some(handle.spawn(async move {
@@ -589,6 +594,7 @@ impl LuaDevice {
             plugin_id: manifest.plugin_id.clone(),
             plugin_type: manifest.plugin_type,
             device_type: spec.and_then(|s| s.device_type).unwrap_or_default(),
+            visibility: VisibilitySlot::default(),
             transport_kind: spec
                 .and_then(|s| super::transport::descriptor_for(&s.transport))
                 .map(|d| d.kind)
@@ -799,6 +805,10 @@ impl Device for LuaDevice {
         Some(self.plugin_id.clone())
     }
 
+    fn visibility_slot(&self) -> Option<&VisibilitySlot> {
+        Some(&self.visibility)
+    }
+
     fn is_live(&self) -> bool {
         self.runtime
             .as_ref()
@@ -870,6 +880,9 @@ impl Device for LuaDevice {
             for (key, selected) in choices {
                 self.controls.choice_cache.record(&key, selected);
             }
+        }
+        if outcome.ok {
+            self.poll_paused.store(false, Ordering::Relaxed);
         }
         Ok(outcome.ok)
     }
@@ -1219,8 +1232,10 @@ impl LuaDevice {
     }
 
     /// Build one integration controller as a child `LuaDevice` sharing the
-    /// root's [`RuntimeState`]. `None` on connect/init failure. Shared by
-    /// first-time discovery and `resync_children`.
+    /// root's [`RuntimeState`]. Initialization is deliberately deferred to the
+    /// central registration lifecycle, which first checks whether this child is
+    /// disabled. `None` on connect/build failure. Shared by first-time discovery
+    /// and `resync_children`.
     async fn build_child(
         &self,
         controller: &DetectedController,
@@ -1275,15 +1290,6 @@ impl LuaDevice {
             let adapter: Arc<dyn ChainAdapter> = child.clone();
             let host = ChainHost::new(adapter);
             child.install_chain_host(host);
-        }
-        if let Err(e) = child.initialize().await {
-            log::warn!(
-                "plugin '{}' controller {} init failed: {e:#}",
-                self.plugin_id,
-                controller.index
-            );
-            child.close().await;
-            return None;
         }
         let identity = crate::registry::identity::DeviceIdentity {
             scope: Some(ctx.identity_scope.clone()),
@@ -1763,6 +1769,7 @@ mod tests {
     use crate::drivers::transports::mock::test_transport::MockTransport;
     use crate::drivers::transports::Transport;
     use crate::drivers::{FanCapability, RgbCapability, SensorCapability};
+    use halod_shared::types::VisibilityState;
     use std::path::Path;
 
     fn hid_match() -> DevMatch {
@@ -2032,8 +2039,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn poll_caches_status_read_by_sensors() {
         // read_status parses a report into dev.status; get_sensors reads the
-        // cache rather than hitting hardware. Long interval => only the ticker's
-        // immediate first tick plus our explicit poll_once fire (2 reads).
+        // cache rather than hitting hardware. This device is not registered or
+        // initialized, so its background ticker remains paused; poll_once is
+        // the only read.
         const POLL_SCRIPT: &str = r#"
             return {
               devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
@@ -2452,6 +2460,13 @@ mod tests {
           config = { fields = { { key = "host", label = "Host" }, { key = "port", label = "Port" } } },
           transports = { tcp = {} },
 
+          initialize = function(dev)
+            if dev.match.index ~= nil then
+              dev.transport:write(string.char(0xFE, dev.match.index))
+            end
+            return true
+          end,
+
           enumerate_controllers = function(dev)
             return {
               { index = 0, name = "Keyboard", zones = {
@@ -2644,6 +2659,37 @@ mod tests {
 
         let mobo_rgb = children[1].as_rgb().expect("has rgb");
         assert_eq!(mobo_rgb.descriptor().zones.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn disabled_integration_child_is_not_initialized() {
+        let mock = Arc::new(MockTransport::empty());
+        let dev = integration_device(mock.clone());
+        let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+        app.config.write().await.known_devices.insert(
+            "integ-0_ctrl_0".into(),
+            crate::registry::config::DeviceRecord {
+                name: String::new(),
+                vendor: String::new(),
+                model: String::new(),
+                active_state: VisibilityState::Disabled,
+            },
+        );
+
+        crate::registry::usecases::registration::register_device_and_children(
+            &app,
+            dev as Arc<dyn Device>,
+        )
+        .await;
+
+        assert_eq!(
+            *mock.written.lock().await,
+            vec![vec![0xFE, 1]],
+            "only the enabled controller may run initialize()"
+        );
+        let devices = app.devices.read().await;
+        let disabled = devices.iter().find(|d| d.id() == "integ-0_ctrl_0").unwrap();
+        assert_eq!(disabled.active_state(), VisibilityState::Disabled);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -568,9 +568,11 @@ async fn add_hid_device(
         return;
     }
 
-    if let Some(ctrl) = impl_.as_controller() {
-        for child in ctrl.discover_children().await {
-            crate::registry::usecases::registration::register_device(app, child).await;
+    if impl_.active_state() != halod_shared::types::VisibilityState::Disabled {
+        if let Some(ctrl) = impl_.as_controller() {
+            for child in ctrl.discover_children().await {
+                crate::registry::usecases::registration::register_device(app, child).await;
+            }
         }
     }
 
