@@ -138,13 +138,8 @@ HaloDaemon would not exist without the reverse-engineering work and documentatio
 | Project | License | Used for |
 |---------|---------|----------|
 | [Solaar](https://github.com/pwr-Solaar/Solaar) | GPL-2.0-or-later | Logitech HID++ protocol (feature pages, onboard profiles, RGB effects) |
-| [OpenRGB](https://gitlab.com/CalcProgrammer1/OpenRGB) | GPL-2.0-or-later | ENE SMBus, ASUS Aura USB, Corsair DRAM, Corsair NXP peripheral, Zotac GPU protocols |
-| [liquidctl](https://github.com/liquidctl/liquidctl) | GPL-3.0 | NZXT Kraken protocol |
-| [Linux kernel nzxt-smart2](https://github.com/torvalds/linux/blob/master/drivers/hwmon/nzxt-smart2.c) | GPL-2.0-or-later | NZXT Control Hub protocol |
+| [OpenRGB](https://gitlab.com/CalcProgrammer1/OpenRGB) | GPL-2.0-or-later | SMBus transport and ENE SMBus probing |
 | [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) | MPL-2.0 | NCT677x SuperIO register map, AMD Ryzen (Zen) SMN thermal decode |
-| [OpenRazer](https://github.com/openrazer/openrazer) | GPL-2.0-or-later | Razer protocol (matrix RGB, DPI) |
-| [linux-arctis-manager](https://github.com/elegos/Linux-Arctis-Manager) | GPL-3.0 | SteelSeries Arctis protocol |
-| [evnia](https://github.com/tomasf/evnia) | MIT | Philips Evnia Ambiglow protocol |
 | [g560-led](https://github.com/mijoe/g560-led) | MIT | Logitech G560 protocol |
 | [PawnIO modules](https://github.com/namazso/PawnIO_modules) | LGPL-2.1-or-later | Bundled `LpcIO.bin`, `SmbusI801.bin`, `SmbusPIIX4.bin`, `AMDFamily17.bin` for Windows SuperIO / chipset SMBus / AMD SMN access (© 2023 namazso) |
 

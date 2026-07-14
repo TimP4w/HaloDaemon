@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2021 Smasty <hello@smasty.net>
 // Reference: g560-led by Smasty (MIT)
 //   https://github.com/mijoe/g560-led

@@ -21,12 +21,26 @@ Bundled components:
   (https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html).
   Full text installed as PawnIO-LICENSE.txt.
 
-* FFmpeg (ffmpeg.exe and its libav* runtime DLLs), (c) the FFmpeg developers,
+* FFmpeg (ffmpeg.exe and its dynamically linked runtime libraries),
+  (c) the FFmpeg developers,
   used by the LCD video mode as a separate subprocess. This is a GPL build of
   FFmpeg with an LGPL core. Licenses:
     - GPL-3.0-or-later:   https://www.gnu.org/licenses/gpl-3.0.html
     - LGPL-2.1-or-later:  https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
   Upstream notice installed as FFmpeg-LICENSE.md / FFmpeg-README.txt; full texts
-  installed as COPYING.GPLv3 / COPYING.LGPLv2.1.
+  installed as COPYING.GPLv3 / COPYING.LGPLv2.1. Exact MSYS2 package versions,
+  build configuration, source links, and available dependency license files are
+  installed under ThirdPartyLicenses\MSYS2.
+
+* Embedded fonts: Noto Sans, JetBrains Mono, and Inter Tight.
+  License: SIL Open Font License 1.1 (OFL-1.1).
+
+* Embedded icons from Pictogrammers Material Design Icons and Google Material
+  Icons. License: Apache-2.0.
+
+Incorporated protocol code is attributed to OpenRGB (GPL-2.0-or-later),
+LibreHardwareMonitor (MPL-2.0), Solaar (GPL-2.0-or-later), and g560-led (MIT).
+Copyright notices and the full source/asset license texts are embedded in
+halod-gui.exe and are available under Settings -> About -> Licenses.
 
 Installing HaloDaemon means you accept the terms above.

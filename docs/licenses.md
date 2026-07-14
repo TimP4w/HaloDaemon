@@ -16,12 +16,12 @@ audit has a single starting point.
 | REUSE / SPDX | First-party source + repo assets | [`REUSE.toml`](../REUSE.toml) + per-file SPDX headers + [`LICENSES/`](../LICENSES/) | The repo itself | `reuse lint` |
 | Protocol attributions | Ported/adapted driver code | Per-file SPDX headers | README table + GUI *About* dialog | [`ui/build.rs`](../src/ui/build.rs) `scan_protocol_references()` |
 | Rust crate deps | Every compiled dependency | [`about.toml`](../src/about.toml) `accepted` list | GUI *About* dialog | `cargo-about` (run by `build.rs`) |
-| Bundled fonts | `.ttf` files shipped in the binaries | `REUSE.toml` overrides | GUI *About* dialog "Bundled assets" | `build.rs` |
+| Bundled fonts and icons | `.ttf` and third-party `.svg` files embedded in the GUI/daemon | `REUSE.toml` overrides + SVG SPDX headers | GUI *About* dialog "Bundled assets" | `build.rs` |
 | PawnIO blobs | Windows kernel-access `.bin` files | `REUSE.toml` `pwnio/**` | Windows installer (`PawnIO-LICENSE.txt`) | `stage-release.ps1` |
 | External tools | FFmpeg (subprocess, bundled on Windows) | `packaging/windows/FFmpeg-*` + `REUSE.toml` | Windows installer (`ffmpeg.exe` + `FFmpeg-LICENSE.md`) | — |
 
 The single most complete artifact is the GUI **About → Licenses** dialog: it stitches
-together protocol references, every Rust crate license, and the bundled-font licenses
+together protocol references, every Rust crate license, and the bundled asset licenses
 at build time (see [`ui/build.rs`](../src/ui/build.rs)).
 
 ## 1. First-party source — SPDX headers + REUSE
@@ -53,7 +53,8 @@ directory in exact sync with what's actually declared.
 **Verify:** `reuse lint` (the `reuse` tool ships in the Nix dev shell).
 
 Currently declared license set: `GPL-3.0-or-later`, `GPL-2.0-or-later`, `MPL-2.0`,
-`OFL-1.1`, `LGPL-2.1-or-later` — and exactly those five texts live in `LICENSES/`.
+`MIT`, `Apache-2.0`, `OFL-1.1`, `LGPL-2.1-or-later` — and exactly those seven
+texts live in `LICENSES/`.
 
 ## 2. Ported / adapted driver code — per-file SPDX headers
 
@@ -76,8 +77,9 @@ These headers surface in two places:
    of truth. Add a row when you introduce a new upstream. Keep the license column equal
    to the file's SPDX header.
 2. **The GUI About dialog** — [`ui/build.rs`](../src/ui/build.rs) `scan_protocol_references()`
-   walks every `daemon/src/**.rs`, reads the SPDX header, and groups non-project
-   copyright holders by license under a "Protocol references" section.
+   walks the Rust source roots for every workspace crate, reads the SPDX header, and groups non-project
+   copyright holders by license under a "Protocol references" section and appends
+   the corresponding full license texts from `LICENSES/`.
 
 > Keep the file header, the README row, and (implicitly) the About dialog in agreement.
 > If a file adapts an upstream, its SPDX license should equal that upstream's license —
@@ -115,6 +117,14 @@ shared by the daemon (LCD text rendering) and the GUI (egui):
 - Credited in the About dialog "Bundled assets" section, which ships the full OFL-1.1
   text (see `append_bundled_asset_licenses()` in [`ui/build.rs`](../src/ui/build.rs)).
 
+## 4a. Bundled icons — Apache-2.0
+
+The GUI embeds a small SVG icon set from [`ui/assets/icons/`](../src/ui/assets/icons/).
+Most glyphs are original HaloDaemon assets and inherit the project license. The SVGs
+that came from Pictogrammers Material Design Icons or Google Material Icons carry
+their own `Apache-2.0` SPDX header and copyright attribution. The About dialog names
+both icon projects and includes the full Apache-2.0 text from `LICENSES/`.
+
 ## 5. PawnIO kernel blobs — LGPL-2.1-or-later
 
 Windows low-level hardware access (chipset SMBus, SuperIO, AMD SMN) uses prebuilt
@@ -137,8 +147,14 @@ is a **GPL** build of FFmpeg (GPL-3.0-compatible with this project).
   from `PATH`.
 - [`packaging/windows/stage-release.ps1`](../packaging/windows/stage-release.ps1) stages `ffmpeg.exe`
   from MSYS2 UCRT64 next to `halod.exe`, walks its dependencies with `ntldd` and copies
-  the `libav*` runtime DLLs, and ships [`packaging/windows/FFmpeg-LICENSE.md`](../packaging/windows/FFmpeg-LICENSE.md)
+  every required non-system runtime DLL, and ships [`packaging/windows/FFmpeg-LICENSE.md`](../packaging/windows/FFmpeg-LICENSE.md)
   and `FFmpeg-README.txt` beside them.
+- The dependency walk includes separately licensed codec/runtime libraries. Staging
+  resolves every copied file back to its exact MSYS2 package, writes the package
+  versions plus FFmpeg's build configuration/source links to
+  `ThirdPartyLicenses/MSYS2/MSYS2-PACKAGES.txt`, and copies every license directory
+  supplied by those packages. An unowned DLL fails staging instead of silently
+  entering the installer.
 - `FFmpeg-LICENSE.md` is only FFmpeg's licensing **summary** — it points at `COPYING.*`
   texts for the operative terms. Because the bundled binary is a GPL (version3) build
   with an LGPL core, `stage-release.ps1` also copies the repo's
@@ -165,9 +181,9 @@ is a **GPL** build of FFmpeg (GPL-3.0-compatible with this project).
 
 - `LicenseFile=LICENSE.txt` — the GPL notice shown in the install wizard.
 - `InfoBeforeFile=DISCLAIMER.txt` — the pre-install disclaimer.
-- The staged tree carries the two executables, the PawnIO blobs, and
+- The staged tree carries the three HaloDaemon executables, the PawnIO blobs, and
   `PawnIO-LICENSE.txt`.
-- The **full** third-party license text (crates + protocol references + fonts) travels
+- The **full** third-party license text (crates + protocol references + fonts/icons) travels
   inside the binary and is viewable at runtime in **About → Licenses**.
 
 ## Reference clones — `refs/`

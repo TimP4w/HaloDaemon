@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: Adam Honse (CalcProgrammer1) — OpenRGB project
 // Reference: OpenRGB ENE SMBus implementation
 // https://gitlab.com/CalcProgrammer1/OpenRGB/-/blob/master/Controllers/ENESMBusController/ENESMBusInterface/ENESMBusInterface_i2c_smbus.cpp
