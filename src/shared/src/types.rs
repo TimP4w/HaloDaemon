@@ -1000,11 +1000,6 @@ pub struct PluginInfo {
     /// The snapshot accepted during the last successful enable, if any.
     #[serde(default)]
     pub accepted_authority: Option<PluginAuthority>,
-    /// Subset of `declared_permissions` the user has granted. A plugin whose
-    /// declared permissions aren't fully granted is inert (discovered but not
-    /// activated) until the user accepts them.
-    #[serde(default)]
-    pub granted_permissions: Vec<Permission>,
     /// User-editable config fields the plugin declares (e.g. a server IP).
     #[serde(default)]
     pub config_fields: Vec<PluginConfigField>,
@@ -1023,17 +1018,11 @@ pub struct PluginInfo {
     /// plugin, where the field is meaningless.
     #[serde(default = "default_true")]
     pub integration_enabled: bool,
-    /// Whether the user has consented to running this exact script: its content
-    /// hash matches the acknowledged one and every declared permission is
-    /// granted. `false` for a never-acknowledged or since-modified disk plugin
-    /// (which stays inert until re-consented). Always `true` for built-ins.
+    /// Whether the currently declared authority has been accepted and the
+    /// package is eligible to run. Content hashes are update/dirty metadata,
+    /// never a consent gate.
     #[serde(default = "default_true")]
     pub consented: bool,
-    /// Whether the script on disk differs from the version the user last
-    /// consented to (a grant existed but the content hash no longer matches).
-    /// Drives the "this plugin was modified since you allowed it" prompt.
-    #[serde(default)]
-    pub content_changed: bool,
     /// Aggregate operational health for this plugin. Device-specific records
     /// remain scoped in the daemon registry and may be added to wire devices.
     #[serde(default)]

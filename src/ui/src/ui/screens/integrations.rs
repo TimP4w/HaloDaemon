@@ -457,13 +457,11 @@ mod tests {
             declared_permissions: vec![],
             authority: Default::default(),
             accepted_authority: None,
-            granted_permissions: vec![],
             config_fields: vec![],
             config_values: Default::default(),
             secret_set: Default::default(),
             integration_enabled,
             consented: true,
-            content_changed: false,
             health: Default::default(),
         }
     }

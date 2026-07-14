@@ -946,18 +946,10 @@ impl PluginsUi {
                         .color(theme::TEXT_DIM),
                 );
                 match consent_reason(p) {
-                    ConsentReason::PermissionAdded => {
+                    ConsentReason::AuthorityExpanded => {
                         ui.add_space(8.0);
                         ui.label(
                             egui::RichText::new(t!("plugins.consent_permission_added"))
-                                .font(theme::body(11.5))
-                                .color(theme::STAT_AMBER),
-                        );
-                    }
-                    ConsentReason::ContentChanged => {
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(t!("plugins.consent_modified"))
                                 .font(theme::body(11.5))
                                 .color(theme::STAT_AMBER),
                         );
@@ -1407,12 +1399,11 @@ pub(crate) fn plugin_needs_permission(p: &PluginInfo) -> bool {
 /// permissions again after an update or edit. Unlike [`plugin_needs_permission`],
 /// this deliberately excludes a newly installed plugin's first-time consent.
 pub(crate) fn plugin_requires_regrant(p: &PluginInfo) -> bool {
-    let has_new_permission = p
-        .declared_permissions
-        .iter()
-        .any(|perm| !p.granted_permissions.contains(perm));
-    let was_approved = !p.granted_permissions.is_empty();
-    !p.enabled && (p.content_changed || (was_approved && has_new_permission))
+    !p.enabled
+        && p
+            .accepted_authority
+            .as_ref()
+            .is_some_and(|accepted| !p.authority.is_subset_of(accepted))
 }
 
 /// Why the consent modal is being shown, so it can explain the cause.
@@ -1420,27 +1411,19 @@ pub(crate) fn plugin_requires_regrant(p: &PluginInfo) -> bool {
 pub(crate) enum ConsentReason {
     /// Never approved before — a first-time grant.
     New,
-    /// Previously approved, and an update/edit added permissions beyond those
-    /// already granted.
-    PermissionAdded,
-    /// Previously approved, but the script content changed since (no new
-    /// permissions).
-    ContentChanged,
+    /// Previously approved, and the current package expands its authority.
+    AuthorityExpanded,
 }
 
 /// Classify why `p` is asking for consent, from its granted vs declared
 /// permissions and whether its content changed since the last acknowledgment.
 pub(crate) fn consent_reason(p: &PluginInfo) -> ConsentReason {
-    let has_new_permission = p
-        .declared_permissions
-        .iter()
-        .any(|perm| !p.granted_permissions.contains(perm));
-    // A non-empty granted set means the user approved this plugin before.
-    let approved_before = !p.granted_permissions.is_empty();
-    if approved_before && has_new_permission {
-        ConsentReason::PermissionAdded
-    } else if p.content_changed && !has_new_permission {
-        ConsentReason::ContentChanged
+    if p
+        .accepted_authority
+        .as_ref()
+        .is_some_and(|accepted| !p.authority.is_subset_of(accepted))
+    {
+        ConsentReason::AuthorityExpanded
     } else {
         ConsentReason::New
     }
@@ -1452,7 +1435,11 @@ pub(crate) fn consent_reason(p: &PluginInfo) -> ConsentReason {
 fn newly_required_permissions(p: &PluginInfo) -> Vec<halod_shared::types::Permission> {
     p.declared_permissions
         .iter()
-        .filter(|perm| !p.granted_permissions.contains(perm))
+        .filter(|perm| {
+            !p.accepted_authority
+                .as_ref()
+                .is_some_and(|accepted| accepted.permissions.contains(perm))
+        })
         .copied()
         .collect()
 }
@@ -2141,7 +2128,11 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
     ui.add_space(6.0);
 
     for perm in &p.declared_permissions {
-        let color = if p.granted_permissions.contains(perm) {
+        let color = if p
+            .accepted_authority
+            .as_ref()
+            .is_some_and(|accepted| accepted.permissions.contains(perm))
+        {
             theme::ONLINE
         } else {
             theme::STAT_AMBER
@@ -2151,19 +2142,11 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
     }
 
     if !p.consented {
-        if p.content_changed {
-            ui.label(
-                egui::RichText::new(t!("plugins.consent_modified"))
-                    .font(theme::body(11.0))
-                    .color(theme::STAT_AMBER),
-            );
-        } else {
-            ui.label(
-                egui::RichText::new(t!("plugins.permissions_enable_hint"))
-                    .font(theme::body(11.0))
-                    .color(theme::TEXT_MUT),
-            );
-        }
+        ui.label(
+            egui::RichText::new(t!("plugins.permissions_enable_hint"))
+                .font(theme::body(11.0))
+                .color(theme::TEXT_MUT),
+        );
     } else if widgets::button(
         ui,
         &t!("plugins.revoke"),
@@ -2295,8 +2278,8 @@ fn modified_on_disk_banner(ui: &mut egui::Ui) {
 /// banner makes the required action explicit before the normal detail content.
 fn regrant_warning_banner(ui: &mut egui::Ui, p: &PluginInfo) {
     let detail = match consent_reason(p) {
-        ConsentReason::PermissionAdded => t!("plugins.consent_permission_added"),
-        ConsentReason::ContentChanged | ConsentReason::New => t!("plugins.consent_modified"),
+        ConsentReason::AuthorityExpanded => t!("plugins.consent_permission_added"),
+        ConsentReason::New => t!("plugins.consent_modified"),
     };
     egui::Frame::NONE
         .fill(theme::a(theme::STAT_AMBER, 0.10))
@@ -2934,13 +2917,11 @@ mod tests {
             declared_permissions: vec![],
             authority: Default::default(),
             accepted_authority: None,
-            granted_permissions: vec![],
             config_fields: vec![],
             config_values: Default::default(),
             secret_set: Default::default(),
             integration_enabled: true,
             consented: true,
-            content_changed: false,
             health: Default::default(),
         }
     }
@@ -3057,23 +3038,22 @@ mod tests {
         // Never approved: a first-time grant.
         let mut p = info("a", false);
         p.declared_permissions = vec![Permission::Network];
-        p.granted_permissions = vec![];
         assert_eq!(consent_reason(&p), ConsentReason::New);
 
         // Approved before (has a granted perm) and an update declares a new one.
         let mut p = info("a", false);
         p.declared_permissions = vec![Permission::Network, Permission::Os];
-        p.granted_permissions = vec![Permission::Network];
-        p.content_changed = true;
-        assert_eq!(consent_reason(&p), ConsentReason::PermissionAdded);
+        p.authority.permissions = p.declared_permissions.clone();
+        p.accepted_authority = Some(halod_shared::types::PluginAuthority { permissions: vec![Permission::Network], transport_scopes: vec![] });
+        assert_eq!(consent_reason(&p), ConsentReason::AuthorityExpanded);
         assert_eq!(newly_required_permissions(&p), vec![Permission::Os]);
 
         // Approved before, content changed, but no new permission.
         let mut p = info("a", false);
         p.declared_permissions = vec![Permission::Network];
-        p.granted_permissions = vec![Permission::Network];
-        p.content_changed = true;
-        assert_eq!(consent_reason(&p), ConsentReason::ContentChanged);
+        p.authority.permissions = p.declared_permissions.clone();
+        p.accepted_authority = Some(halod_shared::types::PluginAuthority { permissions: vec![Permission::Network], transport_scopes: vec![] });
+        assert_eq!(consent_reason(&p), ConsentReason::New);
         assert!(newly_required_permissions(&p).is_empty());
     }
 
@@ -3308,9 +3288,12 @@ mod tests {
     fn regrant_attention_only_marks_previously_approved_plugins() {
         let mut updated = info("updated", false);
         updated.declared_permissions = vec![halod_shared::types::Permission::Os];
-        updated.granted_permissions = vec![halod_shared::types::Permission::Os];
+        updated.authority.permissions = vec![
+            halod_shared::types::Permission::Os,
+            halod_shared::types::Permission::Network,
+        ];
+        updated.accepted_authority = Some(halod_shared::types::PluginAuthority { permissions: vec![halod_shared::types::Permission::Os], transport_scopes: vec![] });
         updated.consented = false;
-        updated.content_changed = true;
         assert!(plugin_requires_regrant(&updated));
 
         let mut added_permission = info("added-permission", false);
@@ -3318,7 +3301,8 @@ mod tests {
             halod_shared::types::Permission::Os,
             halod_shared::types::Permission::Network,
         ];
-        added_permission.granted_permissions = vec![halod_shared::types::Permission::Os];
+        added_permission.authority.permissions = added_permission.declared_permissions.clone();
+        added_permission.accepted_authority = Some(halod_shared::types::PluginAuthority { permissions: vec![halod_shared::types::Permission::Os], transport_scopes: vec![] });
         added_permission.consented = false;
         assert!(plugin_requires_regrant(&added_permission));
 

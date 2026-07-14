@@ -481,7 +481,7 @@ mod tests {
     use super::*;
     use halod_shared::types::PluginInfo;
 
-    fn plugin(id: &str, consented: bool, content_changed: bool) -> PluginInfo {
+    fn plugin(id: &str, consented: bool, _content_changed: bool) -> PluginInfo {
         PluginInfo {
             id: id.into(),
             name: id.into(),
@@ -505,13 +505,11 @@ mod tests {
             declared_permissions: vec![],
             authority: Default::default(),
             accepted_authority: None,
-            granted_permissions: vec![],
             config_fields: vec![],
             config_values: Default::default(),
             secret_set: Default::default(),
             integration_enabled: true,
             consented,
-            content_changed,
             health: Default::default(),
         }
     }
@@ -562,7 +560,7 @@ mod tests {
     fn plugins_needing_action_counts_new_permission_only_after_prior_approval() {
         let mut p = plugin("permission", true, false);
         p.enabled = false;
-        p.granted_permissions = vec![halod_shared::types::Permission::Os];
+        p.accepted_authority = Some(halod_shared::types::PluginAuthority { permissions: vec![halod_shared::types::Permission::Os], transport_scopes: vec![] });
         p.declared_permissions = vec![
             halod_shared::types::Permission::Os,
             halod_shared::types::Permission::Network,

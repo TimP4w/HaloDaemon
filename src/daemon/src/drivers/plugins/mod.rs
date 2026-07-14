@@ -1015,15 +1015,11 @@ impl Registry {
             declared_permissions: m.permissions.clone(),
             authority: authority_for_manifest(m),
             accepted_authority: state.accepted_authorities.get(&m.plugin_id).cloned(),
-            granted_permissions: self.granted_for(&m.plugin_id),
             config_fields: m.config_fields().iter().map(Into::into).collect(),
             config_values: config_values_for(state, m),
             secret_set,
             integration_enabled: !self.is_integration_disabled(&m.plugin_id),
             consented,
-            content_changed: self
-                .installed_hash_for(&m.plugin_id)
-                .is_some_and(|h| h != m.content_hash()),
             health,
         }
     }
