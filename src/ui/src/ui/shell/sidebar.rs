@@ -28,13 +28,6 @@ pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateSt
         .plugins
         .iter()
         .filter(|p| {
-            let has_new_permission = p
-                .declared_permissions
-                .iter()
-                .any(|perm| !p.granted_permissions.contains(perm));
-            let was_approved = !p.granted_permissions.is_empty();
-            let security_blocked =
-                !p.enabled && (p.content_changed || (was_approved && has_new_permission));
             let update_available = plugin_updates.iter().any(|u| {
                 u.plugin_id == p.id
                     && (u.update_available
@@ -42,7 +35,9 @@ pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateSt
                         // from the plugin snapshot while quarantine is active.
                         || (u.on_disk_changed && !p.enabled))
             });
-            p.issue.is_some() || security_blocked || update_available
+            p.issue.is_some()
+                || crate::ui::screens::plugins::plugin_requires_regrant(p)
+                || update_available
         })
         .count()
 }

@@ -74,6 +74,7 @@ plugins:
   permissions: PERMISSIONS
   permissions_pending: This plugin needs permissions you have not granted yet. It will remain inactive until you decide.
   permissions_not_granted_tag: Not granted
+  regrant_required: Permission review required
   permissions_enable_hint: Enabling this plugin will request the permissions above.
   permissions_granted: Granted
   grant: Grant permissions
@@ -96,7 +97,7 @@ plugins:
   consent_title: Grant permissions
   consent_body: "%{name} needs the following to run."
   consent_warning: Permissions are granted together. You can revoke them at any time, which will disable the plugin.
-  consent_modified: This plugin's script changed after you last approved it. Review the permissions again.
+  consent_modified: This plugin's script changed after you last approved it. Review the permissions again and grant approval to continue using it.
   consent_permission_added: An update to this plugin added a new permission that must be granted before it can run again. Review what it now requires below.
   consent_grant_enable: Grant & enable
   consent_cancel: Cancel

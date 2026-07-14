@@ -74,6 +74,7 @@ plugins:
   permissions: PERMESSI
   permissions_pending: Questo plugin richiede permessi che non hai ancora concesso. Resterà inattivo finché non deciderai se concederli.
   permissions_not_granted_tag: Non concesso
+  regrant_required: È necessario controllare i permessi
   permissions_enable_hint: Se attivi questo plugin, ti verranno richiesti i permessi elencati sopra.
   permissions_granted: Concesso
   grant: Concedi permessi
@@ -96,7 +97,7 @@ plugins:
   consent_title: Concedi permessi
   consent_body: "%{name} richiede quanto segue per funzionare."
   consent_warning: I permessi vengono concessi tutti insieme. Puoi revocarli in qualsiasi momento; in tal caso il plugin verrà disattivato.
-  consent_modified: Lo script del plugin è cambiato dopo l'ultima autorizzazione. Controlla di nuovo i permessi.
+  consent_modified: Lo script del plugin è cambiato dall'ultima autorizzazione. Per motivi di sicurezza, devi ricontrollare i permessi e concedere nuovamente l'autorizzazione.
   consent_permission_added: Un aggiornamento del plugin ha aggiunto un nuovo permesso. Per poterlo usare di nuovo, controlla le richieste qui sotto e concedi il nuovo permesso.
   consent_grant_enable: Concedi e attiva
   consent_cancel: Annulla

@@ -329,10 +329,11 @@ impl PluginsUi {
                             let selected = self.selection == Selection::Plugin(p.id.clone());
                             // An on-disk change only flags the row while the
                             // plugin is held disabled; re-enabling accepts it.
-                            let has_update = plugin_updates.iter().any(|s| {
-                                s.plugin_id == p.id
-                                    && (s.update_available || (s.on_disk_changed && !p.enabled))
-                            });
+                            let needs_action = plugin_requires_regrant(p)
+                                || plugin_updates.iter().any(|s| {
+                                    s.plugin_id == p.id
+                                        && (s.update_available || (s.on_disk_changed && !p.enabled))
+                                });
                             let logo_tex = p
                                 .logo
                                 .as_deref()
@@ -343,7 +344,7 @@ impl PluginsUi {
                             } else {
                                 self.in_flight.get(&p.id).copied()
                             };
-                            match list_row(ui, p, selected, has_update, logo_tex, locked) {
+                            match list_row(ui, p, selected, needs_action, logo_tex, locked) {
                                 RowAction::Select => {
                                     self.selection = Selection::Plugin(p.id.clone())
                                 }
@@ -1302,6 +1303,18 @@ pub(crate) fn plugin_needs_permission(p: &PluginInfo) -> bool {
     !p.declared_permissions.is_empty() && !p.consented
 }
 
+/// True when a previously approved plugin is inert until the user reviews its
+/// permissions again after an update or edit. Unlike [`plugin_needs_permission`],
+/// this deliberately excludes a newly installed plugin's first-time consent.
+pub(crate) fn plugin_requires_regrant(p: &PluginInfo) -> bool {
+    let has_new_permission = p
+        .declared_permissions
+        .iter()
+        .any(|perm| !p.granted_permissions.contains(perm));
+    let was_approved = !p.granted_permissions.is_empty();
+    !p.enabled && (p.content_changed || (was_approved && has_new_permission))
+}
+
 /// Why the consent modal is being shown, so it can explain the cause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConsentReason {
@@ -1455,7 +1468,7 @@ fn list_row(
     ui: &mut egui::Ui,
     p: &PluginInfo,
     selected: bool,
-    has_update: bool,
+    needs_action: bool,
     logo_tex: Option<&egui::TextureHandle>,
     // `Some(target)` while applying: toggle shown at `target`, dimmed, click-blocked.
     locked_target: Option<bool>,
@@ -1496,7 +1509,7 @@ fn list_row(
             theme::TEXT_FAINT,
         );
     }
-    if has_update {
+    if needs_action {
         ui.painter().circle_filled(
             Pos2::new(tile_rect.right() - 2.0, tile_rect.top() + 2.0),
             4.0,
@@ -1717,6 +1730,11 @@ fn detail_body(
             }
         }
         return;
+    }
+
+    if plugin_requires_regrant(p) {
+        ui.add_space(14.0);
+        regrant_warning_banner(ui, p);
     }
 
     ui.add_space(14.0);
@@ -2158,6 +2176,34 @@ fn modified_on_disk_banner(ui: &mut egui::Ui) {
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(t!("plugins.modified_on_disk_sub"))
+                    .font(theme::body(11.5))
+                    .color(theme::TEXT_DIM),
+            );
+        });
+}
+
+/// Prominent recovery hint for a plugin disabled after its previously approved
+/// content or permission set changed. The row dot gets the user here; this
+/// banner makes the required action explicit before the normal detail content.
+fn regrant_warning_banner(ui: &mut egui::Ui, p: &PluginInfo) {
+    let detail = match consent_reason(p) {
+        ConsentReason::PermissionAdded => t!("plugins.consent_permission_added"),
+        ConsentReason::ContentChanged | ConsentReason::New => t!("plugins.consent_modified"),
+    };
+    egui::Frame::NONE
+        .fill(theme::a(theme::STAT_AMBER, 0.10))
+        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 11))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(t!("plugins.regrant_required"))
+                    .font(theme::semibold(12.0))
+                    .color(theme::STAT_AMBER),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(detail)
                     .font(theme::body(11.5))
                     .color(theme::TEXT_DIM),
             );
@@ -3139,6 +3185,30 @@ mod tests {
         // Consented → satisfied.
         p.consented = true;
         assert!(!plugin_needs_permission(&p));
+    }
+
+    #[test]
+    fn regrant_attention_only_marks_previously_approved_plugins() {
+        let mut updated = info("updated", false);
+        updated.declared_permissions = vec![halod_shared::types::Permission::Os];
+        updated.granted_permissions = vec![halod_shared::types::Permission::Os];
+        updated.consented = false;
+        updated.content_changed = true;
+        assert!(plugin_requires_regrant(&updated));
+
+        let mut added_permission = info("added-permission", false);
+        added_permission.declared_permissions = vec![
+            halod_shared::types::Permission::Os,
+            halod_shared::types::Permission::Network,
+        ];
+        added_permission.granted_permissions = vec![halod_shared::types::Permission::Os];
+        added_permission.consented = false;
+        assert!(plugin_requires_regrant(&added_permission));
+
+        let mut first_install = info("first-install", false);
+        first_install.declared_permissions = vec![halod_shared::types::Permission::Network];
+        first_install.consented = false;
+        assert!(!plugin_requires_regrant(&first_install));
     }
 
     #[test]
