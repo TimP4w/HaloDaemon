@@ -1694,6 +1694,28 @@ fn detail_body(
                 ));
             }
         }
+        // A failed plugin cannot expose its normal controls, but an upstream
+        // update may be the only way to make it compatible again. Keep that
+        // recovery action available even when the checked-out files also count
+        // as modified on disk.
+        if let Some(update) = update.filter(|u| u.update_available) {
+            ui.add_space(14.0);
+            let in_flight = updating.contains_key(&update.plugin_id);
+            if update_banner(
+                ui,
+                &update.current_version,
+                &update.available_version,
+                in_flight,
+            ) {
+                updating.insert(update.plugin_id.clone(), now);
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::UpdatePlugin {
+                        plugin_id: update.plugin_id.clone(),
+                    },
+                );
+            }
+        }
         return;
     }
 

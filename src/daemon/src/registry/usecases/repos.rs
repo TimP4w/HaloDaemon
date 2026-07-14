@@ -1005,6 +1005,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_checked_out_plugin_can_update_to_a_valid_remote_revision() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&file_url(src.path()));
+            init_source_repo(src.path(), &slug);
+            add_repo(file_url(src.path()), None, app.clone())
+                .await
+                .unwrap();
+
+            // Simulate a previously valid plugin becoming invalid under newer
+            // Halo validation while a compatible fix is available upstream.
+            let checkout = crate::config::plugin_repos_dir().join(&slug);
+            std::fs::write(
+                checkout.join("plugin.yaml"),
+                format!(
+                    "id: {slug}\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ntype: effect\n"
+                ),
+            )
+            .unwrap();
+            reload_registry(&app).await;
+
+            let failed = app
+                .registry
+                .list(&*app.secret_store)
+                .into_iter()
+                .find(|plugin| plugin.id == slug)
+                .expect("invalid manifest remains visible for recovery");
+            assert_eq!(
+                failed.issue.map(|issue| issue.kind),
+                Some(halod_shared::types::PluginIssueKind::LoadFailed)
+            );
+
+            let upstream = git2::Repository::open(src.path()).unwrap();
+            std::fs::write(src.path().join("main.lua"), "return { fixed = true }").unwrap();
+            commit_all(&upstream, "compatible fix");
+
+            let (statuses, _) = compute_plugin_updates(&app, Some(&slug)).await;
+            let status = statuses
+                .iter()
+                .find(|status| status.plugin_id == slug)
+                .expect("failed repo plugin still receives update status");
+            assert!(status.update_available);
+
+            update_plugin(slug.clone(), app.clone()).await.unwrap();
+
+            let recovered = app
+                .registry
+                .list(&*app.secret_store)
+                .into_iter()
+                .find(|plugin| plugin.id == slug)
+                .expect("updated plugin is loaded again");
+            assert!(recovered.issue.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn compute_plugin_updates_flags_a_local_edit_as_changed_not_an_update() {
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
