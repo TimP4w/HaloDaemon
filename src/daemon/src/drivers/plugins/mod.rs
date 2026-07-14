@@ -60,6 +60,22 @@ pub(crate) const PLUGIN_VM_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 /// Instruction budget per plugin callback / effect render, reset per call.
 pub(crate) const PLUGIN_INSTRUCTION_BUDGET: u64 = 50_000_000;
 
+/// A callback failure already reported through `PluginRuntimeError`. The IPC
+/// layer uses this marker to avoid a second generic stack-trace toast.
+#[derive(Debug)]
+pub(crate) struct SurfacedPluginError {
+    pub plugin: String,
+    pub detail: String,
+}
+
+impl std::fmt::Display for SurfacedPluginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "plugin '{}' failed: {}", self.plugin, self.detail)
+    }
+}
+
+impl std::error::Error for SurfacedPluginError {}
+
 #[cfg(test)]
 mod tests;
 
@@ -559,7 +575,6 @@ impl Registry {
         app: &Arc<crate::state::AppState>,
         plugin_id: &str,
         device_id: &str,
-        device_name: &str,
         detail: String,
     ) {
         self.set_issue(plugin_id, PluginIssueKind::RuntimeError, detail.clone());
@@ -569,7 +584,7 @@ impl Registry {
         crate::platform::notify::send(
             app,
             halod_shared::types::NotificationCode::PluginRuntimeError {
-                plugin: device_name.to_owned(),
+                plugin: plugin_id.to_owned(),
                 detail,
             },
         )

@@ -463,6 +463,11 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             return false;
         }
         Some("error") => {
+            // The plugin layer already sent a structured notification whose
+            // Details modal contains the full callback error.
+            if value.get("handled").and_then(|v| v.as_bool()) == Some(true) {
+                return false;
+            }
             let message = value
                 .get("message")
                 .and_then(|m| m.as_str())
@@ -705,5 +710,16 @@ mod tests {
         }));
         assert!(handle_json(br#"{"type":"image_uploaded"}"#, &tx, &|| {}));
         assert!(rx.borrow().is_none(), "stale progress cleared");
+    }
+
+    #[test]
+    fn handled_command_error_does_not_create_a_duplicate_generic_toast() {
+        let (tx, _rx) = test_tx();
+        assert!(!handle_json(
+            br#"{"type":"error","message":"raw stack trace","handled":true}"#,
+            &tx,
+            &|| {}
+        ));
+        assert!(tx.notifications.lock().unwrap().is_empty());
     }
 }

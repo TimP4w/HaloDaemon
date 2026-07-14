@@ -173,6 +173,11 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
 fn reply_error(client: &ClientHandle, cmd: &str, req_id: Option<&str>, e: anyhow::Error) {
     log::warn!("command '{cmd}' failed: {e}");
     let mut reply = json!({"type": "error", "message": e.to_string()});
+    if e.downcast_ref::<crate::drivers::plugins::SurfacedPluginError>()
+        .is_some()
+    {
+        reply["handled"] = true.into();
+    }
     if let Some(req_id) = req_id {
         reply["request_id"] = req_id.into();
     }

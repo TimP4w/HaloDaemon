@@ -36,8 +36,8 @@ notify:
     title: Plugin modificato su disco
     message: "I file di %{plugin} sono cambiati su disco, quindi è stato disabilitato per sicurezza. Apri la schermata Plugin per rivederlo e riabilitarlo."
   plugin_runtime_error:
-    title: "Errore del plugin: %{plugin}"
-    message: "Qualcosa è andato storto in questo plugin. Apri Dettagli per l'errore completo."
+    title: "Si è verificato un errore nel plugin %{plugin}"
+    message: "Apri Dettagli per l'errore completo."
   plugin_connect_failed:
     title: "Il plugin non si connette: %{plugin}"
     message: "Non è riuscito a raggiungere l'indirizzo configurato. Apri Dettagli per saperne di più."

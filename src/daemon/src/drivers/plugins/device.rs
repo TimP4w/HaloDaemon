@@ -713,21 +713,23 @@ impl LuaDevice {
         let Some(app) = self.notify.upgrade() else {
             return result;
         };
-        match &result {
-            Ok(_) => app.registry.clear_runtime_error(&self.plugin_id, &self.id),
+        match result {
+            Ok(value) => {
+                app.registry.clear_runtime_error(&self.plugin_id, &self.id);
+                Ok(value)
+            }
             Err(e) => {
+                let detail = format!("{e:#}");
                 app.registry
-                    .report_runtime_error(
-                        &app,
-                        &self.plugin_id,
-                        &self.id,
-                        &self.name,
-                        format!("{e:#}"),
-                    )
-                    .await
+                    .report_runtime_error(&app, &self.plugin_id, &self.id, detail.clone())
+                    .await;
+                Err(super::SurfacedPluginError {
+                    plugin: self.plugin_id.clone(),
+                    detail,
+                }
+                .into())
             }
         }
-        result
     }
 
     /// Trigger one status poll synchronously (used by tests; production relies on
@@ -3001,7 +3003,11 @@ mod tests {
         };
 
         // First failure surfaces exactly one plugin_runtime_error toast.
-        assert!(dev.apply(fail()).await.is_err());
+        let err = dev.apply(fail()).await.unwrap_err();
+        let surfaced = err
+            .downcast_ref::<crate::drivers::plugins::SurfacedPluginError>()
+            .expect("foreground error is marked as already surfaced");
+        assert_eq!(surfaced.plugin, manifest.plugin_id);
         let frame = rx.try_recv().expect("first failure surfaced");
         assert_eq!(code_of(&frame), "plugin_runtime_error");
 

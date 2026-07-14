@@ -641,7 +641,7 @@ async fn runtime_error_persists_issue_and_clears_on_success() {
     let pid = manifest().plugin_id;
 
     app.registry
-        .report_runtime_error(&app, &pid, "dev-1", "Acme K1", "lua boom".into())
+        .report_runtime_error(&app, &pid, "dev-1", "lua boom".into())
         .await;
     let issue = app
         .registry

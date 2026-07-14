@@ -36,8 +36,8 @@ notify:
     title: Plugin changed on disk
     message: "%{plugin}'s files changed on disk, so it was disabled for safety. Open the Plugins screen to review and re-enable it."
   plugin_runtime_error:
-    title: "Plugin error: %{plugin}"
-    message: "Something went wrong in this plugin. Open Details for the full error."
+    title: "An error occurred in plugin %{plugin}"
+    message: "Open Details for the full error."
   plugin_connect_failed:
     title: "Plugin can't connect: %{plugin}"
     message: "It couldn't reach its configured address. Open Details for more."

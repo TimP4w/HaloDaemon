@@ -128,5 +128,13 @@ mod tests {
             profile: "Gaming".into(),
         });
         assert!(msg.contains("Gaming"), "param not interpolated: {msg}");
+
+        let (title, message) = notification_text(&PluginRuntimeError {
+            plugin: "xyz".into(),
+            detail: "private stack trace".into(),
+        });
+        assert_eq!(title, "An error occurred in plugin xyz");
+        assert!(!title.contains("private stack trace"));
+        assert!(!message.contains("private stack trace"));
     }
 }

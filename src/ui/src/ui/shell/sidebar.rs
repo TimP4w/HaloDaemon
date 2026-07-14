@@ -2,7 +2,7 @@
 //! Left sidebar: workspace nav, live device list, and the daemon-health footer.
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{AppState, FanCurveStatus, PluginUpdateStatus};
+use halod_shared::types::{AppState, FanCurveStatus, PluginIssueKind, PluginUpdateStatus};
 
 use crate::domain::models::device as model;
 use crate::domain::state::Page;
@@ -42,6 +42,18 @@ pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateSt
         .count()
 }
 
+/// Whether the Plugins attention badge includes a real failure. Load warnings,
+/// updates, and consent prompts remain amber; connect/runtime/load failures use
+/// the same red severity color as their plugin issue banner.
+fn plugins_have_errors(state: &AppState) -> bool {
+    state.plugins.plugins.iter().any(|plugin| {
+        plugin
+            .issue
+            .as_ref()
+            .is_some_and(|issue| issue.kind != PluginIssueKind::LoadWarning)
+    })
+}
+
 /// Count fan curves with an actionable status, such as no temperature sensor,
 /// a sensor malfunction, a stalled fan, or a failed write. Healthy curves do
 /// not add noise to the Cooling navigation item.
@@ -75,6 +87,7 @@ pub fn sidebar(
     plugin_updates: &[PluginUpdateStatus],
 ) {
     let plugin_actions = plugins_needing_action(state, plugin_updates);
+    let plugin_errors = plugins_have_errors(state);
     let cooling_actions = cooling_needing_action(state);
     let rect = ui.max_rect();
     ui.painter().line_segment(
@@ -95,7 +108,19 @@ pub fn sidebar(
                     Page::Cooling => cooling_actions,
                     _ => 0,
                 };
-                if nav_row(ui, *icon, &nav_label(target), *page == *target, badge) {
+                let badge_color = if matches!(target, Page::Plugins) && plugin_errors {
+                    theme::TRAFFIC_RED
+                } else {
+                    theme::STAT_AMBER
+                };
+                if nav_row(
+                    ui,
+                    *icon,
+                    &nav_label(target),
+                    *page == *target,
+                    badge,
+                    badge_color,
+                ) {
                     *page = target.clone();
                 }
                 let row_rect =
@@ -267,7 +292,14 @@ fn nav_label(page: &Page) -> std::borrow::Cow<'static, str> {
     }
 }
 
-fn nav_row(ui: &mut egui::Ui, icon: Icon, label: &str, active: bool, badge: usize) -> bool {
+fn nav_row(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    active: bool,
+    badge: usize,
+    badge_color: Color32,
+) -> bool {
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
     let hovered = resp.hovered();
@@ -310,7 +342,7 @@ fn nav_row(ui: &mut egui::Ui, icon: Icon, label: &str, active: bool, badge: usiz
         text_color,
     );
     if badge > 0 {
-        draw_nav_badge(ui, rect, badge);
+        draw_nav_badge(ui, rect, badge, badge_color);
     }
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -318,9 +350,8 @@ fn nav_row(ui: &mut egui::Ui, icon: Icon, label: &str, active: bool, badge: usiz
     resp.clicked()
 }
 
-/// Amber count pill on the right edge of a nav row, flagging items that need
-/// attention (e.g. plugins with updates or a pending consent).
-fn draw_nav_badge(ui: &mut egui::Ui, row: Rect, count: usize) {
+/// Count pill on the right edge of a nav row, colored for its highest severity.
+fn draw_nav_badge(ui: &mut egui::Ui, row: Rect, count: usize, color: Color32) {
     let label = if count > 9 {
         "9+".to_string()
     } else {
@@ -334,7 +365,7 @@ fn draw_nav_badge(ui: &mut egui::Ui, row: Rect, count: usize) {
         Pos2::new(row.right() - 16.0, row.center().y),
         Vec2::new(w, 18.0),
     );
-    ui.painter().rect_filled(pill, 9.0, theme::STAT_AMBER);
+    ui.painter().rect_filled(pill, 9.0, color);
     ui.painter().galley(
         Pos2::new(
             pill.center().x - galley.size().x / 2.0,
@@ -532,6 +563,23 @@ mod tests {
         let mut state = AppState::default();
         state.plugins.plugins = vec![with_issue, plugin("ok", true, false)];
         assert_eq!(plugins_needing_action(&state, &[]), 1);
+    }
+
+    #[test]
+    fn plugin_badge_is_red_for_errors_but_not_load_warnings() {
+        let mut affected = plugin("affected", true, false);
+        affected.issue = Some(halod_shared::types::PluginIssue {
+            kind: PluginIssueKind::LoadWarning,
+            detail: "warning".into(),
+            timestamp_ms: 0,
+        });
+        let mut state = AppState::default();
+        state.plugins.plugins = vec![affected.clone()];
+        assert!(!plugins_have_errors(&state));
+
+        affected.issue.as_mut().unwrap().kind = PluginIssueKind::RuntimeError;
+        state.plugins.plugins = vec![affected];
+        assert!(plugins_have_errors(&state));
     }
 
     #[test]
