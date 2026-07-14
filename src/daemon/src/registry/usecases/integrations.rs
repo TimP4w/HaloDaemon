@@ -44,9 +44,9 @@ async fn enable_one(app: &Arc<AppState>, id: &str) {
 pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
     {
         let mut cfg = app.config.write().await;
-        cfg.plugins.integrations_disabled.retain(|x| x != &id);
-        if !enabled {
-            cfg.plugins.integrations_disabled.push(id.clone());
+        cfg.plugins.integrations_enabled.retain(|x| x != &id);
+        if enabled {
+            cfg.plugins.integrations_enabled.push(id.clone());
         }
         app.registry.replace_policy(&cfg.plugins);
     }
@@ -132,12 +132,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(app
+            assert!(!app
                 .config
                 .read()
                 .await
                 .plugins
-                .integrations_disabled
+                .integrations_enabled
                 .contains(&"openrgb".to_string()));
             let remaining = app.devices.read().await;
             assert_eq!(

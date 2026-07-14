@@ -378,9 +378,26 @@ impl Registry {
     /// Atomically replace every persisted plugin-policy field in one snapshot.
     pub fn replace_policy(&self, policy: &crate::config::PluginPolicy) {
         self.update(|s| {
-            s.disabled = policy.disabled.iter().cloned().collect();
-            s.integrations_disabled = policy.integrations_disabled.iter().cloned().collect();
-            s.granted = policy.granted.clone();
+            s.disabled = s
+                .manifests
+                .iter()
+                .filter(|manifest| !policy.enabled.contains(&manifest.plugin_id))
+                .map(|manifest| manifest.plugin_id.clone())
+                .collect();
+            s.integrations_disabled = s
+                .manifests
+                .iter()
+                .filter(|manifest| {
+                    manifest.plugin_type == PluginKind::Integration
+                        && !policy.integrations_enabled.contains(&manifest.plugin_id)
+                })
+                .map(|manifest| manifest.plugin_id.clone())
+                .collect();
+            s.granted = policy
+                .accepted_authorities
+                .iter()
+                .map(|(id, authority)| (id.clone(), authority.permissions.clone()))
+                .collect();
             s.accepted_authorities = policy.accepted_authorities.clone();
             s.installed_hashes = policy.installed_hashes.clone();
             s.config_values = policy.config.clone();

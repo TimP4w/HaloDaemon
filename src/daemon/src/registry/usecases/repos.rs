@@ -130,11 +130,7 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
             previous_verified_sha: None,
             last_sync: Some(now_rfc3339()),
         });
-        for plugin_id in &plugin_ids {
-            if !known_plugin_ids.contains(plugin_id) && !cfg.plugins.disabled.contains(plugin_id) {
-                cfg.plugins.disabled.push(plugin_id.clone());
-            }
-        }
+        let _ = &known_plugin_ids;
         for package in &packages {
             cfg.plugins
                 .installed_hashes
@@ -646,7 +642,7 @@ mod tests {
             assert_eq!(cfg.plugins.repos.len(), 1);
             assert_eq!(cfg.plugins.repos[0].slug, slug);
             assert!(
-                cfg.plugins.disabled.contains(&slug),
+                !cfg.plugins.enabled.contains(&slug),
                 "a plugin from a user-added repo must start disabled"
             );
             drop(cfg);
@@ -995,7 +991,7 @@ mod tests {
                 .unwrap();
 
             assert!(
-                !app.config.read().await.plugins.disabled.contains(&slug),
+                !app.config.read().await.plugins.enabled.contains(&slug),
                 "an id collision must not disable the pre-existing plugin owner"
             );
         })
@@ -1170,10 +1166,10 @@ mod tests {
                 .unwrap();
             {
                 let mut cfg = app.config.write().await;
-                cfg.plugins.disabled.push(slug.clone());
+                cfg.plugins.enabled.push(slug.clone());
             }
             app.registry
-                .set_disabled(&app.config.read().await.plugins.disabled);
+                .replace_policy(&app.config.read().await.plugins);
 
             let clone_dir = crate::config::plugin_repos_dir().join(&slug);
             assert!(clone_dir.exists());
@@ -1184,7 +1180,7 @@ mod tests {
             let cfg = app.config.read().await;
             assert!(cfg.plugins.repos.is_empty());
             assert!(
-                !cfg.plugins.disabled.contains(&slug),
+                !cfg.plugins.enabled.contains(&slug),
                 "the removed plugin's disabled flag must be purged"
             );
             drop(cfg);

@@ -19,8 +19,7 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
     }
     {
         let mut cfg = app.config.write().await;
-        cfg.plugins.disabled.retain(|x| x != &id);
-        cfg.plugins.disabled.push(id.clone());
+        cfg.plugins.enabled.retain(|x| x != &id);
     }
     app.request_config_save();
     let device_ids = {
@@ -271,23 +270,18 @@ pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     }
 
     let mut cfg = app.config.write().await;
-    let before = cfg.plugins.disabled.len();
-    cfg.plugins.disabled.retain(|x| x != id);
-    let disabled_changed = cfg.plugins.disabled.len() != before;
+    let before = cfg.plugins.enabled.len();
+    cfg.plugins.enabled.retain(|x| x != id);
+    let enabled_changed = cfg.plugins.enabled.len() != before;
     let config_changed = cfg.plugins.config.remove(id).is_some();
-    let perms_changed = cfg.plugins.granted.remove(id).is_some();
     let authority_changed = cfg.plugins.accepted_authorities.remove(id).is_some();
     let hash_changed = cfg.plugins.installed_hashes.remove(id).is_some();
-    let integ_before = cfg.plugins.integrations_disabled.len();
-    cfg.plugins.integrations_disabled.retain(|x| x != id);
-    let integ_changed = cfg.plugins.integrations_disabled.len() != integ_before;
+    let integ_before = cfg.plugins.integrations_enabled.len();
+    cfg.plugins.integrations_enabled.retain(|x| x != id);
+    let integ_changed = cfg.plugins.integrations_enabled.len() != integ_before;
 
-    let changed = disabled_changed
-        || config_changed
-        || perms_changed
-        || authority_changed
-        || hash_changed
-        || integ_changed;
+    let changed =
+        enabled_changed || config_changed || authority_changed || hash_changed || integ_changed;
     if changed {
         app.registry.replace_policy(&cfg.plugins);
     }
@@ -329,8 +323,8 @@ pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<Strin
                 continue;
             };
             if !current.is_subset_of(accepted) {
-                if !cfg.plugins.disabled.contains(id) {
-                    cfg.plugins.disabled.push(id.clone());
+                if cfg.plugins.enabled.contains(id) {
+                    cfg.plugins.enabled.retain(|enabled| enabled != id);
                 }
                 expanded.push(id.clone());
             }
@@ -373,17 +367,12 @@ pub async fn confirm_enable(
     }
     {
         let mut cfg = app.config.write().await;
-        cfg.plugins.disabled.retain(|plugin| plugin != &id);
+        if !cfg.plugins.enabled.contains(&id) {
+            cfg.plugins.enabled.push(id.clone());
+        }
         cfg.plugins
             .accepted_authorities
             .insert(id.clone(), current.clone());
-        if current.permissions.is_empty() {
-            cfg.plugins.granted.remove(&id);
-        } else {
-            cfg.plugins
-                .granted
-                .insert(id.clone(), current.permissions.clone());
-        }
         app.registry.replace_policy(&cfg.plugins);
     }
     app.request_config_save();
@@ -612,12 +601,12 @@ mod tests {
                 1,
                 "scoped reconciliation must leave unrelated devices alone"
             );
-            assert!(app
+            assert!(!app
                 .config
                 .read()
                 .await
                 .plugins
-                .disabled
+                .enabled
                 .contains(&"some_plugin".to_string()));
         })
         .await;

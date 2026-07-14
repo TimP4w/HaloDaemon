@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::Result;
-use halod_shared::types::{
-    AppRule, Permission, PluginAuthority, VisibilityState, DEFAULT_PROFILE_NAME,
-};
+use halod_shared::types::{AppRule, PluginAuthority, VisibilityState, DEFAULT_PROFILE_NAME};
 // Types shared with wire protocol; re-exported for backward-compat.
 pub use halod_shared::types::{
     CanvasState, CoolingConfig, GuiConfig, LcdConfig, PlacedZone, RgbConfig,
@@ -337,24 +335,18 @@ pub struct PluginPolicy {
     /// can decide whether a changed manifest expands authority.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub accepted_authorities: HashMap<String, PluginAuthority>,
-    /// Plugin ids the user has disabled. Everything present-and-not-listed is
-    /// enabled.
+    /// Plugin ids explicitly enabled through the authority confirmation flow.
+    /// An absent id is inert, which makes a fresh v2 consent decision required.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub disabled: Vec<String>,
-    /// Permissions the user has granted per plugin id. A plugin's declared
-    /// permissions must be a subset of its entry here before it activates.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub granted: HashMap<String, Vec<Permission>>,
+    pub enabled: Vec<String>,
     /// Non-secure user-editable config values per plugin id (key -> value).
     /// Fields declared `secure = true` never appear here — see the encrypted
     /// secret store instead.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub config: HashMap<String, HashMap<String, String>>,
-    /// Integration plugin ids the user has disabled *as an integration* —
-    /// independent of `disabled` (which governs whether the Lua may run at
-    /// all). Everything present-and-not-listed is active.
+    /// Integration ids explicitly enabled independently of package activation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub integrations_disabled: Vec<String>,
+    pub integrations_enabled: Vec<String>,
     /// Content hash (hex SHA-256) of the installed plugin package, keyed by
     /// plugin id. This identifies updates and modified checkouts; it is never
     /// used as a consent gate. `acknowledged` is accepted while loading older
@@ -558,10 +550,14 @@ mod tests {
         cfg.cooling.fan_failsafe_duty = 60;
         cfg.rgb.canvas_fps = 45;
         cfg.lcd.enabled = false;
-        cfg.plugins.disabled.push("nzxt_kraken".into());
-        cfg.plugins
-            .granted
-            .insert("wled_udp".into(), vec![Permission::Network]);
+        cfg.plugins.enabled.push("wled_udp".into());
+        cfg.plugins.accepted_authorities.insert(
+            "wled_udp".into(),
+            PluginAuthority {
+                permissions: vec![halod_shared::types::Permission::Network],
+                transport_scopes: vec![],
+            },
+        );
         cfg.plugins.config.insert(
             "openrgb".into(),
             HashMap::from([("host".to_string(), "127.0.0.1".to_string())]),
@@ -573,10 +569,14 @@ mod tests {
         save(&cfg).unwrap();
         let reloaded = load().unwrap();
 
-        assert_eq!(reloaded.plugins.disabled, vec!["nzxt_kraken".to_string()]);
+        assert_eq!(reloaded.plugins.enabled, vec!["wled_udp".to_string()]);
         assert_eq!(
-            reloaded.plugins.granted.get("wled_udp"),
-            Some(&vec![Permission::Network])
+            reloaded
+                .plugins
+                .accepted_authorities
+                .get("wled_udp")
+                .map(|authority| &authority.permissions),
+            Some(&vec![halod_shared::types::Permission::Network])
         );
         assert_eq!(
             reloaded.plugins.installed_hashes.get("wled_udp"),
