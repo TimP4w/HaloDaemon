@@ -27,10 +27,11 @@ use halod_shared::types::{
 use super::bytebuf::ByteBuf;
 use super::ffi::to_lua_err;
 use super::manifest::{
-    check_lcd_dims, check_led_count, check_zone_count, topology_from, ActionDef, ActionManifest,
-    BatteryManifest, BooleanDef, BooleanManifest, ChainManifest, ChoiceDef, ChoiceManifest,
-    ConnectionManifest, DpiManifest, EqualizerManifest, FanManifest, KeyRemapManifest, LcdManifest,
-    OnboardProfilesManifest, PairingManifest, RangeDef, RangeManifest, RgbManifest, SensorManifest,
+    check_lcd_dims, check_led_count, check_zone_count, topology_from, AccessoryManifest, ActionDef,
+    ActionManifest, BatteryManifest, BooleanDef, BooleanManifest, ChainManifest, ChoiceDef,
+    ChoiceManifest, ConnectionManifest, DpiManifest, EqualizerManifest, FanManifest,
+    KeyRemapManifest, LcdManifest, OnboardProfilesManifest, PairingManifest, RangeDef,
+    RangeManifest, RgbManifest, SensorManifest,
 };
 use super::sandbox;
 use super::transport::{AddrScope, CommandExecutor, PluginIo, RegisterBus};
@@ -250,6 +251,7 @@ pub struct InitOutcome {
     /// is read from the device's config table), for a plugin that declares a
     /// `chain` capability but reports its channels dynamically rather than statically.
     pub chain: Option<Vec<InitChainChannel>>,
+    pub accessories: Option<Vec<AccessoryManifest>>,
     pub controls: Option<InitControls>,
     /// Current range-control values keyed by control key, seeding the host's
     /// range cache so the UI reflects the device instead of manifest defaults.
@@ -271,6 +273,8 @@ struct InitTable {
     lcd: Option<InitLcd>,
     #[serde(default)]
     chain: Option<Vec<InitChainChannel>>,
+    #[serde(default)]
+    accessories: Option<Vec<AccessoryManifest>>,
     #[serde(default)]
     controls: Option<InitControls>,
     #[serde(default)]
@@ -502,6 +506,7 @@ impl PluginHandle {
                         zones: t.zones,
                         lcd: t.lcd,
                         chain: t.chain,
+                        accessories: t.accessories,
                         controls: t.controls,
                         ranges: t.ranges,
                         choices: t.choices,

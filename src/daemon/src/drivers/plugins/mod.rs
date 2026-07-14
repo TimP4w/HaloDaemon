@@ -1488,7 +1488,11 @@ impl Registry {
             dev.set_self_ref(weak.clone());
             dev
         });
-        if manifest.chain.is_some() {
+        if manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability == "chain")
+        {
             let adapter: Arc<dyn crate::drivers::chain::ChainAdapter> = device.clone();
             let host = crate::drivers::chain::ChainHost::new(adapter);
             device.install_chain_host(host);

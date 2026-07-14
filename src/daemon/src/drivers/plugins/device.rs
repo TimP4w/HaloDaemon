@@ -73,6 +73,7 @@ enum Cap {
     Pairing,
     OnboardProfiles,
     KeyRemap,
+    Chain,
 }
 
 /// Typed runtime capabilities permitted by the inert catalog. Descriptors and
@@ -104,6 +105,7 @@ fn declared_caps(manifest: &PluginManifest) -> Vec<Cap> {
     push("pairing", Cap::Pairing);
     push("onboard_profiles", Cap::OnboardProfiles);
     push("key_remap", Cap::KeyRemap);
+    push("chain", Cap::Chain);
     caps
 }
 
@@ -368,18 +370,18 @@ pub struct LuaDevice {
     audio_registry: Option<super::audio_api::SinkRegistry>,
     audio_guard: Option<super::audio_api::AudioGuard>,
 
-    // ── chain / children (present only when the manifest declares `chain`) ──
+    // ── chain / children (reported by initialize) ─────────────────────────
     /// Set after construction (needs the `Arc<Self>`); `None` for non-chain devices.
     chain_host: OnceLock<Arc<ChainHost>>,
     /// Weak back-reference so `discover_children` can hand children a `FanHub`.
     self_ref: Weak<LuaDevice>,
-    /// Statically-declared chain channels from the manifest.
     chain_channels: Vec<ChannelDescriptor>,
     /// Channels reported dynamically by `initialize` (capacity known only at
     /// runtime, e.g. ARGB headers read from a config table). Takes precedence
     /// over `chain_channels` once set.
     dynamic_chain_channels: OnceLock<Vec<ChannelDescriptor>>,
     accessories: Vec<AccessoryManifest>,
+    dynamic_accessories: OnceLock<Vec<AccessoryManifest>>,
 
     /// Weak handle to `AppState` so a failed runtime callback can push a toast
     /// (via `app.registry`) without the device owning `AppState`.
@@ -666,26 +668,10 @@ impl LuaDevice {
             audio_guard: None,
             chain_host: OnceLock::new(),
             self_ref: Weak::new(),
-            chain_channels: manifest
-                .chain
-                .as_ref()
-                .map(|c| {
-                    c.channels
-                        .iter()
-                        .map(|ch| ChannelDescriptor {
-                            channel_id: ch.id.clone(),
-                            display_name: ch.name.clone(),
-                            max_leds: ch.max_leds,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
+            chain_channels: Vec::new(),
             dynamic_chain_channels: OnceLock::new(),
-            accessories: manifest
-                .chain
-                .as_ref()
-                .map(|c| c.accessories.clone())
-                .unwrap_or_default(),
+            accessories: Vec::new(),
+            dynamic_accessories: OnceLock::new(),
             notify,
         }
     }
@@ -889,6 +875,9 @@ impl Device for LuaDevice {
                 .collect();
             let _ = self.dynamic_chain_channels.set(descriptors);
         }
+        if let Some(accessories) = outcome.accessories {
+            let _ = self.dynamic_accessories.set(accessories);
+        }
         if let Some(controls) = outcome.controls {
             let _ = self.dynamic_controls.set(Controls::from_runtime(controls));
         }
@@ -954,6 +943,10 @@ impl Device for LuaDevice {
                 Cap::Pairing => caps.push(CapabilityRef::Pairing(self)),
                 Cap::OnboardProfiles => caps.push(CapabilityRef::OnboardProfiles(self)),
                 Cap::KeyRemap => caps.push(CapabilityRef::KeyRemap(self)),
+                Cap::Chain => {
+                    caps.push(CapabilityRef::Controller(self));
+                    caps.push(CapabilityRef::Chain(self));
+                }
             }
         }
         if self.plugin_type == PluginKind::Integration {
@@ -1162,7 +1155,13 @@ impl LuaDevice {
 
         let mut out = Vec::new();
         for d in detected {
-            let Some(accessory) = self.accessories.iter().find(|a| a.id == d.accessory) else {
+            let Some(accessory) = self
+                .dynamic_accessories
+                .get()
+                .unwrap_or(&self.accessories)
+                .iter()
+                .find(|a| a.id == d.accessory)
+            else {
                 log::debug!(
                     "plugin '{}': unknown accessory 0x{:02x}",
                     self.plugin_id,

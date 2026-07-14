@@ -1507,6 +1507,7 @@ const V2_CAPABILITIES: &[&str] = &[
     "equalizer",
     "pairing",
     "controls",
+    "chain",
 ];
 
 fn validate_v2_catalog(manifest: &PluginManifest) -> Result<()> {
