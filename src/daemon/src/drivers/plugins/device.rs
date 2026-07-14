@@ -357,7 +357,7 @@ pub struct LuaDevice {
     lcd_descriptor: OnceLock<LcdDescriptor>,
     lcd_slot: LcdStateSlot,
     /// Re-apply RGB after an LCD image upload (some panels reset their LEDs).
-    lcd_needs_rgb_restore: bool,
+    lcd_needs_rgb_restore: AtomicBool,
 
     rgb_descriptor: RgbDescriptor,
     /// RGB zones discovered at `initialize()` (dynamic LED counts). Overrides
@@ -634,11 +634,7 @@ impl LuaDevice {
             caps: declared_caps(manifest),
             lcd_descriptor: OnceLock::new(),
             lcd_slot: LcdStateSlot::default(),
-            lcd_needs_rgb_restore: manifest
-                .lcd
-                .as_ref()
-                .map(|l| l.needs_rgb_restore)
-                .unwrap_or(false),
+            lcd_needs_rgb_restore: AtomicBool::new(false),
             dpi_state: Mutex::new(DpiState {
                 steps: Vec::new(),
                 index: 0,
@@ -875,6 +871,8 @@ impl Device for LuaDevice {
                 .set_rotation(degrees_to_rotation(lcd.rotation));
             self.lcd_slot.set_raw_streaming(lcd.raw_streaming);
             self.lcd_slot.set_latches_last_frame(lcd.latches);
+            self.lcd_needs_rgb_restore
+                .store(lcd.needs_rgb_restore, Ordering::Relaxed);
             let _ = self.lcd_descriptor.set(build_lcd_descriptor(&lcd));
         }
         if let Some(channels) = outcome.chain {
@@ -1459,7 +1457,7 @@ impl LcdCapability for LuaDevice {
     }
 
     fn needs_rgb_restore_after_upload(&self) -> bool {
-        self.lcd_needs_rgb_restore
+        self.lcd_needs_rgb_restore.load(Ordering::Relaxed)
     }
 
     /// One rendered engine frame. Rotation/brightness/mode live in the slot and

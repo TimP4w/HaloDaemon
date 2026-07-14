@@ -207,6 +207,10 @@ pub struct InitLcd {
     /// Current rotation in degrees, typically read back from the device.
     #[serde(default)]
     pub rotation: u32,
+    /// Reapply the RGB state after uploading an LCD frame when the device's
+    /// firmware resets its lighting engine as a side effect.
+    #[serde(default)]
+    pub needs_rgb_restore: bool,
 }
 
 fn default_lcd_brightness() -> u8 {

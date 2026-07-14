@@ -163,15 +163,10 @@ pub struct FanManifest {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SensorManifest {}
 
-/// LCD capability marker. The panel descriptor (resolution, rotations, …) is
-/// reported dynamically by `initialize` (it can vary by device variant), so this
-/// carries only device-wide LCD policy.
+/// Legacy test-only LCD marker. Production LCD descriptors are returned by
+/// `initialize`.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct LcdManifest {
-    /// Re-apply the RGB state after an image upload (some panels reset the LEDs).
-    #[serde(default)]
-    pub needs_rgb_restore: bool,
-}
+pub struct LcdManifest {}
 
 /// DPI capability. The host owns the step-list state machine (clamp/index); the
 /// plugin only writes the chosen value through its `set_dpi(dev, dpi)` callback.
