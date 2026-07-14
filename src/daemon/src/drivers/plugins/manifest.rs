@@ -474,20 +474,6 @@ pub struct ChainManifest {
     pub accessories: Vec<AccessoryManifest>,
 }
 
-fn default_poll_interval_ms() -> u64 {
-    1000
-}
-
-/// Background polling. The host runs the loop on the declared interval and calls
-/// the plugin's `read_status(dev)` callback; the returned table is stored as
-/// `dev.status` for other callbacks (sensors/fan) to read without hitting
-/// hardware on every call.
-#[derive(Debug, Clone, Deserialize)]
-pub struct PollManifest {
-    #[serde(default = "default_poll_interval_ms")]
-    pub interval_ms: u64,
-}
-
 /// How the SMBus scanner probes a declared address before emitting a handle.
 /// Openness knob: some controllers NAK a quick-write but answer a read, and a
 /// few must not be probed at all (detection is left entirely to `initialize`).
@@ -836,8 +822,6 @@ pub struct PluginManifest {
     /// and authority boundary used before Lua is started.
     #[serde(default)]
     pub capabilities: Vec<String>,
-    #[serde(default)]
-    pub poll: Option<PollManifest>,
     #[serde(default)]
     pub chain: Option<ChainManifest>,
     #[serde(default)]
@@ -1869,11 +1853,6 @@ fn validate_controls(manifest: &PluginManifest) -> Result<()> {
                     }
                 }
             }
-        }
-    }
-    if let Some(poll) = &manifest.poll {
-        if !(100..=60_000).contains(&poll.interval_ms) {
-            bail!("poll interval_ms must be 100..=60000");
         }
     }
     if let Some(remap) = &manifest.key_remap {
