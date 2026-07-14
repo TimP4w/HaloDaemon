@@ -410,15 +410,6 @@ async fn dispatch(
         DaemonCommand::UpdatePluginRepo { slug } => {
             registry::usecases::repos::update_repo(slug, app).await
         }
-        DaemonCommand::RepairPluginRepoDir { slug, subpath } => {
-            registry::usecases::repos::repair_plugin_dir(slug, subpath, app).await
-        }
-        DaemonCommand::CheckPluginUpdates { slug } => {
-            registry::usecases::repos::check_plugin_updates(slug, app, client).await
-        }
-        DaemonCommand::UpdatePlugin { plugin_id } => {
-            registry::usecases::repos::update_plugin(plugin_id, app).await
-        }
         DaemonCommand::UpdateAllPlugins => registry::usecases::repos::update_all_plugins(app).await,
         DaemonCommand::SetIntegrationEnabled { id, enabled } => {
             registry::usecases::integrations::set_integration_enabled(id, enabled, app).await

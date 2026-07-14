@@ -896,38 +896,7 @@ fn plugin_source_for(plugin_dir: &Path) -> halod_shared::types::PluginSource {
     }
 }
 
-/// For a repo-sourced plugin, its repository slug and path within the selected
-/// immutable revision. `None` for an unknown or local plugin.
 impl Registry {
-    pub fn repo_location_for(&self, plugin_id: &str) -> Option<(String, std::path::PathBuf)> {
-        let state = self.snapshot();
-        // Keep repo operations available for a manifest that was parsed far
-        // enough to identify but failed semantic validation. Updating is the
-        // recovery path when a Halo/plugin-API change makes the checked-out
-        // version invalid, so restricting this lookup to successfully loaded
-        // manifests would strand exactly the plugins that need it most.
-        let invalid = read_recover(&self.invalid_manifests);
-        let manifest = state
-            .manifests
-            .iter()
-            .find(|m| m.plugin_id == plugin_id)
-            .or_else(|| {
-                invalid
-                    .iter()
-                    .map(|(manifest, _)| manifest)
-                    .find(|m| m.plugin_id == plugin_id)
-            })?;
-        let repos_dir = crate::config::plugin_repos_dir();
-        let rel = manifest.plugin_dir.strip_prefix(&repos_dir).ok()?;
-        let mut components = rel.components();
-        let slug = match components.next()? {
-            std::path::Component::Normal(s) => s.to_string_lossy().into_owned(),
-            _ => return None,
-        };
-        let subpath = components.as_path().to_path_buf();
-        Some((slug, subpath))
-    }
-
     /// Every loaded plugin with its enable state, for the management UI.
     /// `secrets` resolves whether each declared secure field currently has a
     /// value stored, without ever reading the plaintext (see `PluginInfo::secret_set`).

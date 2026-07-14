@@ -712,9 +712,8 @@ pub struct RepoUpdateStatus {
     pub behind: bool,
 }
 
-/// One plugin's update-availability, reported in reply to
-/// `DaemonCommand::CheckPluginUpdates` — finer-grained than [`RepoUpdateStatus`]:
-/// a repo can be behind while a given plugin's own content is unchanged.
+/// One package's update-availability inside a repository update check. A
+/// repository can be behind while a given package's content is unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginUpdateStatus {
     pub plugin_id: String,

@@ -348,38 +348,6 @@ async fn touch_last_sync(app: &Arc<AppState>, slugs: &[String]) {
     crate::ipc::broadcast_state(app).await;
 }
 
-/// Check registered repos' plugins for updates and reply with a `plugin_updates` frame.
-/// `slug` scopes the check to one repo; `None` checks every repo.
-pub async fn check_plugin_updates(
-    slug: Option<String>,
-    app: Arc<AppState>,
-    client: ClientHandle,
-) -> Result<()> {
-    let (statuses, reached) = compute_plugin_updates(&app, slug.as_deref()).await;
-    // A check contacts the remote, so it counts as a sync — stamp the reached
-    // repos even when nothing was behind, so "LAST SYNC" isn't stuck at "never".
-    touch_last_sync(&app, &reached).await;
-    *app.plugin_update_status.lock().await = statuses.clone();
-    client.send_json(&json!({
-        "type": "plugin_updates",
-        "plugins": statuses,
-    }));
-    Ok(())
-}
-
-/// Updating one package updates its whole repository.  Repository manifests
-/// deliberately make the repository (not an individual historical subtree)
-/// the atomic compatibility and trust boundary.
-pub async fn update_plugin(plugin_id: String, app: Arc<AppState>) -> Result<()> {
-    let (slug, _) = app
-        .registry
-        .repo_location_for(&plugin_id)
-        .ok_or_else(|| anyhow::anyhow!("plugin '{plugin_id}' is not repo-sourced"))?;
-    update_repo(slug.clone(), app.clone()).await?;
-    broadcast_plugin_updates(&app, Some(&slug)).await;
-    Ok(())
-}
-
 /// Recompute per-plugin update status (optionally scoped to one repo) and
 /// broadcast it to every client, so their update banners reflect reality after
 /// an update lands.
@@ -613,16 +581,6 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     apply_repo_plugins(app, plugin_ids).await
-}
-
-/// Legacy repair requests are intentionally widened to a full repository
-/// reinstall. A package cannot be repaired independently without violating
-/// the repository's atomic digest set.
-pub async fn repair_plugin_dir(slug: String, subpath: String, app: Arc<AppState>) -> Result<()> {
-    if subpath.is_empty() {
-        anyhow::bail!("repair request did not identify a plugin package");
-    }
-    update_repo(slug, app).await
 }
 
 #[cfg(test)]
@@ -888,9 +846,7 @@ mod tests {
                 "the malformed manifest should make the repo plugin undiscoverable"
             );
 
-            repair_plugin_dir(slug.clone(), slug.clone(), app.clone())
-                .await
-                .unwrap();
+            update_repo(slug.clone(), app.clone()).await.unwrap();
 
             let cfg = app.config.read().await;
             let record = cfg.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
@@ -943,7 +899,7 @@ mod tests {
                 subs: Arc::default(),
             });
 
-            update_plugin(slug.clone(), app.clone()).await.unwrap();
+            update_repo(slug.clone(), app.clone()).await.unwrap();
 
             // Drain frames until the plugin_updates one, and assert the flag cleared.
             let mut cleared = None;
@@ -986,7 +942,7 @@ mod tests {
             let second_sha = commit_all(&repo, "broken");
             assert_ne!(first_sha, second_sha);
 
-            let err = update_plugin(slug.clone(), app.clone()).await.unwrap_err();
+            let err = update_repo(slug.clone(), app.clone()).await.unwrap_err();
             assert!(err.to_string().contains("failed validation"), "{err}");
 
             let cfg = app.config.read().await;
@@ -1065,7 +1021,7 @@ mod tests {
             let status = statuses.iter().find(|s| s.plugin_id == slug).unwrap();
             assert!(!status.update_available);
 
-            update_plugin(slug.clone(), app.clone()).await.unwrap();
+            update_repo(slug.clone(), app.clone()).await.unwrap();
             let config = app.config.read().await;
             let record = config.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
             assert_eq!(record.locked_sha, tip_sha);
@@ -1119,7 +1075,7 @@ mod tests {
                 .expect("failed repo plugin still receives update status");
             assert!(status.update_available);
 
-            update_plugin(slug.clone(), app.clone()).await.unwrap();
+            update_repo(slug.clone(), app.clone()).await.unwrap();
 
             let recovered = app
                 .registry

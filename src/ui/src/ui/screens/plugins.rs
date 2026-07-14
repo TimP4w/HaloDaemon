@@ -56,7 +56,6 @@ struct RepoCheck {
 #[derive(Clone)]
 struct PendingRepoRepair {
     slug: String,
-    subpath: String,
     name: String,
 }
 
@@ -440,9 +439,7 @@ impl PluginsUi {
                     });
                 },
                 |ui| {
-                    if let Some((slug, subpath)) =
-                        skipped_repo_location(&s.path, &state.plugins.repos)
-                    {
+                    if let Some((slug, _)) = skipped_repo_location(&s.path, &state.plugins.repos) {
                         if widgets::button(
                             ui,
                             &t!("plugins.repos_repair"),
@@ -453,7 +450,6 @@ impl PluginsUi {
                         {
                             self.pending_repo_repair = Some(PendingRepoRepair {
                                 slug,
-                                subpath,
                                 name: name.to_owned(),
                             });
                         }
@@ -574,9 +570,7 @@ impl PluginsUi {
                     });
                     crate::runtime::ipc::send(
                         cmd,
-                        halod_shared::commands::DaemonCommand::CheckPluginUpdates {
-                            slug: Some(r.slug.clone()),
-                        },
+                        halod_shared::commands::DaemonCommand::CheckPluginRepoUpdates,
                     );
                 }
                 if self.checking_repo.is_some() {
@@ -928,10 +922,7 @@ impl PluginsUi {
         ) {
             crate::runtime::ipc::send(
                 cmd,
-                halod_shared::commands::DaemonCommand::RepairPluginRepoDir {
-                    slug: pending.slug,
-                    subpath: pending.subpath,
-                },
+                halod_shared::commands::DaemonCommand::UpdatePluginRepo { slug: pending.slug },
             );
         }
     }
@@ -1824,8 +1815,8 @@ fn detail_body(
                 updating.insert(update.plugin_id.clone(), now);
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::UpdatePlugin {
-                        plugin_id: update.plugin_id.clone(),
+                    halod_shared::commands::DaemonCommand::UpdatePluginRepo {
+                        slug: update.slug.clone(),
                     },
                 );
             }
@@ -1884,8 +1875,8 @@ fn detail_body(
             updating.insert(update.plugin_id.clone(), now);
             crate::runtime::ipc::send(
                 cmd,
-                halod_shared::commands::DaemonCommand::UpdatePlugin {
-                    plugin_id: update.plugin_id.clone(),
+                halod_shared::commands::DaemonCommand::UpdatePluginRepo {
+                    slug: update.slug.clone(),
                 },
             );
         }

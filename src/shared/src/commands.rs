@@ -171,23 +171,6 @@ pub enum DaemonCommand {
     UpdatePluginRepo {
         slug: String,
     },
-    /// Fetch a repository and restore one skipped plugin directory from the
-    /// remote tip. Unlike `UpdatePluginRepo`, sibling paths are untouched.
-    RepairPluginRepoDir {
-        slug: String,
-        subpath: String,
-    },
-    /// Check repo-sourced plugins for a per-plugin content update, replying
-    /// with `plugin_updates`. `slug` scopes the check to one repo; `None`
-    /// checks every repo. Finer-grained than `CheckPluginRepoUpdates`.
-    CheckPluginUpdates {
-        slug: Option<String>,
-    },
-    /// Update one plugin: check out only its subtree from its repo's remote
-    /// tip, leaving sibling plugins in the same repo untouched. Never automatic.
-    UpdatePlugin {
-        plugin_id: String,
-    },
     /// Update every plugin currently flagged with an update available, across every repo.
     UpdateAllPlugins,
     /// Enable or disable a single integration, independent of the generic
@@ -769,34 +752,6 @@ mod tests {
     fn update_plugin_repo_wire_format() {
         let v = roundtrip(&DaemonCommand::UpdatePluginRepo { slug: "foo".into() });
         assert_eq!(v, json!({"type": "update_plugin_repo", "slug": "foo"}));
-    }
-
-    #[test]
-    fn repair_plugin_repo_dir_wire_format() {
-        let v = roundtrip(&DaemonCommand::RepairPluginRepoDir {
-            slug: "official".into(),
-            subpath: "nzxt_kraken".into(),
-        });
-        assert_eq!(
-            v,
-            json!({"type": "repair_plugin_repo_dir", "slug": "official", "subpath": "nzxt_kraken"})
-        );
-    }
-
-    #[test]
-    fn check_plugin_updates_wire_format() {
-        let v = roundtrip(&DaemonCommand::CheckPluginUpdates {
-            slug: Some("foo".into()),
-        });
-        assert_eq!(v, json!({"type": "check_plugin_updates", "slug": "foo"}));
-    }
-
-    #[test]
-    fn update_plugin_wire_format() {
-        let v = roundtrip(&DaemonCommand::UpdatePlugin {
-            plugin_id: "wled_udp".into(),
-        });
-        assert_eq!(v, json!({"type": "update_plugin", "plugin_id": "wled_udp"}));
     }
 
     #[test]
