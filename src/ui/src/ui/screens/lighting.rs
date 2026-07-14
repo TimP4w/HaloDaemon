@@ -876,11 +876,11 @@ fn rgb_zone_pairs(dev: &WireDevice) -> Vec<(String, String)> {
 
 /// Allocated width of a zone pill for `label` (matches [`widgets::pill`]).
 fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
-    ui.fonts(|f| {
-        f.layout_no_wrap(label.to_string(), theme::body(12.0), Color32::WHITE)
-            .size()
-            .x
-    }) + 24.0
+    ui.painter()
+        .layout_no_wrap(label.to_string(), theme::body(12.0), Color32::WHITE)
+        .size()
+        .x
+        + 24.0
 }
 
 /// Number of rows `pill_widths` wrap into within `avail_w`, matching egui's
