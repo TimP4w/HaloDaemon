@@ -45,8 +45,8 @@ transports:
   hid: { report_size: 64, timeout_ms: 1000 }
 ```
 
-Supported nested matches are `hid`, `smbus`, `hwmon`, `command`, `amd_smn`,
-and `lpcio`. Concrete identifiers must be unique; generic support is always an
+Supported nested matches are `hid`, `usb_control`, `smbus`, `hwmon`, `command`,
+`amd_smn`, and `lpcio`. Concrete identifiers must be unique; generic support is always an
 explicit `any: true` declaration. Unsupported-platform packages remain visible
 but inert and never suppress a native driver.
 
