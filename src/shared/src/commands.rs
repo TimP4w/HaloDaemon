@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::types::{
-    ButtonMapping, EffectDef, EffectParamValue, MacroStep, Permission, PluginAuthority, RgbState,
-    SamplingMode, VisibilityState, ZoneTopology,
+    ButtonMapping, EffectDef, EffectParamValue, MacroStep, PluginAuthority, RgbState, SamplingMode,
+    VisibilityState, ZoneTopology,
 };
 use crate::zone_transform::ZoneContentTransform;
 use serde::{Deserialize, Serialize};
@@ -134,15 +134,6 @@ pub enum DaemonCommand {
     /// and the daemon rejects the request. Applies immediately.
     DeletePlugin {
         id: String,
-    },
-    /// Replace the set of permissions granted to a plugin. An empty `granted`
-    /// revokes everything, leaving the plugin inert if it declares any
-    /// permission. Permission and enabled state change atomically before the
-    /// plugin's devices are reconciled.
-    SetPluginTrust {
-        id: String,
-        granted: Vec<Permission>,
-        enabled: bool,
     },
     /// Confirm the exact manifest-derived authority currently displayed in the
     /// enable modal, then enable the plugin. The daemon rejects stale snapshots

@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
-use halod_shared::types::Permission;
 use serde_json::json;
 
 use crate::ipc::ClientHandle;
@@ -37,46 +36,6 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
         app.registry.clear_operational_errors(&id, &device_ids);
     }
     reconcile_plugins(&app, std::slice::from_ref(&id)).await;
-    Ok(())
-}
-
-/// Replace the set of permissions granted to a plugin and persist the choice.
-/// The grant and enabled state are committed together before devices are
-/// reconciled. Package hashes are update metadata and never affect this gate.
-pub async fn set_trust(
-    id: String,
-    granted: Vec<Permission>,
-    enabled: bool,
-    app: Arc<AppState>,
-) -> Result<()> {
-    let declared = app.registry.declared_permissions_for(&id);
-    let effective: Vec<Permission> = granted
-        .iter()
-        .copied()
-        .filter(|permission| declared.contains(permission))
-        .collect();
-    if effective.len() != granted.len() {
-        let dropped: Vec<Permission> = granted
-            .into_iter()
-            .filter(|permission| !declared.contains(permission))
-            .collect();
-        log::warn!("ignoring undeclared permissions for plugin '{id}': {dropped:?}");
-    }
-    {
-        let mut cfg = app.config.write().await;
-        if effective.is_empty() {
-            // Revoke the authority grant.
-            cfg.plugins.granted.remove(&id);
-        } else {
-            cfg.plugins.granted.insert(id.clone(), effective);
-        }
-        cfg.plugins.disabled.retain(|x| x != &id);
-        if !enabled {
-            cfg.plugins.disabled.push(id.clone());
-        }
-    }
-    app.request_config_save();
-    reconcile_plugins(&app, &[id]).await;
     Ok(())
 }
 
@@ -888,83 +847,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown plugin"));
-    }
-
-    #[tokio::test]
-    async fn set_trust_records_only_declared_permissions() {
-        crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(&app, || async {
-                set_trust(
-                    "cfgtest".into(),
-                    vec![Permission::Network],
-                    true,
-                    app.clone(),
-                )
-                .await
-                .unwrap();
-                let cfg = app.config.read().await;
-                assert_eq!(
-                    cfg.plugins.granted.get("cfgtest"),
-                    Some(&vec![Permission::Network])
-                );
-            })
-            .await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn set_trust_discards_undeclared_permissions() {
-        crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(&app, || async {
-                set_trust(
-                    "cfgtest".into(),
-                    vec![Permission::Network, Permission::Os],
-                    true,
-                    app.clone(),
-                )
-                .await
-                .unwrap();
-
-                let cfg = app.config.read().await;
-                assert_eq!(
-                    cfg.plugins.granted.get("cfgtest"),
-                    Some(&vec![Permission::Network]),
-                    "an undeclared permission must never be persisted"
-                );
-                drop(cfg);
-                assert_eq!(
-                    app.registry.granted_for("cfgtest"),
-                    vec![Permission::Network]
-                );
-            })
-            .await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn revoking_clears_the_grant_without_touching_update_metadata() {
-        crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(&app, || async {
-                set_trust(
-                    "cfgtest".into(),
-                    vec![Permission::Network],
-                    true,
-                    app.clone(),
-                )
-                .await
-                .unwrap();
-                // Empty grant = revoke.
-                set_trust("cfgtest".into(), vec![], false, app.clone())
-                    .await
-                    .unwrap();
-                let cfg = app.config.read().await;
-                assert!(!cfg.plugins.granted.contains_key("cfgtest"));
-            })
-            .await;
-        })
-        .await;
     }
 
     #[tokio::test]

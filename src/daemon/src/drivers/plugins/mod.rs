@@ -407,17 +407,6 @@ impl Registry {
         });
     }
 
-    /// Permissions declared by `plugin_id`'s current manifest. Unknown plugin ids
-    /// have no declared permissions.
-    pub(crate) fn declared_permissions_for(&self, plugin_id: &str) -> Vec<Permission> {
-        self.snapshot()
-            .manifests
-            .iter()
-            .find(|m| m.plugin_id == plugin_id)
-            .map(|m| m.permissions.clone())
-            .unwrap_or_default()
-    }
-
     /// Current authority from inert manifest data. This must stay independent
     /// of Lua so the user can inspect exactly what will run before enabling it.
     pub(crate) fn authority_for(

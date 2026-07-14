@@ -389,11 +389,6 @@ async fn dispatch(
             registry::usecases::plugins::import(source_dir, app).await
         }
         DaemonCommand::DeletePlugin { id } => registry::usecases::plugins::delete(id, app).await,
-        DaemonCommand::SetPluginTrust {
-            id,
-            granted,
-            enabled,
-        } => registry::usecases::plugins::set_trust(id, granted, enabled, app).await,
         DaemonCommand::ConfirmPluginEnable { id, authority } => {
             registry::usecases::plugins::confirm_enable(id, authority, app).await
         }
