@@ -254,6 +254,14 @@ pub struct InitDpi {
     pub onboard: bool,
 }
 
+/// Runtime fan descriptor. The physical channel is device-specific and is
+/// therefore supplied by initialize rather than the catalog.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct InitFan {
+    #[serde(default)]
+    pub channel: u8,
+}
+
 /// What `initialize` returns: a bare bool, or a table with dynamic device info
 /// discovered from the hardware (firmware/model, RGB zones, LCD panel, and the
 /// live range/choice values read back from the device to seed the host caches).
@@ -273,6 +281,7 @@ pub struct InitOutcome {
     pub accessories: Option<Vec<AccessoryManifest>>,
     pub controls: Option<InitControls>,
     pub dpi: Option<InitDpi>,
+    pub fan: Option<InitFan>,
     /// Current range-control values keyed by control key, seeding the host's
     /// range cache so the UI reflects the device instead of manifest defaults.
     pub ranges: Option<HashMap<String, i32>>,
@@ -301,6 +310,8 @@ struct InitTable {
     controls: Option<InitControls>,
     #[serde(default)]
     dpi: Option<InitDpi>,
+    #[serde(default)]
+    fan: Option<InitFan>,
     #[serde(default)]
     ranges: Option<HashMap<String, i32>>,
     #[serde(default)]
@@ -543,6 +554,7 @@ impl PluginHandle {
                         accessories: t.accessories,
                         controls: t.controls,
                         dpi: t.dpi,
+                        fan: t.fan,
                         ranges: t.ranges,
                         choices: t.choices,
                     })

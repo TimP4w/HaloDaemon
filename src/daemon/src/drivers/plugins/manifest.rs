@@ -152,12 +152,10 @@ pub struct RgbManifest {
     pub native_effects: Vec<NativeEffect>,
 }
 
-/// Fan capability marker (pump/fan channel). Presence enables the capability.
+/// Legacy test-only fan marker. Production channel identity is returned by
+/// `initialize`.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct FanManifest {
-    #[serde(default)]
-    pub channel: u8,
-}
+pub struct FanManifest {}
 
 /// Readings come from the `get_sensors` callback.
 #[derive(Debug, Clone, Default, Deserialize)]

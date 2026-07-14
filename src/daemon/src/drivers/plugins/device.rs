@@ -4,7 +4,7 @@
 //! Lua worker. Which capabilities it advertises is decided entirely by the
 //! manifest — Halo owns the capability taxonomy; the script only fills it in.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -368,7 +368,7 @@ pub struct LuaDevice {
     dynamic_rgb_descriptor: OnceLock<RgbDescriptor>,
     rgb_slot: RgbStateSlot,
     fan_slot: FanStateSlot,
-    fan_channel: u8,
+    fan_channel: AtomicU8,
 
     /// Host-run status poll: aborted on drop. `poll_paused` lets a future LCD
     /// path silence polling during a bulk transfer without tearing it down.
@@ -674,7 +674,7 @@ impl LuaDevice {
             dynamic_rgb_descriptor: OnceLock::new(),
             rgb_slot: RgbStateSlot::default(),
             fan_slot: FanStateSlot::default(),
-            fan_channel: manifest.fan.as_ref().map(|f| f.channel).unwrap_or(0),
+            fan_channel: AtomicU8::new(0),
             poll_task: None,
             poll_paused: Arc::new(AtomicBool::new(false)),
             audio_registry: None,
@@ -907,6 +907,9 @@ impl Device for LuaDevice {
             };
             *self.dpi_state.lock().unwrap() = dpi_state_from_runtime(&dpi);
         }
+        if let Some(fan) = outcome.fan {
+            self.fan_channel.store(fan.channel, Ordering::Relaxed);
+        }
         // Seed the host range/choice caches with the values the device reported,
         // so the UI shows live hardware state rather than manifest defaults.
         if let Some(ranges) = outcome.ranges {
@@ -1070,7 +1073,7 @@ impl FanCapability for LuaDevice {
     }
 
     fn fan_channel_id(&self) -> u8 {
-        self.fan_channel
+        self.fan_channel.load(Ordering::Relaxed)
     }
 }
 
@@ -1877,6 +1880,8 @@ mod tests {
           fan = { channel = 3 },
           sensor = {},
 
+          initialize = function(dev) return { fan = { channel = 3 } } end,
+
           write_frame = function(dev, zone, colors)
             local bytes = { 0xAB }
             for _, c in ipairs(colors) do
@@ -1914,6 +1919,7 @@ mod tests {
             .map(std::mem::discriminant)
             .collect();
         assert_eq!(kinds.len(), 3, "rgb + fan + sensor");
+        dev.initialize().await.unwrap();
         assert_eq!(dev.fan_channel_id(), 3);
     }
 
