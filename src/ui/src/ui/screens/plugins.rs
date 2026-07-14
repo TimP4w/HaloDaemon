@@ -2946,6 +2946,7 @@ mod tests {
             consented: true,
             content_changed: false,
             issue: None,
+            integration_issue: None,
         }
     }
 

@@ -603,13 +603,17 @@ async fn connect_error_toasts_once_per_episode_and_persists_issue() {
         .report_connect_error(&app, &pid, "Acme K1", "127.0.0.1 blocked".into())
         .await;
     assert!(rx.try_recv().is_ok(), "first failure toasts");
-    let issue = app
+    let info = app
         .registry
         .list(app.secret_store.as_ref())
         .into_iter()
         .find(|p| p.id == pid)
-        .and_then(|p| p.issue)
-        .expect("issue persisted");
+        .expect("plugin remains listed");
+    assert!(
+        info.issue.is_none(),
+        "an integration connection failure is not a plugin package issue"
+    );
+    let issue = info.integration_issue.expect("integration issue persisted");
     assert_eq!(issue.kind, PluginIssueKind::ConnectFailed);
 
     // Same episode: deduped, no second toast.
@@ -619,14 +623,14 @@ async fn connect_error_toasts_once_per_episode_and_persists_issue() {
     assert!(rx.try_recv().is_err(), "same episode does not re-toast");
 
     // Recovery clears the dedup + issue; a later failure re-arms.
-    app.registry.clear_connect_error(&pid);
+    app.registry.clear_operational_errors(&pid, &[]);
     assert!(app
         .registry
         .list(app.secret_store.as_ref())
         .into_iter()
         .find(|p| p.id == pid)
         .unwrap()
-        .issue
+        .integration_issue
         .is_none());
     app.registry
         .report_connect_error(&app, &pid, "Acme K1", "down again".into())
@@ -652,7 +656,8 @@ async fn runtime_error_persists_issue_and_clears_on_success() {
         .expect("runtime issue persisted");
     assert_eq!(issue.kind, PluginIssueKind::RuntimeError);
 
-    app.registry.clear_runtime_error(&pid, "dev-1");
+    app.registry
+        .clear_operational_errors(&pid, &["dev-1".to_owned()]);
     assert!(app
         .registry
         .list(app.secret_store.as_ref())

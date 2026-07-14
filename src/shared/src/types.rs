@@ -914,10 +914,16 @@ pub struct PluginInfo {
     /// Drives the "this plugin was modified since you allowed it" prompt.
     #[serde(default)]
     pub content_changed: bool,
-    /// The plugin's most recent outstanding issue (connect/runtime failure or a
-    /// load warning), if any. Cleared daemon-side on recovery.
+    /// The plugin package's most recent outstanding issue (device runtime
+    /// failure, load failure, or load warning), if any. Integration connection
+    /// and runtime failures are exposed separately via `integration_issue`.
     #[serde(default)]
     pub issue: Option<PluginIssue>,
+    /// For an integration plugin, its current connection/runtime failure.
+    /// Kept separate so operational integration state is surfaced on the
+    /// Integrations page rather than as a plugin package problem.
+    #[serde(default)]
+    pub integration_issue: Option<PluginIssue>,
 }
 
 fn default_true() -> bool {

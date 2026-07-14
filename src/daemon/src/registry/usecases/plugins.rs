@@ -30,7 +30,21 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
         }
     }
     app.request_config_save();
-    reconcile_plugins(&app, &[id]).await;
+    if !enabled {
+        let device_ids = {
+            let devices = app.devices.read().await;
+            devices
+                .iter()
+                .filter(|device| {
+                    device.owning_plugin_id().as_deref() == Some(id.as_str())
+                        || device.integration_id().as_deref() == Some(id.as_str())
+                })
+                .map(|device| device.id().to_owned())
+                .collect::<Vec<_>>()
+        };
+        app.registry.clear_operational_errors(&id, &device_ids);
+    }
+    reconcile_plugins(&app, std::slice::from_ref(&id)).await;
     Ok(())
 }
 

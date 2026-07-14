@@ -9,3 +9,7 @@ integrations:
   status_connecting: Not connected
   status_disabled: Disabled
   devices_exposed: "%{count} devices"
+  issue_connect_failed: Connection failed
+  issue_runtime_error: Runtime error
+  issue_details: Details
+  issue_modal_title: "Integration issue: %{integration}"

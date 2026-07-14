@@ -10,8 +10,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use egui::{Sense, Vec2};
-use halod_shared::types::{AppState, PluginInfo, PluginKind};
+use egui::{Sense, Stroke, Vec2};
+use halod_shared::types::{AppState, PluginInfo, PluginIssue, PluginIssueKind, PluginKind};
 
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
@@ -45,6 +45,8 @@ pub struct IntegrationsUi {
     /// Cache keys already requested from the daemon, so a missing logo isn't
     /// re-requested every frame.
     requested_logos: HashSet<String>,
+    /// Full integration runtime error opened from a card's error bar.
+    issue_modal: Option<(String, String)>,
 }
 
 /// How many devices an integration currently exposes, and whether its root
@@ -113,6 +115,11 @@ impl IntegrationsUi {
     ) {
         self.sync_logos(ui.ctx(), cmd, &state.plugins.plugins, plugin_assets);
         widgets::page_frame(ui, |ui| self.body(ui, state, cmd));
+        if let Some((title, detail)) = &self.issue_modal {
+            if widgets::issue_modal(ui.ctx(), "integration_issue", title, detail) {
+                self.issue_modal = None;
+            }
+        }
     }
 
     /// Request the logo of every visible integration that hasn't been fetched
@@ -286,6 +293,16 @@ impl IntegrationsUi {
                 },
             );
 
+            if let Some(issue) = &p.integration_issue {
+                ui.add_space(10.0);
+                if integration_issue_bar(ui, issue) {
+                    self.issue_modal = Some((
+                        t!("integrations.issue_modal_title", integration = &p.name).to_string(),
+                        issue.detail.clone(),
+                    ));
+                }
+            }
+
             if has_config && expanded {
                 ui.add_space(12.0);
                 seed_config_edit_if_needed(&mut self.config_edit, &p.id, &p.config_values);
@@ -313,6 +330,48 @@ impl IntegrationsUi {
             self.in_flight.insert(p.id.clone(), target);
         }
     }
+}
+
+/// Runtime/connection failure attached to one integration card. The short bar
+/// keeps the page scannable; Details exposes the complete transport/Lua error.
+fn integration_issue_bar(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
+    let mut clicked = false;
+    let label = match issue.kind {
+        PluginIssueKind::ConnectFailed => t!("integrations.issue_connect_failed"),
+        PluginIssueKind::RuntimeError => t!("integrations.issue_runtime_error"),
+        PluginIssueKind::LoadWarning => t!("plugins.issue_load_warning"),
+        PluginIssueKind::LoadFailed => t!("plugins.issue_load_failed"),
+    };
+    egui::Frame::NONE
+        .fill(theme::a(theme::TRAFFIC_RED, 0.10))
+        .stroke(Stroke::new(1.0, theme::a(theme::TRAFFIC_RED, 0.35)))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 9))
+        .show(ui, |ui| {
+            egui::Sides::new().height(28.0).show(
+                ui,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(label)
+                            .font(theme::semibold(12.0))
+                            .color(theme::TRAFFIC_RED),
+                    );
+                },
+                |ui| {
+                    if widgets::button(
+                        ui,
+                        &t!("integrations.issue_details"),
+                        ButtonKind::Ghost,
+                        Vec2::new(90.0, 28.0),
+                    )
+                    .clicked()
+                    {
+                        clicked = true;
+                    }
+                },
+            );
+        });
+    clicked
 }
 
 /// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
@@ -401,6 +460,7 @@ mod tests {
             consented: true,
             content_changed: false,
             issue: None,
+            integration_issue: None,
         }
     }
 

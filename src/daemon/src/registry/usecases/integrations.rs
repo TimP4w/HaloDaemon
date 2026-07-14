@@ -16,7 +16,7 @@ use crate::state::AppState;
 
 /// Close and drop `id`'s integration root (and the children it exposes) from
 /// `app.devices`, if currently registered. No-op otherwise.
-async fn disable_one(app: &Arc<AppState>, id: &str) {
+async fn disable_one(app: &Arc<AppState>, id: &str) -> Option<String> {
     let root_id = {
         let devices = app.devices.read().await;
         devices
@@ -26,6 +26,9 @@ async fn disable_one(app: &Arc<AppState>, id: &str) {
     };
     if let Some(root_id) = root_id {
         unregister_device_and_children(app, &root_id).await;
+        Some(root_id)
+    } else {
+        None
     }
 }
 
@@ -52,7 +55,9 @@ pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppStat
     if enabled {
         enable_one(&app, &id).await;
     } else {
-        disable_one(&app, &id).await;
+        let root_id = disable_one(&app, &id).await;
+        app.registry
+            .clear_operational_errors(&id, root_id.as_slice());
     }
     crate::ipc::broadcast_state(&app).await;
     Ok(())
@@ -69,7 +74,9 @@ pub async fn set_integration_config(
     super::plugins::persist_config_values(&id, &values, &app).await?;
     app.request_config_save();
 
-    disable_one(&app, &id).await;
+    let root_id = disable_one(&app, &id).await;
+    app.registry
+        .clear_operational_errors(&id, root_id.as_slice());
     enable_one(&app, &id).await;
     crate::ipc::broadcast_state(&app).await;
     Ok(())

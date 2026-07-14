@@ -629,6 +629,29 @@ impl Registry {
         self.clear_issue_of(plugin_id, PluginIssueKind::ConnectFailed);
     }
 
+    /// Clear all operational error state when a plugin or integration is
+    /// deliberately stopped. Removing episode-dedup keys lets a later re-enable
+    /// report a genuinely fresh failure, while clearing the persisted issue
+    /// immediately removes its card/sidebar warning.
+    pub(crate) fn clear_operational_errors(&self, plugin_id: &str, device_ids: &[String]) {
+        write_recover(&self.connect_failed).remove(plugin_id);
+        {
+            let mut failing = write_recover(&self.failing_devices);
+            for device_id in device_ids {
+                failing.remove(device_id);
+            }
+        }
+        let mut issues = write_recover(&self.issues);
+        if issues.get(plugin_id).is_some_and(|issue| {
+            matches!(
+                issue.kind,
+                PluginIssueKind::ConnectFailed | PluginIssueKind::RuntimeError
+            )
+        }) {
+            issues.remove(plugin_id);
+        }
+    }
+
     /// Record a non-fatal load warning (bad logo, id collision) as a persisted
     /// plugin issue, surfaced on the plugin page / sidebar without a toast.
     fn set_load_warning(&self, plugin_id: &str, reason: String) {
@@ -913,6 +936,7 @@ impl Registry {
             info.consented = false;
             info.integration_enabled = false;
             info.issue = Some(issue.clone());
+            info.integration_issue = None;
             infos.push(info);
         }
         infos
@@ -944,6 +968,13 @@ impl Registry {
             })
             .collect();
         let consented = self.consent_satisfied(m);
+        let stored_issue = self.issue_for(&m.plugin_id);
+        let integration_issue = stored_issue.clone().filter(|issue| {
+            issue.kind == PluginIssueKind::ConnectFailed
+                || (m.plugin_type == PluginKind::Integration
+                    && issue.kind == PluginIssueKind::RuntimeError)
+        });
+        let issue = stored_issue.filter(|_| integration_issue.is_none());
         PluginInfo {
             id: m.plugin_id.clone(),
             name: m.display_name(),
@@ -987,7 +1018,8 @@ impl Registry {
             content_changed: self
                 .acknowledged_hash_for(&m.plugin_id)
                 .is_some_and(|h| h != m.content_hash()),
-            issue: self.issue_for(&m.plugin_id),
+            issue,
+            integration_issue,
         }
     }
 

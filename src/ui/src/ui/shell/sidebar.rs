@@ -42,6 +42,17 @@ pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateSt
         .count()
 }
 
+/// Integrations with an active connection/runtime failure. These belong to
+/// the Integrations navigation hint, not the Plugins package-management hint.
+pub fn integrations_needing_action(state: &AppState) -> usize {
+    state
+        .plugins
+        .plugins
+        .iter()
+        .filter(|plugin| plugin.integration_issue.is_some())
+        .count()
+}
+
 /// Whether the Plugins attention badge includes a real failure. Load warnings,
 /// updates, and consent prompts remain amber; connect/runtime/load failures use
 /// the same red severity color as their plugin issue banner.
@@ -88,6 +99,7 @@ pub fn sidebar(
 ) {
     let plugin_actions = plugins_needing_action(state, plugin_updates);
     let plugin_errors = plugins_have_errors(state);
+    let integration_actions = integrations_needing_action(state);
     let cooling_actions = cooling_needing_action(state);
     let rect = ui.max_rect();
     ui.painter().line_segment(
@@ -104,11 +116,14 @@ pub fn sidebar(
             for (icon, _label, target) in &NAV {
                 let row_start = ui.cursor().min;
                 let badge = match target {
+                    Page::Integrations => integration_actions,
                     Page::Plugins => plugin_actions,
                     Page::Cooling => cooling_actions,
                     _ => 0,
                 };
-                let badge_color = if matches!(target, Page::Plugins) && plugin_errors {
+                let badge_color = if matches!(target, Page::Integrations)
+                    || (matches!(target, Page::Plugins) && plugin_errors)
+                {
                     theme::TRAFFIC_RED
                 } else {
                     theme::STAT_AMBER
@@ -487,6 +502,7 @@ mod tests {
             consented,
             content_changed,
             issue: None,
+            integration_issue: None,
         }
     }
 
@@ -553,16 +569,17 @@ mod tests {
     }
 
     #[test]
-    fn plugins_needing_action_counts_runtime_issues() {
+    fn integration_runtime_issues_are_routed_to_integrations() {
         let mut with_issue = plugin("failing", true, false);
-        with_issue.issue = Some(halod_shared::types::PluginIssue {
+        with_issue.integration_issue = Some(halod_shared::types::PluginIssue {
             kind: halod_shared::types::PluginIssueKind::ConnectFailed,
             detail: "boom".into(),
             timestamp_ms: 0,
         });
         let mut state = AppState::default();
         state.plugins.plugins = vec![with_issue, plugin("ok", true, false)];
-        assert_eq!(plugins_needing_action(&state, &[]), 1);
+        assert_eq!(plugins_needing_action(&state, &[]), 0);
+        assert_eq!(integrations_needing_action(&state), 1);
     }
 
     #[test]
