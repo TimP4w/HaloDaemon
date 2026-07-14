@@ -83,17 +83,24 @@ fn transport_controls(ui: &mut egui::Ui, cmd: &CommandTx, playing: bool) {
         }
         if resp.clicked() {
             match idx {
-                0 => crate::domain::actions::system::set_engine_enabled(
+                0 => crate::runtime::ipc::send(
                     cmd,
-                    EngineKind::Canvas,
-                    true,
+                    halod_shared::commands::DaemonCommand::set_engine_enabled(
+                        EngineKind::Canvas,
+                        true,
+                    ),
                 ),
-                1 => crate::domain::actions::system::set_engine_enabled(
+                1 => crate::runtime::ipc::send(
                     cmd,
-                    EngineKind::Canvas,
-                    false,
+                    halod_shared::commands::DaemonCommand::set_engine_enabled(
+                        EngineKind::Canvas,
+                        false,
+                    ),
                 ),
-                _ => crate::domain::actions::canvas::stop(cmd),
+                _ => crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::CanvasStop,
+                ),
             }
         }
     }

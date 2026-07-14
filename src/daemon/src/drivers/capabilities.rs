@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[async_trait]
+#[expect(dead_code, reason = "optional controller persistence protocol")]
 pub trait Controller: Send + Sync {
     async fn discover_children(&self) -> Vec<Arc<dyn Device>> {
         vec![]
@@ -25,6 +26,15 @@ pub trait Controller: Send + Sync {
     /// Re-probe paired slots for a device dropped by its wired sibling. Default no-op.
     async fn rescan_children(&self) -> Vec<Arc<dyn Device>> {
         vec![]
+    }
+
+    /// Re-enumerate children and diff against `existing`, returning
+    /// `(added, gone)`. `Err` means the backing connection dropped. Default no-op.
+    async fn resync_children(
+        &self,
+        _existing: &std::collections::HashSet<String>,
+    ) -> Result<(Vec<Arc<dyn Device>>, Vec<String>)> {
+        Ok((vec![], vec![]))
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
@@ -71,6 +81,7 @@ pub enum TransportMode {
 /// Devices that can hot-swap between wireless and wired transport without
 /// changing Arc identity in app.devices.
 #[async_trait]
+#[expect(dead_code, reason = "optional transport persistence protocol")]
 pub trait TransportSwitchable: Send + Sync {
     /// Switch to a new direct HID transport at `path`.
     /// Re-initializes the device through the new transport. `app` lets the device
@@ -106,37 +117,15 @@ pub trait TransportSwitchable: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct ChainLinkSpec {
-    pub kind: ChainLinkKind,
     pub name: String,
     pub topology: ZoneTopology,
     pub led_count: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChainLinkKind(pub &'static str);
-
-pub const CHAIN_LINK_KIND_AURA_ARGB: ChainLinkKind = ChainLinkKind("generic_aura_argb");
-pub const CHAIN_LINK_KIND_NZXT_ARGB: ChainLinkKind = ChainLinkKind("nzxt_argb");
-
-const KNOWN_CHAIN_LINK_KINDS: &[ChainLinkKind] =
-    &[CHAIN_LINK_KIND_AURA_ARGB, CHAIN_LINK_KIND_NZXT_ARGB];
-
-impl ChainLinkKind {
-    /// Look up a `ChainLinkKind` by its string tag. Returns `None` for unknown tags.
-    pub fn from_tag(s: &str) -> Option<Self> {
-        KNOWN_CHAIN_LINK_KINDS.iter().copied().find(|k| k.0 == s)
-    }
-}
-
-impl std::fmt::Display for ChainLinkKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
 /// Parent-side capability for managing chainable channels; the CRUD surface
 /// delegates to a shared [`chain::ChainHost`] exposed via [`ChainCapability::chain_host`].
 #[async_trait]
+#[expect(dead_code, reason = "optional chain persistence protocol")]
 pub trait ChainCapability: Send + Sync {
     /// The driver's chain host. Returning `None` is treated as "no chainable
     /// channels yet" by every default impl below.
@@ -274,6 +263,10 @@ pub trait PostRegisterHook: Send + Sync {
 /// Fan status/speed surface for chain accessory drivers with fan hardware
 /// alongside their ARGB channels; chain writes go through [`chain::ChainHub`] instead.
 #[async_trait]
+#[expect(
+    dead_code,
+    reason = "capability identity reserved for fan-hub discovery"
+)]
 pub trait FanHub: Send + Sync + 'static {
     fn id(&self) -> &str;
     async fn get_fan_rpm(&self, channel: u8) -> Result<u32>;
@@ -293,6 +286,16 @@ pub trait RgbCapability: Send + Sync {
     /// Writes a raw color frame, bypassing state management. Only for driving the
     /// LEDs in "engine" mode — never call it to set persisted state.
     async fn write_frame(&self, zone_id: &str, colors: &[RgbColor]) -> Result<()>;
+
+    /// Write all zones belonging to one device frame. Drivers that can commit a
+    /// controller atomically should override this; the safe default preserves
+    /// the existing per-zone behavior.
+    async fn write_frame_batch(&self, zones: &[(String, Vec<RgbColor>)]) -> Result<()> {
+        for (zone_id, colors) in zones {
+            self.write_frame(zone_id, colors).await?;
+        }
+        Ok(())
+    }
 
     /// Backing slot — required so all state sub-operations have defaults.
     fn rgb_state(&self) -> &RgbStateSlot;
@@ -474,6 +477,7 @@ pub trait BooleanCapability: Send + Sync {
 }
 
 #[async_trait]
+#[expect(dead_code, reason = "optional action persistence protocol")]
 pub trait ActionCapability: Send + Sync {
     async fn trigger_action(&self, key: &str) -> Result<()>;
 
@@ -491,6 +495,7 @@ pub trait ActionCapability: Send + Sync {
 }
 
 #[async_trait]
+#[expect(dead_code, reason = "optional battery persistence protocol")]
 pub trait BatteryCapability: Send + Sync {
     async fn get_batteries(&self) -> Result<Vec<Battery>>;
 
@@ -628,14 +633,18 @@ pub trait FanCapability: Send + Sync {
     }
     async fn restore_state(&self, v: &serde_json::Value) {
         match serde_json::from_value::<Option<crate::cooling::config::FanCurveRecord>>(v.clone()) {
-            Ok(Some(c)) => self.set_fan_curve(c),
+            Ok(Some(c)) => match c.validate() {
+                Ok(()) => self.set_fan_curve(c),
+                Err(e) => log::warn!("[fan restore_state] dropping invalid curve: {e:#}"),
+            },
             Ok(None) => self.clear_fan_curve(),
-            Err(_) => {}
+            Err(e) => log::warn!("[fan restore_state] invalid curve payload: {e}"),
         }
     }
 }
 
 #[async_trait]
+#[expect(dead_code, reason = "optional sensor persistence protocol")]
 pub trait SensorCapability: Send + Sync {
     async fn get_sensors(&self) -> Result<Vec<Sensor>>;
 
@@ -750,12 +759,17 @@ pub trait OnboardProfilesCapability: Send + Sync {
 }
 
 #[async_trait]
+#[expect(
+    dead_code,
+    reason = "raw-streaming getter is part of the LCD driver protocol"
+)]
 pub trait LcdCapability: Send + Sync {
     fn lcd_descriptor(&self) -> LcdDescriptor;
 
     /// Backing slot — required so all state sub-operations have defaults.
     fn lcd_state(&self) -> &LcdStateSlot;
 
+    /// `health` starts `Stable`; `registry::snapshot` overlays the real value from `VideoEngine` async.
     fn current_state(&self) -> LcdStatus {
         let slot = self.lcd_state();
         LcdStatus {
@@ -766,6 +780,7 @@ pub trait LcdCapability: Send + Sync {
             active_image: slot.active_image(),
             raw_streaming: slot.raw_streaming(),
             video_path: slot.video_path(),
+            health: slot.health(),
         }
     }
 
@@ -830,21 +845,16 @@ pub trait LcdCapability: Send + Sync {
             "params":       slot.lcd_template_params(),
             "brightness":   slot.brightness(),
             "rotation":     slot.rotation(),
-            "mode":         slot.mode(),
+            "mode":         slot.persistent_mode(),
             "active_image": slot.active_image(),
             "raw_streaming": slot.raw_streaming(),
             "video_path": slot.video_path(),
         })
     }
     async fn restore_state(&self, v: &serde_json::Value) {
-        if let Some(id) = v.get("template_id") {
-            self.set_lcd_template_id(serde_json::from_value(id.clone()).ok().flatten());
-        }
-        if let Some(p) = v.get("params") {
-            if let Ok(params) = serde_json::from_value(p.clone()) {
-                self.set_lcd_template_params(params);
-            }
-        }
+        use halod_shared::types::LcdHealth;
+        self.lcd_state().set_health(LcdHealth::Starting);
+        let mut failure = None;
         if let Some(b) = v["brightness"].as_u64() {
             let b = u8::try_from(b).unwrap_or_else(|_| {
                 log::warn!("[lcd restore_state] brightness {b} out of range, clamping to 0");
@@ -852,6 +862,7 @@ pub trait LcdCapability: Send + Sync {
             });
             if let Err(e) = self.set_brightness(b).await {
                 log::warn!("[lcd restore_state] set_brightness failed: {e:#}");
+                failure = Some(format!("restoring brightness failed: {e}"));
             }
         }
         if let Some(r) = v["rotation"].as_str() {
@@ -880,24 +891,72 @@ pub trait LcdCapability: Send + Sync {
             if let Some(d) = degrees {
                 if let Err(e) = self.set_rotation(d).await {
                     log::warn!("[lcd restore_state] set_rotation failed: {e:#}");
+                    failure.get_or_insert_with(|| format!("restoring rotation failed: {e}"));
                 }
             }
-        }
-        if let Some(m) = v.get("mode") {
-            if let Ok(mode) = serde_json::from_value::<halod_shared::types::LcdMode>(m.clone()) {
-                self.lcd_state().set_mode(mode);
-            }
-        }
-        if let Some(img) = v.get("active_image") {
-            self.lcd_state()
-                .set_active_image(serde_json::from_value(img.clone()).ok().flatten());
         }
         if let Some(raw) = v["raw_streaming"].as_bool() {
             self.set_raw_streaming(raw);
         }
-        if let Some(vp) = v.get("video_path") {
-            self.set_video_path(serde_json::from_value(vp.clone()).ok().flatten());
+
+        let has = |key: &str| v.get(key).is_some_and(|x| !x.is_null());
+
+        // Content fields are mutually exclusive; `mode` (or, absent that, whichever content field is set) picks the one to restore so a stale sibling field can't clobber it.
+        use halod_shared::types::LcdMode;
+        let mode = v
+            .get("mode")
+            .and_then(|m| serde_json::from_value::<LcdMode>(m.clone()).ok())
+            .or_else(|| {
+                if has("template_id") {
+                    Some(LcdMode::Engine)
+                } else if has("active_image") {
+                    Some(LcdMode::Image)
+                } else if has("video_path") {
+                    Some(LcdMode::Video)
+                } else {
+                    None
+                }
+            });
+        match mode {
+            Some(LcdMode::Image) | Some(LcdMode::Gif) => {
+                if let Some(img) = v.get("active_image").and_then(|i| {
+                    serde_json::from_value::<Option<String>>(i.clone())
+                        .ok()
+                        .flatten()
+                }) {
+                    self.lcd_state().set_active_image(Some(img));
+                }
+            }
+            Some(LcdMode::Engine) => {
+                if let Some(id) = v.get("template_id").and_then(|i| {
+                    serde_json::from_value::<Option<String>>(i.clone())
+                        .ok()
+                        .flatten()
+                }) {
+                    self.set_lcd_template_id(Some(id));
+                    if let Some(params) = v
+                        .get("params")
+                        .and_then(|p| serde_json::from_value(p.clone()).ok())
+                    {
+                        self.set_lcd_template_params(params);
+                    }
+                }
+            }
+            Some(LcdMode::Video) => {
+                if let Some(path) = v.get("video_path").and_then(|p| {
+                    serde_json::from_value::<Option<String>>(p.clone())
+                        .ok()
+                        .flatten()
+                }) {
+                    self.set_video_path(Some(path));
+                }
+            }
+            _ => self.lcd_state().set_mode(LcdMode::Default),
         }
+        self.lcd_state().set_health(match failure {
+            Some(error) => LcdHealth::Failed(error),
+            None => LcdHealth::Stable,
+        });
     }
 }
 

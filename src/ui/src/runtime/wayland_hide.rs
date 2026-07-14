@@ -590,15 +590,21 @@ fn make_surface(
 ) -> Result<glutin::surface::Surface<glutin::surface::WindowSurface>, Box<dyn std::error::Error>> {
     use glutin::display::GlDisplay as _;
     let (w, h): (u32, u32) = window.inner_size().into();
+    let (w, h) = nonzero_surface_size(w, h);
     let attrs = glutin::surface::SurfaceAttributesBuilder::<glutin::surface::WindowSurface>::new()
-        .build(
-            window.window_handle()?.as_raw(),
-            NonZeroU32::new(w).unwrap_or(NonZeroU32::MIN),
-            NonZeroU32::new(h).unwrap_or(NonZeroU32::MIN),
-        );
+        .build(window.window_handle()?.as_raw(), w, h);
     // SAFETY: the window outlives the surface (dropped together, surface first).
     let surface = unsafe { display.create_window_surface(config, &attrs)? };
     Ok(surface)
+}
+
+/// EGL rejects zero-sized native surfaces. Wayland can report 0×0 while a
+/// window is being recreated, so clamp both dimensions before crossing FFI.
+fn nonzero_surface_size(w: u32, h: u32) -> (NonZeroU32, NonZeroU32) {
+    (
+        NonZeroU32::new(w).unwrap_or(NonZeroU32::MIN),
+        NonZeroU32::new(h).unwrap_or(NonZeroU32::MIN),
+    )
 }
 
 #[cfg(test)]
@@ -627,5 +633,12 @@ mod tests {
         let (close, rest) = partition_close([ViewportCommand::CancelClose, ViewportCommand::Focus]);
         assert!(!close);
         assert_eq!(rest, vec![ViewportCommand::Focus]);
+    }
+
+    #[test]
+    fn egl_surface_dimensions_are_never_zero() {
+        assert_eq!(nonzero_surface_size(0, 0).0.get(), 1);
+        assert_eq!(nonzero_surface_size(0, 720).1.get(), 720);
+        assert_eq!(nonzero_surface_size(1920, 1080).0.get(), 1920);
     }
 }

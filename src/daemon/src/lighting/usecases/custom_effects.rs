@@ -18,19 +18,39 @@ fn effect_path(name: &str) -> std::path::PathBuf {
     custom_effects_dir().join(format!("{name}.yaml"))
 }
 
-/// Sorted-by-name list of saved custom effects.
+const MAX_CUSTOM_EFFECTS: usize = 1024;
+
+/// Sorted-by-name list of saved custom effects. Each file is size-bounded and
+/// re-validated on load (same name allowlist + param normalization as save).
 pub fn list_custom_effects() -> Vec<EffectDef> {
-    let mut defs: Vec<EffectDef> = std::fs::read_dir(custom_effects_dir())
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(custom_effects_dir())
         .into_iter()
         .flatten()
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let path = e.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("yaml"))
+        .collect();
+    paths.sort();
+    if paths.len() > MAX_CUSTOM_EFFECTS {
+        log::warn!(
+            "[RGB] {} custom-effect files exceed the {MAX_CUSTOM_EFFECTS} cap; ignoring the rest",
+            paths.len()
+        );
+        paths.truncate(MAX_CUSTOM_EFFECTS);
+    }
+
+    let mut defs: Vec<EffectDef> = paths
+        .into_iter()
+        .filter_map(|path| {
+            let stem = path.file_stem()?.to_str()?;
+            if !validate_effect_name(stem) {
+                log::warn!("[RGB] ignoring custom effect with invalid name: {stem}");
                 return None;
             }
-            let raw = std::fs::read_to_string(&path).ok()?;
-            serde_yaml::from_str::<EffectDef>(&raw).ok()
+            let raw = crate::config::read_bounded(&path, "custom effect").ok()?;
+            let mut def = serde_yaml::from_str::<EffectDef>(&raw).ok()?;
+            def.params = DesignerParams::from_params(&def.params).to_params();
+            def.effect_id = DESIGNER_EFFECT_ID.to_string();
+            Some(def)
         })
         .collect();
     defs.sort_by(|a, b| {
@@ -56,13 +76,9 @@ pub async fn save_custom_effect(
         name: Some(name.clone()),
         params: normalized,
     };
-    let dir = custom_effects_dir();
-    tokio::fs::create_dir_all(&dir).await?;
     let path = effect_path(&name);
-    let tmp = path.with_extension("yaml.tmp");
     let yaml = serde_yaml::to_string(&def)?;
-    tokio::fs::write(&tmp, &yaml).await?;
-    tokio::fs::rename(&tmp, &path).await?;
+    tokio::task::spawn_blocking(move || crate::config::atomic_write(&path, &yaml)).await??;
     log::info!("[RGB] saved custom effect '{name}'");
     app.lighting.custom_effects.refresh().await;
     crate::ipc::broadcast_state(&app).await;

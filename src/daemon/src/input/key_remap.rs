@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-/// Key remap engine — subscribes to ButtonEvents from diverted HID++ buttons,
-/// resolves the configured action for each CID, and executes it.
-///
-/// Layer Shift: one button can be designated as the global modifier. When held,
-/// all other button events use their `shifted` action instead of `base`.
-///
-/// MomentaryDpi: holds the previous DPI until button release, then restores it.
+/// Key remap engine: resolves ButtonEvents into actions, tracking Layer Shift and MomentaryDpi state.
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,6 +8,35 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::input::action_executor::ActionExecutor;
 use crate::state::{AppState, ButtonEvent};
+
+#[derive(Debug)]
+struct PressedAction {
+    device_id: String,
+    cid: u16,
+    resolved_action: ButtonAction,
+    pressed_at: std::time::Instant,
+}
+
+/// Momentary-DPI lifecycle for one (device_id, cid); no entry means Idle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MomentaryDpiState {
+    Applied {
+        original: u16,
+        temporary: u16,
+    },
+    /// A release-time restore failed; retried opportunistically.
+    RestorePending {
+        original: u16,
+    },
+}
+
+#[derive(Debug)]
+enum ReleaseOutcome {
+    /// A real release event arrived for this cid.
+    Released,
+    /// Force-flushed with no matching release (lag or shutdown).
+    Cancelled,
+}
 
 pub struct KeyRemapEngine {
     executor: Option<Arc<ActionExecutor>>,
@@ -31,64 +54,183 @@ impl KeyRemapEngine {
     pub fn start(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         let engine = self;
         let mut rx = engine.app.input.button_event_tx.subscribe();
+        let mut shutdown_rx = engine.app.input.shutdown_rx();
         tokio::spawn(async move {
             // (device_id, cid) → DPI saved before a momentary press
-            let mut held_momentary: HashMap<(String, u16), u16> = HashMap::new();
+            let mut held_momentary: HashMap<(String, u16), MomentaryDpiState> = HashMap::new();
+            let mut pressed: HashMap<(String, u16), PressedAction> = HashMap::new();
             loop {
-                let event = match rx.recv().await {
-                    Ok(e) => e,
-                    Err(RecvError::Lagged(n)) => {
-                        log::debug!("KeyRemapEngine: lagged {n} events");
-                        continue;
+                let event = match tokio::select! {
+                    event = rx.recv() => Some(event),
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() { None } else { continue }
                     }
-                    Err(RecvError::Closed) => break,
+                } {
+                    None => break,
+                    Some(event) => match event {
+                        Ok(e) => e,
+                        Err(RecvError::Lagged(n)) => {
+                            log::debug!("KeyRemapEngine: lagged {n} events");
+                            // Missed events may include releases — cancel all held.
+                            engine.release_all(&mut pressed, &mut held_momentary).await;
+                            continue;
+                        }
+                        Err(RecvError::Closed) => break,
+                    },
                 };
-                engine.process_event(event, &mut held_momentary).await;
+                engine
+                    .process_event(event, &mut held_momentary, &mut pressed)
+                    .await;
             }
+            // On shutdown, cancel anything still held.
+            engine.release_all(&mut pressed, &mut held_momentary).await;
             log::debug!("KeyRemapEngine: stopped");
         })
     }
 
-    async fn process_event(&self, event: ButtonEvent, held: &mut HashMap<(String, u16), u16>) {
-        let Some(mappings) = self.get_mappings(&event.device_id).await else {
+    fn layer_shift_active(&self) -> bool {
+        self.app.input.layer_shift_active()
+    }
+
+    /// Caller must remove `pa` from `pressed` first — transitions exactly once.
+    async fn release_pressed(
+        &self,
+        pa: PressedAction,
+        held: &mut HashMap<(String, u16), MomentaryDpiState>,
+        outcome: ReleaseOutcome,
+    ) {
+        log::trace!(
+            "KeyRemapEngine: {outcome:?} cid={} device={} action={:?} held_for={:?}",
+            pa.cid,
+            pa.device_id,
+            pa.resolved_action,
+            pa.pressed_at.elapsed()
+        );
+        self.handle_button(&pa.resolved_action, false, pa.cid, &pa.device_id, held)
+            .await;
+    }
+
+    /// Cancel every held action and any in-flight macro (lag recovery, shutdown).
+    async fn release_all(
+        &self,
+        pressed: &mut HashMap<(String, u16), PressedAction>,
+        held: &mut HashMap<(String, u16), MomentaryDpiState>,
+    ) {
+        let drained: Vec<PressedAction> = pressed.drain().map(|(_, pa)| pa).collect();
+        for pa in drained {
+            self.release_pressed(pa, held, ReleaseOutcome::Cancelled)
+                .await;
+        }
+        if let Some(executor) = &self.executor {
+            executor.cancel_macro();
+        }
+    }
+
+    async fn process_event(
+        &self,
+        event: ButtonEvent,
+        held: &mut HashMap<(String, u16), MomentaryDpiState>,
+        pressed: &mut HashMap<(String, u16), PressedAction>,
+    ) {
+        self.retry_pending_dpi_restores(&event.device_id, held)
+            .await;
+        let mappings = self.get_mappings(&event.device_id).await;
+        if mappings.is_none() {
             log::trace!(
                 "KeyRemapEngine: no mappings for device={} event pressed={:?} released={:?}",
                 event.device_id,
                 event.pressed,
                 event.released
             );
-            return;
-        };
+        }
+        let mappings = mappings.unwrap_or_default();
 
         for &cid in &event.released {
-            let layer_shift = self
-                .app
-                .input
-                .layer_shift_active
-                .load(std::sync::atomic::Ordering::Relaxed)
-                > 0;
-            let action = Self::resolve(mappings.iter().find(|m| m.cid == cid), layer_shift);
-            log::trace!(
-                "KeyRemapEngine: release cid={cid} device={} layer_shift={layer_shift} action={action:?}",
-                event.device_id
-            );
-            self.handle_button(action, false, cid, &event.device_id, held)
-                .await;
+            let key = (event.device_id.clone(), cid);
+            match pressed.remove(&key) {
+                Some(pa) => {
+                    self.release_pressed(pa, held, ReleaseOutcome::Released)
+                        .await
+                }
+                None => log::trace!(
+                    "KeyRemapEngine: ignoring release without a recorded press cid={cid} device={}",
+                    event.device_id
+                ),
+            }
         }
         for &cid in &event.pressed {
-            let layer_shift = self
-                .app
-                .input
-                .layer_shift_active
-                .load(std::sync::atomic::Ordering::Relaxed)
-                > 0;
-            let action = Self::resolve(mappings.iter().find(|m| m.cid == cid), layer_shift);
+            let key = (event.device_id.clone(), cid);
+            if pressed.contains_key(&key) {
+                // Idempotent press: ignore duplicates without a release between.
+                continue;
+            }
+            let layer_shift = self.layer_shift_active();
+            let action = Self::resolve(mappings.iter().find(|m| m.cid == cid), layer_shift).clone();
             log::trace!(
                 "KeyRemapEngine: press cid={cid} device={} layer_shift={layer_shift} action={action:?}",
                 event.device_id
             );
-            self.handle_button(action, true, cid, &event.device_id, held)
+            pressed.insert(
+                key,
+                PressedAction {
+                    device_id: event.device_id.clone(),
+                    cid,
+                    resolved_action: action.clone(),
+                    pressed_at: std::time::Instant::now(),
+                },
+            );
+            self.handle_button(&action, true, cid, &event.device_id, held)
                 .await;
+        }
+    }
+
+    /// Retry any `RestorePending` momentary-DPI entries for `device_id`.
+    async fn retry_pending_dpi_restores(
+        &self,
+        device_id: &str,
+        held: &mut HashMap<(String, u16), MomentaryDpiState>,
+    ) {
+        let pending: Vec<u16> = held
+            .iter()
+            .filter(|(k, v)| {
+                k.0 == device_id && matches!(v, MomentaryDpiState::RestorePending { .. })
+            })
+            .map(|(k, _)| k.1)
+            .collect();
+        for cid in pending {
+            self.restore_momentary_dpi(device_id, cid, held).await;
+        }
+    }
+
+    /// On failure, stays `RestorePending` for a later opportunistic retry.
+    async fn restore_momentary_dpi(
+        &self,
+        device_id: &str,
+        cid: u16,
+        held: &mut HashMap<(String, u16), MomentaryDpiState>,
+    ) {
+        let key = (device_id.to_string(), cid);
+        let original = match held.get(&key) {
+            Some(
+                MomentaryDpiState::Applied { original, .. }
+                | MomentaryDpiState::RestorePending { original },
+            ) => *original,
+            None => return,
+        };
+        let Some(device) = self.app.find_device_by_id(device_id).await else {
+            held.insert(key, MomentaryDpiState::RestorePending { original });
+            return;
+        };
+        let Some(sw) = device.as_dpi() else {
+            held.insert(key, MomentaryDpiState::RestorePending { original });
+            return;
+        };
+        if let Err(e) = sw.set_dpi_direct(original).await {
+            log::warn!("KeyRemapEngine: momentary DPI restore failed, will retry: {e}");
+            held.insert(key, MomentaryDpiState::RestorePending { original });
+        } else {
+            held.remove(&key);
+            crate::ipc::broadcast_state(&self.app).await;
         }
     }
 
@@ -115,25 +257,14 @@ impl KeyRemapEngine {
         pressed: bool,
         cid: u16,
         device_id: &str,
-        held: &mut HashMap<(String, u16), u16>,
+        held: &mut HashMap<(String, u16), MomentaryDpiState>,
     ) {
         match (action, pressed) {
             (ButtonAction::LayerShift, pressed) => {
                 if pressed {
-                    self.app
-                        .input
-                        .layer_shift_active
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.app.input.layer_shift_press(device_id, cid);
                 } else {
-                    self.app
-                        .input
-                        .layer_shift_active
-                        .fetch_update(
-                            std::sync::atomic::Ordering::Relaxed,
-                            std::sync::atomic::Ordering::Relaxed,
-                            |v| if v > 0 { Some(v - 1) } else { Some(0) },
-                        )
-                        .ok();
+                    self.app.input.layer_shift_release(device_id, cid);
                 }
                 log::debug!(
                     "KeyRemapEngine: Layer Shift {}",
@@ -144,25 +275,28 @@ impl KeyRemapEngine {
                 if let Some(device) = self.app.find_device_by_id(device_id).await {
                     if let Some(sw) = device.as_dpi() {
                         let status = sw.dpi_status().await;
-                        // Restore point is captured now, not re-read from hardware on
-                        // release (a double-firing button could shift it in between).
+                        // Restore point is captured now, not re-read on release.
                         if status.mode != DpiMode::Host {
-                            // Momentary DPI is host-mode only; in onboard mode
-                            // the device's own profiles govern DPI.
+                            // Onboard mode: the device's own profiles govern DPI.
                             log::debug!(
                                 "KeyRemapEngine: momentary DPI press: not host mode, ignoring"
                             );
                         } else if status.current_dpi == 0 {
-                            // No known DPI — leave it alone rather than risk
-                            // stranding the device at `dpi`.
+                            // No known DPI — leave it alone rather than strand the device.
                             log::warn!(
                                 "KeyRemapEngine: momentary DPI press: no known current DPI; skipping"
                             );
                         } else {
-                            held.insert((device_id.to_string(), cid), status.current_dpi);
                             if let Err(e) = sw.set_dpi_direct(*dpi).await {
                                 log::warn!("KeyRemapEngine: momentary DPI press: {e}");
                             } else {
+                                held.insert(
+                                    (device_id.to_string(), cid),
+                                    MomentaryDpiState::Applied {
+                                        original: status.current_dpi,
+                                        temporary: *dpi,
+                                    },
+                                );
                                 crate::ipc::broadcast_state(&self.app).await;
                             }
                         }
@@ -170,17 +304,7 @@ impl KeyRemapEngine {
                 }
             }
             (ButtonAction::MomentaryDpi { .. }, false) => {
-                if let Some(saved) = held.remove(&(device_id.to_string(), cid)) {
-                    if let Some(device) = self.app.find_device_by_id(device_id).await {
-                        if let Some(sw) = device.as_dpi() {
-                            if let Err(e) = sw.set_dpi_direct(saved).await {
-                                log::warn!("KeyRemapEngine: momentary DPI release: {e}");
-                            } else {
-                                crate::ipc::broadcast_state(&self.app).await;
-                            }
-                        }
-                    }
-                }
+                self.restore_momentary_dpi(device_id, cid, held).await;
             }
             (other, pressed) => {
                 if let Some(ex) = &self.executor {
@@ -196,14 +320,12 @@ impl KeyRemapEngine {
 mod tests {
     use super::*;
     use crate::{config::Config, drivers::Device, test_support::MockDevice};
-    use std::sync::atomic::Ordering;
 
     fn mapping(cid: u16, base: ButtonAction, shifted: ButtonAction) -> ButtonMapping {
         ButtonMapping { cid, base, shifted }
     }
 
-    /// Construct an engine with no ActionExecutor (safe for tests that only
-    /// exercise LayerShift and MomentaryDpi paths, which never reach the executor).
+    /// Engine with no ActionExecutor, for tests that never reach it.
     fn test_engine(app: Arc<AppState>) -> KeyRemapEngine {
         KeyRemapEngine {
             executor: None,
@@ -255,17 +377,13 @@ mod tests {
             .handle_button(&ButtonAction::LayerShift, true, 0, "dev", &mut held)
             .await;
 
-        assert_eq!(
-            app.input.layer_shift_active.load(Ordering::Relaxed),
-            1,
-            "layer_shift_active must be 1 after press"
-        );
+        assert!(engine.layer_shift_active());
     }
 
     #[tokio::test]
     async fn layer_shift_release_clears_active_flag() {
         let app = Arc::new(AppState::new(Config::default()));
-        app.input.layer_shift_active.store(1, Ordering::Relaxed);
+        app.input.layer_shift_press("dev", 0);
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
 
@@ -273,10 +391,29 @@ mod tests {
             .handle_button(&ButtonAction::LayerShift, false, 0, "dev", &mut held)
             .await;
 
-        assert_eq!(
-            app.input.layer_shift_active.load(Ordering::Relaxed),
-            0,
-            "layer_shift_active must be 0 after release"
+        assert!(!engine.layer_shift_active());
+    }
+
+    #[tokio::test]
+    async fn layer_shift_duplicate_press_is_idempotent() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let engine = test_engine(Arc::clone(&app));
+        let mut held = HashMap::new();
+
+        // Double-fire the same token, then release once.
+        engine
+            .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev", &mut held)
+            .await;
+        engine
+            .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev", &mut held)
+            .await;
+        engine
+            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev", &mut held)
+            .await;
+
+        assert!(
+            !engine.layer_shift_active(),
+            "one release must fully clear a duplicated press"
         );
     }
 
@@ -304,7 +441,10 @@ mod tests {
 
         assert_eq!(
             held.get(&("dev1".to_string(), 0x10)),
-            Some(&800),
+            Some(&MomentaryDpiState::Applied {
+                original: 800,
+                temporary: 1600,
+            }),
             "restore point must be the initial DPI"
         );
         assert_eq!(
@@ -325,7 +465,13 @@ mod tests {
 
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
-        held.insert(("dev1".to_string(), 0x10u16), 800u16);
+        held.insert(
+            ("dev1".to_string(), 0x10u16),
+            MomentaryDpiState::Applied {
+                original: 800,
+                temporary: 1600,
+            },
+        );
 
         engine
             .handle_button(
@@ -367,9 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn momentary_dpi_release_uses_held_value_not_live_hardware() {
-        // Simulate a double-firing button: the "hardware" DPI changes to 3200
-        // behind the engine's back between press and release. Release must
-        // restore the app-state-held 800, not read the live 3200.
+        // Release must restore the app-state-held DPI, not the live hardware value.
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
         app.devices
@@ -410,11 +554,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn momentary_dpi_restore_failure_enters_restore_pending_and_retries() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
+        app.devices
+            .write()
+            .await
+            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        let engine = test_engine(Arc::clone(&app));
+        let mut held = HashMap::new();
+        engine
+            .handle_button(
+                &ButtonAction::MomentaryDpi { dpi: 1600 },
+                true,
+                0x10,
+                "dev1",
+                &mut held,
+            )
+            .await;
+
+        // Device disappears before release — the restore can't reach it.
+        app.devices.write().await.clear();
+        engine
+            .handle_button(
+                &ButtonAction::MomentaryDpi { dpi: 1600 },
+                false,
+                0x10,
+                "dev1",
+                &mut held,
+            )
+            .await;
+        assert_eq!(
+            held.get(&("dev1".to_string(), 0x10)),
+            Some(&MomentaryDpiState::RestorePending { original: 800 }),
+            "a failed restore must stay pending, not strand silently"
+        );
+
+        // Device reappears; the next event for it retries the restore.
+        app.devices
+            .write()
+            .await
+            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        engine
+            .process_event(
+                ButtonEvent {
+                    device_id: "dev1".to_string(),
+                    pressed: vec![],
+                    released: vec![],
+                },
+                &mut held,
+                &mut HashMap::new(),
+            )
+            .await;
+        assert!(
+            held.is_empty(),
+            "retry must succeed and clear the pending entry"
+        );
+        assert_eq!(
+            *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap(),
+            Some(800)
+        );
+    }
+
+    #[tokio::test]
     async fn process_event_releases_before_presses_in_same_notification() {
-        // Layer Shift (CID 0x50) releases in the same notification that a
-        // shifted MediaKey (CID 0x51) presses. If releases weren't processed
-        // first, the press would still see layer_shift_active=true and pick
-        // `shifted` instead of `base`.
+        // Releases must be processed before presses in the same notification.
         use halod_shared::types::MediaAction;
         let mappings = vec![
             mapping(0x50, ButtonAction::LayerShift, ButtonAction::Native),
@@ -429,7 +633,7 @@ mod tests {
             ),
         ];
         let app = Arc::new(AppState::new(Config::default()));
-        app.input.layer_shift_active.store(1, Ordering::Relaxed);
+        app.input.layer_shift_press("dev1", 0x50);
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
         app.devices
             .write()
@@ -438,57 +642,53 @@ mod tests {
 
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
+        let mut pressed = HashMap::from([(
+            ("dev1".to_string(), 0x50),
+            PressedAction {
+                device_id: "dev1".to_string(),
+                cid: 0x50,
+                resolved_action: ButtonAction::LayerShift,
+                pressed_at: std::time::Instant::now(),
+            },
+        )]);
         let event = ButtonEvent {
             device_id: "dev1".to_string(),
             pressed: vec![0x51],
             released: vec![0x50],
         };
-        engine.process_event(event, &mut held).await;
+        engine.process_event(event, &mut held, &mut pressed).await;
 
-        assert_eq!(
-            app.input.layer_shift_active.load(Ordering::Relaxed),
-            0,
+        assert!(
+            !engine.layer_shift_active(),
             "layer shift release in the same notification must be processed"
         );
     }
 
     #[tokio::test]
-    async fn layer_shift_counter_stays_positive_when_another_device_still_held() {
-        // Two LayerShift buttons on different devices: releasing one must not
-        // clear the global flag while the other is still held.
+    async fn layer_shift_stays_active_while_another_device_still_holds_it() {
         let app = Arc::new(AppState::new(Config::default()));
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
 
-        // Press LayerShift on device A
         engine
             .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev_a", &mut held)
             .await;
-        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 1);
-
-        // Press LayerShift on device B
         engine
             .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev_b", &mut held)
             .await;
-        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 2);
-
-        // Release device A's LayerShift — the global shift must still be active
         engine
             .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev_a", &mut held)
             .await;
-        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 1);
+        assert!(engine.layer_shift_active(), "dev_b's token is still held");
 
-        // Release device B's LayerShift — now it should clear
         engine
             .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev_b", &mut held)
             .await;
-        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 0);
+        assert!(!engine.layer_shift_active());
     }
 
     #[tokio::test]
-    async fn layer_shift_release_never_drops_below_zero() {
-        // A spurious release (e.g. from a double-disconnect synthetic event)
-        // must not underflow the counter.
+    async fn layer_shift_spurious_release_is_a_no_op() {
         let app = Arc::new(AppState::new(Config::default()));
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
@@ -496,9 +696,8 @@ mod tests {
         engine
             .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev", &mut held)
             .await;
-        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 0);
+        assert!(!engine.layer_shift_active());
 
-        // Press then release twice — second release must still be 0.
         engine
             .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev", &mut held)
             .await;
@@ -508,13 +707,15 @@ mod tests {
         engine
             .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev", &mut held)
             .await;
-        assert_eq!(app.input.layer_shift_active.load(Ordering::Relaxed), 0);
+        assert!(
+            !engine.layer_shift_active(),
+            "a second release must be a no-op"
+        );
     }
 
     #[tokio::test]
     async fn cross_device_layer_shift_affects_other_device() {
-        // Device A holds LayerShift → Device B's button must resolve to its
-        // shifted action. This is the "Layer shift not global" scenario.
+        // Device A holds LayerShift — device B's button must resolve shifted too.
         use halod_shared::types::MediaAction;
         let dev_a_mappings = vec![mapping(
             0x50,
@@ -545,6 +746,7 @@ mod tests {
 
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
+        let mut pressed = HashMap::new();
 
         // Step 1: press LayerShift on device A
         let event_a = ButtonEvent {
@@ -552,12 +754,8 @@ mod tests {
             pressed: vec![0x50],
             released: vec![],
         };
-        engine.process_event(event_a, &mut held).await;
-        assert_eq!(
-            app.input.layer_shift_active.load(Ordering::Relaxed),
-            1,
-            "layer shift must be active after device A press"
-        );
+        engine.process_event(event_a, &mut held, &mut pressed).await;
+        assert!(engine.layer_shift_active());
 
         // Step 2: press button on device B — must see layer_shift=true
         let event_b = ButtonEvent {
@@ -565,12 +763,10 @@ mod tests {
             pressed: vec![0x51],
             released: vec![],
         };
-        engine.process_event(event_b, &mut held).await;
-        // The counter must still be 1 — device B's press didn't change it
-        assert_eq!(
-            app.input.layer_shift_active.load(Ordering::Relaxed),
-            1,
-            "layer shift must remain active after device B press"
+        engine.process_event(event_b, &mut held, &mut pressed).await;
+        assert!(
+            engine.layer_shift_active(),
+            "device B's press didn't change it"
         );
 
         // Step 3: release LayerShift on device A
@@ -579,11 +775,188 @@ mod tests {
             pressed: vec![],
             released: vec![0x50],
         };
-        engine.process_event(event_a_rel, &mut held).await;
+        engine
+            .process_event(event_a_rel, &mut held, &mut pressed)
+            .await;
+        assert!(!engine.layer_shift_active());
+    }
+
+    #[tokio::test]
+    async fn release_runs_the_action_resolved_at_press_not_current() {
+        // Release must replay the shifted chord pressed, even after Layer Shift drops.
+        use halod_shared::types::MediaAction;
+        let shifted = ButtonAction::KeyChord {
+            key: 0x04, // 'a'
+            modifiers: vec![],
+        };
+        let mappings = vec![mapping(
+            0x51,
+            ButtonAction::MediaKey {
+                key: MediaAction::Play,
+            },
+            shifted.clone(),
+        )];
+        let app = Arc::new(AppState::new(Config::default()));
+        app.input.layer_shift_press("shift-btn", 0x50);
+        let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
+        app.devices
+            .write()
+            .await
+            .push(Arc::clone(&dev) as Arc<dyn Device>);
+
+        let engine = test_engine(Arc::clone(&app));
+        let mut held = HashMap::new();
+        let mut pressed = HashMap::new();
+
+        // Press 0x51 while shifted → resolves to the shifted chord and is stored.
+        engine
+            .process_event(
+                ButtonEvent {
+                    device_id: "dev1".to_string(),
+                    pressed: vec![0x51],
+                    released: vec![],
+                },
+                &mut held,
+                &mut pressed,
+            )
+            .await;
         assert_eq!(
-            app.input.layer_shift_active.load(Ordering::Relaxed),
-            0,
-            "layer shift must clear after device A release"
+            pressed
+                .get(&("dev1".to_string(), 0x51))
+                .map(|pa| &pa.resolved_action),
+            Some(&shifted),
+            "press must store the shifted action"
+        );
+
+        // Layer Shift drops before the button is released.
+        app.input.layer_shift_release("shift-btn", 0x50);
+
+        // Release 0x51 → must use the stored shifted action, and clear it.
+        engine
+            .process_event(
+                ButtonEvent {
+                    device_id: "dev1".to_string(),
+                    pressed: vec![],
+                    released: vec![0x51],
+                },
+                &mut held,
+                &mut pressed,
+            )
+            .await;
+        assert!(
+            pressed.is_empty(),
+            "release must clear the stored pressed action"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_press_is_ignored() {
+        // A repeated press with no release between must not store or fire twice.
+        use halod_shared::types::MediaAction;
+        let mappings = vec![mapping(
+            0x51,
+            ButtonAction::MediaKey {
+                key: MediaAction::Play,
+            },
+            ButtonAction::Native,
+        )];
+        let app = Arc::new(AppState::new(Config::default()));
+        let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
+        app.devices
+            .write()
+            .await
+            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        let engine = test_engine(Arc::clone(&app));
+        let mut held = HashMap::new();
+        let mut pressed = HashMap::new();
+        let press = || ButtonEvent {
+            device_id: "dev1".to_string(),
+            pressed: vec![0x51],
+            released: vec![],
+        };
+        engine.process_event(press(), &mut held, &mut pressed).await;
+        engine.process_event(press(), &mut held, &mut pressed).await;
+        assert_eq!(
+            pressed.len(),
+            1,
+            "duplicate press must not add a second entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_release_finds_no_record_and_does_not_panic() {
+        // A PressedAction transitions away from held exactly once.
+        use halod_shared::types::MediaAction;
+        let mappings = vec![mapping(
+            0x51,
+            ButtonAction::MediaKey {
+                key: MediaAction::Play,
+            },
+            ButtonAction::Native,
+        )];
+        let app = Arc::new(AppState::new(Config::default()));
+        let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
+        app.devices
+            .write()
+            .await
+            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        let engine = test_engine(Arc::clone(&app));
+        let mut held = HashMap::new();
+        let mut pressed = HashMap::new();
+        let release = || ButtonEvent {
+            device_id: "dev1".to_string(),
+            pressed: vec![],
+            released: vec![0x51],
+        };
+
+        engine
+            .process_event(
+                ButtonEvent {
+                    device_id: "dev1".to_string(),
+                    pressed: vec![0x51],
+                    released: vec![],
+                },
+                &mut held,
+                &mut pressed,
+            )
+            .await;
+        assert_eq!(pressed.len(), 1);
+
+        engine
+            .process_event(release(), &mut held, &mut pressed)
+            .await;
+        assert!(pressed.is_empty());
+
+        // A second release with no matching record must not panic.
+        engine
+            .process_event(release(), &mut held, &mut pressed)
+            .await;
+        assert!(pressed.is_empty(), "still nothing to remove");
+    }
+
+    #[tokio::test]
+    async fn release_all_cancels_every_pressed_action() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let engine = test_engine(Arc::clone(&app));
+        let mut held = HashMap::new();
+        let mut pressed = HashMap::new();
+        for cid in [1u16, 2] {
+            pressed.insert(
+                ("dev1".to_string(), cid),
+                PressedAction {
+                    device_id: "dev1".to_string(),
+                    cid,
+                    resolved_action: ButtonAction::Native,
+                    pressed_at: std::time::Instant::now(),
+                },
+            );
+        }
+
+        engine.release_all(&mut pressed, &mut held).await;
+
+        assert!(
+            pressed.is_empty(),
+            "release_all must drain every held PressedAction"
         );
     }
 }

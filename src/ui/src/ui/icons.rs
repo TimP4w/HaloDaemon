@@ -14,6 +14,8 @@ pub enum Icon {
     Lighting,
     Cooling,
     Settings,
+    Plugins,
+    Integrations,
 }
 
 impl Icon {
@@ -23,6 +25,8 @@ impl Icon {
             Icon::Lighting => include_bytes!("../../assets/icons/rgb.svg"),
             Icon::Cooling => include_bytes!("../../assets/icons/cooling.svg"),
             Icon::Settings => include_bytes!("../../assets/icons/settings.svg"),
+            Icon::Plugins => include_bytes!("../../assets/icons/plugins.svg"),
+            Icon::Integrations => include_bytes!("../../assets/icons/integrations.svg"),
         }
     }
 
@@ -32,6 +36,8 @@ impl Icon {
             Icon::Lighting => "nav_lighting",
             Icon::Cooling => "nav_cooling",
             Icon::Settings => "nav_settings",
+            Icon::Plugins => "nav_plugins",
+            Icon::Integrations => "nav_integrations",
         }
     }
 }
@@ -56,6 +62,7 @@ fn device_svg(ty: DeviceType) -> &'static [u8] {
     }
 }
 
+#[cfg(test)]
 const DEVICE_TYPES: [DeviceType; 15] = [
     DeviceType::Keyboard,
     DeviceType::Mouse,
@@ -201,6 +208,25 @@ pub fn draw_pencil(p: &egui::Painter, rect: Rect, color: Color32) {
     line(nib_base - perp * w, nib_point);
 }
 
+/// Fork glyph drawn flat-line inside `rect` (the bundled Inter subset has no
+/// `⑂`, which would otherwise render as a tofu square). A stem rising from the
+/// base that forks into two prongs, with a node dot at each of the three tips.
+pub fn draw_fork(p: &egui::Painter, rect: Rect, color: Color32) {
+    let s = Stroke::new(rect.width().min(rect.height()) * 0.06, color);
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.5;
+    let base = c + Vec2::new(0.0, r * 0.62);
+    let split = c + Vec2::new(0.0, -r * 0.04);
+    let left = c + Vec2::new(-r * 0.5, -r * 0.62);
+    let right = c + Vec2::new(r * 0.5, -r * 0.62);
+    p.line_segment([base, split], s);
+    p.line_segment([split, left], s);
+    p.line_segment([split, right], s);
+    for tip in [base, left, right] {
+        p.circle_filled(tip, r * 0.16, color);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,7 +236,13 @@ mod tests {
     /// wrong include path at build time rather than as a blank sidebar glyph.
     #[test]
     fn every_nav_icon_rasterizes() {
-        for icon in [Icon::Home, Icon::Lighting, Icon::Cooling, Icon::Settings] {
+        for icon in [
+            Icon::Home,
+            Icon::Lighting,
+            Icon::Cooling,
+            Icon::Settings,
+            Icon::Integrations,
+        ] {
             let img = rasterize(icon.svg(), ICON_PX)
                 .unwrap_or_else(|| panic!("{} failed to rasterize", icon.key()));
             assert_eq!(img.width().max(img.height()), ICON_PX as usize);

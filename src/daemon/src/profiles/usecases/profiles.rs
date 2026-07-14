@@ -215,6 +215,13 @@ pub async fn set_lighting_targets(
     zones: std::collections::HashMap<String, Vec<String>>,
     app: Arc<AppState>,
 ) -> Result<()> {
+    let cap = halod_shared::types::MAX_LIGHTING_TARGET_IDS;
+    anyhow::ensure!(device_ids.len() <= cap, "too many lighting target devices");
+    anyhow::ensure!(zones.len() <= cap, "too many lighting target zones");
+    anyhow::ensure!(
+        zones.values().all(|v| v.len() <= cap),
+        "too many zones for a device"
+    );
     app.config
         .write()
         .await

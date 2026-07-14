@@ -55,7 +55,7 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
     );
     ui.add_space(10.0);
 
-    let enabled = ctx.state.ffmpeg_available;
+    let enabled = ctx.state.health.ffmpeg_available;
     if widgets::button(
         ui,
         &t!("lcd.choose_video"),
@@ -86,9 +86,19 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
 
 // ── Image section ─────────────────────────────────────────────────────────────
 
-/// The upload spinner's `upload_base`, cleared once the refreshed library has
-/// grown past the size captured when the upload was sent.
-fn cleared_upload_base(base: Option<usize>, lib_len: usize) -> Option<usize> {
+/// The upload spinner's `upload_base`, cleared either by a fresh terminal
+/// (`Done`/`Failed`) upload signal for this device, or — as a fallback — once
+/// the refreshed library has grown past the size captured when the upload was
+/// sent.
+fn cleared_upload_base(
+    base: Option<usize>,
+    lib_len: usize,
+    terminal: Option<&LcdUploadProgress>,
+    device_id: &str,
+) -> Option<usize> {
+    if crate::ui::screens::device::is_terminal_upload_for(terminal, device_id) {
+        return None;
+    }
     base.filter(|&b| lib_len <= b)
 }
 
@@ -104,7 +114,12 @@ pub(super) fn image_section(
     let active_template_id = ctx.state.lcd.engine.device_templates.get(id).cloned();
     let highlighted = lcd.active_image.as_deref();
 
-    st.lcd.upload_base = cleared_upload_base(st.lcd.upload_base, ctx.lcd_images.len());
+    st.lcd.upload_base = cleared_upload_base(
+        st.lcd.upload_base,
+        ctx.lcd_images.len(),
+        ctx.lcd_upload_terminal.as_ref(),
+        id,
+    );
 
     decode_next_thumb(ui, ctx, st, ctx.lcd_images.iter().take(MAX_TILES));
 
@@ -170,7 +185,12 @@ pub(super) fn image_picker(
     id: &str,
     current: &str,
 ) -> Option<String> {
-    st.lcd.upload_base = cleared_upload_base(st.lcd.upload_base, ctx.lcd_images.len());
+    st.lcd.upload_base = cleared_upload_base(
+        st.lcd.upload_base,
+        ctx.lcd_images.len(),
+        ctx.lcd_upload_terminal.as_ref(),
+        id,
+    );
     decode_next_thumb(ui, ctx, st, ctx.lcd_images.iter());
 
     let mut picked = None;
@@ -271,12 +291,20 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
         confirm,
         cancel || dismissed,
     ) {
-        crate::domain::actions::lcd::delete_lcd_image(ctx.cmd, &filename);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::DeleteLcdImage {
+                filename: filename.clone(),
+            },
+        );
         st.lcd.image_cache.remove(&filename);
         st.lcd.requested.remove(&filename);
         // The daemon doesn't push the library after a delete; re-list so
         // the removed tile disappears.
-        crate::domain::actions::lcd::list_lcd_images(ctx.cmd);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::ListLcdImages,
+        );
     }
 }
 
@@ -290,10 +318,18 @@ pub(super) fn select_none(
 ) {
     st.lcd.preview_pending = None;
     if active_template_id.is_some() {
-        crate::domain::actions::lcd::lcd_engine_deactivate(ctx.cmd, id);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::LcdEngineDeactivate {
+                device_id: id.to_string(),
+            },
+        );
         st.lcd.template_params.clear();
     }
-    crate::domain::actions::lcd::set_screen_default(ctx.cmd, id);
+    crate::runtime::ipc::send(
+        ctx.cmd,
+        halod_shared::commands::DaemonCommand::SetScreenDefault { id: id.to_string() },
+    );
 }
 
 /// Handle a click on an image tile: apply it directly to the device, first
@@ -312,11 +348,23 @@ pub(super) fn select_image(
         return;
     }
     if active_template_id.is_some() {
-        crate::domain::actions::lcd::lcd_engine_deactivate(ctx.cmd, id);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::LcdEngineDeactivate {
+                device_id: id.to_string(),
+            },
+        );
         st.lcd.template_params.clear();
     }
     st.lcd.preview_pending = Some(filename.to_string());
-    crate::domain::actions::lcd::set_screen_image_from_library(ctx.cmd, id, filename);
+    crate::runtime::ipc::send(
+        ctx.cmd,
+        halod_shared::commands::DaemonCommand::SetScreenImageFromLibrary {
+            id: id.to_string(),
+            filename: filename.to_string(),
+            request_id: None,
+        },
+    );
 }
 
 /// Label for the in-flight upload spinner. Falls back to a generic
@@ -329,6 +377,9 @@ fn upload_label(progress: Option<&LcdUploadProgress>, device_id: &str) -> String
             }
             (LcdUploadStage::Processing, None) => t!("lcd.upload_processing").to_string(),
             (LcdUploadStage::Applying, _) => t!("lcd.upload_writing").to_string(),
+            // Terminal stages clear the spinner the same frame; the label is a
+            // transient fallback only.
+            (LcdUploadStage::Done | LcdUploadStage::Failed, _) => t!("lcd.uploading").to_string(),
         },
         _ => t!("lcd.uploading").to_string(),
     }
@@ -372,10 +423,12 @@ pub(super) fn poll_picker(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &s
         Err(TryRecvError::Empty) => st.lcd.picker = Some((target, rx)),
         Ok(Some(path)) => match target {
             PickerTarget::Image => start_upload(ui, ctx, st, id, path),
-            PickerTarget::Video => crate::domain::actions::lcd::set_screen_video(
+            PickerTarget::Video => crate::runtime::ipc::send(
                 ctx.cmd,
-                id,
-                path.to_string_lossy().into_owned(),
+                halod_shared::commands::DaemonCommand::SetScreenVideo {
+                    id: id.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                },
             ),
         },
         Ok(None) | Err(TryRecvError::Disconnected) => {}
@@ -385,14 +438,18 @@ pub(super) fn poll_picker(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &s
 /// Read + base64-encode the picked file off the UI thread (a multi-MB GIF would
 /// otherwise freeze the page for the whole encode) and send it to the daemon.
 fn start_upload(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, path: PathBuf) {
-    // Reject oversized files up front (cheap metadata read)
-    const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024; // 32 MiB
-    let size_ok = std::fs::metadata(&path)
-        .map(|m| m.len() <= MAX_IMAGE_BYTES)
-        .unwrap_or(false);
-    if !size_ok {
-        log::warn!("image file {path:?} exceeds {MAX_IMAGE_BYTES} bytes, skipped");
-        return;
+    // Feedback only: the daemon re-enforces the same ceiling on receipt.
+    match std::fs::metadata(&path) {
+        Ok(m) => {
+            if let Err(e) = halod_shared::types::validate_image_upload_size(m.len()) {
+                log::warn!("image file {path:?} rejected: {e}");
+                return;
+            }
+        }
+        Err(e) => {
+            log::warn!("image file {path:?} not readable: {e}");
+            return;
+        }
     }
 
     // The spinner clears when the refreshed library grows (see `upload_base`).
@@ -405,7 +462,14 @@ fn start_upload(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, path: 
             Ok(bytes) => {
                 use base64::Engine as _;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                crate::domain::actions::lcd::set_screen_image(&cmd, &device_id, b64);
+                crate::runtime::ipc::send(
+                    &cmd,
+                    halod_shared::commands::DaemonCommand::SetScreenImage {
+                        id: device_id,
+                        data_b64: b64,
+                        request_id: None,
+                    },
+                );
             }
             Err(e) => log::warn!("upload: reading {path:?} failed: {e}"),
         }
@@ -518,15 +582,42 @@ pub(super) fn draw_thumb_tile(
 mod tests {
     use super::*;
 
+    fn terminal(stage: LcdUploadStage, device_id: &str) -> LcdUploadProgress {
+        LcdUploadProgress {
+            device_id: device_id.into(),
+            stage,
+            percent: None,
+        }
+    }
+
     #[test]
     fn upload_spinner_clears_only_once_the_library_grows() {
         // No spinner armed → stays cleared regardless of library size.
-        assert_eq!(cleared_upload_base(None, 5), None);
+        assert_eq!(cleared_upload_base(None, 5, None, "lcd"), None);
         // Armed at 3: still uploading while the library hasn't grown past 3.
-        assert_eq!(cleared_upload_base(Some(3), 3), Some(3));
-        assert_eq!(cleared_upload_base(Some(3), 2), Some(3));
+        assert_eq!(cleared_upload_base(Some(3), 3, None, "lcd"), Some(3));
+        assert_eq!(cleared_upload_base(Some(3), 2, None, "lcd"), Some(3));
         // The refreshed library grew past the captured size → spinner clears.
-        assert_eq!(cleared_upload_base(Some(3), 4), None);
+        assert_eq!(cleared_upload_base(Some(3), 4, None, "lcd"), None);
+    }
+
+    #[test]
+    fn upload_spinner_clears_on_terminal_signal() {
+        // A fresh Done for this device clears even without library growth.
+        let done = terminal(LcdUploadStage::Done, "lcd");
+        assert_eq!(cleared_upload_base(Some(3), 3, Some(&done), "lcd"), None);
+        // A Failed likewise clears (the reported bug: a failed device write).
+        let failed = terminal(LcdUploadStage::Failed, "lcd");
+        assert_eq!(cleared_upload_base(Some(3), 3, Some(&failed), "lcd"), None);
+        // A terminal for a different device is ignored.
+        let other = terminal(LcdUploadStage::Failed, "other");
+        assert_eq!(
+            cleared_upload_base(Some(3), 3, Some(&other), "lcd"),
+            Some(3)
+        );
+        // Staleness: a retained terminal is delivered as a `None` one-shot on
+        // non-arrival frames, so a freshly-armed spinner is not cleared.
+        assert_eq!(cleared_upload_base(Some(3), 3, None, "lcd"), Some(3));
     }
 
     #[test]

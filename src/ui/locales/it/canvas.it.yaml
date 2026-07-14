@@ -1,0 +1,54 @@
+canvas:
+  title: Canvas degli effetti
+  subtitle: Crea effetti diversi e assegnali alle zone di illuminazione dei dispositivi
+  playing: in esecuzione
+  paused: in pausa
+  drag_hint: trascina per spostare · usa la rotellina per ingrandire
+  mode_frame: Fotogramma
+  mode_leds: LED
+  done: Fatto
+  cancel: Annulla
+  off: "Spento"
+  clear: Cancella
+  select_all: Seleziona tutto
+  untitled: Senza titolo
+  designer: Designer
+  synced: SINCRONIZZATO
+  effect_caps: EFFETTO
+  assigned_zones: ZONE ASSEGNATE
+  unit_zone: zona
+  unit_zones: zone
+  unit_device: dispositivo
+  unit_devices: dispositivi
+  overflow_more: "+ altri %{n}"
+  assign_zones_title: "Assegna zone · %{name}"
+  assign_zones_sub: "%{eff} · %{n} %{zones} assegnate"
+  reassign_hint: Le zone contrassegnate con ● sono usate da un'altra istanza. Clicca per riassegnarle qui.
+  new_instance_title: Nuova istanza dell'effetto
+  fps_title: Frequenza dei fotogrammi del canvas
+  fps_desc: Frequenza con cui il motore del canvas campiona e invia i fotogrammi.
+  frame_rate: Frequenza dei fotogrammi
+  sampling: Campionamento
+  sampling_desc: Area attorno a ogni LED di cui il canvas calcola il colore medio.
+  sampling_area: Area di campionamento
+  roll_zone: Avvolgi zona
+  unroll_zone: Svolgi zona
+  effect_instances: Livelli effetti
+  new_button: "+ Aggiungi livello"
+  no_instances: 'Nessun livello effetti: aggiungine uno per iniziare.'
+  default_effect_title: Livello base
+  default_effect_hint: Le zone senza un livello specifico usano questo effetto.
+  edit_zones: Modifica zone →
+  add_zones: "+ Aggiungi zone a questo livello"
+  edit_in_designer: Modifica nel designer
+  delete_instance: Elimina istanza
+  effect_param_speed: Velocità
+  effect_param_scale: Scala
+  effect_param_thickness: Spessore
+  effect_param_cells: Celle
+  effect_param_interval: Intervallo (s)
+  effect_param_decay: Dissolvenza (s)
+  effect_param_random_color: Colore casuale
+  effect_enum_fill:
+    bars: Barre
+    solid: Pieno

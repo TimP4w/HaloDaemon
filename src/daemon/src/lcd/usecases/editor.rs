@@ -24,22 +24,27 @@ pub async fn render(
     app: Arc<AppState>,
     client: ClientHandle,
 ) -> Result<()> {
+    crate::lcd::usecases::templates::validate_template(&def)?;
     let device = require_device_owned_id(&device_id, &app).await?;
-    let descriptor = device
+    let lcd = device
         .as_lcd()
-        .ok_or_else(|| anyhow::anyhow!("device does not support LCD: {device_id}"))?
-        .lcd_descriptor();
+        .ok_or_else(|| anyhow::anyhow!("device does not support LCD: {device_id}"))?;
+    let descriptor = lcd.lcd_descriptor();
+    lcd.lcd_state().set_editor_preview();
+    lcd.lcd_state()
+        .set_health(halod_shared::types::LcdHealth::Starting);
     let (cw, ch) = (descriptor.width.max(1), descriptor.height.max(1));
 
     let sensors = app.snapshot_sensors().await;
     let images_dir = crate::config::lcd_images_dir();
     let render_device_id = device_id.clone();
+    let render_app = Arc::clone(&app);
     // `try_lock` inside the blocking closure: a render already in flight for
     // this device makes a queued second one pointless (the GUI re-requests
     // every ~200ms anyway), so drop the request rather than let
     // `spawn_blocking` tasks pile up behind a serialized lock.
     let result = tokio::task::spawn_blocking(move || {
-        let Ok(mut session) = app.lcd.editor_session.try_lock() else {
+        let Ok(mut session) = render_app.lcd.editor_session.try_lock() else {
             return None;
         };
         Some(custom::render_editor_sprites(
@@ -53,7 +58,19 @@ pub async fn render(
             &mut session,
         ))
     })
-    .await?;
+    .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            lcd.lcd_state()
+                .set_health(halod_shared::types::LcdHealth::Failed(error.to_string()));
+            crate::ipc::broadcast_state(&app).await;
+            return Err(error.into());
+        }
+    };
+    lcd.lcd_state()
+        .set_health(halod_shared::types::LcdHealth::Stable);
+    crate::ipc::broadcast_state(&app).await;
     let Some((sprites, signatures)) = result else {
         return Ok(());
     };

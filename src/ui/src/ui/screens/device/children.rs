@@ -222,7 +222,12 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                 .clicked()
                 {
                     ui.ctx().data_mut(|d| d.insert_temp(cancel_key, true));
-                    crate::domain::actions::devices::receiver_stop_pairing(ctx.cmd, id);
+                    crate::runtime::ipc::send(
+                        ctx.cmd,
+                        halod_shared::commands::DaemonCommand::ReceiverStopPairing {
+                            id: id.to_string(),
+                        },
+                    );
                 }
             } else {
                 ui.label(
@@ -240,10 +245,12 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                 .clicked()
                 {
                     ui.ctx().data_mut(|d| d.remove::<bool>(cancel_key));
-                    crate::domain::actions::devices::receiver_start_pairing(
+                    crate::runtime::ipc::send(
                         ctx.cmd,
-                        id,
-                        PAIR_TIMEOUT_SECS,
+                        halod_shared::commands::DaemonCommand::ReceiverStartPairing {
+                            id: id.to_string(),
+                            timeout_secs: PAIR_TIMEOUT_SECS,
+                        },
                     );
                 }
             }
@@ -355,7 +362,13 @@ fn pair_slot_row(
                 )
                 .clicked()
                 {
-                    crate::domain::actions::devices::receiver_unpair(ctx.cmd, id, slot_idx);
+                    crate::runtime::ipc::send(
+                        ctx.cmd,
+                        halod_shared::commands::DaemonCommand::ReceiverUnpair {
+                            id: id.to_string(),
+                            slot: slot_idx,
+                        },
+                    );
                 }
             });
         });

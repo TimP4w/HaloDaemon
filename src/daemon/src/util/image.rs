@@ -6,7 +6,92 @@
 //! can pre-validate before uploading.
 
 use anyhow::Result;
-use halod_shared::types::sniff_ext;
+use halod_shared::types::{sniff_ext, validate_image_upload_size, MAX_LCD_IMAGE_BYTES};
+use std::path::Path;
+
+/// Read an image file, rejecting anything past [`MAX_LCD_IMAGE_BYTES`] by
+/// metadata before the bytes are allocated. Mirrors `config::read_bounded`.
+pub fn read_image_bounded(path: &Path) -> Result<Vec<u8>> {
+    let link_meta = std::fs::symlink_metadata(path)?;
+    if link_meta.file_type().is_symlink() || !link_meta.is_file() {
+        anyhow::bail!(
+            "image {} must be a regular, non-symlink file",
+            path.display()
+        );
+    }
+    let meta = std::fs::metadata(path)?;
+    if meta.len() > MAX_LCD_IMAGE_BYTES {
+        anyhow::bail!(
+            "image {} is too large ({} bytes)",
+            path.display(),
+            meta.len()
+        );
+    }
+    let data = std::fs::read(path)?;
+    let after = std::fs::symlink_metadata(path)?;
+    if after.file_type().is_symlink() || !after.is_file() || after.len() != data.len() as u64 {
+        anyhow::bail!("image {} changed while it was being read", path.display());
+    }
+    validate_image_upload_size(data.len() as u64).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(data)
+}
+
+/// Async sibling of [`read_image_bounded`] for the tokio-runtime usecases.
+pub async fn read_image_bounded_async(path: &Path) -> Result<Vec<u8>> {
+    let link_meta = tokio::fs::symlink_metadata(path).await?;
+    if link_meta.file_type().is_symlink() || !link_meta.is_file() {
+        anyhow::bail!(
+            "image {} must be a regular, non-symlink file",
+            path.display()
+        );
+    }
+    let meta = tokio::fs::metadata(path).await?;
+    if meta.len() > MAX_LCD_IMAGE_BYTES {
+        anyhow::bail!(
+            "image {} is too large ({} bytes)",
+            path.display(),
+            meta.len()
+        );
+    }
+    let data = tokio::fs::read(path).await?;
+    let after = tokio::fs::symlink_metadata(path).await?;
+    if after.file_type().is_symlink() || !after.is_file() || after.len() != data.len() as u64 {
+        anyhow::bail!("image {} changed while it was being read", path.display());
+    }
+    validate_image_upload_size(data.len() as u64).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(data)
+}
+
+/// Cap on the source dimensions the image decoder may allocate for. A valid
+/// header can declare enormous width/height that balloon allocation *before* any
+/// resize, and `data` is attacker-controlled (uploaded over IPC or shipped by a
+/// plugin), so every in-memory decode goes through [`decode_limited`]. Far above
+/// any real LCD panel.
+pub const MAX_DECODE_DIM: u32 = 8192;
+/// Upper bound for decoded source pixels (64 MiB as RGBA8), independent of
+/// per-side dimensions. A 8192×8192 image is otherwise still excessive for
+/// the small LCD renderers.
+pub const MAX_DECODE_PIXELS: u64 = 16 * 1024 * 1024;
+pub const MAX_DECODE_RGBA_BYTES: u64 = MAX_DECODE_PIXELS * 4;
+
+/// Decode an image from memory under [`MAX_DECODE_DIM`] source-dimension limits.
+/// Bounds decompression-bomb allocation that `image::load_from_memory` (which
+/// applies no limits) would otherwise incur before a resize can shrink it.
+pub fn decode_limited(data: &[u8]) -> Result<image::DynamicImage> {
+    let header_reader =
+        image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format()?;
+    let (width, height) = header_reader.into_dimensions()?;
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_DECODE_PIXELS {
+        anyhow::bail!("image dimensions {width}×{height} exceed the decoded pixel limit");
+    }
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_DIM);
+    limits.max_image_height = Some(MAX_DECODE_DIM);
+    limits.max_alloc = Some(MAX_DECODE_RGBA_BYTES);
+    reader.limits(limits);
+    Ok(reader.decode()?)
+}
 
 /// Count the frames of a GIF without compositing them: the LZW data is decoded
 /// into a discarded buffer, which is far cheaper than the RGBA resize pass and
@@ -46,13 +131,22 @@ pub fn resize_gif(
             .map_err(|e| anyhow::anyhow!("GIF decode: {e}"))?;
         (hdr.width() as u32, hdr.height() as u32)
     };
-    if src_w == width && src_h == height {
-        return Ok(data.to_vec());
+    if src_w == 0
+        || src_h == 0
+        || src_w > MAX_DECODE_DIM
+        || src_h > MAX_DECODE_DIM
+        || u64::from(src_w) * u64::from(src_h) > MAX_DECODE_PIXELS
+    {
+        anyhow::bail!("GIF dimensions {src_w}×{src_h} exceed the decoded pixel limit");
     }
 
-    const MAX_GIF_DIM: u32 = 8192;
-    if src_w > MAX_GIF_DIM || src_h > MAX_GIF_DIM {
-        anyhow::bail!("GIF dimensions {src_w}×{src_h} exceed the {MAX_GIF_DIM} px limit");
+    const MAX_GIF_FRAMES: usize = 500;
+    let total_frames = count_gif_frames(data)?;
+    if total_frames > MAX_GIF_FRAMES {
+        anyhow::bail!("GIF exceeds the {MAX_GIF_FRAMES} frame limit");
+    }
+    if src_w == width && src_h == height {
+        return Ok(data.to_vec());
     }
 
     // Composite all frames to RGBA before resizing
@@ -65,11 +159,6 @@ pub fn resize_gif(
         .set_repeat(image::codecs::gif::Repeat::Infinite)
         .map_err(|e| anyhow::anyhow!("GIF set repeat: {e}"))?;
 
-    const MAX_GIF_FRAMES: usize = 500;
-    let total_frames = count_gif_frames(data)?;
-    if total_frames > MAX_GIF_FRAMES {
-        anyhow::bail!("GIF exceeds the {MAX_GIF_FRAMES} frame limit");
-    }
     let mut frame_count = 0usize;
     for frame in decoder.into_frames() {
         let frame = frame.map_err(|e| anyhow::anyhow!("GIF frame: {e}"))?;
@@ -117,15 +206,7 @@ pub fn compress_for_storage(
         return Ok((resized, "gif"));
     }
 
-    // Decode under explicit dimension limits: `data` is attacker-controlled
-    // (uploaded over IPC), and a valid header can declare enormous dimensions
-    // that balloon allocation. 8192² is far above any LCD panel.
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    reader.limits(limits);
-    let img = reader.decode()?;
+    let img = decode_limited(data)?;
     if img.width() <= width && img.height() <= height {
         return Ok((data.to_vec(), sniff_ext(data)));
     }
@@ -137,6 +218,85 @@ pub fn compress_for_storage(
     let mut out: Vec<u8> = Vec::new();
     JpegEncoder::new_with_quality(Cursor::new(&mut out), 85).encode_image(&rgb)?;
     Ok((out, "jpg"))
+}
+
+/// Decode a static image (PNG/JPEG/…) and resize it to `width`×`height`,
+/// returning a raw `width*height*4` RGBA8 buffer. CPU-heavy (Lanczos3) — call
+/// off the async runtime.
+pub fn decode_static_image_rgba(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    let img = decode_limited(data)?;
+    let img = if img.width() == width && img.height() == height {
+        img
+    } else {
+        img.resize_exact(width, height, image::imageops::FilterType::Lanczos3)
+    };
+    Ok(img.into_rgba8().into_raw())
+}
+
+/// Rotate a square RGBA8 buffer by a multiple of 90°. Non-multiples of 90 and
+/// non-square buffers are returned unchanged (LCD panels rotate their built-in
+/// display in firmware but not streamed frames, so we pre-rotate in software).
+pub fn rotate_rgba_square(rgba: &[u8], size: u32, degrees: u32) -> Vec<u8> {
+    let n = size as usize;
+    let step = degrees % 360;
+    if step == 0 || rgba.len() != n * n * 4 {
+        return rgba.to_vec();
+    }
+    let mut out = vec![0u8; rgba.len()];
+    for y in 0..n {
+        for x in 0..n {
+            let (cx, cy) = match step {
+                90 => (n - 1 - y, x),
+                180 => (n - 1 - x, n - 1 - y),
+                270 => (y, n - 1 - x),
+                _ => (x, y),
+            };
+            let s = (y * n + x) * 4;
+            let d = (cy * n + cx) * 4;
+            out[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+        }
+    }
+    out
+}
+
+/// RGBA8 → BGR888 (drops alpha, reorders to B,G,R) — the raw uncompressed LCD
+/// stream format.
+pub fn rgba_to_bgr888(rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        out.extend_from_slice(&[px[2], px[1], px[0]]);
+    }
+    out
+}
+
+/// Encode a raw RGBA8 frame as a complete Q565 file (QOI-style RGB565 codec):
+/// `b"q565"` magic, LE u16 width/height, encoded stream, `OP_END`. This is the
+/// compressed LCD stream format some panels (e.g. NZXT Kraken type-0x08) expect.
+pub fn rgba_to_q565(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    use q565::{
+        encode::Q565EncodeContext,
+        utils::{encode_rgb565_unchecked, rgb888_to_rgb565},
+    };
+    let pixels = (width as usize) * (height as usize);
+    let expected = pixels * 4;
+    if rgba.len() != expected {
+        anyhow::bail!(
+            "RGBA frame size mismatch: got {} bytes, expected {expected} for {width}x{height}",
+            rgba.len()
+        );
+    }
+    if width > u16::MAX as u32 || height > u16::MAX as u32 {
+        anyhow::bail!("frame {width}x{height} exceeds Q565 u16 dimension limit");
+    }
+    let rgb565: Vec<u16> = rgba
+        .chunks_exact(4)
+        .map(|p| encode_rgb565_unchecked(rgb888_to_rgb565([p[0], p[1], p[2]])))
+        .collect();
+    let mut out = Vec::with_capacity(8 + pixels);
+    if !Q565EncodeContext::encode_to_vec(width as u16, height as u16, &rgb565, &mut out) {
+        anyhow::bail!("Q565 encode failed for {width}x{height}");
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -204,6 +364,41 @@ mod tests {
     }
 
     #[test]
+    fn decode_limited_rejects_oversized_source_dimensions() {
+        // A header declaring dimensions above MAX_DECODE_DIM is refused before the
+        // decoder allocates, even though the encoded bytes stay tiny; a small image
+        // still decodes fine.
+        let mut big = Vec::new();
+        image::GrayImage::new(MAX_DECODE_DIM + 1, 1)
+            .write_to(&mut std::io::Cursor::new(&mut big), image::ImageFormat::Png)
+            .unwrap();
+        assert!(decode_limited(&big).is_err());
+
+        let mut small = Vec::new();
+        image::GrayImage::new(8, 8)
+            .write_to(
+                &mut std::io::Cursor::new(&mut small),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        assert!(decode_limited(&small).is_ok());
+    }
+
+    #[test]
+    fn decode_limited_rejects_images_over_total_pixel_budget() {
+        // Each side is below the dimension limit, but the decoded RGBA image
+        // would exceed the 16 Mi-pixel allocation budget.
+        let mut data = Vec::new();
+        image::GrayImage::new(5000, 5000)
+            .write_to(
+                &mut std::io::Cursor::new(&mut data),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        assert!(decode_limited(&data).is_err());
+    }
+
+    #[test]
     fn resize_gif_passthrough_reports_no_progress() {
         let gif_bytes = make_gif(4, 4);
         let mut reported = Vec::new();
@@ -259,6 +454,17 @@ mod tests {
     }
 
     #[test]
+    fn read_image_bounded_reads_small_file_and_rejects_missing() {
+        use std::io::Write as _;
+        let png = make_png(4, 4);
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(&png).unwrap();
+        assert_eq!(read_image_bounded(f.path()).unwrap(), png);
+
+        assert!(read_image_bounded(std::path::Path::new("no-such-image.png")).is_err());
+    }
+
+    #[test]
     fn compress_for_storage_keeps_small_png_as_is() {
         let png = make_png(4, 4);
         let (data, ext) = compress_for_storage(&png, 10, 10, |_| {}).unwrap();
@@ -285,5 +491,69 @@ mod tests {
         let decoder = opts.read_info(std::io::Cursor::new(&data)).unwrap();
         assert_eq!(decoder.width(), 4);
         assert_eq!(decoder.height(), 4);
+    }
+
+    // ── codecs ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rgba_to_bgr888_reorders_and_drops_alpha() {
+        let rgba = [10u8, 20, 30, 255, 40, 50, 60, 128];
+        assert_eq!(rgba_to_bgr888(&rgba), vec![30, 20, 10, 60, 50, 40]);
+    }
+
+    #[test]
+    fn rotate_rgba_square_90_moves_top_left_to_top_right() {
+        let mut src = vec![0u8; 2 * 2 * 4];
+        src[0..4].copy_from_slice(&[1, 1, 1, 255]);
+        let out = rotate_rgba_square(&src, 2, 90);
+        assert_eq!(&out[4..8], &[1, 1, 1, 255]);
+        assert_eq!(&out[0..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rotate_rgba_square_zero_and_bad_size_passthrough() {
+        let src = vec![9u8; 2 * 2 * 4];
+        assert_eq!(rotate_rgba_square(&src, 2, 0), src);
+        assert_eq!(rotate_rgba_square(&src, 4, 90), src);
+    }
+
+    #[test]
+    fn q565_payload_has_magic_dimensions_and_end() {
+        let rgba = [255u8; 4 * 4 * 4];
+        let out = rgba_to_q565(&rgba, 4, 4).unwrap();
+        assert_eq!(&out[0..4], b"q565");
+        assert_eq!(&out[4..8], &[4, 0, 4, 0]);
+        assert_eq!(*out.last().unwrap(), 0xFF);
+    }
+
+    #[test]
+    fn q565_rejects_size_mismatch() {
+        assert!(rgba_to_q565(&[0u8; 4], 2, 2).is_err());
+    }
+
+    #[test]
+    fn decode_static_image_rgba_resizes_to_native() {
+        use image::ImageEncoder as _;
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([255u8, 0, 0, 255]));
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(img.as_raw(), 2, 2, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let rgba = decode_static_image_rgba(&png, 4, 4).unwrap();
+        assert_eq!(rgba.len(), 4 * 4 * 4);
+        assert!(rgba.chunks_exact(4).all(|px| px == [255, 0, 0, 255]));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn rotate_rgba_square_four_quarters_is_identity(
+            pixels in proptest::collection::vec(proptest::num::u8::ANY, 5 * 5 * 4..=5 * 5 * 4)
+        ) {
+            let mut img = pixels.clone();
+            for _ in 0..4 {
+                img = rotate_rgba_square(&img, 5, 90);
+            }
+            proptest::prop_assert_eq!(img, pixels);
+        }
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use rustfft::{num_complex::Complex32, Fft, FftPlanner};
 
-use super::{SpectrumFrame, BANDS, WAVE_SAMPLES};
+use super::{SpectrumFrame, BANDS};
 
 const FFT_SIZE: usize = 1024;
 const HOP: usize = 512;
@@ -179,15 +179,7 @@ impl SpectrumAnalyzer {
             self.beat_refractory_remaining = BEAT_REFRACTORY_SECS;
         }
 
-        // 5. Waveform downsample.
-        let mut waveform = [0.0f32; WAVE_SAMPLES];
-        let stride = window.len() as f32 / WAVE_SAMPLES as f32;
-        for (i, w) in waveform.iter_mut().enumerate() {
-            let idx = ((i as f32 * stride) as usize).min(window.len() - 1);
-            *w = window[idx].clamp(-1.0, 1.0);
-        }
-
-        // 6. Sequence.
+        // 5. Sequence.
         self.seq += 1;
 
         SpectrumFrame {
@@ -195,7 +187,6 @@ impl SpectrumAnalyzer {
             level: self.level_smoothed,
             flux,
             beat,
-            waveform,
             seq: self.seq,
         }
     }
@@ -366,9 +357,6 @@ mod tests {
                 }
                 prop_assert!(f.level.is_finite() && f.level >= 0.0 && f.level <= 1.0);
                 prop_assert!(f.flux.is_finite() && f.flux >= 0.0 && f.flux <= 1.0);
-                for w in f.waveform.iter() {
-                    prop_assert!(w.is_finite() && *w >= -1.0 && *w <= 1.0);
-                }
             }
         }
 

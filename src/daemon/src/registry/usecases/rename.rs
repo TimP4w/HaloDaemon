@@ -114,9 +114,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::drivers::chain::{ChainAdapter, ChainHost, ChannelDescriptor};
-    use crate::drivers::{
-        CapabilityRef, ChainCapability, ChainLinkSpec, Device, CHAIN_LINK_KIND_AURA_ARGB,
-    };
+    use crate::drivers::{CapabilityRef, ChainCapability, ChainLinkSpec, Device};
     use async_trait::async_trait;
     use halod_shared::types::{RgbColor, ZoneTopology};
 
@@ -288,19 +286,15 @@ mod tests {
     }
 
     async fn setup_chain_parent_with_one_link(app: &Arc<AppState>) -> String {
-        let host = ChainHost::new(
-            Arc::new(StubAdapter {
-                parent_id: "parent_x".into(),
-            }),
-            CHAIN_LINK_KIND_AURA_ARGB,
-        );
+        let host = ChainHost::new(Arc::new(StubAdapter {
+            parent_id: "parent_x".into(),
+        }));
         let parent: Arc<dyn Device> = Arc::new(ChainParent { host: host.clone() });
         app.devices.write().await.push(parent.clone());
         let (child_id, child_dev) = host
             .add_link(
                 "ch0",
                 ChainLinkSpec {
-                    kind: CHAIN_LINK_KIND_AURA_ARGB,
                     name: "Original".into(),
                     topology: ZoneTopology::Linear,
                     led_count: 8,

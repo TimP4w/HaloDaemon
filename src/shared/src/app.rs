@@ -23,7 +23,9 @@ pub const GUI_PROCESS_NAME: &str = "halod-gui";
 /// (`{APP_ID}.desktop`).
 pub const APP_ID: &str = "dev.timp4w.Halod";
 
-/// Name the daemon registers itself under in the Windows Service Control
-/// Manager. The daemon's service supervisor and the GUI's "Start daemon" button
-/// must agree on this; both reference it here.
-pub const WINDOWS_SERVICE_NAME: &str = "HalodDaemon";
+/// Main project repository URL (distinct from the plugins repo in
+/// `daemon::constants::OFFICIAL_PLUGIN_REPO_URL`).
+pub const REPO_URL: &str = "https://github.com/TimP4w/HaloDaemon";
+
+/// Author/developer credit shown in the GUI about/credits.
+pub const AUTHOR: &str = "TimP4w";

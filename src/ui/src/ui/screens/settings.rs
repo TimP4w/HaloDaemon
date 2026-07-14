@@ -20,7 +20,6 @@ const THIRD_PARTY_LICENSES: &str =
 
 #[derive(Default)]
 pub struct SettingsUi {
-    pub profile_popup: bool,
     /// Which modal overlay is currently open.
     modal: Option<Modal>,
     /// Set once we've asked the daemon for `DebugInfo` to populate the
@@ -54,7 +53,7 @@ pub fn show(
     // Lazily pull a DebugInfo snapshot the first time Settings is shown while
     // connected; it feeds both the dependency panel and the diagnostics modal.
     if connected && !st.deps_requested {
-        crate::domain::actions::system::get_debug_info(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
         st.deps_requested = true;
     }
 
@@ -116,6 +115,7 @@ fn page_body(
             close_to_tray_row(ui, state, cmd);
             window_controls_row(ui, state, cmd);
             dependency_warning_row(ui, state, cmd);
+            plugin_downloads_row(ui, state, cmd);
             replay_tutorials_row(ui, cmd);
         });
     });
@@ -328,13 +328,33 @@ fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         &t!("settings.close_to_tray_title"),
         &t!("settings.close_to_tray_sub"),
     );
-    let on = state.global_config.close_to_tray;
+    let on = state.gui.close_to_tray;
     if row_toggle(ui, rect, on, "close_to_tray") {
-        crate::domain::actions::system::set_ui_config(
+        crate::runtime::ipc::send(
             cmd,
-            !on,
-            state.global_config.suppress_dependency_warning,
-            state.global_config.hide_window_controls,
+            halod_shared::commands::DaemonCommand::SetUiConfig {
+                close_to_tray: !on,
+                suppress_dependency_warning: state.gui.suppress_dependency_warning,
+                hide_window_controls: state.gui.hide_window_controls,
+            },
+        );
+    }
+    bottom_border(ui, rect);
+}
+
+fn plugin_downloads_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+    let rect = row_rect(ui);
+    row_label(
+        ui,
+        rect,
+        &t!("settings.plugin_downloads_title"),
+        &t!("settings.plugin_downloads_sub"),
+    );
+    let on = state.gui.plugin_downloads == halod_shared::types::PluginDownloadConsent::Allowed;
+    if row_toggle(ui, rect, on, "plugin_downloads") {
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::SetPluginDownloadConsent { allowed: !on },
         );
     }
     bottom_border(ui, rect);
@@ -348,13 +368,15 @@ fn window_controls_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         &t!("settings.window_controls_title"),
         &t!("settings.window_controls_sub"),
     );
-    let on = !state.global_config.hide_window_controls;
+    let on = !state.gui.hide_window_controls;
     if row_toggle(ui, rect, on, "window_controls") {
-        crate::domain::actions::system::set_ui_config(
+        crate::runtime::ipc::send(
             cmd,
-            state.global_config.close_to_tray,
-            state.global_config.suppress_dependency_warning,
-            on,
+            halod_shared::commands::DaemonCommand::SetUiConfig {
+                close_to_tray: state.gui.close_to_tray,
+                suppress_dependency_warning: state.gui.suppress_dependency_warning,
+                hide_window_controls: on,
+            },
         );
     }
     bottom_border(ui, rect);
@@ -368,13 +390,15 @@ fn dependency_warning_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) 
         &t!("settings.startup_healthcheck_title"),
         &t!("settings.startup_healthcheck_sub"),
     );
-    let warn_on = !state.global_config.suppress_dependency_warning;
+    let warn_on = !state.gui.suppress_dependency_warning;
     if row_toggle(ui, rect, warn_on, "dependency_warning") {
-        crate::domain::actions::system::set_ui_config(
+        crate::runtime::ipc::send(
             cmd,
-            state.global_config.close_to_tray,
-            warn_on,
-            state.global_config.hide_window_controls,
+            halod_shared::commands::DaemonCommand::SetUiConfig {
+                close_to_tray: state.gui.close_to_tray,
+                suppress_dependency_warning: warn_on,
+                hide_window_controls: state.gui.hide_window_controls,
+            },
         );
     }
     bottom_border(ui, rect);
@@ -405,7 +429,7 @@ fn replay_tutorials_row(ui: &mut egui::Ui, cmd: &CommandTx) {
     )
     .clicked()
     {
-        crate::domain::actions::system::reset_tours_seen(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::ResetToursSeen);
         crate::domain::tour::request_reset(ui.ctx());
     }
     bottom_border(ui, rect);
@@ -417,8 +441,8 @@ fn lcd_engine_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(ui, rect, "LCD", &t!("settings.lcd_engine_sub"));
 
-    let lcd_enabled = state.global_config.engine_lcd_enabled;
-    let lcd_fps = state.global_config.engine_lcd_fps;
+    let lcd_enabled = state.lcd.config.enabled;
+    let lcd_fps = state.lcd.config.fps;
 
     let chip_w = 72.0_f32;
     let fps_chip_rect = Rect::from_min_size(
@@ -452,7 +476,13 @@ fn lcd_engine_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         let clamped = parse_fps(&buf, lcd_fps);
         buf = clamped.to_string();
         if clamped != lcd_fps {
-            crate::domain::actions::system::set_engine_fps(cmd, EngineKind::Lcd, clamped as u64);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::set_engine_fps(
+                    EngineKind::Lcd,
+                    clamped as u64,
+                ),
+            );
         }
     }
     ui.data_mut(|d| d.insert_temp(fps_id, buf));
@@ -460,7 +490,13 @@ fn lcd_engine_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     let toggle_x = rect.right() - 36.0;
     let toggle_y = rect.top() + 17.0;
     if row_toggle_at(ui, toggle_x, toggle_y, lcd_enabled, "lcd") {
-        crate::domain::actions::system::set_engine_enabled(cmd, EngineKind::Lcd, !lcd_enabled);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::set_engine_enabled(
+                EngineKind::Lcd,
+                !lcd_enabled,
+            ),
+        );
     }
 
     bottom_border(ui, rect);
@@ -528,7 +564,7 @@ fn rediscover_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     )
     .clicked()
     {
-        crate::domain::actions::system::rediscover(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::Rediscover);
     }
 
     bottom_border(ui, rect);
@@ -561,7 +597,7 @@ fn healthcheck_section(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugI
     )
     .clicked()
     {
-        crate::domain::actions::system::get_debug_info(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
     }
     ui.add_space(4.0);
 
@@ -693,7 +729,7 @@ fn language_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(ui, rect, &t!("settings.language"), "");
 
-    let current = state.global_config.language.as_str();
+    let current = state.gui.language.as_str();
     let combo_w = 130.0;
     let combo_rect = Rect::from_min_size(
         Pos2::new(rect.right() - combo_w, rect.top() + 11.0),
@@ -717,7 +753,12 @@ fn language_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         });
     if let Some(code) = picked {
         if code != current {
-            crate::domain::actions::system::set_language(cmd, code);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::SetLanguage {
+                    lang: code.to_string(),
+                },
+            );
         }
     }
 
@@ -737,7 +778,7 @@ fn log_level_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         &t!("settings.log_level_sub"),
     );
 
-    let current = state.global_config.log_level.to_lowercase();
+    let current = state.gui.log_level.to_lowercase();
     let combo_w = 130.0;
     let combo_rect = Rect::from_min_size(
         Pos2::new(rect.right() - combo_w, rect.top() + 11.0),
@@ -761,7 +802,12 @@ fn log_level_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         });
     if let Some(level) = picked {
         if level != current {
-            crate::domain::actions::system::set_log_level(cmd, level);
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::SetLogLevel {
+                    level: level.to_string(),
+                },
+            );
         }
     }
 
@@ -947,7 +993,7 @@ fn diagnostics_row(ui: &mut egui::Ui, cmd: &CommandTx, st: &mut SettingsUi) {
     )
     .clicked()
     {
-        crate::domain::actions::system::get_debug_info(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
         st.modal = Some(Modal::Diagnostics);
     }
     bottom_border(ui, rect);
@@ -960,7 +1006,7 @@ fn about_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
     ui.painter().text(
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
-        "HaloDaemon",
+        halod_shared::app::APP_DISPLAY_NAME,
         theme::body(12.5),
         theme::TEXT,
     );
@@ -1001,7 +1047,7 @@ fn third_party_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
     bottom_border(ui, rect);
 }
 
-const REPO_URL: &str = "https://github.com/TimP4w/HaloDaemon";
+const REPO_URL: &str = halod_shared::app::REPO_URL;
 
 fn repo_row(ui: &mut egui::Ui) {
     let rect = row_rect(ui);
@@ -1016,7 +1062,7 @@ fn repo_row(ui: &mut egui::Ui) {
     ui.painter().text(
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
-        "github.com/TimP4w/HaloDaemon",
+        REPO_URL.trim_start_matches("https://"),
         theme::body(10.5),
         if resp.hovered() {
             theme::CYAN
@@ -1117,7 +1163,7 @@ fn licenses_modal(ctx: &egui::Context, st: &mut SettingsUi) {
 fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
     modal_frame(ctx, &t!("settings.credits_title"), st, 420.0, 340.0, |ui| {
         ui.label(
-            egui::RichText::new("HaloDaemon")
+            egui::RichText::new(halod_shared::app::APP_DISPLAY_NAME)
                 .font(theme::bold(16.0))
                 .color(theme::TEXT),
         );
@@ -1128,9 +1174,13 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
         );
         ui.add_space(8.0);
         ui.label(
-            egui::RichText::new(format!("{} TimP4w", t!("settings.credits_developer")))
-                .font(theme::body(12.0))
-                .color(theme::TEXT_DIM),
+            egui::RichText::new(format!(
+                "{} {}",
+                t!("settings.credits_developer"),
+                halod_shared::app::AUTHOR
+            ))
+            .font(theme::body(12.0))
+            .color(theme::TEXT_DIM),
         );
         ui.label(
             egui::RichText::new(format!(
@@ -1141,10 +1191,10 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
             .color(theme::TEXT_DIM),
         );
         ui.hyperlink_to(
-            egui::RichText::new("https://github.com/TimP4w/HaloDaemon")
+            egui::RichText::new(REPO_URL)
                 .font(theme::body(12.0))
                 .color(theme::CYAN),
-            "https://github.com/TimP4w/HaloDaemon",
+            REPO_URL,
         );
         ui.add_space(16.0);
 
@@ -1448,6 +1498,22 @@ mod tests {
         assert!(!is_scanning(&scanning(DiscoveryPhase::Error)));
     }
 
+    /// Recursively collect every `.yaml` catalog file under the locales tree.
+    /// Catalogs now live in per-locale subdirs (`locales/<code>/…`), so a flat
+    /// `read_dir` would miss them — rust-i18n walks recursively and so must we.
+    fn locale_yaml_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.extend(locale_yaml_files(&path));
+            } else if path.extension().and_then(|e| e.to_str()) == Some("yaml") {
+                out.push(path);
+            }
+        }
+        out
+    }
+
     /// Merge every `en` catalog file into the set of fully-qualified leaf keys
     /// it defines (mirrors how rust-i18n merges + flattens at load time).
     fn defined_en_keys() -> std::collections::BTreeSet<String> {
@@ -1475,11 +1541,7 @@ mod tests {
         }
         let dir = format!("{}/locales", env!("CARGO_MANIFEST_DIR"));
         let mut out = std::collections::BTreeSet::new();
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
-                continue;
-            }
+        for path in locale_yaml_files(std::path::Path::new(&dir)) {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap();
             if stem.split('.').next_back() != Some("en") {
                 continue;
@@ -1624,11 +1686,7 @@ mod tests {
         }
         let dir = format!("{}/locales", env!("CARGO_MANIFEST_DIR"));
         let mut per_locale: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for entry in std::fs::read_dir(&dir).expect("locales dir") {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
-                continue;
-            }
+        for path in locale_yaml_files(std::path::Path::new(&dir)) {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap();
             let locale = stem.split('.').next_back().unwrap().to_string();
             let text = std::fs::read_to_string(&path).unwrap();

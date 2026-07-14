@@ -49,6 +49,10 @@ pub enum LcdUploadStage {
     Processing,
     /// Writing the processed image to the device.
     Applying,
+    /// The image finished uploading and was applied to the device (terminal).
+    Done,
+    /// The upload or device write failed and was aborted (terminal).
+    Failed,
 }
 
 /// A rendered LCD engine frame broadcast to subscribed clients.
@@ -111,7 +115,7 @@ pub const DEFAULT_LOG_LEVEL: &str = "info";
 pub const DEFAULT_LANGUAGE: &str = "en";
 /// UI language codes both sides agree on. The GUI has a catalog for each and
 /// the daemon accepts only these in `SetLanguage`; add a code here when adding
-/// a set of `locales/*.<code>.yaml` catalogs.
+/// a set of `locales/<code>/` catalogs.
 pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "it"];
 /// Default for the per-engine enable toggles.
 pub const DEFAULT_ENGINE_ENABLED: bool = true;
@@ -181,6 +185,20 @@ pub fn validate_image_filename(name: &str) -> Result<(), &'static str> {
     }
 }
 
+/// Max byte size of a user-supplied LCD image. Sized so its base64 fits one IPC
+/// frame ([`crate::frames::MAX_PAYLOAD`]); enforced by both GUI and daemon.
+pub const MAX_LCD_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Reject an image payload past [`MAX_LCD_IMAGE_BYTES`].
+pub fn validate_image_upload_size(len: u64) -> Result<(), String> {
+    if len > MAX_LCD_IMAGE_BYTES {
+        return Err(format!(
+            "image is {len} bytes, over the {MAX_LCD_IMAGE_BYTES}-byte limit"
+        ));
+    }
+    Ok(())
+}
+
 /// Sniff an image's format from its magic bytes, returning a file extension.
 pub fn sniff_ext(data: &[u8]) -> &'static str {
     if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
@@ -192,6 +210,45 @@ pub fn sniff_ext(data: &[u8]) -> &'static str {
     } else {
         "unknown"
     }
+}
+
+/// Max encoded size of any plugin display asset (logo/effect thumbnail) served
+/// over IPC. Bounds a careless or hostile plugin from bloating the socket and
+/// the GUI's texture memory. Enforced by the daemon on read.
+pub const MAX_PLUGIN_ASSET_BYTES: u64 = 256 * 1024;
+
+/// Max pixel width/height of a plugin logo. It's painted into a small square
+/// tile, so anything larger is wasted decode/memory.
+pub const MAX_PLUGIN_LOGO_DIM: u32 = 512;
+
+/// Max long:short side ratio of a plugin logo. The tile is square and the GUI
+/// letterboxes to fit, but an extreme banner would shrink to an unreadable
+/// sliver — reject it outright rather than display it.
+pub const MAX_PLUGIN_LOGO_ASPECT: u32 = 2;
+
+/// Validate a decoded plugin logo's dimensions: non-zero, within
+/// [`MAX_PLUGIN_LOGO_DIM`], and no more lopsided than [`MAX_PLUGIN_LOGO_ASPECT`].
+/// Pure so both the daemon (on load) and the GUI (on import) can enforce it.
+pub fn validate_logo_dimensions(width: u32, height: u32) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("logo has a zero dimension".to_owned());
+    }
+    if width > MAX_PLUGIN_LOGO_DIM || height > MAX_PLUGIN_LOGO_DIM {
+        return Err(format!(
+            "logo {width}x{height} exceeds the {MAX_PLUGIN_LOGO_DIM}px maximum"
+        ));
+    }
+    let (long, short) = if width >= height {
+        (width, height)
+    } else {
+        (height, width)
+    };
+    if long > short * MAX_PLUGIN_LOGO_ASPECT {
+        return Err(format!(
+            "logo aspect {width}x{height} exceeds the {MAX_PLUGIN_LOGO_ASPECT}:1 maximum"
+        ));
+    }
+    Ok(())
 }
 
 /// How the canvas sampler maps LEDs to pixmap positions for a zone.
@@ -261,19 +318,115 @@ impl Default for CanvasState {
     }
 }
 
+/// Max placed zones on one device's canvas.
+pub const MAX_PLACED_ZONES: usize = 256;
+/// Max distinct canvas effect instances.
+pub const MAX_CANVAS_EFFECTS: usize = 256;
+/// Max params on a single effect or LCD widget.
+pub const MAX_EFFECT_PARAMS: usize = 64;
+/// Max device/zone ids in a lighting-target selection.
+pub const MAX_LIGHTING_TARGET_IDS: usize = 512;
+
+impl PlacedZone {
+    /// Replace any non-finite coordinate with a safe default; `serde_json`
+    /// rejects non-finite floats, and the sampler must never see NaN.
+    pub fn sanitize(&mut self) {
+        self.x = finite_or(self.x, 0.0);
+        self.y = finite_or(self.y, 0.0);
+        self.w = finite_or(self.w, DEFAULT_ZONE_SIZE);
+        self.h = finite_or(self.h, DEFAULT_ZONE_SIZE);
+        self.rotation = finite_or(self.rotation, 0.0);
+    }
+}
+
+impl CanvasState {
+    /// Finite-clean every placed zone and bound the collections — applied on
+    /// config load and before persistence so corrupt/hostile state never
+    /// reaches the engine or the wire.
+    pub fn sanitize(&mut self) {
+        for z in &mut self.placed_zones {
+            z.sanitize();
+        }
+        self.placed_zones.truncate(MAX_PLACED_ZONES);
+        self.sample_radius = finite_or(self.sample_radius, DEFAULT_SAMPLE_RADIUS);
+    }
+}
+
+/// Cooling engine config, nested into [`CoolingState`]. Persisted on the daemon
+/// under `config.yaml`'s `cooling` key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GlobalConfig {
-    pub engine_fan_curve_enabled: bool,
+pub struct CoolingConfig {
+    pub fan_curve_enabled: bool,
     /// Milliseconds between fan-curve ticks.
-    pub engine_fan_curve_tick_ms: u64,
-    pub engine_canvas_enabled: bool,
-    pub engine_canvas_fps: u32,
-    pub engine_lcd_enabled: bool,
-    pub engine_lcd_fps: u32,
+    pub fan_curve_tick_ms: u64,
     /// Duty (0-100) applied when a fan's assigned sensor is absent.
     pub fan_failsafe_duty: u8,
-    pub log_level: String,
+}
+
+impl Default for CoolingConfig {
+    fn default() -> Self {
+        Self {
+            fan_curve_enabled: DEFAULT_ENGINE_ENABLED,
+            fan_curve_tick_ms: DEFAULT_FAN_CURVE_TICK_MS,
+            fan_failsafe_duty: DEFAULT_FAN_FAILSAFE_DUTY,
+        }
+    }
+}
+
+/// RGB engine config, nested into [`LightingState`]. Persisted on the daemon
+/// under `config.yaml`'s `rgb` key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RgbConfig {
+    pub canvas_enabled: bool,
+    pub canvas_fps: u32,
+}
+
+impl Default for RgbConfig {
+    fn default() -> Self {
+        Self {
+            canvas_enabled: DEFAULT_ENGINE_ENABLED,
+            canvas_fps: DEFAULT_CANVAS_FPS,
+        }
+    }
+}
+
+/// LCD engine config, nested into [`LcdState`]. Persisted on the daemon under
+/// `config.yaml`'s `lcd` key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LcdConfig {
+    pub enabled: bool,
+    pub fps: u32,
+}
+
+impl Default for LcdConfig {
+    fn default() -> Self {
+        Self {
+            enabled: DEFAULT_ENGINE_ENABLED,
+            fps: DEFAULT_LCD_FPS,
+        }
+    }
+}
+
+/// Whether the daemon may contact GitHub to download official plugins and
+/// check for updates automatically. `Unset` until the user is first asked, so
+/// the GUI knows to show the first-run consent prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginDownloadConsent {
+    #[default]
+    Unset,
+    Allowed,
+    Denied,
+}
+
+/// GUI-facing preferences and daemon log level, sent as `AppState.gui` and
+/// persisted on the daemon under `config.yaml`'s `gui` key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuiConfig {
     /// UI language code (e.g. "en", "it"); the GUI translates against it.
     pub language: String,
     pub close_to_tray: bool,
@@ -284,24 +437,20 @@ pub struct GlobalConfig {
     /// Persistence keys (e.g. "page:home", "tab:cooling") of tutorials the
     /// user has completed or skipped.
     pub seen_tours: BTreeSet<String>,
+    pub log_level: String,
+    pub plugin_downloads: PluginDownloadConsent,
 }
 
-impl Default for GlobalConfig {
+impl Default for GuiConfig {
     fn default() -> Self {
         Self {
-            engine_fan_curve_enabled: DEFAULT_ENGINE_ENABLED,
-            engine_fan_curve_tick_ms: DEFAULT_FAN_CURVE_TICK_MS,
-            engine_canvas_enabled: DEFAULT_ENGINE_ENABLED,
-            engine_canvas_fps: DEFAULT_CANVAS_FPS,
-            engine_lcd_enabled: DEFAULT_ENGINE_ENABLED,
-            engine_lcd_fps: DEFAULT_LCD_FPS,
-            fan_failsafe_duty: DEFAULT_FAN_FAILSAFE_DUTY,
-            log_level: DEFAULT_LOG_LEVEL.to_string(),
             language: DEFAULT_LANGUAGE.to_string(),
             close_to_tray: DEFAULT_CLOSE_TO_TRAY,
             suppress_dependency_warning: DEFAULT_SUPPRESS_DEPENDENCY_WARNING,
             hide_window_controls: DEFAULT_HIDE_WINDOW_CONTROLS,
             seen_tours: BTreeSet::new(),
+            log_level: DEFAULT_LOG_LEVEL.to_string(),
+            plugin_downloads: PluginDownloadConsent::Unset,
         }
     }
 }
@@ -355,6 +504,37 @@ pub enum NotificationCode {
     FanStalled {
         fan: String,
     },
+    /// An auto-discovered plugin (found by a directory scan, not a manual
+    /// "Add plugin" import — those get a blocking consent modal instead)
+    /// declares permissions the user hasn't granted yet, so it stays inert.
+    PluginNeedsPermission {
+        plugin: String,
+    },
+    /// A plugin's on-disk content hash changed since it was last acknowledged,
+    /// without going through the update flow (e.g. a manual edit). Emitted for
+    /// plugins that declare no permissions, so the change is still surfaced —
+    /// permission-declaring plugins are covered by `PluginNeedsPermission`.
+    PluginContentChanged {
+        plugin: String,
+    },
+    /// A plugin device's Lua callback failed at runtime on a background path
+    /// (engine tick, sensor poll) where the error would otherwise only be
+    /// logged. Deduplicated daemon-side so a persistently-failing plugin alerts
+    /// once, not every frame. `detail` is the full error text, shown in the
+    /// Details modal (the toast itself stays short).
+    PluginRuntimeError {
+        plugin: String,
+        detail: String,
+    },
+    /// A config-instantiated integration plugin failed to open its connection
+    /// (blocked/non-routable address such as `127.0.0.1`, missing `network`
+    /// permission, transport error). Deduplicated daemon-side per plugin so a
+    /// persistently-unreachable integration alerts once per failure episode.
+    /// `detail` is the full error text, shown in the Details modal.
+    PluginConnectFailed {
+        plugin: String,
+        detail: String,
+    },
     /// A generic error surfaced as free text (e.g. a failed command's error).
     /// The GUI translates only the title and shows `message` verbatim.
     Generic {
@@ -373,8 +553,22 @@ impl NotificationCode {
             KeyRemapUnavailable { .. }
             | WirelessReinitFailed { .. }
             | DeviceReconnectFailed { .. }
-            | FanStalled { .. } => NotificationSeverity::Warning,
+            | FanStalled { .. }
+            | PluginNeedsPermission { .. }
+            | PluginContentChanged { .. }
+            | PluginRuntimeError { .. }
+            | PluginConnectFailed { .. } => NotificationSeverity::Warning,
             ProfileSwitched { .. } => NotificationSeverity::Info,
+        }
+    }
+
+    /// The free-text error detail carried by codes that back a "Details" modal
+    /// (`None` for codes whose full copy already fits the toast).
+    pub fn detail(&self) -> Option<&str> {
+        use NotificationCode::*;
+        match self {
+            PluginRuntimeError { detail, .. } | PluginConnectFailed { detail, .. } => Some(detail),
+            _ => None,
         }
     }
 }
@@ -429,32 +623,23 @@ pub struct ProfileOverrides {
     pub active_is_default: bool,
 }
 
+/// Active profile, the available profile names, app-focus rules, and the
+/// active profile's per-device capability overrides.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AppState {
+pub struct ProfileState {
     #[serde(default)]
-    pub discovery: DiscoveryStatus,
+    pub active: String,
     #[serde(default)]
-    pub devices: Vec<WireDevice>,
-    #[serde(default)]
-    pub active_profile: String,
-    #[serde(default)]
-    pub profiles: Vec<String>,
-    #[serde(default)]
-    pub cooling: CoolingState,
-    #[serde(default)]
-    pub lighting: LightingState,
-    #[serde(default)]
-    pub lcd: LcdState,
-    #[serde(default)]
-    pub global_config: GlobalConfig,
-    #[serde(default)]
-    pub log_entries: Vec<LogEntry>,
-    /// Filesystem path to the daemon's config directory; the UI displays and
-    /// opens it without recomputing client-side.
-    #[serde(default)]
-    pub config_dir: String,
+    pub available: Vec<String>,
     #[serde(default)]
     pub app_rules: Vec<AppRule>,
+    #[serde(default)]
+    pub overrides: ProfileOverrides,
+}
+
+/// Results of the daemon's host-capability probes, gating optional UI features.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HealthCheckState {
     /// False when no supported compositor/platform backend was found.
     /// Default false so the UI doesn't flash "supported" before the first broadcast.
     #[serde(default)]
@@ -462,14 +647,326 @@ pub struct AppState {
     /// Whether `ffmpeg` is available on the daemon's host, gating LCD video mode.
     #[serde(default)]
     pub ffmpeg_available: bool,
+}
+
+/// Device plugins and repositories for the Plugins screen.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginsState {
+    /// Device plugins discovered in the plugins directory, with their
+    /// enable/disable state, for the Plugins management screen.
     #[serde(default)]
-    pub profile_overrides: ProfileOverrides,
+    pub plugins: Vec<PluginInfo>,
+    /// Registered git-repo plugin sources, for the "Plugin Repositories" section of the Plugins screen.
+    #[serde(default)]
+    pub repos: Vec<PluginRepoInfo>,
+    /// Plugins whose manifest was too malformed to load, shown as a "skipped"
+    /// notice rather than a plugin entry.
+    #[serde(default)]
+    pub skipped: Vec<SkippedPlugin>,
+}
+
+/// A plugin directory that couldn't be parsed into a manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedPlugin {
+    pub path: String,
+    pub reason: String,
+}
+
+/// A registered git-repo plugin source, as shown in the GUI. Mirrors the daemon's `PluginRepoRecord`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginRepoInfo {
+    pub url: String,
+    pub slug: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    pub locked_sha: String,
+    /// When this repo was last cloned/fetched/checked out (RFC 3339), if ever.
+    #[serde(default)]
+    pub last_sync: Option<String>,
+    /// True for the seeded official repo — the GUI hides its remove control.
+    #[serde(default)]
+    pub official: bool,
+}
+
+/// One repo's update check result, reported in reply to `DaemonCommand::CheckPluginRepoUpdates`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoUpdateStatus {
+    pub slug: String,
+    pub locked_sha: String,
+    pub remote_sha: String,
+    pub behind: bool,
+}
+
+/// One plugin's update-availability, reported in reply to
+/// `DaemonCommand::CheckPluginUpdates` — finer-grained than [`RepoUpdateStatus`]:
+/// a repo can be behind while a given plugin's own content is unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginUpdateStatus {
+    pub plugin_id: String,
+    pub slug: String,
+    /// The repo's checked-out (`locked_sha`) content differs from the remote
+    /// tip — a genuine upstream update the user can pull.
+    pub update_available: bool,
+    /// The on-disk content differs from what the repo checked out — a local
+    /// edit (or tampering), not an upstream change. Distinct from
+    /// `update_available` so the GUI can say "modified on disk" rather than
+    /// "update available".
+    #[serde(default)]
+    pub on_disk_changed: bool,
+    pub current_version: String,
+    pub available_version: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppState {
+    #[serde(default)]
+    pub discovery: DiscoveryStatus,
+    #[serde(default)]
+    pub devices: Vec<WireDevice>,
+    #[serde(default)]
+    pub profiles: ProfileState,
+    #[serde(default)]
+    pub cooling: CoolingState,
+    #[serde(default)]
+    pub lighting: LightingState,
+    #[serde(default)]
+    pub lcd: LcdState,
+    #[serde(default)]
+    pub gui: GuiConfig,
+    #[serde(default)]
+    pub log_entries: Vec<LogEntry>,
+    /// Filesystem path to the daemon's config directory; the UI displays and
+    /// opens it without recomputing client-side.
+    #[serde(default)]
+    pub config_dir: String,
+    #[serde(default)]
+    pub health: HealthCheckState,
     /// Resolved `process_name -> icon` for every process referenced by an app
     /// rule, so the UI can show app icons on rule badges without re-resolving.
     /// On Linux the icon is a theme name or absolute path from the matching
     /// `.desktop` file; on Windows an absolute path to a cached PNG.
     #[serde(default)]
     pub process_icons: HashMap<String, String>,
+    #[serde(default)]
+    pub plugins: PluginsState,
+}
+
+/// A privileged capability a plugin must declare before the daemon grants it —
+/// the enforcement boundary between "trusted to talk to its matched device"
+/// (every plugin) and "trusted to reach outside it".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Permission {
+    /// Open network connections (e.g. a TCP client to a local SDK server).
+    Network,
+    /// Reach OS-level primitives beyond pure computation (currently: clock
+    /// reads via `os.time`/`os.clock`).
+    Os,
+    /// Read this plugin's own decrypted secret config values (`secure = true`
+    /// fields) via `halod.config`. Non-secure config values need no permission.
+    SecureStorage,
+    /// Scan, read, or write SMBus/I2C devices (the `smbus` transport backend and
+    /// `pre_scan`). A raw bus grants access to every device on it, so it is an
+    /// explicit grant separate from a plugin's matched-hardware access.
+    Smbus,
+    /// Create/route host audio sinks (`dev.audio`) via the `pactl`-backed sink
+    /// registry. Gates `AudioApi` so plugins cannot spawn host audio modules
+    /// without consent.
+    AudioRouting,
+}
+
+/// Which discovery path a plugin registers into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginKind {
+    /// Declares hardware via `match` and (optionally) device capabilities.
+    #[default]
+    Device,
+    /// Declares RGB effects only; never opens a transport.
+    Effect,
+    /// Instantiated from its own config values (e.g. a server host/port)
+    /// rather than a hardware discovery handle; its children are the
+    /// individual things the remote service reports.
+    Integration,
+}
+
+/// One effect's thumbnail; display-only, the GUI fetches the bytes via `GetPluginAsset`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginEffectAsset {
+    pub id: String,
+    /// Asset name to pass as `GetPluginAsset { name, .. }`.
+    pub thumbnail: String,
+}
+
+/// Where a plugin came from: local disk, or a registered git repo.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginSource {
+    #[default]
+    Local,
+    Repo {
+        slug: String,
+    },
+}
+
+/// The category of an outstanding [`PluginIssue`], driving its localized label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginIssueKind {
+    /// A config-instantiated integration could not open its connection.
+    ConnectFailed,
+    /// A device callback failed at runtime on a background path.
+    RuntimeError,
+    /// The plugin loaded with a non-fatal warning (bad logo, id collision).
+    LoadWarning,
+    /// The plugin's manifest built but failed validation, so it can't be enabled.
+    LoadFailed,
+}
+
+/// A plugin's most recent outstanding issue, persisted daemon-side and surfaced
+/// on the plugin's detail page (and via the sidebar badge) so it survives a
+/// transient toast the user may have missed. `detail` is the full error text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginIssue {
+    pub kind: PluginIssueKind,
+    pub detail: String,
+    pub timestamp_ms: u64,
+}
+
+/// One plugin as shown in the GUI's Plugins screen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginInfo {
+    pub id: String,
+    pub name: String,
+    /// Filesystem path of the script.
+    pub path: String,
+    #[serde(default)]
+    pub plugin_type: PluginKind,
+    /// Human-readable capability labels the plugin declares (e.g. "RGB", "Fan").
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Display names of the RGB effects the plugin declares (device plugins
+    /// may bundle effects alongside their hardware capabilities).
+    #[serde(default)]
+    pub effect_names: Vec<String>,
+    pub enabled: bool,
+    /// Plugin author, as declared in the manifest (empty when unset).
+    #[serde(default)]
+    pub author: String,
+    /// Plugin version string, as declared in the manifest (empty when unset).
+    #[serde(default)]
+    pub version: String,
+    /// Free-text description from the manifest (empty when unset).
+    #[serde(default)]
+    pub description: String,
+    /// Device labels the plugin targets, derived from its declared devices.
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// Declared license, as an SPDX identifier or free-text name (empty when unset).
+    #[serde(default)]
+    pub license: String,
+    /// Every device this plugin declares (empty for an `effect`/`integration` plugin).
+    #[serde(default)]
+    pub devices: Vec<PluginDeviceInfo>,
+    /// Display-only logo asset name, if declared. Fetch via `GetPluginAsset`.
+    #[serde(default)]
+    pub logo: Option<String>,
+    /// Per-effect thumbnail asset names, if declared.
+    #[serde(default)]
+    pub effect_thumbnails: Vec<PluginEffectAsset>,
+    /// Where this plugin came from (local disk vs. a registered git repo).
+    #[serde(default)]
+    pub source: PluginSource,
+    /// Privileged capabilities the manifest declares.
+    #[serde(default)]
+    pub declared_permissions: Vec<Permission>,
+    /// Subset of `declared_permissions` the user has granted. A plugin whose
+    /// declared permissions aren't fully granted is inert (discovered but not
+    /// activated) until the user accepts them.
+    #[serde(default)]
+    pub granted_permissions: Vec<Permission>,
+    /// User-editable config fields the plugin declares (e.g. a server IP).
+    #[serde(default)]
+    pub config_fields: Vec<PluginConfigField>,
+    /// Current values of the plugin's non-secure config fields, keyed by
+    /// field key. Secure fields never appear here — see `secret_set`.
+    #[serde(default)]
+    pub config_values: HashMap<String, String>,
+    /// Whether a secret is currently stored for each secure config field
+    /// (keyed by field key). The GUI shows "set"/"not set"; the secret's
+    /// plaintext never crosses the IPC boundary.
+    #[serde(default)]
+    pub secret_set: HashMap<String, bool>,
+    /// For a `PluginKind::Integration` plugin, whether the *integration
+    /// itself* is enabled — independent of `enabled` (which only governs
+    /// whether its Lua may run at all). Always `true` for a non-integration
+    /// plugin, where the field is meaningless.
+    #[serde(default = "default_true")]
+    pub integration_enabled: bool,
+    /// Whether the user has consented to running this exact script: its content
+    /// hash matches the acknowledged one and every declared permission is
+    /// granted. `false` for a never-acknowledged or since-modified disk plugin
+    /// (which stays inert until re-consented). Always `true` for built-ins.
+    #[serde(default = "default_true")]
+    pub consented: bool,
+    /// Whether the script on disk differs from the version the user last
+    /// consented to (a grant existed but the content hash no longer matches).
+    /// Drives the "this plugin was modified since you allowed it" prompt.
+    #[serde(default)]
+    pub content_changed: bool,
+    /// The plugin package's most recent outstanding issue (device runtime
+    /// failure, load failure, or load warning), if any. Integration connection
+    /// and runtime failures are exposed separately via `integration_issue`.
+    #[serde(default)]
+    pub issue: Option<PluginIssue>,
+    /// For an integration plugin, its current connection/runtime failure.
+    /// Kept separate so operational integration state is surfaced on the
+    /// Integrations page rather than as a plugin package problem.
+    #[serde(default)]
+    pub integration_issue: Option<PluginIssue>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One device a `device`-type plugin declares (see [`PluginKind`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginDeviceInfo {
+    pub vendor: String,
+    pub model: String,
+    /// Display name (the device's `name` override, or `model`).
+    pub name: String,
+    #[serde(default)]
+    pub device_type: Option<DeviceType>,
+}
+
+/// Interpretation hint for a [`PluginConfigField`] value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginConfigFieldKind {
+    #[default]
+    Text,
+    Number,
+}
+
+/// One user-editable setting a plugin declares (mirrors the manifest's
+/// `ConfigFieldDef`, without the `default` — the GUI is only ever shown the
+/// resolved current value via `PluginInfo::config_values`/`secret_set`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfigField {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub kind: PluginConfigFieldKind,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub secure: bool,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -478,6 +975,8 @@ pub struct CoolingState {
     pub fan_curves: Vec<WireFanCurve>,
     #[serde(default)]
     pub preset_curves: Vec<WirePresetCurve>,
+    #[serde(default)]
+    pub config: CoolingConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -487,6 +986,8 @@ pub struct LightingState {
     /// Active profile's saved RGB Lighting selection.
     #[serde(default)]
     pub targets: LightingTargets,
+    #[serde(default)]
+    pub config: RgbConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -496,6 +997,8 @@ pub struct LcdState {
     /// Names of saved custom LCD templates (`lcd/<name>.yaml`), sorted.
     #[serde(default)]
     pub templates: Vec<String>,
+    #[serde(default)]
+    pub config: LcdConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -517,6 +1020,11 @@ pub struct DiscoveryStatus {
     /// can show live progress. Empty when idle or complete.
     #[serde(default)]
     pub detail: String,
+    /// True while a background plugin-update check is in flight, so the radar
+    /// can show a "checking for updates" step. Independent of `phase`: it may
+    /// still be true after device discovery completes.
+    #[serde(default)]
+    pub checking_updates: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -587,6 +1095,51 @@ pub struct WireDevice {
     /// today's behavior.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub control_layout: Vec<CategoryLayout>,
+    /// Set to the owning plugin id when this device *is* an integration's
+    /// root (e.g. the OpenRGB SDK client) rather than a real device — the GUI
+    /// hides it from Home/sidebar and shows it on the Integrations page
+    /// instead. `None` for every other device, including the devices an
+    /// integration exposes as children.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_id: Option<String>,
+    /// Other live devices that may control the same physical hardware. This
+    /// is computed by the daemon for each snapshot and is never persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<DeviceConflictSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictConfidence {
+    Confirmed,
+    Possible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceConflictSummary {
+    pub peer_ids: Vec<String>,
+    pub recommended_id: String,
+    pub confidence: ConflictConfidence,
+    /// Source metadata for every participant. Kept alongside the conflict so
+    /// clients can explain an integration/plugin choice without guessing from
+    /// the device id.
+    #[serde(default)]
+    pub participants: Vec<ConflictParticipant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictParticipant {
+    pub id: String,
+    pub source: ConflictDeviceSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictDeviceSource {
+    #[default]
+    Native,
+    Plugin(String),
+    Integration(String),
 }
 
 fn span_default() -> u8 {
@@ -701,6 +1254,18 @@ pub enum LcdMode {
     Gif,
     Engine,
     Video,
+    EditorPreview,
+}
+
+/// Orthogonal to `LcdMode`: whether the active content is actually rendering.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LcdHealth {
+    #[default]
+    Stable,
+    Starting,
+    Stopping,
+    Failed(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -715,6 +1280,8 @@ pub struct LcdStatus {
     pub video_path: Option<String>,
     #[serde(default)]
     pub raw_streaming: bool,
+    #[serde(default)]
+    pub health: LcdHealth,
 }
 
 /// Which layer the device's DPI is currently managed by.
@@ -963,9 +1530,6 @@ pub struct ChainableChannelInfo {
     pub channel_id: String,
     pub name: String,
     pub max_leds: u32,
-    /// String the UI echoes back as `kind` in `RgbChainAddLink` (e.g.
-    /// `"generic_aura_argb"`).
-    pub link_kind: String,
     pub links: Vec<ChainLinkInfo>,
 }
 
@@ -1057,8 +1621,13 @@ pub struct ChoiceOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Boolean {
     pub key: String,
-    pub label: String,
     pub value: bool,
+    // `label`/`read_only`/`category` default so a plugin's `get_booleans`
+    // callback can return just `{ key, value }`; the device layer backfills the
+    // rest from the manifest's `BooleanDef`.
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
     pub category: String,
@@ -1281,6 +1850,9 @@ pub struct MacroStep {
 /// Upper bounds shared by the GUI editor clamps and the daemon guards.
 pub const MACRO_MAX_STEPS: usize = 512;
 pub const MACRO_MAX_DELAY_MS: u32 = 60_000;
+/// Aggregate ceiling on a macro's total programmed delay, so a macro under the
+/// per-step and step-count limits still can't schedule input for hours.
+pub const MACRO_MAX_TOTAL_MS: u64 = 600_000;
 
 /// Action to execute when a button event fires.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1401,7 +1973,7 @@ mod app_rule_tests {
     #[test]
     fn app_state_defaults_empty_app_rules() {
         let state: AppState = serde_json::from_str("{}").unwrap();
-        assert!(state.app_rules.is_empty());
+        assert!(state.profiles.app_rules.is_empty());
     }
 
     #[test]
@@ -1412,25 +1984,160 @@ mod app_rule_tests {
     }
 
     #[test]
-    fn global_config_seen_tours_round_trip() {
-        let mut cfg = GlobalConfig::default();
+    fn gui_config_seen_tours_round_trip() {
+        let mut cfg = GuiConfig::default();
         cfg.seen_tours.insert("page:home".into());
         cfg.seen_tours.insert("tab:cooling".into());
         let json = serde_json::to_string(&cfg).unwrap();
-        let back: GlobalConfig = serde_json::from_str(&json).unwrap();
+        let back: GuiConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.seen_tours, cfg.seen_tours);
     }
 
     #[test]
-    fn global_config_seen_tours_defaults_empty_for_old_configs() {
-        let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
+    fn gui_config_seen_tours_defaults_empty_for_old_configs() {
+        let cfg: GuiConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.seen_tours.is_empty());
+    }
+
+    #[test]
+    fn cooling_config_defaults() {
+        let c: CoolingConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.fan_curve_enabled, DEFAULT_ENGINE_ENABLED);
+        assert_eq!(c.fan_curve_tick_ms, DEFAULT_FAN_CURVE_TICK_MS);
+        assert_eq!(c.fan_failsafe_duty, DEFAULT_FAN_FAILSAFE_DUTY);
+    }
+
+    #[test]
+    fn rgb_config_defaults() {
+        let c: RgbConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.canvas_enabled, DEFAULT_ENGINE_ENABLED);
+        assert_eq!(c.canvas_fps, DEFAULT_CANVAS_FPS);
+    }
+
+    #[test]
+    fn lcd_config_defaults() {
+        let c: LcdConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.enabled, DEFAULT_ENGINE_ENABLED);
+        assert_eq!(c.fps, DEFAULT_LCD_FPS);
+    }
+
+    #[test]
+    fn gui_config_defaults() {
+        let c: GuiConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.language, DEFAULT_LANGUAGE);
+        assert_eq!(c.close_to_tray, DEFAULT_CLOSE_TO_TRAY);
+        assert_eq!(
+            c.suppress_dependency_warning,
+            DEFAULT_SUPPRESS_DEPENDENCY_WARNING
+        );
+        assert_eq!(c.hide_window_controls, DEFAULT_HIDE_WINDOW_CONTROLS);
+        assert_eq!(c.log_level, DEFAULT_LOG_LEVEL);
+    }
+
+    /// An empty AppState JSON must materialize the manual config defaults through
+    /// the nested `config` fields — the easiest silent regression to introduce.
+    #[test]
+    fn app_state_empty_json_config_defaults() {
+        let state: AppState = serde_json::from_str("{}").unwrap();
+        assert!(state.gui.close_to_tray);
+        assert_eq!(
+            state.cooling.config.fan_failsafe_duty,
+            DEFAULT_FAN_FAILSAFE_DUTY
+        );
+        assert_eq!(state.lighting.config.canvas_fps, DEFAULT_CANVAS_FPS);
+        assert_eq!(state.lcd.config.fps, DEFAULT_LCD_FPS);
+    }
+
+    #[test]
+    fn app_state_regrouped_json_round_trips() {
+        let mut state = AppState::default();
+        state.profiles.active = "gaming".into();
+        state.profiles.available = vec!["default".into(), "gaming".into()];
+        state.gui.language = "it".into();
+        state.gui.seen_tours.insert("page:home".into());
+        state.cooling.config.fan_failsafe_duty = 42;
+        state.lighting.config.canvas_fps = 33;
+        state.lcd.config.enabled = false;
+        state.health.ffmpeg_available = true;
+        let value = serde_json::to_value(&state).unwrap();
+        let back: AppState = serde_json::from_value(value).unwrap();
+        assert_eq!(back.profiles.active, "gaming");
+        assert_eq!(back.profiles.available, state.profiles.available);
+        assert_eq!(back.gui.language, "it");
+        assert_eq!(back.gui.seen_tours, state.gui.seen_tours);
+        assert_eq!(back.cooling.config.fan_failsafe_duty, 42);
+        assert_eq!(back.lighting.config.canvas_fps, 33);
+        assert!(!back.lcd.config.enabled);
+        assert!(back.health.ffmpeg_available);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_detail_and_severity_for_plugin_codes() {
+        let connect = NotificationCode::PluginConnectFailed {
+            plugin: "wled".into(),
+            detail: "127.0.0.1 blocked".into(),
+        };
+        let runtime = NotificationCode::PluginRuntimeError {
+            plugin: "wled".into(),
+            detail: "lua boom".into(),
+        };
+        assert_eq!(connect.detail(), Some("127.0.0.1 blocked"));
+        assert_eq!(runtime.detail(), Some("lua boom"));
+        assert_eq!(connect.severity(), NotificationSeverity::Warning);
+        // A code that carries no modal text has no detail.
+        assert_eq!(
+            NotificationCode::FanStalled { fan: "cpu".into() }.detail(),
+            None
+        );
+    }
+
+    #[test]
+    fn plugin_issue_round_trips_and_info_defaults_none() {
+        let issue = PluginIssue {
+            kind: PluginIssueKind::ConnectFailed,
+            detail: "boom".into(),
+            timestamp_ms: 42,
+        };
+        let back: PluginIssue =
+            serde_json::from_str(&serde_json::to_string(&issue).unwrap()).unwrap();
+        assert_eq!(back, issue);
+        // The kind serializes snake_case for a stable wire form.
+        assert_eq!(
+            serde_json::to_value(&issue).unwrap()["kind"],
+            "connect_failed"
+        );
+        // A PluginInfo payload without `issue` deserializes to None.
+        let info: PluginInfo = serde_json::from_value(serde_json::json!({
+            "id": "p", "name": "P", "path": "", "enabled": true
+        }))
+        .unwrap();
+        assert_eq!(info.issue, None);
+    }
+
+    #[test]
+    fn load_failed_and_skipped_round_trip() {
+        let failed = PluginIssue {
+            kind: PluginIssueKind::LoadFailed,
+            detail: "needs network".into(),
+            timestamp_ms: 1,
+        };
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap()["kind"],
+            "load_failed"
+        );
+        let skipped = SkippedPlugin {
+            path: "/a/b".into(),
+            reason: "bad yaml".into(),
+        };
+        let back: SkippedPlugin =
+            serde_json::from_str(&serde_json::to_string(&skipped).unwrap()).unwrap();
+        assert_eq!(back, skipped);
+    }
 
     #[test]
     fn effect_param_value_steps_round_trips_untagged() {
@@ -1453,6 +2160,26 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         let back: EffectParamValue = serde_json::from_str(&json).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn lcd_upload_stage_serde_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&LcdUploadStage::Done).unwrap(),
+            "\"done\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LcdUploadStage::Failed).unwrap(),
+            "\"failed\""
+        );
+        let p = LcdUploadProgress {
+            device_id: "lcd".into(),
+            stage: LcdUploadStage::Failed,
+            percent: None,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: LcdUploadProgress = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
     }
 
     #[test]
@@ -1844,18 +2571,35 @@ mod default_tests {
     }
 
     #[test]
-    fn global_config_defaults_close_to_tray_when_omitted() {
-        let c: GlobalConfig = serde_json::from_str(
-            r#"{"engine_fan_curve_enabled":true,"engine_fan_curve_tick_ms":2000,
-                "engine_canvas_enabled":true,"engine_canvas_fps":20,
-                "engine_lcd_enabled":true,"engine_lcd_fps":20,
-                "fan_failsafe_duty":75,"log_level":"info"}"#,
-        )
-        .unwrap();
+    fn gui_config_defaults_close_to_tray_when_omitted() {
+        let c: GuiConfig = serde_json::from_str(r#"{"language":"en","log_level":"info"}"#).unwrap();
         assert!(c.close_to_tray, "default_close_to_tray");
         assert!(
             !c.suppress_dependency_warning,
             "default_suppress_dependency_warning"
+        );
+    }
+
+    #[test]
+    fn gui_config_defaults_plugin_downloads_to_unset_when_omitted() {
+        let c: GuiConfig = serde_json::from_str(r#"{"language":"en","log_level":"info"}"#).unwrap();
+        assert_eq!(c.plugin_downloads, PluginDownloadConsent::Unset);
+    }
+
+    #[test]
+    fn plugin_download_consent_round_trips() {
+        for v in [
+            PluginDownloadConsent::Unset,
+            PluginDownloadConsent::Allowed,
+            PluginDownloadConsent::Denied,
+        ] {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: PluginDownloadConsent = serde_json::from_str(&json).unwrap();
+            assert_eq!(v, back);
+        }
+        assert_eq!(
+            serde_json::to_string(&PluginDownloadConsent::Allowed).unwrap(),
+            "\"allowed\""
         );
     }
 
@@ -1884,6 +2628,57 @@ mod default_tests {
                 "should reject {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn validate_logo_dimensions_accepts_square_and_mild_rectangles() {
+        assert!(validate_logo_dimensions(64, 64).is_ok());
+        assert!(validate_logo_dimensions(MAX_PLUGIN_LOGO_DIM, MAX_PLUGIN_LOGO_DIM).is_ok());
+        // Exactly the aspect bound is allowed; just past it is not.
+        assert!(validate_logo_dimensions(200, 100).is_ok());
+        assert!(validate_logo_dimensions(100, 200).is_ok());
+        assert!(validate_logo_dimensions(201, 100).is_err());
+    }
+
+    #[test]
+    fn validate_logo_dimensions_rejects_zero_oversize_and_banners() {
+        assert!(validate_logo_dimensions(0, 64).is_err());
+        assert!(validate_logo_dimensions(64, 0).is_err());
+        assert!(validate_logo_dimensions(MAX_PLUGIN_LOGO_DIM + 1, 64).is_err());
+        assert!(validate_logo_dimensions(64, MAX_PLUGIN_LOGO_DIM + 1).is_err());
+        assert!(validate_logo_dimensions(500, 50).is_err());
+    }
+
+    #[test]
+    fn validate_image_upload_size_gates_at_the_ceiling() {
+        assert!(validate_image_upload_size(0).is_ok());
+        assert!(validate_image_upload_size(MAX_LCD_IMAGE_BYTES).is_ok());
+        assert!(validate_image_upload_size(MAX_LCD_IMAGE_BYTES + 1).is_err());
+        assert!(validate_image_upload_size(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn canvas_state_sanitize_cleans_nonfinite_and_caps_zones() {
+        let mut cs = CanvasState {
+            placed_zones: (0..MAX_PLACED_ZONES + 10)
+                .map(|_| PlacedZone::default())
+                .collect(),
+            ..CanvasState::default()
+        };
+        cs.placed_zones[0].x = f32::NAN;
+        cs.placed_zones[0].rotation = f32::INFINITY;
+        cs.sanitize();
+        assert_eq!(cs.placed_zones.len(), MAX_PLACED_ZONES);
+        assert!(cs.placed_zones[0].x.is_finite());
+        assert!(cs.placed_zones[0].rotation.is_finite());
+    }
+
+    #[test]
+    fn max_lcd_image_base64_fits_in_one_ipc_frame() {
+        // An accepted image's base64 (≈4/3) plus envelope must fit the frame cap,
+        // or the upload the size check "passes" would be rejected at the wire.
+        let base64_len = MAX_LCD_IMAGE_BYTES.div_ceil(3) * 4;
+        assert!(base64_len < crate::frames::MAX_PAYLOAD as u64);
     }
 
     #[test]

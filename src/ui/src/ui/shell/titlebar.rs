@@ -65,6 +65,9 @@ impl WinCtl {
 /// Which side of the title bar the window controls sit on.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Side {
+    // Only produced by the GNOME (Linux) button-layout parse; the layout code
+    // still matches it on every platform, so it is never constructed on Windows.
+    #[allow(dead_code)]
     Left,
     Right,
 }
@@ -173,6 +176,9 @@ fn detect_native_chrome() -> ChromeConfig {
 /// that aren't window controls (`appmenu`, `menu`, `icon`, `spacer`, …) are
 /// ignored. A layout with controls on the right wins the side; otherwise the left
 /// group is used. An empty result means "no controls" — a valid preference.
+// GNOME desktop layout parsing — only used by the Linux native-chrome detection
+// (and its cross-platform unit tests).
+#[cfg(any(target_os = "linux", test))]
 fn parse_gnome_button_layout(layout: &str) -> (Side, Vec<WinCtl>) {
     let (left, right) = layout.split_once(':').unwrap_or((layout, ""));
     let group = |g: &str| -> Vec<WinCtl> {
@@ -222,10 +228,10 @@ fn gnome_button_layout() -> Option<String> {
 /// (control, hit-rect) pairs and the horizontal span `(min_x, max_x)` the group
 /// occupies, or `None` when there are no controls (so other chrome — the logo and
 /// profile button — can be kept clear of them).
-fn window_controls_layout(
-    bar: Rect,
-    cfg: &ChromeConfig,
-) -> (Vec<(WinCtl, Rect)>, Option<(f32, f32)>) {
+type WindowControlRects = Vec<(WinCtl, Rect)>;
+type HorizontalSpan = Option<(f32, f32)>;
+
+fn window_controls_layout(bar: Rect, cfg: &ChromeConfig) -> (WindowControlRects, HorizontalSpan) {
     let n = cfg.buttons.len();
     if n == 0 {
         return (Vec::new(), None);
@@ -390,13 +396,7 @@ fn paint_windows(p: &egui::Painter, rect: Rect, ctl: WinCtl, hovered: bool, maxi
     }
 }
 
-pub fn title_bar(
-    ui: &mut egui::Ui,
-    state: &AppState,
-    cmd: &CommandTx,
-    profile_ui: &mut profile::ProfileUi,
-    page: &mut Page,
-) {
+fn title_bar_chrome(ui: &mut egui::Ui, state: &AppState) -> (ChromeConfig, Option<(f32, f32)>) {
     let rect = ui.max_rect();
 
     // Drag the whole bar to move the window; double-click toggles maximize.
@@ -424,7 +424,7 @@ pub fn title_bar(
     // desktop: flat caption buttons on Windows, circular buttons elsewhere; on
     // GNOME the `button-layout` preference decides which buttons show, their order
     // and side. The user can hide them entirely (tiling window managers).
-    let cfg = ChromeConfig::resolve(state.global_config.hide_window_controls);
+    let cfg = ChromeConfig::resolve(state.gui.hide_window_controls);
     let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
     let (buttons, ctl_span) = window_controls_layout(rect, &cfg);
     for (ctl, btn_rect) in &buttons {
@@ -465,6 +465,26 @@ pub fn title_bar(
         theme::bold(14.0),
         theme::hex(0x9b7fe0),
     );
+
+    (cfg, ctl_span)
+}
+
+/// The title bar without the profile button — window controls and logo only.
+/// Used by the discovery radar overlay, which has no active profile to show.
+pub fn title_bar_plain(ui: &mut egui::Ui, state: &AppState) {
+    title_bar_chrome(ui, state);
+}
+
+pub fn title_bar(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    cmd: &CommandTx,
+    profile_ui: &mut profile::ProfileUi,
+    page: &mut Page,
+) {
+    let rect = ui.max_rect();
+    let cy = rect.center().y;
+    let (cfg, ctl_span) = title_bar_chrome(ui, state);
 
     // Profile button — right edge sits clear of any right-side window controls,
     // otherwise it hugs the right edge.

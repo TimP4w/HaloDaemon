@@ -160,13 +160,6 @@ pub enum LcdMediaTab {
 /// One decoded GIF frame: `(rgba_bytes, width, height, delay_ms)`.
 pub type GifFrame = (Vec<u8>, usize, usize, u32);
 
-/// Animated-GIF frames as textures, for the editor's Image-widget preview.
-pub struct GifTex {
-    pub frames: Vec<egui::TextureHandle>,
-    pub delays: Vec<f64>,
-    pub total_ms: f64,
-}
-
 /// What a completed native file pick applies to.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum PickerTarget {
@@ -240,7 +233,6 @@ pub struct LcdTab {
     pub gif_advance_at: Option<f64>,
     /// Editor Image-widget GIF frames keyed by filename. `None` marks a file
     /// that isn't an animated GIF (or failed) so it isn't retried.
-    pub gif_widget_tex: HashMap<String, Option<GifTex>>,
     /// Editor state for the "custom" template's stage + inspector.
     pub editor: lcd::editor::EditorState,
 }
@@ -329,6 +321,9 @@ pub struct TabCtx<'a> {
     pub lcd_preview: Option<crate::runtime::ipc::DecodedFrame>,
     /// Stage/percent of the in-flight LCD image upload; `None` when idle.
     pub lcd_upload: Option<halod_shared::types::LcdUploadProgress>,
+    /// A terminal (`Done`/`Failed`) upload signal, delivered as a one-shot edge:
+    /// `Some` only on the frame it arrives. Clears the upload/preview spinners.
+    pub lcd_upload_terminal: Option<halod_shared::types::LcdUploadProgress>,
     /// A just-loaded named LCD template, consumed once by the open editor.
     pub lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
     /// Latest on-demand LCD editor render (per-widget sprites) for the open
@@ -341,7 +336,22 @@ pub struct TabCtx<'a> {
     pub write_rate_history: Option<&'a std::collections::VecDeque<f32>>,
 }
 
+/// Whether `terminal` is a one-shot upload result (`Done`/`Failed`) for
+/// `device_id` — the signal the LCD spinner gates clear on.
+pub(super) fn is_terminal_upload_for(
+    terminal: Option<&halod_shared::types::LcdUploadProgress>,
+    device_id: &str,
+) -> bool {
+    use halod_shared::types::LcdUploadStage;
+    matches!(
+        terminal,
+        Some(p) if p.device_id == device_id
+            && matches!(p.stage, LcdUploadStage::Done | LcdUploadStage::Failed)
+    )
+}
+
 /// Shared empty LED-color map for contexts without live canvas frames (tests).
+#[cfg(test)]
 pub fn empty_led_colors() -> &'static crate::ui::screens::canvas::LedColorMap {
     static EMPTY: std::sync::OnceLock<crate::ui::screens::canvas::LedColorMap> =
         std::sync::OnceLock::new();
@@ -369,6 +379,7 @@ pub fn show(
     lcd_images: &[String],
     lcd_preview: Option<crate::runtime::ipc::DecodedFrame>,
     lcd_upload: Option<halod_shared::types::LcdUploadProgress>,
+    lcd_upload_terminal: Option<halod_shared::types::LcdUploadProgress>,
     lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
     lcd_editor_render: Option<crate::runtime::ipc::DecodedEditorRender>,
     led_colors: &crate::ui::screens::canvas::LedColorMap,
@@ -430,6 +441,7 @@ pub fn show(
                     lcd_images,
                     lcd_preview,
                     lcd_upload,
+                    lcd_upload_terminal,
                     lcd_template,
                     lcd_editor_render,
                     led_colors,
@@ -581,6 +593,7 @@ mod tests {
                 0.0,
                 None,
                 &[],
+                None,
                 None,
                 None,
                 None,

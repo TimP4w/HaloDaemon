@@ -1,0 +1,54 @@
+canvas:
+  title: Effects Canvas
+  subtitle: Create different effects and assign them to device lighting zones
+  playing: playing
+  paused: paused
+  drag_hint: drag to reposition · scroll to zoom
+  mode_frame: Frame
+  mode_leds: LEDs
+  done: Done
+  cancel: Cancel
+  off: "Off"
+  clear: Clear
+  select_all: Select all
+  untitled: Untitled
+  designer: Designer
+  synced: SYNCED
+  effect_caps: EFFECT
+  assigned_zones: ASSIGNED ZONES
+  unit_zone: zone
+  unit_zones: zones
+  unit_device: device
+  unit_devices: devices
+  overflow_more: "+%{n} more"
+  assign_zones_title: "Assign zones · %{name}"
+  assign_zones_sub: "%{eff} · %{n} %{zones} assigned"
+  reassign_hint: Zones marked ● are used by another instance. Select one to reassign it here.
+  new_instance_title: New effect instance
+  fps_title: Canvas frame rate
+  fps_desc: How often the canvas engine samples and pushes frames.
+  frame_rate: Frame rate
+  sampling: Sampling
+  sampling_desc: Area around each LED used to calculate its average color.
+  sampling_area: Sampling area
+  roll_zone: Roll zone
+  unroll_zone: Unroll zone
+  effect_instances: Effect layers
+  new_button: "+ Add layer"
+  no_instances: 'No effect layers yet. Add one to start building your lighting scene.'
+  default_effect_title: Base layer
+  default_effect_hint: Zones without a specific layer use this effect.
+  edit_zones: Edit zones →
+  add_zones: "+ Add zones to this layer"
+  edit_in_designer: Edit in designer
+  delete_instance: Delete instance
+  effect_param_speed: Speed
+  effect_param_scale: Scale
+  effect_param_thickness: Thickness
+  effect_param_cells: Cells
+  effect_param_interval: Interval (s)
+  effect_param_decay: Decay (s)
+  effect_param_random_color: Random color per flash
+  effect_enum_fill:
+    bars: Bars
+    solid: Solid

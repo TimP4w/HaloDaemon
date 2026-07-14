@@ -141,8 +141,6 @@ pub(super) fn canvas_view(
                         .interact_pointer_pos()
                         .unwrap_or_else(|| norm_to_screen(norm, canvas_rect));
                     canvas_ui.drag = Some(DragState {
-                        device_id: dev_id,
-                        zone_id,
                         handle,
                         orig,
                         group,
@@ -205,7 +203,7 @@ pub(super) fn canvas_view(
     if resp.drag_stopped() {
         if canvas_ui.drag.is_some() {
             for (_, (c, _)) in canvas_ui.pending.move_zones.drain() {
-                crate::domain::actions::canvas::send(cmd, c);
+                crate::runtime::ipc::send(cmd, c);
             }
             // Keep drag_zones as an optimistic override; prune_drag_zones drops
             // it once the daemon broadcast reflects the new position.
@@ -218,7 +216,13 @@ pub(super) fn canvas_view(
         if let Some(norm) = ptr_norm {
             // A click on the sole selection's top-right remove badge deletes it.
             if let Some((d, z)) = badge_hit(canvas_ui, state, norm, canvas_rect) {
-                crate::domain::actions::canvas::remove_zone(cmd, &d, &z);
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::CanvasRemoveZone {
+                        device_id: d,
+                        zone_id: z,
+                    },
+                );
                 canvas_ui.selected.clear();
             } else {
                 let hit = hit_test(norm, &state.lighting.canvas.placed_zones, canvas_rect);
@@ -297,18 +301,42 @@ pub(super) fn canvas_view(
         );
     }
 
-    if state.global_config.engine_canvas_enabled {
+    if state.lighting.config.canvas_enabled {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(50));
     }
 }
 
 // ── LED render-mode toggle ──────────────────────────────────────────────────────
+/// Per-segment width for the mode toggle: at least `MODE_SEG_MIN`, but widened so
+/// the widest label fits with padding (localized labels — "Fotogramma" — are far
+/// wider than the English "Frame" the minimum was sized for).
+fn mode_seg_width(max_label_w: f32) -> f32 {
+    const MODE_SEG_MIN: f32 = 60.0;
+    const MODE_SEG_PAD: f32 = 16.0;
+    MODE_SEG_MIN.max(max_label_w + MODE_SEG_PAD * 2.0)
+}
+
 fn mode_toggle(ui: &mut egui::Ui, canvas_rect: Rect, canvas_ui: &mut CanvasUi) {
-    const SEG_W: f32 = 60.0;
     const H: f32 = 26.0;
+    let font = theme::body(11.0);
+    let segments = [
+        (t!("canvas.mode_frame"), LedMode::Frame),
+        (t!("canvas.mode_leds"), LedMode::Leds),
+    ];
+    let max_label_w = segments
+        .iter()
+        .map(|(label, _)| {
+            ui.painter()
+                .layout_no_wrap(label.to_string(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    let seg_w = mode_seg_width(max_label_w);
+
     let origin = Pos2::new(canvas_rect.left() + 12.0, canvas_rect.top() + 12.0);
-    let bg = Rect::from_min_size(origin, Vec2::new(SEG_W * 2.0, H));
+    let bg = Rect::from_min_size(origin, Vec2::new(seg_w * 2.0, H));
     let p = ui.painter();
     p.rect_filled(bg, 8.0, a(theme::hex(0x0b0e14), 0.85));
     p.rect_stroke(
@@ -318,16 +346,10 @@ fn mode_toggle(ui: &mut egui::Ui, canvas_rect: Rect, canvas_ui: &mut CanvasUi) {
         egui::StrokeKind::Middle,
     );
 
-    for (i, (label, mode)) in [
-        (t!("canvas.mode_frame"), LedMode::Frame),
-        (t!("canvas.mode_leds"), LedMode::Leds),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (i, (label, mode)) in segments.into_iter().enumerate() {
         let seg = Rect::from_min_size(
-            Pos2::new(origin.x + i as f32 * SEG_W, origin.y),
-            Vec2::new(SEG_W, H),
+            Pos2::new(origin.x + i as f32 * seg_w, origin.y),
+            Vec2::new(seg_w, H),
         );
         let resp = ui.interact(seg, egui::Id::new(("led_mode", i)), Sense::click());
         let active = canvas_ui.led_mode == mode;
@@ -341,7 +363,7 @@ fn mode_toggle(ui: &mut egui::Ui, canvas_rect: Rect, canvas_ui: &mut CanvasUi) {
             seg.center(),
             Align2::CENTER_CENTER,
             label,
-            theme::body(11.0),
+            font.clone(),
             if active { theme::CYAN } else { theme::TEXT_DIM },
         );
         if resp.clicked() {
@@ -568,6 +590,18 @@ mod tests {
     use crate::ui::screens::canvas::test_fixtures::{r, z};
 
     const ROTATE_DIST: f32 = 20.0;
+
+    #[test]
+    fn mode_seg_width_holds_minimum_for_short_labels() {
+        // A short label ("Frame") stays at the 60px minimum.
+        assert_eq!(mode_seg_width(24.0), 60.0);
+    }
+
+    #[test]
+    fn mode_seg_width_grows_for_a_wide_label() {
+        // A wide label ("Fotogramma") widens the segment to fit it plus padding.
+        assert_eq!(mode_seg_width(70.0), 70.0 + 16.0 * 2.0);
+    }
 
     #[test]
     fn rotation_handle_above_at_zero() {

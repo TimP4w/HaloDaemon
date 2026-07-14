@@ -20,7 +20,8 @@ const ADD_LEDS_DEFAULT: u32 = 30;
 
 /// Topology choices in the Add-link form: (constructor, LED-count divisor).
 /// Display text comes from `topology_label()`, keyed off the variant.
-const TOPOLOGY_CHOICES: &[(fn() -> ZoneTopology, u32)] = &[
+type TopologyChoice = (fn() -> ZoneTopology, u32);
+const TOPOLOGY_CHOICES: &[TopologyChoice] = &[
     (|| ZoneTopology::Linear, 1),
     (|| ZoneTopology::Ring, 1),
     (|| ZoneTopology::Rings { count: 2 }, 2),
@@ -274,10 +275,12 @@ fn channel_header(
         ui.ctx().data_mut(|d| d.insert_temp(flash_key, true));
         ui.ctx()
             .data_mut(|d| d.insert_temp(flash_at_key, now + 2.4));
-        crate::domain::actions::lighting::rgb_chain_detect_channel(
+        crate::runtime::ipc::send(
             ctx.cmd,
-            dev_id,
-            &channel.channel_id,
+            halod_shared::commands::DaemonCommand::RgbChainDetectChannel {
+                id: dev_id.to_string(),
+                channel_id: channel.channel_id.clone(),
+            },
         );
     }
 
@@ -455,10 +458,12 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &ChainLinkInfo) {
         if resp.lost_focus() {
             let trimmed = buf.trim().to_string();
             if !trimmed.is_empty() && trimmed != link.name {
-                crate::domain::actions::devices::rename_device(
+                crate::runtime::ipc::send(
                     ctx.cmd,
-                    &link.child_device_id,
-                    &trimmed,
+                    halod_shared::commands::DaemonCommand::SetDeviceName {
+                        device_id: link.child_device_id.clone(),
+                        name: trimmed,
+                    },
                 );
             }
         }
@@ -547,11 +552,13 @@ fn editable_right(
         icon_col,
     );
     if btn_resp.clicked() {
-        crate::domain::actions::lighting::rgb_chain_remove_link(
+        crate::runtime::ipc::send(
             ctx.cmd,
-            dev_id,
-            channel_id,
-            &link.child_device_id,
+            halod_shared::commands::DaemonCommand::RgbChainRemoveLink {
+                id: dev_id.to_string(),
+                channel_id: channel_id.to_string(),
+                child_device_id: link.child_device_id.clone(),
+            },
         );
     }
 
@@ -718,14 +725,15 @@ fn add_link_panel(
                     .clicked()
                         && can_add
                     {
-                        crate::domain::actions::lighting::rgb_chain_add_link(
+                        crate::runtime::ipc::send(
                             ctx.cmd,
-                            dev_id,
-                            &channel.channel_id,
-                            name.trim(),
-                            leds,
-                            topology_from_idx(topo_idx),
-                            Some(channel.link_kind.clone()),
+                            halod_shared::commands::DaemonCommand::RgbChainAddLink {
+                                id: dev_id.to_string(),
+                                channel_id: channel.channel_id.clone(),
+                                name: name.trim().to_string(),
+                                led_count: leds,
+                                topology: topology_from_idx(topo_idx),
+                            },
                         );
                         ui.ctx().data_mut(|d| d.insert_temp(open_key, false));
                     }
@@ -906,7 +914,6 @@ mod tests {
                     channel_id: "h1".into(),
                     name: "Header 1".into(),
                     max_leds: 120,
-                    link_kind: "generic".into(),
                     links: vec![ChainLinkInfo {
                         child_device_id: "child1".into(),
                         name: "Strip".into(),
@@ -922,6 +929,8 @@ mod tests {
             transport: None,
             write_rate: Default::default(),
             control_layout: Vec::new(),
+            integration_id: None,
+            conflict: None,
         }
     }
 
@@ -964,6 +973,7 @@ mod tests {
                             lcd_images: &[],
                             lcd_preview: None,
                             lcd_upload: None,
+                            lcd_upload_terminal: None,
                             lcd_template: None,
                             lcd_editor_render: None,
                             led_colors: crate::ui::screens::device::empty_led_colors(),

@@ -5,5 +5,6 @@ pub mod focus_watcher;
 pub mod running_apps;
 pub mod state;
 pub mod usecases;
+pub mod validate;
 
 pub use state::FocusState;

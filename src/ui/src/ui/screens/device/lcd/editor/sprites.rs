@@ -26,7 +26,14 @@ pub(super) fn request_editor_render(ui: &egui::Ui, ctx: &TabCtx, st: &mut Device
     }
     ed.last_render_req = ctx.time;
     let known = known_signatures(&ed.sprite_tex);
-    crate::domain::actions::lcd::render_lcd_editor(ctx.cmd, id, ed.def.clone(), known);
+    crate::runtime::ipc::send(
+        ctx.cmd,
+        halod_shared::commands::DaemonCommand::RenderLcdEditor {
+            device_id: id.to_string(),
+            def: ed.def.clone(),
+            known,
+        },
+    );
 }
 
 /// Build the `known` map to send with a render request: every cached
@@ -42,18 +49,9 @@ pub(super) fn known_signatures(
 
 /// Which cached texture ids survive a delta render: an id in `signatures`
 /// stays (its texture is either freshly uploaded this frame or still valid);
-/// anything else was dropped from the def and is evicted. When `signatures`
-/// is empty (a legacy full-replace reply), fall back to the ids present in
-/// `sprites` — the reply IS the complete set. Pure so it's unit-tested.
-pub(super) fn retained_sprite_ids<'a>(
-    sprites: &'a [crate::runtime::ipc::DecodedSprite],
-    signatures: &'a [(String, u64)],
-) -> std::collections::HashSet<&'a str> {
-    if signatures.is_empty() {
-        sprites.iter().map(|s| s.id.as_str()).collect()
-    } else {
-        signatures.iter().map(|(id, _)| id.as_str()).collect()
-    }
+/// anything else was dropped from the def and is evicted.
+pub(super) fn retained_sprite_ids(signatures: &[(String, u64)]) -> std::collections::HashSet<&str> {
+    signatures.iter().map(|(id, _)| id.as_str()).collect()
 }
 
 /// Upload or refresh a texture for each changed widget sprite, cached by
@@ -84,7 +82,7 @@ pub(super) fn ensure_sprite_textures(
                 .insert(s.id.clone(), (s.signature, tex));
         }
     }
-    let keep = retained_sprite_ids(&render.sprites, &render.signatures);
+    let keep = retained_sprite_ids(&render.signatures);
     st.lcd
         .editor
         .sprite_tex
@@ -186,16 +184,6 @@ mod tests {
         egui_ctx.load_texture(name, img, egui::TextureOptions::LINEAR)
     }
 
-    fn decoded_sprite(id: &str, signature: u64) -> crate::runtime::ipc::DecodedSprite {
-        crate::runtime::ipc::DecodedSprite {
-            id: id.to_string(),
-            signature,
-            w: 1,
-            h: 1,
-            rgba: vec![255, 255, 255, 255],
-        }
-    }
-
     #[test]
     fn known_signatures_reflects_cached_texture_ids_and_sigs() {
         let egui_ctx = egui::Context::default();
@@ -210,20 +198,10 @@ mod tests {
 
     #[test]
     fn retained_sprite_ids_uses_signatures_when_present() {
-        let sprites = vec![decoded_sprite("a", 5)];
         let signatures = vec![("a".to_string(), 5), ("b".to_string(), 9)];
         // "b" wasn't in `sprites` (unchanged this tick) but is still current —
         // its cached texture must be retained.
-        let keep = retained_sprite_ids(&sprites, &signatures);
-        assert!(keep.contains("a"));
-        assert!(keep.contains("b"));
-        assert_eq!(keep.len(), 2);
-    }
-
-    #[test]
-    fn retained_sprite_ids_falls_back_to_sprites_when_signatures_empty() {
-        let sprites = vec![decoded_sprite("a", 5), decoded_sprite("b", 9)];
-        let keep = retained_sprite_ids(&sprites, &[]);
+        let keep = retained_sprite_ids(&signatures);
         assert!(keep.contains("a"));
         assert!(keep.contains("b"));
         assert_eq!(keep.len(), 2);

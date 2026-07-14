@@ -23,7 +23,7 @@ use tokio::sync::Mutex as TokioMutex;
 use halod_shared::types::{ChainLinkInfo, ChainableChannelInfo, RgbColor, ZoneTopology};
 
 use crate::drivers::vendors::generic::devices::generic_argb::GenericArgb;
-use crate::drivers::{ChainLinkKind, ChainLinkSpec, Device};
+use crate::drivers::{ChainLinkSpec, Device};
 use crate::registry::config::ChainLinkRecord;
 
 #[derive(Debug, Clone)]
@@ -195,7 +195,6 @@ pub trait ChainHub: Send + Sync + 'static {
 /// [`crate::drivers::ChainCapability`] impls here.
 pub struct ChainHost {
     adapter: Arc<dyn ChainAdapter>,
-    link_kind: ChainLinkKind,
     /// `std::sync::Mutex`: operations never cross `.await` while holding it.
     pub(crate) state: Mutex<HashMap<String, ChannelChainState>>,
     /// Every device the host knows about; `TokioMutex` since `serialize()` reads it async.
@@ -204,14 +203,13 @@ pub struct ChainHost {
 
 impl ChainHost {
     /// Build a host wrapping `adapter`, pre-seeded with an empty chain per channel.
-    pub fn new(adapter: Arc<dyn ChainAdapter>, link_kind: ChainLinkKind) -> Arc<Self> {
+    pub fn new(adapter: Arc<dyn ChainAdapter>) -> Arc<Self> {
         let mut state: HashMap<String, ChannelChainState> = HashMap::new();
         for d in adapter.channels() {
             state.insert(d.channel_id, ChannelChainState::default());
         }
         Arc::new(Self {
             adapter,
-            link_kind,
             state: Mutex::new(state),
             children: TokioMutex::new(Vec::new()),
         })
@@ -234,13 +232,7 @@ impl ChainHost {
             .map(|d| {
                 let empty = ChannelChainState::default();
                 let chain = state.get(&d.channel_id).unwrap_or(&empty);
-                channel_info(
-                    &d.channel_id,
-                    &d.display_name,
-                    d.max_leds,
-                    self.link_kind.0,
-                    chain,
-                )
+                channel_info(&d.channel_id, &d.display_name, d.max_leds, chain)
             })
             .collect()
     }
@@ -299,7 +291,6 @@ impl ChainHost {
 
     /// Append a new user-added chain link, spawn its child device, register it
     /// in `app.devices` and return the new child's id. Validation:
-    /// - `spec.kind` must match the host's declared kind
     /// - the channel must exist
     /// - `led_count` must fit within remaining budget
     /// - `led_count` must satisfy the topology's divisibility constraint
@@ -309,13 +300,6 @@ impl ChainHost {
         channel_id: &str,
         spec: ChainLinkSpec,
     ) -> Result<(String, Arc<dyn Device>)> {
-        if spec.kind != self.link_kind {
-            anyhow::bail!(
-                "this parent accepts {} chain links, got {}",
-                self.link_kind,
-                spec.kind
-            );
-        }
         let new_id = format!(
             "{}_chain_{channel_id}_{}",
             self.adapter.parent_id(),
@@ -546,14 +530,12 @@ pub fn channel_info(
     channel_id: &str,
     name: &str,
     max_leds: u32,
-    link_kind: &str,
     state: &ChannelChainState,
 ) -> ChainableChannelInfo {
     ChainableChannelInfo {
         channel_id: channel_id.to_string(),
         name: name.to_string(),
         max_leds,
-        link_kind: link_kind.to_string(),
         links: state.links.iter().map(|l| l.info()).collect(),
     }
 }
@@ -590,7 +572,6 @@ pub fn validate_led_count(topology: &ZoneTopology, led_count: u32) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::CHAIN_LINK_KIND_AURA_ARGB;
 
     fn link(id: &str, count: u32, locked: bool) -> ChainLinkRuntime {
         ChainLinkRuntime::new(
@@ -733,7 +714,7 @@ mod tests {
         let mut state = ChannelChainState::default();
         state.append(link("a", 24, true));
         state.append(link("b", 30, false));
-        let info = channel_info("ch0", "Channel 1", 120, "generic_nzxt_argb", &state);
+        let info = channel_info("ch0", "Channel 1", 120, &state);
         assert_eq!(info.channel_id, "ch0");
         assert_eq!(info.links.len(), 2);
         assert!(info.links[0].locked);
@@ -777,7 +758,7 @@ mod tests {
             }],
             last_written: Mutex::new(Vec::new()),
         });
-        let host = ChainHost::new(adapter.clone(), CHAIN_LINK_KIND_AURA_ARGB);
+        let host = ChainHost::new(adapter.clone());
         (host, adapter)
     }
 
@@ -937,7 +918,6 @@ mod tests {
     async fn add_link_uses_supplied_name_not_child_default() {
         let host = stub_parts().0;
         let spec = ChainLinkSpec {
-            kind: CHAIN_LINK_KIND_AURA_ARGB,
             name: "Top Strip".to_string(),
             topology: ZoneTopology::Linear,
             led_count: 10,

@@ -87,7 +87,14 @@ fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
             },
             |ui| {
                 if !b.read_only && widgets::toggle(ui, b.value) != b.value {
-                    crate::domain::actions::devices::set_boolean(ctx.cmd, id, &b.key, !b.value);
+                    crate::runtime::ipc::send(
+                        ctx.cmd,
+                        halod_shared::commands::DaemonCommand::SetBoolean {
+                            id: id.to_string(),
+                            key: b.key.clone(),
+                            value: !b.value,
+                        },
+                    );
                 }
             },
         );
@@ -160,8 +167,12 @@ fn slot_row(
                 )
                 .clicked()
                 {
-                    crate::domain::actions::devices::onboard_profile_switch(
-                        ctx.cmd, id, slot.index,
+                    crate::runtime::ipc::send(
+                        ctx.cmd,
+                        halod_shared::commands::DaemonCommand::OnboardProfileSwitch {
+                            id: id.to_string(),
+                            slot: slot.index,
+                        },
                     );
                 }
             }
@@ -179,11 +190,13 @@ fn slot_row(
                 )
                 .clicked()
                 {
-                    crate::domain::actions::devices::onboard_profile_set_enabled(
+                    crate::runtime::ipc::send(
                         ctx.cmd,
-                        id,
-                        slot.index,
-                        enabled_after,
+                        halod_shared::commands::DaemonCommand::OnboardProfileSetEnabled {
+                            id: id.to_string(),
+                            slot: slot.index,
+                            enabled: enabled_after,
+                        },
                     );
                 }
             }
@@ -197,7 +210,13 @@ fn slot_row(
                 )
                 .clicked()
             {
-                crate::domain::actions::devices::onboard_profile_restore(ctx.cmd, id, slot.index);
+                crate::runtime::ipc::send(
+                    ctx.cmd,
+                    halod_shared::commands::DaemonCommand::OnboardProfileRestore {
+                        id: id.to_string(),
+                        slot: slot.index,
+                    },
+                );
             }
         });
     });

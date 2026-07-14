@@ -19,16 +19,9 @@ impl HostMetricsBackend for WindowsMetrics {
 }
 
 fn read_blocking() -> HostMetrics {
-    use wmi::{COMLibrary, Variant, WMIConnection};
+    use wmi::{Variant, WMIConnection};
 
-    let com = match COMLibrary::new() {
-        Ok(c) => c,
-        Err(e) => {
-            log::debug!("[ComputerDevice] metrics COM init failed: {e}");
-            return HostMetrics::default();
-        }
-    };
-    let conn = match WMIConnection::new(com) {
+    let conn = match WMIConnection::new() {
         Ok(c) => c,
         Err(e) => {
             log::debug!("[ComputerDevice] metrics WMI connect failed: {e}");

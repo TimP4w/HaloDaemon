@@ -26,6 +26,8 @@ pub enum Page {
     Cooling,
     Device(String),
     Settings,
+    Plugins,
+    Integrations,
     Profile(String),
 }
 

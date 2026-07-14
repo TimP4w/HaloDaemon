@@ -1,0 +1,123 @@
+plugins:
+  title: Plugins
+  subtitle: Device plugins add hardware support without rebuilding the daemon.
+  counts: "%{count} scripts · %{active} active"
+  empty_title: No plugins installed
+  empty_hint: Add a Lua plugin script to extend HaloDaemon with new devices.
+  add: Add plugin
+  # Plugin repositories
+  repos_title: Repositories
+  repos_check_updates: Check for updates
+  repos_checking: Checking for updates…
+  repos_updates_disabled: Update checks are off. Turn on plugin downloads in Settings to check for updates.
+  repos_url_hint: Git URL (https://...)
+  repos_branch_hint: Branch (optional)
+  repos_branch_label: BRANCH
+  repos_branch_default: Default branch
+  repos_branch_loading: Loading branches…
+  repos_branch_enter_url: Enter a URL first
+  repos_add: Add
+  repos_add_title: Add repository
+  repos_add_sub: Connect HaloDaemon to a remote Git repository to browse, install, and update its plugins.
+  repos_empty: No plugin repositories registered.
+  repos_update: Update
+  repos_repair: Force pull
+  repos_repair_title: Force pull plugin?
+  repos_repair_body: This fetches the repository and restores only the %{name} directory from the remote version. Local changes inside that plugin directory will be lost; sibling plugins are untouched.
+  repos_remove: Remove repository
+  repos_remove_title: Remove repository?
+  repos_remove_body: This removes %{name} and uninstalls every plugin provided by the repository.
+  repo_source: SOURCE
+  repo_last_sync: LAST SYNC
+  repo_never_synced: never
+  repo_sync_just_now: just now
+  repo_sync_minutes: "%{count}m ago"
+  repo_sync_hours: "%{count}h ago"
+  repo_sync_days: "%{count}d ago"
+  repo_drivers: DRIVERS
+  repo_drivers_count: "%{count} installed"
+  repo_drivers_from: DRIVERS FROM THIS REPOSITORY
+  repo_no_drivers: No drivers installed from this repository yet.
+  # Per-plugin updates
+  updates_available: "%{count} plugin update available"
+  updates_available_plural: "%{count} plugin updates available"
+  update_all: Update all
+  updating: Updating…
+  update_available: Update available
+  modified_on_disk: Disabled because it was modified on disk
+  modified_on_disk_sub: This plugin's files changed since they were installed, so it was disabled for safety. Re-enable it to accept the change.
+  # Plugin issues (connect/runtime failures, load warnings)
+  issue_connect_failed: Can't connect
+  issue_runtime_error: Runtime error
+  issue_load_warning: Loaded with a warning
+  issue_load_failed: Failed to load
+  issue_details: Details
+  issue_modal_title: "Plugin issue: %{plugin}"
+  issue_copy: Copy
+  issue_copied: Copied!
+  issue_close: Close
+  skipped_heading: Skipped plugins
+  skipped_title: This plugin has been skipped
+  # Detail panel
+  type_device: Driver
+  type_effect: Effects
+  type_integration: Integration
+  author: AUTHOR
+  capabilities: CAPABILITIES
+  targets: TARGET DEVICES
+  effects: EFFECTS
+  status_active: Active
+  status_disabled: Disabled
+  status_needs_permission: Needs permission
+  enable: Enable
+  disable: Disable
+  delete: Delete script
+  repo_sourced_note: This plugin is provided by a repository. Remove the repository to uninstall it.
+  # Permissions
+  permissions: PERMISSIONS
+  permissions_pending: This plugin needs permissions you have not granted yet. It will remain inactive until you decide.
+  permissions_not_granted_tag: Not granted
+  regrant_required: Permission review required
+  permissions_enable_hint: Enabling this plugin will request the permissions above.
+  permissions_granted: Granted
+  grant: Grant permissions
+  revoke: Revoke & disable
+  permission_network: Network
+  permission_os: OS
+  permission_secure_storage: Secure storage
+  permission_smbus: SMBus
+  permission_audio_routing: Audio routing
+  permission_network_desc: Opens network connections, such as to a local SDK or server. A malicious script could send data from this computer.
+  permission_os_desc: Reads the system clock (os.time / os.clock). This is low risk and does not grant access to files or processes.
+  permission_secure_storage_desc: Reads this plugin's own saved secret values (e.g. an API token) in clear text while it runs.
+  permission_smbus_desc: Scans, reads, and writes SMBus/I2C devices. This reaches every device on the bus, not just this plugin's own hardware, so a bad write can destabilize other devices.
+  permission_audio_routing_desc: Creates and routes host audio sinks. A malicious script could spawn audio modules or capture/redirect audio on this machine.
+  # Config fields
+  settings: SETTINGS
+  save_settings: Save
+  secret_set_hint: (a secret is stored)
+  # Permission consent dialog (shown when enabling a plugin that declares permissions)
+  consent_title: Grant permissions
+  consent_body: "%{name} needs the following to run."
+  consent_warning: Permissions are granted together. You can revoke them at any time, which will disable the plugin.
+  consent_modified: This plugin's script changed after you last approved it. Review the permissions again and grant approval to continue using it.
+  consent_permission_added: An update to this plugin added a new permission that must be granted before it can run again. Review what it now requires below.
+  consent_grant_enable: Grant & enable
+  consent_cancel: Cancel
+  consent_deny: Not now
+  # First-run consent to contact GitHub for official plugins and updates
+  download_consent_title: Download official plugins?
+  download_consent_body: Official HaloDaemon plugins are hosted on GitHub. To protect your privacy, HaloDaemon makes no network requests for them unless you explicitly allow it.
+  download_consent_note: If allowed, HaloDaemon downloads official plugins automatically and periodically checks GitHub for updates. If not allowed, it never contacts GitHub and you must add plugins manually. You can change this anytime in Settings.
+  download_consent_allow: Allow
+  download_consent_deny: Don't allow
+  # Add dialog
+  add_title: Add a plugin
+  add_sub: Install a plugin package, which is a folder containing plugin.yaml and its entry script.
+  choose_folder: Choose folder…
+  upload_hint: Choose a plugin package folder
+  upload_sub: The package will be copied into your plugins folder.
+  cancel: Cancel
+  # Delete confirmation
+  delete_title: Delete script?
+  delete_body: This permanently removes %{name} from your plugins folder.

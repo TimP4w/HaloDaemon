@@ -340,10 +340,10 @@ pub fn title_button(
     let switching = st.switching_to.is_some();
 
     let p = ui.painter();
-    let profile_name = if state.active_profile.is_empty() {
+    let profile_name = if state.profiles.active.is_empty() {
         "default"
     } else {
-        &state.active_profile
+        &state.profiles.active
     };
 
     // Measure the text components to size the pill.
@@ -487,13 +487,13 @@ pub fn title_dropdown(
     .show(|ui| {
         ui.set_width(drop_w - 16.0);
 
-        let active = if state.active_profile.is_empty() {
+        let active = if state.profiles.active.is_empty() {
             DEFAULT_PROFILE_NAME
         } else {
-            &state.active_profile
+            &state.profiles.active
         };
 
-        for profile in &state.profiles {
+        for profile in &state.profiles.available {
             let is_active = profile == active;
             let is_default = profile == DEFAULT_PROFILE_NAME;
             let is_switch_target = st.switching_to.as_deref() == Some(profile.as_str());
@@ -652,7 +652,10 @@ pub fn title_dropdown(
     // Apply deferred actions.
     if let Some(name) = switch_to {
         st.switching_to = Some(name.clone());
-        crate::domain::actions::profiles::switch_profile(cmd, &name);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::SwitchProfile { name },
+        );
     }
     if let Some(name) = remove {
         // Defer the actual delete to a confirm dialog; close the dropdown so the
@@ -670,10 +673,10 @@ pub fn title_dropdown(
         st.dropdown_open = false;
     }
     if nav_to_settings_page {
-        let active = if state.active_profile.is_empty() {
+        let active = if state.profiles.active.is_empty() {
             DEFAULT_PROFILE_NAME.to_string()
         } else {
-            state.active_profile.clone()
+            state.profiles.active.clone()
         };
         *page = Page::Profile(active);
         st.dropdown_open = false;
@@ -688,6 +691,7 @@ fn name_available(state: &AppState, trimmed: &str) -> bool {
     !trimmed.is_empty()
         && !state
             .profiles
+            .available
             .iter()
             .any(|p| p.eq_ignore_ascii_case(trimmed))
 }
@@ -757,7 +761,12 @@ pub fn add_modal(ctx: &egui::Context, state: &AppState, cmd: &CommandTx, st: &mu
     );
 
     if (create || enter_submit) && name_available(state, st.add_name_buf.trim()) {
-        crate::domain::actions::profiles::add_profile(cmd, st.add_name_buf.trim());
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::AddProfile {
+                name: st.add_name_buf.trim().to_string(),
+            },
+        );
         st.add_modal_open = false;
         st.add_name_buf.clear();
     }
@@ -821,7 +830,10 @@ pub fn delete_confirm_modal(ctx: &egui::Context, cmd: &CommandTx, st: &mut Profi
 
     if let Some(name) = resolve_delete_confirm(&mut st.confirm_delete, confirm, cancel || dismissed)
     {
-        crate::domain::actions::profiles::remove_profile(cmd, &name);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::RemoveProfile { name },
+        );
     }
 }
 
@@ -846,8 +858,8 @@ pub fn show(
 ) {
     seed_if_profile_changed(st, profile);
 
-    let is_active = state.active_profile == profile
-        || (state.active_profile.is_empty() && profile == DEFAULT_PROFILE_NAME);
+    let is_active = state.profiles.active == profile
+        || (state.profiles.active.is_empty() && profile == DEFAULT_PROFILE_NAME);
     let is_default = profile == DEFAULT_PROFILE_NAME;
 
     egui::ScrollArea::vertical()
@@ -894,8 +906,12 @@ pub fn show(
                             if te_resp.lost_focus() {
                                 let new_name = st.settings_name_buf.trim().to_string();
                                 if name_available(state, &new_name) && new_name != profile {
-                                    crate::domain::actions::profiles::rename_profile(
-                                        cmd, profile, &new_name,
+                                    crate::runtime::ipc::send(
+                                        cmd,
+                                        halod_shared::commands::DaemonCommand::RenameProfile {
+                                            old_name: profile.to_string(),
+                                            new_name: new_name.clone(),
+                                        },
                                     );
                                     // Optimistic nav; main.rs redirects to Home if the name
                                     // disappears.
@@ -944,7 +960,12 @@ pub fn show(
                             .clicked()
                             {
                                 st.switching_to = Some(profile.to_string());
-                                crate::domain::actions::profiles::switch_profile(cmd, profile);
+                                crate::runtime::ipc::send(
+                                    cmd,
+                                    halod_shared::commands::DaemonCommand::SwitchProfile {
+                                        name: profile.to_string(),
+                                    },
+                                );
                             }
                         } else {
                             widgets::button_disabled(
@@ -1011,6 +1032,7 @@ fn auto_activate_card(
 ) {
     // Collect all data before entering the closure so we can split-borrow st.
     let rule_processes: Vec<(usize, Vec<String>)> = state
+        .profiles
         .app_rules
         .iter()
         .enumerate()
@@ -1097,20 +1119,26 @@ fn auto_activate_card(
     // different rule.
     if let Some((rule_idx, proc_name)) = remove_process {
         if let Some(rule) = state
+            .profiles
             .app_rules
             .get(rule_idx)
             .filter(|r| r.profile == profile)
         {
             let new_names = names_after_removing(&rule.process_names, &proc_name);
             if new_names.is_empty() {
-                crate::domain::actions::profiles::remove_app_rule(cmd, rule_idx);
-            } else {
-                crate::domain::actions::profiles::update_app_rule(
+                crate::runtime::ipc::send(
                     cmd,
-                    rule_idx,
-                    new_names,
-                    profile,
-                    rule.enabled,
+                    halod_shared::commands::DaemonCommand::RemoveAppRule { index: rule_idx },
+                );
+            } else {
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::UpdateAppRule {
+                        index: rule_idx,
+                        process_names: new_names,
+                        profile: profile.to_string(),
+                        enabled: rule.enabled,
+                    },
                 );
             }
         }
@@ -1121,7 +1149,7 @@ fn auto_activate_card(
         *pick_selected = all_proc_names;
         pick_filter.clear();
         *picking_for = Some(profile.to_string());
-        crate::domain::actions::profiles::list_running_apps(cmd);
+        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::ListRunningApps);
     }
 }
 
@@ -1219,7 +1247,7 @@ fn overrides_section(
                 return;
             }
 
-            let overrides = &state.profile_overrides;
+            let overrides = &state.profiles.overrides;
             if overrides.device_capabilities.is_empty() && !overrides.canvas {
                 ui.label(
                     egui::RichText::new(t!("profile.overrides_empty"))
@@ -1302,7 +1330,10 @@ fn overrides_section(
             }
 
             if let Some(target) = remove_target {
-                crate::domain::actions::profiles::remove_profile_override(cmd, target);
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::RemoveProfileOverride { target },
+                );
             }
         },
     );
@@ -1511,25 +1542,30 @@ pub fn process_picker(
         if !selected.is_empty() {
             // Find an existing rule for this profile to merge into, or create new one.
             let existing_rule = state
+                .profiles
                 .app_rules
                 .iter()
                 .enumerate()
                 .find(|(_, r)| r.profile == picking_profile);
             if let Some((idx, rule)) = existing_rule {
                 let merged = merge_process_names(&rule.process_names, &selected);
-                crate::domain::actions::profiles::update_app_rule(
+                crate::runtime::ipc::send(
                     cmd,
-                    idx,
-                    merged,
-                    &picking_profile,
-                    rule.enabled,
+                    halod_shared::commands::DaemonCommand::UpdateAppRule {
+                        index: idx,
+                        process_names: merged,
+                        profile: picking_profile.clone(),
+                        enabled: rule.enabled,
+                    },
                 );
             } else {
-                crate::domain::actions::profiles::add_app_rule(
+                crate::runtime::ipc::send(
                     cmd,
-                    selected,
-                    &picking_profile,
-                    true,
+                    halod_shared::commands::DaemonCommand::AddAppRule {
+                        process_names: selected,
+                        profile: picking_profile.clone(),
+                        enabled: true,
+                    },
                 );
             }
         }
@@ -1562,9 +1598,12 @@ mod tests {
 
     fn state_with_profiles(profiles: &[&str], active: &str, rules: Vec<AppRule>) -> AppState {
         AppState {
-            profiles: profiles.iter().map(|s| s.to_string()).collect(),
-            active_profile: active.to_string(),
-            app_rules: rules,
+            profiles: halod_shared::types::ProfileState {
+                active: active.to_string(),
+                available: profiles.iter().map(|s| s.to_string()).collect(),
+                app_rules: rules,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }

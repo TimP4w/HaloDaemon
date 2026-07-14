@@ -7,8 +7,8 @@
 #[macro_use]
 extern crate rust_i18n;
 
-// Translation catalogs live in ui/locales/<code>.yaml; `t!(...)` looks up the
-// active locale (set from GlobalConfig.language), falling back to English.
+// Translation catalogs live in ui/locales/<code>/; `t!(...)` looks up the
+// active locale (set from GuiConfig.language), falling back to English.
 i18n!("locales", fallback = "en");
 
 mod app;
@@ -61,7 +61,10 @@ impl eframe::App for App {
             }
             CloseAction::Quit => {
                 if !self.force_quit.load(Ordering::SeqCst) {
-                    domain::actions::system::shutdown(&self.cmd);
+                    crate::runtime::ipc::send(
+                        &self.cmd,
+                        halod_shared::commands::DaemonCommand::Shutdown,
+                    );
                 }
             }
         }

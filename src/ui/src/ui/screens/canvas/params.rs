@@ -58,7 +58,7 @@ pub(super) fn build_instance_params(
 
 /// Send a `CanvasMoveZone` toggling the zone's `sampling_mode`.
 pub(super) fn unroll_cmd(cmd: &CommandTx, zone: &PlacedZone, currently_unrolled: bool) {
-    crate::domain::actions::canvas::send(
+    crate::runtime::ipc::send(
         cmd,
         DaemonCommand::CanvasMoveZone {
             device_id: zone.device_id.clone(),

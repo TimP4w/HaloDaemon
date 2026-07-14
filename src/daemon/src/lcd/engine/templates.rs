@@ -7,14 +7,7 @@ use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use image::{Rgba, RgbaImage};
 use imageproc::drawing::draw_text_mut;
 
-use halod_shared::types::{
-    EffectParamDescriptor, EffectParamValue, LcdEngineTemplateDescriptor, ParamKind, RgbColor,
-    Sensor,
-};
-
-use crate::util::effect_params::{param_f64, param_str};
-
-use super::custom;
+use halod_shared::types::{RgbColor, Sensor};
 
 static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/NotoSans-Regular.ttf");
 static FONT: OnceLock<FontRef<'static>> = OnceLock::new();
@@ -60,40 +53,6 @@ pub struct TemplateCtx<'a> {
     pub sensors: &'a HashMap<String, Sensor>,
 }
 
-/// An LCD engine template: a configurable, sensor-aware animation.
-///
-/// Mirrors the canvas engine's `Effect` trait — each template advertises a
-/// parameter schema via `descriptor()` and is instantiated from a parameter map
-/// via `from_params()`.
-pub trait LcdTemplate: Send {
-    /// Static schema: id, display name, and the parameter descriptors the UI
-    /// renders widgets from.
-    fn descriptor() -> LcdEngineTemplateDescriptor
-    where
-        Self: Sized;
-
-    /// Build a live instance from a parameter map. Missing/mistyped params fall
-    /// back to the descriptor defaults. `images_dir` is the base directory used
-    /// to resolve background image filenames.
-    fn from_params(
-        params: &HashMap<String, EffectParamValue>,
-        images_dir: &Path,
-    ) -> Box<dyn LcdTemplate>
-    where
-        Self: Sized;
-
-    /// Render one frame into `buf` at `ctx.width`×`ctx.height`. The buffer is
-    /// reused across ticks — the caller guarantees `buf.dimensions() ==
-    /// (ctx.width, ctx.height)`. The LCD engine streams the result straight to
-    /// the panel (type-0x08 path) and encodes a separate PNG copy for the UI
-    /// preview.
-    fn render(&mut self, ctx: &TemplateCtx, buf: &mut RgbaImage) -> Result<(), String>;
-
-    fn content_signature(&self, _ctx: &TemplateCtx) -> Option<u64> {
-        None
-    }
-}
-
 // ── Background (shared optional image/gif backdrop) ─────────────────────────────
 
 struct GifFrame {
@@ -104,15 +63,22 @@ struct GifFrame {
 /// Decode image bytes into `(frame, delay_ms)` pairs — one infinitely-held
 /// frame for a static image, one per frame for an animated GIF.
 pub(super) fn decode_image_frames(data: &[u8]) -> Result<Vec<(RgbaImage, f64)>, String> {
-    use image::{codecs::gif::GifDecoder, AnimationDecoder};
+    use image::{codecs::gif::GifDecoder, AnimationDecoder, ImageDecoder};
     use std::io::Cursor;
     if !(data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")) {
-        let img = image::load_from_memory(data)
+        // Decode under dimension limits: `data` is an uploaded LCD background,
+        // attacker-controlled, and a valid header can declare enormous dimensions
+        // that balloon allocation before any downscale (decompression bomb).
+        let img = crate::util::image::decode_limited(data)
             .map_err(|e| e.to_string())?
             .to_rgba8();
         return Ok(vec![(img, f64::INFINITY)]);
     }
-    let decoder = GifDecoder::new(Cursor::new(data)).map_err(|e| e.to_string())?;
+    let mut decoder = GifDecoder::new(Cursor::new(data)).map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(crate::util::image::MAX_DECODE_DIM);
+    limits.max_image_height = Some(crate::util::image::MAX_DECODE_DIM);
+    decoder.set_limits(limits).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for frame in decoder.into_frames() {
         let frame = frame.map_err(|e| e.to_string())?;
@@ -175,36 +141,6 @@ impl Background {
         }
     }
 
-    /// The params every image-capable template appends to its schema.
-    fn params() -> Vec<EffectParamDescriptor> {
-        vec![
-            EffectParamDescriptor {
-                id: "image".to_string(),
-                label: "Background image".to_string(),
-                kind: ParamKind::Image,
-                default: EffectParamValue::Str(String::new()),
-            },
-            EffectParamDescriptor {
-                id: "dim".to_string(),
-                label: "Background dim".to_string(),
-                kind: ParamKind::Range {
-                    min: 0.0,
-                    max: 100.0,
-                    step: 1.0,
-                },
-                default: EffectParamValue::Float(0.0),
-            },
-        ]
-    }
-
-    fn from_params(params: &HashMap<String, EffectParamValue>, images_dir: &Path) -> Self {
-        Self::new(
-            &param_str(params, "image", ""),
-            param_f64(params, "dim", 0.0),
-            images_dir,
-        )
-    }
-
     fn load_frames(filename: &str, images_dir: &Path) -> Vec<GifFrame> {
         if filename.is_empty() {
             return Vec::new();
@@ -214,7 +150,7 @@ impl Background {
             return Vec::new();
         }
         let path = images_dir.join(filename);
-        let data = match std::fs::read(&path) {
+        let data = match crate::util::image::read_image_bounded(&path) {
             Ok(d) => d,
             Err(e) => {
                 log::warn!("[LCD bg] cannot read {filename}: {e}");
@@ -285,26 +221,6 @@ impl Background {
         }
         img
     }
-}
-
-// ── Registry ──────────────────────────────────────────────────────────────────
-
-pub fn build(
-    id: &str,
-    params: &HashMap<String, EffectParamValue>,
-    images_dir: &Path,
-) -> Option<Box<dyn LcdTemplate>> {
-    match id {
-        "custom" => Some(custom::CustomTemplate::from_params(params, images_dir)),
-        _ => {
-            log::warn!("Unknown LCD template id: {id}");
-            None
-        }
-    }
-}
-
-pub fn all_descriptors() -> Vec<LcdEngineTemplateDescriptor> {
-    vec![custom::CustomTemplate::descriptor()]
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -476,31 +392,6 @@ mod tests {
         let img = RgbaImage::from_pixel(8, 8, Rgba([1, 2, 3, 255]));
         let png = encode_png(&img).expect("encode failed");
         assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
-    }
-
-    #[test]
-    fn available_templates_not_empty() {
-        assert!(!all_descriptors().is_empty());
-    }
-
-    #[test]
-    fn all_descriptors_includes_custom() {
-        assert!(all_descriptors().iter().any(|d| d.id == "custom"));
-    }
-
-    #[test]
-    fn build_custom_succeeds() {
-        assert!(build("custom", &HashMap::new(), std::path::Path::new("/tmp")).is_some());
-    }
-
-    #[test]
-    fn build_unknown_returns_none() {
-        assert!(build(
-            "nonexistent_template",
-            &HashMap::new(),
-            std::path::Path::new("/tmp")
-        )
-        .is_none());
     }
 
     #[test]

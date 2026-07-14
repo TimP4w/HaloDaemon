@@ -1,0 +1,19 @@
+shell:
+  nav_home: Home
+  nav_lighting: Illuminazione RGB
+  nav_cooling: Raffreddamento
+  nav_plugins: Plugin
+  nav_integrations: Integrazioni
+  nav_settings: Impostazioni
+  workspace: AREA DI LAVORO
+  my_devices: I MIEI DISPOSITIVI
+  no_devices: Non ci sono ancora dispositivi
+  daemon_running: Daemon in esecuzione
+  daemon_running_sub: Collegato a halod
+  daemon_offline: Daemon offline
+  daemon_offline_sub: Non collegato
+  start: Avvia
+  daemon_not_running: Daemon non in esecuzione
+  daemon_unreachable: HaloDaemon non riesce a comunicare con il servizio halod.
+  daemon_start_hint: Avvialo per controllare i tuoi dispositivi.
+  start_daemon: Avvia il daemon

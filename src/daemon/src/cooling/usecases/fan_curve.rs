@@ -30,9 +30,10 @@ pub async fn set_fan_curve_points(
     app: Arc<AppState>,
 ) -> Result<()> {
     let points: Vec<(f32, f32)> = points.iter().map(|p| (p[0], p[1])).collect();
-    validate_points(&points)?;
-
     let record = FanCurveRecord { sensor_id, points };
+    record.validate()?;
+    require_temperature_sensor(&record.sensor_id, &app).await?;
+
     with_fan(&fan_id, &app, |fan| fan.set_fan_curve(record)).await
 }
 
@@ -48,30 +49,39 @@ pub async fn set_fan_curve_preset(
         .ok_or_else(|| anyhow!("unknown preset: {preset}"))?
         .points
         .to_vec();
-
     let record = FanCurveRecord { sensor_id, points };
+    record.validate()?;
+    require_temperature_sensor(&record.sensor_id, &app).await?;
     with_fan(&fan_id, &app, |fan| fan.set_fan_curve(record)).await
+}
+
+/// `Ok` unless `sensor_id` is `Some` and names something other than a
+/// temperature sensor the system currently exposes.
+async fn require_temperature_sensor(sensor_id: &Option<String>, app: &Arc<AppState>) -> Result<()> {
+    let Some(id) = sensor_id else {
+        return Ok(());
+    };
+    let sensors = app.snapshot_sensors().await;
+    match sensors.get(id) {
+        Some(s) if s.sensor_type == halod_shared::types::SensorType::Temperature => Ok(()),
+        Some(_) => Err(anyhow!("sensor '{id}' is not a temperature source")),
+        None => Err(anyhow!("unknown sensor '{id}'")),
+    }
 }
 
 pub async fn remove_fan_curve(fan_id: String, app: Arc<AppState>) -> Result<()> {
     with_fan(&fan_id, &app, |fan| fan.clear_fan_curve()).await
 }
 
+/// Test-only convenience wrapper for exercising the same record validation as
+/// the command ingress path without fabricating a sensor assignment.
+#[cfg(test)]
 fn validate_points(points: &[(f32, f32)]) -> Result<()> {
-    if points.len() < 2 {
-        anyhow::bail!("fan curve must have at least 2 points");
+    FanCurveRecord {
+        sensor_id: None,
+        points: points.to_vec(),
     }
-    for &(_, duty) in points {
-        if !(0.0..=100.0).contains(&duty) {
-            anyhow::bail!("duty must be between 0 and 100, got {duty}");
-        }
-    }
-    for window in points.windows(2) {
-        if window[0].0 >= window[1].0 {
-            anyhow::bail!("temperature points must be strictly ascending");
-        }
-    }
-    Ok(())
+    .validate()
 }
 
 #[cfg(test)]
@@ -98,9 +108,37 @@ mod tests {
         (app, device)
     }
 
+    fn sensor(id: &str, kind: halod_shared::types::SensorType) -> halod_shared::types::Sensor {
+        halod_shared::types::Sensor {
+            id: id.to_string(),
+            name: id.to_string(),
+            value: 40.0,
+            unit: halod_shared::types::SensorUnit::Celsius,
+            sensor_type: kind,
+            visibility: Default::default(),
+        }
+    }
+
+    fn make_app_with_fan_and_sensor(
+        fan_id: &str,
+        sensor_id: &str,
+    ) -> (Arc<AppState>, Arc<MockDevice>) {
+        let cfg = Config::default();
+        let app = Arc::new(AppState::new(cfg));
+        let device = Arc::new(MockDevice::new(fan_id).with_fan().with_sensor(vec![sensor(
+            sensor_id,
+            halod_shared::types::SensorType::Temperature,
+        )]));
+        {
+            let mut devices = app.devices.try_write().unwrap();
+            devices.push(device.clone() as Arc<dyn crate::drivers::Device>);
+        }
+        (app, device)
+    }
+
     #[tokio::test]
     async fn set_fan_curve_preset_stores_points() {
-        let (app, device) = make_app_with_fan("fan_0");
+        let (app, device) = make_app_with_fan_and_sensor("fan_0", "sensor_0");
         let preset = preset_curves().iter().find(|p| p.id == "balanced").unwrap();
         set_fan_curve_preset(
             "fan_0".into(),
@@ -142,6 +180,70 @@ mod tests {
         let points: Vec<(f32, f32)> = vec![(50.0, 75.0)];
         let err = validate_points(&points).unwrap_err();
         assert!(err.to_string().contains("at least 2"));
+    }
+
+    #[test]
+    fn validate_points_errors_on_too_many_points() {
+        let points: Vec<(f32, f32)> = (0..FanCurveRecord::MAX_POINTS as i32 + 1)
+            .map(|i| (i as f32, 50.0))
+            .collect();
+        let err = validate_points(&points).unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn set_fan_curve_points_accepts_owned_temperature_sensor() {
+        let (app, device) = make_app_with_fan_and_sensor("fan_0", "cpu_temp");
+        set_fan_curve_points(
+            "fan_0".into(),
+            vec![[30.0f32, 20.0], [80.0f32, 100.0]],
+            Some("cpu_temp".into()),
+            app,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fan_curve(&device).unwrap().sensor_id,
+            Some("cpu_temp".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn set_fan_curve_points_rejects_unknown_sensor() {
+        let (app, _device) = make_app_with_fan("fan_0");
+        let err = set_fan_curve_points(
+            "fan_0".into(),
+            vec![[30.0f32, 20.0], [80.0f32, 100.0]],
+            Some("ghost_sensor".into()),
+            app,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown sensor"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn set_fan_curve_points_rejects_non_temperature_sensor() {
+        let cfg = Config::default();
+        let app = Arc::new(AppState::new(cfg));
+        let device = Arc::new(
+            MockDevice::new("fan_0")
+                .with_fan()
+                .with_sensor(vec![sensor("load0", halod_shared::types::SensorType::Load)]),
+        );
+        {
+            let mut devices = app.devices.try_write().unwrap();
+            devices.push(device.clone() as Arc<dyn crate::drivers::Device>);
+        }
+        let err = set_fan_curve_points(
+            "fan_0".into(),
+            vec![[30.0f32, 20.0], [80.0f32, 100.0]],
+            Some("load0".into()),
+            app,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("not a temperature"), "{err}");
     }
 
     #[tokio::test]
@@ -199,12 +301,12 @@ mod tests {
     #[test]
     fn validate_points_errors_on_duty_above_100() {
         let err = validate_points(&[(30.0, 20.0), (50.0, 101.0)]).unwrap_err();
-        assert!(err.to_string().contains("duty must be between 0 and 100"));
+        assert!(err.to_string().contains("duty"));
     }
 
     #[test]
     fn validate_points_errors_on_negative_duty() {
         let err = validate_points(&[(30.0, 20.0), (50.0, -1.0)]).unwrap_err();
-        assert!(err.to_string().contains("duty must be between 0 and 100"));
+        assert!(err.to_string().contains("duty"));
     }
 }

@@ -7,15 +7,17 @@ device, a command, or an engine. Companion docs go deeper on specific areas:
 (toolchain, onboarding walkthrough, udev rules), and the per-protocol/transport
 pages under [protocols/](protocols/) and [transports/](transports/).
 
-## The three crates
+## The five crates
 
-The workspace (`src/Cargo.toml`) has three members:
+The workspace (`src/Cargo.toml`) has five members:
 
 | Crate | Directory | Role |
 |-------|-----------|------|
-| `halod-shared` | [src/shared/](../src/shared/) | Shared **wire types only**, no logic. IPC commands, the `DeviceCapability` enum, frame/zone definitions. Both other crates depend on it. |
-| `halod` | [src/daemon/](../src/daemon/) | The **daemon**: device I/O, discovery, engine loops, config persistence, IPC server. Runs elevated. |
-| `halod-gui` | [src/ui/](../src/ui/) | **GUI** with a system tray. Talks to the daemon over IPC; holds no device logic. |
+| `halod-shared` | [src/shared/](../src/shared/) | Shared types **and logic** other crates depend on: IPC commands, the `DeviceCapability` enum, and frame/zone definitions, plus real logic — curve evaluation, frame codecs, geometry, zone transforms, and LCD/effect helpers. |
+| `halod-hwaccess` | [src/hwaccess/](../src/hwaccess/) | Low-level hardware-access primitives shared by the daemon and the broker. |
+| `halod-broker` | [src/broker/](../src/broker/) | **Windows-only** privileged helper: runs as LocalSystem and performs the hardware access the per-user daemon can't. |
+| `halod` | [src/daemon/](../src/daemon/) | The **daemon**: device I/O, discovery, engine loops, config persistence, IPC server. Runs **per-user** (not elevated); on Windows privileged hardware access is delegated to the `halod-broker` process. |
+| `halod-gui` | [src/ui/](../src/ui/) | **GUI** (eframe/egui on a glow/OpenGL renderer) with a system tray. Talks to the daemon over IPC; holds no device logic. |
 
 The cardinal rule (`CLAUDE.md` → *Keep the layers separate*): protocol (wire
 encode/decode) ↔ device (`Device` trait + capabilities) ↔ transport (byte
@@ -58,24 +60,23 @@ throughput is still measured and surfaced to the GUI regardless of whether a
 limit is set. Chain accessories (e.g. an NZXT F-series fan on a Kraken) don't
 hold their own transport at all, so their writes are already covered by
 their parent hub's limiter for free — the GUI resolves this by walking the
-hub's chain links (`ui/src/device/info.rs::find_hub_write_rate`) rather than
+hub's chain links (`ui/src/domain/models/device.rs::find_hub_write_rate`) rather than
 requiring the daemon to duplicate the number per accessory. SMBus devices
 sharing one `SmBusScanEntry` (e.g. multiple DRAM sticks) share one bus-level
 limiter, since they already serialize through the same bus mutex; a
 different vendor's `SmBusScanEntry` on the same *physical* bus number still
-opens an independent `SmBusDevice`/limiter today — cross-vendor unification
-on one physical bus is a known, unaddressed gap. USB-control enforcement
-isn't wired up yet (HID and SMBus are the dominant write paths); devices on
-that transport don't report live write-rate stats.
+opens an independent `SmBusDevice`/limiter today—cross-vendor unification on
+one physical bus is a known, unaddressed gap. USB-control endpoints are also
+metered and receive the plugin/device write-rate limit.
 
 ### Protocol — speaking the vendor's wire format
 
 A protocol module sits on top of a transport and turns intent ("set zone 2 to
 red", "read fan RPM") into the exact byte sequences the chip expects, and parses
 replies back. Protocols hold a transport (often `Mutex<Option<T>>` so it can be
-opened/closed) and expose typed methods. See
-[philips_evnia.rs](../src/daemon/src/drivers/vendors/philips/protocols/philips_evnia.rs)
-for a compact example. When you port a wire format from third-party code, add the
+opened/closed) and expose typed methods. See the
+[HID++ protocol implementation](../src/daemon/src/drivers/vendors/logitech/protocols/hidpp/mod.rs)
+for an example. When you port a wire format from third-party code, add the
 SPDX attribution header (`CLAUDE.md` → *Licensing & attribution*) and document the
 format in [docs/protocols/](protocols/).
 
@@ -140,6 +141,48 @@ inventory::submit!(DeviceDescriptor {
 it in `AppState`, restores its saved config, runs `discover_children()`, and calls
 `after_register()`.
 
+### Plugins — devices without recompiling
+
+Native drivers register at **compile time** via `inventory`. **Device plugins**
+([drivers/plugins/](../src/daemon/src/drivers/plugins/)) add a parallel **runtime**
+registry: `load_all_with_repos()` reads directory packages (`plugin.yaml` + entry
+script) from the local plugins directory and every registered git-repo source, and
+`make_device()` consults `plugins::match_handle()` *before* the native descriptors —
+so a plugin **shadows** a native driver for the same hardware. A single generic
+`LuaDevice` implements the `Device` + capability traits and forwards each call into a
+per-device Lua worker thread (which owns the VM + transport). Plugins expose only
+existing capability *kinds*; the capability taxonomy and engines stay native and
+type-safe. See [docs/plugins.md](plugins.md) for the authoring guide.
+
+**Trust boundary.** Untrusted plugin Lua runs **in-process** in the daemon today.
+Runtime VMs strip filesystem/process/native-loading globals and enforce heap,
+instruction, and per-call time limits, but this is not process isolation. The
+roadmap moves Lua into an unprivileged, killable plugin-host process, with
+privileged hardware access behind a separate broker (as already used for
+Windows), so a misbehaving plugin can be terminated without taking the daemon
+down and never touches privileged hardware directly.
+
+There are no plugins compiled into the daemon binary. At startup the daemon seeds
+a non-removable **official plugin repo** record and clones it over the network
+(`registry::ensure_official_repo`) — a clone failure (e.g. no network on first
+launch) is logged and never fails boot, so the daemon simply has no official
+plugins until a later successful clone. Official plugins use the same gate as
+all other sources: permissionless packages activate directly, while permissioned
+packages require every declared grant and current-content acknowledgement. A plugin id
+is owned by whichever source loads it first (official repo, then local
+`plugins/`, then other repos in config order — see `load_all_with_repos`), so a
+community repo can never shadow an existing plugin id; a collision is rejected
+and surfaced via `take_plugin_load_warnings` rather than silently dropped.
+
+Repo-sourced plugins support **per-plugin update detection**: `repo::remote_plugin_content`
+reads a plugin's `plugin.yaml` + entry script straight out of git's object
+database at the repo's fetched remote tip (no working-tree checkout) and
+compares its content hash to the loaded manifest's — finer-grained than a
+whole-repo SHA compare, since a repo can be behind while a given plugin's own
+files are unchanged. Accepting an update (`repo::checkout_subtree`) checks out
+only that plugin's subtree, leaving sibling plugins in the same repo untouched;
+updates are never automatic.
+
 ## IPC and usecases — the daemon's public API
 
 The daemon and GUI are separate processes talking over a Unix domain socket
@@ -196,7 +239,7 @@ directly.
 
 ## State and config
 
-- **`AppState`** ([daemon/src/state.rs](../src/daemon/src/state.rs)) is the shared
+- **`AppState`** ([daemon/src/state/mod.rs](../src/daemon/src/state/mod.rs)) is the shared
   hub: the device registry (`Mutex<Vec<Arc<dyn Device>>>`), connected IPC clients,
   discovery status, engine handles, fan-curve statuses, button-event broadcast,
   and shutdown signaling. It is passed (as `Arc<AppState>`) into usecases and
@@ -207,7 +250,8 @@ directly.
   (global settings + active profile), `devices.yaml` (known devices, chain
   layouts, zone transforms, sensor visibility), `app_rules.yaml`, one
   `profiles/<name>.yaml` per profile, and `lcd/<name>.yaml` for saved custom
-  LCD templates. Each file is written atomically (tmp + rename); the
+  LCD templates. Each file is saved via tmp-file + rename, fsync'd on Unix (a
+  fully durable cross-platform atomic-replace is still being unified); the
   in-memory `Config` struct stays unified, so usecases read/write it exactly
   as before. A device's persistent capability state flows through
   `save_state`/`load_state` on the `Device` trait, keyed by each capability's
@@ -215,11 +259,14 @@ directly.
 
 ## The GUI side
 
-The GUI ([ui/src/](../src/ui/src/)) is immediate-mode (eframe) — each
-frame is drawn from a local `Model` ([ui/src/model.rs](../src/ui/src/model.rs))
-that caches the latest daemon state read from a `watch` channel. The device page
+The GUI ([ui/src/](../src/ui/src/)) is immediate-mode (eframe/egui on a
+glow/OpenGL renderer) — each frame is drawn from app state held in
+[ui/src/app.rs](../src/ui/src/app.rs) as an `Arc<AppState>` (the latest daemon
+state, cloned when its `watch` channel changes), with GUI-side derivations under
+[ui/src/domain/models/](../src/ui/src/domain/models/). Daemon IPC lives in
+[ui/src/runtime/ipc.rs](../src/ui/src/runtime/ipc.rs). The device page
 is **capability-driven**: each capability tab is registered in
-[ui/src/device/mod.rs](../src/ui/src/device/mod.rs) and shown only when
+[ui/src/ui/screens/device/mod.rs](../src/ui/src/ui/screens/device/mod.rs) and shown only when
 the connected device reports that capability, so a new capability shows up in the
 UI by registering a tab — not by editing the device page. Two-way-bound widgets
 gate daemon updates for ~1.5 s after a user edit (a `LiveGuard`) and debounce

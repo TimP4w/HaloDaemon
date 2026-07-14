@@ -29,16 +29,9 @@ impl BoardInfo {
 /// Read `Win32_BaseBoard.Manufacturer` + `Win32_BaseBoard.Product` via WMI.
 /// Returns an empty record on any error — labels then fall back to heuristic.
 pub fn read_board_info() -> BoardInfo {
-    use wmi::{COMLibrary, Variant, WMIConnection};
+    use wmi::{Variant, WMIConnection};
 
-    let com = match COMLibrary::new() {
-        Ok(c) => c,
-        Err(e) => {
-            log::debug!("[SuperIO] board: COM init failed: {e}");
-            return BoardInfo::default();
-        }
-    };
-    let conn = match WMIConnection::new(com) {
+    let conn = match WMIConnection::new() {
         Ok(c) => c,
         Err(e) => {
             log::debug!("[SuperIO] board: WMI connect failed: {e}");

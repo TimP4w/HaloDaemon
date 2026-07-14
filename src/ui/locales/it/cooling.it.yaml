@@ -1,0 +1,34 @@
+cooling:
+  title: Raffreddamento
+  subtitle: "Curve delle ventole e controllo delle pompe su %{count} dispositivi"
+  empty_title: Nessun dispositivo di raffreddamento connesso
+  empty_subtitle: Collega un controller per ventole o pompe per gestire il raffreddamento
+  curve_sensor: Sensore della curva
+  curve_sensor_caps: SENSORE CURVA
+  no_sensor: Nessun sensore
+  rpm_vs: "RPM vs %{sensor}"
+  open_device: Apri dispositivo
+  fan_curve: Curva della ventola
+  pump_curve: Curva della pompa
+  fan_and_pump_curve: Curva della ventola e della pompa
+  celsius_now: "°C attuali"
+  fan_speed: Velocità ventola
+  fan_duty: Ciclo di lavoro della ventola
+  pump_speed: Velocità pompa
+  pump_duty: Ciclo di lavoro della pompa
+  rpm: "%{v} RPM"
+  percent: "%{v}%"
+  preset: "Preset…"
+  preset_name:
+    balanced: Bilanciata
+    silent: Silenziosa
+    performance: Prestazioni
+    full_speed: Velocità massima
+    fifty_percent: "50%"
+  curve_hint: "Trascina un punto per modificare la curva · clicca su uno spazio vuoto per aggiungere · tasto destro su un punto per eliminare"
+  status_no_sensor: "Nessun sensore di temperatura assegnato. La ventola resta al 75%."
+  status_sensor_malfunction: "È stato rilevato un guasto al sensore. La ventola resta al 75%."
+  status_permission_denied: "Non hai i permessi per scrivere i valori PWM. Esegui: sudo udevadm trigger --subsystem-match=hwmon"
+  status_write_error: Impossibile impostare la velocità della ventola. Controlla i log del daemon.
+  status_fan_stalled: "La ventola non gira (0 RPM). Controlla i collegamenti o sostituiscila."
+  status_no_device: La ventola non è connessa. La curva verrà riapplicata quando sarà di nuovo disponibile.

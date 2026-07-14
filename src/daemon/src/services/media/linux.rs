@@ -129,13 +129,20 @@ fn percent_decode(s: &str) -> String {
 /// Blocking: load art from a `file://` or `http(s)://` URL, downscaled so the
 /// longest side is ≤ 240 px (LCD panels are ≤ 240). Any failure → `None`.
 fn load_art_from_url(url: &str) -> Option<RgbaImage> {
-    let img = if let Some(path) = file_url_to_path(url) {
-        image::open(path).ok()?
+    let bytes = if let Some(path) = file_url_to_path(url) {
+        // The common helper rejects symlinks/non-regular files and performs a
+        // metadata size check before allocating the file contents.
+        let bytes = crate::util::image::read_image_bounded(std::path::Path::new(&path)).ok()?;
+        if bytes.len() > 2 * 1024 * 1024 {
+            return None;
+        }
+        bytes
     } else if url.starts_with("http://") || url.starts_with("https://") {
-        image::load_from_memory(&fetch_http_bytes(url)?).ok()?
+        fetch_http_bytes(url)?
     } else {
         return None;
     };
+    let img = crate::util::image::decode_limited(&bytes).ok()?;
     const MAX_SIDE: u32 = 240;
     let scaled = if img.width().max(img.height()) > MAX_SIDE {
         img.resize(MAX_SIDE, MAX_SIDE, image::imageops::FilterType::Lanczos3)
@@ -145,21 +152,101 @@ fn load_art_from_url(url: &str) -> Option<RgbaImage> {
     Some(scaled.to_rgba8())
 }
 
-/// Blocking http(s) GET with a 4 s timeout and a 2 MB size cap.
+/// Extract `(host, port)` from an `http(s)` URL, or `None` for any other scheme
+/// or a malformed authority.
+fn http_authority(url: &str) -> Option<(String, u16)> {
+    let (rest, default_port) = url
+        .strip_prefix("https://")
+        .map(|r| (r, 443u16))
+        .or_else(|| url.strip_prefix("http://").map(|r| (r, 80u16)))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let (host, port) = if let Some(h) = authority.strip_prefix('[') {
+        // [ipv6]:port
+        let (h6, tail) = h.split_once(']')?;
+        (
+            h6.to_string(),
+            tail.strip_prefix(':')
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(default_port),
+        )
+    } else if let Some((h, p)) = authority.rsplit_once(':') {
+        (h.to_string(), p.parse().unwrap_or(default_port))
+    } else {
+        (authority.to_string(), default_port)
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((host, port))
+}
+
+/// Split a ureq `host:port` netloc, stripping IPv6 brackets from the host.
+fn split_netloc(netloc: &str) -> Option<(String, u16)> {
+    let (host, port) = netloc.rsplit_once(':')?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    Some((host.to_string(), port.parse().ok()?))
+}
+
+/// Resolve `host:port` and keep only addresses that pass the SSRF policy (same
+/// as the plugin TCP transport). Errors if nothing resolves or all are blocked.
+fn resolve_vetted(host: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = (host, port)
+        .to_socket_addrs()?
+        .filter(|sa| !crate::drivers::plugins::backends::tcp::is_blocked_ip(&sa.ip()))
+        .collect();
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "host has no routable address",
+        ));
+    }
+    Ok(addrs)
+}
+
+/// True if the URL's host resolves to at least one vetted (non loopback/private/
+/// link-local) address. The connection itself is vetted independently by the
+/// agent resolver, so this is only a fast pre-check.
+#[cfg(test)]
+fn host_is_vetted(url: &str) -> bool {
+    let Some((host, port)) = http_authority(url) else {
+        return false;
+    };
+    resolve_vetted(&host, port).is_ok()
+}
+
+/// Blocking http(s) GET with a 4 s timeout, address vetting, no redirects, and a
+/// 2 MB size cap (an over-cap body is rejected, not silently truncated).
 fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
     use std::io::Read;
     const MAX_BYTES: u64 = 2 * 1024 * 1024;
+    http_authority(url)?;
+    // A custom resolver vets the exact address ureq connects to, so the client
+    // can't re-resolve the host to a blocked address after our check (TOCTOU).
     let resp = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(4))
+        .redirects(0)
+        .resolver(|netloc: &str| match split_netloc(netloc) {
+            Some((host, port)) => resolve_vetted(&host, port),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "malformed netloc",
+            )),
+        })
         .build()
         .get(url)
         .call()
         .ok()?;
     let mut buf = Vec::new();
     resp.into_reader()
-        .take(MAX_BYTES)
+        .take(MAX_BYTES + 1)
         .read_to_end(&mut buf)
         .ok()?;
+    if buf.len() as u64 > MAX_BYTES {
+        log::debug!("media: art response exceeds {MAX_BYTES} bytes; rejecting");
+        return None;
+    }
     Some(buf)
 }
 
@@ -227,11 +314,7 @@ fn to_media_info(state: &PlayerState) -> MediaInfo {
     MediaInfo {
         title: state.meta.title.clone(),
         artist: state.meta.artist.clone(),
-        album: state.meta.album.clone(),
         status: state.status.clone(),
-        position: state.position,
-        position_at: Some(state.position_at),
-        length: state.meta.length,
         art: state.art.clone(),
     }
 }
@@ -543,6 +626,33 @@ mod tests {
 
     fn str_value(s: &str) -> OwnedValue {
         OwnedValue::try_from(Value::Str(Str::from(s.to_string()))).unwrap()
+    }
+
+    #[test]
+    fn vetting_rejects_loopback_and_private_and_bad_scheme() {
+        assert!(!host_is_vetted("http://127.0.0.1/a.png"));
+        assert!(!host_is_vetted("http://localhost:8080/a.png"));
+        assert!(!host_is_vetted("https://169.254.169.254/latest"));
+        assert!(!host_is_vetted("https://[::1]/a.png"));
+        assert!(!host_is_vetted("ftp://example.com/a.png"));
+        assert!(!host_is_vetted("http://192.168.1.5/a.png"));
+    }
+
+    #[test]
+    fn resolver_returns_no_vetted_addrs_for_blocked_hosts() {
+        assert!(resolve_vetted("127.0.0.1", 80).is_err());
+        assert!(resolve_vetted("192.168.1.5", 443).is_err());
+        assert!(resolve_vetted("169.254.169.254", 80).is_err());
+        assert!(resolve_vetted("::1", 443).is_err());
+    }
+
+    #[test]
+    fn split_netloc_strips_ipv6_brackets() {
+        assert_eq!(split_netloc("[::1]:443"), Some(("::1".to_string(), 443)));
+        assert_eq!(
+            split_netloc("1.2.3.4:80"),
+            Some(("1.2.3.4".to_string(), 80))
+        );
     }
 
     fn array_value(items: &[&str]) -> OwnedValue {

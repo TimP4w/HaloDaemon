@@ -1,38 +1,116 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::sync::Arc;
 
+use super::persistence::ConfigSaveState;
 use super::AppState;
+
+const SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
+const SAVE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     let mut rx = app.persistence.save_tx.subscribe();
+    let mut shutdown_rx = app.persistence.shutdown_tx.subscribe();
     tokio::spawn(async move {
+        let mut saved_version = *rx.borrow();
         loop {
-            if rx.changed().await.is_err() {
-                break;
+            tokio::select! {
+                changed = rx.changed() => if changed.is_err() { break },
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() { break; }
+                    continue;
+                }
             }
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(250);
+            app.persistence
+                .save_state
+                .send_replace(ConfigSaveState::Debouncing);
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => break,
-                    result = rx.changed() => {
-                        if result.is_err() { return; }
+                    _ = tokio::time::sleep(SAVE_DEBOUNCE) => break,
+                    result = rx.changed() => if result.is_err() { return },
+                    result = shutdown_rx.changed() => {
+                        if result.is_err() || *shutdown_rx.borrow() { break; }
                     }
                 }
+                if *shutdown_rx.borrow() {
+                    break;
+                }
             }
+            if *shutdown_rx.borrow() {
+                break;
+            }
+
+            loop {
+                let version = *rx.borrow_and_update();
+                app.persistence
+                    .save_state
+                    .send_replace(ConfigSaveState::Saving(version));
+                let cfg = app.config.read().await.clone();
+                let result = tokio::task::spawn_blocking(move || crate::config::save(&cfg)).await;
+                match result {
+                    Ok(Ok(())) => {
+                        saved_version = version;
+                        if *rx.borrow() == saved_version {
+                            app.persistence
+                                .save_state
+                                .send_replace(ConfigSaveState::Clean);
+                            break;
+                        }
+                        app.persistence
+                            .save_state
+                            .send_replace(ConfigSaveState::DirtyWhileSaving);
+                    }
+                    Ok(Err(error)) => {
+                        log::warn!("[Config] Save failed, retrying: {error}");
+                        app.persistence
+                            .save_state
+                            .send_replace(ConfigSaveState::Failed(error.to_string()));
+                        tokio::select! {
+                            _ = tokio::time::sleep(SAVE_RETRY) => {},
+                            _ = rx.changed() => {},
+                            _ = shutdown_rx.changed() => {},
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("[Config] Save worker panicked, retrying: {error}");
+                        app.persistence
+                            .save_state
+                            .send_replace(ConfigSaveState::Failed(error.to_string()));
+                        tokio::time::sleep(SAVE_RETRY).await;
+                    }
+                }
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+        }
+
+        app.persistence
+            .save_state
+            .send_replace(ConfigSaveState::Stopping);
+        let latest = *rx.borrow();
+        if latest != saved_version {
             let cfg = app.config.read().await.clone();
-            let result = tokio::task::spawn_blocking(move || crate::config::save(&cfg)).await;
-            match result {
-                Err(e) => {
-                    log::warn!("[Config] Save worker panicked: {e}");
-                    // Re-queue the save so the pending change isn't lost
-                    // just because the blocker thread panicked.
-                    let _ = app.persistence.save_tx.send(());
+            match tokio::task::spawn_blocking(move || crate::config::save(&cfg)).await {
+                Ok(Ok(())) => {
+                    app.persistence
+                        .save_state
+                        .send_replace(ConfigSaveState::Clean);
                 }
-                Ok(Err(e)) => {
-                    log::warn!("[Config] Save failed, will retry on next change: {e}");
+                Ok(Err(error)) => {
+                    app.persistence
+                        .save_state
+                        .send_replace(ConfigSaveState::Failed(error.to_string()));
                 }
-                Ok(Ok(())) => {}
+                Err(error) => {
+                    app.persistence
+                        .save_state
+                        .send_replace(ConfigSaveState::Failed(error.to_string()));
+                }
             }
+        } else {
+            app.persistence
+                .save_state
+                .send_replace(ConfigSaveState::Clean);
         }
     })
 }

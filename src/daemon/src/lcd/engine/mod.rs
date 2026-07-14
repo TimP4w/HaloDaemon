@@ -5,20 +5,18 @@ pub mod video;
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use halod_shared::types::{
-    EffectParamValue, LcdEngineFrame, LcdEngineTemplateDescriptor, WireLcdEngineState,
-};
+use halod_shared::types::{EffectParamValue, LcdEngineFrame, WireLcdEngineState};
 use image::RgbaImage;
 use tokio::sync::{watch, Mutex};
 
 use crate::state::{AppState, EngineRunConfig};
-use templates::{LcdTemplate, TemplateCtx};
+use custom::CustomTemplate;
+use templates::TemplateCtx;
 
 /// An LCD preview frame already encoded to its framed `lcd_engine_frame` wire
 /// message. Built once per broadcast so fanning out to N clients is N cheap
 /// `Arc` clones instead of N full JSON serializations of the base64 payload.
 pub struct LcdWireFrame {
-    pub device_id: String,
     pub wire: Arc<Vec<u8>>,
 }
 
@@ -37,7 +35,6 @@ pub(crate) fn encode_wire_frame(
         &serde_json::json!({"type": "lcd_engine_frame", "data": frame}),
     )?;
     Some(Arc::new(LcdWireFrame {
-        device_id: device_id.to_string(),
         wire: Arc::new(wire),
     }))
 }
@@ -57,7 +54,7 @@ fn should_trim_on_swap(had_existing_slot: bool) -> bool {
 struct DeviceSlot {
     template_id: String,
     params: HashMap<String, EffectParamValue>,
-    template: Box<dyn LcdTemplate>,
+    template: CustomTemplate,
     frame_id: u64,
     /// Consecutive `stream_frame` failures. Used to back off (and stop log
     /// flooding) when a device has gone away but hotplug hasn't removed it yet.
@@ -74,6 +71,10 @@ struct DeviceSlot {
 
 const FAIL_BACKOFF_THRESHOLD: u8 = 3;
 const BACKOFF_TICKS: u8 = 30;
+
+fn build_template(id: &str, params: &HashMap<String, EffectParamValue>) -> Option<CustomTemplate> {
+    (id == "custom").then(|| CustomTemplate::from_params(params, &crate::config::lcd_images_dir()))
+}
 
 /// Poll interval for evicting idle editor sessions; independent of the render tick.
 const EDITOR_SESSION_EVICT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
@@ -117,8 +118,7 @@ impl LcdEngine {
         template_id: &str,
         params: &HashMap<String, EffectParamValue>,
     ) {
-        if let Some(tmpl) = templates::build(template_id, params, &crate::config::lcd_images_dir())
-        {
+        if let Some(tmpl) = build_template(template_id, params) {
             let mut slots = self.device_slots.lock().await;
             let existed = slots.contains_key(device_id);
             let frame_id = slots.get(device_id).map(|s| s.frame_id).unwrap_or(0);
@@ -176,12 +176,14 @@ impl LcdEngine {
     }
 
     /// Drop the editor session if it's been idle past the timeout.
-    fn evict_idle_editor_session(&self) {
+    async fn evict_idle_editor_session(&self) {
+        let mut expired_device = None;
         if let Ok(mut session) = self.app_state.lcd.editor_session.try_lock() {
             if session
                 .as_ref()
                 .is_some_and(|s| s.is_idle(Instant::now(), custom::EDITOR_SESSION_IDLE_TIMEOUT))
             {
+                expired_device = session.as_ref().map(|session| session.device_id.clone());
                 *session = None;
                 // Dropping the session only returns its buffers to the
                 // allocator; ask glibc to hand free pages back to the OS so
@@ -192,14 +194,19 @@ impl LcdEngine {
                 }
             }
         }
-    }
-
-    pub fn available_template_descriptors() -> Vec<LcdEngineTemplateDescriptor> {
-        templates::all_descriptors()
+        if let Some(device_id) = expired_device {
+            if let Some(device) = self.app_state.find_device_by_id(&device_id).await {
+                if let Some(lcd) = device.as_lcd() {
+                    lcd.lcd_state().end_editor_preview();
+                    lcd.lcd_state()
+                        .set_health(halod_shared::types::LcdHealth::Stable);
+                }
+            }
+        }
     }
 
     pub fn template_exists(id: &str) -> bool {
-        templates::build(id, &HashMap::new(), &crate::config::lcd_images_dir()).is_some()
+        id == "custom"
     }
 
     pub fn wire_state(
@@ -207,7 +214,7 @@ impl LcdEngine {
         device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
     ) -> WireLcdEngineState {
         WireLcdEngineState {
-            available_templates: templates::all_descriptors(),
+            available_templates: vec![CustomTemplate::descriptor()],
             device_templates,
             device_template_params,
         }
@@ -219,7 +226,7 @@ impl LcdEngine {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            self.evict_idle_editor_session();
+            self.evict_idle_editor_session().await;
         }
     }
 
@@ -227,24 +234,19 @@ impl LcdEngine {
         self: Arc<Self>,
         cfg_rx: watch::Receiver<EngineRunConfig>,
     ) -> tokio::task::JoinHandle<()> {
-        let evictor = Arc::clone(&self);
-        tokio::spawn(async move {
-            evictor
-                .run_editor_session_evictor(EDITOR_SESSION_EVICT_INTERVAL)
-                .await;
-        });
         tokio::spawn(async move {
             let start = Instant::now();
             // Idle whenever no device has an active template; wake instantly when
             // one is set. Everything else (master switch, fps, config changes)
             // routes through the shared engine loop.
+            let self_tick = Arc::clone(&self);
             let (self_wait, self_has) = (Arc::clone(&self), Arc::clone(&self));
-            crate::run_loop::engine_run_loop_idle(
+            let engine_loop = crate::run_loop::engine_run_loop_idle(
                 "LCD",
                 cfg_rx,
                 tokio::time::MissedTickBehavior::Skip,
                 move |_cfg| {
-                    let this = Arc::clone(&self);
+                    let this = Arc::clone(&self_tick);
                     let t = start.elapsed().as_secs_f64();
                     async move { this.tick(t).await }
                 },
@@ -256,13 +258,17 @@ impl LcdEngine {
                     let this = Arc::clone(&self_has);
                     async move { this.has_active_content().await }
                 },
-            )
-            .await;
+            );
+            let evictor = Arc::clone(&self);
+            tokio::select! {
+                _ = engine_loop => {}
+                _ = evictor.run_editor_session_evictor(EDITOR_SESSION_EVICT_INTERVAL) => {}
+            }
         })
     }
 
     async fn tick(&self, t: f64) {
-        self.evict_idle_editor_session();
+        self.evict_idle_editor_session().await;
         let sensors = self.app_state.snapshot_sensors().await;
 
         let receiver_count = self.frame_tx.receiver_count();
@@ -292,9 +298,7 @@ impl LcdEngine {
                 None => true,
             };
             if needs_insert {
-                if let Some(tmpl) =
-                    templates::build(template_id, params, &crate::config::lcd_images_dir())
-                {
+                if let Some(tmpl) = build_template(template_id, params) {
                     let existed = slots.contains_key(device_id.as_str());
                     let frame_id = slots
                         .get(device_id.as_str())
@@ -521,24 +525,18 @@ mod tests {
     /// `load_active_profile`) reach `engine`.
     async fn install_engines(app: &Arc<AppState>, engine: &Arc<LcdEngine>) {
         use crate::state::EngineRunConfig;
-        let global = crate::config::GlobalConfig::default();
         app.lighting.set_engine(
             crate::lighting::rgb_engine::RgbEngine::new(Arc::clone(app)).await,
-            watch::channel(EngineRunConfig::canvas(&global)).0,
+            watch::channel(EngineRunConfig::canvas(&Default::default())).0,
         );
         app.cooling.set_engine(
-            crate::cooling::fan_curve::FanCurveEngine::new(Arc::clone(app)),
-            watch::channel(EngineRunConfig::fan_curve(&global)).0,
+            watch::channel(EngineRunConfig::fan_curve(&Default::default())).0,
             watch::channel(75).0,
         );
         app.lcd.set_engine(
             Arc::clone(engine),
             video::VideoEngine::new(Arc::clone(app), engine.frame_sender()),
-            watch::channel(EngineRunConfig::lcd(&global)).0,
-        );
-        app.focus.set_engine(
-            crate::profiles::focus_watcher::FocusWatcherEngine::new(Arc::clone(app)),
-            watch::channel(EngineRunConfig::focus_watcher(&global)).0,
+            watch::channel(EngineRunConfig::lcd(&Default::default())).0,
         );
     }
 
@@ -624,7 +622,7 @@ mod tests {
 
         let mut frames = engine.subscribe();
         let (_cfg_tx, cfg_rx) =
-            watch::channel(EngineRunConfig::lcd(&crate::config::GlobalConfig::default()));
+            watch::channel(EngineRunConfig::lcd(&crate::config::LcdConfig::default()));
         let handle = Arc::clone(&engine).start(cfg_rx).await;
         // Let the engine park idle before the profile load.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -635,7 +633,7 @@ mod tests {
             .await
             .expect("engine must wake and render after profile load")
             .expect("frame channel must stay open");
-        assert_eq!(frame.device_id, "lcd0");
+        assert!(!frame.wire.is_empty());
         handle.abort();
     }
 
@@ -829,7 +827,7 @@ mod tests {
             .await
             .expect("preview must be sent once a subscriber is present")
             .expect("channel must stay open");
-        assert_eq!(frame.device_id, "lcd5");
+        assert!(!frame.wire.is_empty());
     }
 
     /// Regression for the parked-engine leak: the render tick never runs while
@@ -837,8 +835,7 @@ mod tests {
     #[tokio::test]
     async fn editor_session_evictor_runs_independent_of_the_render_tick() {
         let app = Arc::new(AppState::new(Config::default()));
-        *app.lcd.editor_session.lock().unwrap() =
-            Some(custom::EditorSession::new_idle_for_test("dev1"));
+        *app.lcd.editor_session() = Some(custom::EditorSession::new_idle_for_test("dev1"));
         let engine = LcdEngine::new(Arc::clone(&app));
         assert!(
             !engine.has_active_content().await,
@@ -856,7 +853,7 @@ mod tests {
 
         tokio::time::timeout(std::time::Duration::from_millis(200), async {
             loop {
-                if app.lcd.editor_session.lock().unwrap().is_none() {
+                if app.lcd.editor_session().is_none() {
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;

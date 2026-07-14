@@ -20,7 +20,7 @@ impl App {
             false
         }) {
             self.state_cache = std::sync::Arc::new(self.ui.state.borrow_and_update().clone());
-            crate::ui::screens::settings::apply_locale(&self.state_cache.global_config.language);
+            crate::ui::screens::settings::apply_locale(&self.state_cache.gui.language);
         }
         let state = std::sync::Arc::clone(&self.state_cache);
         self.tray.sync(ctx, &state);
@@ -36,6 +36,32 @@ impl App {
                 std::sync::Arc::new(self.ui.lcd_images.borrow_and_update().clone());
         }
         let lcd_images = std::sync::Arc::clone(&self.lcd_images_cache);
+        if self.ui.plugin_assets.has_changed().unwrap_or_else(|_| {
+            log::warn!("IPC plugin_assets channel closed");
+            false
+        }) {
+            self.plugin_assets_cache =
+                std::sync::Arc::new(self.ui.plugin_assets.borrow_and_update().clone());
+        }
+        let plugin_assets = std::sync::Arc::clone(&self.plugin_assets_cache);
+        if self.ui.repo_updates.has_changed().unwrap_or_else(|_| {
+            log::warn!("IPC repo_updates channel closed");
+            false
+        }) {
+            self.repo_updates_cache = self.ui.repo_updates.borrow_and_update().clone();
+        }
+        if self.ui.plugin_updates.has_changed().unwrap_or_else(|_| {
+            log::warn!("IPC plugin_updates channel closed");
+            false
+        }) {
+            self.plugin_updates_cache = self.ui.plugin_updates.borrow_and_update().clone();
+        }
+        if self.ui.repo_branches.has_changed().unwrap_or_else(|_| {
+            log::warn!("IPC repo_branches channel closed");
+            false
+        }) {
+            self.repo_branches_cache = self.ui.repo_branches.borrow_and_update().clone();
+        }
         let lcd_preview = if let Page::Device(ref id) = self.page {
             self.ui.lcd_frames.borrow().get(id).cloned()
         } else {
@@ -51,6 +77,20 @@ impl App {
             self.lcd_editor_render_cache
                 .clone()
                 .filter(|r| &r.device_id == id)
+        } else {
+            None
+        };
+        // A terminal (`Done`/`Failed`) is consumed as a one-shot edge: `Some`
+        // only on the frame it newly arrives, so a retained stale terminal
+        // can't clear a freshly-armed upload spinner.
+        let lcd_upload_terminal = if self.ui.lcd_upload.has_changed().unwrap_or(false) {
+            self.ui.lcd_upload.borrow_and_update().clone().filter(|p| {
+                matches!(
+                    p.stage,
+                    halod_shared::types::LcdUploadStage::Done
+                        | halod_shared::types::LcdUploadStage::Failed
+                )
+            })
         } else {
             None
         };
@@ -72,9 +112,10 @@ impl App {
             self.depcheck_grace
                 .advance(connected, time, DEPCHECK_GRACE_SECS);
         match grace_action {
-            crate::ui::screens::depcheck::GraceAction::Recheck => {
-                domain::actions::system::get_debug_info(&self.cmd)
-            }
+            crate::ui::screens::depcheck::GraceAction::Recheck => crate::runtime::ipc::send(
+                &self.cmd,
+                halod_shared::commands::DaemonCommand::GetDebugInfo,
+            ),
             crate::ui::screens::depcheck::GraceAction::RepaintAfter(secs) => {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(secs));
             }
@@ -127,6 +168,15 @@ impl App {
             ctx.request_repaint();
             return;
         }
+
+        // After the radar gate (which returns before toasts.show) so it renders.
+        let quarantine = crate::ui::screens::plugins::quarantine_toasts(
+            &state.plugins.plugins,
+            &self.plugin_updates_cache,
+            &mut self.quarantine_toasted,
+            (time * 1000.0) as u64,
+        );
+        self.toasts.ingest(quarantine, time);
 
         // Prevent desktop bleed-through under transparent panels.
         let screen = ui.max_rect();
@@ -193,10 +243,31 @@ impl App {
             }
         }
         if let Page::Profile(name) = &self.page {
-            if !state.profiles.contains(name) {
+            if !state.profiles.available.contains(name) {
                 self.page = Page::Home;
             }
         }
+
+        // Start the page tour before rendering any modal. This lets the tour
+        // establish precedence on its first frame, even though its spotlight
+        // is painted after the page widgets have registered their anchors.
+        let tour_key = tour_key_for(
+            &self.page,
+            &self.device_ui,
+            self.lighting_ui.tab,
+            &self.tour,
+            &state.gui.seen_tours,
+        );
+        if let Some(key) = tour_key {
+            domain::tour::maybe_start(&mut self.tour, &state.gui.seen_tours, key);
+        }
+        let tour_active = domain::tour::is_active(&self.tour);
+        let download_prompt = !tour_active
+            && crate::ui::screens::download_consent::should_prompt(
+                &state,
+                connected,
+                self.consent_prompt_deferred,
+            );
 
         egui::Panel::left("sidebar")
             .exact_size(236.0)
@@ -213,8 +284,34 @@ impl App {
                     },
                     crate::ui::theme::SIDEBAR_BG,
                 );
-                crate::ui::shell::sidebar(ui, &state, connected, &mut self.page);
+                crate::ui::shell::sidebar(
+                    ui,
+                    &state,
+                    connected,
+                    &mut self.page,
+                    &self.plugin_updates_cache,
+                );
             });
+
+        if download_prompt {
+            use crate::ui::screens::download_consent::Decision;
+            match crate::ui::screens::download_consent::prompt(ctx, &self.cmd) {
+                Decision::Allow => crate::runtime::ipc::send(
+                    &self.cmd,
+                    halod_shared::commands::DaemonCommand::SetPluginDownloadConsent {
+                        allowed: true,
+                    },
+                ),
+                Decision::Deny => crate::runtime::ipc::send(
+                    &self.cmd,
+                    halod_shared::commands::DaemonCommand::SetPluginDownloadConsent {
+                        allowed: false,
+                    },
+                ),
+                Decision::Defer => self.consent_prompt_deferred = true,
+                Decision::Pending => {}
+            }
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -240,8 +337,11 @@ impl App {
                             &mut self.search,
                             &mut self.rename,
                             &mut self.confirm_remove,
+                            &mut self.conflict_choice,
+                            &mut self.conflict_prompted,
                             &self.sensor_history,
                             &mut self.page,
+                            !tour_active && !download_prompt,
                         );
                     }
                     Page::Device(id) => {
@@ -258,6 +358,7 @@ impl App {
                             &lcd_images,
                             lcd_preview,
                             lcd_upload,
+                            lcd_upload_terminal,
                             lcd_template,
                             lcd_editor_render,
                             self.canvas_ui.led_colors(),
@@ -300,6 +401,21 @@ impl App {
                             &mut self.settings_ui,
                         );
                     }
+                    Page::Plugins => {
+                        self.plugins_ui.show(
+                            ui,
+                            &state,
+                            &self.cmd,
+                            &plugin_assets,
+                            &self.repo_updates_cache,
+                            &self.plugin_updates_cache,
+                            &self.repo_branches_cache,
+                        );
+                    }
+                    Page::Integrations => {
+                        self.integrations_ui
+                            .show(ui, &state, &self.cmd, &plugin_assets);
+                    }
                     Page::Profile(name) => {
                         let name = name.clone();
                         crate::ui::screens::profile::show(
@@ -319,44 +435,45 @@ impl App {
                 }
 
                 // Modal overlays rendered unconditionally so they work from any page.
-                crate::ui::screens::profile::add_modal(
-                    ui.ctx(),
-                    &state,
-                    &self.cmd,
-                    &mut self.profile_ui,
-                );
+                if !tour_active && !download_prompt {
+                    crate::ui::screens::profile::add_modal(
+                        ui.ctx(),
+                        &state,
+                        &self.cmd,
+                        &mut self.profile_ui,
+                    );
+                }
             });
 
-        crate::ui::screens::depcheck::show(
-            ctx,
-            &state,
-            &self.cmd,
-            debug.as_ref(),
-            connected,
-            within_grace,
-            &mut self.depcheck_ui,
-        );
+        if !tour_active && !download_prompt {
+            crate::ui::screens::depcheck::show(
+                ctx,
+                &state,
+                &self.cmd,
+                debug.as_ref(),
+                connected,
+                within_grace,
+                &mut self.depcheck_ui,
+            );
+        }
 
         // The tutorial tour: suppressed while the healthcheck dialog is up so
         // the two overlays don't fight over the screen.
-        let depcheck_visible = crate::ui::screens::depcheck::visible(
-            &state,
-            debug.as_ref(),
-            connected,
-            within_grace,
-            &self.depcheck_ui,
-        );
-        let tour_key = tour_key_for(
-            &self.page,
-            &self.device_ui,
-            self.lighting_ui.tab,
-            &self.tour,
-            &state.global_config.seen_tours,
-        );
+        // The dependency dialog is deliberately not rendered while a tour is
+        // active. Keep the same gate here, otherwise the stale dependency
+        // state would suppress the tour indefinitely.
+        let depcheck_visible = !tour_active
+            && crate::ui::screens::depcheck::visible(
+                &state,
+                debug.as_ref(),
+                connected,
+                within_grace,
+                &self.depcheck_ui,
+            );
         crate::ui::tour::show(
             ctx,
             &mut self.tour,
-            &state.global_config.seen_tours,
+            &state.gui.seen_tours,
             &self.cmd,
             tour_key,
             connected,
@@ -364,7 +481,29 @@ impl App {
         );
 
         // Toasts overlay everything, including the daemon-down scrim.
-        self.toasts.show(ctx);
+        if let Some(note) = self.toasts.show(ctx) {
+            if let Some(detail) = note.code.detail() {
+                let (title, _) =
+                    crate::domain::models::notifications::notification_text(&note.code);
+                self.plugin_issue_modal = Some(crate::app::PluginIssueModal {
+                    title,
+                    detail: detail.to_owned(),
+                });
+            }
+        }
+        if !domain::tour::is_active(&self.tour) && !download_prompt {
+            if let Some(modal) = &self.plugin_issue_modal {
+                let dismissed = crate::ui::components::issue_modal(
+                    ctx,
+                    "plugin_issue",
+                    &modal.title,
+                    &modal.detail,
+                );
+                if dismissed {
+                    self.plugin_issue_modal = None;
+                }
+            }
+        }
     }
 }
 
@@ -394,6 +533,8 @@ fn tour_key_for(
             }
         }
         Page::EffectDesigner => Some(domain::tour::TourKey::EffectDesigner),
+        Page::Plugins => Some(domain::tour::TourKey::PagePlugins),
+        Page::Integrations => Some(domain::tour::TourKey::PageIntegrations),
     }
 }
 

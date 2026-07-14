@@ -8,7 +8,7 @@ Windows LPC I/O port access via PawnIO's `LpcIO.bin` kernel module. Used by the 
 
 ## Overview
 
-Nuvoton NCT677x and ITE SuperIO chips provide motherboard temperature sensors and PWM fan headers. On Windows these chips are accessed through LPC I/O port reads/writes, which require a kernel-mode driver. HaloDaemon uses [PawnIO](https://pawnio.eu/), a signed kernel driver that provides safe, signed port I/O from an elevated user-space process.
+Nuvoton NCT677x and ITE SuperIO chips provide motherboard temperature sensors and PWM fan headers. On Windows these chips are accessed through LPC I/O port reads/writes, which require a kernel-mode driver. HaloDaemon uses [PawnIO](https://pawnio.eu/), loaded only by the elevated `halod-broker` process; the daemon remains non-elevated.
 
 ---
 
@@ -16,8 +16,15 @@ Nuvoton NCT677x and ITE SuperIO chips provide motherboard temperature sensors an
 
 | Method | PawnIO function | Purpose |
 |--------|-----------------|---------|
+| `select_slot(slot)` | `ioctl_select_slot` | Select SuperIO slot 0 or 1 |
+| `find_bars()` | `ioctl_find_bars` | Register the selected chip's runtime I/O window |
 | `read_port(port)` | `ioctl_pio_inb` | Read byte from I/O port |
 | `write_port(port, val)` | `ioctl_pio_outb` | Write byte to I/O port |
+| `superio_inb(register)` | `ioctl_superio_inb` | Read a SuperIO configuration register |
+| `superio_outb(register, val)` | `ioctl_superio_outb` | Write a SuperIO configuration register |
+
+These mappings exist only in the broker. The daemon RPC contains typed LPC
+requests and never supplies a PawnIO module name, function name, or argument vector.
 
 ---
 
@@ -38,14 +45,14 @@ Nuvoton NCT677x and ITE SuperIO chips provide motherboard temperature sensors an
 
 ## Module loading
 
-`LpcIoBus::open` locates `PawnIOLib.dll` from an explicit list of absolute paths
+The typed `OpenLpcIo` request makes the broker locate `PawnIOLib.dll` from an explicit list of absolute paths
 (never the bare DLL search path / `%PATH%` / CWD, which would be a hijack into an
 elevated process), in order:
 - `C:\Program Files\PawnIO\PawnIOLib.dll`
 - `%ProgramFiles%\PawnIO\PawnIOLib.dll`
 - `%ProgramW6432%\PawnIO\PawnIOLib.dll`
 
-It then loads `LpcIO.bin` only from beside the elevated executable (these blobs
+The broker then loads the fixed `LpcIO.bin` module only from beside its executable (these blobs
 are executed by the kernel driver, so user-writable locations like the CWD are
 deliberately excluded), in order:
 - Executable's directory
@@ -64,4 +71,4 @@ A single `LpcIoBus` is created at discovery time and shared across all sensor an
 ## Limitations
 
 - Windows only — excluded from Linux builds at the compiler level.
-- Requires PawnIO installed and the daemon running as Administrator.
+- Requires PawnIO installed; only the on-demand `halod-broker` helper is elevated.

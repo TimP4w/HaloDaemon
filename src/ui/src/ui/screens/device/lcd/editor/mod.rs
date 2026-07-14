@@ -130,7 +130,8 @@ pub fn show(
         send_def(ctx, st, id, true);
     }
 
-    // Stage : inspector ≈ 66:33, mirroring the design's `1fr 322px` LCD grid.
+    // Stage + persistent inspector. Keep object controls beside the stage so
+    // selecting a widget never causes a long form to appear below the canvas.
     let avail = ui.available_width();
     let mut left_column = Rect::NOTHING;
     let mut inspector_rect = Rect::NOTHING;
@@ -146,16 +147,16 @@ pub fn show(
             .map(|w| w.id.clone())
             .collect();
         st.lcd.editor.selected.retain(|s| live.contains(s));
-        // The inspector edits the sole selection; a multi-selection shows none.
+        // Selection is edited in the right-hand inspector below. The stage is
+        // deliberately the only content in the left column.
+        left_column = left.min_rect();
+
         let sel = st.lcd.editor.primary().cloned();
-        left.add_space(12.0);
-        widgets::card(left, |ui| match &sel {
+        widgets::card(right, |ui| match &sel {
             Some(sel) => selected_widget_card(ui, ctx, st, id, sel),
             None => empty_selection_card(ui),
         });
-        // Capture after content is rendered so the rect spans stage + params.
-        left_column = left.min_rect();
-
+        right.add_space(12.0);
         widgets::card(right, |ui| library_card(ui, ctx, st, id));
         right.add_space(12.0);
         widgets::card(right, |ui| screen_style_card(ui, ctx, st, id, lcd));
@@ -278,7 +279,14 @@ fn send_def(ctx: &TabCtx, st: &mut DeviceUi, id: &str, immediate: bool) {
     params.insert(WIDGETS_JSON_PARAM.to_string(), EffectParamValue::Str(json));
     if immediate {
         st.last_edit = ctx.time;
-        crate::domain::actions::lcd::lcd_engine_set_template(ctx.cmd, id, "custom", params);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::LcdEngineSetTemplate {
+                device_id: id.to_string(),
+                template_id: "custom".to_string(),
+                params,
+            },
+        );
     } else {
         let cmd = DaemonCommand::LcdEngineSetTemplate {
             device_id: id.to_string(),
@@ -325,6 +333,7 @@ mod tests {
             lcd_images: &[],
             lcd_preview: None,
             lcd_upload: None,
+            lcd_upload_terminal: None,
             lcd_template: None,
             lcd_editor_render: None,
             led_colors: crate::ui::screens::device::empty_led_colors(),

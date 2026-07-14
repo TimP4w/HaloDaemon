@@ -66,6 +66,16 @@ pub async fn persist_device_state(app: &Arc<AppState>, device: &dyn Device) {
         return;
     }
     let device_id = device.id().to_owned();
+    let mut validation_profile = crate::profiles::config::Profile::default();
+    validation_profile
+        .device_states
+        .insert(device_id.clone(), state.clone());
+    if let Err(e) =
+        crate::profiles::validate::validate_profile("persisted state", &validation_profile)
+    {
+        log::warn!("[{device_id}] refusing to persist invalid device state: {e:#}");
+        return;
+    }
     log::debug!("[{device_id}] persisting state");
     {
         let mut cfg = app.config.write().await;

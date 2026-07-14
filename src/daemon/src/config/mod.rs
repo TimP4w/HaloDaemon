@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::Result;
-use halod_shared::types::{AppRule, VisibilityState, DEFAULT_PROFILE_NAME};
+use halod_shared::types::{AppRule, Permission, VisibilityState, DEFAULT_PROFILE_NAME};
 // Types shared with wire protocol; re-exported for backward-compat.
-pub use halod_shared::types::{CanvasState, GlobalConfig, PlacedZone};
+pub use halod_shared::types::{
+    CanvasState, CoolingConfig, GuiConfig, LcdConfig, PlacedZone, RgbConfig,
+};
 use halod_shared::zone_transform::ZoneContentTransform;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -16,7 +18,7 @@ use crate::registry::config::{DeviceLayout, DeviceRecord};
 //
 // The single in-memory `Config` is split across several files by concern, each
 // independently atomic (tmp+rename) and independently defaultable:
-//   config.yaml          - active_profile + GlobalConfig
+//   config.yaml          - active_profile + cooling/rgb/lcd/gui config
 //   devices.yaml          - known_devices, device_layouts, device_transforms, sensor_visibility
 //   app_rules.yaml        - app_rules
 //   profiles/<slug>.yaml  - one Profile per file, named for a human to read
@@ -25,23 +27,28 @@ pub fn load() -> Result<Config> {
     let main: MainFile = load_file(&main_config_path(), "config.yaml")?;
     let devices: DevicesFile = load_file(&devices_config_path(), "devices.yaml")?;
     let app_rules: AppRulesFile = load_file(&app_rules_config_path(), "app_rules.yaml")?;
+    let plugins: PluginPolicy = load_file(&plugins_config_path(), "plugins.yaml")?;
     let mut profiles = load_profiles()?;
     if profiles.is_empty() {
         profiles.insert(DEFAULT_PROFILE_NAME.to_string(), Profile::default());
     }
 
-    let mut global = main.global;
-    global.fan_failsafe_duty = global.fan_failsafe_duty.min(100);
+    let mut cooling = main.cooling;
+    cooling.fan_failsafe_duty = cooling.fan_failsafe_duty.min(100);
 
     Ok(Config {
         active_profile: main.active_profile,
         profiles,
         known_devices: devices.known_devices,
-        global,
+        cooling,
+        rgb: main.rgb,
+        lcd: main.lcd,
+        gui: main.gui,
         device_layouts: devices.device_layouts,
         sensor_visibility: devices.sensor_visibility,
         device_transforms: devices.device_transforms,
         app_rules: app_rules.app_rules,
+        plugins,
     })
 }
 
@@ -50,7 +57,10 @@ pub fn save(cfg: &Config) -> Result<()> {
         &main_config_path(),
         &serde_yaml::to_string(&MainFile {
             active_profile: cfg.active_profile.clone(),
-            global: cfg.global.clone(),
+            cooling: cfg.cooling.clone(),
+            rgb: cfg.rgb.clone(),
+            lcd: cfg.lcd.clone(),
+            gui: cfg.gui.clone(),
         })?,
     )?;
     atomic_write(
@@ -68,36 +78,52 @@ pub fn save(cfg: &Config) -> Result<()> {
             app_rules: cfg.app_rules.clone(),
         })?,
     )?;
+    atomic_write(
+        &plugins_config_path(),
+        &serde_yaml::to_string(&cfg.plugins)?,
+    )?;
     save_profiles(&cfg.profiles)?;
     Ok(())
 }
 
-fn atomic_write(path: &Path, contents: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("yaml.tmp");
-    std::fs::write(&tmp, contents)?;
-    std::fs::rename(tmp, path)?;
-    Ok(())
+pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+    crate::util::fs::atomic_write_str(path, contents)
 }
 
 fn load_file<T: Default + DeserializeOwned>(path: &Path, label: &str) -> Result<T> {
     if !path.exists() {
         return Ok(T::default());
     }
+    let raw = read_bounded(path, label)?;
+    serde_yaml::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {label} at {}: {e}", path.display()))
+}
+
+pub(crate) const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const MAX_PROFILES: usize = 1024;
+
+/// Read a config file, rejecting anything past the 1 MiB ceiling using file
+/// metadata so a huge file is never fully allocated first.
+/// TODO: probably belongs to utils
+pub(crate) fn read_bounded(path: &Path, label: &str) -> Result<String> {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_CONFIG_BYTES {
+            anyhow::bail!(
+                "{label} at {} is too large ({} bytes)",
+                path.display(),
+                meta.len()
+            );
+        }
+    }
     let raw = std::fs::read_to_string(path)?;
-    // Guard against crafted files: config is trusted (daemon-written) but a
-    // 1 MiB ceiling catches accidental corruption and local tampering.
-    if raw.len() > 1024 * 1024 {
+    if raw.len() as u64 > MAX_CONFIG_BYTES {
         anyhow::bail!(
             "{label} at {} is too large ({} bytes)",
             path.display(),
             raw.len()
         );
     }
-    serde_yaml::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("Failed to parse {label} at {}: {e}", path.display()))
+    Ok(raw)
 }
 
 fn load_profiles() -> Result<HashMap<String, Profile>> {
@@ -110,11 +136,20 @@ fn load_profiles() -> Result<HashMap<String, Profile>> {
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("yaml"))
         .collect();
+    anyhow::ensure!(
+        paths.len() <= MAX_PROFILES,
+        "too many profile files ({} > {MAX_PROFILES})",
+        paths.len()
+    );
     paths.sort();
     for path in paths {
-        let raw = std::fs::read_to_string(&path)?;
-        let file: ProfileFile = serde_yaml::from_str(&raw)
+        let raw = read_bounded(&path, "profile")?;
+        let mut file: ProfileFile = serde_yaml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("Failed to parse profile at {}: {e}", path.display()))?;
+        crate::profiles::validate::validate_profile(&file.name, &file.profile)?;
+        if let Some(canvas) = file.profile.lighting.canvas.as_mut() {
+            canvas.sanitize();
+        }
         out.insert(file.name, file.profile);
     }
     Ok(out)
@@ -218,6 +253,10 @@ fn app_rules_config_path() -> PathBuf {
     config_dir().join("app_rules.yaml")
 }
 
+fn plugins_config_path() -> PathBuf {
+    config_dir().join("plugins.yaml")
+}
+
 fn profiles_dir() -> PathBuf {
     config_dir().join("profiles")
 }
@@ -228,19 +267,40 @@ pub fn lcd_images_dir() -> PathBuf {
     config_dir().join(halod_shared::types::LCD_IMAGES_SUBDIR)
 }
 
+/// Directory holding device plugin scripts (`*.lua`), read at startup.
+pub fn plugins_dir() -> PathBuf {
+    config_dir().join("plugins")
+}
+
+/// Directory holding checked-out git-repo plugin sources, one subdirectory per repo (see `PluginRepoRecord`).
+pub fn plugin_repos_dir() -> PathBuf {
+    config_dir().join("plugin_repos")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MainFile {
     #[serde(default = "default_profile_name")]
     active_profile: String,
+    // The daemon's persisted RGB config key is `rgb`; the wire side names the
+    // same struct `lighting.config`.
     #[serde(default)]
-    global: GlobalConfig,
+    cooling: CoolingConfig,
+    #[serde(default)]
+    rgb: RgbConfig,
+    #[serde(default)]
+    lcd: LcdConfig,
+    #[serde(default)]
+    gui: GuiConfig,
 }
 
 impl Default for MainFile {
     fn default() -> Self {
         Self {
             active_profile: default_profile_name(),
-            global: GlobalConfig::default(),
+            cooling: CoolingConfig::default(),
+            rgb: RgbConfig::default(),
+            lcd: LcdConfig::default(),
+            gui: GuiConfig::default(),
         }
     }
 }
@@ -263,6 +323,53 @@ struct AppRulesFile {
     app_rules: Vec<AppRule>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginPolicy {
+    /// Plugin ids the user has disabled. Everything present-and-not-listed is
+    /// enabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled: Vec<String>,
+    /// Permissions the user has granted per plugin id. A plugin's declared
+    /// permissions must be a subset of its entry here before it activates.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub granted: HashMap<String, Vec<Permission>>,
+    /// Non-secure user-editable config values per plugin id (key -> value).
+    /// Fields declared `secure = true` never appear here — see the encrypted
+    /// secret store instead.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub config: HashMap<String, HashMap<String, String>>,
+    /// Integration plugin ids the user has disabled *as an integration* —
+    /// independent of `disabled` (which governs whether the Lua may run at
+    /// all). Everything present-and-not-listed is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub integrations_disabled: Vec<String>,
+    /// Content hash (hex SHA-256) of the exact script the user consented to,
+    /// per plugin id. A plugin whose current script hashes differently is
+    /// treated as not-yet-consented and stays inert until re-acknowledged.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub acknowledged: HashMap<String, String>,
+    /// Registered git-repo plugin sources. See `PluginRepoRecord`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<PluginRepoRecord>,
+}
+
+/// A registered git-repo plugin source, pinned to a commit SHA that only an explicit "update" advances.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginRepoRecord {
+    pub url: String,
+    /// Directory name under `plugin_repos_dir()`, derived from the URL at `add_repo` time
+    /// (fixed to `constants::OFFICIAL_PLUGIN_REPO_SLUG` for the seeded official repo).
+    pub slug: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Commit SHA the checked-out working tree is pinned to.
+    pub locked_sha: String,
+    /// When this repo's clone directory was last cloned/fetched/checked out
+    /// (RFC 3339), for the GUI's repo detail panel. `None` until the first sync.
+    #[serde(default)]
+    pub last_sync: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileFile {
     name: String,
@@ -279,7 +386,13 @@ pub struct Config {
     #[serde(default)]
     pub known_devices: HashMap<String, DeviceRecord>,
     #[serde(default)]
-    pub global: GlobalConfig,
+    pub cooling: CoolingConfig,
+    #[serde(default)]
+    pub rgb: RgbConfig,
+    #[serde(default)]
+    pub lcd: LcdConfig,
+    #[serde(default)]
+    pub gui: GuiConfig,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub device_layouts: HashMap<String, DeviceLayout>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -288,6 +401,7 @@ pub struct Config {
     pub device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_rules: Vec<AppRule>,
+    pub plugins: PluginPolicy,
 }
 
 fn default_profile_name() -> String {
@@ -302,11 +416,15 @@ impl Default for Config {
             active_profile: DEFAULT_PROFILE_NAME.to_string(),
             profiles,
             known_devices: HashMap::new(),
-            global: GlobalConfig::default(),
+            cooling: CoolingConfig::default(),
+            rgb: RgbConfig::default(),
+            lcd: LcdConfig::default(),
+            gui: GuiConfig::default(),
             device_layouts: HashMap::new(),
             sensor_visibility: HashMap::new(),
             device_transforms: HashMap::new(),
             app_rules: Vec::new(),
+            plugins: PluginPolicy::default(),
         }
     }
 }
@@ -316,9 +434,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn global_config_close_to_tray_defaults_to_true_when_field_absent() {
+    fn gui_config_close_to_tray_defaults_to_true_when_field_absent() {
         let yaml = "log_level: info";
-        let cfg: GlobalConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: GuiConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.close_to_tray);
     }
 
@@ -395,10 +513,42 @@ mod tests {
             profile: "Gäming Setup".into(),
             enabled: true,
         });
-        cfg.global.seen_tours.insert("page:home".into());
+        cfg.gui.seen_tours.insert("page:home".into());
+        cfg.cooling.fan_failsafe_duty = 60;
+        cfg.rgb.canvas_fps = 45;
+        cfg.lcd.enabled = false;
+        cfg.plugins.disabled.push("nzxt_kraken".into());
+        cfg.plugins
+            .granted
+            .insert("wled_udp".into(), vec![Permission::Network]);
+        cfg.plugins.config.insert(
+            "openrgb".into(),
+            HashMap::from([("host".to_string(), "127.0.0.1".to_string())]),
+        );
+        cfg.plugins
+            .acknowledged
+            .insert("wled_udp".into(), "abc123".into());
 
         save(&cfg).unwrap();
         let reloaded = load().unwrap();
+
+        assert_eq!(reloaded.plugins.disabled, vec!["nzxt_kraken".to_string()]);
+        assert_eq!(
+            reloaded.plugins.granted.get("wled_udp"),
+            Some(&vec![Permission::Network])
+        );
+        assert_eq!(
+            reloaded.plugins.acknowledged.get("wled_udp"),
+            Some(&"abc123".to_string())
+        );
+        assert_eq!(
+            reloaded
+                .plugins
+                .config
+                .get("openrgb")
+                .and_then(|m| m.get("host")),
+            Some(&"127.0.0.1".to_string())
+        );
 
         assert_eq!(reloaded.active_profile, cfg.active_profile);
         assert_eq!(reloaded.profiles.len(), cfg.profiles.len());
@@ -419,7 +569,10 @@ mod tests {
         assert!(reloaded.device_layouts.contains_key("hub1"));
         assert!(reloaded.sensor_visibility.contains_key("sensor1"));
         assert_eq!(reloaded.app_rules.len(), 1);
-        assert!(reloaded.global.seen_tours.contains("page:home"));
+        assert!(reloaded.gui.seen_tours.contains("page:home"));
+        assert_eq!(reloaded.cooling.fan_failsafe_duty, 60);
+        assert_eq!(reloaded.rgb.canvas_fps, 45);
+        assert!(!reloaded.lcd.enabled);
 
         unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
@@ -491,5 +644,38 @@ mod tests {
         let yaml = "device_id: d\nzone_id: z\nx: 0.0\ny: 0.0\n";
         let z: PlacedZone = serde_yaml::from_str(yaml).unwrap();
         assert!(z.effect.is_none());
+    }
+
+    #[test]
+    fn plugin_policy_accepts_a_sparse_current_file() {
+        let f: PluginPolicy = serde_yaml::from_str("disabled: [foo]\n").unwrap();
+        assert!(f.repos.is_empty());
+    }
+
+    #[test]
+    fn plugin_repos_round_trip_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+
+        let mut cfg = Config::default();
+        cfg.plugins.repos.push(PluginRepoRecord {
+            url: "https://example.com/foo.git".into(),
+            slug: "foo".into(),
+            branch: Some("main".into()),
+            locked_sha: "deadbeef".into(),
+            last_sync: None,
+        });
+        save(&cfg).unwrap();
+        let reloaded = load().unwrap();
+
+        assert_eq!(reloaded.plugins.repos.len(), 1);
+        assert_eq!(reloaded.plugins.repos[0].slug, "foo");
+        assert_eq!(reloaded.plugins.repos[0].locked_sha, "deadbeef");
+        assert_eq!(reloaded.plugins.repos[0].branch.as_deref(), Some("main"));
+
+        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 }

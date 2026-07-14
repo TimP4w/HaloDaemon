@@ -108,8 +108,74 @@ pub fn dialog(
             .max_height(max_body)
             .show(ui, body);
         ui.add_space(16.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
+        // Height-bound the centered action row: with padding below it, an
+        // unbounded row claims the auto-sizing modal's full height and grows it
+        // every frame. Zero desired height still expands to fit tall buttons.
+        ui.allocate_ui_with_layout(
+            egui::Vec2::new(ui.available_width(), 0.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            actions,
+        );
+        ui.add_space(6.0);
     })
+}
+
+/// A modal showing a plugin issue's full detail text (monospace), with Copy and
+/// Close actions. Returns `true` when dismissed (backdrop, ×, or Close).
+pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> bool {
+    use super::button::{button, ButtonKind};
+    let copied_key = egui::Id::new((id, "copied_at"));
+    let mut close = false;
+    let dismissed = dialog(
+        ctx,
+        id,
+        title,
+        520.0,
+        |ui| {
+            ui.label(
+                egui::RichText::new(detail)
+                    .font(theme::mono(12.0))
+                    .color(theme::TEXT_DIM),
+            );
+        },
+        |ui| {
+            if button(
+                ui,
+                &t!("plugins.issue_close"),
+                ButtonKind::Primary,
+                egui::vec2(110.0, 32.0),
+            )
+            .clicked()
+            {
+                close = true;
+            }
+            ui.add_space(8.0);
+            if button(
+                ui,
+                &t!("plugins.issue_copy"),
+                ButtonKind::Ghost,
+                egui::vec2(110.0, 32.0),
+            )
+            .clicked()
+            {
+                ui.ctx().copy_text(detail.to_owned());
+                let now = ui.ctx().input(|i| i.time);
+                ui.ctx().data_mut(|d| d.insert_temp(copied_key, now));
+            }
+            let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(copied_key));
+            let now = ui.ctx().input(|i| i.time);
+            if crate::ui::screens::settings::copied_feedback_visible(copied_at, now) {
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new(t!("plugins.issue_copied"))
+                        .font(theme::semibold(12.0))
+                        .color(theme::TRAFFIC_GREEN),
+                );
+                ui.ctx().request_repaint();
+            }
+        },
+    );
+    dismissed || close
 }
 
 /// Reduce a delete/remove-confirmation modal's outcome: `Some(target)` means
@@ -216,6 +282,74 @@ mod tests {
         assert!(
             body_top >= modal_top + 18.0 + 15.0,
             "modal body overlaps the title row: body_top={body_top} modal_top={modal_top}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dialog_tests {
+    use super::super::button::{button, ButtonKind};
+    use super::*;
+    use egui::{Pos2, Rect, Vec2};
+
+    fn dialog_heights_over_frames(button_h: f32) -> Vec<f32> {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1000.0))),
+            ..Default::default()
+        };
+        let mut heights = Vec::new();
+        for _ in 0..8 {
+            let _ = ctx.run_ui(input(), |ui| {
+                dialog(
+                    ui.ctx(),
+                    "d",
+                    "Title",
+                    420.0,
+                    |ui| {
+                        ui.label("Body text.");
+                        ui.add_space(12.0);
+                    },
+                    |ui| {
+                        let _ = button(ui, "OK", ButtonKind::Primary, Vec2::new(120.0, button_h));
+                    },
+                );
+            });
+            heights.push(
+                ctx.memory(|m| m.area_rect(egui::Id::new(("d", "modal"))))
+                    .map(|r| r.height())
+                    .unwrap_or(0.0),
+            );
+        }
+        heights
+    }
+
+    #[test]
+    fn dialog_height_stays_bounded_across_frames() {
+        // The action row's vertically-centered layout followed by bottom
+        // padding used to claim the auto-sizing modal's full height and feed
+        // back, growing the modal every frame.
+        let h = dialog_heights_over_frames(34.0);
+        assert!(
+            (h.last().unwrap() - h[1]).abs() < 1.0,
+            "dialog modal grew across frames: {h:?}"
+        );
+    }
+
+    #[test]
+    fn dialog_action_row_grows_to_fit_tall_buttons() {
+        // A taller action button must enlarge the modal (not get clipped by the
+        // height-bounded action row) — and still not creep frame over frame.
+        let short = dialog_heights_over_frames(34.0);
+        let tall = dialog_heights_over_frames(60.0);
+        assert!(
+            tall[1] > short[1] + 20.0,
+            "tall action button did not enlarge the modal: short={short:?} tall={tall:?}"
+        );
+        assert!(
+            (tall.last().unwrap() - tall[1]).abs() < 1.0,
+            "dialog with tall buttons grew across frames: {tall:?}"
         );
     }
 }

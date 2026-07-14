@@ -7,7 +7,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{EffectParamDescriptor, EffectParamValue, ParamKind, RgbColor, SensorUnit};
+use crate::types::{
+    EffectParamDescriptor, EffectParamValue, ParamKind, RgbColor, SensorUnit, MAX_EFFECT_PARAMS,
+};
 
 /// Param key the custom template's `widgets_json` is stored under in
 /// `EffectDef`/`RgbState`-style parameter maps.
@@ -17,6 +19,12 @@ pub const WIDGETS_JSON_PARAM: &str = "widgets_json";
 /// logo ([`LOGO_SVG`]) rather than a library file. The `@` prefix can't collide
 /// with a real upload (`validate_image_filename` rejects it).
 pub const LOGO_IMAGE: &str = "@halo-logo";
+
+/// Templates are supplied over IPC and kept in profiles. Keep their work and
+/// persisted size bounded independently of the generic effect-param limit.
+pub const MAX_LCD_WIDGETS: usize = 64;
+pub const MAX_WIDGET_ID_BYTES: usize = 64;
+pub const MAX_WIDGET_TEXT_BYTES: usize = 4096;
 
 /// The bundled HaloDaemon logo, rasterized by the daemon and GUI for the
 /// [`LOGO_IMAGE`] sentinel.
@@ -70,16 +78,13 @@ pub struct WidgetSprite {
 /// `sprites` carries only the widgets whose content changed since the
 /// requester's `known` signatures (all of them when `known` was empty);
 /// `signatures` carries the current (id, signature) pair for every widget so
-/// the requester can tell which cached sprites are still valid. A `Vec` with
-/// empty `signatures` (from a pre-delta daemon) means legacy full-replace
-/// semantics: `sprites` is the complete set.
+/// the requester can tell which cached sprites are still valid.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LcdEditorRender {
     pub device_id: String,
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub sprites: Vec<WidgetSprite>,
-    #[serde(default)]
     pub signatures: Vec<(String, u64)>,
 }
 
@@ -320,6 +325,150 @@ pub fn sensor_fill_color(fill: RgbColor, high: RgbColor, gradient: bool, frac: f
     } else {
         fill
     }
+}
+
+/// Validate every widget's geometry and referenced assets: finite coords, an
+/// on-canvas center, a positive/bounded scale, a bounded param map, and valid
+/// image filenames. Pure — the GUI uses it for feedback, the daemon enforces it
+/// on save, load, and preview.
+pub fn validate_widgets(def: &CustomTemplateDef) -> Result<(), String> {
+    let scale_ok = |s: f32| s.is_finite() && s > 0.0 && s <= 100.0;
+    if def.widgets.len() > MAX_LCD_WIDGETS {
+        return Err(format!("template has more than {MAX_LCD_WIDGETS} widgets"));
+    }
+    let mut ids = std::collections::HashSet::with_capacity(def.widgets.len());
+    for w in &def.widgets {
+        if w.id.is_empty()
+            || w.id.len() > MAX_WIDGET_ID_BYTES
+            || w.id.contains('\0')
+            || !ids.insert(&w.id)
+        {
+            return Err(format!("widget '{}' has an invalid or duplicate id", w.id));
+        }
+        if w.widget_type == WidgetType::Unknown {
+            return Err(format!("widget '{}' has an unknown widget type", w.id));
+        }
+        if !w.x.is_finite()
+            || !(0.0..=1.0).contains(&w.x)
+            || !w.y.is_finite()
+            || !(0.0..=1.0).contains(&w.y)
+        {
+            return Err(format!("widget '{}' position out of bounds", w.id));
+        }
+        if !scale_ok(w.scale) {
+            return Err(format!("widget '{}' scale out of range", w.id));
+        }
+        if !w.rotation.is_finite() {
+            return Err(format!("widget '{}' rotation is not finite", w.id));
+        }
+        if w.params.len() > MAX_EFFECT_PARAMS {
+            return Err(format!("widget '{}' has too many params", w.id));
+        }
+        validate_widget_params(w, scale_ok)?;
+    }
+    if let BgKind::Image { filename, dim } = &def.style.background {
+        if !filename.is_empty() && crate::types::validate_image_filename(filename).is_err() {
+            return Err("background image filename is invalid".to_string());
+        }
+        if !dim.is_finite() || !(0.0..=100.0).contains(dim) {
+            return Err("background image dim must be between 0 and 100".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_widget_params(w: &WidgetDef, scale_ok: impl Fn(f32) -> bool) -> Result<(), String> {
+    let schema = widget_schema(w.widget_type);
+    for (key, value) in &w.params {
+        if key.is_empty() || key.len() > MAX_WIDGET_ID_BYTES || key.contains('\0') {
+            return Err(format!("widget '{}' has an invalid parameter key", w.id));
+        }
+        if key == "scale_y" {
+            if !is_box_widget(w.widget_type) {
+                return Err(format!("widget '{}' cannot use scale_y", w.id));
+            }
+            match value {
+                EffectParamValue::Float(scale_y) if scale_ok(*scale_y as f32) => continue,
+                _ => return Err(format!("widget '{}' scale_y out of range", w.id)),
+            }
+        }
+        let Some(desc) = schema.iter().find(|desc| desc.id == *key) else {
+            return Err(format!("widget '{}' has unknown parameter '{key}'", w.id));
+        };
+        validate_widget_param_value(w, desc, value)?;
+    }
+    if w.widget_type == WidgetType::Sensor {
+        let min = w
+            .params
+            .get("min")
+            .and_then(|v| match v {
+                EffectParamValue::Float(v) => Some(*v),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        let max = w
+            .params
+            .get("max")
+            .and_then(|v| match v {
+                EffectParamValue::Float(v) => Some(*v),
+                _ => None,
+            })
+            .unwrap_or(100.0);
+        if min >= max {
+            return Err(format!(
+                "widget '{}' sensor min must be less than max",
+                w.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_widget_param_value(
+    widget: &WidgetDef,
+    desc: &EffectParamDescriptor,
+    value: &EffectParamValue,
+) -> Result<(), String> {
+    let err = |detail: &str| {
+        Err(format!(
+            "widget '{}' parameter '{}' {detail}",
+            widget.id, desc.id
+        ))
+    };
+    match (&desc.kind, value) {
+        (ParamKind::Range { min, max, step }, EffectParamValue::Float(value)) => {
+            if !value.is_finite() || value < min || value > max {
+                return err("is out of range");
+            }
+            if *step > 0.0 && (((value - min) / step).round() * step - (value - min)).abs() > 1e-8 {
+                return err("does not align to its step");
+            }
+        }
+        (ParamKind::Number { min, max }, EffectParamValue::Float(value))
+            if value.is_finite() && value >= min && value <= max => {}
+        (ParamKind::Enum { options }, EffectParamValue::Str(value))
+            if options.iter().any(|option| option == value) => {}
+        (ParamKind::Color, EffectParamValue::Color(_))
+        | (ParamKind::Boolean, EffectParamValue::Bool(_)) => {}
+        (ParamKind::Text | ParamKind::Sensor, EffectParamValue::Str(value)) => {
+            if value.len() > MAX_WIDGET_TEXT_BYTES || value.contains('\0') {
+                return err("contains invalid text");
+            }
+        }
+        (ParamKind::Image, EffectParamValue::Str(value)) => {
+            if value != LOGO_IMAGE
+                && !value.is_empty()
+                && crate::types::validate_image_filename(value).is_err()
+            {
+                return err("has an invalid image filename");
+            }
+        }
+        (ParamKind::Steps, EffectParamValue::Steps(steps))
+            if steps.len() <= MAX_EFFECT_PARAMS
+                && steps.iter().all(|step| step.value.is_finite()) => {}
+        _ => return err("has the wrong type or value"),
+    }
+    Ok(())
 }
 
 /// Full param schema for a widget type: the type-specific rows plus the
@@ -755,6 +904,98 @@ mod tests {
             let back: CustomTemplateDef = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(back, def);
         }
+
+        #[test]
+        fn validate_widgets_never_panics(def in custom_template_def_strategy()) {
+            let _ = validate_widgets(&def);
+        }
+    }
+
+    fn def_with(widgets: Vec<WidgetDef>) -> CustomTemplateDef {
+        CustomTemplateDef {
+            widgets,
+            style: ScreenStyle::default(),
+        }
+    }
+
+    #[test]
+    fn validate_widgets_accepts_a_default_widget() {
+        assert!(validate_widgets(&def_with(vec![widget_with(&[])])).is_ok());
+    }
+
+    #[test]
+    fn validate_widgets_rejects_offcanvas_and_nonfinite() {
+        let mut off = widget_with(&[]);
+        off.x = 1.5;
+        assert!(validate_widgets(&def_with(vec![off])).is_err());
+
+        let mut nan_rot = widget_with(&[]);
+        nan_rot.rotation = f32::NAN;
+        assert!(validate_widgets(&def_with(vec![nan_rot])).is_err());
+
+        let mut bad_scale = widget_with(&[]);
+        bad_scale.scale = 0.0;
+        assert!(validate_widgets(&def_with(vec![bad_scale])).is_err());
+    }
+
+    #[test]
+    fn validate_widgets_rejects_traversal_image_filename() {
+        let w = widget_with(&[(
+            "filename",
+            EffectParamValue::Str("../../etc/shadow".to_string()),
+        )]);
+        assert!(validate_widgets(&def_with(vec![w])).is_err());
+    }
+
+    #[test]
+    fn validate_widgets_rejects_too_many_params() {
+        let params: Vec<(String, EffectParamValue)> = (0..MAX_EFFECT_PARAMS + 1)
+            .map(|i| (format!("k{i}"), EffectParamValue::Float(1.0)))
+            .collect();
+        let mut w = widget_with(&[]);
+        for (k, v) in params {
+            w.params.insert(k, v);
+        }
+        assert!(validate_widgets(&def_with(vec![w])).is_err());
+    }
+
+    #[test]
+    fn validate_widgets_enforces_schema_and_widget_specific_invariants() {
+        let mut unknown = widget_with(&[("not_a_param", EffectParamValue::Bool(true))]);
+        unknown.widget_type = WidgetType::Logo;
+        assert!(validate_widgets(&def_with(vec![unknown])).is_err());
+
+        let mut wrong_type = widget_with(&[("opacity", EffectParamValue::Str("100".to_string()))]);
+        wrong_type.widget_type = WidgetType::Logo;
+        assert!(validate_widgets(&def_with(vec![wrong_type])).is_err());
+
+        let mut sensor = widget_with(&[
+            ("min", EffectParamValue::Float(100.0)),
+            ("max", EffectParamValue::Float(10.0)),
+        ]);
+        sensor.widget_type = WidgetType::Sensor;
+        assert!(validate_widgets(&def_with(vec![sensor])).is_err());
+    }
+
+    #[test]
+    fn validate_widgets_rejects_duplicate_ids_and_non_box_scale_y() {
+        let a = widget_with(&[]);
+        let b = widget_with(&[]);
+        assert!(validate_widgets(&def_with(vec![a, b])).is_err());
+
+        let mut clock = widget_with(&[("scale_y", EffectParamValue::Float(2.0))]);
+        clock.widget_type = WidgetType::Clock;
+        assert!(validate_widgets(&def_with(vec![clock])).is_err());
+    }
+
+    #[test]
+    fn validate_widgets_requires_a_bounded_background_dim() {
+        let mut def = def_with(vec![widget_with(&[])]);
+        def.style.background = BgKind::Image {
+            filename: "wallpaper.png".to_string(),
+            dim: 101.0,
+        };
+        assert!(validate_widgets(&def).is_err());
     }
 
     #[test]
@@ -935,17 +1176,5 @@ mod tests {
         let json = serde_json::to_string(&render).unwrap();
         let back: LcdEditorRender = serde_json::from_str(&json).unwrap();
         assert_eq!(back, render);
-    }
-
-    #[test]
-    fn lcd_editor_render_deserializes_legacy_json_without_signatures() {
-        let legacy = serde_json::json!({
-            "device_id": "dev1",
-            "canvas_w": 240,
-            "canvas_h": 240,
-            "sprites": [],
-        });
-        let back: LcdEditorRender = serde_json::from_value(legacy).unwrap();
-        assert!(back.signatures.is_empty());
     }
 }

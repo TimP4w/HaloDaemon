@@ -24,8 +24,10 @@ pub trait KeepAwake: Send + Sync {
 }
 
 /// No-op backend for platforms that have no keep-awake API.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 struct NoOpKeepAwake;
 
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 #[async_trait]
 impl KeepAwake for NoOpKeepAwake {
     async fn set(&self, _on: bool) -> Result<()> {

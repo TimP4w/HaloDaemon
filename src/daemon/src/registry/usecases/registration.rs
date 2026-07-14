@@ -7,7 +7,8 @@ use crate::state::AppState;
 use halod_shared::types::{VisibilityState, DEFAULT_PROFILE_NAME};
 
 /// Load the device's effective saved state, then re-apply its per-zone RGB
-/// transforms (which `load_state` does not cover). Shared by both register paths.
+/// transforms (which `load_state` does not cover). Active devices only: state
+/// restoration may perform hardware I/O and must never run for a disabled one.
 pub(super) async fn restore_saved_state(app: &Arc<AppState>, device: &Arc<dyn Device>) {
     let saved = {
         let cfg = app.config.read().await;
@@ -60,8 +61,8 @@ pub async fn register_if_disabled(app: &Arc<AppState>, device: &Arc<dyn Device>)
         return false;
     }
     device.set_active_state(VisibilityState::Disabled);
-    restore_saved_state(app, device).await;
-    // clear any engine slots restored by load_state
+    // Constructors may seed participation slots even though saved state is not
+    // restored here. Keep the disabled placeholder inert for every engine.
     clear_engine_slots(device);
     log::info!(
         "[{}] registered as disabled, skipping initialize()",
@@ -130,31 +131,145 @@ async fn ensure_default_baseline(app: &Arc<AppState>, device: &dyn Device) {
 ///
 /// Returns `true` when the device is now active in app.devices.
 pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bool {
-    if app
-        .devices
-        .read()
-        .await
-        .iter()
-        .any(|d| d.id() == device.id())
-    {
+    let device_id = device.id().to_owned();
+    if !claim_registration(app, &device_id).await {
         return false;
     }
     if register_if_disabled(app, &device).await {
+        finish_registration(app, &device_id).await;
         return true;
     }
     match init_device(app, &device).await {
         Ok(true) => {}
-        _ => return false,
+        _ => {
+            finish_registration(app, &device_id).await;
+            return false;
+        }
     }
     // baseline before overrides
     ensure_default_baseline(app, device.as_ref()).await;
     restore_saved_state(app, &device).await;
     app.devices.write().await.push(device.clone());
+    log_registration_conflicts(app, &device).await;
+    finish_registration(app, &device_id).await;
     log::info!("[{}] registered", device.name());
     if let Some(hook) = device.as_post_register_hook() {
         hook.on_registered(Arc::clone(app)).await;
     }
     true
+}
+
+async fn log_registration_conflicts(app: &Arc<AppState>, device: &Arc<dyn Device>) {
+    if device.active_state() == VisibilityState::Disabled || !device.is_live() {
+        return;
+    }
+    let identity = device.identity();
+    if identity.is_empty() {
+        return;
+    }
+    let origin = device.conflict_origin();
+    for other in app.devices.read().await.iter() {
+        if other.id() == device.id()
+            || other.active_state() == VisibilityState::Disabled
+            || !other.is_live()
+            || other.integration_id().is_some()
+        {
+            continue;
+        }
+        match crate::registry::identity::compare(
+            &identity,
+            &origin,
+            &other.identity(),
+            &other.conflict_origin(),
+        ) {
+            crate::registry::identity::MatchEvidence::ConfirmedSerial
+            | crate::registry::identity::MatchEvidence::ConfirmedLocation => log::warn!(
+                "device '{}' may conflict with '{}' (same physical hardware)",
+                device.id(),
+                other.id()
+            ),
+            crate::registry::identity::MatchEvidence::PossibleUsb => log::info!(
+                "device '{}' may conflict with '{}' (matching VID/PID)",
+                device.id(),
+                other.id()
+            ),
+            _ => {}
+        }
+    }
+}
+
+/// Atomically reserve a device id across the asynchronous initialization
+/// window. The reservation lock is held while consulting `devices`, closing
+/// the check/insert race between concurrent transport scanners.
+async fn claim_registration(app: &Arc<AppState>, id: &str) -> bool {
+    let mut active = app.device_registrations.lock().await;
+    if active.contains(id) || app.devices.read().await.iter().any(|d| d.id() == id) {
+        return false;
+    }
+    active.insert(id.to_owned());
+    true
+}
+
+async fn finish_registration(app: &Arc<AppState>, id: &str) {
+    app.device_registrations.lock().await.remove(id);
+}
+
+/// Register `device`, then — if it's a `Controller` — discover and register
+/// its children too. Shared by every scanner that hosts children (HID hubs,
+/// the plugin-integration scanner): register the parent first so children can
+/// resolve it (e.g. as a `ChainHub`/`FanHub`), then walk `discover_children()`.
+/// Returns whether the parent itself was registered.
+pub async fn register_device_and_children(app: &Arc<AppState>, device: Arc<dyn Device>) -> bool {
+    if !register_device(app, device.clone()).await {
+        return false;
+    }
+    if device.active_state() == VisibilityState::Disabled {
+        return true;
+    }
+    if let Some(ctrl) = device.as_controller() {
+        for child in ctrl.discover_children().await {
+            register_device(app, child).await;
+        }
+    }
+    true
+}
+
+/// True if `id` is a child registered alongside root `root_id`: `_ctrl_`
+/// (integration controllers), `_acc_` (chain accessories), or `_chain_` (chain
+/// links). Matching the markers rather than a bare `{root_id}_` prefix stops two
+/// roots differing only by a trailing `_<suffix>` from tearing each other down.
+fn is_registered_child(id: &str, root_id: &str) -> bool {
+    id.strip_prefix(root_id)
+        .and_then(|rest| rest.strip_prefix('_'))
+        .is_some_and(|marker| {
+            marker.starts_with("ctrl_")
+                || marker.starts_with("acc_")
+                || marker.starts_with("chain_")
+        })
+}
+
+/// The mirror of [`register_device_and_children`]: close and drop `root_id` plus
+/// every child registered alongside it (see [`is_registered_child`]). Used for a
+/// scoped reload of one integration or plugin. Returns the removed ids so the
+/// caller can prune their (shared) HID-tracking entry.
+pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) -> Vec<String> {
+    let removed: Vec<Arc<dyn Device>> = {
+        let mut devices = app.devices.write().await;
+        let mut removed = Vec::new();
+        devices.retain(|d| {
+            if d.id() == root_id || is_registered_child(d.id(), root_id) {
+                removed.push(d.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    };
+    for device in &removed {
+        device.close().await;
+    }
+    removed.iter().map(|d| d.id().to_owned()).collect()
 }
 
 #[cfg(test)]
@@ -230,6 +345,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_registration_claims_allow_only_one_owner() {
+        let app = make_app();
+        let (a, b) = tokio::join!(
+            claim_registration(&app, "steelseries-1"),
+            claim_registration(&app, "steelseries-1")
+        );
+
+        assert_ne!(a, b, "exactly one concurrent scanner must own the id");
+        assert_eq!(app.device_registrations.lock().await.len(), 1);
+        finish_registration(&app, "steelseries-1").await;
+    }
+
+    #[tokio::test]
     async fn register_device_registers_disabled_device_without_init() {
         let app = make_app();
         {
@@ -243,16 +371,37 @@ mod tests {
                     active_state: VisibilityState::Disabled,
                 },
             );
+            cfg.active_profile_data_mut().device_states.insert(
+                "dev-1".into(),
+                serde_json::json!({
+                    "rgb": {
+                        "state": {
+                            "mode": "static",
+                            "color": {"r": 255, "g": 0, "b": 0}
+                        }
+                    }
+                }),
+            );
         }
-        // .fail() makes initialize() Err: if it were called, result would be false.
-        let device = Arc::new(MockDevice::new("dev-1").fail());
-        let result = register_device(&app, device as Arc<dyn Device>).await;
+        let device = Arc::new(MockDevice::new("dev-1").with_rgb().init_panics());
+        let result = register_device(&app, device.clone() as Arc<dyn Device>).await;
 
         assert!(result, "disabled device should return true");
         assert_eq!(
             app.devices.read().await.len(),
             1,
             "disabled device must be pushed"
+        );
+        assert!(
+            !device.load_called.load(std::sync::atomic::Ordering::SeqCst),
+            "disabled registration must not restore state"
+        );
+        assert_eq!(
+            device
+                .rgb_apply_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "saved RGB state must not be sent to disabled hardware"
         );
     }
 
@@ -498,5 +647,85 @@ mod tests {
             "lcd template id must be cleared after registering a disabled device, \
              so the LCD engine treats it as non-participating"
         );
+    }
+
+    #[tokio::test]
+    async fn unregister_device_and_children_removes_only_the_matching_subtree() {
+        let app = make_app();
+        let root = Arc::new(MockDevice::new("openrgb-127_0_0_1_6742"));
+        let child1 = Arc::new(MockDevice::new("openrgb-127_0_0_1_6742_ctrl_0"));
+        let child2 = Arc::new(MockDevice::new("openrgb-127_0_0_1_6742_ctrl_1"));
+        let unrelated = Arc::new(MockDevice::new("other-device"));
+        {
+            let mut devices = app.devices.write().await;
+            devices.push(root.clone());
+            devices.push(child1.clone());
+            devices.push(child2.clone());
+            devices.push(unrelated.clone());
+        }
+
+        unregister_device_and_children(&app, "openrgb-127_0_0_1_6742").await;
+
+        let remaining = app.devices.read().await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id(), "other-device");
+        drop(remaining);
+
+        assert!(root.closed.load(Ordering::SeqCst));
+        assert!(child1.closed.load(Ordering::SeqCst));
+        assert!(child2.closed.load(Ordering::SeqCst));
+        assert!(!unrelated.closed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn unregister_device_and_children_removes_chain_accessory_and_link_children() {
+        // A device plugin's chain children (auto-detected `_acc_` accessories and
+        // manually-added `_chain_` links) must be torn down with the parent —
+        // otherwise they linger after a disable and collide with freshly-built
+        // children on re-enable, leaving the plugin in a broken state.
+        let app = make_app();
+        let root = Arc::new(MockDevice::new("kraken-0"));
+        let accessory = Arc::new(MockDevice::new("kraken-0_acc_0_19"));
+        let link = Arc::new(MockDevice::new("kraken-0_chain_0_abcd"));
+        // A sibling whose id merely shares a leading substring must survive.
+        let sibling = Arc::new(MockDevice::new("kraken-0b"));
+        {
+            let mut devices = app.devices.write().await;
+            devices.push(root.clone());
+            devices.push(accessory.clone());
+            devices.push(link.clone());
+            devices.push(sibling.clone());
+        }
+
+        unregister_device_and_children(&app, "kraken-0").await;
+
+        let remaining = app.devices.read().await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id(), "kraken-0b");
+        drop(remaining);
+
+        assert!(root.closed.load(Ordering::SeqCst));
+        assert!(
+            accessory.closed.load(Ordering::SeqCst),
+            "_acc_ child removed"
+        );
+        assert!(link.closed.load(Ordering::SeqCst), "_chain_ child removed");
+        assert!(!sibling.closed.load(Ordering::SeqCst), "sibling survives");
+    }
+
+    #[test]
+    fn is_registered_child_matches_only_known_markers() {
+        let root = "openrgb-a_1";
+        assert!(is_registered_child("openrgb-a_1_ctrl_0", root));
+        assert!(is_registered_child("openrgb-a_1_acc_0_19", root));
+        assert!(is_registered_child("openrgb-a_1_chain_0_uuid", root));
+        assert!(
+            is_registered_child("openrgb-a_1_ctrl_0_acc_0_19", root),
+            "nested"
+        );
+        // Another root that differs only by a trailing `_<suffix>` is NOT a child.
+        assert!(!is_registered_child("openrgb-a_1_2", root));
+        assert!(!is_registered_child("openrgb-a_1", root), "the root itself");
+        assert!(!is_registered_child("openrgb-a_1b", root));
     }
 }

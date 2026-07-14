@@ -27,22 +27,75 @@ fn next_client_id() -> u64 {
     NEXT_CLIENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The LCD-preview keepalive lease; `Active` expires to `Expired` once
+/// `last_keepalive` is more than `LCD_PREVIEW_LEASE_SECS` old.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LeaseState {
+    Unsubscribed,
+    Active {
+        last_keepalive: tokio::time::Instant,
+    },
+    Expired,
+}
+
+/// Which engine topics a client has subscribed to; carried by `ClientState::Subscribed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SubscribedTopics {
+    pub canvas: bool,
+    pub lcd: bool,
+}
+
+/// A client's IPC connection lifecycle.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientState {
+    Connected,
+    Subscribed(SubscribedTopics),
+    Closing,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SubscriptionTopic {
+    Canvas,
+    Lcd,
+}
+
+struct SubscriptionState {
+    client: ClientState,
+    canvas_lease: LeaseState,
+    lcd_lease: LeaseState,
+    canvas_task: bool,
+    lcd_task: bool,
+}
+
+impl Default for SubscriptionState {
+    fn default() -> Self {
+        Self {
+            client: ClientState::Connected,
+            canvas_lease: LeaseState::Unsubscribed,
+            lcd_lease: LeaseState::Unsubscribed,
+            canvas_task: false,
+            lcd_task: false,
+        }
+    }
+}
+
 /// Per-client one-shot subscription flags, shared across clones of a handle so a
 /// re-subscribe to the same engine topic doesn't spawn a duplicate forwarder.
 pub struct Subscriptions {
-    canvas: std::sync::atomic::AtomicBool,
-    lcd: std::sync::atomic::AtomicBool,
-    lcd_keepalive: tokio::sync::watch::Sender<tokio::time::Instant>,
+    lifecycle: std::sync::Mutex<SubscriptionState>,
+    lcd_lease: tokio::sync::watch::Sender<LeaseState>,
     lcd_preview: tokio::sync::watch::Sender<Option<Arc<Vec<u8>>>>,
+    tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl Default for Subscriptions {
     fn default() -> Self {
         Self {
-            canvas: std::sync::atomic::AtomicBool::new(false),
-            lcd: std::sync::atomic::AtomicBool::new(false),
-            lcd_keepalive: tokio::sync::watch::channel(tokio::time::Instant::now()).0,
+            lifecycle: std::sync::Mutex::new(SubscriptionState::default()),
+            lcd_lease: tokio::sync::watch::channel(LeaseState::Unsubscribed).0,
             lcd_preview: tokio::sync::watch::channel(None).0,
+            tasks: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -85,30 +138,108 @@ impl ClientHandle {
 
     /// Claim the canvas subscription; returns `true` only on the first call.
     pub fn try_subscribe_canvas(&self) -> bool {
-        !self
-            .subs
-            .canvas
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        let mut lifecycle = self.subs.lifecycle.lock().unwrap();
+        if lifecycle.canvas_task
+            || matches!(lifecycle.client, ClientState::Closing | ClientState::Closed)
+        {
+            return false;
+        }
+        lifecycle.canvas_task = true;
+        lifecycle.canvas_lease = LeaseState::Active {
+            last_keepalive: tokio::time::Instant::now(),
+        };
+        true
     }
 
     /// Claim the LCD-engine subscription; returns `true` only on the first call.
     pub fn try_subscribe_lcd(&self) -> bool {
-        !self
-            .subs
-            .lcd
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        let mut lifecycle = self.subs.lifecycle.lock().unwrap();
+        if lifecycle.lcd_task
+            || matches!(lifecycle.client, ClientState::Closing | ClientState::Closed)
+        {
+            return false;
+        }
+        lifecycle.lcd_task = true;
+        true
     }
 
     /// Renew the LCD-preview lease (called on every `LcdEngineSubscribe` receipt).
     pub fn touch_lcd_preview(&self) {
-        self.subs
-            .lcd_keepalive
-            .send_replace(tokio::time::Instant::now());
+        let active = LeaseState::Active {
+            last_keepalive: tokio::time::Instant::now(),
+        };
+        let mut lifecycle = self.subs.lifecycle.lock().unwrap();
+        if matches!(lifecycle.client, ClientState::Closing | ClientState::Closed) {
+            return;
+        }
+        lifecycle.lcd_lease = active;
+        drop(lifecycle);
+        self.subs.lcd_lease.send_replace(active);
     }
 
-    /// Subscribe to this client's LCD-preview lease renewals.
-    pub fn lcd_keepalive_rx(&self) -> tokio::sync::watch::Receiver<tokio::time::Instant> {
-        self.subs.lcd_keepalive.subscribe()
+    /// Subscribe to this client's LCD-preview lease state changes.
+    pub fn lcd_lease_rx(&self) -> tokio::sync::watch::Receiver<LeaseState> {
+        self.subs.lcd_lease.subscribe()
+    }
+
+    /// Transition an `Active` lease to `Expired`; a no-op if already expired/unsubscribed or renewed since.
+    pub(crate) fn expire_lcd_lease(&self) {
+        let mut lifecycle = self.subs.lifecycle.lock().unwrap();
+        if matches!(lifecycle.lcd_lease, LeaseState::Active { .. }) {
+            lifecycle.lcd_lease = LeaseState::Expired;
+        }
+        drop(lifecycle);
+        let _ = self.subs.lcd_lease.send_if_modified(|s| {
+            if matches!(s, LeaseState::Active { .. }) {
+                *s = LeaseState::Expired;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    /// Register a spawned engine-subscription forwarder as owned by this client, advancing its state to `Subscribed`.
+    pub fn track_subscription(&self, topic: SubscriptionTopic, task: tokio::task::JoinHandle<()>) {
+        let mut lifecycle = self.subs.lifecycle.lock().unwrap();
+        if matches!(lifecycle.client, ClientState::Closing | ClientState::Closed) {
+            task.abort();
+            return;
+        }
+        let mut topics = match lifecycle.client {
+            ClientState::Subscribed(t) => t,
+            _ => SubscribedTopics::default(),
+        };
+        match topic {
+            SubscriptionTopic::Canvas => topics.canvas = true,
+            SubscriptionTopic::Lcd => topics.lcd = true,
+        }
+        lifecycle.client = ClientState::Subscribed(topics);
+        self.subs.tasks.lock().unwrap().push(task);
+    }
+
+    #[cfg(test)]
+    pub fn state(&self) -> ClientState {
+        self.subs.lifecycle.lock().unwrap().client.clone()
+    }
+
+    /// Abort every tracked subscription task and transition to `Closed`; called once at client teardown.
+    pub async fn close(&self) {
+        {
+            let mut lifecycle = self.subs.lifecycle.lock().unwrap();
+            lifecycle.client = ClientState::Closing;
+            lifecycle.canvas_lease = LeaseState::Expired;
+            lifecycle.lcd_lease = LeaseState::Expired;
+        }
+        self.subs.lcd_lease.send_replace(LeaseState::Expired);
+        let tasks: Vec<_> = self.subs.tasks.lock().unwrap().drain(..).collect();
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+        self.subs.lifecycle.lock().unwrap().client = ClientState::Closed;
     }
 }
 
@@ -167,7 +298,7 @@ fn current_user_sid() -> Result<String> {
         ConvertSidToStringSidW(token_user.User.Sid, &mut sid_str)
             .map_err(|e| anyhow::anyhow!("ConvertSidToStringSidW failed: {e}"))?;
         let result = sid_str.to_string();
-        let _ = LocalFree(HLOCAL(sid_str.0 as *mut std::ffi::c_void));
+        let _ = LocalFree(Some(HLOCAL(sid_str.0 as *mut std::ffi::c_void)));
         result.map_err(|e| anyhow::anyhow!("SID string not valid UTF-16: {e}"))
     }
 }
@@ -182,6 +313,7 @@ unsafe impl Send for PipeSecurity {}
 /// `user_sid` only, with a Medium integrity label. Pure string formatting —
 /// kept separate from `PipeSecurity::new` so the ACL text is testable without
 /// the Windows security APIs.
+#[cfg(any(windows, test))]
 fn pipe_security_sddl(user_sid: &str) -> String {
     format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{user_sid})S:(ML;;NW;;;ME)")
 }
@@ -235,7 +367,7 @@ impl Drop for PipeSecurity {
         if !self.descriptor.0.is_null() {
             // SAFETY: `descriptor` was allocated by the Convert* call in `new`.
             unsafe {
-                let _ = LocalFree(HLOCAL(self.descriptor.0));
+                let _ = LocalFree(Some(HLOCAL(self.descriptor.0)));
             }
         }
     }
@@ -293,19 +425,28 @@ pub fn ensure_single_instance() -> Result<()> {
 
 #[cfg(unix)]
 pub fn serve(app: Arc<AppState>) -> tokio::task::JoinHandle<Result<()>> {
+    let (dir, is_fallback) = halod_shared::socket::runtime_dir();
+    serve_at(app, dir, is_fallback)
+}
+
+#[cfg(unix)]
+fn serve_at(
+    app: Arc<AppState>,
+    dir: std::path::PathBuf,
+    is_fallback: bool,
+) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
-        use halod_shared::socket::{current_uid, runtime_dir};
+        use halod_shared::socket::{current_uid, socket_path_in};
         use std::fs::Permissions;
         use std::os::unix::fs::PermissionsExt;
         use tokio::net::UnixListener;
 
-        let (dir, is_fallback) = runtime_dir();
         if is_fallback {
             std::fs::create_dir_all(&dir)?;
             std::fs::set_permissions(&dir, Permissions::from_mode(0o700))?;
         }
 
-        let path = socket_path();
+        let path = socket_path_in(&dir);
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
         // Belt-and-suspenders against umask/TOCTOU: even inside a private dir,
@@ -349,7 +490,7 @@ pub fn serve(app: Arc<AppState>) -> tokio::task::JoinHandle<Result<()>> {
         let path = socket_path();
 
         // Explicit security descriptor so the non-elevated UI can connect even
-        // when the daemon runs elevated (see `PipeSecurity`). Built once and
+        // if process integrity differs (see `PipeSecurity`). Built once and
         // kept alive for the whole accept loop.
         let security = PipeSecurity::new()?;
 
@@ -405,6 +546,14 @@ where
     let state_msg = build_state_msg(&app).await;
     handle.send_json(&state_msg);
 
+    let plugin_updates = app.plugin_update_status.lock().await.clone();
+    if !plugin_updates.is_empty() {
+        handle.send_json(&serde_json::json!({
+            "type": "plugin_updates",
+            "plugins": plugin_updates,
+        }));
+    }
+
     {
         let mut clients = app.clients.lock().await;
         clients.push(handle.clone());
@@ -444,6 +593,7 @@ where
         let mut clients = app.clients.lock().await;
         deregister(&mut clients, handle.id);
     }
+    handle.close().await;
     writer.abort();
 
     result
@@ -599,7 +749,12 @@ pub fn broadcast_loop(app: Arc<AppState>) -> tokio::task::JoinHandle<Result<()>>
 
 pub async fn broadcast_state(app: &Arc<AppState>) {
     let msg = build_state_msg(app).await;
-    let Some(frame) = encode_json_frame(&msg) else {
+    broadcast_json(app, &msg).await;
+}
+
+/// Fan an arbitrary JSON frame out to every connected client (encoded once).
+pub async fn broadcast_json(app: &Arc<AppState>, msg: &Value) {
+    let Some(frame) = encode_json_frame(msg) else {
         return;
     };
     let frame = Arc::new(frame);
@@ -820,6 +975,89 @@ mod handle_tests {
             "a stalled client's queue must not grow past capacity"
         );
     }
+
+    #[test]
+    fn client_state_starts_connected() {
+        let (tx, _rx) = mpsc::channel::<Arc<Vec<u8>>>(4);
+        let handle = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        assert_eq!(handle.state(), ClientState::Connected);
+    }
+
+    #[tokio::test]
+    async fn tracking_a_subscription_advances_to_subscribed_with_that_topic() {
+        let (tx, _rx) = mpsc::channel::<Arc<Vec<u8>>>(4);
+        let handle = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        handle.track_subscription(SubscriptionTopic::Canvas, tokio::spawn(async {}));
+        assert_eq!(
+            handle.state(),
+            ClientState::Subscribed(SubscribedTopics {
+                canvas: true,
+                lcd: false
+            })
+        );
+        handle.track_subscription(SubscriptionTopic::Lcd, tokio::spawn(async {}));
+        assert_eq!(
+            handle.state(),
+            ClientState::Subscribed(SubscribedTopics {
+                canvas: true,
+                lcd: true
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn close_aborts_tracked_subscription_tasks_and_ends_closed() {
+        let (tx, _rx) = mpsc::channel::<Arc<Vec<u8>>>(4);
+        let handle = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        });
+        handle.track_subscription(SubscriptionTopic::Canvas, task);
+
+        handle.close().await;
+
+        assert_eq!(handle.state(), ClientState::Closed);
+    }
+
+    #[test]
+    fn touch_lcd_preview_sets_an_active_lease() {
+        let (tx, _rx) = mpsc::channel::<Arc<Vec<u8>>>(4);
+        let handle = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        assert_eq!(*handle.lcd_lease_rx().borrow(), LeaseState::Unsubscribed);
+        handle.touch_lcd_preview();
+        assert!(matches!(
+            *handle.lcd_lease_rx().borrow(),
+            LeaseState::Active { .. }
+        ));
+    }
+
+    #[test]
+    fn expire_lcd_lease_is_a_noop_when_not_active() {
+        let (tx, _rx) = mpsc::channel::<Arc<Vec<u8>>>(4);
+        let handle = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        handle.expire_lcd_lease();
+        assert_eq!(*handle.lcd_lease_rx().borrow(), LeaseState::Unsubscribed);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -860,27 +1098,18 @@ mod unix_tests {
     async fn serve_locks_down_fallback_dir_and_socket() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // Drive `runtime_dir()` down the fallback branch (XDG unset) while
-        // redirecting the temp base via TMPDIR. This is the only test in this
-        // crate that touches these env vars; it restores them before returning.
-        let prev_xdg = std::env::var_os("XDG_RUNTIME_DIR");
-        let prev_tmp = std::env::var_os("TMPDIR");
-        // SAFETY: single-threaded test setup, restored below.
-        unsafe {
-            std::env::remove_var("XDG_RUNTIME_DIR");
-            std::env::set_var("TMPDIR", tmp.path());
-        }
-
-        let (dir, is_fallback) = halod_shared::socket::runtime_dir();
-        assert!(is_fallback, "expected fallback dir under {:?}", tmp.path());
-        let path = socket_path();
+        let dir = tmp.path().join("halod-test");
+        let path = halod_shared::socket::socket_path_in(&dir);
 
         let app = Arc::new(AppState::new(Config::default()));
-        let handle = serve(app);
+        let handle = serve_at(app, dir.clone(), true);
 
         // serve() binds inside its spawned task; wait for the socket to appear.
         let mut waited = 0;
         while !std::path::Path::new(&path).exists() && waited < 200 {
+            if handle.is_finished() {
+                panic!("IPC server exited before binding: {:?}", handle.await);
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
             waited += 1;
         }
@@ -888,18 +1117,6 @@ mod unix_tests {
 
         let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         let sock_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-
-        // SAFETY: restore env before asserting so a failure does not leak it.
-        unsafe {
-            match prev_xdg {
-                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
-            }
-            match prev_tmp {
-                Some(v) => std::env::set_var("TMPDIR", v),
-                None => std::env::remove_var("TMPDIR"),
-            }
-        }
 
         handle.abort();
 

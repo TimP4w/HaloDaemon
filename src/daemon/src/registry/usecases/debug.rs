@@ -147,10 +147,10 @@ fn health_rules(ffmpeg_available: bool) -> Vec<HealthRule> {
             check: Box::new(|| pawnio_present().unwrap_or(false)),
         },
         HealthRule {
-            id: DependencyRule::Administrator,
+            id: DependencyRule::Broker,
             required: false,
             platform: "Windows",
-            check: Box::new(is_elevated),
+            check: Box::new(|| broker_service_present().unwrap_or(false)),
         },
     ]);
 
@@ -343,7 +343,7 @@ async fn build_device_debug(
     hid_entries: &[HidEntryDebugInfo],
 ) -> DeviceDebugInfo {
     let wire = device.serialize().await;
-    let mut fields = Vec::new();
+    let mut fields = source_fields(device);
 
     let hid_key = tracking_keys
         .iter()
@@ -398,6 +398,36 @@ async fn build_device_debug(
         transport,
         fields,
     }
+}
+
+/// Ownership metadata is deliberately emitted for every device, not merely
+/// Lua-backed devices. It makes a debug export answer the practical question
+/// behind a duplicate report: which component is talking to this hardware?
+fn source_fields(device: &dyn crate::drivers::Device) -> Vec<(String, String)> {
+    use crate::registry::identity::DeviceOrigin;
+
+    let origin = device.conflict_origin();
+    let mut fields = match (&origin, device.integration_id()) {
+        (_, Some(id)) => vec![
+            ("source_kind".into(), "integration_root".into()),
+            ("integration_id".into(), id),
+        ],
+        (DeviceOrigin::Integration(id), None) => vec![
+            ("source_kind".into(), "integration_controller".into()),
+            ("integration_id".into(), id.clone()),
+        ],
+        (DeviceOrigin::Plugin(id), None) => vec![
+            ("source_kind".into(), "plugin".into()),
+            ("plugin_id".into(), id.clone()),
+        ],
+        (DeviceOrigin::Native, None) => vec![("source_kind".into(), "native_driver".into())],
+    };
+    if let Some(plugin_id) = device.owning_plugin_id() {
+        if !fields.iter().any(|(key, _)| key == "plugin_id") {
+            fields.push(("plugin_id".into(), plugin_id));
+        }
+    }
+    fields
 }
 
 fn enumerate_hid() -> Vec<HidEntryDebugInfo> {
@@ -548,6 +578,27 @@ fn pawnio_present() -> Option<bool> {
     None
 }
 
+/// Whether the elevated `HalodBroker` service is registered with the SCM. Since
+/// the privilege split the worker never runs elevated itself — chipset SMBus /
+/// PawnIO access goes through this on-demand service, which the worker starts
+/// without a UAC prompt. If it isn't installed, register-bus access falls back
+/// to a per-session UAC prompt (a dev run), so its absence is what limits
+/// chipset RGB/sensors — not the worker's own elevation. `None` off Windows.
+#[cfg(windows)]
+fn broker_service_present() -> Option<bool> {
+    use halod_hwaccess::proto::BROKER_SERVICE_NAME;
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager =
+        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+    Some(
+        manager
+            .open_service(BROKER_SERVICE_NAME, ServiceAccess::QUERY_STATUS)
+            .is_ok(),
+    )
+}
+
 /// Whether `60-halod.rules` is installed in one of the standard udev
 /// directories. `None` outside Linux.
 #[cfg(target_os = "linux")]
@@ -569,6 +620,22 @@ fn udev_rules_present() -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_fields_identify_native_plugin_and_integration_roots() {
+        use crate::test_support::MockDevice;
+
+        assert!(source_fields(&MockDevice::new("native"))
+            .contains(&("source_kind".into(), "native_driver".into())));
+        assert!(
+            source_fields(&MockDevice::new("plugin").with_owning_plugin_id("foo"))
+                .contains(&("plugin_id".into(), "foo".into()))
+        );
+        assert!(
+            source_fields(&MockDevice::new("root").with_integration_id("openrgb"))
+                .contains(&("integration_id".into(), "openrgb".into()))
+        );
+    }
 
     #[test]
     fn matches_hid_key_pairs_vid_pid_serial() {

@@ -44,7 +44,7 @@ pub(super) fn header(
         let badge = Rect::from_min_size(Pos2::new(rect.left(), cy - 28.0), Vec2::new(60.0, 56.0));
         let p = ui.painter();
         theme::glow(p, badge.center(), 30.0, color, 0.45);
-        crate::ui::components::device_badge(p, badge, dev.device_type, color, 11.0, 2.0);
+        crate::ui::components::device_badge(p, badge, dev.device_type);
     }
 
     // ── Name row: edit mode or static ────────────────────────────────────────
@@ -94,7 +94,13 @@ pub(super) fn header(
         if commit || save_resp.clicked() {
             let trimmed = ui_state.rename_val.trim().to_string();
             if !trimmed.is_empty() {
-                crate::domain::actions::devices::rename_device(cmd, &dev.id, &trimmed);
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::SetDeviceName {
+                        device_id: dev.id.clone(),
+                        name: trimmed,
+                    },
+                );
             }
             ui_state.rename_editing = false;
         }

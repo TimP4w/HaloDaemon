@@ -1,0 +1,143 @@
+lcd:
+  tab_image: Immagine
+  tab_editor: Editor
+  tab_video: Video
+  ffmpeg_not_installed: ffmpeg non installato
+  display: Schermo
+  brightness: Luminosità
+  rotation: ROTAZIONE
+  reset_to_default: Ripristina predefinito
+  raw_streaming: Streaming non compresso
+  raw_streaming_hint: Invia fotogrammi non compressi al pannello senza usare la codifica Q565
+  media: Media
+  no_video_selected: Nessun video selezionato
+  choose_video: "Scegli video…"
+  filter_videos: Video
+  ffmpeg_unavailable_host: ffmpeg non è disponibile sull'host del daemon
+  upload_image_gif: "Carica immagine / GIF…"
+  filter_images: Immagini
+  upload_processing_pct: "Elaborazione… %{pct}%"
+  upload_processing: "Elaborazione…"
+  upload_writing: "Scrittura sul dispositivo…"
+  uploading: "Caricamento…"
+  none: "(nessuno)"
+  widget_count: "%{n} widget"
+  clear_all: Cancella tutto
+  empty_screen_hint: Lo schermo è vuoto. Trascina qui i widget dalla libreria in basso.
+  editor_shortcuts_hint: "Canc per eliminare  ·  Alt+H / Alt+V per centrare  ·  trascina il pomello ⟳ per ruotare  ·  doppio clic sul testo per modificare"
+  no_image_selected: Nessuna immagine selezionata
+  widget_clock: Orologio
+  widget_date: Data
+  widget_sensor: Sensore
+  widget_text: Testo
+  widget_image: Immagine
+  widget_debug: Debug
+  widget_spectrum: Spettro
+  widget_vu_meter: VU Meter
+  widget_now_playing: In riproduzione
+  widget_logo: Logo
+  widget_shape: Forma
+  preset_stats: Statistiche
+  preset_clock: Orologio
+  preset_cooler: Raffreddamento
+  preset_gauge: Indicatore
+  start_from_preset: PARTI DA UN PRESET
+  widget_library: Libreria widget
+  drag_onto_screen: trascina sullo schermo
+  my_templates: I MIEI TEMPLATE
+  template_name_hint: Nome del template
+  save: Salva
+  delete_template_title: Vuoi eliminare il template?
+  delete_image_title: Vuoi eliminare l'immagine?
+  delete_confirm_body: 'Vuoi davvero eliminare "%{name}"? Non potrai annullare questa operazione.'
+  cancel: Annulla
+  delete: Elimina
+  empty_selection_hint: "Tocca un widget sullo schermo\nper modificarne dimensioni, colore o testo."
+  selected_caption: "SELEZIONATO · %{kind}"
+  type_clock: Orologio
+  type_date: Data
+  type_ring_gauge: Indicatore ad anello
+  type_progress_bar: Barra di avanzamento
+  type_sensor_stat: Valore del sensore
+  type_text: Testo
+  type_image: Immagine
+  type_logo: Logo
+  type_shape: Forma
+  type_debug: Debug
+  type_spectrum: Spettro
+  type_vu_bar: Barra VU
+  type_vu_ring: Anello VU
+  type_now_playing: In riproduzione
+  type_widget: Widget
+  size: Dimensione
+  color: Colore
+  accent: Accento
+  font: Font
+  center: Centro
+  screen_style: Stile schermo
+  background: Sfondo
+  dim: Attenua
+  bg_flow: Flusso
+  bg_solid: Tinta unita
+  bg_grid: Griglia
+  bg_glow: Bagliore
+  bg_image: Immagine
+  param_opacity: Opacità
+  param_variant: Stile
+  param_sensor: Sensore
+  param_label: Testo etichetta
+  param_show_value: Mostra valore
+  param_value_color: Colore numero
+  param_label_color: Colore etichetta
+  param_rounded: Estremità arrotondate
+  param_inverted: Invertito
+  param_curve: Curva del misuratore
+  param_fill: Colore riempimento
+  param_fill_bar: Colore barra
+  param_fill_plain: Colore
+  param_track: Colore traccia
+  param_gradient: Sfumatura sul valore
+  param_gradient_height: Sfumatura in altezza
+  param_gradient_high: Colore superiore della sfumatura
+  param_min: Valore minimo
+  param_max: Valore massimo
+  param_text: Testo
+  param_filename: Immagine
+  param_fit: Adattamento
+  param_shape: Forma
+  param_bands: Bande
+  param_flip_h: Capovolgi orizzontalmente
+  param_flip_v: Capovolgi verticalmente
+  param_mirror: Rifletti dal centro
+  param_show_art: Mostra copertina album
+  param_show_title: Mostra titolo
+  param_show_artist: Mostra artista
+  param_title_color: Colore titolo
+  param_artist_color: Colore artista
+  param_show_img: Mostra logo
+  param_show_text: Mostra testo
+  param_filled: Riempito
+  enum_variant:
+    24h: 24h
+    24h_seconds: 24h (con secondi)
+    12h: 12h
+    short: Breve
+    numeric: Numerico
+    stat: Stat
+    ring: Anello
+    bar: Barra
+  enum_fit:
+    fit: Adatta
+    cover: Copri
+    contain: Contieni
+  enum_shape:
+    rect: Rettangolo
+    rounded: Arrotondato
+    circle: Cerchio
+    square: Quadrato
+    rectangle: Rettangolo
+    triangle: Triangolo
+    line: Linea
+  group_shape: Forma
+  group_colors: Colori
+  group_range: Intervallo

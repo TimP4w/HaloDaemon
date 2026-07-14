@@ -2,7 +2,7 @@
 //! Step-by-step spotlight tour shown the first time the user lands on a page
 //! or device capability tab: dim the screen, highlight one widget at a time
 //! with a callout bubble, advance on Next/Skip. "Seen" tours persist in the
-//! daemon's `GlobalConfig` (`seen_tours`); `local_seen` here only bridges the
+//! daemon's `GuiConfig` (`seen_tours`); `local_seen` here only bridges the
 //! ~250 ms window before that roundtrip lands, so a completed/skipped tour
 //! can't immediately re-trigger.
 
@@ -25,7 +25,8 @@ pub enum AnchorId {
     HomeSidebarHome,
     HomeSidebarLighting,
     HomeSidebarCooling,
-    HomeSidebarCanvas,
+    HomeSidebarIntegrations,
+    HomeSidebarPlugins,
     HomeSidebarSettings,
     LightingEffects,
     LightingImport,
@@ -82,6 +83,16 @@ pub enum AnchorId {
     EffectDesignerPreview,
     EffectDesignerControls,
     EffectDesignerSave,
+    /// Plugins page
+    PluginsOverview,
+    PluginsOfficialRepo,
+    PluginsAddPlugin,
+    PluginsAddRepo,
+    PluginsToggle,
+    PluginsPermissions,
+    /// Integrations page
+    IntegrationsOverview,
+    IntegrationsToggle,
 }
 
 /// Which tour applies to the page/tab the user is currently viewing.
@@ -107,10 +118,12 @@ pub enum TourKey {
     TabPairing,
     LcdEditor,
     EffectDesigner,
+    PagePlugins,
+    PageIntegrations,
 }
 
 impl TourKey {
-    /// Persistence key stored in `GlobalConfig::seen_tours`.
+    /// Persistence key stored in `GuiConfig::seen_tours`.
     pub fn id(self) -> &'static str {
         match self {
             TourKey::PageHome => "page:home",
@@ -133,6 +146,8 @@ impl TourKey {
             TourKey::TabPairing => "tab:pairing",
             TourKey::LcdEditor => "lcd_editor",
             TourKey::EffectDesigner => "effect_designer",
+            TourKey::PagePlugins => "page:plugins",
+            TourKey::PageIntegrations => "page:integrations",
         }
     }
 }
@@ -206,6 +221,11 @@ pub const MISSING_GRACE_SECS: f64 = 0.5;
 pub fn is_seen(st: &TourState, daemon_seen: &BTreeSet<String>, key: TourKey) -> bool {
     let id = key.id();
     daemon_seen.contains(id) || st.local_seen.contains(id)
+}
+
+/// Whether a tour is currently blocking the rest of the onboarding flow.
+pub fn is_active(st: &TourState) -> bool {
+    st.active.is_some()
 }
 
 /// Start `key`'s tour unless one is already active or it's already seen.

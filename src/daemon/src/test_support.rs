@@ -45,6 +45,33 @@ where
     unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
 }
 
+/// RAII form of [`with_tmp_config`] for tests that build their own `AppState`
+/// (custom `Config`): points `HALOD_CONFIG_DIR` at a fresh tempdir under the
+/// shared lock and restores it on drop, so a `request_config_save()` inside the
+/// test never touches the real `~/.config/halod`. Bind it for the whole test.
+pub struct TmpConfigDir {
+    _dir: tempfile::TempDir,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+pub fn tmp_config_dir() -> TmpConfigDir {
+    let guard = HALOD_CONFIG_DIR_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+    TmpConfigDir {
+        _dir: dir,
+        _guard: guard,
+    }
+}
+
+impl Drop for TmpConfigDir {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
+    }
+}
+
 #[derive(Debug)]
 pub enum InitBehavior {
     OkTrue,
@@ -64,6 +91,17 @@ pub struct MockDevice {
     init_behavior: InitBehavior,
     /// Set to `true` by the default `load_state()` override when tracking is enabled.
     pub load_called: Arc<AtomicBool>,
+    /// Set to `true` by `close()`, for tests asserting a device was torn down.
+    pub closed: Arc<AtomicBool>,
+    /// Backs `Device::is_live`. Defaults to live; flip via `.offline()` or the
+    /// shared `Arc` to exercise engine liveness gating.
+    pub live: Arc<AtomicBool>,
+    /// Owning plugin id when this device stands in for an integration root
+    /// (see `Device::integration_id`). `None` for a normal device.
+    pub integration_id: Option<String>,
+    /// Owning plugin id for scoped teardown (see `Device::owning_plugin_id`).
+    /// `None` for a normal native device.
+    pub owning_plugin_id: Option<String>,
     // Capability slots — `None` means the capability is absent.
     pub fan: Option<FanStateSlot>,
     /// RPM returned by `get_rpm()`; `None` (the default) means "no tachometer".
@@ -111,6 +149,10 @@ impl MockDevice {
             visibility: VisibilitySlot::default(),
             init_behavior: InitBehavior::OkTrue,
             load_called: Arc::new(AtomicBool::new(false)),
+            closed: Arc::new(AtomicBool::new(false)),
+            live: Arc::new(AtomicBool::new(true)),
+            integration_id: None,
+            owning_plugin_id: None,
             fan: None,
             fan_rpm: None,
             rgb: None,
@@ -164,6 +206,27 @@ impl MockDevice {
 
     pub fn with_model(mut self, model: &str) -> Self {
         self.model = model.to_string();
+        self
+    }
+
+    /// Stand in for an integration root owned by plugin `id` (see
+    /// `Device::integration_id`).
+    pub fn with_integration_id(mut self, id: &str) -> Self {
+        self.integration_id = Some(id.to_string());
+        self
+    }
+
+    /// Stand in for a device owned by plugin `id` for scoped teardown
+    /// (see `Device::owning_plugin_id`).
+    pub fn with_owning_plugin_id(mut self, id: &str) -> Self {
+        self.owning_plugin_id = Some(id.to_string());
+        self
+    }
+
+    /// Start the device offline (`is_live() == false`), for engine liveness-gating tests.
+    #[allow(dead_code)] // shared test builder option; only some feature/target suites use it
+    pub fn offline(self) -> Self {
+        self.live.store(false, Ordering::SeqCst);
         self
     }
 
@@ -289,7 +352,21 @@ impl Device for MockDevice {
             InitBehavior::Panic => panic!("initialize must not be called"),
         }
     }
-    async fn close(&self) {}
+    async fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn integration_id(&self) -> Option<String> {
+        self.integration_id.clone()
+    }
+
+    fn owning_plugin_id(&self) -> Option<String> {
+        self.owning_plugin_id.clone()
+    }
+
+    fn is_live(&self) -> bool {
+        self.live.load(Ordering::SeqCst)
+    }
 
     async fn load_state(&self, state: &serde_json::Value) {
         self.load_called.store(true, Ordering::SeqCst);
@@ -366,14 +443,25 @@ impl FanCapability for MockDevice {
     }
 }
 
-static EMPTY_RGB_DESC: std::sync::OnceLock<RgbDescriptor> = std::sync::OnceLock::new();
+static MOCK_RGB_DESC: std::sync::OnceLock<RgbDescriptor> = std::sync::OnceLock::new();
 
 #[async_trait]
 impl RgbCapability for MockDevice {
     fn descriptor(&self) -> &RgbDescriptor {
-        EMPTY_RGB_DESC.get_or_init(|| RgbDescriptor {
-            zones: vec![],
-            native_effects: vec![],
+        MOCK_RGB_DESC.get_or_init(|| {
+            let zone = |id: &str, topology| halod_shared::types::RgbZone {
+                id: id.to_string(),
+                name: id.to_string(),
+                topology,
+                leds: vec![],
+            };
+            RgbDescriptor {
+                zones: vec![
+                    zone("ring", halod_shared::types::ZoneTopology::Ring),
+                    zone("strip", halod_shared::types::ZoneTopology::Linear),
+                ],
+                native_effects: vec![],
+            }
         })
     }
     async fn apply(&self, state: RgbState) -> Result<()> {
@@ -721,22 +809,18 @@ mod capability_tests {
         let dev = MockDevice::new("lcd_dev").with_lcd();
         let slot = dev.lcd.as_ref().unwrap();
 
-        // Set up all 8 fields via the slot (mimicking what save_state captures)
         slot.set_brightness(80);
         slot.set_rotation(halod_shared::types::ScreenRotation::R90);
-        slot.set_mode(halod_shared::types::LcdMode::Image);
         slot.set_active_image(Some("test.png".into()));
         slot.set_raw_streaming(true);
-        slot.set_video_path(Some("/tmp/v.mp4".into()));
 
         let saved = LcdCap::save_state(&dev);
         assert_eq!(saved["brightness"], 80);
         assert_eq!(saved["rotation"], "r90");
         assert_eq!(saved["active_image"], "test.png");
         assert_eq!(saved["raw_streaming"], true);
-        assert_eq!(saved["video_path"], "/tmp/v.mp4");
+        assert_eq!(saved["video_path"], serde_json::Value::Null);
 
-        // Restore on a fresh device
         let dev2 = MockDevice::new("lcd_dev2").with_lcd();
         LcdCap::restore_state(&dev2, &saved).await;
         let slot2 = dev2.lcd.as_ref().unwrap();
@@ -746,6 +830,21 @@ mod capability_tests {
         assert!(matches!(slot2.mode(), halod_shared::types::LcdMode::Image));
         assert_eq!(slot2.active_image(), Some("test.png".into()));
         assert!(slot2.raw_streaming());
+        assert_eq!(slot2.video_path(), None);
+    }
+
+    #[tokio::test]
+    async fn lcd_restore_video_mode_is_not_clobbered_by_the_null_sibling_fields() {
+        let dev = MockDevice::new("lcd_dev").with_lcd();
+        let slot = dev.lcd.as_ref().unwrap();
+        slot.set_video_path(Some("/tmp/v.mp4".into()));
+        let saved = LcdCap::save_state(&dev);
+
+        let dev2 = MockDevice::new("lcd_dev2").with_lcd();
+        LcdCap::restore_state(&dev2, &saved).await;
+        let slot2 = dev2.lcd.as_ref().unwrap();
+
         assert_eq!(slot2.video_path(), Some("/tmp/v.mp4".into()));
+        assert!(matches!(slot2.mode(), halod_shared::types::LcdMode::Video));
     }
 }

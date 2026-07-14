@@ -32,6 +32,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 base64 = "0.22"
 resvg = "0.44"
 rust-i18n = "4"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [target.'cfg(unix)'.dependencies]
 ksni = "0.2"
@@ -48,9 +49,9 @@ glow = "0.17"
 egui_glow = { version = "0.35", default-features = false, features = ["winit", "wayland"] }
 
 [target.'cfg(windows)'.dependencies]
-tray-icon = "0.19"
+tray-icon = "0.24.1"
 # HKCU Run-key autostart entry (ui/src/lifecycle/autostart/windows.rs).
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Registry"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Registry"] }
 
 [target.'cfg(windows)'.build-dependencies]
 # Embeds assets/icon.ico as the exe's Win32 icon resource so Windows shows the

@@ -27,6 +27,7 @@ pub(super) fn letterbox(outer: Rect, aspect: f32) -> Rect {
 
 /// Perimeter points of a zone as a rounded rectangle in screen space,
 /// rotation-aware. Clockwise winding (TL→TR→BR→BL) for `convex_polygon`.
+#[cfg(test)]
 fn rounded_zone_outline(zone: &PlacedZone, canvas_rect: Rect, radius: f32) -> Vec<Pos2> {
     // Built in normalized canvas space (rotation included) then mapped to screen,
     // identical to `zone_corners`/LED placement so the box and LEDs stay locked

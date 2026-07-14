@@ -11,15 +11,7 @@ use crate::ui::theme;
 /// background fill. Replaces the old 2–3 letter code chips so every
 /// surface (home cards/rows, sidebar, lighting targets, device header, radar)
 /// uses one component.
-pub fn device_badge(
-    p: &egui::Painter,
-    rect: Rect,
-    ty: DeviceType,
-    color: Color32,
-    rounding: f32,
-    stroke_w: f32,
-) {
-    let _ = (rounding, color, stroke_w); // retained for call-site compatibility
+pub fn device_badge(p: &egui::Painter, rect: Rect, ty: DeviceType) {
     let glyph = Rect::from_center_size(rect.center(), Vec2::splat(rect.height() * 0.8));
     icons::draw_device(p, glyph, ty, Color32::WHITE);
 }

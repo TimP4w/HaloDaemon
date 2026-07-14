@@ -95,14 +95,6 @@ impl UsbBulkTransport {
     pub fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
         self.io.set_limit(limit);
     }
-
-    /// Offloads the blocking transfer to `spawn_blocking`; prefer over `write` in async contexts.
-    pub async fn write_async(&self, data: Vec<u8>) -> Result<usize> {
-        let transport = self.clone();
-        tokio::task::spawn_blocking(move || transport.write(&data))
-            .await
-            .map_err(|e| anyhow!("spawn_blocking join: {e}"))?
-    }
 }
 
 #[async_trait]
@@ -119,10 +111,10 @@ impl BulkTransport for UsbBulkTransport {
     }
 
     fn rate_status(&self) -> WriteRateStatus {
-        self.io.status()
+        UsbBulkTransport::rate_status(self)
     }
 
     fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
-        self.io.set_limit(limit);
+        UsbBulkTransport::set_write_rate_limit(self, limit);
     }
 }

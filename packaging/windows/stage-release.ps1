@@ -7,8 +7,8 @@
 .DESCRIPTION
     Copies the release executables, the bundled ffmpeg.exe (+ its DLL deps) and
     the PawnIO kernel blobs into packaging\windows\staging\, which is packaged verbatim
-    by halod.iss.  halod-gui uses wgpu (D3D12/Vulkan) built into Windows, so the
-    two Rust exes need no runtime DLLs of their own — but the LCD video mode
+    by halod.iss.  halod-gui uses the glow (OpenGL) renderer via opengl32 built
+    into Windows, so the Rust exes need no runtime DLLs of their own — but the LCD video mode
     shells out to ffmpeg.exe (placed beside halod.exe), which is a dynamically
     linked MSYS2 build and DOES need its libav* DLLs collected here.
 
@@ -50,7 +50,12 @@ if (Test-Path $StagingDir) { Remove-Item $StagingDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
 
 # --- 1. Executables -----------------------------------------------------------
-$exes = "halod.exe", "halod-gui.exe"
+# halod-broker.exe is the elevated register-bus broker (see the privilege-
+# separation design): the installed on-demand HalodBroker LocalSystem service
+# that halod.exe starts via the SCM the first time it needs a register bus,
+# while halod.exe itself runs at medium integrity. It must be code-signed
+# alongside the other two exes wherever CI signs the staged binaries.
+$exes = "halod.exe", "halod-gui.exe", "halod-broker.exe"
 foreach ($exe in $exes) {
     $src = Join-Path $TargetDir $exe
     if (-not (Test-Path $src)) { Fail "missing built executable: $src (run cargo build --release first)" }

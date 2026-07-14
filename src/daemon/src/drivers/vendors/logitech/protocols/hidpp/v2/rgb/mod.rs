@@ -34,7 +34,6 @@ const CLED_GET_INFO: u8 = 0x00;
 const CLED_GET_ZONE_INFO: u8 = 0x10;
 const CLED_GET_ZONE_EFFECT_INFO: u8 = 0x20;
 const CLED_SET_EFFECT: u8 = 0x30;
-const CLED_GET_SW_CONTROL: u8 = 0x70;
 const CLED_SET_SW_CONTROL: u8 = 0x80;
 
 impl Hidpp20 {

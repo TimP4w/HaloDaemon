@@ -13,8 +13,10 @@ mod platform;
 mod profiles;
 mod registry;
 mod run_loop;
+mod secrets;
 mod services;
 mod state;
+mod task_supervisor;
 #[cfg(test)]
 mod test_support;
 mod util;
@@ -28,36 +30,43 @@ use crate::registry::initialize_app_state;
 use crate::state::EngineRunConfig;
 
 /// How this process was invoked, decided purely from argv.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The daemon is always a plain user process now — Windows service registration
+/// and the elevated register-bus broker live in `halod-broker.exe`, and the GUI
+/// launches this daemon directly. The only knob is `--headless`, which opts out
+/// of idle-shutdown (see [`crate::lifecycle`]) for a frontend-less deployment.
+///
+/// `plugin-test <package-dir>` (behind the `plugin-test` cargo feature) is a
+/// separate mode entirely: it drives one plugin package's `test.lua` against
+/// a recording mock transport (see `drivers::plugins::plugin_test`) and never
+/// touches config, device discovery, or the engines — the official plugin
+/// repo's CI runs it once per package, not the daemon proper.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ProcessRole {
-    /// `--install-service`: register the Windows service, then exit.
-    InstallService,
-    /// `--uninstall-service`: remove the Windows service, then exit.
-    UninstallService,
-    /// `--service`: run the SCM supervisor.
-    Supervisor,
-    /// Run the device server. `worker` is true when the supervisor relaunched
-    /// this exe into the user session (`--worker`): it is already elevated, so
-    /// the UAC self-elevation must be skipped. `headless` opts out of
-    /// idle-shutdown (see [`crate::lifecycle`]) for a frontend-less deployment.
-    Server { worker: bool, headless: bool },
+    Server {
+        headless: bool,
+    },
+    #[cfg(feature = "plugin-test")]
+    PluginTest {
+        package: std::path::PathBuf,
+    },
 }
 
-/// The service-control flags take precedence; `--worker`/`--headless` only
-/// refine a plain server run.
 fn process_role(args: &[String]) -> ProcessRole {
+    #[cfg(feature = "plugin-test")]
+    if args.first().map(String::as_str) == Some("plugin-test") {
+        let package = args
+            .get(1)
+            .unwrap_or_else(|| {
+                eprintln!("usage: halod plugin-test <package-dir>");
+                std::process::exit(2);
+            })
+            .into();
+        return ProcessRole::PluginTest { package };
+    }
     let has = |flag: &str| args.iter().any(|a| a == flag);
-    if has("--install-service") {
-        ProcessRole::InstallService
-    } else if has("--uninstall-service") {
-        ProcessRole::UninstallService
-    } else if has("--service") {
-        ProcessRole::Supervisor
-    } else {
-        ProcessRole::Server {
-            worker: has("--worker"),
-            headless: has(halod_shared::lifecycle::HEADLESS_ARG),
-        }
+    ProcessRole::Server {
+        headless: has(halod_shared::lifecycle::HEADLESS_ARG),
     }
 }
 
@@ -65,19 +74,18 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let role = process_role(&args);
 
-    // Windows service control entry points, dispatched before any runtime exists.
-    #[cfg(windows)]
-    match role {
-        ProcessRole::InstallService => return platform::service::install(),
-        ProcessRole::UninstallService => return platform::service::uninstall(),
-        ProcessRole::Supervisor => return platform::service::run_supervisor(),
-        ProcessRole::Server { .. } => {}
+    #[cfg(feature = "plugin-test")]
+    if let ProcessRole::PluginTest { package } = &role {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?;
+        let handle = runtime.handle().clone();
+        let exit_code = drivers::plugins::plugin_test::run(handle, package)?;
+        std::process::exit(exit_code);
     }
 
-    // A `--worker` run is already elevated (the supervisor passed it an
-    // elevated token), so it must not prompt for UAC; a plain/dev run does.
-    let is_worker = matches!(role, ProcessRole::Server { worker: true, .. });
-    let headless = matches!(role, ProcessRole::Server { headless: true, .. });
+    let headless = matches!(role, ProcessRole::Server { headless: true });
 
     // Before the runtime starts (still single-threaded, no env-reader race).
     #[cfg(target_os = "linux")]
@@ -106,71 +114,30 @@ fn main() -> Result<()> {
         .worker_threads(4)
         .enable_all()
         .build()?;
-    runtime.block_on(run_daemon(is_worker, headless, cfg))
+    runtime.block_on(run_daemon(headless, cfg))
 }
 
-/// Watches one engine's join handle and notifies the user if it exits other
-/// than by a deliberate abort, without affecting any other engine.
-fn spawn_engine_supervisor(
-    app: Arc<state::AppState>,
-    handle: tokio::task::JoinHandle<()>,
-    title: &'static str,
-    body: &'static str,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let result = handle.await;
-        // Aborted tasks are expected during clean shutdown; suppress notifications.
-        if result.as_ref().is_err_and(|e| e.is_cancelled()) {
-            return;
-        }
-        let panicked = result.is_err_and(|e| e.is_panic());
-        if body.is_empty() {
-            if panicked {
-                log::error!("{title} (panicked)");
-            } else {
-                log::info!("{title}");
-            }
-        } else {
-            platform::notify::send(
-                &app,
-                halod_shared::types::NotificationCode::EngineStopped {
-                    detail: body.to_string(),
-                },
-            )
-            .await;
-        }
-    })
-}
-
-/// The actual device server. Runs for a dev/plain launch and for the service
-/// `--worker` process alike.
-async fn run_daemon(is_worker: bool, headless: bool, cfg: crate::config::Config) -> Result<()> {
-    let initial_level: log::LevelFilter = cfg
-        .global
-        .log_level
-        .parse()
-        .unwrap_or(log::LevelFilter::Info);
+/// The actual device server — always a plain, unprivileged user process.
+/// On Windows, register-bus access is delegated to the elevated `halod-broker`
+/// on demand (see `drivers::transports::register_ops`); nothing here elevates.
+async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
+    let initial_level: log::LevelFilter =
+        cfg.gui.log_level.parse().unwrap_or(log::LevelFilter::Info);
 
     let env_logger = env_logger::Builder::new()
         .filter_level(initial_level)
         .parse_default_env()
         .build();
 
-    let app = Arc::new(state::AppState::new(cfg).with_service_worker(is_worker));
-    let _save_worker = crate::state::start_config_save_worker(app.clone());
-    let _persist_worker = crate::state::start_persist_worker(app.clone());
+    let app = Arc::new(state::AppState::new(cfg).with_secret_store(secrets::open_secret_store()));
+    let save_worker = crate::state::start_config_save_worker(app.clone());
+    let persist_worker = crate::state::start_persist_worker(app.clone());
 
     let buffering_logger = logger::BufferingLogger::new(env_logger, Arc::clone(&app.log_buffer));
     if let Err(e) = log::set_boxed_logger(Box::new(buffering_logger)) {
         log::warn!("logger already installed: {e}");
     }
     log::set_max_level(initial_level);
-
-    // The service worker is already elevated by the supervisor, so it must NOT
-    // prompt — only a dev/plain run requests UAC (declining is non-fatal).
-    if !is_worker {
-        platform::elevation::ensure_elevated();
-    }
 
     log::info!(
         "Starting halod v{} (build {})",
@@ -179,12 +146,16 @@ async fn run_daemon(is_worker: bool, headless: bool, cfg: crate::config::Config)
     );
     log::info!("Daemon is running. Press Ctrl+C to shut down.");
 
+    #[cfg(unix)]
+    platform::elevation::warn_if_elevated();
+
     // Must run before device discovery opens any HID handles: a second daemon
     // has to exit *before* it can fight the first over the hardware.
     ipc::ensure_single_instance()?;
 
     let ipc_handle = ipc::serve(app.clone());
     let broadcast_handle = ipc::broadcast_loop(app.clone());
+    let mut supervisor = task_supervisor::TaskSupervisor::new(Arc::clone(&app));
 
     // Reclaim sinks leaked by a previous daemon; safe once single-instance owns.
     services::audio::sink::cleanup_orphaned_sinks().await;
@@ -195,84 +166,131 @@ async fn run_daemon(is_worker: bool, headless: bool, cfg: crate::config::Config)
 
     // Started only once startup is done — the grace clock must not elapse
     // before a client has had any chance to connect.
-    let _idle_watcher = lifecycle::spawn_idle_watcher(app.clone(), headless);
-    {
-        let app2 = app.clone();
-        let hotplug_handle = tokio::spawn(hid::hotplug_monitor(app2));
-        tokio::spawn(async move {
-            if let Err(e) = hotplug_handle.await {
-                if !e.is_cancelled() {
-                    log::warn!("hotplug monitor exited unexpectedly: {e}");
-                }
-            }
-        });
-    }
+    let idle_app = Arc::clone(&app);
+    supervisor.register(
+        "Idle watcher",
+        "",
+        move || {
+            let app = Arc::clone(&idle_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(lifecycle::spawn_idle_watcher(app, headless))
+            })
+        },
+        || {},
+    );
+    let hotplug_app = Arc::clone(&app);
+    supervisor.register(
+        "HID hotplug monitor",
+        "Device hotplug monitoring stopped unexpectedly.",
+        move || {
+            let app = Arc::clone(&hotplug_app);
+            Box::pin(
+                async move { task_supervisor::TaskHandle(tokio::spawn(hid::hotplug_monitor(app))) },
+            )
+        },
+        || {},
+    );
 
-    let global = {
+    // Reconnect/liveness watcher for config-instantiated integration plugins
+    // (offline-at-startup, mid-run drops, controller add/remove). Runs beside
+    // the HID hotplug monitor.
+    let integration_app = Arc::clone(&app);
+    supervisor.register(
+        "Plugin integration monitor",
+        "Plugin integration monitoring stopped unexpectedly.",
+        move || {
+            let app = Arc::clone(&integration_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(
+                    drivers::plugins::integration_monitor::integration_monitor(app),
+                ))
+            })
+        },
+        || {},
+    );
+
+    let (cooling_cfg, rgb_cfg, lcd_cfg) = {
         let cfg = app.config.read().await;
-        cfg.global.clone()
+        (cfg.cooling.clone(), cfg.rgb.clone(), cfg.lcd.clone())
     };
 
-    let (fan_curve_cfg_tx, fan_curve_cfg_rx) = watch::channel(EngineRunConfig::fan_curve(&global));
-    let (failsafe_duty_tx, failsafe_duty_rx) = watch::channel(global.fan_failsafe_duty);
-    let (rgb_cfg_tx, rgb_cfg_rx) = watch::channel(EngineRunConfig::canvas(&global));
-    let (lcd_cfg_tx, lcd_cfg_rx) = watch::channel(EngineRunConfig::lcd(&global));
+    let (fan_curve_cfg_tx, fan_curve_cfg_rx) =
+        watch::channel(EngineRunConfig::fan_curve(&cooling_cfg));
+    let (failsafe_duty_tx, failsafe_duty_rx) = watch::channel(cooling_cfg.fan_failsafe_duty);
+    let (rgb_cfg_tx, rgb_cfg_rx) = watch::channel(EngineRunConfig::canvas(&rgb_cfg));
+    let (lcd_cfg_tx, lcd_cfg_rx) = watch::channel(EngineRunConfig::lcd(&lcd_cfg));
 
     let fan_curve = cooling::fan_curve::FanCurveEngine::new(app.clone());
     let rgb = lighting::rgb_engine::RgbEngine::new(app.clone()).await;
     let lcd = lcd::engine::LcdEngine::new(app.clone());
     let video = lcd::engine::video::VideoEngine::new(app.clone(), lcd.frame_sender());
 
-    let (focus_ctrl_tx, focus_ctrl_rx) =
-        tokio::sync::mpsc::channel::<profiles::focus_watcher::ControlMsg>(32);
-    app.focus.set_ctrl_tx(focus_ctrl_tx).await;
-
-    let (focus_watcher_cfg_tx, focus_watcher_cfg_rx) =
-        watch::channel(EngineRunConfig::focus_watcher(&global));
-
     let focus_watcher = profiles::focus_watcher::FocusWatcherEngine::new(app.clone());
 
-    app.lighting.set_engine(rgb.clone(), rgb_cfg_tx);
+    app.lighting.set_engine(rgb.clone(), rgb_cfg_tx.clone());
     app.cooling
-        .set_engine(fan_curve.clone(), fan_curve_cfg_tx, failsafe_duty_tx);
-    app.lcd.set_engine(lcd.clone(), video, lcd_cfg_tx);
-    app.focus
-        .set_engine(focus_watcher.clone(), focus_watcher_cfg_tx);
+        .set_engine(fan_curve_cfg_tx.clone(), failsafe_duty_tx.clone());
+    app.lcd.set_engine(lcd.clone(), video, lcd_cfg_tx.clone());
     // Receivers are subscribed lazily; SendError just means no live receivers yet,
     // but watch still stores the value so future subscribers see `true`.
     let _ = app.engines_ready.send(true);
 
-    let fan_curve_handle = fan_curve.start(fan_curve_cfg_rx, failsafe_duty_rx);
-    let rgb_handle = rgb.start(rgb_cfg_rx).await;
-    let lcd_handle = lcd.start(lcd_cfg_rx).await;
-    let focus_watcher_handle = focus_watcher
-        .start(focus_watcher_cfg_rx, focus_ctrl_rx)
-        .await;
-
-    // Engines are supervised independently so one exiting can't take the others down.
-    let engine_aborts = [
-        fan_curve_handle.abort_handle(),
-        rgb_handle.abort_handle(),
-        lcd_handle.abort_handle(),
-        focus_watcher_handle.abort_handle(),
-    ];
-    let supervise = |handle, title, body| spawn_engine_supervisor(app.clone(), handle, title, body);
-    supervise(
-        fan_curve_handle,
-        "FanCurve engine exited",
-        "FanCurve engine exited unexpectedly, fan control will no longer respond to sensors.",
+    drop((fan_curve_cfg_rx, failsafe_duty_rx, rgb_cfg_rx, lcd_cfg_rx));
+    let fan_engine = Arc::clone(&fan_curve);
+    let fan_cfg = fan_curve_cfg_tx.clone();
+    let fan_failsafe = failsafe_duty_tx.clone();
+    supervisor.register(
+        "FanCurve engine",
+        "FanCurve engine exited unexpectedly; fan control will no longer respond to sensors.",
+        move || {
+            let engine = Arc::clone(&fan_engine);
+            let cfg = fan_cfg.subscribe();
+            let failsafe = fan_failsafe.subscribe();
+            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg, failsafe)) })
+        },
+        || {},
     );
-    supervise(
-        rgb_handle,
-        "RGB engine exited",
-        "RGB engine exited unexpectedly, RGB animations will stop.",
+    let rgb_engine = Arc::clone(&rgb);
+    let rgb_config = rgb_cfg_tx.clone();
+    supervisor.register(
+        "RGB engine",
+        "RGB engine exited unexpectedly; RGB animations will stop.",
+        move || {
+            let engine = Arc::clone(&rgb_engine);
+            let cfg = rgb_config.subscribe();
+            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg).await) })
+        },
+        || {},
     );
-    supervise(
-        lcd_handle,
-        "LCD engine exited",
-        "LCD engine exited unexpectedly, device LCDs will stop updating.",
+    let lcd_engine = Arc::clone(&lcd);
+    let lcd_config = lcd_cfg_tx.clone();
+    supervisor.register(
+        "LCD engine",
+        "LCD engine exited unexpectedly; device LCDs will stop updating.",
+        move || {
+            let engine = Arc::clone(&lcd_engine);
+            let cfg = lcd_config.subscribe();
+            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg).await) })
+        },
+        || {},
     );
-    supervise(focus_watcher_handle, "FocusWatcher engine exited", "");
+    let focus_engine = Arc::clone(&focus_watcher);
+    let focus_app = Arc::clone(&app);
+    supervisor.register(
+        "Focus watcher",
+        "",
+        move || {
+            let engine = Arc::clone(&focus_engine);
+            let app = Arc::clone(&focus_app);
+            Box::pin(async move {
+                let (tx, rx) =
+                    tokio::sync::mpsc::channel::<profiles::focus_watcher::ControlMsg>(32);
+                app.focus.set_ctrl_tx(tx).await;
+                task_supervisor::TaskHandle(engine.start(rx).await)
+            })
+        },
+        || {},
+    );
 
     // Action executor may fail to init on headless Linux.
     match input::action_executor::ActionExecutor::new() {
@@ -281,15 +299,17 @@ async fn run_daemon(is_worker: bool, headless: bool, cfg: crate::config::Config)
             app.input.set_executor(Arc::clone(&executor));
             let remap_engine =
                 Arc::new(input::key_remap::KeyRemapEngine::new(executor, app.clone()));
-            let handle = remap_engine.start();
-            // KeyRemapEngine has no config channel; supervise its handle.
-            tokio::spawn(async move {
-                if let Err(e) = handle.await {
-                    if !e.is_cancelled() {
-                        log::warn!("KeyRemapEngine exited unexpectedly: {e}");
-                    }
-                }
-            });
+            let remap_start = Arc::clone(&remap_engine);
+            let remap_app = Arc::clone(&app);
+            supervisor.register(
+                "Key remap engine",
+                "Key remapping stopped unexpectedly.",
+                move || {
+                    let engine = Arc::clone(&remap_start);
+                    Box::pin(async move { task_supervisor::TaskHandle(engine.start()) })
+                },
+                move || remap_app.input.shutdown(),
+            );
         }
         Err(e) => {
             platform::notify::send(
@@ -332,10 +352,24 @@ async fn run_daemon(is_worker: bool, headless: bool, cfg: crate::config::Config)
         r = broadcast_handle => { if let Err(e) = r { log::error!("Broadcast: {e}"); } }
     }
 
-    // Stop engines before closing devices so no tick writes mid-close.
-    for abort in &engine_aborts {
-        abort.abort();
+    // Stop every supervised task before closing devices so no engine writes mid-close.
+    supervisor.shutdown().await;
+    if let Some(executor) = app.input.executor() {
+        executor.shutdown().await;
     }
+
+    // Persistence owns its shutdown transition and performs one final flush of
+    // the newest version before it exits. The device-state worker has no disk
+    // queue of its own and can be cancelled after engines stop producing work.
+    app.persistence.shutdown_tx.send_replace(true);
+    if tokio::time::timeout(std::time::Duration::from_secs(5), save_worker)
+        .await
+        .is_err()
+    {
+        log::error!("Config persistence worker did not finish its shutdown flush");
+    }
+    persist_worker.abort();
+    let _ = persist_worker.await;
 
     state::shutdown(app).await;
     Ok(())
@@ -353,21 +387,7 @@ mod tests {
     fn no_args_runs_a_plain_server() {
         assert_eq!(
             process_role(&argv(&[])),
-            ProcessRole::Server {
-                worker: false,
-                headless: false
-            }
-        );
-    }
-
-    #[test]
-    fn worker_flag_marks_a_worker_server() {
-        assert_eq!(
-            process_role(&argv(&["--worker"])),
-            ProcessRole::Server {
-                worker: true,
-                headless: false
-            }
+            ProcessRole::Server { headless: false }
         );
     }
 
@@ -375,61 +395,33 @@ mod tests {
     fn headless_flag_marks_a_headless_server() {
         assert_eq!(
             process_role(&argv(&["--headless"])),
-            ProcessRole::Server {
-                worker: false,
-                headless: true
-            }
+            ProcessRole::Server { headless: true }
         );
     }
 
     #[test]
-    fn service_control_flags_select_their_roles() {
-        assert_eq!(
-            process_role(&argv(&["--install-service"])),
-            ProcessRole::InstallService
-        );
-        assert_eq!(
-            process_role(&argv(&["--uninstall-service"])),
-            ProcessRole::UninstallService
-        );
-        assert_eq!(process_role(&argv(&["--service"])), ProcessRole::Supervisor);
-    }
-
-    #[test]
-    fn service_control_flags_take_precedence_over_worker() {
-        assert_eq!(
-            process_role(&argv(&["--worker", "--install-service"])),
-            ProcessRole::InstallService
-        );
+    fn former_service_and_worker_flags_are_now_ignored() {
+        // Service registration + the elevated broker moved to halod-broker.exe;
+        // these flags no longer mean anything to the daemon.
+        for flag in [
+            "--service",
+            "--install-service",
+            "--uninstall-service",
+            "--worker",
+        ] {
+            assert_eq!(
+                process_role(&argv(&[flag])),
+                ProcessRole::Server { headless: false },
+                "{flag} should be ignored",
+            );
+        }
     }
 
     #[test]
     fn unknown_arguments_are_ignored() {
         assert_eq!(
             process_role(&argv(&["--frobnicate", "foo"])),
-            ProcessRole::Server {
-                worker: false,
-                headless: false
-            }
+            ProcessRole::Server { headless: false }
         );
-    }
-
-    #[tokio::test]
-    async fn aborting_one_supervised_engine_does_not_affect_another() {
-        let app = Arc::new(state::AppState::new(crate::config::Config::default()));
-
-        let never_ending = tokio::spawn(std::future::pending::<()>());
-        let survivor_handle = tokio::spawn(std::future::pending::<()>());
-
-        let aborted_sup = spawn_engine_supervisor(app.clone(), never_ending, "aborted", "");
-        // Give the supervised task a moment to start awaiting the join handle.
-        tokio::task::yield_now().await;
-
-        aborted_sup.abort();
-        let _ = aborted_sup.await;
-
-        // The other engine's supervisor is untouched and the task keeps running.
-        assert!(!survivor_handle.is_finished());
-        survivor_handle.abort();
     }
 }

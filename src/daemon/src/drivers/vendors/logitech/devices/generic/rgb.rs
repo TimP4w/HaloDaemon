@@ -25,6 +25,42 @@ use halod_shared::types::{
 };
 use halod_shared::zone_transform::build_permutation;
 
+/// Pick the wire for a device that reports RGB_EFFECTS. Per-LED streaming
+/// (`PerKey`) needs the per-key feature AND zone LEDs that carry real firmware
+/// IDs — keyboards get those from their static layout, mice only once PK
+/// discovery has populated `pk_led_ids`. Anything else stays on whole-zone
+/// `RgbEffects`, which `write_frame` collapses to `colors.first()`.
+fn rgb_effects_wire(is_keyboard: bool, has_per_key: bool, pk_leds_discovered: bool) -> RgbWire {
+    if has_per_key && (is_keyboard || pk_leds_discovered) {
+        RgbWire::PerKey
+    } else {
+        RgbWire::RgbEffects
+    }
+}
+
+/// Remap the streaming `wire` to the wire a one-shot static fill should use.
+/// PerKey drives per-LED animation; a static colour is better served by the
+/// device's hardware effect table (RGB_EFFECTS / COLOR_LED) when it has one,
+/// falling back to the per-key path only for pure per-key devices.
+fn static_effect_wire(wire: RgbWire, has_rgb_effects: bool, has_color_led: bool) -> RgbWire {
+    match wire {
+        RgbWire::PerKey if has_rgb_effects => RgbWire::RgbEffects,
+        RgbWire::PerKey if has_color_led => RgbWire::ColorLedEffects,
+        other => other,
+    }
+}
+
+/// Build `setIndividual` pairs painting every id in `led_ids` a single colour.
+/// Used for a mouse static apply on the PerKey wire, where the keyboard-style
+/// `SET_RANGE 0x00..0xFF` of `per_key_set_all` is rejected (INVALID_ARGUMENT)
+/// because only the discovered firmware ids are valid.
+fn pk_uniform_pairs(led_ids: &[u8], color: RgbColor) -> Vec<(u8, u8, u8, u8)> {
+    led_ids
+        .iter()
+        .map(|&id| (id, color.r, color.g, color.b))
+        .collect()
+}
+
 fn collect_pairs(
     zones: &HashMap<String, HashMap<String, RgbColor>>,
     zone_map: &HashMap<String, usize>,
@@ -52,14 +88,21 @@ impl LogitechDevice {
     // ── RGB write helpers ─────────────────────────────────────────────────────
 
     pub(super) async fn rgb_set_static(&self, color: RgbColor) -> Result<()> {
-        let (zones, static_slots, wire) = {
+        let (zones, static_slots, wire, has_rgb_effects, has_color_led) = {
             let state = self.state.lock().await;
             (
                 state.rgb.rgb_zones.clone(),
                 state.rgb.rgb_static_slots.clone(),
                 state.rgb.rgb_wire,
+                state.features.contains_key(&feature::RGB_EFFECTS),
+                state.features.contains_key(&feature::COLOR_LED_EFFECTS),
             )
         };
+        // PerKey is a per-LED *streaming* wire; a one-shot static fill belongs on
+        // the hardware effect table when the device exposes one. per_key_set_all's
+        // whole-range paint is rejected (INVALID_ARGUMENT) by devices whose valid
+        // ids are sparse, and it would clobber the persistent hardware effect.
+        let wire = static_effect_wire(wire, has_rgb_effects, has_color_led);
         let hidpp = self.hidpp2().await;
 
         log::debug!(
@@ -73,10 +116,23 @@ impl LogitechDevice {
 
         match wire {
             RgbWire::PerKey => {
-                hidpp.per_key_set_all(color).await.map_err(|e| {
-                    log::warn!("[{}] PER_KEY set-all failed: {e}", self.id);
-                    e
-                })?;
+                // Reached only by a pure per-key device (no effect table).
+                // Keyboards accept the whole-range `SET_RANGE 0x00..0xFF`; mice
+                // only accept their discovered firmware ids, so paint those
+                // explicitly to avoid an INVALID_ARGUMENT rejection.
+                if self.is_keyboard() {
+                    hidpp.per_key_set_all(color).await.map_err(|e| {
+                        log::warn!("[{}] PER_KEY set-all failed: {e}", self.id);
+                        e
+                    })?;
+                } else {
+                    let pk_led_ids = { self.state.lock().await.rgb.pk_led_ids.clone() };
+                    let pairs = pk_uniform_pairs(&pk_led_ids, color);
+                    hidpp.write_per_key_pairs(&pairs).await.map_err(|e| {
+                        log::warn!("[{}] PER_KEY set-all (mouse) failed: {e}", self.id);
+                        e
+                    })?;
+                }
             }
             RgbWire::ColorLedEffects => {
                 let mut last_err = None;
@@ -570,8 +626,10 @@ impl LogitechDevice {
         }
 
         state.rgb.rgb_static_slots = static_slots;
+        let pk_leds_discovered = !state.rgb.pk_led_ids.is_empty();
+        state.rgb.rgb_wire =
+            rgb_effects_wire(self.is_keyboard(), pk_idx.is_some(), pk_leds_discovered);
         self.commit_rgb_descriptor(zones, state);
-        // RgbWire defaults to RgbEffects — no explicit assignment needed.
     }
 }
 
@@ -787,5 +845,76 @@ impl RgbCapability for LogitechDevice {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_with_per_key_streams_per_led() {
+        // Keyboard LEDs always carry real firmware IDs, so discovery is moot.
+        assert_eq!(rgb_effects_wire(true, true, false), RgbWire::PerKey);
+        assert_eq!(rgb_effects_wire(true, true, true), RgbWire::PerKey);
+    }
+
+    #[test]
+    fn keyboard_without_per_key_stays_rgb_effects() {
+        assert_eq!(rgb_effects_wire(true, false, false), RgbWire::RgbEffects);
+    }
+
+    #[test]
+    fn mouse_streams_per_led_only_once_leds_are_discovered() {
+        // Discovered PK LED IDs are real firmware IDs — safe to stream per-LED.
+        assert_eq!(rgb_effects_wire(false, true, true), RgbWire::PerKey);
+        // Not discovered: LEDs carry synthetic IDs, so stay whole-zone.
+        assert_eq!(rgb_effects_wire(false, true, false), RgbWire::RgbEffects);
+    }
+
+    #[test]
+    fn no_per_key_feature_always_stays_rgb_effects() {
+        assert_eq!(rgb_effects_wire(false, false, true), RgbWire::RgbEffects);
+        assert_eq!(rgb_effects_wire(true, false, true), RgbWire::RgbEffects);
+    }
+
+    #[test]
+    fn static_fill_prefers_effect_table_over_per_key() {
+        // A keyboard/mouse that also has an effect table must not paint a static
+        // colour via per_key_set_all's whole-range write (rejected on real hw).
+        assert_eq!(
+            static_effect_wire(RgbWire::PerKey, true, false),
+            RgbWire::RgbEffects
+        );
+        assert_eq!(
+            static_effect_wire(RgbWire::PerKey, false, true),
+            RgbWire::ColorLedEffects
+        );
+        // Pure per-key device (no effect table) stays on the per-key path.
+        assert_eq!(
+            static_effect_wire(RgbWire::PerKey, false, false),
+            RgbWire::PerKey
+        );
+        // Non-PerKey wires are untouched.
+        assert_eq!(
+            static_effect_wire(RgbWire::RgbEffects, true, true),
+            RgbWire::RgbEffects
+        );
+        assert_eq!(
+            static_effect_wire(RgbWire::ColorLedEffects, true, true),
+            RgbWire::ColorLedEffects
+        );
+    }
+
+    #[test]
+    fn pk_uniform_pairs_paints_only_discovered_ids() {
+        // A mouse static apply must target its real firmware ids, not the
+        // keyboard 0x00..0xFF range that firmware rejects.
+        let color = RgbColor { r: 1, g: 2, b: 3 };
+        assert_eq!(
+            pk_uniform_pairs(&[4, 7, 11], color),
+            vec![(4, 1, 2, 3), (7, 1, 2, 3), (11, 1, 2, 3)]
+        );
+        assert!(pk_uniform_pairs(&[], color).is_empty());
     }
 }

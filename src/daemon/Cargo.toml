@@ -9,12 +9,18 @@ description = "Peripheral control daemon with an egui UI (fan curves, RGB, LCD, 
 [lints]
 workspace = true
 
+[features]
+# `halod plugin-test <package-dir>` — drives a plugin package's `test.lua`
+# against a recording mock transport, for the official plugin repo's own CI.
+plugin-test = []
+
 [[bin]]
 name = "halod"
 path = "src/main.rs"
 
 [dependencies]
 halod-shared = { path = "../shared" }
+halod-hwaccess = { path = "../hwaccess" }
 
 tokio      = { workspace = true }
 serde      = { workspace = true }
@@ -23,10 +29,14 @@ serde_yaml = "0.9"
 anyhow     = { workspace = true }
 log        = { workspace = true }
 async-trait = { workspace = true }
+semver     = { workspace = true }
 env_logger = "0.11"
 fnv        = "1"
 hidapi     = "2"
 inventory  = "0.3"
+# Embedded Lua runtime for device plugins (statically vendored, no system Lua).
+# `serialize` bridges manifest tables straight into serde types.
+mlua       = { version = "0.10", features = ["lua54", "vendored", "serialize"] }
 rusb       = { version = "0.9" }
 uuid       = { version = "1", features = ["v4"] }
 base64     = "0.22"
@@ -41,11 +51,19 @@ tiny-skia = "0.11"
 resvg      = { version = "0.44", default-features = false }
 chrono     = { version = "0.4", default-features = false, features = ["clock"] }
 rustfft    = "6"
+chacha20poly1305 = "0.11.0"
+sha2 = "0.10"
+zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
+keyring = "4.1.4"
+# Fully vendored (libgit2/libssh2/openssl via `cc`), matching mlua's `vendored` Lua.
+git2 = { version = "0.19", default-features = false, features = ["ssh", "https", "vendored-libgit2", "vendored-openssl"] }
+futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
 tokio    = { version = "1", features = ["test-util"] }
 proptest = "1"
+url      = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netlink-sys = { version = "0.8", features = ["tokio_socket"] }
@@ -56,7 +74,6 @@ evdev = "0.12"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 zbus = { version = "4", default-features = false, features = ["tokio"] }
-futures-util = "0.3"
 # http(s) album art for the now-playing widget (MPRIS players like Spotify
 # expose remote art URLs, not file:// paths).
 ureq = { version = "2", default-features = false, features = ["tls"] }
@@ -66,15 +83,19 @@ version = "0.2"
 default-features = false
 
 [target.'cfg(target_os = "windows")'.dependencies]
-wmi        = "0.13"
-windows    = { version = "0.58", features = [
+wmi        = "0.18.4"
+windows    = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_System_Variant",
     "Win32_System_Environment",
     "Win32_System_RemoteDesktop",
     "Win32_System_StationsAndDesktops",
@@ -94,7 +115,7 @@ windows    = { version = "0.58", features = [
     "Storage_Streams",
 ] }
 # SCM dispatcher + service install/uninstall/stop for the supervisor service.
-windows-service = "0.7"
+windows-service = "0.8.1"
 libloading = "0.8"
 
 # ── Linux packaging ──────────────────────────────────────────────────────────

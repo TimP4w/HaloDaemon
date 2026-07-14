@@ -290,7 +290,7 @@ fn commit(
     };
     if immediate {
         st.last_edit = ctx.time;
-        crate::domain::actions::keys::send(ctx.cmd, cmd);
+        crate::runtime::ipc::send(ctx.cmd, cmd);
     } else {
         st.queue(&format!("btn:macro:{cid}:{}", layer.tag()), cmd, ctx.time);
     }
@@ -504,7 +504,12 @@ fn header_row(
         }
         if !steps.is_empty() && !recording {
             if widgets::pill(ui, &t!("misc.macro_play"), false) {
-                crate::domain::actions::keys::play_macro(ctx.cmd, steps.to_vec());
+                crate::runtime::ipc::send(
+                    ctx.cmd,
+                    halod_shared::commands::DaemonCommand::PlayMacro {
+                        steps: steps.to_vec(),
+                    },
+                );
             }
             if widgets::pill(ui, &t!("misc.macro_clear"), false) {
                 commit(ctx, st, id, cid, layer, Vec::new(), true);
@@ -1165,6 +1170,7 @@ mod tests {
             lcd_images: &[],
             lcd_preview: None,
             lcd_upload: None,
+            lcd_upload_terminal: None,
             lcd_template: None,
             lcd_editor_render: None,
             led_colors: crate::ui::screens::device::empty_led_colors(),

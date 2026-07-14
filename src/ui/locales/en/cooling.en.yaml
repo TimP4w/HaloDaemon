@@ -1,0 +1,34 @@
+cooling:
+  title: Cooling
+  subtitle: "Fan curves and pump control across %{count} devices"
+  empty_title: No cooling devices connected
+  empty_subtitle: Connect a fan or pump controller to manage your cooling system
+  curve_sensor: Curve sensor
+  curve_sensor_caps: CURVE SENSOR
+  no_sensor: No sensor
+  rpm_vs: "RPM vs %{sensor}"
+  open_device: Open device
+  fan_curve: Fan curve
+  pump_curve: Pump curve
+  fan_and_pump_curve: Fan & pump curve
+  celsius_now: "°C now"
+  fan_speed: Fan speed
+  fan_duty: Fan duty
+  pump_speed: Pump speed
+  pump_duty: Pump duty
+  rpm: "%{v} RPM"
+  percent: "%{v}%"
+  preset: "Preset…"
+  preset_name:
+    balanced: Balanced
+    silent: Silent
+    performance: Performance
+    full_speed: Full Speed
+    fifty_percent: "50%"
+  curve_hint: "Drag a point to reshape · click empty space to add · right-click a point to delete"
+  status_no_sensor: "No temperature sensor is assigned. The fan will remain at 75%."
+  status_sensor_malfunction: "A sensor malfunction was detected. The fan will remain at 75%."
+  status_permission_denied: "Permission denied while writing PWM values. Run: sudo udevadm trigger --subsystem-match=hwmon"
+  status_write_error: Failed to set the fan speed. Check the daemon logs.
+  status_fan_stalled: "The fan is not spinning (0 RPM). Check its connections or replace it."
+  status_no_device: The fan is not connected. Its curve will resume when it becomes available again.

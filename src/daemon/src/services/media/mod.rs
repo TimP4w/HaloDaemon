@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
-use std::time::{Duration, Instant};
 
 use image::RgbaImage;
 
@@ -21,27 +20,8 @@ pub enum PlaybackStatus {
 pub struct MediaInfo {
     pub title: String,
     pub artist: String,
-    pub album: String,
     pub status: PlaybackStatus,
-    pub position: Option<Duration>,
-    pub position_at: Option<Instant>,
-    pub length: Option<Duration>,
     pub art: Option<Arc<RgbaImage>>,
-}
-
-impl MediaInfo {
-    /// Interpolated position: `position + (now - position_at)` while Playing;
-    /// frozen at the last known `position` otherwise.
-    pub fn position_now(&self, now: Instant) -> Option<Duration> {
-        let position = self.position?;
-        if self.status != PlaybackStatus::Playing {
-            return Some(position);
-        }
-        match self.position_at {
-            Some(at) => Some(position + now.saturating_duration_since(at)),
-            None => Some(position),
-        }
-    }
 }
 
 /// Max album-art images kept per platform watcher before evicting the oldest.
@@ -143,47 +123,13 @@ fn start_platform(weak: Weak<MediaHandle>) {
 mod tests {
     use super::*;
 
-    fn info(status: PlaybackStatus, position: Option<Duration>, at: Option<Instant>) -> MediaInfo {
+    fn info() -> MediaInfo {
         MediaInfo {
             title: "t".into(),
             artist: "a".into(),
-            album: "al".into(),
-            status,
-            position,
-            position_at: at,
-            length: None,
+            status: PlaybackStatus::Stopped,
             art: None,
         }
-    }
-
-    #[test]
-    fn position_now_interpolates_while_playing() {
-        let at = Instant::now();
-        let m = info(
-            PlaybackStatus::Playing,
-            Some(Duration::from_secs(10)),
-            Some(at),
-        );
-        let now = at + Duration::from_secs(3);
-        assert_eq!(m.position_now(now), Some(Duration::from_secs(13)));
-    }
-
-    #[test]
-    fn position_now_freezes_while_paused() {
-        let at = Instant::now();
-        let m = info(
-            PlaybackStatus::Paused,
-            Some(Duration::from_secs(10)),
-            Some(at),
-        );
-        let now = at + Duration::from_secs(3);
-        assert_eq!(m.position_now(now), Some(Duration::from_secs(10)));
-    }
-
-    #[test]
-    fn position_now_none_without_position() {
-        let m = info(PlaybackStatus::Playing, None, None);
-        assert_eq!(m.position_now(Instant::now()), None);
     }
 
     #[test]
@@ -192,7 +138,7 @@ mod tests {
             latest: RwLock::new(None),
         };
         assert!(handle.latest().is_none());
-        let m = info(PlaybackStatus::Stopped, None, None);
+        let m = info();
         handle.publish(Some(m.clone()));
         let got = handle.latest().unwrap();
         assert_eq!(got.title, m.title);

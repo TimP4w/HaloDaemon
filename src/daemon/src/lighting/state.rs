@@ -4,23 +4,14 @@ use tokio::sync::{watch, RwLock};
 
 use halod_shared::types::{
     finite_or, CanvasState, EffectDef, LightingState as WireLightingState, DEFAULT_SAMPLE_RADIUS,
-    DEFAULT_ZONE_SIZE,
 };
 
 use crate::config::{Config, PlacedZone};
 use crate::lighting::rgb_engine::RgbEngine;
 use crate::run_loop::EngineRunConfig;
 
-/// Sanitize a placed zone before it goes on the wire: `serde_json` rejects
-/// non-finite floats, so a NaN/Inf from a hand-edited config.yaml would panic
-/// the broadcast loop. Config and wire share one `PlacedZone` type now, so this
-/// is a plain in-place clean rather than a type conversion.
 fn sanitize_zone(mut p: PlacedZone) -> PlacedZone {
-    p.x = finite_or(p.x, 0.0);
-    p.y = finite_or(p.y, 0.0);
-    p.w = finite_or(p.w, DEFAULT_ZONE_SIZE);
-    p.h = finite_or(p.h, DEFAULT_ZONE_SIZE);
-    p.rotation = finite_or(p.rotation, 0.0);
+    p.sanitize();
     p
 }
 
@@ -79,14 +70,19 @@ impl LightingState {
         let _ = self.engine.set(Engine { handle, cfg_tx });
     }
 
-    pub async fn snapshot(&self, cfg: &Config, placed_zones: Vec<PlacedZone>) -> WireLightingState {
+    pub async fn snapshot(
+        &self,
+        registry: &crate::drivers::plugins::Registry,
+        cfg: &Config,
+        placed_zones: Vec<PlacedZone>,
+    ) -> WireLightingState {
         let cs = cfg.effective_canvas_state();
         let custom_direct_effects = self.custom_effects.effects.read().await.clone();
 
         WireLightingState {
             canvas: CanvasState {
-                available_effects: RgbEngine::available_effect_descriptors(),
-                available_direct_effects: RgbEngine::direct_effect_descriptors(),
+                available_effects: RgbEngine::available_effect_descriptors(registry),
+                available_direct_effects: RgbEngine::direct_effect_descriptors(registry),
                 custom_direct_effects,
                 effects: cs.effects.clone(),
                 default_effect: cs.default_effect.clone(),
@@ -94,6 +90,8 @@ impl LightingState {
                 sample_radius: finite_or(cs.sample_radius, DEFAULT_SAMPLE_RADIUS),
             },
             targets: cfg.active_profile_data().lighting.targets.clone(),
+            // Overwritten by the serializer from the persisted config.
+            config: Default::default(),
         }
     }
 }
@@ -158,6 +156,7 @@ mod snapshot_tests {
 
     #[tokio::test]
     async fn snapshot_includes_placed_zones_from_devices() {
+        let app = Arc::new(crate::state::AppState::new(Config::default()));
         let state = LightingState::default();
         let cfg = Config::default();
         let zones = vec![PlacedZone {
@@ -172,7 +171,7 @@ mod snapshot_tests {
             sampling_mode: Default::default(),
         }];
 
-        let wire = state.snapshot(&cfg, zones).await;
+        let wire = state.snapshot(&app.registry, &cfg, zones).await;
 
         assert_eq!(wire.canvas.placed_zones.len(), 1);
         assert_eq!(wire.canvas.placed_zones[0].device_id, "rgb_dev");

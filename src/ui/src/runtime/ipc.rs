@@ -19,7 +19,7 @@ use halod_shared::lcd_custom::{CustomTemplateDef, LcdEditorRender};
 use halod_shared::socket::socket_path;
 use halod_shared::types::{
     AppState, CanvasFrame, LcdEngineFrame, LcdUploadProgress, Notification, NotificationCode,
-    RunningApp,
+    PluginUpdateStatus, RepoUpdateStatus, RunningApp,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -55,8 +55,7 @@ pub struct DecodedSprite {
 
 /// The daemon's editor render: sprites for the widgets that changed since the
 /// `known` signatures this request sent, plus the current signature of every
-/// widget. Empty `signatures` means a pre-delta daemon: `sprites` is the
-/// complete set (legacy full-replace semantics).
+/// widget.
 #[derive(Clone)]
 pub struct DecodedEditorRender {
     pub device_id: String,
@@ -78,6 +77,15 @@ pub struct UiRx {
     pub lcd_frames: watch::Receiver<HashMap<String, DecodedFrame>>,
     pub canvas_frame: watch::Receiver<Option<CanvasFrame>>,
     pub running_apps: watch::Receiver<Vec<RunningApp>>,
+    /// Decoded plugin display assets, keyed by `plugin_asset_cache_key`.
+    pub plugin_assets: watch::Receiver<HashMap<String, Vec<u8>>>,
+    /// Latest repo update-check result; empty until one is requested.
+    pub repo_updates: watch::Receiver<Vec<RepoUpdateStatus>>,
+    /// Latest per-plugin update-check result; empty until one is requested.
+    pub plugin_updates: watch::Receiver<Vec<PluginUpdateStatus>>,
+    /// Remote branch lists keyed by the repo URL they were fetched for; empty
+    /// until the Add-repository picker requests one via `ListRepoBranches`.
+    pub repo_branches: watch::Receiver<HashMap<String, Vec<String>>>,
     /// Stage/percent of the in-flight LCD image upload; `None` when idle.
     pub lcd_upload: watch::Receiver<Option<LcdUploadProgress>>,
     /// The most recently loaded named LCD template, pushed in response to
@@ -97,6 +105,10 @@ struct UiTx {
     lcd_frames: watch::Sender<HashMap<String, DecodedFrame>>,
     canvas_frame: watch::Sender<Option<CanvasFrame>>,
     running_apps: watch::Sender<Vec<RunningApp>>,
+    plugin_assets: watch::Sender<HashMap<String, Vec<u8>>>,
+    repo_updates: watch::Sender<Vec<RepoUpdateStatus>>,
+    plugin_updates: watch::Sender<Vec<PluginUpdateStatus>>,
+    repo_branches: watch::Sender<HashMap<String, Vec<String>>>,
     lcd_upload: watch::Sender<Option<LcdUploadProgress>>,
     lcd_template: watch::Sender<Option<(String, CustomTemplateDef)>>,
     lcd_editor_render: watch::Sender<Option<DecodedEditorRender>>,
@@ -129,6 +141,10 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
     let (frames_s, frames_r) = watch::channel(HashMap::new());
     let (canvas_s, canvas_r) = watch::channel(None);
     let (apps_s, apps_r) = watch::channel(Vec::new());
+    let (assets_s, assets_r) = watch::channel(HashMap::new());
+    let (repo_updates_s, repo_updates_r) = watch::channel(Vec::new());
+    let (plugin_updates_s, plugin_updates_r) = watch::channel(Vec::new());
+    let (repo_branches_s, repo_branches_r) = watch::channel(HashMap::new());
     let (upload_s, upload_r) = watch::channel(None);
     let (template_s, template_r) = watch::channel(None);
     let (editor_render_s, editor_render_r) = watch::channel(None);
@@ -142,6 +158,10 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
         lcd_frames: frames_s,
         canvas_frame: canvas_s,
         running_apps: apps_s,
+        plugin_assets: assets_s,
+        repo_updates: repo_updates_s,
+        plugin_updates: plugin_updates_s,
+        repo_branches: repo_branches_s,
         lcd_upload: upload_s,
         lcd_template: template_s,
         lcd_editor_render: editor_render_s,
@@ -155,6 +175,10 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
         lcd_frames: frames_r,
         canvas_frame: canvas_r,
         running_apps: apps_r,
+        plugin_assets: assets_r,
+        repo_updates: repo_updates_r,
+        plugin_updates: plugin_updates_r,
+        repo_branches: repo_branches_r,
         lcd_upload: upload_r,
         lcd_template: template_r,
         lcd_editor_render: editor_render_r,
@@ -179,8 +203,7 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
 }
 
 /// Retry a daemon start every Nth reconnect attempt (~500ms apart) rather than
-/// every attempt, so a long outage doesn't hammer `sc.exe`/spawn a process
-/// every 500ms.
+/// every attempt, so a long outage doesn't spawn a process every 500ms.
 const ENSURE_DAEMON_UP_EVERY: u32 = 10;
 
 async fn reconnect_loop(tx: UiTx, mut cmd_rx: CommandRx, repaint: impl Fn()) {
@@ -320,6 +343,11 @@ fn push_notification(tx: &UiTx, n: Notification, repaint: &impl Fn()) {
     repaint();
 }
 
+/// Key an asset is stored/looked up under in `UiRx::plugin_assets`.
+pub fn plugin_asset_cache_key(plugin_id: &str, name: &str) -> String {
+    format!("{plugin_id}/{name}")
+}
+
 /// Route one inbound JSON frame onto the right channel. Returns `true` when the
 /// caller should re-request the LCD image library (an upload just completed).
 fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
@@ -435,6 +463,11 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             return false;
         }
         Some("error") => {
+            // The plugin layer already sent a structured notification whose
+            // Details modal contains the full callback error.
+            if value.get("handled").and_then(|v| v.as_bool()) == Some(true) {
+                return false;
+            }
             let message = value
                 .get("message")
                 .and_then(|m| m.as_str())
@@ -474,6 +507,54 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             repaint();
             return false;
         }
+        Some("plugin_asset") => {
+            let plugin_id = value.get("plugin_id").and_then(|v| v.as_str());
+            let name = value.get("name").and_then(|v| v.as_str());
+            let data_b64 = value.get("data_b64").and_then(|v| v.as_str());
+            if let (Some(plugin_id), Some(name), Some(data_b64)) = (plugin_id, name, data_b64) {
+                use base64::Engine as _;
+                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data_b64) {
+                    let key = plugin_asset_cache_key(plugin_id, name);
+                    tx.plugin_assets.send_modify(|m| {
+                        m.insert(key, bytes);
+                    });
+                    repaint();
+                }
+            }
+            return false;
+        }
+        Some("plugin_repo_updates") => {
+            let statuses: Vec<RepoUpdateStatus> = value
+                .get("repos")
+                .and_then(|r| serde_json::from_value(r.clone()).ok())
+                .unwrap_or_default();
+            tx.repo_updates.send_replace(statuses);
+            repaint();
+            return false;
+        }
+        Some("plugin_updates") => {
+            let statuses: Vec<PluginUpdateStatus> = value
+                .get("plugins")
+                .and_then(|p| serde_json::from_value(p.clone()).ok())
+                .unwrap_or_default();
+            tx.plugin_updates.send_replace(statuses);
+            repaint();
+            return false;
+        }
+        Some("repo_branches") => {
+            let url = value.get("url").and_then(|u| u.as_str());
+            let branches: Option<Vec<String>> = value
+                .get("branches")
+                .and_then(|b| serde_json::from_value(b.clone()).ok());
+            if let (Some(url), Some(branches)) = (url, branches) {
+                let url = url.to_owned();
+                tx.repo_branches.send_modify(|m| {
+                    m.insert(url, branches);
+                });
+                repaint();
+            }
+            return false;
+        }
         Some("lcd_template") => {
             let name = value
                 .get("name")
@@ -494,8 +575,6 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
         }
         None => return false,
     }
-    // `ScreenRotation` deserializes legacy integer degrees on its own, so no
-    // pre-pass over the JSON tree is needed here.
     let data = value.get("data").cloned().unwrap_or(value);
     match serde_json::from_value::<AppState>(data) {
         Ok(state) => {
@@ -521,6 +600,10 @@ mod tests {
             lcd_frames: watch::channel(HashMap::new()).0,
             canvas_frame: watch::channel(None).0,
             running_apps: watch::channel(Vec::new()).0,
+            plugin_assets: watch::channel(HashMap::new()).0,
+            repo_updates: watch::channel(Vec::new()).0,
+            plugin_updates: watch::channel(Vec::new()).0,
+            repo_branches: watch::channel(HashMap::new()).0,
             lcd_upload: upload_s,
             lcd_template: watch::channel(None).0,
             lcd_editor_render: watch::channel(None).0,
@@ -540,6 +623,84 @@ mod tests {
     }
 
     #[test]
+    fn plugin_asset_cache_key_is_scoped_per_plugin() {
+        assert_eq!(plugin_asset_cache_key("acme", "logo.png"), "acme/logo.png");
+        assert_ne!(
+            plugin_asset_cache_key("acme", "logo.png"),
+            plugin_asset_cache_key("other", "logo.png"),
+        );
+    }
+
+    #[test]
+    fn plugin_asset_frame_lands_on_the_watch_channel() {
+        use base64::Engine as _;
+        let (tx, _upload_r) = test_tx();
+        let mut assets_r = tx.plugin_assets.subscribe();
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(b"PNGDATA");
+        let payload = format!(
+            r#"{{"type":"plugin_asset","plugin_id":"acme","name":"logo.png","data_b64":"{data_b64}"}}"#
+        );
+        assert!(!handle_json(payload.as_bytes(), &tx, &|| {}));
+        let got = assets_r
+            .borrow_and_update()
+            .get("acme/logo.png")
+            .cloned()
+            .expect("asset routed");
+        assert_eq!(got, b"PNGDATA");
+    }
+
+    #[test]
+    fn plugin_repo_updates_frame_lands_on_the_watch_channel() {
+        let (tx, _upload_r) = test_tx();
+        let mut repo_updates_r = tx.repo_updates.subscribe();
+        let payload = br#"{"type":"plugin_repo_updates","repos":[
+            {"slug":"foo","locked_sha":"aaa","remote_sha":"bbb","behind":true}
+        ]}"#;
+        assert!(!handle_json(payload, &tx, &|| {}));
+        let got = repo_updates_r.borrow_and_update().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].slug, "foo");
+        assert!(got[0].behind);
+    }
+
+    #[test]
+    fn plugin_updates_frame_lands_on_the_watch_channel() {
+        let (tx, _upload_r) = test_tx();
+        let mut plugin_updates_r = tx.plugin_updates.subscribe();
+        let payload = br#"{"type":"plugin_updates","plugins":[
+            {"plugin_id":"wled_udp","slug":"foo","update_available":true,"current_version":"1.0.0","available_version":"1.1.0"}
+        ]}"#;
+        assert!(!handle_json(payload, &tx, &|| {}));
+        let got = plugin_updates_r.borrow_and_update().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].plugin_id, "wled_udp");
+        assert!(got[0].update_available);
+    }
+
+    #[test]
+    fn terminal_upload_frames_land_on_the_watch_channel() {
+        use halod_shared::types::LcdUploadStage;
+        // The spinner-clearing terminals ride the same untouched handler.
+        for (raw, stage) in [
+            (
+                br#"{"type":"lcd_upload_progress","data":{"device_id":"lcd","stage":"done"}}"#
+                    .as_slice(),
+                LcdUploadStage::Done,
+            ),
+            (
+                br#"{"type":"lcd_upload_progress","data":{"device_id":"lcd","stage":"failed"}}"#
+                    .as_slice(),
+                LcdUploadStage::Failed,
+            ),
+        ] {
+            let (tx, rx) = test_tx();
+            assert!(!handle_json(raw, &tx, &|| {}));
+            let got = rx.borrow().clone().expect("terminal routed");
+            assert_eq!(got.stage, stage);
+        }
+    }
+
+    #[test]
     fn image_uploaded_clears_progress_and_requests_refresh() {
         let (tx, rx) = test_tx();
         tx.lcd_upload.send_replace(Some(LcdUploadProgress {
@@ -549,5 +710,16 @@ mod tests {
         }));
         assert!(handle_json(br#"{"type":"image_uploaded"}"#, &tx, &|| {}));
         assert!(rx.borrow().is_none(), "stale progress cleared");
+    }
+
+    #[test]
+    fn handled_command_error_does_not_create_a_duplicate_generic_toast() {
+        let (tx, _rx) = test_tx();
+        assert!(!handle_json(
+            br#"{"type":"error","message":"raw stack trace","handled":true}"#,
+            &tx,
+            &|| {}
+        ));
+        assert!(tx.notifications.lock().unwrap().is_empty());
     }
 }

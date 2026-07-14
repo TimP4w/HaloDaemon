@@ -2,17 +2,19 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
+use crate::input::validate::{validate_button_mapping, validate_macro};
 use crate::ipc::broadcast_state;
 use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::state::AppState;
-use halod_shared::types::{ButtonMapping, MacroStep, MACRO_MAX_DELAY_MS, MACRO_MAX_STEPS};
+use halod_shared::types::{ButtonMapping, MacroStep};
 
 pub async fn set_button_mapping(
     id: String,
     mapping: ButtonMapping,
     app: Arc<AppState>,
 ) -> Result<()> {
+    validate_button_mapping(&mapping)?;
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
         .as_key_remap()
@@ -49,15 +51,7 @@ pub async fn reset_all_button_mappings(id: String, app: Arc<AppState>) -> Result
 }
 
 pub async fn play_macro(steps: Vec<MacroStep>, app: Arc<AppState>) -> Result<()> {
-    anyhow::ensure!(!steps.is_empty(), "macro has no steps");
-    anyhow::ensure!(
-        steps.len() <= MACRO_MAX_STEPS,
-        "macro exceeds {MACRO_MAX_STEPS} steps"
-    );
-    anyhow::ensure!(
-        steps.iter().all(|s| s.delay_after_ms <= MACRO_MAX_DELAY_MS),
-        "macro delay exceeds {MACRO_MAX_DELAY_MS} ms"
-    );
+    validate_macro(&steps)?;
     let exec = app
         .input
         .executor()
@@ -92,7 +86,7 @@ mod tests {
     use crate::config::Config;
     use crate::drivers::Device;
     use crate::test_support::MockDevice;
-    use halod_shared::types::ButtonAction;
+    use halod_shared::types::{ButtonAction, MACRO_MAX_DELAY_MS, MACRO_MAX_STEPS};
     use std::sync::Arc;
 
     fn make_app(dev: Arc<MockDevice>) -> Arc<AppState> {

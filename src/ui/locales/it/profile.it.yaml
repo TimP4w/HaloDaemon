@@ -1,0 +1,42 @@
+capability:
+  rgb: RGB
+  dpi: DPI
+  fan_curve: Curva della ventola
+  lcd: LCD
+  key_remap: Rimappatura tasti
+  equalizer: Equalizzatore
+  choice: Scelta
+  range: Intervallo
+  boolean: Interruttori
+
+profile:
+  profile_label: "PROFILO"
+  new_profile_btn: "+ Nuovo profilo"
+  profile_settings_btn: "Impostazioni profilo"
+  new_profile_title: "Nuovo profilo"
+  profile_name_hint: "Nome profilo…"
+  name_taken: "Esiste già un profilo con questo nome."
+  create: "Crea"
+  cancel: "Annulla"
+  delete_title: "Vuoi eliminare il profilo?"
+  delete_confirm: 'Vuoi davvero eliminare "%{name}"? Non potrai annullare questa operazione.'
+  delete: "Elimina"
+  back: "← Indietro"
+  active: "Attivo"
+  set_active: "Imposta come attivo"
+  default_desc: "Il profilo predefinito resta attivo quando nessuna regola associata alle applicazioni corrisponde."
+  profile_desc: "Le impostazioni di questo profilo vengono applicate quando è attivo."
+  auto_activate_title: "ATTIVAZIONE AUTOMATICA"
+  auto_activate_desc: "Passa automaticamente a questo profilo quando una di queste app è in primo piano."
+  add_processes: "+ Aggiungi processi"
+  overrides_title: "OVERRIDE"
+  overrides_inactive: "Attiva questo profilo per visualizzare le impostazioni specifiche di ogni dispositivo."
+  overrides_empty: "Non ci sono ancora impostazioni specifiche. Le modifiche che apporti mentre il profilo è attivo verranno salvate qui."
+  canvas_effects: "Effetti canvas"
+  revert: "Ripristina"
+  select_processes_title: "Seleziona processi"
+  select_processes_desc: "Scegli quali app in esecuzione attivano questo profilo."
+  filter_processes_hint: "Filtra processi…"
+  no_processes: "Nessun processo in esecuzione trovato."
+  add_selected: "Aggiungi selezionati"
+  add_selected_n: "Aggiungi selezionati (%{n})"

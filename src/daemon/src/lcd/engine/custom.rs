@@ -34,7 +34,7 @@ use halod_shared::types::{EffectParamValue, LcdEngineTemplateDescriptor, RgbColo
 
 use super::templates::{
     angle_cw_from_top, dim_color, draw_text_bold, load_font, load_inter_font, load_mono_font, rgba,
-    text_extent, Background, LcdTemplate, TemplateCtx,
+    text_extent, Background, TemplateCtx,
 };
 
 pub struct CustomTemplate {
@@ -60,8 +60,8 @@ pub struct CustomTemplate {
     media: Option<Arc<MediaHandle>>,
 }
 
-impl LcdTemplate for CustomTemplate {
-    fn descriptor() -> LcdEngineTemplateDescriptor {
+impl CustomTemplate {
+    pub(super) fn descriptor() -> LcdEngineTemplateDescriptor {
         LcdEngineTemplateDescriptor {
             id: "custom".to_string(),
             name: "Custom".to_string(),
@@ -70,10 +70,10 @@ impl LcdTemplate for CustomTemplate {
         }
     }
 
-    fn from_params(
+    pub(super) fn from_params(
         params: &HashMap<String, EffectParamValue>,
         images_dir: &Path,
-    ) -> Box<dyn LcdTemplate> {
+    ) -> Self {
         let def = match params.get(halod_shared::lcd_custom::WIDGETS_JSON_PARAM) {
             Some(EffectParamValue::Str(json)) => serde_json::from_str::<CustomTemplateDef>(json)
                 .unwrap_or_else(|e| {
@@ -82,10 +82,10 @@ impl LcdTemplate for CustomTemplate {
                 }),
             _ => CustomTemplateDef::default(),
         };
-        Box::new(Self::new(def, images_dir))
+        Self::new(def, images_dir)
     }
 
-    fn render(&mut self, ctx: &TemplateCtx, buf: &mut RgbaImage) -> Result<(), String> {
+    pub(super) fn render(&mut self, ctx: &TemplateCtx, buf: &mut RgbaImage) -> Result<(), String> {
         let (w, h) = (ctx.width, ctx.height);
         let accent = self.def.style.accent;
 
@@ -116,7 +116,7 @@ impl LcdTemplate for CustomTemplate {
         Ok(())
     }
 
-    fn content_signature(&self, ctx: &TemplateCtx) -> Option<u64> {
+    pub(super) fn content_signature(&self, ctx: &TemplateCtx) -> Option<u64> {
         let mut hasher = DefaultHasher::new();
         self.background_signature(ctx.t).hash(&mut hasher);
         for widget in &self.def.widgets {
@@ -490,6 +490,7 @@ impl CustomTemplate {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // text rasterization inputs remain independently meaningful
     fn render_text(
         &self,
         img: &mut RgbaImage,
@@ -1367,7 +1368,9 @@ fn decode_source_image(filename: &str) -> Option<Arc<DecodedImage>> {
         return None;
     }
     let path = crate::config::lcd_images_dir().join(filename);
-    let data = std::fs::read(&path).ok()?;
+    let data = crate::util::image::read_image_bounded(&path)
+        .map_err(|e| log::warn!("[LCD custom] cannot read {filename}: {e}"))
+        .ok()?;
     let decoded = super::templates::decode_image_frames(&data)
         .map_err(|e| log::warn!("[LCD custom] decode {filename} failed: {e}"))
         .ok()?;
@@ -1528,6 +1531,7 @@ fn draw_ring(
 /// Flat progress bar: a rounded-rect `track` with a rounded-rect `fill`. The
 /// fill's corner radius is clamped to half its own width, so a short fill reads
 /// as a small rounded sliver rather than a full-height ball.
+#[allow(clippy::too_many_arguments)] // primitive geometry/style parameters
 fn draw_bar(
     img: &mut RgbaImage,
     cx: f32,
@@ -1671,6 +1675,7 @@ fn sensor_fill(widget: &WidgetDef, base: RgbColor, frac: f32) -> RgbColor {
     sensor_fill_color(fill, high, gradient, frac)
 }
 
+#[allow(clippy::too_many_arguments)] // primitive text geometry/style parameters
 fn draw_centered_text(
     img: &mut RgbaImage,
     color: RgbColor,
@@ -1915,6 +1920,7 @@ impl CustomTemplate {
 /// what `update_def` decides needs it); otherwise starts a fresh one so the
 /// caller keeps it alive for the next request. Returns the changed sprites
 /// plus the current (id, signature) pair for every widget.
+#[allow(clippy::too_many_arguments)] // editor render request plus reusable session state
 pub(crate) fn render_editor_sprites(
     device_id: &str,
     def: &CustomTemplateDef,
@@ -2283,9 +2289,7 @@ mod tests {
 
     #[test]
     fn build_custom_succeeds() {
-        assert!(
-            super::super::templates::build("custom", &HashMap::new(), Path::new("/tmp")).is_some()
-        );
+        let _ = CustomTemplate::from_params(&HashMap::new(), Path::new("/tmp"));
     }
 
     #[test]
@@ -2660,11 +2664,7 @@ mod tests {
         let info = MediaInfo {
             title: "Track".to_string(),
             artist: "Artist".to_string(),
-            album: "Album".to_string(),
             status: crate::services::media::PlaybackStatus::Playing,
-            position: None,
-            position_at: None,
-            length: None,
             art: None,
         };
         // show_art only: no title, no artist.
@@ -2678,11 +2678,7 @@ mod tests {
         let info = MediaInfo {
             title: "A Very Long Track Title That Would Scroll".to_string(),
             artist: "Artist".to_string(),
-            album: "Album".to_string(),
             status: crate::services::media::PlaybackStatus::Playing,
-            position: None,
-            position_at: None,
-            length: None,
             art: None,
         };
         let layout = now_playing_layout(Some(&info), true, true, true);
@@ -2696,11 +2692,7 @@ mod tests {
         let info = MediaInfo {
             title: "Track".to_string(),
             artist: "Artist".to_string(),
-            album: "Album".to_string(),
             status: crate::services::media::PlaybackStatus::Playing,
-            position: None,
-            position_at: None,
-            length: None,
             art: None,
         };
         let layout = now_playing_layout(Some(&info), true, true, false);

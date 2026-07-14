@@ -56,7 +56,7 @@ fn draw_write_rate_graph(
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     // Request a debug snapshot once for this device.
     if !st.debug_requested {
-        crate::domain::actions::system::get_debug_info(ctx.cmd);
+        crate::runtime::ipc::send(ctx.cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
         st.debug_requested = true;
     }
     let dev = ctx.dev;

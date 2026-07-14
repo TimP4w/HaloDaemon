@@ -15,6 +15,7 @@ pub struct HideState {
 
 impl HideState {
     /// Install the loop wakeup (Linux custom loop only).
+    #[cfg(target_os = "linux")]
     pub fn set_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
         if let Ok(mut w) = self.waker.lock() {
             *w = Some(Box::new(waker));

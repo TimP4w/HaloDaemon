@@ -55,6 +55,16 @@ fn build_tour(key: TourKey) -> Tour {
                 t!("tour.page_home.sidebar_cooling.body"),
             ),
             step(
+                AnchorId::HomeSidebarIntegrations,
+                t!("tour.page_home.sidebar_integrations.title"),
+                t!("tour.page_home.sidebar_integrations.body"),
+            ),
+            step(
+                AnchorId::HomeSidebarPlugins,
+                t!("tour.page_home.sidebar_plugins.title"),
+                t!("tour.page_home.sidebar_plugins.body"),
+            ),
+            step(
                 AnchorId::HomeSidebarSettings,
                 t!("tour.page_home.sidebar_settings.title"),
                 t!("tour.page_home.sidebar_settings.body"),
@@ -299,10 +309,55 @@ fn build_tour(key: TourKey) -> Tour {
                 t!("tour.page_effect_designer.tune.body"),
             ),
         ]),
+        TourKey::PagePlugins => make_tour(vec![
+            step(
+                AnchorId::PluginsOverview,
+                t!("tour.page_plugins.overview.title"),
+                t!("tour.page_plugins.overview.body"),
+            ),
+            step(
+                AnchorId::PluginsOfficialRepo,
+                t!("tour.page_plugins.official_repo.title"),
+                t!("tour.page_plugins.official_repo.body"),
+            ),
+            step(
+                AnchorId::PluginsAddPlugin,
+                t!("tour.page_plugins.add_plugin.title"),
+                t!("tour.page_plugins.add_plugin.body"),
+            ),
+            step(
+                AnchorId::PluginsAddRepo,
+                t!("tour.page_plugins.add_repo.title"),
+                t!("tour.page_plugins.add_repo.body"),
+            ),
+            step(
+                AnchorId::PluginsToggle,
+                t!("tour.page_plugins.toggle.title"),
+                t!("tour.page_plugins.toggle.body"),
+            ),
+            step(
+                AnchorId::PluginsPermissions,
+                t!("tour.page_plugins.permissions.title"),
+                t!("tour.page_plugins.permissions.body"),
+            ),
+        ]),
+        TourKey::PageIntegrations => make_tour(vec![
+            step(
+                AnchorId::IntegrationsOverview,
+                t!("tour.page_integrations.overview.title"),
+                t!("tour.page_integrations.overview.body"),
+            ),
+            step(
+                AnchorId::IntegrationsToggle,
+                t!("tour.page_integrations.toggle.title"),
+                t!("tour.page_integrations.toggle.body"),
+            ),
+        ]),
     }
 }
 
 /// Every [`TourKey`] variant, for exhaustive testing/proptesting over "any tour".
+#[cfg(test)]
 pub const ALL_TOUR_KEYS: &[TourKey] = &[
     TourKey::PageHome,
     TourKey::PageLighting,
@@ -324,14 +379,18 @@ pub const ALL_TOUR_KEYS: &[TourKey] = &[
     TourKey::TabPairing,
     TourKey::LcdEditor,
     TourKey::EffectDesigner,
+    TourKey::PagePlugins,
+    TourKey::PageIntegrations,
 ];
 
 /// Localized tours, interned per `(locale, tour)` so the `&'static Tour` shape
 /// the tour engine expects is preserved while still honouring a runtime locale
 /// switch: the first request for a locale builds and leaks that locale's copy;
 /// later requests return the cached reference.
-fn cache() -> &'static Mutex<HashMap<(String, &'static str), Arc<Tour>>> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, &'static str), Arc<Tour>>>> = OnceLock::new();
+type TourCache = Mutex<HashMap<(String, &'static str), Arc<Tour>>>;
+
+fn cache() -> &'static TourCache {
+    static CACHE: OnceLock<TourCache> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

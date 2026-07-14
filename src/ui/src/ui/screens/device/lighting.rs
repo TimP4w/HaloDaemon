@@ -160,51 +160,45 @@ fn leave_canvas_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         return;
     }
     let (mut confirm, mut cancel) = (false, false);
-    let dismissed = widgets::modal_frame(
+    let dismissed = widgets::dialog(
         ui.ctx(),
         "lighting_leave_canvas",
         &t!("lighting.remove_from_canvas_title"),
         420.0,
-        190.0,
         |ui| {
             ui.label(
                 egui::RichText::new(t!("lighting.remove_from_canvas_body"))
                     .font(theme::body(12.5))
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(18.0);
-            egui::Sides::new().show(
+        },
+        |ui| {
+            if widgets::button(
                 ui,
-                |ui| {
-                    if widgets::button(
-                        ui,
-                        &t!("lighting.cancel"),
-                        widgets::ButtonKind::Ghost,
-                        egui::vec2(96.0, 32.0),
-                    )
-                    .clicked()
-                    {
-                        cancel = true;
-                    }
-                },
-                |ui| {
-                    if widgets::button(
-                        ui,
-                        &t!("lighting.remove_and_apply"),
-                        widgets::ButtonKind::Primary,
-                        egui::vec2(150.0, 32.0),
-                    )
-                    .clicked()
-                    {
-                        confirm = true;
-                    }
-                },
-            );
+                &t!("lighting.remove_and_apply"),
+                widgets::ButtonKind::Primary,
+                egui::vec2(150.0, 32.0),
+            )
+            .clicked()
+            {
+                confirm = true;
+            }
+            ui.add_space(8.0);
+            if widgets::button(
+                ui,
+                &t!("lighting.cancel"),
+                widgets::ButtonKind::Ghost,
+                egui::vec2(96.0, 32.0),
+            )
+            .clicked()
+            {
+                cancel = true;
+            }
         },
     );
     if confirm {
         if let Some(cmd) = st.lighting.confirm_leave_canvas.take() {
-            crate::domain::actions::lighting::send(ctx.cmd, cmd);
+            crate::runtime::ipc::send(ctx.cmd, cmd);
         }
     } else if cancel || dismissed {
         st.lighting.confirm_leave_canvas = None;
@@ -290,7 +284,7 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, 
                         .clicked()
                         {
                             st.lighting.paint_buf.remove(&zone.id);
-                            crate::domain::actions::lighting::send(ctx.cmd, paint_cmd(ctx, st));
+                            crate::runtime::ipc::send(ctx.cmd, paint_cmd(ctx, st));
                         }
                         if widgets::button(
                             ui,
@@ -304,7 +298,7 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, 
                             let m: HashMap<u32, RgbColor> =
                                 zone.leds.iter().map(|l| (l.id, c)).collect();
                             st.lighting.paint_buf.insert(zone.id.clone(), m);
-                            crate::domain::actions::lighting::send(ctx.cmd, paint_cmd(ctx, st));
+                            crate::runtime::ipc::send(ctx.cmd, paint_cmd(ctx, st));
                         }
                     },
                 );
@@ -408,7 +402,7 @@ fn transform_controls(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &
     });
 
     if let Some(new_tx) = changed_tx {
-        crate::domain::actions::lighting::send(ctx.cmd, tx_cmd(ctx, &zone.id, new_tx));
+        crate::runtime::ipc::send(ctx.cmd, tx_cmd(ctx, &zone.id, new_tx));
     }
 
     // Rotation stepper for ring topologies — steps the content by whole LEDs.
@@ -423,7 +417,7 @@ fn transform_controls(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &
                 led_offset: wrap_offset(live_tx.led_offset, delta, n),
                 ..live_tx
             };
-            crate::domain::actions::lighting::send(ctx.cmd, tx_cmd(ctx, &zone.id, new_tx));
+            crate::runtime::ipc::send(ctx.cmd, tx_cmd(ctx, &zone.id, new_tx));
         }
     }
 }
@@ -542,7 +536,7 @@ fn right_panel(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStat
                                 if matches!(mode, Mode::Engine) {
                                     st.lighting.confirm_leave_canvas = Some(cmd);
                                 } else {
-                                    crate::domain::actions::lighting::send(ctx.cmd, cmd);
+                                    crate::runtime::ipc::send(ctx.cmd, cmd);
                                 }
                             }
                         }
@@ -563,7 +557,7 @@ fn right_panel(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStat
                 canvas_btn.rect,
             );
             if canvas_btn.clicked() {
-                crate::domain::actions::lighting::send(ctx.cmd, place_on_canvas_cmd(ctx, st));
+                crate::runtime::ipc::send(ctx.cmd, place_on_canvas_cmd(ctx, st));
             }
         },
     );
@@ -593,17 +587,12 @@ fn right_panel(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStat
 
                 if color_changed {
                     match mode {
-                        Mode::Solid => {
-                            crate::domain::actions::lighting::send(ctx.cmd, solid_cmd(ctx, st))
-                        }
+                        Mode::Solid => crate::runtime::ipc::send(ctx.cmd, solid_cmd(ctx, st)),
                         Mode::Effect(id) => {
                             if let Some(eff) =
                                 rgb.descriptor.native_effects.iter().find(|e| &e.id == id)
                             {
-                                crate::domain::actions::lighting::send(
-                                    ctx.cmd,
-                                    effect_cmd(ctx, st, rgb, eff),
-                                );
+                                crate::runtime::ipc::send(ctx.cmd, effect_cmd(ctx, st, rgb, eff));
                             }
                         }
                         Mode::Direct(id) => {
@@ -615,10 +604,7 @@ fn right_panel(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStat
                                 .iter()
                                 .find(|a| &a.id == id)
                             {
-                                crate::domain::actions::lighting::send(
-                                    ctx.cmd,
-                                    direct_cmd(ctx, st, rgb, anim),
-                                );
+                                crate::runtime::ipc::send(ctx.cmd, direct_cmd(ctx, st, rgb, anim));
                             }
                         }
                         _ => {}

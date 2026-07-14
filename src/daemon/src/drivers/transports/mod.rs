@@ -7,9 +7,9 @@ pub mod hwmon;
 #[cfg(target_os = "windows")]
 pub mod lpcio;
 pub mod mock;
-#[cfg(target_os = "windows")]
-pub mod pawnio;
+pub mod register_ops;
 pub mod smbus;
+pub mod tcp;
 pub mod usb_bulk;
 pub mod usb_control;
 
@@ -22,6 +22,11 @@ use rusb::UsbContext;
 pub struct UsbClaim {
     pub handle: rusb::DeviceHandle<rusb::Context>,
     pub interface: u8,
+    /// `true` when we detached a kernel driver in [`Self::claim`], so
+    /// [`Drop`] knows to re-attach it. Kernel-driver detach/reattach is a Linux
+    /// (libusb) concern only.
+    #[cfg(target_os = "linux")]
+    had_kernel_driver: bool,
 }
 
 impl UsbClaim {
@@ -37,8 +42,13 @@ impl UsbClaim {
     /// Claim an interface on an already-opened device handle.
     pub fn claim(handle: rusb::DeviceHandle<rusb::Context>, interface: u8) -> Result<Self> {
         #[cfg(target_os = "linux")]
+        let mut had_kernel_driver = false;
+        #[cfg(target_os = "linux")]
         match handle.kernel_driver_active(interface) {
-            Ok(true) => handle.detach_kernel_driver(interface)?,
+            Ok(true) => {
+                handle.detach_kernel_driver(interface)?;
+                had_kernel_driver = true;
+            }
             Ok(false) => {}
             Err(e) => log::warn!(
                 "UsbClaim: kernel_driver_active({}) query failed: {e}",
@@ -47,11 +57,19 @@ impl UsbClaim {
         }
 
         handle.claim_interface(interface)?;
-        Ok(Self { handle, interface })
+        Ok(Self {
+            handle,
+            interface,
+            #[cfg(target_os = "linux")]
+            had_kernel_driver,
+        })
     }
 
+    #[expect(dead_code, reason = "explicit early release for transport owners")]
     pub fn release(self) {
-        std::mem::forget(self);
+        // Drop runs, releasing the interface and re-attaching the kernel driver
+        // on Linux. The caller has taken ownership and wants explicit cleanup;
+        // letting the value drop is the correct behaviour.
     }
 }
 
@@ -64,17 +82,20 @@ impl Drop for UsbClaim {
             );
         }
         #[cfg(target_os = "linux")]
-        if let Err(e) = self.handle.attach_kernel_driver(self.interface) {
-            log::warn!(
-                "UsbClaim: attach_kernel_driver({}) failed: {e}",
-                self.interface
-            );
+        if self.had_kernel_driver {
+            if let Err(e) = self.handle.attach_kernel_driver(self.interface) {
+                log::warn!(
+                    "UsbClaim: attach_kernel_driver({}) failed: {e}",
+                    self.interface
+                );
+            }
         }
     }
 }
 
 /// Lets device code accept `impl BulkTransport` and be tested with a mock instead of real hardware.
 #[async_trait]
+#[expect(dead_code, reason = "plugin-facing bulk transport protocol")]
 pub trait BulkTransport: Send + Sync {
     /// Write all bytes to the bulk-OUT endpoint, looping until every byte is
     /// delivered. Returns the total number of bytes sent.
@@ -97,6 +118,7 @@ pub trait BulkTransport: Send + Sync {
 /// `UsbControlTransport` implements this trait. Device code that accepts
 /// `impl ControlTransport` (or `dyn ControlTransport`) can be tested with a
 /// mock without opening real hardware.
+#[expect(dead_code, reason = "rate-limit hook is optional transport protocol")]
 pub trait ControlTransport: Send + Sync {
     /// Issue a vendor control OUT transfer.
     fn write_control(
@@ -162,24 +184,6 @@ pub trait Transport: Send + Sync {
 
     async fn read_long(&self, size: usize) -> Result<Vec<u8>> {
         self.read(size).await
-    }
-
-    async fn read_matching<F>(&self, size: usize, predicate: F, max_tries: usize) -> Option<Vec<u8>>
-    where
-        F: Fn(&[u8]) -> bool + Send,
-    {
-        for i in 0..max_tries {
-            match self.read(size).await {
-                Ok(msg) if predicate(&msg) => return Some(msg),
-                Ok(_) => {}
-                Err(e) => log::debug!("read_matching: read failed: {e}"),
-            }
-            // Backoff to avoid tight-spinning on non-blocking transports.
-            if i > 0 && i % 10 == 0 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-            }
-        }
-        None
     }
 
     /// Live write-rate limit and throughput. No default: every implementor

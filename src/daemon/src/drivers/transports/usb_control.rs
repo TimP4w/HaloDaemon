@@ -46,14 +46,6 @@ impl UsbControlTransport {
         Ok(())
     }
 
-    pub fn rate_status(&self) -> WriteRateStatus {
-        self.io.status()
-    }
-
-    pub fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
-        self.io.set_limit(limit);
-    }
-
     pub fn read_control(
         &self,
         bm_request_type: u8,
@@ -76,10 +68,12 @@ impl UsbControlTransport {
             .context("USB control read failed")
     }
 
-    pub fn release(self) {
-        if let Some(claim) = self.io.into_inner() {
-            claim.release();
-        }
+    pub fn rate_status(&self) -> WriteRateStatus {
+        self.io.status()
+    }
+
+    pub fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
+        self.io.set_limit(limit);
     }
 }
 
@@ -107,10 +101,10 @@ impl ControlTransport for UsbControlTransport {
     }
 
     fn rate_status(&self) -> WriteRateStatus {
-        self.io.status()
+        UsbControlTransport::rate_status(self)
     }
 
     fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
-        self.io.set_limit(limit);
+        UsbControlTransport::set_write_rate_limit(self, limit);
     }
 }

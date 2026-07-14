@@ -39,28 +39,29 @@ fn sibling_path(current_exe: Option<&Path>, name: &str) -> Option<PathBuf> {
 }
 
 /// Ordered `(program, args)` attempts to bring the daemon up; first success wins.
+///
+/// The daemon is a plain user process (not a Windows service since the privilege
+/// split — the elevated register-bus broker is a separate on-demand service that
+/// the daemon itself starts). So the GUI just spawns `halod.exe`: the sibling
+/// next to the GUI, then `halod.exe` on `PATH`.
 #[cfg(windows)]
 fn daemon_start_attempts(current_exe: Option<&Path>) -> Vec<(String, Vec<String>)> {
-    let mut attempts = vec![(
-        "sc.exe".to_string(),
-        vec![
-            "start".to_string(),
-            halod_shared::app::WINDOWS_SERVICE_NAME.to_string(),
-        ],
-    )];
-    if let Some(sibling) = sibling_path(current_exe, "halod.exe") {
+    let exe = format!("{}.exe", halod_shared::app::APP_NAME);
+    let mut attempts = Vec::new();
+    if let Some(sibling) = sibling_path(current_exe, &exe) {
         attempts.push((sibling.to_string_lossy().into_owned(), vec![]));
     }
+    attempts.push((exe, vec![]));
     attempts
 }
 
 #[cfg(not(windows))]
 fn daemon_start_attempts(current_exe: Option<&Path>) -> Vec<(String, Vec<String>)> {
     let mut attempts = Vec::new();
-    if let Some(sibling) = sibling_path(current_exe, "halod") {
+    if let Some(sibling) = sibling_path(current_exe, halod_shared::app::APP_NAME) {
         attempts.push((sibling.to_string_lossy().into_owned(), vec![]));
     }
-    attempts.push(("halod".to_string(), vec![]));
+    attempts.push((halod_shared::app::APP_NAME.to_string(), vec![]));
     attempts
 }
 
@@ -179,12 +180,22 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_attempts_start_with_the_service() {
+    fn windows_attempts_prefer_sibling_then_fall_back_to_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("halod-gui.exe");
+        std::fs::write(&exe, b"").unwrap();
+        let sibling = dir.path().join("halod.exe");
+        std::fs::write(&sibling, b"").unwrap();
+
+        let attempts = daemon_start_attempts(Some(&exe));
+        assert_eq!(attempts[0].0, sibling.to_string_lossy());
+        assert_eq!(attempts[1].0, "halod.exe");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_attempts_fall_back_to_path_only_without_a_sibling() {
         let attempts = daemon_start_attempts(None);
-        assert_eq!(attempts[0].0, "sc.exe");
-        assert_eq!(
-            attempts[0].1,
-            vec!["start", halod_shared::app::WINDOWS_SERVICE_NAME]
-        );
+        assert_eq!(attempts, vec![("halod.exe".to_string(), vec![])]);
     }
 }

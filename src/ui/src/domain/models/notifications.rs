@@ -42,6 +42,22 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
             t!("notify.fan_stalled.title", fan = fan).to_string(),
             t!("notify.fan_stalled.message").to_string(),
         ),
+        PluginNeedsPermission { plugin } => (
+            t!("notify.plugin_needs_permission.title").to_string(),
+            t!("notify.plugin_needs_permission.message", plugin = plugin).to_string(),
+        ),
+        PluginContentChanged { plugin } => (
+            t!("notify.plugin_content_changed.title").to_string(),
+            t!("notify.plugin_content_changed.message", plugin = plugin).to_string(),
+        ),
+        PluginRuntimeError { plugin, detail: _ } => (
+            t!("notify.plugin_runtime_error.title", plugin = plugin).to_string(),
+            t!("notify.plugin_runtime_error.message").to_string(),
+        ),
+        PluginConnectFailed { plugin, detail: _ } => (
+            t!("notify.plugin_connect_failed.title", plugin = plugin).to_string(),
+            t!("notify.plugin_connect_failed.message").to_string(),
+        ),
         Generic { message } => (t!("notify.error_title").to_string(), message.clone()),
     }
 }
@@ -78,6 +94,20 @@ mod tests {
                 detail: "boom".into(),
             },
             FanStalled { fan: "cpu".into() },
+            PluginNeedsPermission {
+                plugin: "wled_udp".into(),
+            },
+            PluginContentChanged {
+                plugin: "wled_udp".into(),
+            },
+            PluginRuntimeError {
+                plugin: "wled_udp".into(),
+                detail: "boom".into(),
+            },
+            PluginConnectFailed {
+                plugin: "wled_udp".into(),
+                detail: "boom".into(),
+            },
             Generic {
                 message: "boom".into(),
             },
@@ -98,5 +128,13 @@ mod tests {
             profile: "Gaming".into(),
         });
         assert!(msg.contains("Gaming"), "param not interpolated: {msg}");
+
+        let (title, message) = notification_text(&PluginRuntimeError {
+            plugin: "xyz".into(),
+            detail: "private stack trace".into(),
+        });
+        assert_eq!(title, "An error occurred in plugin xyz");
+        assert!(!title.contains("private stack trace"));
+        assert!(!message.contains("private stack trace"));
     }
 }

@@ -1,0 +1,123 @@
+plugins:
+  title: Plugin
+  subtitle: I plugin aggiungono il supporto a nuovi dispositivi senza ricompilare il daemon.
+  counts: "%{count} script · %{active} attivi"
+  empty_title: Nessun plugin installato
+  empty_hint: Aggiungi uno script Lua per estendere HaloDaemon con nuovi dispositivi.
+  add: Aggiungi plugin
+  # Repository dei plugin
+  repos_title: Repository
+  repos_check_updates: Controlla aggiornamenti
+  repos_checking: Controllo aggiornamenti…
+  repos_updates_disabled: Il controllo aggiornamenti è disattivato. Attiva il download dei plugin nelle Impostazioni per cercare aggiornamenti.
+  repos_url_hint: URL Git (https://...)
+  repos_branch_hint: Branch (opzionale)
+  repos_branch_label: BRANCH
+  repos_branch_default: Branch predefinito
+  repos_branch_loading: Caricamento branch…
+  repos_branch_enter_url: Inserisci prima un URL
+  repos_add: Aggiungi
+  repos_add_title: Aggiungi repository
+  repos_add_sub: Collega HaloDaemon a un repository Git remoto per esplorare, installare e aggiornare i plugin disponibili.
+  repos_empty: Nessun repository di plugin registrato.
+  repos_update: Aggiorna
+  repos_repair: Pull forzato
+  repos_repair_title: Forzare il pull del plugin?
+  repos_repair_body: Questa operazione scarica il repository e ripristina dal remoto solo la directory %{name}. Le modifiche locali al suo interno andranno perse; gli altri plugin non verranno modificati.
+  repos_remove: Rimuovi repository
+  repos_remove_title: Vuoi rimuovere il repository?
+  repos_remove_body: In questo modo rimuoverai %{name} e disinstallerai tutti i plugin forniti dal repository.
+  repo_source: ORIGINE
+  repo_last_sync: ULTIMA SINCRONIZZAZIONE
+  repo_never_synced: mai
+  repo_sync_just_now: proprio ora
+  repo_sync_minutes: "%{count} min fa"
+  repo_sync_hours: "%{count} ore fa"
+  repo_sync_days: "%{count} giorni fa"
+  repo_drivers: DRIVER
+  repo_drivers_count: "%{count} installati"
+  repo_drivers_from: DRIVER DA QUESTO REPOSITORY
+  repo_no_drivers: Nessun driver installato da questo repository.
+  # Aggiornamenti per plugin
+  updates_available: "%{count} aggiornamento plugin disponibile"
+  updates_available_plural: "%{count} aggiornamenti plugin disponibili"
+  update_all: Aggiorna tutto
+  updating: Aggiornamento…
+  update_available: Aggiornamento disponibile
+  modified_on_disk: Disabilitato perché modificato su disco
+  modified_on_disk_sub: I file di questo plugin sono cambiati dall'installazione, quindi è stato disabilitato per sicurezza. Riabilitalo per accettare la modifica.
+  # Problemi del plugin (errori di connessione/runtime, avvisi di caricamento)
+  issue_connect_failed: Impossibile connettersi
+  issue_runtime_error: Errore di runtime
+  issue_load_warning: Caricato con un avviso
+  issue_load_failed: Caricamento non riuscito
+  issue_details: Dettagli
+  issue_modal_title: "Il plugin %{plugin} sta riscontrando un problema"
+  issue_copy: Copia
+  issue_copied: Copiato!
+  issue_close: Chiudi
+  skipped_heading: Plugin ignorati
+  skipped_title: Questo plugin è stato ignorato
+  # Pannello dettagli
+  type_device: Driver
+  type_effect: Effetti
+  type_integration: Integrazione
+  author: AUTORE
+  capabilities: FUNZIONALITÀ
+  targets: DISPOSITIVI SUPPORTATI
+  effects: EFFETTI
+  status_active: Attivo
+  status_disabled: Disattivato
+  status_needs_permission: Richiede permessi
+  enable: Attiva
+  disable: Disattiva
+  delete: Elimina script
+  repo_sourced_note: Questo plugin proviene da un repository. Rimuovi il repository per disinstallarlo.
+  # Permessi
+  permissions: PERMESSI
+  permissions_pending: Questo plugin richiede permessi che non hai ancora concesso. Resterà inattivo finché non deciderai se concederli.
+  permissions_not_granted_tag: Non concesso
+  regrant_required: È necessario controllare i permessi
+  permissions_enable_hint: Se attivi questo plugin, ti verranno richiesti i permessi elencati sopra.
+  permissions_granted: Concesso
+  grant: Concedi permessi
+  revoke: Revoca e disattiva
+  permission_network: Rete
+  permission_os: Sistema operativo
+  permission_secure_storage: Archiviazione sicura
+  permission_smbus: SMBus
+  permission_audio_routing: Instradamento audio
+  permission_network_desc: Apre connessioni di rete, ad esempio verso un SDK o un server locale. Uno script dannoso potrebbe inviare dati all'esterno del computer.
+  permission_os_desc: Legge l'orologio di sistema (os.time / os.clock). Il rischio è basso e non viene mai concesso l'accesso a file o processi.
+  permission_secure_storage_desc: Legge i valori segreti salvati di questo plugin (es. un token API) in chiaro durante l'esecuzione.
+  permission_smbus_desc: Scansiona, legge e scrive dispositivi SMBus/I2C. Raggiunge ogni dispositivo sul bus, non solo l'hardware di questo plugin, quindi una scrittura errata può destabilizzare altri dispositivi.
+  permission_audio_routing_desc: Crea e instrada sink audio di sistema. Uno script malevolo potrebbe avviare moduli audio o catturare/reindirizzare l'audio su questo computer.
+  # Campi di configurazione
+  settings: IMPOSTAZIONI
+  save_settings: Salva
+  secret_set_hint: (un segreto è memorizzato)
+  # Finestra di consenso permessi (mostrata quando si attiva un plugin che richiede permessi)
+  consent_title: Concedi permessi
+  consent_body: "%{name} richiede quanto segue per funzionare."
+  consent_warning: I permessi vengono concessi tutti insieme. Puoi revocarli in qualsiasi momento; in tal caso il plugin verrà disattivato.
+  consent_modified: Lo script del plugin è cambiato dall'ultima autorizzazione. Per motivi di sicurezza, devi ricontrollare i permessi e concedere nuovamente l'autorizzazione.
+  consent_permission_added: Un aggiornamento del plugin ha aggiunto un nuovo permesso. Per poterlo usare di nuovo, controlla le richieste qui sotto e concedi il nuovo permesso.
+  consent_grant_enable: Concedi e attiva
+  consent_cancel: Annulla
+  consent_deny: Non ora
+  # Consenso iniziale per contattare GitHub per plugin ufficiali e aggiornamenti
+  download_consent_title: Vuoi scaricare i plugin ufficiali?
+  download_consent_body: I plugin ufficiali di HaloDaemon sono ospitati su GitHub. Per proteggere la tua privacy, HaloDaemon non effettua richieste di rete per questi plugin se non lo autorizzi esplicitamente.
+  download_consent_note: Se autorizzi, HaloDaemon scarica automaticamente i plugin ufficiali e controlla periodicamente su GitHub la presenza di aggiornamenti. Se non autorizzi, non contatta mai GitHub e dovrai aggiungere i plugin manualmente. Puoi cambiare la scelta nelle Impostazioni.
+  download_consent_allow: Consenti
+  download_consent_deny: Non consentire
+  # Finestra di aggiunta
+  add_title: Aggiungi un plugin
+  add_sub: Installa un pacchetto plugin, cioè una cartella contenente plugin.yaml e lo script principale.
+  choose_folder: Scegli cartella…
+  upload_hint: Scegli la cartella di un pacchetto plugin
+  upload_sub: Verrà copiata nella cartella dei plugin.
+  cancel: Annulla
+  # Conferma eliminazione
+  delete_title: Vuoi eliminare lo script?
+  delete_body: Questo rimuove definitivamente %{name} dalla cartella dei plugin.

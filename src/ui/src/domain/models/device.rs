@@ -7,9 +7,49 @@
 //! to a `Color32`.
 
 use halod_shared::types::{
-    AppState, BatteryStatus, ConnectionType, DeviceCapability, DeviceType, SensorType, SensorUnit,
-    VisibilityState, WireDevice, WriteRateStatus,
+    AppState, BatteryStatus, ConflictConfidence, ConnectionType, DeviceCapability, DeviceType,
+    SensorType, SensorUnit, VisibilityState, WireDevice, WriteRateStatus,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictPresentation {
+    pub peer_names: Vec<String>,
+    pub recommended_name: String,
+    pub confidence: ConflictConfidence,
+    pub is_recommended: bool,
+    pub can_disable: bool,
+}
+
+pub fn conflict_presentation(
+    d: &WireDevice,
+    devices: &[WireDevice],
+) -> Option<ConflictPresentation> {
+    let conflict = d.conflict.as_ref()?;
+    let peer_names = conflict
+        .peer_ids
+        .iter()
+        .map(|id| {
+            devices
+                .iter()
+                .find(|other| other.id == *id)
+                .map(|other| other.name.clone())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect();
+    let recommended_name = devices
+        .iter()
+        .find(|other| other.id == conflict.recommended_id)
+        .map(|other| other.name.clone())
+        .unwrap_or_else(|| conflict.recommended_id.clone());
+    let is_recommended = conflict.recommended_id == d.id;
+    Some(ConflictPresentation {
+        peer_names,
+        recommended_name,
+        confidence: conflict.confidence,
+        is_recommended,
+        can_disable: !is_recommended && d.active_state != VisibilityState::Disabled,
+    })
+}
 
 /// Find the parent hub whose RGB chain lists `device_id` and return its
 /// write-rate status. Chain accessories share their parent's transport, so
@@ -73,8 +113,16 @@ pub fn battery_level(level: u8, charging: bool) -> BatteryLevel {
     }
 }
 
+/// Whether `d` *is* an integration's root (e.g. the OpenRGB SDK client)
+/// rather than a real device — it belongs on the Integrations page, not
+/// Home/sidebar. The devices an integration exposes as children have no
+/// `integration_id` of their own, so they stay listable.
+pub fn is_integration_root(d: &WireDevice) -> bool {
+    d.integration_id.is_some()
+}
+
 pub fn listable(d: &WireDevice) -> bool {
-    !matches!(d.device_type, DeviceType::Sensor)
+    !matches!(d.device_type, DeviceType::Sensor) && !is_integration_root(d)
 }
 
 pub fn is_hidden(d: &WireDevice) -> bool {
@@ -138,6 +186,7 @@ pub fn type_label(d: &WireDevice) -> std::borrow::Cow<'static, str> {
 
 /// Number of distinct accent hues a device can map to (see [`hue_index`]).
 /// Pinned against `ui::theme::DEVICE_HUES.len()` on the theme side.
+#[cfg(test)]
 pub const DEVICE_HUE_COUNT: usize = 10;
 
 /// Which accent hue slot (`0..DEVICE_HUE_COUNT`) a device type maps to.
@@ -262,6 +311,31 @@ mod tests {
             capabilities: caps,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn conflict_presentation_resolves_peer_and_recommendation() {
+        use halod_shared::types::{ConflictConfidence, DeviceConflictSummary};
+        let primary = WireDevice {
+            id: "native".into(),
+            name: "Native".into(),
+            ..Default::default()
+        };
+        let duplicate = WireDevice {
+            id: "openrgb".into(),
+            name: "OpenRGB".into(),
+            conflict: Some(DeviceConflictSummary {
+                peer_ids: vec!["native".into()],
+                recommended_id: "native".into(),
+                confidence: ConflictConfidence::Confirmed,
+                participants: vec![],
+            }),
+            ..Default::default()
+        };
+        let p = conflict_presentation(&duplicate, &[primary, duplicate.clone()]).unwrap();
+        assert_eq!(p.peer_names, vec!["Native"]);
+        assert_eq!(p.recommended_name, "Native");
+        assert!(p.can_disable);
     }
 
     #[test]
@@ -431,9 +505,20 @@ mod tests {
     }
 
     #[test]
-    fn listable_excludes_only_sensors() {
+    fn listable_excludes_sensors_and_integration_roots() {
         assert!(listable(&dev(DeviceType::Keyboard, vec![])));
         assert!(!listable(&dev(DeviceType::Sensor, vec![])));
+
+        let mut integration_root = dev(DeviceType::Other, vec![]);
+        integration_root.integration_id = Some("openrgb".into());
+        assert!(is_integration_root(&integration_root));
+        assert!(!listable(&integration_root));
+
+        // The devices an integration exposes as children carry no
+        // integration_id of their own, so they stay listable.
+        let child = dev(DeviceType::LedStrip, vec![]);
+        assert!(!is_integration_root(&child));
+        assert!(listable(&child));
     }
 
     #[test]
@@ -544,7 +629,6 @@ mod tests {
                     channel_id: "0".into(),
                     name: "Ext".into(),
                     max_leds: 40,
-                    link_kind: "nzxt_argb".into(),
                     links: vec![ChainLinkInfo {
                         child_device_id: child_id.into(),
                         name: "Fan".into(),

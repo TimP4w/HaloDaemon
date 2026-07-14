@@ -260,7 +260,14 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
                         for (i, opt) in c.options.iter().enumerate() {
                             if widgets::pill(ui, &opt.label, i == c.selected) && i != c.selected {
-                                crate::domain::actions::devices::set_choice(ctx.cmd, id, &c.key, i);
+                                crate::runtime::ipc::send(
+                                    ctx.cmd,
+                                    halod_shared::commands::DaemonCommand::SetChoice {
+                                        id: id.to_string(),
+                                        key: c.key.clone(),
+                                        selected: i,
+                                    },
+                                );
                             }
                         }
                     });
@@ -283,8 +290,13 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     {
                         if let Ok(idx) = new_id.parse::<usize>() {
                             if idx != c.selected {
-                                crate::domain::actions::devices::set_choice(
-                                    ctx.cmd, id, &c.key, idx,
+                                crate::runtime::ipc::send(
+                                    ctx.cmd,
+                                    halod_shared::commands::DaemonCommand::SetChoice {
+                                        id: id.to_string(),
+                                        key: c.key.clone(),
+                                        selected: idx,
+                                    },
                                 );
                             }
                         }
@@ -303,11 +315,13 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         |ui| {
                             let on = c.selected == 1;
                             if widgets::toggle(ui, on) != on {
-                                crate::domain::actions::devices::set_choice(
+                                crate::runtime::ipc::send(
                                     ctx.cmd,
-                                    id,
-                                    &c.key,
-                                    if on { 0 } else { 1 },
+                                    halod_shared::commands::DaemonCommand::SetChoice {
+                                        id: id.to_string(),
+                                        key: c.key.clone(),
+                                        selected: if on { 0 } else { 1 },
+                                    },
                                 );
                             }
                         },
@@ -392,7 +406,14 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     } else {
                         let new_val = widgets::toggle(ui, on);
                         if new_val != on {
-                            crate::domain::actions::devices::set_boolean(ctx.cmd, id, &b.key, !on);
+                            crate::runtime::ipc::send(
+                                ctx.cmd,
+                                halod_shared::commands::DaemonCommand::SetBoolean {
+                                    id: id.to_string(),
+                                    key: b.key.clone(),
+                                    value: !on,
+                                },
+                            );
                         }
                     }
                 },
@@ -408,7 +429,13 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
             )
             .clicked()
             {
-                crate::domain::actions::devices::trigger_action(ctx.cmd, id, &a.key);
+                crate::runtime::ipc::send(
+                    ctx.cmd,
+                    halod_shared::commands::DaemonCommand::TriggerAction {
+                        id: id.to_string(),
+                        key: a.key.clone(),
+                    },
+                );
             }
             ui.add_space(10.0);
         }

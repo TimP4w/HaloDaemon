@@ -15,7 +15,7 @@ OS-specific features under one device. Today it exposes:
 
 Unlike the hardware transports, this one moves no bytes over a bus. It wraps the
 operating system's own interfaces so the host itself shows up in HaloDaemon as a
-device. There is no VID:PID and no udev rule — the daemon already runs elevated,
+device. There is no VID:PID and no udev rule — these OS APIs need no broker access,
 which is all the platform mechanisms need.
 
 The device (`ComputerDevice`) and its capabilities live in

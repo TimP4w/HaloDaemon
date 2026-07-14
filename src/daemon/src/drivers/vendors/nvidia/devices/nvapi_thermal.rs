@@ -77,7 +77,6 @@ type GetThermalFn = unsafe extern "C" fn(usize, u32, *mut NvThermalSettings) -> 
 /// Cached NvAPI handles for the lifetime of the process.
 struct NvApi {
     _lib: libloading::Library,
-    get_full_name: GetFullNameFn,
     get_thermal: GetThermalFn,
     gpus: Vec<NvGpu>,
 }
@@ -169,7 +168,6 @@ fn init_nvapi() -> Option<NvApi> {
 
     Some(NvApi {
         _lib: lib,
-        get_full_name,
         get_thermal,
         gpus,
     })

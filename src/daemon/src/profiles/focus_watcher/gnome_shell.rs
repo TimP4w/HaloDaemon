@@ -55,6 +55,21 @@ pub async fn extension_status() -> Option<ExtensionStatus> {
     })
 }
 
+/// Current unique-name owner of `org.gnome.Shell`, or `None` if unowned.
+async fn gnome_shell_owner(session: &Connection) -> Option<String> {
+    let reply = session
+        .call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "GetNameOwner",
+            &("org.gnome.Shell",),
+        )
+        .await
+        .ok()?;
+    reply.body().deserialize::<String>().ok()
+}
+
 /// Connects to the HaloDaemon GNOME Shell extension's D-Bus signal for focus
 /// tracking. Returns an error if the extension is not installed/enabled.
 pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
@@ -106,8 +121,10 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
     let (tx, rx) = mpsc::channel::<FocusEvent>(32);
 
     let consumer = tokio::spawn(async move {
-        let _session = session;
+        let session = session;
         let mut stream = stream;
+        // Only trust signals from the current owner of org.gnome.Shell.
+        let mut owner = gnome_shell_owner(&session).await;
 
         while let Some(msg) = stream.next().await {
             let msg = match msg {
@@ -117,6 +134,14 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
                     break;
                 }
             };
+            let sender = msg.header().sender().map(|s| s.to_string());
+            if sender != owner {
+                owner = gnome_shell_owner(&session).await;
+                if sender != owner {
+                    log::debug!("[FocusWatcher/GnomeShell] dropping signal from unexpected sender {sender:?}");
+                    continue;
+                }
+            }
             match msg.body().deserialize::<(String,)>() {
                 Ok((name,)) if !name.is_empty() => {
                     let normalized = super::normalize_name(&name);

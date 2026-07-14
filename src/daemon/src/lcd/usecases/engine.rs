@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::{ipc, lcd::engine::LcdEngine, state::AppState};
-use halod_shared::types::EffectParamValue;
+use halod_shared::types::{EffectParamValue, LcdHealth};
 
 pub async fn set_template(
     device_id: String,
@@ -23,6 +23,7 @@ pub async fn set_template(
     let slot = device
         .as_lcd()
         .ok_or_else(|| anyhow::anyhow!("device does not support LCD engine: {device_id}"))?;
+    slot.lcd_state().set_health(LcdHealth::Starting);
     slot.set_lcd_template_id(Some(template_id.clone()));
     slot.set_lcd_template_params(params.clone());
     persist_device_state(&app, device.as_ref()).await;
@@ -36,6 +37,7 @@ pub async fn set_template(
             .set_template_active(&device_id, &template_id, &params)
             .await;
     }
+    slot.lcd_state().set_health(LcdHealth::Stable);
 
     ipc::broadcast_state(&app).await;
     Ok(())
@@ -46,6 +48,7 @@ pub async fn deactivate(device_id: String, app: Arc<AppState>) -> Result<()> {
     let slot = device
         .as_lcd()
         .ok_or_else(|| anyhow::anyhow!("device does not support LCD engine: {device_id}"))?;
+    slot.lcd_state().set_health(LcdHealth::Stopping);
     slot.set_lcd_template_id(None);
     slot.set_lcd_template_params(HashMap::new());
     persist_device_state(&app, device.as_ref()).await;
@@ -53,6 +56,7 @@ pub async fn deactivate(device_id: String, app: Arc<AppState>) -> Result<()> {
     if let Some(lcd_engine) = app.lcd.engine() {
         lcd_engine.remove_device(&device_id).await;
     }
+    slot.lcd_state().set_health(LcdHealth::Stable);
 
     ipc::broadcast_state(&app).await;
     Ok(())
@@ -130,6 +134,7 @@ mod tests {
                 active_image: None,
                 raw_streaming: false,
                 video_path: None,
+                health: Default::default(),
             }
         }
         async fn set_image(&self, _data: &[u8]) -> anyhow::Result<()> {

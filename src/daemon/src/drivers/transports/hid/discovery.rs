@@ -7,7 +7,7 @@ use crate::{
     drivers::Device,
     ipc::broadcast_state,
     platform::notify,
-    registry::discovery::{make_device, DeviceDescriptor, DiscoveryHandle, TransportScanner},
+    registry::discovery::{DeviceDescriptor, DiscoveryHandle, TransportScanner},
     state::{AppState, HidTrackingEntry},
 };
 
@@ -70,7 +70,7 @@ pub async fn hotplug_monitor(app: Arc<AppState>) {
         // Re-snapshot so a key freed this cycle can be re-added in the same pass.
         let tracked_keys: HashSet<String> = app.hid.keys().await;
 
-        let picked = pick_hid_devices(&live);
+        let picked = pick_hid_devices(&app.registry, &live);
         for (info, idx) in devices_to_register(&picked, &tracked_keys) {
             let serial_opt = (!info.serial.is_empty()).then_some(info.serial.as_str());
             add_hid_device(
@@ -109,7 +109,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
     // Skip already-registered devices so a rescan never opens a second handle to
     // hardware in use (a rival listener corrupts HID++ messaging for both).
     let tracked_keys: HashSet<String> = app.hid.keys().await;
-    let picked = pick_hid_devices(&entries);
+    let picked = pick_hid_devices(&app.registry, &entries);
     for (info, idx) in devices_to_register(&picked, &tracked_keys) {
         log::debug!(
             "Checking HID {:04x}:{:04x} path={} iface={}",
@@ -181,12 +181,18 @@ impl From<&hidapi::DeviceInfo> for HidDeviceInfo {
 /// Resolve enumerated HID entries to one entry per physical device,
 /// keyed by `(vid, pid, serial)`.
 ///
-/// Uses `DeviceDescriptor::matches` to filter entries. When multiple entries
-/// exist for one physical device (Windows HID collections), the one whose
-/// usage_page/usage satisfies a descriptor's `matches()` is preferred; otherwise
-/// the first entry in the group wins. Result order follows enumeration
-/// first-occurrence so device `idx` assignment stays stable.
-fn pick_hid_devices(entries: &[HidDeviceInfo]) -> Vec<&HidDeviceInfo> {
+/// Filters entries against both the native `DeviceDescriptor` inventory and
+/// the loaded plugin registry (`plugins::has_match`) — a device driven only
+/// by a plugin, with no native fallback, must still pass this pre-filter or
+/// it never reaches `make_device`. When multiple entries exist for one
+/// physical device (Windows HID collections), the one whose usage_page/usage
+/// satisfies a match is preferred; otherwise the first entry in the group
+/// wins. Result order follows enumeration first-occurrence so device `idx`
+/// assignment stays stable.
+fn pick_hid_devices<'a>(
+    registry: &crate::drivers::plugins::Registry,
+    entries: &'a [HidDeviceInfo],
+) -> Vec<&'a HidDeviceInfo> {
     let make_probe = |e: &HidDeviceInfo| DiscoveryHandle::Hid {
         vid: e.vid,
         pid: e.pid,
@@ -201,9 +207,14 @@ fn pick_hid_devices(entries: &[HidDeviceInfo]) -> Vec<&HidDeviceInfo> {
     let mut order: Vec<(u16, u16, String)> = Vec::new();
     let mut groups: HashMap<(u16, u16, String), Vec<&HidDeviceInfo>> = HashMap::new();
 
+    let is_recognized = |probe: &DiscoveryHandle<'_>| {
+        inventory::iter::<DeviceDescriptor>().any(|d| (d.matches)(probe))
+            || registry.has_match(probe)
+    };
+
     for e in entries {
         let probe = make_probe(e);
-        if inventory::iter::<DeviceDescriptor>().all(|d| !(d.matches)(&probe)) {
+        if !is_recognized(&probe) {
             continue;
         }
         let key = (e.vid, e.pid, e.serial.clone());
@@ -220,10 +231,7 @@ fn pick_hid_devices(entries: &[HidDeviceInfo]) -> Vec<&HidDeviceInfo> {
             candidates
                 .iter()
                 .copied()
-                .find(|e| {
-                    let probe = make_probe(e);
-                    inventory::iter::<DeviceDescriptor>().any(|d| (d.matches)(&probe))
-                })
+                .find(|e| is_recognized(&make_probe(e)))
                 .unwrap_or(candidates[0])
         })
         .collect()
@@ -487,6 +495,7 @@ pub(crate) async fn try_connect_direct(
 /// If an existing device with the same `hardware_serial()` implements `TransportSwitchable`
 /// it adopts this HID path as its wired transport (Arc identity is preserved for engines).
 /// Otherwise the new device is registered as a brand-new `Primary` entry.
+#[allow(clippy::too_many_arguments)] // HID identity and usage tuple comes directly from hidapi
 async fn add_hid_device(
     app: &Arc<AppState>,
     vid: u16,
@@ -508,28 +517,62 @@ async fn add_hid_device(
         usage,
         interface_number,
     };
-    let Some(impl_) = make_device(handle) else {
+    // Scoped-plugin gate: under `PluginSet`, only in-scope handles (the
+    // changed plugins' hardware) register. A scoped device otherwise goes
+    // through the same register → children → track flow as a normal one, so a
+    // re-enabled plugin gets its children and HID tracking too — only the
+    // native-eviction below and skipping the TransportSwitchable adoption are
+    // scoped-specific (a plugin HID device always registers as a new primary).
+    let scoped = {
+        use crate::registry::discovery::DiscoveryScope;
+        match &*app.discovery_scope.read().await {
+            DiscoveryScope::PluginSet { filter, .. } => {
+                if !filter.matches(&handle) {
+                    return;
+                }
+                true
+            }
+            DiscoveryScope::Clean | DiscoveryScope::Full => false,
+        }
+    };
+
+    let Some(impl_) = app.registry.make_device(app, handle.clone()) else {
         return;
     };
     let serial_key = serial.filter(|s| !s.is_empty()).unwrap_or("").to_string();
     let key = hid_key(vid, pid, &serial_key);
 
-    if try_connect_direct(app, &impl_, path, pid, key.clone()).await {
+    if scoped {
+        // Evict a stale native device the plugin now shadows: its id differs, so
+        // dedup won't, and both would otherwise bind the same hardware.
+        if impl_.owning_plugin_id().is_some()
+            && crate::registry::discovery::has_native_match(&handle)
+        {
+            if let Some(native) = crate::registry::discovery::make_device_native_only(handle) {
+                let native_id = native.id().to_owned();
+                native.close().await;
+                crate::registry::usecases::registration::unregister_device_and_children(
+                    app, &native_id,
+                )
+                .await;
+            }
+        }
+    } else if try_connect_direct(app, &impl_, path, pid, key.clone()).await {
         return;
     }
 
-    // No transport switch — register as a new primary device via the centralised
-    // registration lifecycle.
+    // Register as a new primary device via the centralised registration lifecycle.
     let registered =
         crate::registry::usecases::registration::register_device(app, impl_.clone()).await;
     if !registered {
         return;
     }
 
-    if let Some(ctrl) = impl_.as_controller() {
-        let children = ctrl.discover_children().await;
-        for child in children {
-            crate::registry::usecases::registration::register_device(app, child).await;
+    if impl_.active_state() != halod_shared::types::VisibilityState::Disabled {
+        if let Some(ctrl) = impl_.as_controller() {
+            for child in ctrl.discover_children().await {
+                crate::registry::usecases::registration::register_device(app, child).await;
+            }
         }
     }
 
@@ -599,7 +642,8 @@ mod tests {
             g560_entry("bogus", 2, 0xFF00, 0x0001, "S1"),
             g560_entry("vendor", 2, 0xFF43, 0x0202, "S1"),
         ];
-        let picked = pick_hid_devices(&entries);
+        let app = make_app();
+        let picked = pick_hid_devices(&app.registry, &entries);
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].path, "vendor");
     }
@@ -608,7 +652,8 @@ mod tests {
     fn picker_falls_back_to_first_on_linux_single_node() {
         // Linux hidraw: one node, usage 0/0 — accepted as the G560 fallback.
         let entries = [g560_entry("hidraw3", 2, 0, 0, "S1")];
-        let picked = pick_hid_devices(&entries);
+        let app = make_app();
+        let picked = pick_hid_devices(&app.registry, &entries);
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].path, "hidraw3");
     }
@@ -620,7 +665,8 @@ mod tests {
             g560_entry("a", 2, 0xFF43, 0x0202, "S1"),
             g560_entry("b", 2, 0xFF43, 0x0202, "S1"),
         ];
-        let picked = pick_hid_devices(&entries);
+        let app = make_app();
+        let picked = pick_hid_devices(&app.registry, &entries);
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].path, "a");
     }
@@ -635,7 +681,8 @@ mod tests {
             g560_entry("vendor_B", 2, 0xFF43, 0x0202, "BBB"), // matches — BBB group forms here
             g560_entry("vendor_A", 2, 0xFF43, 0x0202, "AAA"), // matches — AAA group forms here
         ];
-        let picked = pick_hid_devices(&entries);
+        let app = make_app();
+        let picked = pick_hid_devices(&app.registry, &entries);
         assert_eq!(picked.len(), 2);
         assert_eq!(picked[0].path, "vendor_B"); // BBB group first matching entry
         assert_eq!(picked[1].path, "vendor_A"); // AAA group second
@@ -649,9 +696,42 @@ mod tests {
             g560_entry("iface0", 0, 0xFF43, 0x0202, "S1"),
             g560_entry("iface2", 2, 0, 0, "S1"),
         ];
-        let picked = pick_hid_devices(&entries);
+        let app = make_app();
+        let picked = pick_hid_devices(&app.registry, &entries);
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].path, "iface2");
+    }
+
+    #[test]
+    fn picker_recognizes_a_plugin_only_device_with_no_native_descriptor() {
+        let app = make_app();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plugin_only_hid");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: plugin_only_hid\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 0x1E71\n    pid: 0x3012\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+        app.registry.load_all(tmp.path());
+
+        let entry = HidDeviceInfo {
+            vid: 0x1E71,
+            pid: 0x3012, // plugin-only PID, no native descriptor
+            path: "kraken".into(),
+            iface: 0,
+            serial: "S1".into(),
+            usage_page: 0,
+            usage: 0,
+        };
+        let entries = [entry];
+        let picked = pick_hid_devices(&app.registry, &entries);
+        assert_eq!(
+            picked.len(),
+            1,
+            "a plugin-only HID device must survive the discovery pre-filter"
+        );
     }
 
     #[test]

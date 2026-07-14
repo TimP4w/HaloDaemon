@@ -31,11 +31,15 @@ pub fn index_of(id: &str) -> Option<usize> {
 
 // --- Windows power-plan GUIDs (kept platform-neutral so they can be unit
 // tested off Windows). Aliases: SCHEME_MIN / SCHEME_BALANCED / SCHEME_MAX. ---
+#[cfg(any(target_os = "windows", test))]
 pub const WIN_GUID_PERFORMANCE: &str = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
+#[cfg(any(target_os = "windows", test))]
 pub const WIN_GUID_BALANCED: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
+#[cfg(any(target_os = "windows", test))]
 pub const WIN_GUID_POWER_SAVER: &str = "a1841308-3541-4fab-bc81-f71556f20b4a";
 
 /// The Windows power-plan GUID for a canonical profile id.
+#[cfg(any(target_os = "windows", test))]
 pub fn windows_guid_for(id: &str) -> Option<&'static str> {
     match id {
         "performance" => Some(WIN_GUID_PERFORMANCE),
@@ -47,6 +51,7 @@ pub fn windows_guid_for(id: &str) -> Option<&'static str> {
 
 /// The canonical profile id for a Windows power-plan GUID (case-insensitive).
 /// `None` for a custom/unknown plan.
+#[cfg(any(target_os = "windows", test))]
 pub fn windows_profile_for_guid(guid: &str) -> Option<&'static str> {
     let g = guid.trim().to_ascii_lowercase();
     match g.as_str() {
@@ -57,6 +62,7 @@ pub fn windows_profile_for_guid(guid: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn is_guid(s: &str) -> bool {
     s.len() == 36
         && s.as_bytes().iter().enumerate().all(|(i, &b)| {
@@ -70,6 +76,7 @@ fn is_guid(s: &str) -> bool {
 
 /// Extract the active scheme GUID from `powercfg /getactivescheme` output, e.g.
 /// `Power Scheme GUID: 381b4222-... (Balanced)` -> the lowercased GUID.
+#[cfg(any(target_os = "windows", test))]
 pub fn parse_powercfg_active_guid(output: &str) -> Option<String> {
     output
         .split_whitespace()

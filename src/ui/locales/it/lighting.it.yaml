@@ -1,0 +1,53 @@
+lighting:
+  title: Illuminazione RGB
+  subtitle: Applica contemporaneamente un colore o un effetto a tutti i dispositivi
+  tab_canvas: Canvas degli effetti
+  tab_direct: Effetti diretti
+  static: Statico
+  paint: Dipingi
+  edit: Modifica
+  export: Esporta
+  delete: Elimina
+  cancel: Annulla
+  master_color: Colore master
+  global_effect: Effetto globale
+  new_effect: Nuovo effetto
+  import: Importa
+  effect_settings: Impostazioni effetto
+  master_brightness: Luminosità master
+  saturation: Saturazione
+  target_devices_zones: Dispositivi e zone interessati
+  targets_subtitle: Scegli a quali dispositivi e zone applicare l'illuminazione. Seleziona un dispositivo per visualizzarne le zone.
+  deselect_all: Deseleziona tutto
+  select_all: Seleziona tutto
+  zones_count: "%{sel}/%{total} zone"
+  none: "(nessuna)"
+  delete_effect_title: Vuoi eliminare l'effetto?
+  delete_confirm: 'Vuoi davvero eliminare "%{name}"? Non potrai annullare questa operazione.'
+  no_zones_title: Nessuna zona di illuminazione rilevata
+  no_zones_subtitle: Il dispositivo non segnala alcuna zona RGB indirizzabile
+  remove_from_canvas_title: Vuoi rimuovere il dispositivo dal canvas?
+  remove_from_canvas_body: Il dispositivo si trova sul canvas. Se applichi questo effetto, verrà rimosso dal canvas.
+  remove_and_apply: Rimuovi e applica
+  lighting_preview: Anteprima illuminazione
+  mode_static: STATICO
+  mode_paint: DIPINGI
+  mode_effect: EFFETTO
+  mode_software: SOFTWARE
+  mode_canvas_engine: MOTORE CANVAS
+  zone_caps: ZONA
+  all_zones: Tutte
+  paint_hint: Clicca o trascina sui LED per dipingerli
+  clear: Cancella
+  fill_zone: Riempi zona
+  transform_caps: TRASFORMAZIONE
+  reverse: "↺ Inverti"
+  swap: "⇄ Scambia"
+  flip_h: "⇄ Ribalta orizz."
+  flip_v: "⇅ Ribalta vert."
+  reset: Ripristina
+  rotate: Ruota
+  effect: Effetto
+  place_on_canvas: "Aggiungi al canvas →"
+  brush_color: Colore pennello
+  color: Colore

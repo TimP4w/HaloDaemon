@@ -5,6 +5,7 @@
 //! callbacks act directly on a cloned egui `Context` (`send_viewport_cmd` +
 //! `request_repaint` are thread-safe) rather than routing through a channel.
 
+use halod_shared::app;
 use ksni::menu::{MenuItem, RadioGroup, RadioItem, StandardItem, SubMenu};
 
 use std::sync::atomic::AtomicBool;
@@ -129,11 +130,11 @@ fn load_icon() -> Vec<ksni::Icon> {
 
 impl ksni::Tray for HalodTray {
     fn id(&self) -> String {
-        "halod".to_string()
+        app::APP_NAME.to_string()
     }
 
     fn title(&self) -> String {
-        "HaloDaemon".to_string()
+        app::APP_DISPLAY_NAME.to_string()
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
@@ -146,7 +147,7 @@ impl ksni::Tray for HalodTray {
 
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "HaloDaemon".to_string(),
+            title: app::APP_DISPLAY_NAME.to_string(),
             description: self.battery_lines.join("\n"),
             ..Default::default()
         }
@@ -190,7 +191,12 @@ impl ksni::Tray for HalodTray {
                     options,
                     select: Box::new(|this: &mut Self, idx| {
                         if let Some(name) = this.profiles.get(idx) {
-                            crate::domain::actions::profiles::switch_profile(&this.cmd, name);
+                            crate::runtime::ipc::send(
+                                &this.cmd,
+                                halod_shared::commands::DaemonCommand::SwitchProfile {
+                                    name: name.to_string(),
+                                },
+                            );
                         }
                     }),
                 })],

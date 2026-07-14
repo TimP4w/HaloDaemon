@@ -2,8 +2,11 @@
 pub mod capability;
 pub mod chain;
 pub mod debug;
+pub mod integrations;
+pub mod plugins;
 pub mod receiver;
 pub mod registration;
 pub mod rename;
+pub mod repos;
 pub mod settings;
 pub mod visibility;

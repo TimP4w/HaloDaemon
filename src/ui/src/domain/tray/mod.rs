@@ -95,7 +95,7 @@ fn quit(
     hide_state: &crate::domain::state::HideState,
 ) {
     force_quit.store(true, Ordering::SeqCst);
-    crate::domain::actions::system::shutdown(cmd);
+    crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::Shutdown);
     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     ctx.request_repaint();
     // Linux: while closed to tray there is no window to receive the close, so
@@ -135,14 +135,14 @@ pub struct TrayModel {
 
 impl TrayModel {
     fn from_state(state: &AppState) -> Self {
-        let active = if state.active_profile.is_empty() {
+        let active = if state.profiles.active.is_empty() {
             DEFAULT_PROFILE_NAME.to_string()
         } else {
-            state.active_profile.clone()
+            state.profiles.active.clone()
         };
         Self {
             battery_lines: battery_lines(state),
-            profiles: state.profiles.clone(),
+            profiles: state.profiles.available.clone(),
             active,
         }
     }

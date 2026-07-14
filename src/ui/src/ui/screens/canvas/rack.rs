@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The right-hand sidebar: sampling-radius card and the effect-instance rack
-//! (default effect, per-instance cards with param editing and zone assignment).
+//! The right-hand sidebar: sampling-radius card and the effect-layer rack
+//! (base layer, named layers with param editing and zone assignment).
 
 use std::collections::{HashMap, HashSet};
 
@@ -163,6 +163,7 @@ pub(super) fn instance_name<'a>(effects: &'a HashMap<String, EffectDef>, id: &'a
 }
 
 /// The first `max` labels plus a "+N more" overflow chip label.
+#[cfg(test)]
 fn chip_overflow(labels: &[String], max: usize) -> (&[String], Option<String>) {
     if labels.len() > max {
         (
@@ -237,9 +238,8 @@ pub(super) fn ring_zone_context_menu(ui: &mut egui::Ui, cmd: &CommandTx, z: &Pla
     }
 }
 
-/// Instance-first authoring (design 1A): a rack of named pixmap-effect
-/// instances, each assigned to zones; zones with no instance fall back to the
-/// default. Drives `CanvasUpsertEffect`/`CanvasRemoveEffect`/`CanvasSetDefaultEffect`.
+/// Layer-first authoring: a rack of named pixmap-effect layers, each assigned
+/// to zones; zones with no layer use the base effect.
 fn instance_rack(
     ui: &mut egui::Ui,
     state: &AppState,
@@ -280,7 +280,7 @@ fn instance_rack(
                 ui,
                 &t!("canvas.new_button"),
                 widgets::ButtonKind::Ghost,
-                egui::vec2(60.0, 24.0),
+                egui::vec2(94.0, 24.0),
             )
             .clicked()
             {
@@ -353,7 +353,12 @@ fn default_effect_card(
                     }
                 });
             if selected != current {
-                crate::domain::actions::canvas::set_default_effect(cmd, selected);
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::CanvasSetDefaultEffect {
+                        instance_id: selected,
+                    },
+                );
             }
             ui.add_space(6.0);
             ui.label(
@@ -520,7 +525,7 @@ fn instance_row(
                 {
                     canvas_ui.pending.effect = None;
                 }
-                crate::domain::actions::canvas::send(
+                crate::runtime::ipc::send(
                     cmd,
                     upsert_instance_cmd(id.to_string(), def.effect_id.clone(), new_name, params),
                 );
@@ -618,7 +623,7 @@ fn instance_row(
                         .collect()
                 })
                 .unwrap_or_default();
-            crate::domain::actions::canvas::send(
+            crate::runtime::ipc::send(
                 cmd,
                 upsert_instance_cmd(id.to_string(), sel, effective_name.clone(), params),
             );
@@ -748,7 +753,12 @@ fn instance_row(
         if canvas_ui.zones_modal.as_deref() == Some(id) {
             canvas_ui.zones_modal = None;
         }
-        crate::domain::actions::canvas::remove_effect(cmd, id);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::CanvasRemoveEffect {
+                instance_id: id.to_string(),
+            },
+        );
     }
 }
 

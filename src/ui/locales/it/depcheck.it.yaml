@@ -1,0 +1,55 @@
+depcheck:
+  title: Alcuni controlli richiedono la tua attenzione
+  intro: HaloDaemon ha rilevato alcuni problemi che potrebbero impedire il corretto funzionamento di dispositivi o funzionalità.
+  dont_show_again: Non mostrare più questo avviso all'avvio
+  got_it: Ho capito
+  required: Obbligatorio
+  optional: Facoltativo
+  impact: Impatto
+  how_to_fix: Come risolvere
+  rules:
+    ffmpeg:
+      title: ffmpeg
+      impact: Riproduzione video sugli schermi LCD
+      fix: Installa ffmpeg e assicurati che sia nel PATH
+    pactl:
+      title: pactl
+      impact: "ChatMix cuffie: divisione audio gioco/chat tramite sink virtuali"
+      fix: Installa le utility PipeWire o PulseAudio (fornisce pactl)
+    nvidia_smi:
+      title: nvidia-smi
+      impact: Monitoraggio temperatura GPU NVIDIA
+      fix: Solo per GPU NVIDIA; incluso nel driver proprietario
+    udev_rules:
+      title: Regole udev
+      impact: Accesso ai dispositivi HID e hwmon senza privilegi root
+      fix: Installa udev/60-halod.rules, quindi ricarica udev
+    i2c_access:
+      title: Accesso I2C
+      impact: RGB SMBus del chipset (DRAM e GPU)
+      fix: Carica il modulo i2c-dev e aggiungi il tuo utente al gruppo 'i2c'
+    fan_control_access:
+      title: Accesso al controllo delle ventole
+      impact: Controllo ventole PWM della scheda madre
+      fix: "Carica il tuo modulo SuperIO (es. nct6775) e aggiungi il tuo utente al gruppo 'halod'"
+    powerprofilesctl:
+      title: powerprofilesctl
+      impact: Cambio del profilo energetico del sistema
+      fix: Installa power-profiles-daemon (fornisce powerprofilesctl)
+    xdg_desktop_portal:
+      title: xdg-desktop-portal
+      impact: Cattura schermo per effetti RGB ambientali (campionamento dello schermo)
+      fix: Installa xdg-desktop-portal e un backend per il tuo desktop (es. xdg-desktop-portal-gtk, -kde o -wlr)
+    pawnio:
+      title: PawnIO
+      impact: "Accesso SMBus del chipset (RGB DRAM, sensori scheda madre)"
+      fix: Installa PawnIO da pawnio.eu
+    broker:
+      title: Broker con privilegi elevati
+      impact: "Accesso SMBus del chipset (RGB DRAM, sensori scheda madre, alcuni RGB GPU)"
+      fix: Reinstalla HaloDaemon per registrare il servizio broker con privilegi elevati (HalodBroker)
+    gnome_extension:
+      title: Estensione GNOME Shell
+      impact: Cambio del profilo in base all'app in primo piano su GNOME
+      fix_disabled: "Installata ma disabilitata, abilitala nell'app Estensioni"
+      fix_missing: Installa e abilita l'estensione GNOME Shell di HaloDaemon

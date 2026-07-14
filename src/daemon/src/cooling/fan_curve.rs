@@ -273,6 +273,11 @@ impl FanCurveEngine {
         sensors: &HashMap<String, halod_shared::types::Sensor>,
         failsafe_duty: u8,
     ) -> FanCurveStatus {
+        if let Err(e) = record.validate() {
+            log::warn!("[FanCurve] Invalid curve for {fan_id}: {e:#}");
+            self.apply_failsafe(fan_id, failsafe_duty).await;
+            return FanCurveStatus::WriteError(format!("invalid fan curve configuration: {e}"));
+        }
         let Some(sensor_id) = &record.sensor_id else {
             self.apply_failsafe(fan_id, failsafe_duty).await;
             return FanCurveStatus::NoSensor;
@@ -283,10 +288,20 @@ impl FanCurveEngine {
             self.apply_failsafe(fan_id, failsafe_duty).await;
             return FanCurveStatus::NoSensor;
         };
+        if sensor.sensor_type != halod_shared::types::SensorType::Temperature {
+            log::warn!("[FanCurve] Sensor {sensor_id} is not a temperature sensor");
+            self.apply_failsafe(fan_id, failsafe_duty).await;
+            return FanCurveStatus::NoSensor;
+        }
         let temp = self.update_control_temp(fan_id, sensor.value as f32);
         let target = interpolate(&record.points, temp);
         let fan_device = self.app_state.find_device_by_id(fan_id).await;
         if let Some(device) = &fan_device {
+            // Offline but present — treat as missing so we stop writing to a dead socket.
+            if !device.is_live() {
+                self.record_missing_device(fan_id);
+                return FanCurveStatus::NoDevice;
+            }
             self.clear_missing_device(fan_id);
             let current = current_duty(device).await;
             if (current - target).abs() > 1.0 {
@@ -540,6 +555,7 @@ mod tests {
         duty: StdMutex<u8>,
         rpm: StdMutex<u32>,
         fan: FanStateSlot,
+        live: std::sync::atomic::AtomicBool,
     }
 
     impl MockFan {
@@ -549,7 +565,16 @@ mod tests {
                 duty: StdMutex::new(20),
                 rpm: StdMutex::new(1000),
                 fan: FanStateSlot::default(),
+                live: std::sync::atomic::AtomicBool::new(true),
             })
+        }
+
+        /// A fan whose backing device is offline (`is_live() == false`), e.g. an
+        /// integration whose server dropped.
+        fn new_offline_with_curve(id: &'static str, record: FanCurveRecord) -> Arc<Self> {
+            let this = Self::new_with_curve(id, record);
+            this.live.store(false, std::sync::atomic::Ordering::SeqCst);
+            this
         }
 
         fn new_with_curve(id: &'static str, record: FanCurveRecord) -> Arc<Self> {
@@ -587,6 +612,9 @@ mod tests {
             Ok(true)
         }
         async fn close(&self) {}
+        fn is_live(&self) -> bool {
+            self.live.load(std::sync::atomic::Ordering::SeqCst)
+        }
         fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
             vec![CapabilityRef::Fan(self)]
         }
@@ -896,6 +924,32 @@ mod tests {
         };
         let status = engine.process_fan("ghost_fan", &record, &sensors, 75).await;
         assert_eq!(status, FanCurveStatus::NoDevice);
+    }
+
+    #[tokio::test]
+    async fn process_fan_skips_an_offline_device() {
+        // An offline fan (e.g. an integration whose server dropped) is present
+        // but unreachable: no duty write, and reported as NoDevice so the engine
+        // stops hammering the dead socket.
+        let record = FanCurveRecord {
+            sensor_id: Some("sensor_0".to_string()),
+            points: vec![(0.0, 50.0), (100.0, 100.0)],
+        };
+        let fan = MockFan::new_offline_with_curve("fan_0", record.clone());
+        let sensor = MockSensor::new("sensor_0", 80.0);
+        let app = make_app(fan.clone(), Some(sensor));
+        let initial_duty = fan.last_duty();
+        let engine = FanCurveEngine::new(app.clone());
+        let sensors = app.snapshot_sensors().await;
+
+        let status = engine.process_fan("fan_0", &record, &sensors, 75).await;
+
+        assert_eq!(status, FanCurveStatus::NoDevice);
+        assert_eq!(
+            fan.last_duty(),
+            initial_duty,
+            "an offline fan must not receive a duty write"
+        );
     }
 
     #[tokio::test]

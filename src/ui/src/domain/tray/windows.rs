@@ -32,7 +32,7 @@ impl PlatformTray {
     ) -> Self {
         let built = build_menu(&TrayModel::default());
         let tray = TrayIconBuilder::new()
-            .with_tooltip("HaloDaemon")
+            .with_tooltip(halod_shared::app::APP_DISPLAY_NAME)
             .with_menu(Box::new(built.menu))
             .with_icon(load_icon())
             .build()
@@ -65,7 +65,12 @@ impl PlatformTray {
             } else if ev.id == self.quit_id {
                 quit(ctx, &self.cmd, &self.force_quit, &self.hide_state);
             } else if let Some((_, name)) = self.profile_ids.iter().find(|(id, _)| *id == ev.id) {
-                crate::domain::actions::profiles::switch_profile(&self.cmd, name);
+                crate::runtime::ipc::send(
+                    &self.cmd,
+                    halod_shared::commands::DaemonCommand::SwitchProfile {
+                        name: name.to_string(),
+                    },
+                );
             }
         }
         if changed {

@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "halod-broker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Elevated register-bus broker for HaloDaemon (Windows): serves SMBus/PawnIO over a same-user named pipe"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "halod-broker"
+path = "src/main.rs"
+
+[dependencies]
+# Deliberately narrow: the elevated binary can reach register buses and nothing
+# else — no Lua runtime, no network types, no `halod` itself. That the tree is
+# this small is the whole point of the privilege split.
+halod-hwaccess = { path = "../hwaccess" }
+anyhow = { workspace = true }
+# `std` enables `log::set_boxed_logger`; the broker links std anyway.
+log    = { workspace = true, features = ["std"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# SCM dispatcher + service install/uninstall/stop for the on-demand service.
+windows-service = "0.8.1"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }

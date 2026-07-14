@@ -3,7 +3,6 @@
 //! center and one animated blip per device the daemon has discovered so far.
 //! Shown until the user enters the workspace.
 
-use crate::ui::components as widgets;
 use std::hash::{Hash, Hasher};
 
 use egui::{epaint::Vertex, Align2, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Vec2};
@@ -28,6 +27,23 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
         egui::StrokeKind::Middle,
     );
 
+    egui::Panel::top("radar_title")
+        .exact_size(46.0)
+        .frame(egui::Frame::NONE)
+        .show(ui, |ui| {
+            ui.painter().rect_filled(
+                ui.max_rect(),
+                egui::CornerRadius {
+                    nw: 12,
+                    ne: 12,
+                    sw: 0,
+                    se: 0,
+                },
+                theme::TITLE_BG,
+            );
+            crate::ui::shell::title_bar_plain(ui, state);
+        });
+
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
@@ -39,12 +55,23 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                 crate::ui::shell::arm_pointer_release_workaround(&ctx);
             }
 
-            ui.painter().rect_filled(full, 12.0, theme::hex(0x070a0f));
+            ui.painter().rect_filled(
+                full,
+                egui::CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: 12,
+                    se: 12,
+                },
+                theme::hex(0x070a0f),
+            );
             let p = ui.painter().clone();
             let complete = matches!(state.discovery.phase, DiscoveryPhase::Complete);
             let found = state.devices.iter().filter(|d| model::listable(d)).count();
 
-            // Brand wordmark, top-center.
+            // Build the screen as one centered vertical composition. Keeping the
+            // logo, radar and status copy in the same layout calculation avoids
+            // the uneven gaps caused by independent percentage offsets.
             let halo = p.layout_no_wrap("halo".to_string(), theme::bold(22.0), theme::TEXT);
             let daemon = p.layout_no_wrap(
                 "daemon".to_string(),
@@ -53,8 +80,19 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
             );
             let icon_size = 48.0_f32;
             let total = icon_size + 14.0 + halo.size().x + daemon.size().x;
+            let logo_height = icon_size;
+            let gap = 28.0_f32;
+            let checking = connected && state.discovery.checking_updates;
+            let status_height = if checking { 68.0 } else { 48.0 };
+            let fixed_height = logo_height + gap * 2.0 + status_height;
+            let radius = ((full.height() - fixed_height) / 2.0)
+                .min(full.width() * 0.34)
+                .clamp(48.0, 210.0);
+            let composition_height = fixed_height + radius * 2.0;
+            let top = full.center().y - composition_height / 2.0;
+
             let mark = Rect::from_min_size(
-                Pos2::new(full.center().x - total / 2.0, 28.0),
+                Pos2::new(full.center().x - total / 2.0, top),
                 Vec2::splat(icon_size),
             );
             theme::logo_icon(&p, &ctx, mark, time as f32);
@@ -66,8 +104,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                 theme::hex(0x9b7fe0),
             );
 
-            let center = Pos2::new(full.center().x, full.top() + full.height() * 0.42);
-            let radius = (full.height() * 0.45).min(full.width() * 0.34).min(210.0);
+            let center = Pos2::new(full.center().x, mark.bottom() + gap + radius);
             draw_radar(&p, center, radius, time);
 
             for (i, d) in state
@@ -81,7 +118,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
 
             // Title + subtitle. When the daemon is down there is nothing to scan,
             // so prompt the user to start it instead.
-            let title_y = center.y + radius + 34.0;
+            let title_y = center.y + radius + gap + 10.0;
             let (title, sub) = if !connected {
                 (
                     t!("misc.radar_daemon_down").to_string(),
@@ -114,47 +151,18 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                 theme::mono(12.5),
                 theme::TEXT_MUT,
             );
-
-            if connected {
-                if complete {
-                    dismissed = true;
-                }
-            } else {
-                let btn_rect = Rect::from_center_size(
-                    Pos2::new(center.x, title_y + 88.0),
-                    Vec2::new(196.0, 42.0),
+            if connected && state.discovery.checking_updates {
+                p.text(
+                    Pos2::new(center.x, title_y + 44.0),
+                    Align2::CENTER_CENTER,
+                    t!("misc.radar_checking_updates").to_string(),
+                    theme::mono(11.5),
+                    a(theme::CYAN, 0.7),
                 );
-                let resp = ui
-                    .scope_builder(egui::UiBuilder::new().max_rect(btn_rect), |ui| {
-                        widgets::button(
-                            ui,
-                            &t!("misc.radar_start_discovery"),
-                            widgets::ButtonKind::PrimaryArrow,
-                            Vec2::new(196.0, 42.0),
-                        )
-                    })
-                    .inner;
-                if resp.clicked() {
-                    crate::domain::lifecycle::ensure_daemon_up();
-                }
             }
 
-            // Quit, bottom.
-            let quit_size = Vec2::new(120.0, 38.0);
-            let quit_rect =
-                Rect::from_center_size(Pos2::new(center.x, full.bottom() - 36.0), quit_size);
-            let quit_resp = ui
-                .scope_builder(egui::UiBuilder::new().max_rect(quit_rect), |ui| {
-                    widgets::button(
-                        ui,
-                        &t!("misc.radar_quit"),
-                        widgets::ButtonKind::Ghost,
-                        quit_size,
-                    )
-                })
-                .inner;
-            if quit_resp.clicked() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            if connected && complete {
+                dismissed = true;
             }
         });
     dismissed

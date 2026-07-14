@@ -10,7 +10,7 @@ Byte movement runs over the [LpcIO transport](../transports/lpcio.md) — that d
 
 ## Overview
 
-The NCT677x is a Nuvoton (formerly Winbond) Super I/O chip found on most consumer AMD/Intel motherboards. At protocol level it exposes a hardware monitor (HWM) for temperatures, fan tachometers, and PWM fan control, reached over the classic LPC **Super I/O index/data port model**: write a register index to an index port, then read or write a data port. **Windows only** (`#![cfg(target_os = "windows")]`); the daemon moves bytes through PawnIO's `LpcIO.bin` module via the [LpcIO transport](../transports/lpcio.md) (root/Administrator required).
+The NCT677x is a Nuvoton (formerly Winbond) Super I/O chip found on most consumer AMD/Intel motherboards. At protocol level it exposes a hardware monitor (HWM) for temperatures, fan tachometers, and PWM fan control, reached over the classic LPC **Super I/O index/data port model**: write a register index to an index port, then read or write a data port. **Windows only** (`#![cfg(target_os = "windows")]`); the non-elevated daemon sends typed LPC operations to the elevated broker, which maps them to PawnIO's `LpcIO.bin` module.
 
 There are **two register spaces**:
 
@@ -371,7 +371,7 @@ None — all access is host-initiated register reads; HaloDaemon re-reads on its
 
 ## Notes
 
-- **Windows only.** The `superio` module and the LpcIO transport are gated `#![cfg(target_os = "windows")]`. Port I/O goes through PawnIO's signed `LpcIO.bin` and requires Administrator; if the blob is unavailable or the daemon isn't elevated, no SuperIO devices appear. See the [LpcIO transport](../transports/lpcio.md). (On Linux, motherboard fans/temps come from the [hwmon transport](../transports/hwmon.md) instead.)
+- **Windows only.** The `superio` module and LpcIO transport are gated `#![cfg(target_os = "windows")]`. Port I/O goes through PawnIO's signed `LpcIO.bin` inside the elevated broker; if the broker, PawnIO, or blob is unavailable, no SuperIO devices appear. See the [LpcIO transport](../transports/lpcio.md). (On Linux, motherboard fans/temps come from the [hwmon transport](../transports/hwmon.md) instead.)
 - **Unmatched chip IDs are rejected**, not guessed. `id == 0x00/0xFF` ⇒ no chip; an unrecognised `(id, revision)` ⇒ probe abandoned. `Nct5585D` and `Nct6687DR` exist in the variant enum/tables but have **no `from_id` match arm**, so detection never produces them.
 - **`0x4BA → 0x4CC` fan-register stride oddity.** The modern-family `fan_count_regs` default ends `…0x4B8, 0x4BA, 0x4CC` — the 7th channel breaks the `0x4B0, 0x4B2, …` +2 stride. Documented verbatim from the source (matches LibreHardwareMonitor); flagged as a likely upstream quirk rather than corrected.
 - **EC-family (NCT6683D/6686D/6687D/6687DR) fan control is unsupported.** All channels share one control-mode register (`0xA00`) selected by bit `1 << channel`; a plain write would clobber other channels' bits, so `set_duty` errors and `read_ctrl_mode`/`restore_ctrl_mode` return early (`is_ec_family`). Their temp-slot table is empty, so EC-family temperatures are not decoded.

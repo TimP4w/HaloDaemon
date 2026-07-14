@@ -53,7 +53,6 @@ pub struct ChainLinkRecord {
     /// Stable across restarts — canvas placements, transforms, and saved RGB
     /// state are keyed by this child id.
     pub id: String,
-    pub kind: String,
     pub name: String,
     pub topology: halod_shared::types::ZoneTopology,
     pub led_count: u32,

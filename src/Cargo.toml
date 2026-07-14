@@ -1,5 +1,5 @@
 [workspace]
-members = ["shared", "daemon", "ui"]
+members = ["shared", "hwaccess", "broker", "daemon", "ui"]
 resolver = "2"
 
 [workspace.package]
@@ -15,19 +15,9 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 anyhow     = "1"
 log        = "0.4"
 async-trait = "0.1"
-
-# Lint policy so CI can gate on `cargo clippy -- -D warnings`. A few categories
-# are intentionally relaxed:
-#   - dead_code: vendor/protocol scaffolding (constants, alt accessors, future
-#     device hooks) is deliberately kept even when not yet wired up.
-#   - type_complexity / too_many_arguments: closure-heavy UI state and driver
-#     builders legitimately carry complex signatures; factoring them hurts clarity.
-[workspace.lints.rust]
-dead_code = "allow"
+semver     = "1"
 
 [workspace.lints.clippy]
-type_complexity = "allow"
-too_many_arguments = "allow"
 # Opinionated style/formatting lints kept off so the gate stays focused on
 # substantive issues: nested `mod tests` followed by sibling code, protocol enums
 # whose variants share a natural prefix (WriteByte/WriteBlock…), and doc-comment
@@ -35,3 +25,8 @@ too_many_arguments = "allow"
 items_after_test_module = "allow"
 enum_variant_names = "allow"
 doc_lazy_continuation = "allow"
+# Closure-heavy UI callbacks and driver/builder signatures legitimately carry
+# many parameters and complex closure types; kept off so the gate stays on
+# substantive issues (see the lint policy in CLAUDE.md).
+too_many_arguments = "allow"
+type_complexity = "allow"

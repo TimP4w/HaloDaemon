@@ -24,14 +24,14 @@ Use Conventional Commits: `<type>(<optional scope>): <summary>`. Types:
 
 Scope is encouraged given the layered codebase, e.g. `feat(cooling): ...`, `fix(drivers/asus): ...`, `docs(protocols): ...`.
 
-The workspace manifest lives at `src/Cargo.toml`. Members are the directories `shared`, `daemon`, `ui` (crates `halod-shared`, `halod`, `halod-gui`).
+The workspace manifest lives at `src/Cargo.toml`. Members are the directories `shared`, `hwaccess`, `broker`, `daemon`, `ui` (crates `halod-shared`, `hwaccess`, `halod-broker`, `halod`, `halod-gui`).
 
 ## Code conventions
 
 - **Minimize code.** Prefer simplicity and maintainability — the smallest change that does the job. Reuse existing helpers, traits, and patterns instead of adding parallel ones; check for an existing accessor/usecase/transport before writing a new one.
 - **Comments are sparse.** Avoid lengthy comments. If a behaviour needs a long explanation, encode it in a test that demonstrates it rather than prose.
 - **Test all new code — the GUI included.** Every new behaviour gets a test in its owning crate; don't land logic that isn't exercised. Prefer property tests (`proptest`, already a dev-dependency in `shared` and `halod`) over example-based ones where a meaningful invariant exists — pick invariants that actually pin down correctness (round-trip encode/decode equals identity, output stays within device bounds, monotonic curves stay monotonic) rather than restating the implementation. See the `proptest!` blocks in [shared/src/frames.rs](src/shared/src/frames.rs), [shared/src/zone_transform.rs](src/shared/src/zone_transform.rs), and [daemon/src/cooling/fan_curve.rs](src/daemon/src/cooling/fan_curve.rs).
-  - **`halod-gui` is not exempt.** It can't be driven through a live egui frame in tests, but the logic *around* the immediate-mode painting can and must be: state reducers (seeding/debounce/selection), geometry math (widget rects, clamps, resize/scale), and value mapping (params ↔ wire types, formatting). Factor that logic into free functions taking plain data — not `&mut egui::Ui` — so it's unit-testable, then test it. Build a minimal `TabCtx` over `AppState::default()` for daemon-facing state logic; see the `seed_if_needed`/`send_def`/`spawn_widget` tests in [ui/src/device/lcd_editor.rs](src/ui/src/device/lcd_editor.rs). When the daemon and GUI must agree on a constant or formula (e.g. an LCD widget's size factors), pin it with a test on each side.
+  - **`halod-gui` is not exempt.** It can't be driven through a live egui frame in tests, but the logic *around* the immediate-mode painting can and must be: state reducers (seeding/debounce/selection), geometry math (widget rects, clamps, resize/scale), and value mapping (params ↔ wire types, formatting). Factor that logic into free functions taking plain data — not `&mut egui::Ui` — so it's unit-testable, then test it. Build a minimal `TabCtx` over `AppState::default()` for daemon-facing state logic; see the `seed_if_needed`/`send_def`/`spawn_widget` tests in [ui/src/ui/screens/device/lcd/editor/](src/ui/src/ui/screens/device/lcd/editor/). When the daemon and GUI must agree on a constant or formula (e.g. an LCD widget's size factors), pin it with a test on each side.
 - **Keep the layers separate.** Maintain the clean split: protocol (wire encode/decode) ↔ device (`Device` trait + capabilities) ↔ transport (byte movement). Don't leak transport bytes into a device, vendor wire formats into a usecase, or device logic into the GUI.
 - **No device assumptions in shared code.** Engines, usecases, and any layer above a concrete driver must NEVER assume device-specific behaviour (e.g. "the panel latches the last frame so we can skip the re-stream", "this controller ignores duplicate writes", timing/keepalive quirks). This is a NO-GO: baking one device's quirk into generic code silently breaks every other device that doesn't share it. Such a property is something the *device declares* through its descriptor/capability, and shared code branches on that declared flag — with the safe/conservative behaviour as the default. If shared code must behave differently for a device, add the flag to the capability descriptor and default it to the safe value.
 - **Attribute references.** When porting or adapting third-party code, add a REUSE-style SPDX header to the file and register the license — see [Licensing & attribution](#licensing--attribution).
@@ -56,10 +56,12 @@ A CodeGraph MCP server (`codegraph`) is wired up in [src/.mcp.json](src/.mcp.jso
 
 [docs/architecture.md](docs/architecture.md) is the full map — layer boundaries (vendor → device → protocol → transport), discovery, IPC/usecases, engines, state/config, and step-by-step recipes for adding a device or a command. Read it before implementing a new feature or device; the summary below is the orientation.
 
-Three crates under `src/`:
+Five crates under `src/`:
 
-- **`halod-shared`** — shared wire types only (no logic). Both other crates depend on it. IPC messages, `Capability` enum, frame/command definitions.
-- **`halod`** — the daemon: device I/O, engine loops, config persistence. Runs elevated.
+- **`halod-shared`** — types shared across crates plus the logic that operates on them: IPC messages, the `Capability` enum, frame/command definitions, and the codec/geometry pieces both sides need (curve evaluation, frame codecs, zone transforms, LCD/effect logic).
+- **`hwaccess`** — low-level hardware-access primitives (register/bus I/O) used by the broker.
+- **`halod-broker`** — the Windows LocalSystem privileged hardware broker; runs elevated so the per-user daemon doesn't have to.
+- **`halod`** — the per-user daemon: device I/O, engine loops, config persistence. Runs unprivileged; on Windows it delegates privileged hardware access to `halod-broker` (privilege separation), on Linux it runs as a per-user service.
 - **`halod-gui`** — eframe/egui GUI with a system tray; talks to the daemon, holds no device logic.
 
 ### Daemon ↔ GUI IPC
@@ -84,24 +86,24 @@ Devices are organized as **vendor → device → protocol → transport**, all u
 
 ### GUI
 
-The GUI ([ui/src/](src/ui/src/)) uses eframe/egui in immediate-mode style. State is fetched from the daemon via the IPC socket ([ui/src/ipc.rs](src/ui/src/ipc.rs)) and cached in a local `Model` ([ui/src/model.rs](src/ui/src/model.rs)) that drives the next frame. The device page is capability-driven: each capability tab is registered in [ui/src/device/mod.rs](src/ui/src/device/mod.rs) and shown only when the connected device reports that capability. High-frequency canvas/LCD frames arrive on dedicated async channels kept separate from the state poll loop. The system tray is handled per-platform in [ui/src/tray/](src/ui/src/tray/).
+The GUI ([ui/src/](src/ui/src/)) uses eframe/egui in immediate-mode style. State is fetched from the daemon via the IPC socket ([ui/src/runtime/ipc.rs](src/ui/src/runtime/ipc.rs)) and cached on the `App` as an `Arc<AppState>` ([ui/src/app.rs](src/ui/src/app.rs)) that drives the next frame; pure derivations from that wire state live in [ui/src/domain/models/](src/ui/src/domain/models/). The device page is capability-driven: each capability tab is registered in [ui/src/ui/screens/device/mod.rs](src/ui/src/ui/screens/device/mod.rs) and shown only when the connected device reports that capability. High-frequency canvas/LCD frames arrive on dedicated async channels kept separate from the state poll loop. The system tray is handled per-platform in [ui/src/domain/tray/](src/ui/src/domain/tray/).
 
 ### Engines
 
-Engines live inside their owning domain module, not a shared `engines/` tree: **canvas**/**direct** (unified RGB effect loop sampling a tiny-skia pixmap per zone) in [daemon/src/lighting/rgb_engine/](src/daemon/src/lighting/rgb_engine/), **fan_curve** (closed-loop temp→PWM with hysteresis and failsafe) in [daemon/src/cooling/fan_curve.rs](src/daemon/src/cooling/fan_curve.rs), **lcd** (template image rendering) in [daemon/src/lcd/engine/](src/daemon/src/lcd/engine/), plus `action_executor`/`key_remap` in [daemon/src/input/](src/daemon/src/input/) and `focus_watcher` in [daemon/src/profiles/focus_watcher/](src/daemon/src/profiles/focus_watcher/) — documented in `docs/engines.md`. [daemon/src/engines.rs](src/daemon/src/engines.rs) holds only the shared `engine_run_loop`/`EngineRunConfig` infra every engine's watch-loop is built on. `AppState` ([daemon/src/state/mod.rs](src/daemon/src/state/mod.rs)) composes each domain's state struct and holds the shared device registry; engines receive runtime config via `watch` channels.
+Engines live inside their owning domain module, not a shared `engines/` tree: **canvas**/**direct** (unified RGB effect loop sampling a tiny-skia pixmap per zone) in [daemon/src/lighting/rgb_engine/](src/daemon/src/lighting/rgb_engine/), **fan_curve** (closed-loop temp→PWM with hysteresis and failsafe) in [daemon/src/cooling/fan_curve.rs](src/daemon/src/cooling/fan_curve.rs), **lcd** (template image rendering) in [daemon/src/lcd/engine/](src/daemon/src/lcd/engine/), plus `action_executor`/`key_remap` in [daemon/src/input/](src/daemon/src/input/) and `focus_watcher` in [daemon/src/profiles/focus_watcher/](src/daemon/src/profiles/focus_watcher/) — documented in `docs/engines.md`. [daemon/src/run_loop.rs](src/daemon/src/run_loop.rs) holds only the shared `engine_run_loop`/`EngineRunConfig` infra every engine's watch-loop is built on. `AppState` ([daemon/src/state/mod.rs](src/daemon/src/state/mod.rs)) composes each domain's state struct and holds the shared device registry; engines receive runtime config via `watch` channels.
 
 ### Config
 
 Persisted as a directory of YAML files under `~/.config/halod/` (Linux) or `%APPDATA%\halod\` (Windows), split by concern — see [daemon/src/config/mod.rs](src/daemon/src/config/mod.rs):
 
-- `config.yaml` — `active_profile` + `GlobalConfig` (engine toggles, log level, close-to-tray)
+- `config.yaml` — `active_profile` + per-domain config (`cooling`, `rgb`, `lcd`, `gui`: engine toggles, log level, close-to-tray)
 - `devices.yaml` — known devices, chain layouts, zone transforms, sensor visibility
 - `app_rules.yaml` — app-focus → profile rules
 - `profiles/<name>.yaml` — one file per profile (device capability state, canvas overrides, RGB Lighting targets)
 - `lcd/<name>.yaml` — saved custom LCD templates ([daemon/src/lcd/usecases/templates.rs](src/daemon/src/lcd/usecases/templates.rs))
 - `media/lcd_images/` — uploaded LCD image library
 
-Every file is written atomically (tmp + rename) on each save; profile files are named from a sanitized slug of the profile name and pruned on rename/delete.
+Every file is saved via tmp-file + rename, fsync'd on Unix (a fully durable cross-platform atomic-replace is still being unified); profile files are named from a sanitized slug of the profile name and pruned on rename/delete.
 
 ## Licensing & attribution
 

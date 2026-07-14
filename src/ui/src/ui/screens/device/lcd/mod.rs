@@ -84,21 +84,24 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     // Seed the media tab from the daemon's mode, once per profile: a switch
     // re-applies that profile's LCD state, so the tab (and the editor's def)
     // must follow it instead of keeping the previous profile's selection.
-    if st.lcd.seeded_profile.as_deref() != Some(ctx.state.active_profile.as_str()) {
+    if st.lcd.seeded_profile.as_deref() != Some(ctx.state.profiles.active.as_str()) {
         st.lcd.media_tab = match lcd.mode {
             LcdMode::Video => LcdMediaTab::Video,
             LcdMode::Engine => LcdMediaTab::Template,
             _ => LcdMediaTab::Images,
         };
         st.lcd.editor.seeded = false;
-        st.lcd.seeded_profile = Some(ctx.state.active_profile.clone());
+        st.lcd.seeded_profile = Some(ctx.state.profiles.active.clone());
         // The profile already set the daemon to this mode; suppress re-activation.
         st.lcd.prev_mode_tab = Some(st.lcd.media_tab);
     }
 
     // Fetch the library once on first render of this device page.
     if !st.lcd.list_requested {
-        crate::domain::actions::lcd::list_lcd_images(ctx.cmd);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::ListLcdImages,
+        );
         st.lcd.list_requested = true;
     }
 
@@ -106,7 +109,10 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     if wants_engine_preview(st.lcd.media_tab)
         && preview_keepalive_due(&mut st.lcd.preview_keepalive_at, ctx.time)
     {
-        crate::domain::actions::lcd::lcd_engine_subscribe(ctx.cmd);
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::LcdEngineSubscribe,
+        );
     }
 
     poll_picker(ui, ctx, st, &id);
@@ -160,7 +166,13 @@ fn activate_video_mode(ctx: &TabCtx, id: &str, lcd: &LcdStatus) {
     let Some(path) = lcd.video_path.clone() else {
         return;
     };
-    crate::domain::actions::lcd::set_screen_video(ctx.cmd, id, path);
+    crate::runtime::ipc::send(
+        ctx.cmd,
+        halod_shared::commands::DaemonCommand::SetScreenVideo {
+            id: id.to_string(),
+            path,
+        },
+    );
 }
 
 fn mode_header(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
@@ -189,7 +201,7 @@ fn mode_header(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                 st.lcd.media_tab = LcdMediaTab::Template;
             }
             let video_active = st.lcd.media_tab == LcdMediaTab::Video;
-            if ctx.state.ffmpeg_available {
+            if ctx.state.health.ffmpeg_available {
                 if widgets::pill(ui, &t!("lcd.tab_video"), video_active) {
                     st.lcd.media_tab = LcdMediaTab::Video;
                 }
@@ -219,7 +231,7 @@ fn drive_preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, lcd: &LcdSt
             // image is seen as a change and clears the stale frame.
             st.lcd.preview_key = preview_key(&LcdMode::Gif, lcd.active_image.as_deref());
         }
-        LcdMode::Engine | LcdMode::Video => {
+        LcdMode::Engine | LcdMode::Video | LcdMode::EditorPreview => {
             clear_gif(st);
             // The daemon pre-decodes engine/video preview frames to RGBA; rebuild
             // the texture only when the frame id changes.
@@ -317,6 +329,7 @@ mod tests {
             active_image: active_image.map(str::to_string),
             video_path: None,
             raw_streaming: false,
+            health: Default::default(),
         }
     }
 
@@ -359,7 +372,10 @@ mod tests {
             std::fs::create_dir_all(tmp.path().join(halod_shared::types::LCD_IMAGES_SUBDIR))
                 .unwrap();
             let state = AppState {
-                ffmpeg_available: true,
+                health: halod_shared::types::HealthCheckState {
+                    ffmpeg_available: true,
+                    ..Default::default()
+                },
                 devices: vec![dev.clone()],
                 config_dir: tmp.path().to_string_lossy().into_owned(),
                 ..Default::default()
@@ -427,6 +443,7 @@ mod tests {
                         lcd_images: images.as_slice(),
                         lcd_preview: preview.clone(),
                         lcd_upload: upload.clone(),
+                        lcd_upload_terminal: None,
                         lcd_template: None,
                         lcd_editor_render: None,
                         led_colors: crate::ui::screens::device::empty_led_colors(),
@@ -690,7 +707,7 @@ mod tests {
     fn profile_switch_reseeds_media_tab_and_editor() {
         // Opened under a profile driving the LCD via the engine → Editor tab.
         let mut fx = Fixture::new(LcdMode::Engine, None);
-        fx.state.active_profile = "A".into();
+        fx.state.profiles.active = "A".into();
         let mut st = DeviceUi::new("lcd".into());
         fx.frame(&mut st);
         assert!(st.lcd.media_tab == LcdMediaTab::Template);
@@ -703,7 +720,7 @@ mod tests {
         st.lcd.media_tab = LcdMediaTab::Template;
 
         // The daemon switches to a profile with a static image selected.
-        fx.state.active_profile = "B".into();
+        fx.state.profiles.active = "B".into();
         fx.images = vec!["a.png".into()];
         fx.put_image("a.png", &make_png());
         fx.set_lcd(LcdMode::Image, Some("a.png"));
@@ -759,6 +776,7 @@ mod tests {
             lcd_images: fx.images.as_slice(),
             lcd_preview: None,
             lcd_upload: None,
+            lcd_upload_terminal: None,
             lcd_template: None,
             lcd_editor_render: None,
             led_colors: crate::ui::screens::device::empty_led_colors(),
@@ -787,6 +805,7 @@ mod tests {
             lcd_images: fx.images.as_slice(),
             lcd_preview: None,
             lcd_upload: None,
+            lcd_upload_terminal: None,
             lcd_template: None,
             lcd_editor_render: None,
             led_colors: crate::ui::screens::device::empty_led_colors(),

@@ -24,6 +24,18 @@ impl Clone for HidTrackingEntry {
     }
 }
 
+/// True when every device an entry tracks is in `ids` — so untracking its key
+/// can't strand a still-live device that shares the key. An empty `Primary`
+/// (no devices) is never owned.
+fn entry_owned_by(entry: &HidTrackingEntry, ids: &HashSet<String>) -> bool {
+    match entry {
+        HidTrackingEntry::Primary(arcs) => {
+            !arcs.is_empty() && arcs.iter().all(|d| ids.contains(d.id()))
+        }
+        HidTrackingEntry::WiredOverride(d) => ids.contains(d.id()),
+    }
+}
+
 /// Derives the set of device ids reachable over HID from a tracking map.
 fn compute_hid_ids(tracking: &HashMap<String, HidTrackingEntry>) -> HashSet<String> {
     let mut ids = HashSet::new();
@@ -82,7 +94,25 @@ impl HidTracking {
         removed
     }
 
-    /// A clone of one tracked entry, if present.
+    /// Untrack every HID key whose tracked device id(s) all appear in `ids`, so a
+    /// subsequent scoped re-probe re-registers that hardware instead of skipping
+    /// it as already-open. Returns the number of keys removed.
+    pub async fn untrack_devices(&self, ids: &HashSet<String>) -> usize {
+        let keys: Vec<String> = {
+            let tracking = self.tracking.lock().await;
+            tracking
+                .iter()
+                .filter(|(_, entry)| entry_owned_by(entry, ids))
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        for key in &keys {
+            self.untrack(key).await;
+        }
+        keys.len()
+    }
+
+    #[cfg(test)]
     pub async fn get(&self, key: &str) -> Option<HidTrackingEntry> {
         self.tracking.lock().await.get(key).cloned()
     }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::drivers::{
     chain::ChainHub,
-    vendors::generic::devices::common::{per_led_frame, ring_led_positions},
+    vendors::generic::devices::common::{ring_led_positions, transformed_zone_frame},
     CapabilityRef, Device, RgbCapability, RgbStateSlot, VisibilitySlot,
 };
 use anyhow::Result;
@@ -13,7 +13,6 @@ use async_trait::async_trait;
 use halod_shared::types::{
     DeviceType, LedPosition, RgbColor, RgbDescriptor, RgbState, RgbZone, ZoneTopology,
 };
-use halod_shared::zone_transform::transform_colors;
 
 fn topology_to_positions(topology: &ZoneTopology, count: u32) -> Vec<LedPosition> {
     if count == 0 {
@@ -132,10 +131,8 @@ impl GenericArgb {
             }
             RgbState::PerLed { zones } => {
                 if let Some(led_map) = zones.get("strip") {
-                    let colors = per_led_frame(led_map, led_count);
                     let zone = &self.rgb_descriptor.zones[0];
-                    let transform = self.core.rgb.transform_for(&zone.id);
-                    let colors = transform_colors(&colors, zone, &transform);
+                    let colors = transformed_zone_frame(zone, &self.core.rgb, led_map);
                     self.hub
                         .write_chain_slice(&self.core.channel_id, &self.core.id, &colors)
                         .await?;

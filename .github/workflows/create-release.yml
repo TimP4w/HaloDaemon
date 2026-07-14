@@ -1,11 +1,10 @@
 name: Create Release
 
 # Triggered manually to cut a new release in the correct order:
-#   1. test        — test on both Linux and Windows, then build release
-#   2. commit      — bump the workspace version in Cargo.toml / Cargo.lock
-#   3. tag         — create a vX.Y.Z tag on that commit
-#   4. package     — produce the Windows installer + Linux tarball
-#   5. publish     — create the GitHub release with both artifacts
+#   1. commit      — create and push the immutable version commit
+#   2. test/build  — checkout that exact SHA on Linux and Windows
+#   3. package     — package only binaries built from that SHA
+#   4. tag/publish — tag the tested SHA and attach all artifacts
 
 on:
   workflow_dispatch:
@@ -32,7 +31,7 @@ jobs:
     outputs:
       new_version: ${{ steps.calc.outputs.new }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
         with:
           ref: main
 
@@ -59,10 +58,12 @@ jobs:
   # Run the full test suite + clippy first (fail fast), then build the
   # release binaries and cache them for the tarball packaging step.
   test-linux:
-    needs: version
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -79,25 +80,6 @@ jobs:
       - name: Install cargo-about
         run: cargo install --locked --features cli cargo-about
 
-      - name: Bump version locally before build
-        run: |
-          v="${{ needs.version.outputs.new_version }}"
-          python3 - "$v" <<'PY'
-          import pathlib, re, sys
-          version = sys.argv[1]
-          toml = pathlib.Path("src/Cargo.toml")
-          text, n = re.subn(
-              r'(\[workspace\.package\]\nversion = ")[^"]*(")',
-              lambda m: f'{m.group(1)}{version}{m.group(2)}',
-              toml.read_text(),
-              count=1,
-          )
-          if n == 0:
-              sys.exit("Failed to patch workspace version in src/Cargo.toml")
-          toml.write_text(text)
-          print(f"Bumped src/Cargo.toml to {version}")
-          PY
-
       - name: Test + clippy
         working-directory: src
         run: |
@@ -108,10 +90,10 @@ jobs:
         working-directory: src
         env:
           HALOD_REQUIRE_LICENSES: "1"
-        run: cargo build --release -p halod -p halod-gui
+        run: cargo build --release --workspace
 
       - name: Upload release binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: linux-release-bin
           path: |
@@ -120,15 +102,18 @@ jobs:
 
   # ── Test (Windows) ───────────────────────────────────────────────
   # Run tests + clippy first (fail fast), then build the release
-  # binaries (daemon + egui UI) and cache them for the installer step.
+  # binaries (daemon + egui UI + elevated broker) and cache them for the
+  # installer step.
   test-windows:
-    needs: version
+    needs: prepare
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - name: Set up MSYS2 (UCRT64)
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 #v2.32.0
         with:
           msystem: UCRT64
           update: true
@@ -140,32 +125,12 @@ jobs:
             mingw-w64-ucrt-x86_64-cargo-about
             mingw-w64-ucrt-x86_64-python
 
-      - name: Bump version locally before build
-        shell: msys2 {0}
-        run: |
-          v="${{ needs.version.outputs.new_version }}"
-          python3 - "$v" <<'PY'
-          import pathlib, re, sys
-          version = sys.argv[1]
-          toml = pathlib.Path("src/Cargo.toml")
-          text, n = re.subn(
-              r'(\[workspace\.package\]\nversion = ")[^"]*(")',
-              lambda m: f'{m.group(1)}{version}{m.group(2)}',
-              toml.read_text(),
-              count=1,
-          )
-          if n == 0:
-              sys.exit("Failed to patch workspace version in src/Cargo.toml")
-          toml.write_text(text)
-          print(f"Bumped src/Cargo.toml to {version}")
-          PY
-
       - name: Test + clippy
         shell: msys2 {0}
         run: |
           cd src
-          cargo test -p halod
-          cargo clippy -p halod --all-targets -- -D warnings
+          cargo test --workspace
+          cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build release binaries
         shell: msys2 {0}
@@ -173,25 +138,27 @@ jobs:
           HALOD_REQUIRE_LICENSES: "1"
         run: |
           cd src
-          cargo build --release -p halod -p halod-gui
+          cargo build --release --workspace
 
       - name: Upload release binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: windows-release-bin
           path: |
             src/target/release/halod.exe
             src/target/release/halod-gui.exe
+            src/target/release/halod-broker.exe
 
   # ── Prepare ──────────────────────────────────────────────────────
-  # Version bump commit + tag. Only runs after both test jobs pass.
+  # Create the immutable release source commit before any build starts.
   prepare:
-    needs: [version, test-linux, test-windows]
+    needs: version
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ needs.version.outputs.new_version }}
+      release_sha: ${{ steps.release_commit.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
         with:
           ref: main
 
@@ -221,8 +188,9 @@ jobs:
           )
           lock.write_text(locktext)
 
-          # The Arch PKGBUILD builds the git tag this workflow is about to
-          # create, so its pkgver must track the release version.
+          # Keep pkgver synchronized in the release commit. The immutable
+          # source SHA is written after this commit exists (a commit cannot
+          # contain its own hash).
           pkgbuild = pathlib.Path("packaging/arch/PKGBUILD")
           pbtext, n = re.subn(
               r'(?m)^(pkgver=).*$',
@@ -235,20 +203,40 @@ jobs:
           pkgbuild.write_text(pbtext)
           PY
 
-      - name: Commit version bump
+      - name: Create release commit
+        id: release_commit
         run: |
           v="${{ needs.version.outputs.new_version }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/Cargo.toml src/Cargo.lock packaging/arch/PKGBUILD
           git commit -m "chore: bump version to v${v}"
-          git push origin HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Tag release
+      - name: Pin PKGBUILD to release commit
         run: |
           v="${{ needs.version.outputs.new_version }}"
-          git tag "v${v}"
-          git push origin "v${v}"
+          release_sha="${{ steps.release_commit.outputs.sha }}"
+          python3 - "$release_sha" <<'PY'
+          import pathlib, re, sys
+          release_sha = sys.argv[1]
+          if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
+              sys.exit(f"Invalid release commit SHA: {release_sha!r}")
+
+          pkgbuild = pathlib.Path("packaging/arch/PKGBUILD")
+          text, n = re.subn(
+              r"(?m)^(source=.*#commit=)[^\"']+",
+              lambda m: f"{m.group(1)}{release_sha}",
+              pkgbuild.read_text(),
+              count=1,
+          )
+          if n == 0:
+              sys.exit("Failed to patch source commit in packaging/arch/PKGBUILD")
+          pkgbuild.write_text(text)
+          PY
+          git add packaging/arch/PKGBUILD
+          git commit -m "chore: pin Arch package for v${v}"
+          git push origin HEAD:main
 
   # ── Windows installer ────────────────────────────────────────────
   # Takes the already-built Windows binaries from the test phase and
@@ -257,16 +245,18 @@ jobs:
     needs: [test-windows, prepare]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - name: Download Windows release binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: windows-release-bin
           path: src/target/release
 
       - name: Set up MSYS2 (UCRT64) for ffmpeg
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 #v2.32.0
         with:
           msystem: UCRT64
           update: true
@@ -294,7 +284,7 @@ jobs:
             packaging\windows\halod.iss
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: halod-setup-x64
           path: packaging/windows/Output/halod-setup-x64.exe
@@ -306,10 +296,12 @@ jobs:
     needs: [test-linux, prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - name: Download Linux release binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: linux-release-bin
           path: src/target/release
@@ -352,7 +344,7 @@ jobs:
           tar czf halod-linux-x64.tar.gz "$d"
 
       - name: Upload tarball artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: halod-linux-x64
           path: halod-linux-x64.tar.gz
@@ -366,14 +358,17 @@ jobs:
     needs: [test-linux, prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
         with:
-          ref: main
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
+      # dtolnay/rust-toolchain has no versioned releases: `@stable` is a rolling
+      # ref by design (tracks current stable Rust). Intentionally left unpinned;
+      # pin to a commit SHA here if a fully reproducible toolchain is required.
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Download Linux release binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: linux-release-bin
           path: src/target/release
@@ -389,7 +384,7 @@ jobs:
         run: cargo deb --no-build --no-strip --manifest-path src/daemon/Cargo.toml
 
       - name: Upload .deb artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: halod-deb
           path: src/target/debian/*.deb
@@ -404,14 +399,14 @@ jobs:
     needs: [test-linux, prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
         with:
-          ref: main
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Download Linux release binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: linux-release-bin
           path: src/target/release
@@ -430,7 +425,7 @@ jobs:
         run: cargo generate-rpm -p daemon
 
       - name: Upload .rpm artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: halod-rpm
           path: src/target/generate-rpm/*.rpm
@@ -441,12 +436,20 @@ jobs:
     needs: [prepare, windows-installer, linux-tarball, linux-deb, linux-rpm]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           path: artifacts
+
+      - name: Tag tested release commit
+        run: |
+          v="${{ needs.prepare.outputs.new_version }}"
+          git tag "v${v}" "${{ needs.prepare.outputs.release_sha }}"
+          git push origin "v${v}"
 
       - name: Compute SHA-256 and build release notes
         run: |
@@ -478,14 +481,44 @@ jobs:
           | \`$(basename "$RPM")\` | \`${RPM_HASH}\` |
           EOF
 
+      - name: Generate SHA256SUMS and detached signature
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp artifacts/halod-setup-x64/halod-setup-x64.exe release/
+          cp artifacts/halod-linux-x64/halod-linux-x64.tar.gz release/
+          cp artifacts/halod-deb/*.deb release/
+          cp artifacts/halod-rpm/*.rpm release/
+          ( cd release && sha256sum -- * > SHA256SUMS )
+          echo "release/SHA256SUMS:"; cat release/SHA256SUMS
+          if [ -n "${GPG_PRIVATE_KEY}" ]; then
+            echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+            KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')
+            gpg --batch --yes --pinentry-mode loopback \
+              ${GPG_PASSPHRASE:+--passphrase "$GPG_PASSPHRASE"} \
+              --local-user "$KEYID" --detach-sign --armor \
+              --output release/SHA256SUMS.asc release/SHA256SUMS
+            echo "Wrote detached signature release/SHA256SUMS.asc"
+          else
+            echo "GPG_PRIVATE_KEY not set — skipping detached signature"
+          fi
+
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b #v3.0.1
         with:
           tag_name: v${{ needs.prepare.outputs.new_version }}
           name: HaloDaemon ${{ needs.prepare.outputs.new_version }}
           body_path: release-notes.md
+          # SHA256SUMS.asc is only present when GPG_PRIVATE_KEY is configured;
+          # softprops/action-gh-release defaults to fail_on_unmatched_files: false,
+          # so its absence is a warning, not a failure.
           files: |
             artifacts/halod-setup-x64/halod-setup-x64.exe
             artifacts/halod-linux-x64/halod-linux-x64.tar.gz
             artifacts/halod-deb/*.deb
             artifacts/halod-rpm/*.rpm
+            release/SHA256SUMS
+            release/SHA256SUMS.asc

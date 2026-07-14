@@ -8,7 +8,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::cooling;
 use crate::input;
-use crate::ipc::ClientHandle;
+use crate::ipc::{ClientHandle, LeaseState, SubscriptionTopic};
 use crate::lcd;
 use crate::lighting;
 use crate::profiles;
@@ -18,15 +18,28 @@ use crate::state::AppState;
 const LCD_PREVIEW_LEASE: Duration =
     Duration::from_secs(halod_shared::types::LCD_PREVIEW_LEASE_SECS);
 
-/// Lease-gated LCD preview forwarder; drops the broadcast receiver when idle.
+const IPC_MAX_DEPTH: usize = 64;
+const IPC_MAX_NODES: usize = 200_000;
+
+/// Reject a command whose JSON nests too deep or holds too many collection nodes,
+/// so a small frame can't expand into excessive nested work.
+fn check_ipc_bounds(v: &Value) -> Result<(), String> {
+    crate::util::json::check_bounds(v, IPC_MAX_DEPTH, IPC_MAX_NODES)
+}
+
+/// Lease-gated LCD preview forwarder; drops the broadcast receiver once the lease goes `Expired`.
 async fn lcd_preview_forward_loop(app: Arc<AppState>, client: ClientHandle) {
-    let mut keepalive = client.lcd_keepalive_rx();
+    let mut lease = client.lcd_lease_rx();
     loop {
-        // Paused: no receiver held. Wait for a keepalive or client teardown.
-        if keepalive.borrow_and_update().elapsed() >= LCD_PREVIEW_LEASE {
+        // Paused: no active lease. Wait for a keepalive (re-subscribe) or client teardown.
+        let is_live = matches!(
+            *lease.borrow_and_update(),
+            LeaseState::Active { last_keepalive } if last_keepalive.elapsed() < LCD_PREVIEW_LEASE
+        );
+        if !is_live {
             tokio::select! {
                 _ = client.tx.closed() => return,
-                c = keepalive.changed() => { if c.is_err() { return; } continue; }
+                c = lease.changed() => { if c.is_err() { return; } continue; }
             }
         }
         // Engine may not be set yet at startup — same readiness dance as
@@ -43,10 +56,13 @@ async fn lcd_preview_forward_loop(app: Arc<AppState>, client: ClientHandle) {
         };
         // Active: forward frames until the lease expires, then drop rx.
         loop {
-            let deadline = *keepalive.borrow_and_update() + LCD_PREVIEW_LEASE;
+            let deadline = match *lease.borrow_and_update() {
+                LeaseState::Active { last_keepalive } => last_keepalive + LCD_PREVIEW_LEASE,
+                LeaseState::Unsubscribed | LeaseState::Expired => break,
+            };
             tokio::select! {
                 _ = client.tx.closed() => return,
-                _ = tokio::time::sleep_until(deadline) => break,
+                _ = tokio::time::sleep_until(deadline) => { client.expire_lcd_lease(); break; }
                 res = rx.recv() => match res {
                     Ok(frame) => client.send_lcd_preview(frame.wire.clone()),
                     Err(RecvError::Lagged(n)) =>
@@ -108,6 +124,11 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
 
     let req_id = msg["request_id"].as_str();
 
+    if let Err(e) = check_ipc_bounds(&msg) {
+        reply_error(&client, cmd, req_id, anyhow::anyhow!("frame rejected: {e}"));
+        return;
+    }
+
     let typed = match DaemonCommand::deserialize(&msg) {
         Ok(typed) => typed,
         Err(e) => {
@@ -152,6 +173,11 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
 fn reply_error(client: &ClientHandle, cmd: &str, req_id: Option<&str>, e: anyhow::Error) {
     log::warn!("command '{cmd}' failed: {e}");
     let mut reply = json!({"type": "error", "message": e.to_string()});
+    if e.downcast_ref::<crate::drivers::plugins::SurfacedPluginError>()
+        .is_some()
+    {
+        reply["handled"] = true.into();
+    }
     if let Some(req_id) = req_id {
         reply["request_id"] = req_id.into();
     }
@@ -284,6 +310,52 @@ async fn dispatch(
             profiles::usecases::app_rules::remove(index, app).await
         }
         DaemonCommand::Rediscover => registry::usecases::settings::rediscover(app).await,
+        DaemonCommand::SetPluginEnabled { id, enabled } => {
+            registry::usecases::plugins::set_enabled(id, enabled, app).await
+        }
+        DaemonCommand::ImportPlugin { source_dir } => {
+            registry::usecases::plugins::import(source_dir, app).await
+        }
+        DaemonCommand::DeletePlugin { id } => registry::usecases::plugins::delete(id, app).await,
+        DaemonCommand::SetPluginTrust {
+            id,
+            granted,
+            enabled,
+        } => registry::usecases::plugins::set_trust(id, granted, enabled, app).await,
+        DaemonCommand::SetPluginConfig { id, values } => {
+            registry::usecases::plugins::set_config(id, values, app).await
+        }
+        DaemonCommand::AddPluginRepo { url, branch } => {
+            registry::usecases::repos::add_repo(url, branch, app).await
+        }
+        DaemonCommand::RemovePluginRepo { slug } => {
+            registry::usecases::repos::remove_repo(slug, app).await
+        }
+        DaemonCommand::ListRepoBranches { url } => {
+            registry::usecases::repos::list_branches(url, client).await
+        }
+        DaemonCommand::CheckPluginRepoUpdates => {
+            registry::usecases::repos::check_repo_updates(app, client).await
+        }
+        DaemonCommand::UpdatePluginRepo { slug } => {
+            registry::usecases::repos::update_repo(slug, app).await
+        }
+        DaemonCommand::RepairPluginRepoDir { slug, subpath } => {
+            registry::usecases::repos::repair_plugin_dir(slug, subpath, app).await
+        }
+        DaemonCommand::CheckPluginUpdates { slug } => {
+            registry::usecases::repos::check_plugin_updates(slug, app, client).await
+        }
+        DaemonCommand::UpdatePlugin { plugin_id } => {
+            registry::usecases::repos::update_plugin(plugin_id, app).await
+        }
+        DaemonCommand::UpdateAllPlugins => registry::usecases::repos::update_all_plugins(app).await,
+        DaemonCommand::SetIntegrationEnabled { id, enabled } => {
+            registry::usecases::integrations::set_integration_enabled(id, enabled, app).await
+        }
+        DaemonCommand::SetIntegrationConfig { id, values } => {
+            registry::usecases::integrations::set_integration_config(id, values, app).await
+        }
         DaemonCommand::SetLogLevel { level } => {
             registry::usecases::settings::set_log_level(level, app).await
         }
@@ -302,6 +374,9 @@ async fn dispatch(
                 app,
             )
             .await
+        }
+        DaemonCommand::SetPluginDownloadConsent { allowed } => {
+            registry::usecases::settings::set_plugin_download_consent(allowed, app).await
         }
         DaemonCommand::MarkTourSeen { tour } => {
             registry::usecases::settings::mark_tour_seen(tour, app).await
@@ -390,10 +465,9 @@ async fn dispatch(
             name,
             led_count,
             topology,
-            kind,
         } => {
             registry::usecases::chain::rgb_chain_add_link(
-                id, channel_id, name, led_count, topology, kind, app,
+                id, channel_id, name, led_count, topology, app,
             )
             .await
         }
@@ -477,6 +551,9 @@ async fn dispatch(
         DaemonCommand::DeleteLcdImage { filename } => {
             lcd::usecases::lcd::delete_lcd_image(filename, app).await
         }
+        DaemonCommand::GetPluginAsset { plugin_id, name } => {
+            registry::usecases::plugins::get_asset(plugin_id, name, client, app).await
+        }
 
         DaemonCommand::CanvasUpsertEffect { instance_id, def } => {
             lighting::usecases::canvas::upsert_effect(instance_id, def, app).await
@@ -547,12 +624,13 @@ async fn dispatch(
         DaemonCommand::CanvasSubscribe => {
             if client.try_subscribe_canvas() {
                 let c2 = client.clone();
-                tokio::spawn(engine_subscribe_loop(
+                let task = tokio::spawn(engine_subscribe_loop(
                     app,
                     c2,
                     |a| a.lighting.engine().map(|e| e.subscribe()),
                     "canvas_frame",
                 ));
+                client.track_subscription(SubscriptionTopic::Canvas, task);
             }
             Ok(())
         }
@@ -568,7 +646,8 @@ async fn dispatch(
         DaemonCommand::LcdEngineSubscribe => {
             client.touch_lcd_preview();
             if client.try_subscribe_lcd() {
-                tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
+                let task = tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
+                client.track_subscription(SubscriptionTopic::Lcd, task);
             }
             Ok(())
         }
@@ -645,16 +724,9 @@ async fn dispatch(
 /// `Shutdown` command and "no client has been connected for a while" both
 /// route through the same stop path.
 pub(crate) fn request_shutdown(app: &Arc<AppState>) {
-    if app.is_service_worker {
-        #[cfg(windows)]
-        match crate::platform::service::request_stop() {
-            Ok(()) => {
-                log::info!("asked the SCM to stop the HalodDaemon service");
-                return;
-            }
-            Err(e) => log::error!("failed to stop service ({e}); exiting worker directly"),
-        }
-    }
+    // The daemon is a plain user process launched by the GUI — nothing
+    // relaunches it, so exiting is the whole shutdown. (The on-demand broker
+    // service self-stops once this worker's register-bus connections drop.)
     app.shutdown.notify_one();
 }
 
@@ -665,6 +737,27 @@ mod tests {
     use crate::ipc::ClientHandle;
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn ipc_bounds_reject_deep_nesting() {
+        let mut v = json!(0);
+        for _ in 0..IPC_MAX_DEPTH + 2 {
+            v = json!([v]);
+        }
+        assert!(check_ipc_bounds(&v).is_err());
+    }
+
+    #[test]
+    fn ipc_bounds_reject_too_many_nodes() {
+        let v = json!(vec![0u8; IPC_MAX_NODES + 1]);
+        assert!(check_ipc_bounds(&v).is_err());
+    }
+
+    #[test]
+    fn ipc_bounds_allow_large_string_single_node() {
+        let v = json!({ "data": "x".repeat(5_000_000) });
+        assert!(check_ipc_bounds(&v).is_ok());
+    }
 
     #[tokio::test]
     async fn error_reply_echoes_request_id() {
@@ -738,7 +831,6 @@ mod tests {
     #[tokio::test]
     async fn shutdown_request_signals_a_plain_daemon() {
         let app = Arc::new(AppState::new(Config::default()));
-        assert!(!app.is_service_worker, "default daemon is not a worker");
 
         request_shutdown(&app);
 
@@ -757,10 +849,8 @@ mod tests {
         app.lcd.set_engine(
             Arc::clone(&engine),
             VideoEngine::new(Arc::clone(&app), engine.frame_sender()),
-            tokio::sync::watch::channel(EngineRunConfig::lcd(
-                &crate::config::GlobalConfig::default(),
-            ))
-            .0,
+            tokio::sync::watch::channel(EngineRunConfig::lcd(&crate::config::LcdConfig::default()))
+                .0,
         );
         let _ = app.engines_ready.send(true);
         (app, engine)
@@ -810,6 +900,41 @@ mod tests {
         handle.abort();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn lcd_lease_state_is_observably_expired_after_the_deadline() {
+        let (app, engine) = app_with_lcd_engine();
+        let (tx, _rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(8);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        client.touch_lcd_preview();
+        assert!(matches!(
+            *client.lcd_lease_rx().borrow(),
+            LeaseState::Active { .. }
+        ));
+
+        let handle = tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
+        for _ in 0..50 {
+            if engine.frame_sender().receiver_count() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(LCD_PREVIEW_LEASE + Duration::from_millis(50)).await;
+        for _ in 0..50 {
+            if *client.lcd_lease_rx().borrow() == LeaseState::Expired {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*client.lcd_lease_rx().borrow(), LeaseState::Expired);
+
+        handle.abort();
+    }
+
     #[tokio::test]
     async fn lcd_preview_forwarder_exits_when_client_disconnects_while_paused() {
         let (app, _engine) = app_with_lcd_engine();
@@ -819,9 +944,7 @@ mod tests {
             tx,
             subs: Arc::default(),
         };
-        // Lease already stale (default keepalive is `Instant::now()` at
-        // construction, so advance past the lease before dropping the reader).
-        tokio::time::sleep(LCD_PREVIEW_LEASE + Duration::from_millis(50)).await;
+        // A default lease is `Unsubscribed` (never entered the active branch), so the loop is already paused.
         drop(rx);
 
         let handle = tokio::spawn(lcd_preview_forward_loop(app, client));

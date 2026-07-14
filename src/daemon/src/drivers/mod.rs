@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pub mod chain;
+pub mod plugins;
 pub mod transports;
 pub mod vendors;
+
+use crate::registry::identity::{DeviceIdentity, DeviceOrigin};
 
 use crate::drivers::vendors::generic::devices::common::WireDeviceBuilder;
 use anyhow::Result;
@@ -138,11 +141,24 @@ pub trait Device: Send + Sync {
         .serial_number(self.wire_serial_number())
         .connected(self.wire_device_connected().await)
         .capabilities(caps)
+        .integration_id(self.integration_id())
         .build()
     }
 
     fn wire_device_type(&self) -> DeviceType {
         DeviceType::Other
+    }
+
+    /// The owning plugin id when this device *is* an integration's root
+    /// (e.g. the OpenRGB SDK client) rather than a real device. `None` for
+    /// every other device, including the devices an integration exposes as
+    /// children.
+    fn integration_id(&self) -> Option<String> {
+        None
+    }
+
+    fn owning_plugin_id(&self) -> Option<String> {
+        None
     }
 
     async fn wire_connection_type(&self) -> Option<ConnectionType> {
@@ -157,6 +173,12 @@ pub trait Device: Send + Sync {
         true
     }
 
+    /// `false` marks the device present-but-offline (e.g. an integration whose
+    /// server dropped): engines skip it and the GUI greys it. Default `true`.
+    fn is_live(&self) -> bool {
+        true
+    }
+
     async fn wire_device_name(&self) -> String {
         self.name().to_string()
     }
@@ -165,6 +187,18 @@ pub trait Device: Send + Sync {
     /// Used to detect the same physical device appearing on a different transport.
     fn hardware_serial(&self) -> Option<String> {
         None
+    }
+
+    /// Metadata used only to detect independently registered devices that may
+    /// represent the same physical hardware.
+    fn identity(&self) -> DeviceIdentity {
+        DeviceIdentity::serial(self.hardware_serial())
+    }
+
+    fn conflict_origin(&self) -> DeviceOrigin {
+        self.owning_plugin_id()
+            .map(DeviceOrigin::Plugin)
+            .unwrap_or(DeviceOrigin::Native)
     }
 
     /// All capabilities this device exposes.  Add a `CapabilityRef` variant when
@@ -178,6 +212,7 @@ pub trait Device: Send + Sync {
     as_capability!(as_choice, Choice, ChoiceCapability);
     as_capability!(as_boolean, Boolean, BooleanCapability);
     as_capability!(as_action, Action, ActionCapability);
+    #[cfg(test)]
     as_capability!(as_battery, Battery, BatteryCapability);
     as_capability!(as_equalizer, Equalizer, EqualizerCapability);
     as_capability!(as_dpi, Dpi, DpiCapability);
@@ -404,7 +439,7 @@ mod tests {
         };
         dev.fan.set_fan_curve(FanCurveRecord {
             sensor_id: Some("cpu".into()),
-            points: vec![],
+            points: vec![(30.0, 25.0), (70.0, 75.0)],
         });
 
         let saved = dev.save_state().await;

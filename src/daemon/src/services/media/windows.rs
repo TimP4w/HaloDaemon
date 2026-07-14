@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use image::RgbaImage;
 use windows::core::Interface;
@@ -32,13 +32,13 @@ fn read_thumbnail(stream: IRandomAccessStream) -> Option<RgbaImage> {
     let op = input
         .ReadAsync(&buffer, size as u32, InputStreamOptions::ReadAhead)
         .ok()?;
-    let result = op.get().ok()?;
+    let result = op.join().ok()?;
     let len = result.Length().ok()? as usize;
     let reader = windows::Storage::Streams::DataReader::FromBuffer(&result).ok()?;
     let mut bytes = vec![0u8; len];
     reader.ReadBytes(&mut bytes).ok()?;
 
-    let img = image::load_from_memory(&bytes).ok()?;
+    let img = crate::util::image::decode_limited(&bytes).ok()?;
     const MAX_SIDE: u32 = 240;
     let (w, h) = (img.width(), img.height());
     let scaled = if w.max(h) > MAX_SIDE {
@@ -76,12 +76,12 @@ pub fn run(weak: Weak<MediaHandle>) {
 }
 
 fn poll_once(art_cache: &mut ArtCache) -> windows::core::Result<Option<MediaInfo>> {
-    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.get()?;
+    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.join()?;
     let Ok(session) = manager.GetCurrentSession() else {
         return Ok(None);
     };
 
-    let props = session.TryGetMediaPropertiesAsync()?.get()?;
+    let props = session.TryGetMediaPropertiesAsync()?.join()?;
     let title = props.Title().map(|s| s.to_string()).unwrap_or_default();
     let artist = props.Artist().map(|s| s.to_string()).unwrap_or_default();
     let album = props
@@ -96,36 +96,12 @@ fn poll_once(art_cache: &mut ArtCache) -> windows::core::Result<Option<MediaInfo
         .map(map_status)
         .unwrap_or(PlaybackStatus::Stopped);
 
-    let (position, length) = session
-        .GetTimelineProperties()
-        .ok()
-        .map(|tp| {
-            let position = tp.Position().ok().and_then(|d| {
-                let ticks = d.Duration;
-                if ticks >= 0 {
-                    Some(Duration::from_nanos(ticks as u64 * 100))
-                } else {
-                    None
-                }
-            });
-            let end = tp.EndTime().ok().and_then(|d| {
-                let ticks = d.Duration;
-                if ticks > 0 {
-                    Some(Duration::from_nanos(ticks as u64 * 100))
-                } else {
-                    None
-                }
-            });
-            (position, end)
-        })
-        .unwrap_or((None, None));
-
     let art_key = format!("{title}\u{1}{album}");
     let art = if let Some(cached) = art_cache.get(&art_key) {
         Some(cached)
     } else if let Ok(thumb_ref) = props.Thumbnail() {
         match thumb_ref.OpenReadAsync() {
-            Ok(op) => match op.get() {
+            Ok(op) => match op.join() {
                 Ok(stream) => {
                     let loaded = match stream.cast::<IRandomAccessStream>() {
                         Ok(stream) => read_thumbnail(stream),
@@ -148,11 +124,7 @@ fn poll_once(art_cache: &mut ArtCache) -> windows::core::Result<Option<MediaInfo
     Ok(Some(MediaInfo {
         title,
         artist,
-        album,
         status,
-        position,
-        position_at: Some(Instant::now()),
-        length,
         art,
     }))
 }

@@ -1,0 +1,41 @@
+home:
+  device_name: Device name
+  save: Save
+  cancel: Cancel
+  rename_device: Rename device
+  hide_device: Hide device
+  show_device: Show device
+  disable_device: Disable device
+  enable_device: Enable device
+  remove_device: Remove device
+  remove: Remove
+  remove_device_title: Remove device
+  remove_device_confirm: "Do you want to remove %{name} from its chain? This will disconnect the device, and it will no longer appear here."
+  devices_connected: "%{online} of %{total} devices connected"
+  devices_connected_attention: "%{online} of %{total} devices connected · %{attention} need attention"
+  hide_hidden: Hide hidden
+  show_hidden: Show hidden
+  search_devices: Search devices
+  grid: Grid
+  list: List
+  show_sensor: Show sensor
+  hide_sensor: Hide sensor
+  offline: Offline
+  conflict_confirmed: Duplicate device
+  conflict_possible: Possible duplicate
+  conflict_recommended: Recommended owner
+  conflict_owner: "Recommended owner: %{name}"
+  conflict_with: "May also control: %{name}. Click to choose which device to keep."
+  conflict_dialog_title: Choose device owner
+  conflict_dialog_confirmed: "These entries control the same physical device. Choose the one to keep enabled; the others will be disabled."
+  conflict_dialog_possible: "These entries may control the same physical device. Choose the one to keep enabled; the others will be disabled."
+  conflict_keep: "Keep %{name}"
+  conflict_keep_recommended: "Keep %{name} (recommended)"
+  conflict_choose_owner: Choose this device owner
+  conflict_source_native: Native driver
+  conflict_source_plugin: "Plugin: %{name}"
+  conflict_source_integration: "Integration: %{name}"
+  no_matching: No matching devices
+  no_matching_sub: None of your connected devices match this search
+  no_devices: No devices connected
+  no_devices_sub: Plug in a peripheral or check that halod is running

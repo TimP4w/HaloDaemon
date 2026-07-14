@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::types::{
-    ButtonMapping, EffectDef, EffectParamValue, MacroStep, RgbState, SamplingMode, VisibilityState,
-    ZoneTopology,
+    ButtonMapping, EffectDef, EffectParamValue, MacroStep, Permission, RgbState, SamplingMode,
+    VisibilityState, ZoneTopology,
 };
 use crate::zone_transform::ZoneContentTransform;
 use serde::{Deserialize, Serialize};
@@ -36,12 +36,7 @@ pub enum OverrideTarget {
 }
 
 /// Typed LCD screen rotation values. Only 90° multiples are physically supported.
-///
-/// Serializes as `"r0"`..`"r270"`. Deserialization additionally accepts legacy
-/// integer degrees (`0`/`90`/`180`/`270`) so frames from an older daemon — which
-/// sent `LcdStatus::rotation` as a raw `u32` — still parse without a separate
-/// normalization pass on the UI side.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScreenRotation {
     #[default]
@@ -49,48 +44,6 @@ pub enum ScreenRotation {
     R90,
     R180,
     R270,
-}
-
-impl<'de> Deserialize<'de> for ScreenRotation {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct RotationVisitor;
-        impl serde::de::Visitor<'_> for RotationVisitor {
-            type Value = ScreenRotation;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a rotation string (\"r0\"..\"r270\") or integer degrees")
-            }
-            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<ScreenRotation, E> {
-                match s {
-                    "r0" => Ok(ScreenRotation::R0),
-                    "r90" => Ok(ScreenRotation::R90),
-                    "r180" => Ok(ScreenRotation::R180),
-                    "r270" => Ok(ScreenRotation::R270),
-                    other => Err(E::custom(format!("unknown rotation {other:?}"))),
-                }
-            }
-            fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<ScreenRotation, E> {
-                Ok(match n {
-                    90 => ScreenRotation::R90,
-                    180 => ScreenRotation::R180,
-                    270 => ScreenRotation::R270,
-                    _ => ScreenRotation::R0,
-                })
-            }
-            fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<ScreenRotation, E> {
-                self.visit_u64(n.max(0) as u64)
-            }
-            fn visit_f64<E: serde::de::Error>(self, n: f64) -> Result<ScreenRotation, E> {
-                if n.is_nan() {
-                    return Err(E::custom("NaN rotation"));
-                }
-                self.visit_u64(n.round().max(0.0) as u64)
-            }
-        }
-        deserializer.deserialize_any(RotationVisitor)
-    }
 }
 
 /// Typed IPC commands shared between the daemon and the UI.
@@ -163,6 +116,96 @@ pub enum DaemonCommand {
 
     // Misc / global
     Rediscover,
+    /// Enable or disable a device plugin by id. Applies immediately and only
+    /// reconciles devices owned by that plugin.
+    SetPluginEnabled {
+        id: String,
+        enabled: bool,
+    },
+    /// Install a plugin package (a directory containing `plugin.yaml` + its
+    /// entry script) into the plugins directory. `source_dir` is a local
+    /// filesystem path — the GUI's folder picker already runs on the same
+    /// host as the daemon. The daemon validates the package before copying
+    /// it in. Applies immediately.
+    ImportPlugin {
+        source_dir: String,
+    },
+    /// Delete a user plugin script by id. Built-in plugins cannot be deleted
+    /// and the daemon rejects the request. Applies immediately.
+    DeletePlugin {
+        id: String,
+    },
+    /// Replace the set of permissions granted to a plugin. An empty `granted`
+    /// revokes everything, leaving the plugin inert if it declares any
+    /// permission. Permission and enabled state change atomically before the
+    /// plugin's devices are reconciled.
+    SetPluginTrust {
+        id: String,
+        granted: Vec<Permission>,
+        enabled: bool,
+    },
+    /// Replace a plugin's user-editable config values (see `ConfigFieldDef`).
+    /// A `secure` field's key is included only when the user typed a new
+    /// value; an absent secure key leaves the previously stored secret
+    /// unchanged, so secrets are never round-tripped through the GUI or
+    /// cleared by accident. Applies immediately.
+    SetPluginConfig {
+        id: String,
+        values: HashMap<String, String>,
+    },
+    /// Register a git-repo plugin source, cloning it and pinning `locked_sha` to the checked-out commit.
+    AddPluginRepo {
+        url: String,
+        branch: Option<String>,
+    },
+    /// Unregister a git-repo plugin source, purging every plugin id it contributed.
+    RemovePluginRepo {
+        slug: String,
+    },
+    /// List a remote git repo's branches without cloning it, replying with a
+    /// `repo_branches` frame. Used to populate the Add-repository branch picker.
+    ListRepoBranches {
+        url: String,
+    },
+    /// Check every registered repo's remote tip against `locked_sha`, replying with `plugin_repo_updates`.
+    CheckPluginRepoUpdates,
+    /// Fetch and check out a repo's remote tip, advancing `locked_sha`.
+    UpdatePluginRepo {
+        slug: String,
+    },
+    /// Fetch a repository and restore one skipped plugin directory from the
+    /// remote tip. Unlike `UpdatePluginRepo`, sibling paths are untouched.
+    RepairPluginRepoDir {
+        slug: String,
+        subpath: String,
+    },
+    /// Check repo-sourced plugins for a per-plugin content update, replying
+    /// with `plugin_updates`. `slug` scopes the check to one repo; `None`
+    /// checks every repo. Finer-grained than `CheckPluginRepoUpdates`.
+    CheckPluginUpdates {
+        slug: Option<String>,
+    },
+    /// Update one plugin: check out only its subtree from its repo's remote
+    /// tip, leaving sibling plugins in the same repo untouched. Never automatic.
+    UpdatePlugin {
+        plugin_id: String,
+    },
+    /// Update every plugin currently flagged with an update available, across every repo.
+    UpdateAllPlugins,
+    /// Enable or disable a single integration, independent of the generic
+    /// plugin toggle (which only governs whether its Lua may run at all —
+    /// see `SetPluginEnabled`). Applies immediately, scoped to just this
+    /// integration's root device and the devices it exposes.
+    SetIntegrationEnabled {
+        id: String,
+        enabled: bool,
+    },
+    /// Replace a single integration's user-editable config values and
+    /// reconnect just that integration. Applies immediately.
+    SetIntegrationConfig {
+        id: String,
+        values: HashMap<String, String>,
+    },
     SetLogLevel {
         level: String,
     },
@@ -173,6 +216,12 @@ pub enum DaemonCommand {
         close_to_tray: bool,
         suppress_dependency_warning: bool,
         hide_window_controls: bool,
+    },
+    /// Allow or deny the daemon contacting GitHub for official plugins and
+    /// automatic update checks. Granting triggers the deferred official-repo
+    /// clone and a startup update check.
+    SetPluginDownloadConsent {
+        allowed: bool,
     },
     MarkTourSeen {
         tour: String,
@@ -214,7 +263,6 @@ pub enum DaemonCommand {
     },
 
     // Fan speed / curves
-    #[serde(alias = "set_pump_duty")]
     SetFanSpeed {
         id: String,
         duty: u8,
@@ -253,8 +301,6 @@ pub enum DaemonCommand {
         name: String,
         led_count: u32,
         topology: ZoneTopology,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        kind: Option<String>,
     },
     RgbChainRemoveLink {
         id: String,
@@ -336,6 +382,11 @@ pub enum DaemonCommand {
     ListLcdImages,
     DeleteLcdImage {
         filename: String,
+    },
+    /// Fetch a plugin's display-only asset; the daemon replies with a `plugin_asset` frame of base64 bytes.
+    GetPluginAsset {
+        plugin_id: String,
+        name: String,
     },
 
     // Canvas
@@ -423,7 +474,6 @@ pub enum DaemonCommand {
     RenderLcdEditor {
         device_id: String,
         def: crate::lcd_custom::CustomTemplateDef,
-        #[serde(default)]
         known: HashMap<String, u64>,
     },
 
@@ -518,23 +568,11 @@ mod tests {
     }
 
     #[test]
-    fn screen_rotation_parses_string_and_legacy_integer() {
-        // Current daemon: string form.
+    fn screen_rotation_round_trips_as_string() {
         assert_eq!(
             serde_json::from_value::<ScreenRotation>(json!("r90")).unwrap(),
             ScreenRotation::R90
         );
-        // Legacy daemon: raw u32 degrees.
-        assert_eq!(
-            serde_json::from_value::<ScreenRotation>(json!(180)).unwrap(),
-            ScreenRotation::R180
-        );
-        // Unknown integer falls back to R0.
-        assert_eq!(
-            serde_json::from_value::<ScreenRotation>(json!(45)).unwrap(),
-            ScreenRotation::R0
-        );
-        // Round-trips through the string form.
         assert_eq!(
             serde_json::from_value::<ScreenRotation>(
                 serde_json::to_value(ScreenRotation::R180).unwrap()
@@ -646,6 +684,164 @@ mod tests {
     }
 
     #[test]
+    fn set_plugin_enabled_wire_format() {
+        let v = roundtrip(&DaemonCommand::SetPluginEnabled {
+            id: "nzxt_kraken".into(),
+            enabled: false,
+        });
+        assert_eq!(
+            v,
+            json!({"type": "set_plugin_enabled", "id": "nzxt_kraken", "enabled": false})
+        );
+    }
+
+    #[test]
+    fn import_plugin_wire_format() {
+        let v = roundtrip(&DaemonCommand::ImportPlugin {
+            source_dir: "/home/user/my-driver".into(),
+        });
+        assert_eq!(
+            v,
+            json!({"type": "import_plugin", "source_dir": "/home/user/my-driver"})
+        );
+    }
+
+    #[test]
+    fn delete_plugin_wire_format() {
+        let v = roundtrip(&DaemonCommand::DeletePlugin {
+            id: "my_driver".into(),
+        });
+        assert_eq!(v, json!({"type": "delete_plugin", "id": "my_driver"}));
+    }
+
+    #[test]
+    fn get_plugin_asset_wire_format() {
+        let v = roundtrip(&DaemonCommand::GetPluginAsset {
+            plugin_id: "my_driver".into(),
+            name: "logo.png".into(),
+        });
+        assert_eq!(
+            v,
+            json!({"type": "get_plugin_asset", "plugin_id": "my_driver", "name": "logo.png"})
+        );
+    }
+
+    #[test]
+    fn add_plugin_repo_wire_format() {
+        let v = roundtrip(&DaemonCommand::AddPluginRepo {
+            url: "https://example.com/foo.git".into(),
+            branch: Some("main".into()),
+        });
+        assert_eq!(
+            v,
+            json!({"type": "add_plugin_repo", "url": "https://example.com/foo.git", "branch": "main"})
+        );
+    }
+
+    #[test]
+    fn remove_plugin_repo_wire_format() {
+        let v = roundtrip(&DaemonCommand::RemovePluginRepo { slug: "foo".into() });
+        assert_eq!(v, json!({"type": "remove_plugin_repo", "slug": "foo"}));
+    }
+
+    #[test]
+    fn list_repo_branches_wire_format() {
+        let v = roundtrip(&DaemonCommand::ListRepoBranches {
+            url: "https://example.com/foo.git".into(),
+        });
+        assert_eq!(
+            v,
+            json!({"type": "list_repo_branches", "url": "https://example.com/foo.git"})
+        );
+    }
+
+    #[test]
+    fn check_plugin_repo_updates_wire_format() {
+        let v = roundtrip(&DaemonCommand::CheckPluginRepoUpdates);
+        assert_eq!(v, json!({"type": "check_plugin_repo_updates"}));
+    }
+
+    #[test]
+    fn update_plugin_repo_wire_format() {
+        let v = roundtrip(&DaemonCommand::UpdatePluginRepo { slug: "foo".into() });
+        assert_eq!(v, json!({"type": "update_plugin_repo", "slug": "foo"}));
+    }
+
+    #[test]
+    fn repair_plugin_repo_dir_wire_format() {
+        let v = roundtrip(&DaemonCommand::RepairPluginRepoDir {
+            slug: "official".into(),
+            subpath: "nzxt_kraken".into(),
+        });
+        assert_eq!(
+            v,
+            json!({"type": "repair_plugin_repo_dir", "slug": "official", "subpath": "nzxt_kraken"})
+        );
+    }
+
+    #[test]
+    fn check_plugin_updates_wire_format() {
+        let v = roundtrip(&DaemonCommand::CheckPluginUpdates {
+            slug: Some("foo".into()),
+        });
+        assert_eq!(v, json!({"type": "check_plugin_updates", "slug": "foo"}));
+    }
+
+    #[test]
+    fn update_plugin_wire_format() {
+        let v = roundtrip(&DaemonCommand::UpdatePlugin {
+            plugin_id: "wled_udp".into(),
+        });
+        assert_eq!(v, json!({"type": "update_plugin", "plugin_id": "wled_udp"}));
+    }
+
+    #[test]
+    fn update_all_plugins_wire_format() {
+        let v = roundtrip(&DaemonCommand::UpdateAllPlugins);
+        assert_eq!(v, json!({"type": "update_all_plugins"}));
+    }
+
+    #[test]
+    fn set_plugin_config_wire_format() {
+        let mut values = HashMap::new();
+        values.insert("host".to_string(), "127.0.0.1".to_string());
+        let v = roundtrip(&DaemonCommand::SetPluginConfig {
+            id: "openrgb".into(),
+            values,
+        });
+        assert_eq!(
+            v,
+            json!({"type": "set_plugin_config", "id": "openrgb", "values": {"host": "127.0.0.1"}})
+        );
+    }
+
+    #[test]
+    fn set_integration_enabled_wire_format() {
+        let v = roundtrip(&DaemonCommand::SetIntegrationEnabled {
+            id: "openrgb".into(),
+            enabled: false,
+        });
+        assert_eq!(
+            v,
+            json!({"type": "set_integration_enabled", "id": "openrgb", "enabled": false})
+        );
+    }
+
+    #[test]
+    fn set_integration_config_wire_format() {
+        let mut values = HashMap::new();
+        values.insert("host".to_string(), "127.0.0.1".to_string());
+        let v = roundtrip(&DaemonCommand::SetIntegrationConfig {
+            id: "openrgb".into(),
+            values,
+        });
+        assert_eq!(
+            v,
+            json!({"type": "set_integration_config", "id": "openrgb", "values": {"host": "127.0.0.1"}})
+        );
+    }
+
+    #[test]
     fn engine_config_constructors_set_only_their_field() {
         assert_eq!(
             roundtrip(&DaemonCommand::set_engine_enabled(
@@ -709,20 +905,6 @@ mod tests {
         let back: DaemonCommand = serde_json::from_value(v).unwrap();
         match back {
             DaemonCommand::RenderLcdEditor { known: k, .. } => assert_eq!(k, known),
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn render_lcd_editor_deserializes_legacy_json_without_known() {
-        let legacy = json!({
-            "type": "render_lcd_editor",
-            "device_id": "dev1",
-            "def": crate::lcd_custom::CustomTemplateDef::default(),
-        });
-        let back: DaemonCommand = serde_json::from_value(legacy).unwrap();
-        match back {
-            DaemonCommand::RenderLcdEditor { known, .. } => assert!(known.is_empty()),
             _ => panic!("wrong variant"),
         }
     }
@@ -797,14 +979,6 @@ mod tests {
             v,
             json!({"type": "rename_profile", "old_name": "old", "new_name": "new"})
         );
-    }
-
-    #[test]
-    fn set_pump_duty_aliases_set_fan_speed() {
-        let cmd: DaemonCommand =
-            serde_json::from_value(json!({"type": "set_pump_duty", "id": "p", "duty": 60}))
-                .unwrap();
-        assert!(matches!(cmd, DaemonCommand::SetFanSpeed { duty: 60, .. }));
     }
 
     #[test]

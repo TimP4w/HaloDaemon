@@ -226,16 +226,25 @@ mod linux {
         None
     }
 
+    /// Escape a plugin-controlled description for PulseAudio's quoted-value
+    /// syntax: drop control chars, cap length, then escape `\` and `'`.
+    fn escape_description(description: &str) -> String {
+        description
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(128)
+            .collect::<String>()
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+    }
+
     async fn create_null_sink(name: &str, description: &str) -> Result<u32> {
         load_module(&[
             "module-null-sink",
             &format!("sink_name={name}"),
-            // Outer '"' is the first char after '=', triggering PulseAudio quote mode so the
-            // space-separated description is preserved as a single value. Single quotes inside
-            // the description would end the value early, so they are escaped.
             &format!(
                 "sink_properties=\"node.description='{}'\"",
-                description.replace('\'', "\\'")
+                escape_description(description)
             ),
         ])
         .await
@@ -382,6 +391,13 @@ mod linux {
         #[test]
         fn sanitize_preserves_hyphens() {
             assert_eq!(sanitize("Arctis Nova Pro-X"), "halod_arctis_nova_pro-x");
+        }
+
+        #[test]
+        fn escape_description_neutralizes_quotes_backslashes_and_controls() {
+            assert_eq!(escape_description(r"a'b\c"), r"a\'b\\c");
+            assert!(!escape_description("a\nb\tc\0").contains('\n'));
+            assert!(escape_description(&"x".repeat(500)).len() <= 128 * 2);
         }
 
         #[test]

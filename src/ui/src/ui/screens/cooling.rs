@@ -58,10 +58,15 @@ pub fn show(
                     .filter(|d| has_fan_or_pump(d) && !model::is_hidden(d))
                     .collect();
 
-                ui.label(
+                let title_resp = ui.label(
                     egui::RichText::new(t!("cooling.title"))
                         .font(theme::bold(22.0))
                         .color(theme::TEXT),
+                );
+                crate::domain::tour::anchor(
+                    ui.ctx(),
+                    crate::domain::tour::AnchorId::CoolingCurve,
+                    title_resp.rect,
                 );
                 ui.add_space(3.0);
                 ui.label(
@@ -106,18 +111,7 @@ fn cooler_grid(
         }
         ui.columns(2, |cols| {
             for (i, dev) in pair.iter().enumerate() {
-                if row == 0 && i == 0 {
-                    let resp = cols[i].scope(|ui| {
-                        cooler_card(ui, dev, state, cmd, &sensors, time, page);
-                    });
-                    crate::domain::tour::anchor(
-                        cols[i].ctx(),
-                        crate::domain::tour::AnchorId::CoolingCurve,
-                        resp.response.rect,
-                    );
-                } else {
-                    cooler_card(&mut cols[i], dev, state, cmd, &sensors, time, page);
-                }
+                cooler_card(&mut cols[i], dev, state, cmd, &sensors, time, page);
             }
         });
     }
@@ -211,11 +205,13 @@ fn cooler_card(
                         &preset_display_name(preset),
                         active.as_deref() == Some(&preset.id),
                     ) {
-                        crate::domain::actions::cooling::set_fan_curve_preset(
+                        crate::runtime::ipc::send(
                             cmd,
-                            &dev.id,
-                            &preset.id,
-                            sensor_id.clone(),
+                            halod_shared::commands::DaemonCommand::SetFanCurvePreset {
+                                fan_id: dev.id.clone(),
+                                preset: preset.id.clone(),
+                                sensor_id: sensor_id.clone(),
+                            },
                         );
                     }
                 }
@@ -250,13 +246,15 @@ fn cooler_card(
                     }
                 });
             if let Some(sel) = pick {
-                crate::domain::actions::cooling::set_fan_curve_points(
+                crate::runtime::ipc::send(
                     cmd,
-                    &dev.id,
-                    curve
-                        .map(|c| c.points.clone())
-                        .unwrap_or_else(default_curve),
-                    sel,
+                    halod_shared::commands::DaemonCommand::SetFanCurvePoints {
+                        fan_id: dev.id.clone(),
+                        points: curve
+                            .map(|c| c.points.clone())
+                            .unwrap_or_else(default_curve),
+                        sensor_id: sel,
+                    },
                 );
             }
         });

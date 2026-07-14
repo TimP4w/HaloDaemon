@@ -1,0 +1,15 @@
+integrations:
+  title: Integrations
+  subtitle: Connect HaloDaemon to other applications. Devices from active integrations become available in the workspace.
+  empty_title: No integrations available
+  empty_hint: You don't have any integrations yet.
+  configure: Configure
+  hide_configure: Hide
+  status_connected: Connected
+  status_connecting: Not connected
+  status_disabled: Disabled
+  devices_exposed: "%{count} devices"
+  issue_connect_failed: Connection failed
+  issue_runtime_error: Runtime error
+  issue_details: Details
+  issue_modal_title: "Integration issue: %{integration}"

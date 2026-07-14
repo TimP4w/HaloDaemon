@@ -1,0 +1,209 @@
+tour:
+  skip: Salta
+  next: Avanti
+  done: Fine
+  page_home:
+    find_device:
+      title: "Trova un dispositivo"
+      body: "Filtra l'elenco dei dispositivi cercando per nome o produttore."
+    manage_device:
+      title: "Gestisci un dispositivo"
+      body: "Fai clic con il pulsante destro su una scheda per rinominare, nascondere o disabilitare un dispositivo."
+    hidden_devices:
+      title: "Dispositivi nascosti"
+      body: "Qui puoi scegliere se mostrare o nascondere i dispositivi che hai contrassegnato come nascosti."
+    sidebar_home:
+      title: "Home"
+      body: "La pagina Home elenca tutti i dispositivi collegati. Puoi cercarli, nasconderli o gestirli facendo clic con il pulsante destro sulla relativa scheda."
+    sidebar_lighting:
+      title: "Illuminazione RGB"
+      body: "Applica contemporaneamente un colore o un effetto a tutti i dispositivi RGB. Qui puoi creare, importare e gestire effetti personalizzati."
+    sidebar_cooling:
+      title: "Raffreddamento"
+      body: "Visualizza le curve di ventole e pompe, le letture dei sensori e i profili di raffreddamento di tutti i dispositivi."
+    sidebar_canvas:
+      title: "Canvas degli effetti"
+      body: "Combina effetti su più dispositivi in un canvas condiviso. Sposta le zone, sovrapponi gli effetti e regola il campionamento."
+    sidebar_integrations:
+      title: "Integrazioni"
+      body: "Collega HaloDaemon ad altre applicazioni e servizi. Le integrazioni connesse espongono i loro dispositivi nello spazio di lavoro."
+    sidebar_plugins:
+      title: "Plugin"
+      body: "Estendi HaloDaemon con supporto hardware, effetti e integrazioni. Qui puoi controllare aggiornamenti, errori e permessi dei plugin."
+    sidebar_settings:
+      title: "Impostazioni"
+      body: "Qui trovi le preferenze dell'applicazione, i controlli dei motori e il comportamento della finestra quando la chiudi nell'area di notifica."
+    switch_profiles:
+      title: "Cambia profili"
+      body: "Fai clic sul selettore del profilo nella barra del titolo per cambiare profilo o gestire le configurazioni salvate."
+  page_lighting:
+    pick_effect:
+      title: "Scegli un effetto"
+      body: "Scegli un effetto di illuminazione da applicare ai tuoi dispositivi."
+    create_effect:
+      title: "Crea un effetto"
+      body: "Costruisci il tuo effetto personalizzato con il designer: mescola strati, colori e animazioni."
+    import_effect:
+      title: "Importa un effetto"
+      body: "Carica un file di effetto salvato da un'altra macchina o da un preset condiviso."
+    choose_targets:
+      title: "Scegli i dispositivi e le zone"
+      body: "Seleziona a quali dispositivi e zone applicare l'effetto."
+  page_cooling:
+    overview:
+      title: "Panoramica del raffreddamento"
+      body: "Qui trovi tutti i dispositivi di raffreddamento, con i relativi profili e le letture dei sensori. Per modificare la curva di una ventola o di una pompa, apri la scheda Raffreddamento del dispositivo."
+  page_canvas:
+    create_instance:
+      title: "Crea un'istanza di effetto"
+      body: "Aggiungi un'istanza, espandila e fai clic sull'etichetta di una zona per assegnarla."
+    arrange_remove:
+      title: "Disponi e rimuovi"
+      body: "Trascina una zona per riposizionarla; selezionane una e premi Elimina per rimuoverla."
+  page_settings:
+    application:
+      title: "Preferenze dell'applicazione"
+      body: "Qui trovi la chiusura nell'area di notifica, le verifiche all'avvio e le altre preferenze generali dell'applicazione."
+    engines:
+      title: "Motori"
+      body: "Attiva o disattiva i motori delle curve delle ventole, del canvas e degli schermi LCD, quindi regolane le frequenze."
+  page_profile:
+    settings:
+      title: "Impostazioni profilo"
+      body: "Rinomina il profilo, attivalo e configura qui sotto le regole di attivazione automatica."
+    auto_activate:
+      title: "Attivazione automatica tramite le app"
+      body: "Aggiungi i processi che devono attivare automaticamente questo profilo quando l'app corrispondente è in primo piano."
+    overrides:
+      title: "Impostazioni specifiche per dispositivo"
+      body: "Le modifiche apportate ai dispositivi mentre il profilo è attivo vengono salvate qui. Puoi ripristinarle singolarmente o tornare in seguito per perfezionarle."
+  page_device:
+    back:
+      title: "Torna a tutti i dispositivi"
+      body: "Torna all'elenco dei dispositivi da qui."
+    rename:
+      title: "Rinomina questo dispositivo"
+      body: "Fai clic sulla matita accanto al nome per rinominare questo dispositivo."
+    tabs:
+      title: "Schede delle funzionalità"
+      body: "Ogni scheda contiene una delle funzionalità supportate dal dispositivo."
+  tab_devices:
+    connected:
+      title: "Dispositivi collegati"
+      body: "Qui compaiono i dispositivi collegati tramite questo hub o ricevitore."
+  tab_lighting:
+    choose_effect:
+      title: "Scegli un effetto"
+      body: "Scegli tra un colore statico, la modalità Dipingi, gli effetti nativi e quelli gestiti dal motore. Ogni opzione produce un'illuminazione diversa."
+    paint:
+      title: "Dipingi i LED manualmente"
+      body: "In modalità Dipingi puoi fare clic sui singoli LED o trascinare il puntatore per assegnare un colore diverso a ciascuno."
+    place_canvas:
+      title: "Aggiungi al canvas"
+      body: "Aggiungi il dispositivo al Canvas degli effetti, dove puoi combinare più effetti su diversi dispositivi."
+    transform:
+      title: "Trasforma il layout della zona"
+      body: "Capovolgi, scambia, inverti o ruota la disposizione della zona in modo che gli effetti scorrano nella direzione corretta sul dispositivo."
+  tab_chains:
+    led_chains:
+      title: "Catene LED"
+      body: "Questo dispositivo dispone di connettori per LED indirizzabili. Ogni connettore può controllare una catena di strisce, anelli o griglie. Configurali qui per indicare al daemon che cosa è collegato."
+    discover:
+      title: "Rileva i collegamenti"
+      body: "Fai clic su Rileva per cercare sul connettore i dispositivi ARGB già collegati. I collegamenti rilevati automaticamente non possono essere modificati."
+    add_link:
+      title: "Aggiungi un collegamento manualmente"
+      body: "Usa Aggiungi collegamento per configurare una nuova striscia o un nuovo anello. Scegli il nome, la disposizione e il numero di LED, quindi effettua il collegamento."
+  tab_cooling:
+    pick_sensor:
+      title: "Scegli un sensore"
+      body: "Scegli il sensore di temperatura che deve controllare la curva della ventola o della pompa. La lettura in tempo reale compare qui sotto."
+    apply_preset:
+      title: "Applica un preset"
+      body: "Per iniziare rapidamente, carica una curva predefinita dal selettore dei profili."
+    edit_curve:
+      title: "Modifica la curva"
+      body: "Trascina i punti per definire la velocità in base alla temperatura. Fai clic su uno spazio vuoto per aggiungere un punto oppure usa il pulsante destro su un punto per rimuoverlo."
+  tab_lcd:
+    choose_mode:
+      title: "Scegli una modalità"
+      body: "La modalità Immagine mostra un'immagine statica o una GIF; la modalità Video riproduce un file multimediale e richiede ffmpeg; la modalità Editor ti permette di creare un template personalizzato trascinando i widget."
+    preview:
+      title: "Anteprima e impostazioni"
+      body: "L'anteprima in tempo reale mostra ciò che appare sul dispositivo. Usa i controlli in basso per regolare la luminosità, la rotazione e le altre impostazioni dello schermo."
+  tab_equalizer:
+    equalizer:
+      title: "Equalizzatore"
+      body: "Scegli un preset o trascina le bande per modellare l'uscita audio."
+  tab_keys:
+    select_action:
+      title: "Seleziona un'azione"
+      body: "Scegli una categoria, ad esempio tasto, comando multimediale, macro o pulsante del mouse, quindi configurane i parametri qui sotto."
+    record_macro:
+      title: "Registra una macro"
+      body: "Le macro riproducono una sequenza di pressioni di tasti e ritardi. Registra, riordina e modifica i passaggi qui."
+    layer_shift:
+      title: "Livello alternativo"
+      body: "Imposta un'azione diversa da eseguire mentre tieni premuto il tasto del livello alternativo. Puoi assegnare questo tasto solo nel livello di base."
+  tab_performance:
+    dpi_stages:
+      title: "Livelli DPI"
+      body: "Imposta i livelli DPI tra cui può passare il dispositivo."
+  tab_controls:
+    device_controls:
+      title: "Controlli dispositivo"
+      body: "Qui trovi le opzioni e le impostazioni specifiche del produttore per questo dispositivo."
+  tab_onboard:
+    onboard_profiles:
+      title: "Profili onboard"
+      body: "Cambia o sovrascrivi i profili salvati nella memoria interna del dispositivo."
+  tab_pairing:
+    pairing:
+      title: "Accoppiamento"
+      body: "Da qui puoi associare un nuovo dispositivo wireless al ricevitore."
+  lcd_editor:
+    palette:
+      title: "Tavolozza widget"
+      body: "Trascina un widget sullo schermo per aggiungerlo al template."
+    arrange:
+      title: "Disponi il template"
+      body: "Trascina i widget per posizionarli e selezionane uno per modificarne le impostazioni."
+    variant:
+      title: "Varianti e parametri"
+      body: "Ogni widget offre più varianti. Ad esempio, un indicatore può mostrare il valore di un sensore o il livello audio. Puoi anche regolare dimensioni, colore e altri parametri."
+  page_effect_designer:
+    save:
+      title: "Salva il tuo effetto"
+      body: "Assegna un nome all'effetto e fai clic su Salva per aggiungerlo alla libreria. Gli effetti salvati compariranno nei selettori di Illuminazione RGB e del canvas."
+    preview:
+      title: "Anteprima in tempo reale"
+      body: "Controlla l'aspetto dell'effetto su diverse disposizioni: striscia, anello, matrice e hub per ventole. Le modifiche compaiono in tempo reale."
+    tune:
+      title: "Regola i parametri"
+      body: "Scegli un generatore, regola i colori e la velocità, quindi modella la curva di luminosità. Ogni controllo modifica la formula procedurale mostrata sopra il grafico."
+  page_plugins:
+    overview:
+      title: "Cosa sono i plugin?"
+      body: "I plugin aggiungono supporto hardware, effetti e integrazioni senza ricompilare il daemon. Sono estensioni separate e controllate tramite permessi."
+    official_repo:
+      title: "Il repository ufficiale"
+      body: "Il repository ufficiale è la fonte attendibile dei plugin mantenuti da HaloDaemon. I suoi plugin possono essere aggiornati insieme da questa pagina."
+    add_plugin:
+      title: "Aggiungi un plugin"
+      body: "Usa Aggiungi plugin per caricare una cartella locale. Controlla dettagli e permessi prima di abilitarla."
+    add_repo:
+      title: "Aggiungi un repository"
+      body: "Aggiungi un altro repository Git per usare plugin della comunità o privati. Puoi scegliere un branch quando disponibile."
+    toggle:
+      title: "Abilita o disabilita un plugin"
+      body: "Usa l'interruttore nella riga del plugin per controllarne l'attivazione. Disabilitarlo rimuove i dispositivi o gli effetti che fornisce."
+    permissions:
+      title: "Permessi del plugin"
+      body: "I permessi spiegano cosa può usare un plugin, ad esempio rete o orologio di sistema. Concedi solo ciò di cui ti fidi e revoca l'accesso dai dettagli."
+  page_integrations:
+    overview:
+      title: "Integrazioni"
+      body: "Le integrazioni collegano HaloDaemon a un'altra applicazione o servizio. Le integrazioni connesse espongono i loro dispositivi nello spazio di lavoro."
+    toggle:
+      title: "Connetti un'integrazione"
+      body: "Usa l'interruttore per connettere o disconnettere un'integrazione. Configura eventuali endpoint o account richiesti prima di abilitarla."

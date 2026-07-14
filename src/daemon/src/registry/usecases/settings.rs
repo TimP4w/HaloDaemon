@@ -15,62 +15,64 @@ pub async fn set_engine_config(
 ) -> Result<()> {
     let failsafe_duty = failsafe_duty.map(|d| d.min(100));
 
-    let cfg_snap = {
+    {
         let mut cfg = app.config.write().await;
         match kind {
             EngineKind::FanCurve => {
                 if let Some(v) = enabled {
-                    cfg.global.engine_fan_curve_enabled = v;
+                    cfg.cooling.fan_curve_enabled = v;
                 }
                 if let Some(ms) = tick_ms {
-                    cfg.global.engine_fan_curve_tick_ms = ms.clamp(500, 60_000);
+                    cfg.cooling.fan_curve_tick_ms = ms.clamp(500, 60_000);
                 }
                 if let Some(d) = failsafe_duty {
-                    cfg.global.fan_failsafe_duty = d;
+                    cfg.cooling.fan_failsafe_duty = d;
                 }
             }
             EngineKind::Canvas => {
                 if let Some(v) = enabled {
-                    cfg.global.engine_canvas_enabled = v;
+                    cfg.rgb.canvas_enabled = v;
                 }
                 if let Some(fps) = fps {
-                    cfg.global.engine_canvas_fps = fps.clamp(1, 60) as u32;
+                    cfg.rgb.canvas_fps = fps.clamp(1, 60) as u32;
                 }
             }
             EngineKind::Lcd => {
                 if let Some(v) = enabled {
-                    cfg.global.engine_lcd_enabled = v;
+                    cfg.lcd.enabled = v;
                 }
                 if let Some(fps) = fps {
-                    cfg.global.engine_lcd_fps = fps.clamp(1, 60) as u32;
+                    cfg.lcd.fps = fps.clamp(1, 60) as u32;
                 }
             }
         }
-        cfg.global.clone()
-    };
+    }
 
     app.request_config_save();
 
     // Signal the affected engine to re-read config.
     match kind {
         EngineKind::FanCurve => {
+            let cooling = app.config.read().await.cooling.clone();
             if let Some(tx) = app.cooling.cfg_tx() {
-                let _ = tx.send(EngineRunConfig::fan_curve(&cfg_snap));
+                let _ = tx.send(EngineRunConfig::fan_curve(&cooling));
             }
             if failsafe_duty.is_some() {
                 if let Some(tx) = app.cooling.failsafe_duty_tx() {
-                    let _ = tx.send(cfg_snap.fan_failsafe_duty);
+                    let _ = tx.send(cooling.fan_failsafe_duty);
                 }
             }
         }
         EngineKind::Canvas => {
+            let rgb = app.config.read().await.rgb.clone();
             if let Some(tx) = app.lighting.cfg_tx() {
-                let _ = tx.send(EngineRunConfig::canvas(&cfg_snap));
+                let _ = tx.send(EngineRunConfig::canvas(&rgb));
             }
         }
         EngineKind::Lcd => {
+            let lcd = app.config.read().await.lcd.clone();
             if let Some(tx) = app.lcd.cfg_tx() {
-                let _ = tx.send(EngineRunConfig::lcd(&cfg_snap));
+                let _ = tx.send(EngineRunConfig::lcd(&lcd));
             }
         }
     }
@@ -87,7 +89,7 @@ pub async fn set_log_level(level: String, app: Arc<AppState>) -> Result<()> {
 
     {
         let mut cfg = app.config.write().await;
-        cfg.global.log_level = level.to_lowercase();
+        cfg.gui.log_level = level.to_lowercase();
     }
     app.request_config_save();
     log::info!("Log level changed to {level}");
@@ -101,7 +103,7 @@ pub async fn set_language(lang: String, app: Arc<AppState>) -> Result<()> {
     }
     {
         let mut cfg = app.config.write().await;
-        cfg.global.language = lang.clone();
+        cfg.gui.language = lang.clone();
     }
     app.request_config_save();
     log::info!("UI language changed to {lang}");
@@ -116,18 +118,57 @@ pub async fn set_ui_config(
 ) -> Result<()> {
     {
         let mut cfg = app.config.write().await;
-        cfg.global.close_to_tray = close_to_tray;
-        cfg.global.suppress_dependency_warning = suppress_dependency_warning;
-        cfg.global.hide_window_controls = hide_window_controls;
+        cfg.gui.close_to_tray = close_to_tray;
+        cfg.gui.suppress_dependency_warning = suppress_dependency_warning;
+        cfg.gui.hide_window_controls = hide_window_controls;
     }
     app.request_config_save();
+    Ok(())
+}
+
+/// Allow or deny the daemon contacting GitHub for official plugins and
+/// automatic update checks. On a fresh grant, download the (previously
+/// deferred) official repo and kick off a background update check.
+pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> Result<()> {
+    use halod_shared::types::PluginDownloadConsent;
+    let newly_allowed = {
+        let mut cfg = app.config.write().await;
+        let was_allowed = cfg.gui.plugin_downloads == PluginDownloadConsent::Allowed;
+        cfg.gui.plugin_downloads = if allowed {
+            PluginDownloadConsent::Allowed
+        } else {
+            PluginDownloadConsent::Denied
+        };
+        allowed && !was_allowed
+    };
+    app.request_config_save();
+    if newly_allowed {
+        crate::registry::ensure_official_repo(&app).await;
+        super::plugins::reload_registry(&app).await;
+        crate::registry::notify_ungranted_plugins(&app).await;
+        let official_plugins = app
+            .registry
+            .list(&*app.secret_store)
+            .into_iter()
+            .filter_map(|p| match p.source {
+                halod_shared::types::PluginSource::Repo { slug }
+                    if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG =>
+                {
+                    Some(p.id)
+                }
+                _ => None,
+            })
+            .collect();
+        super::plugins::apply_repo_plugins(app.clone(), official_plugins).await?;
+        crate::registry::start_update_check(app.clone()).await;
+    }
     Ok(())
 }
 
 pub async fn mark_tour_seen(tour: String, app: Arc<AppState>) -> Result<()> {
     {
         let mut cfg = app.config.write().await;
-        cfg.global.seen_tours.insert(tour);
+        cfg.gui.seen_tours.insert(tour);
     }
     app.request_config_save();
     Ok(())
@@ -136,7 +177,7 @@ pub async fn mark_tour_seen(tour: String, app: Arc<AppState>) -> Result<()> {
 pub async fn reset_tours_seen(app: Arc<AppState>) -> Result<()> {
     {
         let mut cfg = app.config.write().await;
-        cfg.global.seen_tours.clear();
+        cfg.gui.seen_tours.clear();
     }
     app.request_config_save();
     Ok(())
@@ -144,7 +185,18 @@ pub async fn reset_tours_seen(app: Arc<AppState>) -> Result<()> {
 
 pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     log::info!("Rediscovery triggered via UI");
-    crate::registry::discovery::discover_devices(Arc::clone(&app)).await;
+    // Re-read the plugins directory so a freshly-dropped script is picked up by
+    // a "Scan now" without restarting the daemon.
+    {
+        let cfg = app.config.read().await;
+        app.registry.load_all_with_repos(
+            &crate::config::plugins_dir(),
+            &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
+        );
+        app.registry.replace_policy(&cfg.plugins);
+    }
+    crate::registry::notify_ungranted_plugins(&app).await;
+    crate::registry::usecases::plugins::reconcile_full(&app).await;
 
     let controllers: Vec<std::sync::Arc<dyn crate::drivers::Device>> =
         app.devices.read().await.clone();
@@ -178,7 +230,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(!app.config.read().await.global.engine_fan_curve_enabled);
+            assert!(!app.config.read().await.cooling.fan_curve_enabled);
         })
         .await;
     }
@@ -196,7 +248,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(app.config.read().await.global.engine_fan_curve_tick_ms, 500);
+            assert_eq!(app.config.read().await.cooling.fan_curve_tick_ms, 500);
         })
         .await;
     }
@@ -207,7 +259,7 @@ mod tests {
             set_engine_config(EngineKind::Canvas, None, None, Some(999), None, app.clone())
                 .await
                 .unwrap();
-            assert_eq!(app.config.read().await.global.engine_canvas_fps, 60);
+            assert_eq!(app.config.read().await.rgb.canvas_fps, 60);
         })
         .await;
     }
@@ -224,7 +276,7 @@ mod tests {
     async fn set_log_level_updates_config() {
         with_tmp_config(|app| async move {
             set_log_level("debug".into(), app.clone()).await.unwrap();
-            assert_eq!(app.config.read().await.global.log_level, "debug");
+            assert_eq!(app.config.read().await.gui.log_level, "debug");
         })
         .await;
     }
@@ -241,7 +293,7 @@ mod tests {
     async fn set_language_persists_supported_code() {
         with_tmp_config(|app| async move {
             set_language("EN".into(), app.clone()).await.unwrap();
-            assert_eq!(app.config.read().await.global.language, "en");
+            assert_eq!(app.config.read().await.gui.language, "en");
         })
         .await;
     }
@@ -251,9 +303,9 @@ mod tests {
         with_tmp_config(|app| async move {
             set_ui_config(false, true, true, app.clone()).await.unwrap();
             let cfg = app.config.read().await;
-            assert!(!cfg.global.close_to_tray);
-            assert!(cfg.global.suppress_dependency_warning);
-            assert!(cfg.global.hide_window_controls);
+            assert!(!cfg.gui.close_to_tray);
+            assert!(cfg.gui.suppress_dependency_warning);
+            assert!(cfg.gui.hide_window_controls);
         })
         .await;
     }
@@ -271,9 +323,9 @@ mod tests {
                 .await
                 .unwrap();
             let cfg = app.config.read().await;
-            assert_eq!(cfg.global.seen_tours.len(), 2);
-            assert!(cfg.global.seen_tours.contains("page:home"));
-            assert!(cfg.global.seen_tours.contains("tab:cooling"));
+            assert_eq!(cfg.gui.seen_tours.len(), 2);
+            assert!(cfg.gui.seen_tours.contains("page:home"));
+            assert!(cfg.gui.seen_tours.contains("tab:cooling"));
         })
         .await;
     }
@@ -285,7 +337,7 @@ mod tests {
                 .await
                 .unwrap();
             reset_tours_seen(app.clone()).await.unwrap();
-            assert!(app.config.read().await.global.seen_tours.is_empty());
+            assert!(app.config.read().await.gui.seen_tours.is_empty());
         })
         .await;
     }
@@ -296,7 +348,7 @@ mod tests {
             set_engine_config(EngineKind::Lcd, Some(false), None, None, None, app.clone())
                 .await
                 .unwrap();
-            assert!(!app.config.read().await.global.engine_lcd_enabled);
+            assert!(!app.config.read().await.lcd.enabled);
         })
         .await;
     }
@@ -307,7 +359,7 @@ mod tests {
             set_engine_config(EngineKind::Lcd, None, None, Some(999), None, app.clone())
                 .await
                 .unwrap();
-            assert_eq!(app.config.read().await.global.engine_lcd_fps, 60);
+            assert_eq!(app.config.read().await.lcd.fps, 60);
         })
         .await;
     }

@@ -1,0 +1,88 @@
+misc:
+  # effect_designer.rs
+  designer_back_canvas: Effects Canvas
+  designer_back_lighting: RGB Lighting
+  designer_title: Effect Designer
+  designer_save: Save effect
+  designer_invalid_name: Invalid name
+  designer_reset: Reset
+  designer_subtitle: "Procedural effect · rendered on the canvas or sent directly to individual LEDs"
+  designer_name_hint: Effect name
+  designer_new_effect_name: New effect
+  designer_live_preview: Live preview
+  designer_rig_strip: 40-LED strip
+  designer_rig_ring: 32-LED ring
+  designer_rig_matrix: 8x4 matrix
+  designer_rig_triple: "Triple ring · fan hub (Ring scope below)"
+  designer_brightness_formula: "Brightness · b(p)"
+  designer_generator: Generator
+  designer_motion: Motion
+  designer_direction: Direction
+  designer_speed: Speed
+  designer_repeats: Repeats
+  designer_ring_scope: "Ring scope · multi-ring zones (e.g. triple fans)"
+  designer_shape: Shape
+  designer_decay: Decay
+  designer_width: Width
+  designer_sharpness: Sharpness
+  designer_color: Color
+  designer_color_a: Color A
+  designer_color_b: Color B
+  designer_brightness_floor: Brightness floor
+  designer_saturation: Saturation
+  designer_hue_drift: Hue drift
+  designer_gen_sine: Sine
+  designer_gen_pulse: Pulse
+  designer_gen_comet: Comet
+  designer_gen_sawtooth: Sawtooth
+  designer_gen_twinkle: Twinkle
+  designer_gen_noise: Noise
+  designer_gen_rain: Rain
+  designer_dir_forward: Forward
+  designer_dir_reverse: Reverse
+  designer_dir_center: Center
+  designer_cmode_solid: Solid
+  designer_cmode_gradient: Gradient
+  designer_cmode_spectrum: Spectrum
+  designer_ring_whole: Whole zone
+  designer_ring_separate: Separate rings
+  designer_color_cycle_speed: Color cycle speed
+  designer_phase_spread: Phase spread
+  designer_ambient_color: Ambient color
+  # radar.rs
+  radar_daemon_down: Daemon not running
+  radar_daemon_down_sub: Start discovery to detect your devices
+  radar_one_device_ready: 1 device ready
+  radar_devices_ready: "%{found} devices ready"
+  radar_all_connected: All peripherals connected to the engine
+  radar_checking_updates: "Checking for plugin updates…"
+  radar_scanning: "Scanning for devices…"
+  radar_scan_fallback: "%{found} found · scanning…"
+  radar_scan_detail: "%{found} found · Scanning %{detail}"
+  # device/macro_editor.rs
+  macro_full: The sequence is full. Remove some steps to add more.
+  macro_unreleased: Some keys are still held at the end of the sequence. They will be released automatically after playback.
+  macro_stop: "■ Stop"
+  macro_record: "● Record"
+  macro_play: "▶ Play"
+  macro_clear: Clear
+  macro_hint_recording: Recording in progress. Press keys to record them; pauses will become waits. Select Stop to save.
+  macro_hint_empty: "Record a sequence or add steps below. Drag steps to reorder them; drag the edge of a wait to change its duration."
+  macro_hint_playback: "Playback sends key presses to the focused window. Drag steps to reorder them; drag the edge of a wait to change its duration."
+  macro_click_to_record: Click in here to record mouse buttons
+  macro_add_step: ADD STEP
+  macro_press_key: "press a key…"
+  macro_add_key_down: "+ Key ↓"
+  macro_add_key_up: "+ Key ↑"
+  macro_add_mouse_up: "+ Mouse ↑"
+  macro_add_mouse_down: "+ Mouse ↓"
+  macro_add_wait: "+ Wait"
+  macro_mouse_left: Left
+  macro_mouse_right: Right
+  macro_mouse_middle: Middle
+  macro_mouse_back: Back
+  macro_mouse_forward: Forward
+  # widgets.rs
+  widget_up_to: up to
+  widget_from: from
+  widget_add_step: "+ Add step"

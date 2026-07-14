@@ -16,11 +16,12 @@ use super::sprites::{
 };
 use super::{send_def, DeviceUi, ResizePreview, TabCtx};
 use crate::ui::components as widgets;
-use crate::ui::screens::device::lcd::gif::{decode_next_gif, decode_next_thumb};
+use crate::ui::screens::device::lcd::gif::decode_next_thumb;
 use crate::ui::screens::device::lcd::preview::{cover_uv, paint_image_circle, panel_size};
 use crate::ui::theme;
 
 /// Screen distance from a selected widget's top edge to its rotation handle.
+#[cfg(test)]
 const ROTATE_DIST: f32 = 20.0;
 
 /// `egui` fonts render visually larger than the daemon's `ab_glyph` fonts
@@ -70,17 +71,6 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
         .filter(|f| !f.is_empty())
         .collect();
     decode_next_thumb(ui, ctx, st, image_files.iter());
-    decode_next_gif(ui, ctx, st, image_files.iter());
-    // Evict GIF textures for files no longer referenced by any Image widget —
-    // otherwise a long-lived editor tab accumulates GPU textures for every
-    // GIF ever placed and removed.
-    let referenced: std::collections::HashSet<String> = image_files.iter().cloned().collect();
-    let current: Vec<String> = st.lcd.gif_widget_tex.keys().cloned().collect();
-    let keep: std::collections::HashSet<String> =
-        crate::ui::screens::device::lcd::gif::retained_gif_filenames(current.iter(), &referenced)
-            .into_iter()
-            .collect();
-    st.lcd.gif_widget_tex.retain(|k, _| keep.contains(k));
     // Also decode the bundled logo if any Logo widget is present.
     if st
         .lcd

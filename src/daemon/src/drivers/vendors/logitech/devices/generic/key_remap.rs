@@ -69,6 +69,9 @@ impl LogitechDevice {
             };
             (changed, held)
         };
+        if !online {
+            app.input.layer_shift_clear_device(&self.id);
+        }
         if !held.is_empty()
             && app
                 .input
@@ -200,15 +203,23 @@ impl LogitechDevice {
     pub(super) async fn apply_reprog_mappings(&self) {
         let is_native = is_native_mapping;
 
-        let (rc_idx, gkey_idx, spy_idx, mappings) = {
+        let (rc_idx, gkey_idx, spy_idx, mappings, buttons) = {
             let state = self.state.lock().await;
             (
                 state.features.get(&feature::REPROG_CONTROLS_V4).copied(),
                 state.features.get(&feature::GKEY).copied(),
                 state.features.get(&feature::MOUSE_BUTTON_SPY).copied(),
                 state.remap.button_mappings.clone(),
+                state.remap.reprog_cids.clone(),
             )
         };
+        if let Err(e) = crate::input::validate::validate_button_mappings(&buttons, &mappings) {
+            log::warn!(
+                "[{}] refusing invalid key-remap state before hardware apply: {e:#}",
+                self.id
+            );
+            return;
+        }
         let any_mapped = mappings.iter().any(|m| !is_native(m));
 
         // GKEY backend — single global software-control toggle.
@@ -540,6 +551,7 @@ impl KeyRemapCapability for LogitechDevice {
             {
                 bail!("key remapping requires host mode");
             }
+            crate::input::validate::validate_cid(&state.remap.reprog_cids, &mapping)?;
         }
         {
             let mut state = self.state.lock().await;
@@ -624,6 +636,11 @@ impl KeyRemapCapability for LogitechDevice {
 
     async fn restore_state(&self, v: &serde_json::Value) {
         if let Ok(mappings) = serde_json::from_value::<Vec<ButtonMapping>>(v.clone()) {
+            let buttons = self.state.lock().await.remap.reprog_cids.clone();
+            if let Err(e) = crate::input::validate::validate_button_mappings(&buttons, &mappings) {
+                log::warn!("[{}] rejecting invalid restored mappings: {e:#}", self.id);
+                return;
+            }
             {
                 let mut st = self.state.lock().await;
                 st.remap.button_mappings = mappings;

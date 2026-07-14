@@ -33,14 +33,18 @@ const CUSTOM_PREFIX: &str = "custom:";
 
 /// Tab indices for the unified RGB Lighting view.
 pub(crate) const TAB_CANVAS: usize = 0;
+#[expect(dead_code, reason = "stable direct-lighting tab index")]
 pub(crate) const TAB_DIRECT: usize = 1;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Collapsed device target card height.
 const CARD_BASE_H: f32 = 58.0;
-/// Extra height added when zone pills are expanded.
-const CARD_ZONE_H: f32 = 56.0;
+/// Vertical padding above the first / below the last zone-pill row.
+const ZONE_PAD_TOP: f32 = 10.0;
+const ZONE_PAD_BOTTOM: f32 = 14.0;
+/// Gap between wrapped zone pills (both axes).
+const ZONE_PILL_GAP: f32 = 6.0;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -141,12 +145,7 @@ pub fn show(
                             .color(theme::TEXT_MUT),
                     );
                 });
-                canvas::chrome(
-                    ui,
-                    canvas_ui,
-                    cmd,
-                    state.global_config.engine_canvas_enabled,
-                );
+                canvas::chrome(ui, canvas_ui, cmd, state.lighting.config.canvas_enabled);
             });
             ui.add_space(14.0);
             let labels = [t!("lighting.tab_canvas"), t!("lighting.tab_direct")];
@@ -220,10 +219,10 @@ fn direct_effects(
 /// profile switch. Offline devices stay in the saved selection so reconnecting
 /// restores them.
 fn seed_if_profile_changed(st: &mut LightingUi, state: &AppState) {
-    if st.seeded_for.as_deref() != Some(state.active_profile.as_str()) {
+    if st.seeded_for.as_deref() != Some(state.profiles.active.as_str()) {
         st.sel_ids = state.lighting.targets.device_ids.clone();
         st.zone_sel = state.lighting.targets.zones.clone();
-        st.seeded_for = Some(state.active_profile.clone());
+        st.seeded_for = Some(state.profiles.active.clone());
     }
 }
 
@@ -792,7 +791,7 @@ fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut L
                 .iter()
                 .map(|d| {
                     if st.expanded_id.as_deref() == Some(d.id.as_str()) {
-                        CARD_BASE_H + CARD_ZONE_H
+                        CARD_BASE_H + expanded_zone_height(ui, d, col_w)
                     } else {
                         CARD_BASE_H
                     }
@@ -831,10 +830,12 @@ fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut L
         );
     });
     if persist {
-        crate::domain::actions::lighting::set_lighting_targets(
+        crate::runtime::ipc::send(
             cmd,
-            st.sel_ids.clone(),
-            st.zone_sel.clone(),
+            halod_shared::commands::DaemonCommand::SetLightingTargets {
+                device_ids: st.sel_ids.clone(),
+                zones: st.zone_sel.clone(),
+            },
         );
     }
     apply
@@ -856,6 +857,64 @@ struct CardResult {
     zone_changed: bool,
 }
 
+/// The `(zone id, zone name)` pairs a device exposes via its `Rgb` capability.
+fn rgb_zone_pairs(dev: &WireDevice) -> Vec<(String, String)> {
+    dev.capabilities
+        .iter()
+        .find_map(|c| match c {
+            DeviceCapability::Rgb(r) => Some(
+                r.descriptor
+                    .zones
+                    .iter()
+                    .map(|z| (z.id.clone(), z.name.clone()))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Allocated width of a zone pill for `label` (matches [`widgets::pill`]).
+fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(label.to_string(), theme::body(12.0), Color32::WHITE)
+        .size()
+        .x
+        + 24.0
+}
+
+/// Number of rows `pill_widths` wrap into within `avail_w`, matching egui's
+/// `main_wrap` layout: the first pill on a row is always placed, and a pill
+/// wraps when it (plus the inter-pill `gap`) would exceed `avail_w`.
+fn wrapped_rows(pill_widths: &[f32], avail_w: f32, gap: f32) -> usize {
+    let mut rows = 0usize;
+    let mut x = 0.0f32;
+    for &w in pill_widths {
+        if rows == 0 || x + gap + w > avail_w {
+            rows += 1;
+            x = w;
+        } else {
+            x += gap + w;
+        }
+    }
+    rows
+}
+
+/// Extra height an expanded device card needs to hold its zone pills, sized to
+/// however many rows they wrap into. `0.0` for a device with no zones.
+fn expanded_zone_height(ui: &egui::Ui, dev: &WireDevice, card_w: f32) -> f32 {
+    let pairs = rgb_zone_pairs(dev);
+    if pairs.is_empty() {
+        return 0.0;
+    }
+    let widths: Vec<f32> = pairs.iter().map(|(_, name)| pill_width(ui, name)).collect();
+    let rows = wrapped_rows(&widths, card_w - 28.0, ZONE_PILL_GAP);
+    ZONE_PAD_TOP
+        + rows as f32 * widgets::PILL_H
+        + rows.saturating_sub(1) as f32 * ZONE_PILL_GAP
+        + ZONE_PAD_BOTTOM
+}
+
 fn device_card(
     ui: &mut egui::Ui,
     dev: &WireDevice,
@@ -871,20 +930,7 @@ fn device_card(
         zone_changed: false,
     };
 
-    let zone_pairs: Vec<(String, String)> = dev
-        .capabilities
-        .iter()
-        .find_map(|c| match c {
-            DeviceCapability::Rgb(r) => Some(
-                r.descriptor
-                    .zones
-                    .iter()
-                    .map(|z| (z.id.clone(), z.name.clone()))
-                    .collect(),
-            ),
-            _ => None,
-        })
-        .unwrap_or_default();
+    let zone_pairs = rgb_zone_pairs(dev);
     let all_zone_ids: Vec<String> = zone_pairs.iter().map(|(id, _)| id.clone()).collect();
     let sel_zones = st
         .zone_sel
@@ -991,14 +1037,7 @@ fn device_card(
         Pos2::new(cb_rect.right() + 26.0, hdr.center().y),
         Vec2::new(30.0, 22.0),
     );
-    widgets::device_badge(
-        p,
-        badge,
-        dev.device_type,
-        theme::device_color(dev),
-        6.0,
-        1.4,
-    );
+    widgets::device_badge(p, badge, dev.device_type);
 
     // Device name (clipped to avoid overlapping zone summary).
     let name_x = badge.right() + 10.0;
@@ -1037,15 +1076,18 @@ fn device_card(
             Stroke::new(1.0, theme::BORDER_SOFT),
         );
         let zone_area = Rect::from_min_size(
-            Pos2::new(rect.left() + 14.0, div_y + 10.0),
-            Vec2::new(rect.width() - 28.0, CARD_ZONE_H - 12.0),
+            Pos2::new(rect.left() + 14.0, div_y + ZONE_PAD_TOP),
+            Vec2::new(
+                rect.width() - 28.0,
+                (rect.bottom() - ZONE_PAD_BOTTOM - (div_y + ZONE_PAD_TOP)).max(0.0),
+            ),
         );
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(zone_area)
                 .layout(egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true)),
         );
-        child.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        child.spacing_mut().item_spacing = egui::vec2(ZONE_PILL_GAP, ZONE_PILL_GAP);
         for (zone_id, zone_name) in &zone_pairs {
             let active = sel_zones.contains(zone_id);
             if widgets::pill(&mut child, zone_name, active) {
@@ -1083,7 +1125,7 @@ fn apply_direct_params(
         if !st.sel_ids.contains(&dev.id) {
             continue;
         }
-        crate::domain::actions::lighting::send(
+        crate::runtime::ipc::send(
             cmd,
             DaemonCommand::RgbApply {
                 id: dev.id.clone(),
@@ -1098,7 +1140,7 @@ fn apply_direct_params(
 
 /// Stop driving a device that was just removed from the target selection
 fn release_device(cmd: &CommandTx, id: &str) {
-    crate::domain::actions::lighting::send(
+    crate::runtime::ipc::send(
         cmd,
         DaemonCommand::RgbApply {
             id: id.to_string(),
@@ -1165,7 +1207,7 @@ fn send_to_selected(state: &AppState, cmd: &CommandTx, st: &LightingUi) {
             }
         };
 
-        crate::domain::actions::lighting::send(
+        crate::runtime::ipc::send(
             cmd,
             DaemonCommand::RgbApply {
                 id: dev.id.clone(),
@@ -1305,7 +1347,10 @@ fn delete_confirm_modal(ui: &mut egui::Ui, st: &mut LightingUi, cmd: &CommandTx)
     if let Some(name) =
         widgets::resolve_delete_confirm(&mut st.confirm_delete, confirm, cancel || dismissed)
     {
-        crate::domain::actions::lighting::delete_custom_effect(cmd, &name);
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::DeleteCustomEffect { name: name.clone() },
+        );
         if st.effect == format!("{CUSTOM_PREFIX}{name}") {
             st.effect = String::new();
         }
@@ -1331,6 +1376,7 @@ fn has_rgb_zones(d: &WireDevice) -> bool {
 
 /// Selected devices that are actually present — offline ids stay saved but
 /// don't count toward "applies to N devices".
+#[cfg(test)]
 fn effective_sel_count(state: &AppState, st: &LightingUi) -> usize {
     rgb_devices(state)
         .filter(|d| st.sel_ids.contains(&d.id))
@@ -1849,7 +1895,10 @@ mod tests {
 
     fn state_with_targets(profile: &str, ids: &[&str]) -> AppState {
         AppState {
-            active_profile: profile.into(),
+            profiles: halod_shared::types::ProfileState {
+                active: profile.into(),
+                ..Default::default()
+            },
             lighting: halod_shared::types::LightingState {
                 targets: halod_shared::types::LightingTargets {
                     device_ids: ids.iter().map(|s| s.to_string()).collect(),
@@ -1922,6 +1971,23 @@ mod tests {
         assert_eq!(deadline, None);
         // No further flush without a new change.
         assert!(!debounce_apply(&mut deadline, false, 10.0));
+    }
+
+    #[test]
+    fn wrapped_rows_counts_rows_like_egui_main_wrap() {
+        // Empty → no rows.
+        assert_eq!(wrapped_rows(&[], 100.0, 6.0), 0);
+        // A single pill wider than the row still occupies one row (first pill on
+        // a row is always placed).
+        assert_eq!(wrapped_rows(&[200.0], 100.0, 6.0), 1);
+        // Three 40-wide pills + 6 gaps in a 100-wide row: 40, 40+6+40=86 fit,
+        // the third (86+6+40=132) wraps → 2 rows.
+        assert_eq!(wrapped_rows(&[40.0, 40.0, 40.0], 100.0, 6.0), 2);
+        // Exact fit stays on one row: 40+6+40+6+40 = 132 <= 132.
+        assert_eq!(wrapped_rows(&[40.0, 40.0, 40.0], 132.0, 6.0), 1);
+        // 24 equal pills in a narrow row → many rows, height grows with them
+        // (the bug: fixed height clipped everything past the first row).
+        assert!(wrapped_rows(&[80.0; 24], 300.0, 6.0) >= 7);
     }
 
     #[test]
