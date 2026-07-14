@@ -969,8 +969,6 @@ impl Registry {
             info.enabled = false;
             info.consented = false;
             info.integration_enabled = false;
-            info.issue = Some(issue.clone());
-            info.integration_issue = None;
             info.health = HealthState {
                 status: HealthStatus::Degraded,
                 issue: Some(issue.clone()),
@@ -1008,13 +1006,6 @@ impl Registry {
             .collect();
         let consented = self.consent_satisfied(m);
         let health = self.health_for(&m.plugin_id);
-        let stored_issue = health.issue.clone();
-        let integration_issue = stored_issue.clone().filter(|issue| {
-            issue.kind == PluginIssueKind::ConnectFailed
-                || (m.plugin_type == PluginKind::Integration
-                    && issue.kind == PluginIssueKind::RuntimeError)
-        });
-        let issue = stored_issue.filter(|_| integration_issue.is_none());
         PluginInfo {
             id: m.plugin_id.clone(),
             name: m.display_name(),
@@ -1067,8 +1058,6 @@ impl Registry {
             content_changed: self
                 .installed_hash_for(&m.plugin_id)
                 .is_some_and(|h| h != m.content_hash()),
-            issue,
-            integration_issue,
             health,
         }
     }

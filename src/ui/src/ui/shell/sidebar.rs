@@ -35,7 +35,7 @@ pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateSt
                         // from the plugin snapshot while quarantine is active.
                         || (u.on_disk_changed && !p.enabled))
             });
-            p.issue.is_some()
+            p.health.issue.is_some()
                 || crate::ui::screens::plugins::plugin_requires_regrant(p)
                 || update_available
         })
@@ -49,7 +49,10 @@ pub fn integrations_needing_action(state: &AppState) -> usize {
         .plugins
         .plugins
         .iter()
-        .filter(|plugin| plugin.integration_issue.is_some())
+        .filter(|plugin| {
+            plugin.plugin_type == halod_shared::types::PluginKind::Integration
+                && plugin.health.issue.is_some()
+        })
         .count()
 }
 
@@ -59,6 +62,7 @@ pub fn integrations_needing_action(state: &AppState) -> usize {
 fn plugins_have_errors(state: &AppState) -> bool {
     state.plugins.plugins.iter().any(|plugin| {
         plugin
+            .health
             .issue
             .as_ref()
             .is_some_and(|issue| issue.kind != PluginIssueKind::LoadWarning)
@@ -506,8 +510,6 @@ mod tests {
             integration_enabled: true,
             consented,
             content_changed,
-            issue: None,
-            integration_issue: None,
             health: Default::default(),
         }
     }
@@ -577,7 +579,7 @@ mod tests {
     #[test]
     fn integration_runtime_issues_are_routed_to_integrations() {
         let mut with_issue = plugin("failing", true, false);
-        with_issue.integration_issue = Some(halod_shared::types::PluginIssue {
+        with_issue.health.issue = Some(halod_shared::types::PluginIssue {
             kind: halod_shared::types::PluginIssueKind::ConnectFailed,
             detail: "boom".into(),
             timestamp_ms: 0,
@@ -591,7 +593,7 @@ mod tests {
     #[test]
     fn plugin_badge_is_red_for_errors_but_not_load_warnings() {
         let mut affected = plugin("affected", true, false);
-        affected.issue = Some(halod_shared::types::PluginIssue {
+        affected.health.issue = Some(halod_shared::types::PluginIssue {
             kind: PluginIssueKind::LoadWarning,
             detail: "warning".into(),
             timestamp_ms: 0,
@@ -600,7 +602,7 @@ mod tests {
         state.plugins.plugins = vec![affected.clone()];
         assert!(!plugins_have_errors(&state));
 
-        affected.issue.as_mut().unwrap().kind = PluginIssueKind::RuntimeError;
+        affected.health.issue.as_mut().unwrap().kind = PluginIssueKind::RuntimeError;
         state.plugins.plugins = vec![affected];
         assert!(plugins_have_errors(&state));
     }

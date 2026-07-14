@@ -1034,16 +1034,6 @@ pub struct PluginInfo {
     /// Drives the "this plugin was modified since you allowed it" prompt.
     #[serde(default)]
     pub content_changed: bool,
-    /// The plugin package's most recent outstanding issue (device runtime
-    /// failure, load failure, or load warning), if any. Integration connection
-    /// and runtime failures are exposed separately via `integration_issue`.
-    #[serde(default)]
-    pub issue: Option<PluginIssue>,
-    /// For an integration plugin, its current connection/runtime failure.
-    /// Kept separate so operational integration state is surfaced on the
-    /// Integrations page rather than as a plugin package problem.
-    #[serde(default)]
-    pub integration_issue: Option<PluginIssue>,
     /// Aggregate operational health for this plugin. Device-specific records
     /// remain scoped in the daemon registry and may be added to wire devices.
     #[serde(default)]
@@ -2236,7 +2226,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_issue_round_trips_and_info_defaults_none() {
+    fn plugin_issue_round_trips_and_info_defaults_to_healthy() {
         let issue = PluginIssue {
             kind: PluginIssueKind::ConnectFailed,
             detail: "boom".into(),
@@ -2250,12 +2240,12 @@ mod tests {
             serde_json::to_value(&issue).unwrap()["kind"],
             "connect_failed"
         );
-        // A PluginInfo payload without `issue` deserializes to None.
+        // A PluginInfo payload without `health` deserializes to healthy.
         let info: PluginInfo = serde_json::from_value(serde_json::json!({
             "id": "p", "name": "P", "path": "", "enabled": true
         }))
         .unwrap();
-        assert_eq!(info.issue, None);
+        assert_eq!(info.health, HealthState::default());
     }
 
     #[test]

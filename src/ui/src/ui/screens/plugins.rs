@@ -1608,7 +1608,7 @@ fn list_row(
             theme::STAT_AMBER,
         );
     }
-    if p.issue.is_some() {
+    if p.health.issue.is_some() {
         ui.painter().circle_filled(
             Pos2::new(tile_rect.left() + 2.0, tile_rect.top() + 2.0),
             4.0,
@@ -1790,7 +1790,7 @@ fn detail_body(
     );
 
     if is_load_failed(p) {
-        if let Some(issue) = &p.issue {
+        if let Some(issue) = &p.health.issue {
             ui.add_space(14.0);
             if issue_banner(ui, issue) {
                 *issue_modal = Some((
@@ -1832,7 +1832,7 @@ fn detail_body(
     ui.add_space(14.0);
     status_banner(ui, p);
 
-    if let Some(issue) = &p.issue {
+    if let Some(issue) = &p.health.issue {
         ui.add_space(14.0);
         if issue_banner(ui, issue) {
             *issue_modal = Some((
@@ -2322,7 +2322,8 @@ fn issue_label_key(kind: &PluginIssueKind) -> &'static str {
 }
 
 fn is_load_failed(p: &PluginInfo) -> bool {
-    p.issue
+    p.health
+        .issue
         .as_ref()
         .is_some_and(|i| i.kind == PluginIssueKind::LoadFailed)
 }
@@ -2933,8 +2934,6 @@ mod tests {
             integration_enabled: true,
             consented: true,
             content_changed: false,
-            issue: None,
-            integration_issue: None,
             health: Default::default(),
         }
     }
@@ -3030,13 +3029,13 @@ mod tests {
     fn is_load_failed_only_for_load_failed_issue() {
         let mut p = info("p", true);
         assert!(!is_load_failed(&p));
-        p.issue = Some(PluginIssue {
+        p.health.issue = Some(PluginIssue {
             kind: PluginIssueKind::RuntimeError,
             detail: "x".into(),
             timestamp_ms: 0,
         });
         assert!(!is_load_failed(&p));
-        p.issue = Some(PluginIssue {
+        p.health.issue = Some(PluginIssue {
             kind: PluginIssueKind::LoadFailed,
             detail: "x".into(),
             timestamp_ms: 0,

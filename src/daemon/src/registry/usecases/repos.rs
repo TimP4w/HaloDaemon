@@ -703,7 +703,7 @@ mod tests {
                 .registry
                 .list(&*app.secret_store)
                 .iter()
-                .any(|plugin| plugin.id == slug && plugin.issue.is_none()));
+                .any(|plugin| plugin.id == slug && plugin.health.issue.is_none()));
         })
         .await;
     }
@@ -1061,7 +1061,7 @@ mod tests {
                 .find(|plugin| plugin.id == slug)
                 .expect("invalid manifest remains visible for recovery");
             assert_eq!(
-                failed.issue.map(|issue| issue.kind),
+                failed.health.issue.map(|issue| issue.kind),
                 Some(halod_shared::types::PluginIssueKind::LoadFailed)
             );
 
@@ -1084,7 +1084,7 @@ mod tests {
                 .into_iter()
                 .find(|plugin| plugin.id == slug)
                 .expect("updated plugin is loaded again");
-            assert!(recovered.issue.is_none());
+            assert!(recovered.health.issue.is_none());
         })
         .await;
     }

@@ -570,7 +570,7 @@ fn official_repo_plugin_cannot_be_shadowed_by_a_later_source() {
         .list(app.secret_store.as_ref())
         .into_iter()
         .find(|p| p.id == "dup")
-        .and_then(|p| p.issue)
+        .and_then(|p| p.health.issue)
         .expect("load warning surfaced as a plugin issue");
     assert_eq!(
         dup_issue.kind,
@@ -605,10 +605,13 @@ async fn connect_error_toasts_once_per_episode_and_persists_issue() {
         .find(|p| p.id == pid)
         .expect("plugin remains listed");
     assert!(
-        info.issue.is_none(),
+        info.health.issue.is_none(),
         "an integration connection failure is not a plugin package issue"
     );
-    let issue = info.integration_issue.expect("integration issue persisted");
+    let issue = info
+        .health
+        .issue
+        .expect("integration health issue persisted");
     assert_eq!(issue.kind, PluginIssueKind::ConnectFailed);
 
     // Same episode: deduped, no second toast.
@@ -625,7 +628,8 @@ async fn connect_error_toasts_once_per_episode_and_persists_issue() {
         .into_iter()
         .find(|p| p.id == pid)
         .unwrap()
-        .integration_issue
+        .health
+        .issue
         .is_none());
     app.registry
         .report_connect_error(&app, &pid, "Acme K1", "down again".into())
@@ -647,7 +651,8 @@ async fn connect_error_toasts_once_per_episode_and_persists_issue() {
         .into_iter()
         .find(|p| p.id == pid)
         .unwrap()
-        .integration_issue
+        .health
+        .issue
         .is_none());
 }
 
@@ -665,7 +670,7 @@ async fn runtime_error_persists_issue_and_clears_on_success() {
         .list(app.secret_store.as_ref())
         .into_iter()
         .find(|p| p.id == pid)
-        .and_then(|p| p.issue)
+        .and_then(|p| p.health.issue)
         .expect("runtime issue persisted");
     assert_eq!(issue.kind, PluginIssueKind::RuntimeError);
 
@@ -677,6 +682,7 @@ async fn runtime_error_persists_issue_and_clears_on_success() {
         .into_iter()
         .find(|p| p.id == pid)
         .unwrap()
+        .health
         .issue
         .is_none());
 
@@ -692,6 +698,7 @@ async fn runtime_error_persists_issue_and_clears_on_success() {
         .into_iter()
         .find(|p| p.id == pid)
         .unwrap()
+        .health
         .issue
         .is_none());
 }
@@ -722,7 +729,7 @@ fn invalid_plugin_lists_as_load_failed_and_malformed_is_skipped() {
         .expect("invalid plugin is listed");
     assert!(!failed.enabled, "invalid plugin can't be enabled");
     assert_eq!(
-        failed.issue.as_ref().map(|i| &i.kind),
+        failed.health.issue.as_ref().map(|i| &i.kind),
         Some(&PluginIssueKind::LoadFailed)
     );
 
@@ -745,7 +752,7 @@ fn invalid_plugin_lists_as_load_failed_and_malformed_is_skipped() {
         .find(|p| p.id == "tcpbad")
         .expect("still listed after fix");
     assert!(
-        fixed.issue.is_none(),
+        fixed.health.issue.is_none(),
         "fixing the manifest clears the issue"
     );
 }

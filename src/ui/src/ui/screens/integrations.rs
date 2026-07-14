@@ -293,7 +293,7 @@ impl IntegrationsUi {
                 },
             );
 
-            if let Some(issue) = &p.integration_issue {
+            if let Some(issue) = &p.health.issue {
                 ui.add_space(10.0);
                 if integration_issue_bar(ui, issue) {
                     self.issue_modal = Some((
@@ -464,8 +464,6 @@ mod tests {
             integration_enabled,
             consented: true,
             content_changed: false,
-            issue: None,
-            integration_issue: None,
             health: Default::default(),
         }
     }
