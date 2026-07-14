@@ -56,6 +56,7 @@ pub async fn initialize_app_state_with_dev_repo(
     } else {
         ensure_official_repo(&app).await;
     }
+    *app.development_plugin_repo.write().await = dev_plugin_repo.clone();
     let mut discovered_hashes = Vec::new();
     {
         let cfg = app.config.read().await;

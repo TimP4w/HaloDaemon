@@ -288,11 +288,14 @@ pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     changed
 }
 
-/// Re-read the plugins directory and every configured git-repo source, and re-apply the disabled/granted sets. Shared with `repos.rs`.
+/// Re-read plugins while preserving the process-local development source, then
+/// re-apply the enabled and accepted-authority policy. Shared with `repos.rs`.
 pub(crate) async fn reload_registry(app: &Arc<AppState>) {
     let cfg = app.config.read().await;
-    app.registry.load_all_with_repos(
+    let development_repo = app.development_plugin_repo.read().await.clone();
+    app.registry.load_all_with_priority_repo(
         &crate::config::plugins_dir(),
+        development_repo.as_deref(),
         &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
     );
     app.registry.replace_policy(&cfg.plugins);
