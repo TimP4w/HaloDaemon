@@ -497,9 +497,13 @@ inventory::submit!(TransportScanner {
 #[cfg(test)]
 mod tests {
     use super::{
-        bus_scan_label, gate_bus, BusInfo, CountingSmBusOps, PciMatch, Probe, SmBusSyncOps,
+        bus_scan_label, gate_bus, BusInfo, CountingSmBusOps, PciMatch, Probe, SmBusDevice,
+        SmBusSyncOps,
     };
+    use crate::drivers::Metered;
+    use halod_shared::types::Permission;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     struct FakeOps {
         fail_writes: bool,
@@ -536,6 +540,63 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    struct AccessCountingOps(Arc<AtomicUsize>);
+
+    impl SmBusSyncOps for AccessCountingOps {
+        fn read_byte(&mut self, _addr: u8) -> anyhow::Result<u8> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(0)
+        }
+        fn read_byte_data(&mut self, _addr: u8, _cmd: u8) -> anyhow::Result<u8> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(0)
+        }
+        fn write_quick(&mut self, _addr: u8) -> anyhow::Result<bool> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(true)
+        }
+        fn write_byte_data(&mut self, _addr: u8, _cmd: u8, _val: u8) -> anyhow::Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn write_word_data(&mut self, _addr: u8, _cmd: u8, _val: u16) -> anyhow::Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn write_block_data(&mut self, _addr: u8, _cmd: u8, _data: &[u8]) -> anyhow::Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_pre_scan_requires_smbus_grant_before_bus_access() {
+        let accesses = Arc::new(AtomicUsize::new(0));
+        let ops: Box<dyn SmBusSyncOps + Send> = Box::new(AccessCountingOps(accesses.clone()));
+        let bus = Arc::new(SmBusDevice {
+            io: Metered::new(Mutex::new(ops), None),
+        });
+        let source = r#"
+            return {
+              pre_scan = function(dev)
+                dev.transport:read_u8(0x50, 0)
+              end,
+            }
+        "#;
+
+        let err = crate::drivers::plugins::run_pre_scan(
+            source,
+            bus,
+            vec![0x50],
+            &[Permission::Os],
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("requires the `smbus` permission"));
+        assert_eq!(accesses.load(Ordering::Relaxed), 0);
     }
 
     #[test]

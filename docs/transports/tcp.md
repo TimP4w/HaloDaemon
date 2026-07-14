@@ -28,8 +28,13 @@ payload, and relies on this guarantee.
 
 ## Connecting
 
-Two constructors, both bounded by a caller-supplied timeout (default 5s if
-`0`):
+The production plugin backend resolves the configured hostname once, rejects
+non-routable results unless `transports.tcp.allow_private: true`, and connects
+to that exact vetted `SocketAddr` through `connect_addr_blocking`. This avoids a
+second DNS lookup and DNS-rebinding gap. The connect and subsequent reads/writes
+use the manifest timeout (default 5 seconds; validated as `1..=60000` ms).
+
+The underlying transport also exposes two test/convenience constructors:
 
 - `TcpTransport::connect(host, port, timeout_ms)` — async, for callers already
   on an async task.
@@ -45,19 +50,21 @@ Two constructors, both bounded by a caller-supplied timeout (default 5s if
   scanner ([`drivers/plugins/integration_scan.rs`](../../src/daemon/src/drivers/plugins/integration_scan.rs))
   does, so a slow/unreachable server only stalls that one scanner pass.
 
-## No hotplug / reconnect
+## Reconnect and controller monitoring
 
-Unlike HID, there is no background monitor watching for a dropped TCP
-connection. If the remote server restarts or becomes unreachable, in-flight
-reads/writes fail and are logged; reconnecting requires the user to re-run
-discovery (or disable/re-enable the plugin). Automatic reconnect-with-backoff
-is a deliberate non-goal for now, not an oversight.
+The transport reports failures; the plugin integration monitor owns recovery.
+It checks enabled roots every 5 seconds, reconnects integrations that were
+offline at startup or dropped later, and backs persistent failures off at
+5/5/10/20/30 seconds (capped at 30). A healthy pass also re-enumerates and diffs
+remote controllers, adding/removing children without a full discovery scan.
+Disabling an integration or changing its config performs a scoped teardown and
+reconnect immediately.
 
 ## Limitations
 
-- No TLS — plugins using this transport are expected to talk to a local or
-  trusted-network service (e.g. OpenRGB's SDK server has no auth or
-  encryption of its own either).
+- No TLS — plugins must implement protocol security themselves or talk to a
+  trusted service. Private, loopback, and link-local targets require the
+  manifest's explicit `allow_private: true` opt-in.
 - The plugin declares its own host/port via manifest `config` fields (see
   [plugins.md](../plugins.md)); there's no discovery/enumeration of network
   services — the user types an address.

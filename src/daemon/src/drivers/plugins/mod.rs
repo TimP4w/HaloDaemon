@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Device plugins: add a device without recompiling the daemon.
 //!
-//! A plugin is a Lua script in the plugins directory that declares a `match`
-//! (which hardware it drives) and an `identity`, plus — in later steps —
-//! callbacks that turn capability calls into transport bytes. Plugins expose
+//! A plugin is a directory package whose `plugin.yaml` declares hardware,
+//! identity, permissions, transports, and capabilities. Its Lua entry contains
+//! callbacks that turn capability calls into transport bytes and is not
+//! evaluated during manifest loading. Plugins expose
 //! only *existing* capability kinds; Halo owns the capability taxonomy.
 //!
 //! Registration is at runtime (not the compile-time `inventory` path native
@@ -397,13 +398,34 @@ impl Registry {
         });
     }
 
-    /// Permissions actually granted to `plugin_id`'s Lua sandbox: the user-set grants.
-    pub(crate) fn granted_for(&self, plugin_id: &str) -> Vec<Permission> {
+    /// Permissions declared by `plugin_id`'s current manifest. Unknown plugin ids
+    /// have no declared permissions.
+    pub(crate) fn declared_permissions_for(&self, plugin_id: &str) -> Vec<Permission> {
         self.snapshot()
+            .manifests
+            .iter()
+            .find(|m| m.plugin_id == plugin_id)
+            .map(|m| m.permissions.clone())
+            .unwrap_or_default()
+    }
+
+    /// Effective permissions granted to `plugin_id`'s Lua sandbox: persisted user
+    /// grants intersected with the current manifest declaration. This is the
+    /// authoritative capability boundary even if persisted config was edited or an
+    /// internal caller supplied an undeclared permission.
+    pub(crate) fn granted_for(&self, plugin_id: &str) -> Vec<Permission> {
+        let state = self.snapshot();
+        let Some(manifest) = state.manifests.iter().find(|m| m.plugin_id == plugin_id) else {
+            return Vec::new();
+        };
+        state
             .granted
             .get(plugin_id)
-            .cloned()
-            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|permission| manifest.permissions.contains(permission))
+            .collect()
     }
 
     #[cfg(test)]

@@ -5,68 +5,74 @@ SPDX-License-Identifier: GPL-3.0-or-later
 # Device plugins (Lua)
 
 Device plugins let you add support for a new device **without recompiling the
-daemon**. A plugin is a single Lua script dropped into the plugins directory;
-the daemon loads it at startup, matches it against connected hardware, and drives
-it through the same capability system as a native driver.
+daemon**. A plugin is a directory package containing a declarative
+`plugin.yaml` and a Lua callback module. The daemon loads the YAML at startup,
+matches it against connected hardware, and drives it through the same capability
+system as a native driver. Lua is not compiled or executed while loading the
+manifest. Device, integration, effect, and SMBus `pre_scan` workers start only
+when the plugin activates (after consent when it declares permissions).
 
 Plugins expose only the capability *kinds* Halo already knows about (RGB, fan,
 sensor, …). The daemon owns the capability taxonomy and the engines that consume
 it — a plugin just fills in the device-specific byte formats.
 
-- **Where:** `~/.config/halod/plugins/*.lua` (Linux) or
-  `%APPDATA%\halod\plugins\*.lua` (Windows).
+- **Where:** `~/.config/halod/plugins/<id>/` (Linux) or
+  `%APPDATA%\halod\plugins\<id>\` (Windows).
 - **When:** loaded at daemon start. Press **Scan now** (or use the Plugins
   screen) to re-read the directory without restarting.
 - **Managing:** the **Plugins** screen lists every loaded plugin and lets you
   enable/disable each one. A disabled plugin releases its hardware back to the
   native driver (if any).
 
-> **Trust.** A plugin runs inside the (elevated) daemon and can talk to the
+> **Trust.** A plugin runs inside the daemon and can talk to the
 > device it matches. The Lua environment is sandboxed — no filesystem, process,
 > or native-library access — but you should still only install plugins you
 > trust, and they are matched narrowly by USB vendor/product id.
 
 ## Anatomy of a plugin
 
-A plugin script `return`s a single table: a declarative part (which hardware,
-what it is, which capabilities) plus callback functions that turn capability
-calls into transport bytes.
+A package separates declarations from code:
+
+- `plugin.yaml` contains identity, matching, permissions, transports,
+  capabilities, configuration fields, and effects.
+- `main.lua` (or the file selected by `entry`) returns only callback functions
+  that turn capability calls into transport bytes.
+
+```yaml
+id: acme-k1
+compatibility:
+  halod: ">=0.2.0"
+  plugin_api: 1
+name: Acme K1
+author: you@example.com
+version: 1.0.0
+description: Driver for the Acme K1 keyboard.
+devices:
+  - transport: hid
+    vendor: Acme
+    model: K1
+    vid: 4660
+    pid: 22136
+transports:
+  hid:
+    report_size: 64
+    timeout_ms: 1000
+rgb:
+  zones: []
+```
 
 ```lua
 return {
-  -- Which hardware this plugin drives (one table, or an array of them).
-  match = { transport = "hid", vid = 0x1234, pid = 0x5678 },
-
-  -- Required identity. `author`, `version` and `description` are optional and
-  -- surfaced in the Plugins screen.
-  identity = {
-    vendor = "Acme", model = "K1", name = "Acme K1",
-    author = "you@example.com", version = "1.0.0",
-    description = "Driver for the Acme K1 keyboard.",
-  },
-
-  -- Transport parameters (optional; sensible HID defaults).
-  transports = { hid = { report_size = 64, timeout_ms = 1000 } },
-
-  -- Capabilities: presence of a section enables that capability.
-  rgb = {
-    zones = {
-      { id = "ring", name = "Ring", topology = { type = "ring" },
-        leds = { {id=0, x=0.5, y=0.0}, {id=1, x=1.0, y=0.5}, --[[ … ]] } },
-    },
-  },
-
-  -- Callbacks (see below).
   initialize  = function(dev) --[[ … ]] return true end,
   write_frame = function(dev, zone_id, colors) --[[ … ]] end,
   apply       = function(dev, state) --[[ … ]] end,
 }
 ```
 
-### `match`
+### Device matching (`devices`)
 
-`match` is either **one** table or an **array** of tables (a plugin can drive
-several hardware shapes — e.g. an SMBus DRAM controller *and* a GPU one). The
+`devices` is an array of device tables (a plugin can drive several hardware
+shapes — e.g. an SMBus DRAM controller *and* a GPU one). The
 `transport` field selects the backend; each backend requires its own fields.
 
 **HID** (`transport = "hid"`):
@@ -127,43 +133,53 @@ matched device correctly.
 Omitted optional fields mean "don't care". A plugin **shadows** a native driver
 for the same hardware, so this is also how you override a built-in driver.
 
-### `identity`
+### Package metadata
 
-| field         | type   | meaning                                             |
-|---------------|--------|-----------------------------------------------------|
-| `vendor`      | string | required                                            |
-| `model`       | string | required                                            |
-| `name`        | string | display name (defaults to `model`)                  |
-| `id`          | string | stable id prefix (defaults to the script file stem) |
-| `author`      | string | plugin author, shown in the Plugins screen          |
-| `version`     | string | plugin version, e.g. `"1.2.0"`                      |
-| `description` | string | free-text summary, shown in the Plugins screen      |
+These fields live at the top level of `plugin.yaml`; there is no nested
+`identity` table in a directory package.
+
+| field | type | meaning |
+|-------|------|---------|
+| `id` | string | required; must exactly equal the package directory name |
+| `compatibility` | table | required; `halod` SemVer requirement plus exact `plugin_api` generation |
+| `type` | string | `device` (default), `integration`, or `effect` |
+| `name` | string | plugin display name (defaults to `id`) |
+| `author` | string | plugin author, shown in the Plugins screen |
+| `version` | string | plugin version, e.g. `"1.2.0"` |
+| `license` | string | SPDX identifier or other license name |
+| `description` | string | free-text summary, shown in the Plugins screen |
+| `entry` | string | callback module path inside the package (default `main.lua`) |
+| `logo` | string | bare filename under `assets/`; defaults to `logo.png` when present |
+| `effect_assets` | array | effect-id-to-thumbnail mappings; see [packaging](#packaging--the-official-repo) |
+
+Hardware `vendor`, `model`, optional display `name`, and `device_type` belong
+to each entry in `devices`, not to package metadata.
 
 ### Capability sections
 
 Include a section to advertise that capability:
 
-- `rgb = { zones = { … }, native_effects = { … } }` — see [RGB](#rgb).
-- `fan = { channel = <u8> }` — a controllable fan/pump channel.
-- `sensor = {}` — the device reports sensor readings (via `get_sensors`).
-- `lcd = { needs_rgb_restore = <bool> }` — the device has an image panel; see [LCD](#lcd).
-- `dpi = { min, max, steps = { … } }` — a pointing device's DPI; see [DPI & choices](#dpi--choices).
-- `choice = { choices = { … } }` — discrete selectors (e.g. polling rate); see [DPI & choices](#dpi--choices).
-- `range = { ranges = { … } }` — continuous integer sliders (e.g. lift-off distance); see [Controls](#controls).
-- `boolean = { booleans = { … } }` — on/off toggles (e.g. angle-snap); see [Controls](#controls).
-- `action = { actions = { … } }` — fire-and-forget buttons (e.g. calibrate); see [Controls](#controls).
-- `battery = {}` — the device reports battery levels (via `get_batteries`).
-- `connection = {}` — the device reports a wireless connection state (via `connection_status`).
-- `equalizer = {}` — the device has an audio equalizer; see [Equalizer](#equalizer).
-- `pairing = {}` — the device pairs wireless children; see [Pairing](#pairing).
-- `onboard_profiles = {}` — the device has on-board profile slots; see [Onboard profiles](#onboard-profiles).
-- `key_remap = { buttons = { … }, requires_host_mode = <bool>, default_mappings = { … } }`
+- `rgb: { zones: […], native_effects: […] }` — see [RGB](#rgb).
+- `fan: { channel: <u8> }` — a controllable fan/pump channel.
+- `sensor: {}` — the device reports sensor readings (via `get_sensors`).
+- `lcd: { needs_rgb_restore: <bool> }` — the device has an image panel; see [LCD](#lcd).
+- `dpi: { min: …, max: …, steps: […] }` — a pointing device's DPI; see [DPI & choices](#dpi--choices).
+- `choice: { choices: […] }` — discrete selectors (e.g. polling rate); see [DPI & choices](#dpi--choices).
+- `range: { ranges: […] }` — continuous integer sliders (e.g. lift-off distance); see [Controls](#controls).
+- `boolean: { booleans: […] }` — on/off toggles (e.g. angle-snap); see [Controls](#controls).
+- `action: { actions: […] }` — fire-and-forget buttons (e.g. calibrate); see [Controls](#controls).
+- `battery: {}` — the device reports battery levels (via `get_batteries`).
+- `connection: {}` — the device reports a wireless connection state (via `connection_status`).
+- `equalizer: {}` — the device has an audio equalizer; see [Equalizer](#equalizer).
+- `pairing: {}` — the device pairs wireless children; see [Pairing](#pairing).
+- `onboard_profiles: {}` — the device has on-board profile slots; see [Onboard profiles](#onboard-profiles).
+- `key_remap: { buttons: […], requires_host_mode: <bool>, default_mappings: […] }`
   — remappable buttons; see [Key remap](#key-remap).
-- `poll = { interval_ms = <n> }` — run `read_status` on a background loop.
-- `chain = { channels = { … }, accessories = { … } }` — host detachable child
+- `poll: { interval_ms: <n> }` — run `read_status` on a background loop.
+- `chain: { channels: […], accessories: […] }` — host detachable child
   accessories (fan hubs / ARGB chains); see [Chained accessories](#chained-accessories).
 
-Not a capability, but declarable by any plugin: `config = { fields = { … } }`
+Not a capability, but declarable by any plugin: YAML `config.fields`
 — user-editable settings (e.g. a server host/port); see
 [Config fields](#config-fields).
 
@@ -177,7 +193,7 @@ identity (`dev.match.vid`/`pid`/…); and `dev.audio` creates
 
 | callback                         | capability | returns                       |
 |----------------------------------|------------|-------------------------------|
-| `initialize(dev)`                | —          | `true` if connected           |
+| `initialize(dev)`                | —          | `true`/`nil` to accept, `false` to reject, or dynamic info table |
 | `close(dev)`                     | —          | —                             |
 | `write_frame(dev, zone, colors)` | rgb        | —                             |
 | `apply(dev, state)`              | rgb        | —                             |
@@ -243,13 +259,14 @@ end
 `"static"`, `"per_led"`, `"native_effect"`, `"direct_effect"`, `"engine"`; e.g.
 `state.mode == "static"` carries `state.color = {r, g, b}`.
 
-A zone declares its LED layout as normalized `0..1` positions (`x`,`y`), used
-both for canvas sampling and for the GUI's zone widget. `topology` is one of
-`{type="ring"}`, `{type="linear"}`, `{type="grid"}`, `{type="rings", count=N}`.
+A static YAML zone declares `leds` as `{ id, x, y }` entries with normalized
+`0..1` positions, used for canvas sampling and the GUI's zone widget.
+`topology` is a tagged YAML table such as `{ type: ring }`, `{ type: linear }`,
+`{ type: grid }`, or `{ type: rings, count: 2 }`.
 
 ### Fan
 
-`fan = { channel = 0 }` enables a fan/pump channel. `get_duty`/`set_duty` use
+`fan: { channel: 0 }` in `plugin.yaml` enables a fan/pump channel. `get_duty`/`set_duty` use
 duty `0..=255`; `get_rpm` returns an integer or `nil` (e.g. a pump reporting duty
 but not rpm).
 
@@ -258,14 +275,13 @@ but not rpm).
 Some devices host detachable children — e.g. an AIO pump whose accessory port
 drives an RGB fan. Declare the channel(s) and the accessories you recognize:
 
-```lua
-chain = {
-  channels = { { id = "0", name = "Accessory", max_leds = 40 } },
-  accessories = {
-    { id = 0x13, name = "F120 RGB", led_count = 8, topology = "ring", fan = true },
-    { id = 0x1B, name = "F240 RGB Core", led_count = 16, topology = "rings", rings = 2, fan = true },
-  },
-}
+```yaml
+chain:
+  channels:
+    - { id: "0", name: Accessory, max_leds: 40 }
+  accessories:
+    - { id: 19, name: F120 RGB, led_count: 8, topology: ring, fan: true }
+    - { id: 27, name: F240 RGB Core, led_count: 16, topology: rings, rings: 2, fan: true }
 ```
 
 You provide the probe and the routing; the host owns the child device and the
@@ -286,12 +302,12 @@ reads don't race the background poll.
 ### Polling
 
 Devices that report status usually stream a single report you read periodically.
-Declare `poll = { interval_ms = 500 }` and provide `read_status`; the daemon runs
+Declare `poll: { interval_ms: 500 }` in `plugin.yaml` and provide `read_status`
+in the Lua entry point; the daemon runs
 the loop (never the script — it stays single-threaded) and stores the returned
 table in `dev.status` for your other callbacks to read:
 
 ```lua
-poll = { interval_ms = 500 },
 read_status = function(dev)
   local r = halod.buffer(dev.transport:read_nonblocking(64))
   return { liquid_temp = r:get_u8(15), pump_rpm = r:get_u16_le(17) }
@@ -350,24 +366,33 @@ the control handshake). The bulk endpoint opens lazily on first use.
 
 ### DPI & choices
 
-`dpi = { min, max, steps = { 800, 1600, 3200 } }` enables a pointing device's DPI
+`dpi: { min: 100, max: 26000, steps: [800, 1600, 3200] }` in `plugin.yaml`
+enables a pointing device's DPI
 control. The **host owns the step-cycle state** (clamp, index, the current value)
 — the plugin only writes the chosen value through one callback:
 
 ```lua
-dpi = { min = 100, max = 26000, steps = { 800, 1600, 3200 } },
 set_dpi = function(dev, dpi) dev.transport:write(dpi_report(dpi)) end,
 ```
 
-`choice = { choices = { … } }` declares discrete selectors (dropdowns / toggles).
+`choice: { choices: [ … ] }` in `plugin.yaml` declares discrete selectors
+(dropdowns / toggles).
 The host caches the selection and calls `set_choice` to apply it:
 
+```yaml
+choice:
+  choices:
+    - key: poll_rate
+      label: Polling Rate
+      category: Mouse
+      display: list
+      options:
+        - { id: 1000 Hz, label: 1000 Hz }
+        - { id: 500 Hz, label: 500 Hz }
+      default: 0
+```
+
 ```lua
-choice = { choices = {
-  { key = "poll_rate", label = "Polling Rate", category = "Mouse", display = "list",
-    options = { { id = "1000 Hz", label = "1000 Hz" }, { id = "500 Hz", label = "500 Hz" } },
-    default = 0 },
-} },
 set_choice = function(dev, key, selected) --[[ apply ]] end,
 ```
 
@@ -383,11 +408,19 @@ the host caches the last-written value; the plugin only applies it.
   `set_boolean(dev, key, value)` writes one.
 - **`action`** — a fire-and-forget button. `trigger_action(dev, key)` runs it.
 
-```lua
-range = { ranges = { { key = "lod", label = "Lift-off", min = 1, max = 2, default = 1 } } },
-boolean = { booleans = { { key = "snap", label = "Angle Snap", category = "Mouse" } } },
-action = { actions = { { key = "calibrate", label = "Calibrate" } } },
+```yaml
+range:
+  ranges:
+    - { key: lod, label: Lift-off, min: 1, max: 2, default: 1 }
+boolean:
+  booleans:
+    - { key: snap, label: Angle Snap, category: Mouse }
+action:
+  actions:
+    - { key: calibrate, label: Calibrate }
+```
 
+```lua
 set_range   = function(dev, key, value) --[[ apply ]] end,
 get_booleans = function(dev) return { { key = "snap", value = true } } end,
 set_boolean = function(dev, key, value) --[[ apply ]] end,
@@ -449,7 +482,7 @@ values; reads return Lua strings.
 | `:feature_exchange(data, n)`        | HID feature report exchange → string    |
 | `:write_many({p1, p2, …})`          | write several packets                   |
 
-`transports = { hid = { report_size, feature_report, timeout_ms } }` configures
+YAML `transports.hid` (`report_size`, `feature_report`, `timeout_ms`) configures
 the stream. `report_size` is either **`0` for raw passthrough** (no report id or
 padding) or `1..=1024` as the padding target. With a non-zero size, the transport
 adds the platform's report-id framing and pads the payload; use raw mode only
@@ -466,12 +499,16 @@ closed), never a short read, since a byte stream has no report framing to
 fall back on. Only [integration plugins](#integration-plugins) can declare
 this transport today.
 
-`transports = { tcp = { host_key, port_key, timeout_ms } }` — `host_key`/
+YAML `transports.tcp` accepts `host_key`, `port_key`, `timeout_ms`, and
+`allow_private`. `host_key`/
 `port_key` (default `"host"`/`"port"`) name which of the plugin's own
 [config fields](#config-fields) hold the address to connect to, so the same
-values the user edits in the Plugins screen are what the transport connects
+values the user edits in the Integrations screen are what the transport connects
 with; `timeout_ms` (default `5000`) bounds the connect attempt and every
-subsequent read/write.
+subsequent read/write. By default, resolved loopback, private, link-local, and
+other non-routable addresses are rejected as an SSRF defense. Set
+`allow_private: true` only for an integration intentionally targeting localhost
+or a LAN service.
 
 ### Register transport (SMBus)
 
@@ -501,18 +538,23 @@ An op naming an address **outside** the plugin's declared `addresses` (plus
 `extra_addresses` during `pre_scan`) raises — the declared set is a hard
 boundary, so a script can never free-roam the bus.
 
-**`pre_scan(dev)`** (optional, SMBus): a top-level callback run once per matching
-bus *before* the host probes addresses. Use it for bus preparation whose control
-flow depends on live reads (e.g. an ENE DRAM broadcast remap). It drives the same
-`dev.transport:batch(fn)` API, scoped to `addresses` + `extra_addresses`.
+**`pre_scan(dev)`** (optional, SMBus): a callback run once per matching bus
+*before* the host probes addresses. Use it for bus preparation whose control
+flow depends on live reads (e.g. an ENE DRAM broadcast remap). It runs in a
+throwaway 64 MiB/instruction-limited VM with a 5-second wall-clock timeout and
+drives the same `dev.transport:batch(fn)` API, scoped to `addresses` +
+`extra_addresses`. It receives no plugin config. The scanner contributes this
+entry only after the plugin reaches `Ready`, and transport injection
+independently requires the effective `smbus` grant.
 
 ### USB control transport (`usb_control`)
 
 For USB vendor control transfers (DDC/CI over a hub controller, ENE RGB
 controllers, …). Matched by `vid` + `pid` on a `UsbNonHid` device:
 
-```lua
-match = { transport = "usb_control", vid = 0x2109, pid = 0x8884 },
+```yaml
+devices:
+  - { transport: usb_control, vid: 8457, pid: 34948 }
 ```
 
 Two methods issue a single blocking control transfer each. The first argument
@@ -531,22 +573,26 @@ VID/PID — so a plugin can present, say, a monitor's DDC controller and its LED
 controller as a single device. Declare them under `transports.usb_control`, then
 reach each by its `id`:
 
+```yaml
+transports:
+  usb_control:
+    interface: 0
+    endpoints:
+      - { id: ambiglow, vid: 3314, pid: 45569, interface: 0 }
+```
+
+Then, in a Lua callback:
+
 ```lua
-transports = {
-  usb_control = {
-    interface = 0,
-    endpoints = { { id = "ambiglow", vid = 0x0CF2, pid = 0xB201, interface = 0 } },
-  },
-},
--- …then, in a callback:
 dev.transport:control_write("ambiglow", 0x40, 0x80, 0x00, 0xE100, frame)
 ```
 
 Control transfers have no framing/rate helper of their own; a protocol that needs
 timed gaps between transfers (DDC/CI's inter-write gap and read delay) drives them
 with **`halod.sleep_ms(ms)`** — a blocking sleep on the device's own worker thread,
-so it only serializes that device's queued commands. See the built-in
-`philips_evnia` plugin for a full worked example.
+so it only serializes that device's queued commands. See the official
+[`philips_evnia`](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/philips_evnia)
+plugin for a full worked example.
 
 ## Virtual audio sinks (`dev.audio`)
 
@@ -571,7 +617,8 @@ Sinks are **host-owned**: the daemon tears every one down when the device
 closes (and reclaims any a crashed daemon leaked at next startup), so a plugin
 can't leak them — calling `:remove()` yourself is optional. Creation is scoped
 to the device's *own* USB id (`dev.match.vid`/`pid`), so a plugin can never open
-sinks for hardware it doesn't drive. See the built-in `steelseries_arctis`
+sinks for hardware it doesn't drive. See the official
+[`steelseries_arctis`](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/steelseries_arctis)
 plugin for a full ChatMix example.
 
 ## The byte buffer (`halod.buffer`)
@@ -601,18 +648,33 @@ also available if you prefer.
 buffer one `set_u8` at a time (e.g. a 400×300 pixmap) pays for one host call
 per byte. Build a chunk in pure Lua first (`string.char`/`table.concat`, no
 host round-trip) and write it with a single `set_bytes` call instead — see
-the row-batched fill in the built-in
-[`halo_effects.lua`](../src/daemon/src/drivers/plugins/builtins/halo_effects.lua)
+the row-batched fill in the official
+[`halo_effects/main.lua`](https://github.com/TimP4w/HaloDaemon-plugins/blob/main/halo_effects/main.lua)
 plugin.
 
 ## Sandbox
 
-Removed globals: `os`, `io`, `package`, `require`, `dofile`, `loadfile`, `load`,
-`debug`, `collectgarbage`. Available: `string`, `table`, `math` (incl. Lua 5.4
-bitwise ops and `string.pack`), plus `log(msg)`, `halod.buffer`,
-`halod.sleep_ms(ms)` (a blocking sleep on the device's own worker thread, for
-protocol inter-transfer gaps; capped at 5 s per call), and `halod.config` (see
-[Config fields](#config-fields)).
+Manifest discovery creates no Lua VM: the daemon parses and validates only
+`plugin.yaml`, then reads the entry file as inert UTF-8 source for hashing and
+later activation. Invalid Lua can therefore be discovered and listed; it fails
+only after activation, when a worker or SMBus `pre_scan` evaluates the module.
+
+Runtime workers remove `os`, `io`, `package`, `require`, `dofile`, `loadfile`,
+`load`, `debug`, and `collectgarbage`. The `os` permission restores a new,
+reduced `os` table containing only `os.time()` and `os.clock()`—never process or
+filesystem functions. Available standard functionality includes `string`,
+`table`, `math`, Lua 5.4 bitwise operators, and `string.pack`/`string.unpack`.
+The host adds `log(msg)`, `halod.buffer`, image/effect helpers,
+`halod.sleep_ms(ms)` (blocking only the device worker and capped at 5 seconds per
+call), and `halod.config` (see [Config fields](#config-fields)).
+
+Each runtime VM has a 64 MiB Lua heap limit and a 50,000,000-instruction budget
+reset for each callback. Device callbacks also have a 30-second request
+deadline; effect callbacks have a 2-second deadline. These controls bound
+accidents and straightforward runaway code, but this is still an in-process
+sandbox rather than OS-level isolation: Lua and its native bindings remain
+parser/runtime attack surface, and a granted plugin can intentionally operate
+its matched device plus any explicitly granted host capability.
 
 ## Config fields
 
@@ -624,14 +686,12 @@ plugin and governs whether its Lua may run at all, but never shows a config
 editor — a device or effect plugin declaring `config.fields` has nowhere to
 edit them today.
 
-```lua
-config = {
-  fields = {
-    { key = "host", label = "Server host", kind = "text", default = "127.0.0.1" },
-    { key = "port", label = "Server port", kind = "number", default = "6742" },
-    { key = "token", label = "API token", secure = true },
-  },
-},
+```yaml
+config:
+  fields:
+    - { key: host, label: Server host, kind: text, default: 127.0.0.1 }
+    - { key: port, label: Server port, kind: number, default: "6742" }
+    - { key: token, label: API token, secure: true }
 ```
 
 | field     | type   | meaning                                                        |
@@ -642,6 +702,7 @@ config = {
 | `default` | string | value shown before the user sets one                            |
 | `category`| string | groups fields under a heading in the GUI                        |
 | `secure`  | bool   | see [Secure fields](#secure-fields) below                        |
+| `min` / `max` | number | optional inclusive bounds for `kind: number`; defaults and submitted values must be finite and in range |
 
 Every callback's `dev` argument doesn't carry config — read it from the
 sandboxed **`halod.config`** table instead, e.g. `halod.config.host`. It holds
@@ -674,8 +735,7 @@ OS login/keyring unlocked.
 ## Integration plugins
 
 An integration plugin connects to a **network service** instead of matching
-local hardware — the built-in OpenRGB client is the
-reference example. Set `type = "integration"` and declare no `match` at all:
+local hardware. Set YAML `type: integration` and declare no `devices`:
 the plugin is instantiated from its own [config fields](#config-fields) (a
 host/port the user types), not a discovery handle.
 
@@ -690,17 +750,19 @@ and the devices it exposes, without touching anything else; saving a config
 change (e.g. a new host/port) does the same before reconnecting with the new
 values — neither one runs the full device rediscovery.
 
-```lua
-type = "integration",
-permissions = { "network", "os" }, -- `os` only if you need to throttle sends, see below
-config = {
-  fields = {
-    { key = "host", label = "Server host", kind = "text", default = "127.0.0.1" },
-    { key = "port", label = "Server port", kind = "number", default = "6742" },
-  },
-},
-transports = { tcp = { host_key = "host", port_key = "port" } },
+```yaml
+type: integration
+permissions: [network, os]
+config:
+  fields:
+    - { key: host, label: Server host, default: 127.0.0.1 }
+    - { key: port, label: Server port, kind: number, default: "6742" }
+transports:
+  tcp: { host_key: host, port_key: port }
+```
 
+```lua
+return {
 enumerate_controllers = function(dev)
   return {
     { index = 0, name = "Keyboard", zones = {
@@ -709,21 +771,22 @@ enumerate_controllers = function(dev)
   }
 end,
 
--- Each enumerated controller becomes a full LuaDevice child that shares
--- this same script source.  The controller index is in dev.match.index so
--- a single set of callbacks can route to the right remote controller.
-write_frame = function(dev, zone_id, colors)
-  -- dev.match.index identifies the controller; zone_id is the zone's id
-  -- string as declared above; colors is an array of {r, g, b}.
+-- One integration root multiplexes every controller, so RGB callbacks receive
+-- the controller index explicitly.
+write_controller_frame = function(dev, index, zone_id, colors)
+  -- zone_id is the zone's declared id; colors is an array of {r, g, b}.
 end,
+}
 ```
 
-Integration children are full `LuaDevice` instances — they use the **same
-callbacks** as a `Device`-type plugin ([Capability callbacks](#capability-callbacks)):
-`write_frame`, `apply`, `set_duty`, `get_duty`, `get_sensors`, `set_dpi`,
-`get_dpi`, `get_batteries`, and so on.  The controller `index` from
-`enumerate_controllers` is injected as `dev.match.index` so a single shared
-script can route each call to the right remote controller.
+Integration children are full `LuaDevice` instances. Non-RGB capabilities use
+the ordinary device callbacks (`set_duty`, `get_duty`, `get_sensors`, `set_dpi`,
+`get_batteries`, and so on), with the controller `index` also available as
+`dev.match.index`. RGB is deliberately explicit because one integration root
+multiplexes every controller: implement
+`write_controller_frame(dev, index, zone_id, colors)` and
+`apply_controller(dev, index, state)`, not the ordinary `write_frame`/`apply`
+signatures.
 
 - **`enumerate_controllers(dev) -> controllers`** — called once per
   discovery pass. Returns an array of controller tables; each becomes
@@ -737,15 +800,18 @@ script can route each call to the right remote controller.
   | `index` | integer | yes | Controller index (becomes `dev.match.index`). |
   | `name` | string | yes | Display name for the child device. |
   | `zones` | array | see below | RGB-zone topology shorthand (promoted to an `rgb` section when no explicit one is given). |
-  | `rgb`, `fan`, `sensor`, `lcd`, `dpi`, `choice`, `range`, `boolean`, `action`, `battery`, `connection`, `equalizer`, `pairing`, `onboard_profiles`, `key_remap`, `chain` | table | no | Per-controller capability sections.  Each mirrors the same shape as a static manifest capability section (e.g. `fan = { channel = 0 }`, `sensor = {}`, `lcd = {}`).  A controller that declares none of these still gets RGB from the `zones` shorthand. |
+  | `rgb`, `fan`, `sensor`, `lcd`, `dpi`, `choice`, `range`, `boolean`, `action`, `battery`, `connection`, `equalizer`, `pairing`, `onboard_profiles`, `key_remap`, `chain` | table | no | Per-controller capability sections returned at runtime. Each uses the Lua-table equivalent of the static YAML shape (e.g. `fan = { channel = 0 }`, `sensor = {}`, `lcd = {}`). A controller that declares none of these still gets RGB from the `zones` shorthand. |
 
   Each zone entry needs `id`, `name`, `topology`
   (`"ring"`/`"linear"`/`"grid"`/`"rings"`), and `led_count` — the same shape
   [chained accessories](#chained-accessories) use.
 
-There's no reconnect/hotplug monitor for a dropped network connection today —
-if the server restarts, use the Integrations screen's enable toggle (off then
-on) to reconnect just this integration.
+The integration monitor probes enabled integrations every 5 seconds. It
+connects roots that were offline at startup, marks children offline when a
+connection drops, retries with a 5/5/10/20/30-second capped backoff, and diffs
+controller enumeration so remote additions/removals appear without a full
+device rescan. The Integrations screen's enable toggle or a config save still
+forces an immediate scoped teardown/reconnect.
 
 The wire protocol itself typically gives no acknowledgement of when a sent
 frame is actually applied — the server may queue and process frames on its
@@ -789,17 +855,23 @@ and per-stick LED count once probed.
 
 A plugin that needs a privileged capability declares it up front:
 
-```lua
-permissions = { "network", "os" },
+```yaml
+permissions: [network, os]
 ```
 
-Known permissions: `network` (required to open a [`tcp` transport](#stream-transport-tcp)
-— gates whether a config-instantiated [integration plugin](#integration-plugins)
-is ever connected at all), `os` (re-enables the read-only wall clock —
-`os.time()`/`os.clock()` — inside the sandbox; every other `os.*` function
-stays stripped), `secure_storage` (required to read a `secure` [config
-field](#secure-fields)'s decrypted value from `halod.config` — without it the
-key is simply absent). A plugin with any declared permission loads but stays
+Known permissions:
+
+- `network` — required to open a [`tcp` transport](#stream-transport-tcp); the
+  manifest and the actual connect are both gated.
+- `os` — restores only `os.time()` and `os.clock()` inside the sandbox.
+- `secure_storage` — exposes this plugin's own decrypted `secure` config values
+  through `halod.config`; without it those keys are absent.
+- `smbus` — required to scan, pre-scan, read, or write SMBus/I²C. Address scope
+  is still limited to the manifest's `addresses` and `extra_addresses`.
+- `audio_routing` — exposes `dev.audio` so the plugin can create and route
+  host-managed virtual audio sinks.
+
+A plugin with any declared permission loads but stays
 **inert** — discovered, listed in the Plugins screen, but never matched
 against hardware (or, for an integration plugin, never connected) — until the
 user grants it. Manually importing such a plugin (Add plugin) prompts for
@@ -807,25 +879,29 @@ consent immediately; one found by a directory scan instead gets a toast
 notification. Revoking a grant reverts the plugin to inert on the next
 rediscovery.
 
-**Built-in plugins are auto-granted their own declared permissions** — they
-ship inside the trusted daemon binary itself, so the consent step (which
-exists to gate untrusted third-party scripts) doesn't apply to them. This is
-why the built-in OpenRGB integration works out of the
-box once you set its host/port, with no separate "grant network" click.
+SMBus declarations are contributed to discovery only after the plugin is
+enabled, every declared permission is granted, and the acknowledged content
+hash still matches. `pre_scan` also checks the effective `smbus` grant at its
+transport-injection boundary. PCI gates, address scope, rate limits, VM limits,
+and the 5-second timeout remain additional constraints.
+
+Nothing is auto-granted: official, community, local, device, integration, and
+effect packages all use the same gate. Permissionless plugins need no consent;
+permissioned plugins require every declared permission plus acknowledgement of
+their current content hash before any Lua worker is created.
 
 ## RGB effects
 
 A plugin can also declare RGB effects instead of (or alongside) a device.
-An effect-only plugin sets `type = "effect"` and needs no `match` spec — it
+An effect-only plugin sets YAML `type: effect` and needs no `devices` entries — it
 never opens a transport and is pure compute, so it needs no permissions
 either:
 
-```lua
-type = "effect",
-effects = {
-  { kind = "pixmap", id = "plasma", name = "Plasma", params = { ... } },
-  { kind = "direct", id = "comet", name = "Comet", params = { ... } },
-},
+```yaml
+type: effect
+effects:
+  - { kind: pixmap, id: plasma, name: Plasma, params: [] }
+  - { kind: direct, id: comet, name: Comet, params: [] }
 ```
 
 Each entry registers under a namespaced catalog id (`<plugin_id>:<id>`) in
@@ -868,12 +944,14 @@ the stock effect library — it ships every pixmap/direct effect except
 ## Packaging & the official repo
 
 Every plugin is a **directory package**: a folder containing `plugin.yaml`
-(the manifest — `id`, `compatibility`, `type`, identity fields, `entry`, `permissions`,
-`devices`, `transports`, optional `logo`/`effects` asset references) plus its
-entry Lua file (`main.lua` by default) and an optional `assets/` subdirectory
+(the complete declarative manifest — `id`, `compatibility`, `type`, identity,
+permissions, devices, transports, capabilities, config, and effects) plus its
+callback-only entry Lua file (`main.lua` by default) and an optional `assets/` subdirectory
 for the logo/effect thumbnails. `plugin.yaml`'s `id` **must equal the
 directory name**. There is no single-file plugin format and nothing is
 compiled into the daemon binary.
+
+### Compatibility
 
 Every manifest must declare both the HaloDaemon release range and the exact
 plugin API generation it targets:
@@ -898,23 +976,38 @@ The GUI may report an error earlier, but it is not the enforcement boundary.
 
 - IDs are non-empty, ASCII-safe identifiers; duplicate device, zone, field,
   effect, parameter, control, and chain IDs are rejected.
+- `plugin.yaml` and the selected entry script must each be a regular,
+  non-symlink file no larger than 1 MiB. `entry` must remain inside the package.
 - Text values may not contain NUL and are bounded (configuration values are at
   most 4096 bytes). Numeric defaults and submitted number fields must be finite
   and satisfy their declared inclusive `min`/`max` bounds.
 - HID report sizes are `0` (raw) or `1..=1024`; HID/TCP timeouts are
   `1..=60000` ms; a TCP transport's `host_key` and `port_key` must name declared
   non-secret config fields.
-- Manifest collection limits apply to devices, zones, effects, controls,
-  configuration fields, chain channels/accessories, and effect parameters.
-  Keep package data small and declarative; do not rely on truncation.
+- Poll intervals are `100..=60000` ms. LED counts are capped at 4096 per
+  zone/accessory/channel, LCD dimensions at 8192 per side, static zones and
+  integration controllers at 256 each.
+- Collection limits include 256 devices/effects/control definitions, 128 config
+  fields, 64 effect parameters, 64 chain channels, 256 chain accessories, 32
+  secondary USB-control endpoints, and 256 key-remap mappings. Invalid values
+  are rejected rather than truncated.
 
 Invalid stored plugin configuration is not passed through to Lua: the affected
 non-secret field falls back to its manifest default, while an invalid secret is
-omitted. Correct the value in the Plugins screen to make it available again.
+omitted. Correct integration values in the Integrations screen to make them
+available again.
 
 A logo need not be declared: an `assets/logo.png` file is adopted
 automatically when `plugin.yaml` omits `logo`. Declare `logo:` explicitly only
 to point at a differently-named file.
+
+Effect thumbnails use a separate `effect_assets` list so `effects` remains the
+effect declaration list:
+
+```yaml
+effect_assets:
+  - { id: plasma, thumbnail: plasma.png }
+```
 
 Display assets are bounded: any file the daemon serves (logo or effect
 thumbnail) must be at most **256 KB**, and a `logo` is additionally held to at
@@ -923,12 +1016,14 @@ a small square tile and letterboxed to preserve aspect. A logo that's absent,
 undecodable, or out of bounds is dropped at load (the plugin still loads; a
 warning is surfaced and the GUI falls back to an initials tile).
 
-A plugin's **content hash** (`sha256(plugin.yaml bytes || entry script
-bytes)`) is what user consent is pinned to (trust-on-first-use): granting a
-plugin's declared permissions records this hash, and editing the script —
-even swapping the file on disk after a grant — changes the hash and revokes
-consent until the user re-approves. This applies uniformly to every plugin,
-including the official repo's — nothing is consent-exempt.
+A plugin's **content hash** is SHA-256 over the CRLF-normalized
+`plugin.yaml` bytes followed by the CRLF-normalized entry-script bytes. For a
+permissioned plugin, granting its declared permissions records this hash;
+editing either file makes the plugin inert until the user reviews and approves
+the new content. Permissionless plugins do not have a consent gate, so their
+hash does not block activation. Display assets and `test.lua` are not included
+in this hash; changing security-relevant behavior therefore requires changing
+`plugin.yaml` or the entry script.
 
 Plugins install from three sources:
 
@@ -938,7 +1033,7 @@ Plugins install from three sources:
 - **The official repo** — a git repository the daemon seeds a non-removable
   record for and clones at startup (network failure is logged, not fatal —
   the daemon just has no official plugins until a later successful clone).
-  Official plugins go through the same consent flow as any other; the repo
+  Official plugins use the same permission gate as every other source; the repo
   *record* just can't be removed.
 - **Community repos** — any other git repository registered via the
   Plugins screen's "+ Add repository", each cloned under
@@ -946,6 +1041,11 @@ Plugins install from three sources:
   root, as sibling package directories directly under its root (the official
   repo's layout: `nzxt_kraken/`, `ene_smbus/`, …), and/or nested under a
   `plugins/<id>/` subdirectory — any combination of the three.
+
+New plugin ids introduced by a user-added community repository start disabled,
+including permissionless plugins. The user must explicitly enable each one in
+the Plugins screen. This default does not apply to the separately bootstrapped
+official repository.
 
 A plugin id is owned by whichever source loads it first — official repo,
 then local, then other repos in registration order — so a community repo can
@@ -959,7 +1059,8 @@ flags it in the Plugins screen when they differ — independent of whether the
 containing repo as a whole is "behind", since a repo can have unrelated
 commits while a given plugin's own files are unchanged. Accepting an update
 checks out only that plugin's files, leaving sibling plugins in the same repo
-untouched, and (since the content changed) re-requires consent.
+untouched. A permissioned plugin then requires consent for the new content;
+a permissionless plugin can activate immediately.
 
 **Testing a package without hardware.** A package may ship a `test.lua`
 alongside its `plugin.yaml`, which the daemon can run directly:

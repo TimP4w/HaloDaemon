@@ -67,6 +67,12 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
             anyhow::bail!("a repo with slug '{slug}' is already registered");
         }
     }
+    let known_plugin_ids: std::collections::HashSet<String> = app
+        .registry
+        .list(&*app.secret_store)
+        .into_iter()
+        .map(|plugin| plugin.id)
+        .collect();
 
     let dest = crate::config::plugin_repos_dir().join(&slug);
     let locked_sha = {
@@ -78,6 +84,7 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
             .context("clone task panicked")??
     };
 
+    let plugin_ids = crate::drivers::plugins::repo_plugin_ids(&dest);
     {
         let mut cfg = app.config.write().await;
         cfg.plugins.repos.push(PluginRepoRecord {
@@ -87,9 +94,13 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
             locked_sha,
             last_sync: Some(now_rfc3339()),
         });
+        for plugin_id in &plugin_ids {
+            if !known_plugin_ids.contains(plugin_id) && !cfg.plugins.disabled.contains(plugin_id) {
+                cfg.plugins.disabled.push(plugin_id.clone());
+            }
+        }
     }
     app.request_config_save();
-    let plugin_ids = crate::drivers::plugins::repo_plugin_ids(&dest);
     apply_repo_plugins(app, plugin_ids).await?;
     Ok(())
 }
@@ -691,13 +702,25 @@ mod tests {
             let cfg = app.config.read().await;
             assert_eq!(cfg.plugins.repos.len(), 1);
             assert_eq!(cfg.plugins.repos[0].slug, slug);
+            assert!(
+                cfg.plugins.disabled.contains(&slug),
+                "a plugin from a user-added repo must start disabled"
+            );
             drop(cfg);
 
             let plugins = app.registry.list(&*app.secret_store);
+            let plugin = plugins.iter().find(|p| p.id == slug);
             assert!(
-                plugins.iter().any(|p| p.id == slug),
+                plugin.is_some(),
                 "repo-sourced plugin should be discoverable after add_repo"
             );
+            assert!(!plugin.unwrap().enabled);
+
+            crate::registry::usecases::plugins::set_enabled(slug.clone(), true, app.clone())
+                .await
+                .unwrap();
+            let plugins = app.registry.list(&*app.secret_store);
+            assert!(plugins.iter().find(|p| p.id == slug).unwrap().enabled);
         })
         .await;
     }
@@ -910,6 +933,40 @@ mod tests {
             let manifest = crate::drivers::plugins::parse_manifest_from_dir(&dir)
                 .expect("the reverted checkout must parse again");
             assert_eq!(manifest.plugin_id, slug);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn add_repo_does_not_disable_a_preexisting_plugin_id() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&file_url(src.path()));
+            init_source_repo(src.path(), &slug);
+
+            let local_dir = crate::config::plugins_dir().join(&slug);
+            std::fs::create_dir_all(&local_dir).unwrap();
+            std::fs::copy(
+                src.path().join("plugin.yaml"),
+                local_dir.join("plugin.yaml"),
+            )
+            .unwrap();
+            std::fs::copy(src.path().join("main.lua"), local_dir.join("main.lua")).unwrap();
+            app.registry.load_all(&crate::config::plugins_dir());
+            assert!(app
+                .registry
+                .list(&*app.secret_store)
+                .iter()
+                .any(|plugin| plugin.id == slug));
+
+            add_repo(file_url(src.path()), None, app.clone())
+                .await
+                .unwrap();
+
+            assert!(
+                !app.config.read().await.plugins.disabled.contains(&slug),
+                "an id collision must not disable the pre-existing plugin owner"
+            );
         })
         .await;
     }

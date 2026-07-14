@@ -1291,16 +1291,13 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_sensor_fx\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: effect\n",
+            "id: engine_sensor_fx\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: effect\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
         )
         .unwrap();
         std::fs::write(
             plugin_dir.join("main.lua"),
             r#"
                 return {
-                  effects = {
-                    { kind = "direct", id = "probe", name = "Probe" },
-                  },
                   led_colors_probe = function(leds, t, dt, params, sensor)
                     local v = 0.0
                     if sensor ~= nil then v = sensor / 100.0 end
@@ -1656,17 +1653,13 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_test_fx\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: effect\n",
+            "id: engine_test_fx\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: effect\neffects:\n  - kind: pixmap\n    id: solid\n    name: Solid\n  - kind: direct\n    id: ramp\n    name: Ramp\n",
         )
         .unwrap();
         std::fs::write(
             plugin_dir.join("main.lua"),
             r#"
                 return {
-                  effects = {
-                    { kind = "pixmap", id = "solid", name = "Solid" },
-                    { kind = "direct", id = "ramp", name = "Ramp" },
-                  },
                   render_solid = function(buf, t, dt, params)
                     for i = 0, #buf - 1, 4 do
                       buf:set_u8(i, 9)

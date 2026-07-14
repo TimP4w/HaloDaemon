@@ -136,6 +136,63 @@ fn activation_status_reports_disabled_needs_consent_and_ready() {
 }
 
 #[test]
+fn smbus_scan_entries_require_ready_activation() {
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+    let src = r#"
+        return {
+          devices = { {
+            transport = "smbus", bus = "chipset", addresses = { 0x50 },
+            vendor = "Acme", model = "RAM", pre_scan = true,
+          } },
+          permissions = { "smbus" },
+        }
+    "#;
+    let m = parse_manifest(src, Path::new("smbus_scan.lua")).unwrap();
+    set_registry(&app.registry, vec![m.clone()]);
+
+    app.registry.set_granted(&HashMap::new());
+    assert!(app.registry.plugin_smbus_scan_entries().is_empty());
+
+    app.registry
+        .set_disabled(std::slice::from_ref(&m.plugin_id));
+    assert!(app.registry.plugin_smbus_scan_entries().is_empty());
+
+    app.registry.set_disabled(&[]);
+    app.registry.set_granted(&HashMap::from([(
+        m.plugin_id.clone(),
+        vec![Permission::Smbus],
+    )]));
+    acknowledge(&app.registry, std::slice::from_ref(&m));
+    let entries = app.registry.plugin_smbus_scan_entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].plugin_id, m.plugin_id);
+    assert!(entries[0].pre_scan);
+}
+
+#[test]
+fn granted_for_intersects_stored_and_declared_permissions() {
+    let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
+    let src = r#"
+        return {
+          devices = { { transport = "smbus", bus = "chipset", addresses = { 0x50 }, vendor = "Acme", model = "RAM" } },
+          permissions = { "smbus" },
+        }
+    "#;
+    let m = parse_manifest(src, Path::new("declared_smbus.lua")).unwrap();
+    set_registry(&app.registry, vec![m.clone()]);
+    app.registry.set_granted(&HashMap::from([(
+        m.plugin_id.clone(),
+        vec![Permission::Smbus, Permission::Os],
+    )]));
+
+    assert_eq!(
+        app.registry.granted_for(&m.plugin_id),
+        vec![Permission::Smbus]
+    );
+    assert!(app.registry.granted_for("unknown-plugin").is_empty());
+}
+
+#[test]
 fn granted_permission_is_pinned_to_script_content() {
     // A permissioned plugin activates only while its granted content pin
     // matches the current script; editing the script revokes consent.
@@ -351,9 +408,8 @@ fn load_all_with_repos_discovers_sibling_packages_at_a_repos_root() {
 #[test]
 fn load_all_never_runs_a_dropped_in_scripts_side_effects() {
     // A malicious file dropped into the plugins dir tries to write a
-    // sentinel at top level. `load_all` evaluates its manifest, but the
-    // sandbox strips `io`/`os`, so the write never happens and the plugin
-    // is skipped — dropping a file can't run code before consent.
+    // sentinel at top level. `load_all` must treat the entry as inert source:
+    // it neither compiles nor executes it before consent.
     let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let dir = tempfile::tempdir().unwrap();
     let sentinel = dir.path().join("pwned.txt");
@@ -378,12 +434,12 @@ fn load_all_never_runs_a_dropped_in_scripts_side_effects() {
         "a dropped-in script's filesystem write must never execute at load time"
     );
     assert!(
-        !app.registry
+        app.registry
             .snapshot()
             .manifests
             .iter()
             .any(|m| m.plugin_id == "evil"),
-        "a script that errors under the sandbox must be skipped, not registered"
+        "valid YAML must register without evaluating its entry Lua"
     );
     app.registry.load_all(Path::new("/nonexistent"));
 }
@@ -1029,7 +1085,8 @@ fn write_asset_plugin(root: &Path, id: &str, logo_bytes: Option<&[u8]>) -> std::
         dir.join("plugin.yaml"),
         format!(
             "id: {id}\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n\
-             logo: logo.png\neffects:\n  - id: rainbow\n    thumbnail: rainbow.png\n"
+             logo: logo.png\neffects:\n  - kind: pixmap\n    id: rainbow\n    name: Rainbow\n\
+             effect_assets:\n  - id: rainbow\n    thumbnail: rainbow.png\n"
         ),
     )
     .unwrap();

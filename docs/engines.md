@@ -52,10 +52,10 @@ The engine broadcasts a PNG preview and per-LED RGB data on a high-frequency cha
 ### Effects
 
 Only `screen_sampler` and the effect designer's `designer` pixmap are native
-Rust (`daemon/src/lighting/rgb_engine/canvas/effects.rs`). Every other
-pixmap effect ships as the built-in `halo_effects.lua` plugin
-(`daemon/src/drivers/plugins/builtins/halo_effects.lua`) — see
-[plugins.md](plugins.md#rgb-effects) for the plugin effect API.
+Rust (`daemon/src/lighting/rgb_engine/canvas/effects.rs`). Every other pixmap
+effect ships in the official repository's
+[`halo_effects`](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/halo_effects)
+package—see [plugins.md](plugins.md#rgb-effects) for the plugin effect API.
 
 | Effect | Kind | Description | Parameters |
 |--------|------|-------------|------------|
@@ -69,7 +69,7 @@ The `screen_sampler` effect captures the screen via XDG Desktop Portal (Linux, W
 
 ### Direct effect: Sensor Gradient
 
-`sensor_gradient` and its sibling `sensor_steps` are direct effects — no pixmap — shipped in the built-in `halo_effects.lua` plugin (not native Rust). They color a zone from a live sensor reading, delivered each tick as the 5th argument to the effect's `led_colors_<id>` callback (`nil` when the sensor is unset or unavailable) — the plugin-effect equivalent of the native `DirectLedEffect::sensor_id`/`set_sensor_value` pair used by the `designer` effect below.
+`sensor_gradient` and its sibling `sensor_steps` are direct effects—no pixmap—shipped in the official `halo_effects` package (not native Rust). They color a zone from a live sensor reading, delivered each tick as the 5th argument to the effect's `led_colors_<id>` callback (`nil` when the sensor is unset or unavailable)—the plugin-effect equivalent of the native `DirectLedEffect::sensor_id`/`set_sensor_value` pair used by the `designer` effect below.
 
 `sensor_gradient` picks any sensor via a `Sensor`-kind param (including the synthesized fan readings below), normalizes the reading against a configurable `[min, max]` range, smooths it (0–5 s time constant), and blends along a two-stop `color_a`→`color_b` gradient:
 
@@ -191,7 +191,7 @@ Both modules back a `shared()` function acquired by consumers in `from_params` (
 
 Captures the default audio sink's loopback (Linux: PipeWire stream targeting the monitor; Windows: WASAPI shared-mode loopback) and feeds a platform-neutral DSP pipeline (`dsp.rs`, `rustfft`): Hann-windowed FFT, folded into 64 log-spaced bands with per-band attack/release smoothing, RMS level, bass energy-flux beat detection with a refractory period, and a downsampled waveform. Consumers poll the latest `SpectrumFrame` via `AudioHandle::latest()` — latest-only, no ring buffer; scrolling history (spectrum bars, waveform trace) lives in the consuming effect, keyed off `SpectrumFrame::seq`.
 
-Three RGB effects consume it, all shipped in the built-in `halo_effects.lua` plugin (not native Rust) via the `halod.audio()` callback helper, which returns the latest `SpectrumFrame` fields (`level`, `flux`, `beat`, `seq`, `bands`):
+Three RGB effects consume it, all shipped in the official `halo_effects` package (not native Rust) via the `halod.audio()` callback helper, which returns the latest `SpectrumFrame` fields (`level`, `flux`, `beat`, `seq`, `bands`):
 
 | Effect | Kind | Behavior |
 | --- | --- | --- |

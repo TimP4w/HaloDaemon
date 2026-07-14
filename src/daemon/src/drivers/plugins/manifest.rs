@@ -7,6 +7,7 @@ use halod_shared::types::{
     EffectParamDescriptor, EffectParamValue, NativeEffect, ParamKind, Permission,
     PluginConfigFieldKind, PluginKind, RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
 };
+#[cfg(test)]
 use mlua::{DeserializeOptions, LuaSerdeExt};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
@@ -732,7 +733,11 @@ pub struct PluginManifest {
     pub config: Option<ConfigManifest>,
 }
 
-/// `plugin.yaml`: the authoritative manifest for a directory plugin (see [`parse_manifest_from_dir`]).
+/// Package-only fields from `plugin.yaml`. All declarative device, capability,
+/// transport, permission, effect, control, and config fields are deserialized
+/// directly into [`PluginManifest`] from the same YAML document. The entry Lua
+/// is never evaluated while loading a manifest; it is only read as inert source
+/// for hashing and for a later, consent-gated runtime worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginMeta {
     /// Required; must equal the plugin's directory name.
@@ -762,9 +767,10 @@ pub struct PluginMeta {
     /// Display-only logo, a bare filename under the plugin's `assets/` directory.
     #[serde(default)]
     pub logo: Option<String>,
-    /// Per-effect thumbnails, keyed by the entry Lua's declared effect ids.
+    /// Per-effect thumbnails, keyed by the YAML-declared effect ids. Kept under
+    /// a distinct key because `effects` is the actual effect declaration list.
     #[serde(default)]
-    pub effects: Vec<EffectAssetRef>,
+    pub effect_assets: Vec<EffectAssetRef>,
 }
 
 fn default_entry() -> String {
@@ -965,40 +971,35 @@ pub(super) fn plugin_content_hash(manifest: &[u8], script: &[u8]) -> String {
         .collect()
 }
 
-/// Parse (and validate) a plugin script's manifest. Does not register it.
-/// Cap on the throwaway parse VM's heap (8 MiB) — a manifest is small
-/// declarative data, so this only bites a script trying to exhaust memory
-/// before it ever gets consent.
+/// Test-only cap for legacy inline-Lua fixtures. Real package manifests are
+/// parsed exclusively from YAML and never create a Lua VM.
+#[cfg(test)]
 const MANIFEST_MEMORY_LIMIT: usize = 8 * 1024 * 1024;
 
-/// Instruction budget for evaluating a manifest. Ample for the declarative
-/// table plus any trivial helper definitions, but bounds a top-level
-/// `while true do end` from hanging daemon load.
+/// Test-only instruction budget for legacy inline-Lua fixtures.
+#[cfg(test)]
 const MANIFEST_INSTRUCTION_BUDGET: u64 = 5_000_000;
 
-/// Wall-clock ceiling on evaluating one manifest. The instruction budget catches
-/// an *uncaught* runaway, but a `pcall`-catching loop (or a pathological alloc/
-/// GC storm) can burn the whole budget repeatedly; since parsing happens on the
-/// scanner thread for every dropped-in file *before* consent, a wedged parse
-/// would otherwise hang discovery. On timeout the eval thread is abandoned
-/// (memory-capped, so bounded) and the plugin is skipped.
+/// Test-only timeout for legacy inline-Lua fixtures.
+#[cfg(test)]
 const MANIFEST_EVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Evaluate a plugin's Lua source and deserialize its returned table into a bare
-/// `PluginManifest`, on a throwaway thread bounded by [`MANIFEST_EVAL_TIMEOUT`].
-fn eval_manifest_table(source: &str) -> Result<PluginManifest> {
+/// Build old inline-Lua unit-test fixtures. No package or production load path
+/// reaches this helper.
+#[cfg(test)]
+fn parse_legacy_lua_fixture_threaded(source: &str) -> Result<PluginManifest> {
     let source = source.to_owned();
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("halod-manifest-eval".into())
         .spawn(move || {
-            let _ = tx.send(eval_manifest_table_inner(&source));
+            let _ = tx.send(parse_legacy_lua_fixture_inner(&source));
         })
         .map_err(|e| anyhow!("spawning manifest eval thread failed: {e}"))?;
     match rx.recv_timeout(MANIFEST_EVAL_TIMEOUT) {
         Ok(res) => res,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            bail!("manifest evaluation exceeded its {MANIFEST_EVAL_TIMEOUT:?} deadline")
+            bail!("legacy Lua fixture exceeded its {MANIFEST_EVAL_TIMEOUT:?} deadline")
         }
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             bail!("manifest eval thread died")
@@ -1006,11 +1007,10 @@ fn eval_manifest_table(source: &str) -> Result<PluginManifest> {
     }
 }
 
-fn eval_manifest_table_inner(source: &str) -> Result<PluginManifest> {
-    // Reading the manifest evaluates the whole script, so go through the shared VM
-    // chokepoint with `StripOnly` — same escape-hatch stripping, memory cap, and
-    // instruction budget as the runtime sandbox, but no `halod` runtime surface: a
-    // dropped-in file must not run `os`/`io`/`require` or hang the daemon before consent.
+#[cfg(test)]
+fn parse_legacy_lua_fixture_inner(source: &str) -> Result<PluginManifest> {
+    // Old unit fixtures predate package YAML. Keep them sandboxed and bounded;
+    // no on-disk package or production load path reaches this helper.
     let (lua, _budget) = super::sandbox::bootstrap_vm(
         super::sandbox::InjectSurface::StripOnly,
         MANIFEST_MEMORY_LIMIT,
@@ -1091,8 +1091,8 @@ pub fn check_lcd_dims(width: u32, height: u32) -> Result<()> {
     Ok(())
 }
 
-/// Upper bound on the entry Lua source read from disk. The script is a manifest,
-/// not a data file; without a cap a symlinked/pathological `entry` (e.g.
+/// Upper bound on the entry Lua source read from disk. Without a cap a
+/// symlinked/pathological `entry` (e.g.
 /// `/dev/zero`) would drive an unbounded `read_to_string`.
 const MAX_ENTRY_BYTES: u64 = 1024 * 1024;
 
@@ -1688,10 +1688,9 @@ fn validate_component(what: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Parse a single-file plugin source straight from an in-memory string, with
-/// the Lua table as the whole manifest. Every real plugin is a directory
-/// package (see [`parse_manifest_from_dir`]); this exists only to build inline
-/// Lua fixtures in tests without writing them to disk.
+/// Build a legacy inline-Lua unit-test fixture. Every real plugin is a YAML
+/// directory package (see [`parse_manifest_from_dir`]); production code never
+/// evaluates Lua to obtain manifest declarations.
 #[cfg(test)]
 pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
     let plugin_id = path
@@ -1700,7 +1699,7 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
         .map(str::to_owned)
         .ok_or_else(|| anyhow!("plugin path has no file stem: {}", path.display()))?;
 
-    let mut manifest = eval_manifest_table(source)?;
+    let mut manifest = parse_legacy_lua_fixture_threaded(source)?;
     manifest.plugin_id = plugin_id;
     manifest.source_path = path.to_path_buf();
     manifest.script_source = source.to_owned();
@@ -1709,7 +1708,9 @@ pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
     Ok(manifest)
 }
 
-/// Parse a directory plugin: `dir/plugin.yaml` overlaid on `dir/<entry>`'s capability sections/callbacks.
+/// Parse a directory plugin. `plugin.yaml` is the only declarative manifest;
+/// `dir/<entry>` is read as inert source for the consent hash and later runtime
+/// execution, but is deliberately not compiled or evaluated here.
 pub fn parse_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
     let manifest = build_manifest_from_dir(dir)?;
     validate_manifest(&manifest)?;
@@ -1728,6 +1729,8 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         std::fs::read(&meta_path).with_context(|| format!("reading {}", meta_path.display()))?;
     let meta: PluginMeta = serde_yaml::from_slice(&manifest_bytes)
         .with_context(|| format!("parsing {}", meta_path.display()))?;
+    let mut manifest: PluginManifest = serde_yaml::from_slice(&manifest_bytes)
+        .with_context(|| format!("parsing declarative fields in {}", meta_path.display()))?;
 
     if meta.id.is_empty() {
         bail!("{} declares an empty id", meta_path.display());
@@ -1746,13 +1749,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
     let source = std::fs::read_to_string(&entry_path)
         .with_context(|| format!("reading {}", entry_path.display()))?;
 
-    // plugin.yaml overlays the entry Lua's table for these fields.
-    let mut manifest = eval_manifest_table(&source)?;
-    manifest.plugin_type = meta.plugin_type;
     manifest.compatibility = meta.compatibility;
-    manifest.devices = meta.devices;
-    manifest.transports = meta.transports;
-    manifest.permissions = meta.permissions;
     manifest.identity = Identity {
         name: meta.name,
         id: Some(meta.id.clone()),
@@ -1769,7 +1766,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
             .is_file()
             .then(|| DEFAULT_LOGO_NAME.to_owned())
     });
-    manifest.effect_thumbnails = meta.effects;
+    manifest.effect_thumbnails = meta.effect_assets;
 
     manifest.plugin_id = meta.id;
     manifest.source_path = entry_path;
@@ -2501,13 +2498,9 @@ mod tests {
         assert!(parse_manifest(src, Path::new("integ3.lua")).is_ok());
     }
 
-    // ── directory plugins (`plugin.yaml` overlay) ───────────────────────
+    // ── directory plugins (`plugin.yaml` is authoritative) ─────────────
 
-    const ENTRY_LUA: &str = r#"
-        return {
-          rgb = { zones = {} },
-        }
-    "#;
+    const ENTRY_LUA: &str = "return {}";
 
     fn write_plugin_dir(root: &Path, id: &str, yaml_extra: &str, lua: &str) -> PathBuf {
         let dir = root.join(id);
@@ -2529,17 +2522,14 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "dirplug",
-            "devices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "devices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\nrgb:\n  zones: []\n",
             ENTRY_LUA,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
         assert_eq!(m.plugin_id, "dirplug");
         assert_eq!(m.devices.len(), 1);
         assert_eq!(m.devices[0].vendor, "Acme");
-        assert!(
-            m.rgb.is_some(),
-            "entry Lua's capability sections still apply"
-        );
+        assert!(m.rgb.is_some(), "YAML capability sections are loaded");
         let compatibility = m.compatibility.as_ref().unwrap();
         assert_eq!(compatibility.halod, ">=0.2.0, <0.3.0");
         assert_eq!(compatibility.plugin_api, PLUGIN_API_VERSION);
@@ -2620,9 +2610,10 @@ mod tests {
     }
 
     #[test]
-    fn directory_plugin_yaml_type_overlay_wins_over_lua_declarations() {
+    fn directory_plugin_ignores_all_lua_declarations() {
         let tmp = tempfile::tempdir().unwrap();
-        // The entry Lua's devices/identity/type must be discarded in favor of plugin.yaml.
+        // Even valid-looking declarative fields in the entry Lua are inert at
+        // manifest load time; only plugin.yaml contributes declarations.
         let lua = r#"return {
             type = "integration",
             devices = { { transport = "hid", vid = 9, pid = 9, vendor = "Lua", model = "Ignored" } },
@@ -2641,9 +2632,23 @@ mod tests {
         assert_eq!(m.devices[0].vendor, "Real");
         assert_eq!(m.identity.name.as_deref(), Some("Real Name"));
         assert!(
-            m.rgb.is_some(),
-            "non-overlaid capability sections still come from Lua"
+            m.rgb.is_none(),
+            "Lua capability declarations must be ignored"
         );
+    }
+
+    #[test]
+    fn directory_manifest_never_compiles_or_executes_entry_lua() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "inert_entry",
+            "type: integration\n",
+            "this is deliberately not valid Lua",
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(manifest.plugin_type, PluginKind::Integration);
+        assert_eq!(manifest.script_source, "this is deliberately not valid Lua");
     }
 
     #[test]
@@ -2752,7 +2757,8 @@ mod tests {
             "withassets",
             "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n\
              logo: logo.png\n\
-             effects:\n  - id: rainbow\n    thumbnail: rainbow.png\n",
+             effects:\n  - kind: pixmap\n    id: rainbow\n    name: Rainbow\n\
+             effect_assets:\n  - id: rainbow\n    thumbnail: rainbow.png\n",
             ENTRY_LUA,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();

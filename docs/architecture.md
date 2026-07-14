@@ -65,19 +65,18 @@ requiring the daemon to duplicate the number per accessory. SMBus devices
 sharing one `SmBusScanEntry` (e.g. multiple DRAM sticks) share one bus-level
 limiter, since they already serialize through the same bus mutex; a
 different vendor's `SmBusScanEntry` on the same *physical* bus number still
-opens an independent `SmBusDevice`/limiter today — cross-vendor unification
-on one physical bus is a known, unaddressed gap. USB-control enforcement
-isn't wired up yet (HID and SMBus are the dominant write paths); devices on
-that transport don't report live write-rate stats.
+opens an independent `SmBusDevice`/limiter today—cross-vendor unification on
+one physical bus is a known, unaddressed gap. USB-control endpoints are also
+metered and receive the plugin/device write-rate limit.
 
 ### Protocol — speaking the vendor's wire format
 
 A protocol module sits on top of a transport and turns intent ("set zone 2 to
 red", "read fan RPM") into the exact byte sequences the chip expects, and parses
 replies back. Protocols hold a transport (often `Mutex<Option<T>>` so it can be
-opened/closed) and expose typed methods. See
-[aura_usb.rs](../src/daemon/src/drivers/vendors/asus/protocols/aura_usb.rs)
-for a compact example. When you port a wire format from third-party code, add the
+opened/closed) and expose typed methods. See the
+[HID++ protocol implementation](../src/daemon/src/drivers/vendors/logitech/protocols/hidpp/mod.rs)
+for an example. When you port a wire format from third-party code, add the
 SPDX attribution header (`CLAUDE.md` → *Licensing & attribution*) and document the
 format in [docs/protocols/](protocols/).
 
@@ -155,19 +154,21 @@ per-device Lua worker thread (which owns the VM + transport). Plugins expose onl
 existing capability *kinds*; the capability taxonomy and engines stay native and
 type-safe. See [docs/plugins.md](plugins.md) for the authoring guide.
 
-**Trust boundary.** Untrusted plugin Lua runs **in-process** in the daemon today,
-sandboxed only by bounded worker threads and queues. The roadmap moves it out to
-an unprivileged, killable plugin-host process, with privileged hardware access
-behind a separate broker (as already used for Windows) — so a misbehaving plugin
-can be terminated without taking the daemon down and never touches hardware
-directly.
+**Trust boundary.** Untrusted plugin Lua runs **in-process** in the daemon today.
+Runtime VMs strip filesystem/process/native-loading globals and enforce heap,
+instruction, and per-call time limits, but this is not process isolation. The
+roadmap moves Lua into an unprivileged, killable plugin-host process, with
+privileged hardware access behind a separate broker (as already used for
+Windows), so a misbehaving plugin can be terminated without taking the daemon
+down and never touches privileged hardware directly.
 
 There are no plugins compiled into the daemon binary. At startup the daemon seeds
 a non-removable **official plugin repo** record and clones it over the network
 (`registry::ensure_official_repo`) — a clone failure (e.g. no network on first
 launch) is logged and never fails boot, so the daemon simply has no official
-plugins until a later successful clone. Official plugins go through the exact
-same consent/permission flow as any other plugin: nothing is exempt. A plugin id
+plugins until a later successful clone. Official plugins use the same gate as
+all other sources: permissionless packages activate directly, while permissioned
+packages require every declared grant and current-content acknowledgement. A plugin id
 is owned by whichever source loads it first (official repo, then local
 `plugins/`, then other repos in config order — see `load_all_with_repos`), so a
 community repo can never shadow an existing plugin id; a collision is rejected

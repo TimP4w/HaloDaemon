@@ -902,9 +902,9 @@ fn build_ctx(
 /// calling thread (a `spawn_blocking` worker), so register batches block inline.
 /// Wall-clock ceiling on one `pre_scan` run. The instruction budget catches an
 /// *uncaught* runaway, but a `pcall`-catching loop stays on the thread; since
-/// `pre_scan` runs during SMBus discovery *before* any device is matched or
-/// consented, a wedged one would otherwise hang the scanner. On timeout the eval
-/// thread is abandoned (memory-capped, so bounded) — mirrors the manifest parser.
+/// `pre_scan` runs during SMBus discovery before any device is matched, so a
+/// wedged one would otherwise hang the scanner. Scan entries are activation-gated;
+/// on timeout the eval thread is abandoned (memory-capped, so bounded).
 const PRE_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub fn run_pre_scan(
@@ -945,6 +945,10 @@ fn run_pre_scan_inner(
     granted: &[Permission],
     handle: Handle,
 ) -> Result<()> {
+    if !granted.contains(&Permission::Smbus) {
+        bail!("pre_scan requires the `smbus` permission");
+    }
+
     // `pre_scan` is one-time bus preparation before a device is even matched,
     // not general plugin logic — it gets no `halod.config` (an empty map).
     let (lua, _budget) = sandbox::bootstrap_vm(

@@ -64,14 +64,27 @@ pub async fn set_trust(
     app: Arc<AppState>,
 ) -> Result<()> {
     let hash = app.registry.content_hash_for(&id);
+    let declared = app.registry.declared_permissions_for(&id);
+    let effective: Vec<Permission> = granted
+        .iter()
+        .copied()
+        .filter(|permission| declared.contains(permission))
+        .collect();
+    if effective.len() != granted.len() {
+        let dropped: Vec<Permission> = granted
+            .into_iter()
+            .filter(|permission| !declared.contains(permission))
+            .collect();
+        log::warn!("ignoring undeclared permissions for plugin '{id}': {dropped:?}");
+    }
     {
         let mut cfg = app.config.write().await;
-        if granted.is_empty() {
+        if effective.is_empty() {
             // Revoke: drop the grant and its content pin, back to pristine.
             cfg.plugins.granted.remove(&id);
             cfg.plugins.acknowledged.remove(&id);
         } else {
-            cfg.plugins.granted.insert(id.clone(), granted);
+            cfg.plugins.granted.insert(id.clone(), effective);
             // Pin the grant to the exact script the user is consenting to.
             match hash {
                 Some(h) => {
@@ -729,18 +742,11 @@ mod tests {
         .await;
     }
 
-    const CONFIG_TEST_PLUGIN: &str = r#"
-        return {
-          config = { fields = {
-            { key = "host", label = "Host" },
-            { key = "token", label = "Token", secure = true },
-          } },
-        }
-    "#;
+    const CONFIG_TEST_PLUGIN: &str = "return {}";
 
-    /// `devices` must be declared here — a directory plugin's own Lua manifest fields are overlaid away.
+    /// Every declaration lives in YAML; the Lua entry contains callbacks only.
     const CONFIG_TEST_PLUGIN_YAML: &str =
-        "id: cfgtest\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n";
+        "id: cfgtest\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\npermissions:\n  - network\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
 
     fn write_config_test_plugin(root: &std::path::Path) {
         let dir = root.join("cfgtest");
@@ -857,6 +863,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_trust_discards_undeclared_permissions() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(&app, || async {
+                set_trust(
+                    "cfgtest".into(),
+                    vec![Permission::Network, Permission::Os],
+                    true,
+                    app.clone(),
+                )
+                .await
+                .unwrap();
+
+                let cfg = app.config.read().await;
+                assert_eq!(
+                    cfg.plugins.granted.get("cfgtest"),
+                    Some(&vec![Permission::Network]),
+                    "an undeclared permission must never be persisted"
+                );
+                drop(cfg);
+                assert_eq!(
+                    app.registry.granted_for("cfgtest"),
+                    vec![Permission::Network]
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn revoking_clears_both_the_grant_and_the_content_pin() {
         crate::test_support::with_tmp_config(|app| async move {
             with_config_test_plugin(&app, || async {
@@ -961,12 +997,12 @@ mod tests {
             std::fs::create_dir_all(&pdir).unwrap();
             std::fs::write(
                 pdir.join("plugin.yaml"),
-                "id: numcfg\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+                "id: numcfg\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\nconfig:\n  fields:\n    - key: hz\n      label: Hz\n      kind: number\n      min: 1\n      max: 100\n",
             )
             .unwrap();
             std::fs::write(
                 pdir.join("main.lua"),
-                r#"return { config = { fields = { { key = "hz", label = "Hz", kind = "number", min = 1, max = 100 } } } }"#,
+                "return {}",
             )
             .unwrap();
             app.registry.load_all(&dir);

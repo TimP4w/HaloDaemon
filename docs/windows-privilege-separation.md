@@ -66,7 +66,7 @@ the wire protocol. Every scope carries request-rate and total-operation ceilings
 |---|---|---|
 | `halod.exe` daemon | **Yes** | — |
 | `halod-broker.exe` | **Yes** | — |
-| Lua plugins (run inside the daemon) | **No** | daemon-layer `smbus` permission gate |
+| Lua plugins (run inside the daemon) | **No** | declared address scope plus daemon-layer activation and permission gates |
 | Other interactive users on the box | **No** | **the broker pipe (this document)** |
 
 Two consequences follow, and they are the crux of the model:
@@ -76,12 +76,13 @@ Two consequences follow, and they are the crux of the model:
    The split limits elevated code and prevents unrelated processes/users from
    reaching it; it is not a sandbox for the daemon itself.
 
-2. **Plugins are untrusted.** A plugin must hold the daemon-layer `smbus`
-   permission and declare its addresses. The daemon turns the scan job's exact
-   addresses and pre-scan scope into the broker capability. The broker therefore
-   rejects an accidental or confused-deputy request outside that scope, while a
-   daemon compromise can still request a different capability as described in
-   (1).
+2. **Plugins are untrusted.** A package using SMBus must declare the `smbus`
+   permission and exact addresses. The daemon contributes its scan entries only
+   after the plugin is activation-ready, and `pre_scan` checks the effective
+   `smbus` grant again before injecting a transport. The daemon turns a scan
+   job's addresses and pre-scan scope into the broker capability, so the broker
+   rejects requests outside that scope. Scope/rate/PCI/VM limits also apply. A
+   daemon compromise can request a different capability as described in (1).
 
 The boundary the **broker** actually enforces is the last row: keeping a
 *different* interactive user off the elevated pipe.

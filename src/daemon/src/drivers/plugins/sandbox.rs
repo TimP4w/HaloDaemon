@@ -30,8 +30,8 @@ const REMOVED: &[&str] = &[
 
 /// Strip every escape hatch, then re-inject `halod`/`log`, then selectively
 /// re-enable permission-gated globals the plugin was actually granted.
-/// `granted` is the intersection the caller already computed (declared ∩
-/// user-accepted) — this function only ever adds capability, never checks
+/// `granted` is the effective declared ∩ user-accepted set guaranteed by
+/// `Registry::granted_for`; this function only ever adds capability, never checks
 /// consent itself. `config` is this plugin's own resolved config values (see
 /// `plugins::resolved_config_for`) — never another plugin's, since the caller
 /// builds one `config` map per VM.
@@ -59,9 +59,8 @@ pub fn apply(
 }
 
 /// Remove every filesystem/process/native escape hatch from `lua`'s globals.
-/// Shared by the runtime sandbox and the manifest parser, so a plugin script
-/// can't reach `os`/`io`/`require`/… even while its manifest table is being
-/// read (which evaluates the whole script).
+/// Shared by runtime VMs and legacy inline-Lua test fixtures. Real package
+/// manifests are pure YAML and never create a Lua VM.
 pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
     let globals = lua.globals();
     for name in REMOVED {
@@ -71,13 +70,13 @@ pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
 }
 
 /// What surface a bootstrapped VM exposes. The device/effect workers get the
-/// full `halod` runtime API; the manifest parser only evaluates the script to
-/// read its table, so it strips the escape hatches but injects no runtime API.
+/// full `halod` runtime API; `StripOnly` exists only for legacy test fixtures.
 pub(super) enum InjectSurface<'a> {
     FullRuntime {
         granted: &'a [Permission],
         config: &'a HashMap<String, String>,
     },
+    #[cfg(test)]
     StripOnly,
 }
 
@@ -98,6 +97,7 @@ pub(super) fn bootstrap_vm(
     lua.set_app_data(CallDeadline(Rc::new(Cell::new(None))));
     match surface {
         InjectSurface::FullRuntime { granted, config } => apply(&lua, granted, config)?,
+        #[cfg(test)]
         InjectSurface::StripOnly => strip_escape_hatches(&lua)?,
     }
     let _ = lua.set_memory_limit(memory_limit);

@@ -37,13 +37,14 @@ impl PluginScanEntry {
 }
 
 impl super::Registry {
-    /// Build the SMBus scan entries every enabled plugin declares. Called by the
-    /// SMBus scanner each discovery pass, so enable/disable and reloads take effect.
+    /// Build the SMBus scan entries every activation-ready plugin declares. Called
+    /// by the SMBus scanner each discovery pass, so consent, enable/disable, and
+    /// reloads take effect.
     pub fn plugin_smbus_scan_entries(&self) -> Vec<PluginScanEntry> {
         let state = self.snapshot();
         let mut out = Vec::new();
         for m in state.manifests.iter() {
-            if state.disabled.contains(&m.plugin_id) {
+            if state.activation.get(&m.plugin_id) != Some(&super::ActivationPhase::Ready) {
                 continue;
             }
             for spec in m.smbus_devices() {
