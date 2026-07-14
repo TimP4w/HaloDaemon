@@ -50,30 +50,37 @@ pub async fn initialize_app_state_with_dev_repo(
     dev_plugin_repo: Option<std::path::PathBuf>,
 ) {
     let dev_plugin_repo = dev_plugin_repo.map(|dir| {
-        std::fs::canonicalize(&dir).unwrap_or_else(|e| {
-            panic!("invalid --dev-plugin-repo '{}': {e}", dir.display())
-        })
+        std::fs::canonicalize(&dir)
+            .unwrap_or_else(|e| panic!("invalid --dev-plugin-repo '{}': {e}", dir.display()))
     });
     if let Some(dir) = &dev_plugin_repo {
-        crate::drivers::plugins::repo::read_repository_manifest(dir).unwrap_or_else(|e| {
-            panic!("invalid --dev-plugin-repo '{}': {e:#}", dir.display())
-        });
+        crate::drivers::plugins::repo::read_repository_manifest(dir)
+            .unwrap_or_else(|e| panic!("invalid --dev-plugin-repo '{}': {e:#}", dir.display()));
         log::warn!("Using development plugin repository at {}", dir.display());
     } else {
         ensure_official_repo(&app).await;
     }
+    let mut discovered_hashes = Vec::new();
     {
         let cfg = app.config.read().await;
         let mut repo_dirs = crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos);
         if dev_plugin_repo.is_none() {
-            let official_dir = crate::config::plugin_repos_dir()
-                .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
+            let official_dir =
+                crate::config::plugin_repos_dir().join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
             if official_dir.is_dir() {
-                if let Err(e) = crate::drivers::plugins::repo::verify_official_repository(&official_dir) {
-                    log::warn!(
-                        "official plugin repository is not signed or failed verification: {e:#}"
-                    );
-                    repo_dirs.retain(|dir| dir != &official_dir);
+                match crate::drivers::plugins::repo::verify_official_repository(&official_dir) {
+                    Ok(manifest) => discovered_hashes.extend(
+                        manifest
+                            .packages
+                            .into_iter()
+                            .map(|package| (package.id, package.sha256)),
+                    ),
+                    Err(e) => {
+                        log::warn!(
+                            "official plugin repository is not signed or failed verification: {e:#}"
+                        );
+                        repo_dirs.retain(|dir| dir != &official_dir);
+                    }
                 }
             }
         }
@@ -83,6 +90,14 @@ pub async fn initialize_app_state_with_dev_repo(
             &repo_dirs,
         );
         app.registry.replace_policy(&cfg.plugins);
+    }
+    if !discovered_hashes.is_empty() {
+        let mut cfg = app.config.write().await;
+        for (id, hash) in discovered_hashes {
+            cfg.plugins.installed_hashes.entry(id).or_insert(hash);
+        }
+        app.registry.replace_policy(&cfg.plugins);
+        app.request_config_save();
     }
     // Security: disable any plugin whose files changed on disk since checkout,
     // BEFORE discovery so a tampered plugin never activates. No network, so it
@@ -196,17 +211,15 @@ pub(crate) async fn start_update_check(app: Arc<AppState>) {
 }
 
 /// Toast one notification per auto-discovered plugin that can't activate: a
-/// "needs permission" warning for one never approved, or a "content changed"
-/// warning for one whose on-disk hash changed since it was approved. A
-/// manually-imported plugin is pre-marked notified by the import usecase (the
-/// GUI shows a blocking consent modal for that flow instead).
+/// "needs permission" warning for each unapproved plugin. A manually-imported
+/// plugin is pre-marked notified by the import usecase (the GUI shows a
+/// blocking consent modal for that flow instead).
 pub(crate) async fn notify_ungranted_plugins(app: &Arc<AppState>) {
     use crate::drivers::plugins::UngrantedReason;
     use halod_shared::types::NotificationCode;
     for (plugin, reason) in app.registry.take_newly_ungranted_plugins() {
         let code = match reason {
             UngrantedReason::NeedsPermission => NotificationCode::PluginNeedsPermission { plugin },
-            UngrantedReason::ContentChanged => NotificationCode::PluginContentChanged { plugin },
         };
         crate::platform::notify::send(app, code).await;
     }

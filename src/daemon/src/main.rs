@@ -49,9 +49,7 @@ enum ProcessRole {
         dev_plugin_repo: Option<std::path::PathBuf>,
     },
     #[cfg(feature = "plugin-test")]
-    PluginTest {
-        package: std::path::PathBuf,
-    },
+    PluginTest { package: std::path::PathBuf },
 }
 
 fn process_role(args: &[String]) -> ProcessRole {
@@ -75,7 +73,10 @@ fn process_role(args: &[String]) -> ProcessRole {
                 eprintln!("usage: halod [--headless] [--dev-plugin-repo <DIR>]");
                 std::process::exit(2);
             };
-            if dev_plugin_repo.replace(std::path::PathBuf::from(path)).is_some() {
+            if dev_plugin_repo
+                .replace(std::path::PathBuf::from(path))
+                .is_some()
+            {
                 eprintln!("--dev-plugin-repo may only be provided once");
                 std::process::exit(2);
             }
@@ -112,6 +113,17 @@ fn main() -> Result<()> {
         #[cfg(feature = "plugin-test")]
         ProcessRole::PluginTest { .. } => unreachable!("handled above"),
     };
+    let dev_plugin_repo = dev_plugin_repo.map(|path| {
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|e| {
+            eprintln!("invalid --dev-plugin-repo '{}': {e}", path.display());
+            std::process::exit(2);
+        });
+        crate::drivers::plugins::repo::read_repository_manifest(&canonical).unwrap_or_else(|e| {
+            eprintln!("invalid --dev-plugin-repo '{}': {e:#}", canonical.display());
+            std::process::exit(2);
+        });
+        canonical
+    });
 
     // Before the runtime starts (still single-threaded, no env-reader race).
     #[cfg(target_os = "linux")]
@@ -417,7 +429,10 @@ mod tests {
     fn no_args_runs_a_plain_server() {
         assert_eq!(
             process_role(&argv(&[])),
-            ProcessRole::Server { headless: false, dev_plugin_repo: None }
+            ProcessRole::Server {
+                headless: false,
+                dev_plugin_repo: None
+            }
         );
     }
 
@@ -425,7 +440,10 @@ mod tests {
     fn headless_flag_marks_a_headless_server() {
         assert_eq!(
             process_role(&argv(&["--headless"])),
-            ProcessRole::Server { headless: true, dev_plugin_repo: None }
+            ProcessRole::Server {
+                headless: true,
+                dev_plugin_repo: None
+            }
         );
     }
 
@@ -441,7 +459,10 @@ mod tests {
         ] {
             assert_eq!(
                 process_role(&argv(&[flag])),
-                ProcessRole::Server { headless: false, dev_plugin_repo: None },
+                ProcessRole::Server {
+                    headless: false,
+                    dev_plugin_repo: None
+                },
                 "{flag} should be ignored",
             );
         }
@@ -451,7 +472,10 @@ mod tests {
     fn unknown_arguments_are_ignored() {
         assert_eq!(
             process_role(&argv(&["--frobnicate", "foo"])),
-            ProcessRole::Server { headless: false, dev_plugin_repo: None }
+            ProcessRole::Server {
+                headless: false,
+                dev_plugin_repo: None
+            }
         );
     }
 

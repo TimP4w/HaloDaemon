@@ -471,7 +471,7 @@ fn ungranted_in_reports_once_then_stays_silent() {
 }
 
 #[test]
-fn ungranted_in_flags_content_change_when_acknowledgment_is_stale() {
+fn ungranted_in_does_not_treat_a_stale_installed_hash_as_revoked_consent() {
     let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
     let src = r#"
         return {
@@ -481,8 +481,8 @@ fn ungranted_in_flags_content_change_when_acknowledgment_is_stale() {
         }
     "#;
     let m = parse_manifest(src, Path::new("approved_once.lua")).unwrap();
-    // Grant the permission but pin acknowledgment to a hash that no longer
-    // matches the manifest — i.e. its content changed since approval.
+    // Installed hashes discover explicit updates; they do not revoke an
+    // already granted permission when plugin files change.
     app.registry.set_granted(&HashMap::from([(
         m.plugin_id.clone(),
         vec![Permission::Network],
@@ -494,10 +494,7 @@ fn ungranted_in_flags_content_change_when_acknowledgment_is_stale() {
     let mut notified = HashSet::new();
 
     let out = app.registry.ungranted_in(&[m], &mut notified);
-    assert_eq!(
-        out,
-        vec![("Approved Once".to_string(), UngrantedReason::ContentChanged)]
-    );
+    assert!(out.is_empty());
 
     app.registry.set_granted(&HashMap::new());
     app.registry.set_acknowledged(&HashMap::new());

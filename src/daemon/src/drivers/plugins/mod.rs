@@ -809,9 +809,6 @@ impl Registry {
 pub enum UngrantedReason {
     /// Never approved (or explicitly revoked): the user must grant permissions.
     NeedsPermission,
-    /// Previously approved, but the on-disk content hash changed since — an
-    /// edit or an update. The user re-approves the new content.
-    ContentChanged,
 }
 
 impl Registry {

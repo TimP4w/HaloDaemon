@@ -353,17 +353,6 @@ pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<Strin
     // before reconciliation so workers use the newly accepted code rather
     // than stale manifest/source snapshots.
     reload_registry(&app).await;
-    {
-        let mut cfg = app.config.write().await;
-        for plugin_id in &plugin_ids {
-            if let Some(hash) = app.registry.content_hash_for(plugin_id) {
-                cfg.plugins.installed_hashes.insert(plugin_id.clone(), hash);
-            } else {
-                cfg.plugins.installed_hashes.remove(plugin_id);
-            }
-        }
-    }
-    app.request_config_save();
     reconcile_plugins(&app, &plugin_ids).await;
     Ok(())
 }

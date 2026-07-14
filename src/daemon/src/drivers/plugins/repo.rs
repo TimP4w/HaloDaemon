@@ -55,9 +55,31 @@ struct RepositorySignature {
 pub fn read_repository_manifest(repo_dir: &Path) -> Result<RepositoryManifest> {
     let path = repo_dir.join("repository.yaml");
     let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    let manifest: RepositoryManifest = serde_yaml::from_slice(&bytes)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let manifest: RepositoryManifest =
+        serde_yaml::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
     validate_repository_manifest(repo_dir, &manifest)?;
+    Ok(manifest)
+}
+
+/// Read the repository index directly from a fetched commit without changing
+/// the working tree.  This is used to advertise an explicit update before the
+/// user accepts it; the complete on-disk validation still runs after checkout.
+pub fn read_repository_manifest_at_commit(
+    repo_dir: &Path,
+    sha: &str,
+) -> Result<RepositoryManifest> {
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
+    let tree = repo
+        .find_commit(oid)
+        .with_context(|| format!("commit '{sha}' not found"))?
+        .tree()
+        .context("reading commit tree")?;
+    let bytes = read_blob_at(&repo, &tree, Path::new("repository.yaml"))?;
+    let manifest: RepositoryManifest =
+        serde_yaml::from_slice(&bytes).context("parsing repository.yaml from commit")?;
+    validate_repository_index(&manifest)?;
     Ok(manifest)
 }
 
@@ -66,30 +88,42 @@ pub fn read_repository_manifest(repo_dir: &Path) -> Result<RepositoryManifest> {
 /// matching the standalone `repo-sign` tool.
 pub fn verify_official_repository(repo_dir: &Path) -> Result<RepositoryManifest> {
     let yaml_path = repo_dir.join("repository.yaml");
-    let yaml = std::fs::read(&yaml_path).with_context(|| format!("reading {}", yaml_path.display()))?;
+    let yaml =
+        std::fs::read(&yaml_path).with_context(|| format!("reading {}", yaml_path.display()))?;
     let manifest: RepositoryManifest = serde_yaml::from_slice(&yaml)
         .with_context(|| format!("parsing {}", yaml_path.display()))?;
     validate_repository_manifest(repo_dir, &manifest)?;
 
     let sig_path = repo_dir.join("repository.sig");
-    let sig_bytes = std::fs::read(&sig_path).with_context(|| format!("reading {}", sig_path.display()))?;
+    let sig_bytes =
+        std::fs::read(&sig_path).with_context(|| format!("reading {}", sig_path.display()))?;
     let signature: RepositorySignature = serde_yaml::from_slice(&sig_bytes)
         .with_context(|| format!("parsing {}", sig_path.display()))?;
     if signature.schema != REPOSITORY_SCHEMA {
-        bail!("unsupported repository signature schema {}", signature.schema);
+        bail!(
+            "unsupported repository signature schema {}",
+            signature.schema
+        );
     }
     if signature.algorithm != "ed25519" {
-        bail!("unsupported repository signature algorithm '{}'", signature.algorithm);
+        bail!(
+            "unsupported repository signature algorithm '{}'",
+            signature.algorithm
+        );
     }
     if signature.key_id != OFFICIAL_KEY_ID {
-        bail!("unknown official repository signing key '{}'", signature.key_id);
+        bail!(
+            "unknown official repository signing key '{}'",
+            signature.key_id
+        );
     }
     let public: [u8; 32] = B64
         .decode(OFFICIAL_PUBLIC_KEY_B64)
         .context("decoding embedded official plugin signing key")?
         .try_into()
         .map_err(|_| anyhow!("embedded official plugin signing key is not 32 bytes"))?;
-    let key = VerifyingKey::from_bytes(&public).context("constructing official plugin verifying key")?;
+    let key =
+        VerifyingKey::from_bytes(&public).context("constructing official plugin verifying key")?;
     let raw_signature: [u8; 64] = B64
         .decode(signature.signature.trim())
         .context("decoding repository signature")?
@@ -113,10 +147,47 @@ pub fn verify_official_repository(repo_dir: &Path) -> Result<RepositoryManifest>
 }
 
 fn validate_repository_manifest(repo_dir: &Path, manifest: &RepositoryManifest) -> Result<()> {
+    validate_repository_index(manifest)?;
+
+    for package in &manifest.packages {
+        let dir = repo_dir.join(&package.path);
+        if !dir.is_dir() {
+            bail!(
+                "repository package '{}' directory is missing: {}",
+                package.id,
+                dir.display()
+            );
+        }
+        let meta: MetaEntryVersion = serde_yaml::from_slice(
+            &std::fs::read(dir.join("plugin.yaml"))
+                .with_context(|| format!("reading package '{}' manifest", package.id))?,
+        )
+        .with_context(|| format!("parsing package '{}' manifest", package.id))?;
+        if meta.id.as_deref() != Some(package.id.as_str()) {
+            bail!(
+                "repository package '{}' does not match its plugin.yaml id",
+                package.id
+            );
+        }
+        if meta.version.as_deref().unwrap_or_default() != package.version {
+            bail!(
+                "repository package '{}' does not match its plugin.yaml version",
+                package.id
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Checks fields that are meaningful before the commit is checked out.
+fn validate_repository_index(manifest: &RepositoryManifest) -> Result<()> {
     if manifest.schema != REPOSITORY_SCHEMA {
         bail!("unsupported repository manifest schema {}", manifest.schema);
     }
-    if manifest.id.trim().is_empty() || manifest.name.trim().is_empty() || manifest.version.trim().is_empty() {
+    if manifest.id.trim().is_empty()
+        || manifest.name.trim().is_empty()
+        || manifest.version.trim().is_empty()
+    {
         bail!("repository manifest id, name, and version must be non-empty");
     }
     if manifest.compatibility.plugin_api != PLUGIN_API {
@@ -145,33 +216,39 @@ fn validate_repository_manifest(repo_dir: &Path, manifest: &RepositoryManifest) 
             bail!("repository package id and version must be non-empty");
         }
         if !ids.insert(&package.id) {
-            bail!("repository package id '{}' is declared more than once", package.id);
+            bail!(
+                "repository package id '{}' is declared more than once",
+                package.id
+            );
         }
         if package.path.is_absolute()
             || package.path.as_os_str().is_empty()
-            || package.path.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)))
+            || package.path.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
         {
-            bail!("repository package '{}' has an invalid path '{}'", package.id, package.path.display());
+            bail!(
+                "repository package '{}' has an invalid path '{}'",
+                package.id,
+                package.path.display()
+            );
         }
         if !paths.insert(&package.path) {
-            bail!("repository package path '{}' is declared more than once", package.path.display());
+            bail!(
+                "repository package path '{}' is declared more than once",
+                package.path.display()
+            );
         }
         if package.sha256.len() != 64 || !package.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-            bail!("repository package '{}' has an invalid sha256 digest", package.id);
-        }
-        let dir = repo_dir.join(&package.path);
-        if !dir.is_dir() {
-            bail!("repository package '{}' directory is missing: {}", package.id, dir.display());
-        }
-        let meta: MetaEntryVersion = serde_yaml::from_slice(
-            &std::fs::read(dir.join("plugin.yaml")).with_context(|| format!("reading package '{}' manifest", package.id))?,
-        )
-        .with_context(|| format!("parsing package '{}' manifest", package.id))?;
-        if meta.id.as_deref() != Some(package.id.as_str()) {
-            bail!("repository package '{}' does not match its plugin.yaml id", package.id);
-        }
-        if meta.version.as_deref().unwrap_or_default() != package.version {
-            bail!("repository package '{}' does not match its plugin.yaml version", package.id);
+            bail!(
+                "repository package '{}' has an invalid sha256 digest",
+                package.id
+            );
         }
     }
     Ok(())
@@ -198,7 +275,9 @@ pub fn package_hash(package_dir: &Path) -> Result<String> {
 }
 
 fn collect_package_files(root: &Path, current: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(current).with_context(|| format!("reading {}", current.display()))? {
+    for entry in
+        std::fs::read_dir(current).with_context(|| format!("reading {}", current.display()))?
+    {
         let entry = entry?;
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
@@ -207,9 +286,18 @@ fn collect_package_files(root: &Path, current: &Path, out: &mut Vec<PathBuf>) ->
         if file_type.is_dir() {
             collect_package_files(root, &entry.path(), out)?;
         } else if file_type.is_file() {
-            out.push(entry.path().strip_prefix(root).expect("walk remains under root").to_path_buf());
+            out.push(
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .expect("walk remains under root")
+                    .to_path_buf(),
+            );
         } else {
-            bail!("package contains a non-regular file: {}", entry.path().display());
+            bail!(
+                "package contains a non-regular file: {}",
+                entry.path().display()
+            );
         }
     }
     Ok(())
