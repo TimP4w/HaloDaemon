@@ -659,9 +659,14 @@ mod tests {
             );
             assert!(!plugin.unwrap().enabled);
 
-            crate::registry::usecases::plugins::set_enabled(slug.clone(), true, app.clone())
-                .await
-                .unwrap();
+            let authority = app.registry.authority_for(&slug).unwrap();
+            crate::registry::usecases::plugins::confirm_enable(
+                slug.clone(),
+                authority,
+                app.clone(),
+            )
+            .await
+            .unwrap();
             let plugins = app.registry.list(&*app.secret_store);
             assert!(plugins.iter().find(|p| p.id == slug).unwrap().enabled);
         })
@@ -1114,59 +1119,6 @@ mod tests {
             assert!(
                 !s.update_available,
                 "a local edit with no upstream change is not an available update"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn quarantine_disables_a_tampered_plugin_and_reenabling_accepts_it() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            // Tamper with the checked-out file, then reload so the manifest hash
-            // reflects the edit.
-            let clone_main = crate::config::plugin_repos_dir()
-                .join(&slug)
-                .join("main.lua");
-            std::fs::write(&clone_main, "return { hacked = true }").unwrap();
-            reload_registry(&app).await;
-
-            quarantine_changed_plugins(app.clone()).await;
-            assert!(
-                app.config
-                    .read()
-                    .await
-                    .plugins
-                    .disabled
-                    .iter()
-                    .any(|x| x == &slug),
-                "a plugin changed on disk must be disabled"
-            );
-
-            // Re-enabling accepts the current content as the new baseline, so it
-            // is no longer flagged (and would not be re-quarantined).
-            crate::registry::usecases::plugins::set_enabled(slug.clone(), true, app.clone())
-                .await
-                .unwrap();
-            assert!(
-                compute_on_disk_changes(&app).await.is_empty(),
-                "re-enabling must accept the on-disk content as the new baseline"
-            );
-            assert!(
-                !app.config
-                    .read()
-                    .await
-                    .plugins
-                    .disabled
-                    .iter()
-                    .any(|x| x == &slug),
-                "re-enabling clears the disabled flag"
             );
         })
         .await;

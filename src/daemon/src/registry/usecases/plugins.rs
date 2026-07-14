@@ -11,30 +11,30 @@ use serde_json::json;
 use crate::ipc::ClientHandle;
 use crate::state::AppState;
 
-/// Enable or disable a plugin, persist the choice, and reconcile its devices.
+/// Disable a plugin immediately. Enabling is only allowed through
+/// [`confirm_enable`], which verifies the authority snapshot shown to the user.
 pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
+    if enabled {
+        bail!("enabling a plugin requires ConfirmPluginEnable");
+    }
     {
         let mut cfg = app.config.write().await;
         cfg.plugins.disabled.retain(|x| x != &id);
-        if !enabled {
-            cfg.plugins.disabled.push(id.clone());
-        }
+        cfg.plugins.disabled.push(id.clone());
     }
     app.request_config_save();
-    if !enabled {
-        let device_ids = {
-            let devices = app.devices.read().await;
-            devices
-                .iter()
-                .filter(|device| {
-                    device.owning_plugin_id().as_deref() == Some(id.as_str())
-                        || device.integration_id().as_deref() == Some(id.as_str())
-                })
-                .map(|device| device.id().to_owned())
-                .collect::<Vec<_>>()
-        };
-        app.registry.clear_operational_errors(&id, &device_ids);
-    }
+    let device_ids = {
+        let devices = app.devices.read().await;
+        devices
+            .iter()
+            .filter(|device| {
+                device.owning_plugin_id().as_deref() == Some(id.as_str())
+                    || device.integration_id().as_deref() == Some(id.as_str())
+            })
+            .map(|device| device.id().to_owned())
+            .collect::<Vec<_>>()
+    };
+    app.registry.clear_operational_errors(&id, &device_ids);
     reconcile_plugins(&app, std::slice::from_ref(&id)).await;
     Ok(())
 }
