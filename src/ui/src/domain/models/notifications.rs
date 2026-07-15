@@ -76,9 +76,6 @@ mod tests {
             KeyRemapUnavailable {
                 detail: "boom".into(),
             },
-            WirelessReinitFailed {
-                device: "Kraken".into(),
-            },
             DeviceReconnectFailed {
                 device: "Kraken".into(),
             },
