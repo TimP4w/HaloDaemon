@@ -14,7 +14,9 @@
 //! Calling a stream method on a register transport (or vice-versa) raises a
 //! clear Lua error.
 
-use mlua::{Function, LuaSerdeExt, UserData, UserDataMethods, Value};
+#[cfg(target_os = "linux")]
+use mlua::LuaSerdeExt;
+use mlua::{Function, UserData, UserDataMethods, Value};
 use tokio::runtime::Handle;
 
 use crate::drivers::transports::smbus::SmBusSyncOps;

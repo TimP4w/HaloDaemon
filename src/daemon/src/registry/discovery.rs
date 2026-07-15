@@ -87,7 +87,7 @@ pub enum DiscoveryHandle<'a> {
         interface_number: u8,
     },
     Smbus {
-        bus: Arc<dyn crate::drivers::transports::smbus::SmBusOps>,
+        bus: Arc<crate::drivers::transports::smbus::SmBusDevice>,
         addr: u8,
         bus_kind: crate::drivers::transports::smbus::SmbusBusKind,
     },

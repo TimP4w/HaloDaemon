@@ -10,7 +10,7 @@ use crate::drivers::plugins::manifest::{DeviceSpec, PluginManifest};
 use crate::drivers::plugins::transport::{
     AddrScope, PluginIo, PluginTransportDescriptor, RegisterBus,
 };
-use crate::drivers::transports::smbus::{downcast_smbus_device, SmbusBusKind};
+use crate::drivers::transports::smbus::SmbusBusKind;
 use crate::registry::discovery::DiscoveryHandle;
 
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
@@ -33,7 +33,7 @@ fn open(
     let DiscoveryHandle::Smbus { bus, addr, .. } = handle else {
         bail!("smbus backend matched a non-SMBus handle");
     };
-    let device = downcast_smbus_device(std::sync::Arc::clone(bus));
+    let device = std::sync::Arc::clone(bus);
     device.set_write_rate_limit(limit);
     // A running device is scoped to its own address only — pre-scan (broadcast
     // remap, candidate probing) is the sole place the wider declared set is

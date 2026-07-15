@@ -12,7 +12,6 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -167,28 +166,6 @@ impl SmBusSyncOps for CountingSmBusOps<'_> {
     fn supports_block_write(&self) -> bool {
         self.inner.supports_block_write()
     }
-}
-
-/// Abstraction over an SMBus bus, so [`crate::registry::discovery::DiscoveryHandle`] stays free of the concrete type.
-pub trait SmBusOps: Send + Sync {
-    /// Convert this `Arc<Self>` into `Arc<dyn Any + Send + Sync>` so the
-    /// standard [`Arc::downcast`] can recover the concrete type.
-    fn into_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
-}
-
-impl SmBusOps for SmBusDevice {
-    fn into_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-        self
-    }
-}
-
-/// Downcast `Arc<dyn SmBusOps>` to `Arc<SmBusDevice>`. Panics if the
-/// underlying type isn't `SmBusDevice` (never happens: every `Smbus`
-/// discovery handle is created by the SMBus transport scanner).
-pub fn downcast_smbus_device(bus: Arc<dyn SmBusOps>) -> Arc<SmBusDevice> {
-    bus.into_any_arc()
-        .downcast::<SmBusDevice>()
-        .expect("SmBusOps handle was not a SmBusDevice")
 }
 
 pub struct SmBusTransport;
@@ -407,7 +384,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
                 crate::registry::discovery::discover_handle(
                     &app,
                     DiscoveryHandle::Smbus {
-                        bus: Arc::clone(&bus) as Arc<dyn SmBusOps>,
+                        bus: Arc::clone(&bus),
                         addr,
                         bus_kind: job.bus_kind,
                     },
