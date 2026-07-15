@@ -52,6 +52,7 @@ plugins:
   issue_runtime_error: Runtime error
   issue_load_warning: Loaded with a warning
   issue_load_failed: Failed to load
+  repository_hash_mismatch: "Plugin package '%{package}' failed integrity validation. Expected SHA-256 %{expected}, but found %{actual}."
   issue_details: Details
   issue_modal_title: "Plugin issue: %{plugin}"
   issue_copy: Copy

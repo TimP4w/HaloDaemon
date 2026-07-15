@@ -894,6 +894,18 @@ pub enum PluginIssueKind {
     LoadFailed,
 }
 
+/// Structured context for plugin issues whose user-facing detail is translated
+/// by the UI. Unknown/unstructured failures continue to use `PluginIssue::detail`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PluginIssueContext {
+    RepositoryHashMismatch {
+        package: String,
+        expected: String,
+        actual: String,
+    },
+}
+
 /// A plugin's most recent outstanding issue, persisted daemon-side and surfaced
 /// on the plugin's detail page (and via the sidebar badge) so it survives a
 /// transient toast the user may have missed. `detail` is the full error text.
@@ -901,6 +913,8 @@ pub enum PluginIssueKind {
 pub struct PluginIssue {
     pub kind: PluginIssueKind,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<PluginIssueContext>,
     pub timestamp_ms: u64,
 }
 
@@ -2209,6 +2223,7 @@ mod tests {
         let issue = PluginIssue {
             kind: PluginIssueKind::ConnectFailed,
             detail: "boom".into(),
+            context: None,
             timestamp_ms: 42,
         };
         let back: PluginIssue =
@@ -2229,6 +2244,7 @@ mod tests {
         let init_failed = PluginIssue {
             kind: PluginIssueKind::InitFailed,
             detail: "HID++ timeout".into(),
+            context: None,
             timestamp_ms: 43,
         };
         assert_eq!(
@@ -2242,6 +2258,7 @@ mod tests {
         let failed = PluginIssue {
             kind: PluginIssueKind::LoadFailed,
             detail: "needs network".into(),
+            context: None,
             timestamp_ms: 1,
         };
         assert_eq!(

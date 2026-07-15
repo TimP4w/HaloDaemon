@@ -49,7 +49,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use halod_shared::types::{
     Animation, EffectParamValue, HealthState, HealthStatus, Permission, PluginInfo, PluginIssue,
-    PluginIssueKind, PluginKind, SkippedPlugin, WriteRateLimit,
+    PluginIssueContext, PluginIssueKind, PluginKind, SkippedPlugin, WriteRateLimit,
 };
 
 use crate::drivers::Device;
@@ -527,6 +527,7 @@ impl Registry {
                 issue: Some(PluginIssue {
                     kind,
                     detail,
+                    context: None,
                     timestamp_ms: crate::util::time::now_ms(),
                 }),
                 notification_sent: true,
@@ -1133,7 +1134,7 @@ fn validate_logo(dir: &Path, manifest: &mut PluginManifest, warnings: &mut Vec<P
 struct LoadScan {
     manifests: Vec<PluginManifest>,
     warnings: Vec<PluginLoadWarning>,
-    invalid: Vec<(PluginManifest, String)>,
+    invalid: Vec<(PluginManifest, String, Option<PluginIssueContext>)>,
     skipped: Vec<SkippedPlugin>,
 }
 
@@ -1156,7 +1157,7 @@ fn try_load_plugin_dir(dir: &Path, scan: &mut LoadScan) {
     if let Err(e) = manifest::validate_manifest(&manifest) {
         let reason = format!("{e:#}");
         log::warn!("Plugin {} is invalid: {reason}", dir.display());
-        scan.invalid.push((manifest, reason));
+        scan.invalid.push((manifest, reason, None));
         return;
     }
     if scan
@@ -1191,10 +1192,13 @@ fn record_invalid_plugin_dir(
     package_id: String,
     package_version: String,
     reason: &str,
+    context: Option<&PluginIssueContext>,
     scan: &mut LoadScan,
 ) {
     match manifest::build_manifest_from_dir(dir) {
-        Ok(manifest) => scan.invalid.push((manifest, reason.to_owned())),
+        Ok(manifest) => scan
+            .invalid
+            .push((manifest, reason.to_owned(), context.cloned())),
         Err(error) => scan.invalid.push((
             PluginManifest {
                 plugin_id: package_id.clone(),
@@ -1221,6 +1225,7 @@ fn record_invalid_plugin_dir(
                 config: None,
             },
             format!("{reason}; package manifest also failed to parse: {error:#}"),
+            context.cloned(),
         )),
     }
 }
@@ -1261,12 +1266,20 @@ fn scan_repo(repo_dir: &Path, scan: &mut LoadScan) {
             );
             if let Ok(repository) = repo::read_repository_index(repo_dir) {
                 let reason = format!("repository package failed integrity validation: {error:#}");
+                let context = error
+                    .downcast_ref::<halod_plugin_signing::PackageHashMismatch>()
+                    .map(|mismatch| PluginIssueContext::RepositoryHashMismatch {
+                        package: mismatch.package.clone(),
+                        expected: mismatch.expected.clone(),
+                        actual: mismatch.actual.clone(),
+                    });
                 for package in repository.packages {
                     record_invalid_plugin_dir(
                         &repo_dir.join(package.path),
                         package.id,
                         package.version,
                         &reason,
+                        context.as_ref(),
                         scan,
                     );
                 }
@@ -1387,12 +1400,13 @@ impl Registry {
         let invalid = scan
             .invalid
             .into_iter()
-            .map(|(m, reason)| {
+            .map(|(m, reason, context)| {
                 (
                     m,
                     PluginIssue {
                         kind: PluginIssueKind::LoadFailed,
                         detail: reason,
+                        context,
                         timestamp_ms: crate::util::time::now_ms(),
                     },
                 )

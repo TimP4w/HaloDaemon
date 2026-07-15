@@ -52,6 +52,7 @@ plugins:
   issue_runtime_error: Errore di runtime
   issue_load_warning: Caricato con un avviso
   issue_load_failed: Caricamento non riuscito
+  repository_hash_mismatch: "Il pacchetto plugin '%{package}' non ha superato il controllo di integrità. SHA-256 previsto: %{expected}; SHA-256 rilevato: %{actual}."
   issue_details: Dettagli
   issue_modal_title: "Il plugin %{plugin} sta riscontrando un problema"
   issue_copy: Copia

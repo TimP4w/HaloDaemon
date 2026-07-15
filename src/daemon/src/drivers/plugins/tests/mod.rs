@@ -112,4 +112,11 @@ fn indexed_repository_with_a_bad_digest_does_not_fall_back_to_loose_scanning() {
     assert_eq!(scan.invalid.len(), 1);
     assert_eq!(scan.invalid[0].0.plugin_id, "demo");
     assert!(scan.invalid[0].1.contains("integrity validation"));
+    assert!(matches!(
+        scan.invalid[0].2,
+        Some(halod_shared::types::PluginIssueContext::RepositoryHashMismatch {
+            ref package,
+            ..
+        }) if package == "demo"
+    ));
 }

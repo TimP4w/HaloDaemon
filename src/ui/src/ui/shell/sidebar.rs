@@ -591,6 +591,7 @@ mod tests {
         with_issue.health.issue = Some(halod_shared::types::PluginIssue {
             kind: halod_shared::types::PluginIssueKind::ConnectFailed,
             detail: "boom".into(),
+            context: None,
             timestamp_ms: 0,
         });
         let mut state = AppState::default();
@@ -605,6 +606,7 @@ mod tests {
         affected.health.issue = Some(halod_shared::types::PluginIssue {
             kind: PluginIssueKind::LoadWarning,
             detail: "warning".into(),
+            context: None,
             timestamp_ms: 0,
         });
         let mut state = AppState::default();

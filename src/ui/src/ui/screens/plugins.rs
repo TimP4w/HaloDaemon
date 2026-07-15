@@ -12,6 +12,7 @@ use halod_shared::types::{
     PluginRepoInfo, PluginSource, PluginUpdateStatus, RepoUpdateStatus,
 };
 
+use crate::domain::models::plugin_issues::plugin_issue_detail;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::icons;
@@ -1777,7 +1778,7 @@ fn detail_body(
             if issue_banner(ui, issue) {
                 *issue_modal = Some((
                     t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
-                    issue.detail.clone(),
+                    plugin_issue_detail(issue),
                 ));
             }
         }
@@ -1821,7 +1822,7 @@ fn detail_body(
         if issue_banner(ui, issue) {
             *issue_modal = Some((
                 t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
-                issue.detail.clone(),
+                plugin_issue_detail(issue),
             ));
         }
     }
@@ -3085,12 +3086,14 @@ mod tests {
         p.health.issue = Some(PluginIssue {
             kind: PluginIssueKind::RuntimeError,
             detail: "x".into(),
+            context: None,
             timestamp_ms: 0,
         });
         assert!(!is_load_failed(&p));
         p.health.issue = Some(PluginIssue {
             kind: PluginIssueKind::LoadFailed,
             detail: "x".into(),
+            context: None,
             timestamp_ms: 0,
         });
         assert!(is_load_failed(&p));

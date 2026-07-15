@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use egui::{Sense, Stroke, Vec2};
 use halod_shared::types::{AppState, PluginInfo, PluginIssue, PluginIssueKind, PluginKind};
 
+use crate::domain::models::plugin_issues::plugin_issue_detail;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::screens::plugin_config::{config_section, seed_config_edit_if_needed};
@@ -298,7 +299,7 @@ impl IntegrationsUi {
                 if integration_issue_bar(ui, issue) {
                     self.issue_modal = Some((
                         t!("integrations.issue_modal_title", integration = &p.name).to_string(),
-                        issue.detail.clone(),
+                        plugin_issue_detail(issue),
                     ));
                 }
             }
