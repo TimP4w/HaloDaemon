@@ -415,7 +415,12 @@ pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) 
         });
         removed
     };
-    for device in &removed {
+    // Dynamic children share their root's Lua worker. Close them first so
+    // close_child hooks run before the root close hook terminates the worker.
+    for device in removed.iter().filter(|device| device.id() != root_id) {
+        close_device(app, device).await;
+    }
+    for device in removed.iter().filter(|device| device.id() == root_id) {
         close_device(app, device).await;
     }
     removed.iter().map(|d| d.id().to_owned()).collect()

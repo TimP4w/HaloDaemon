@@ -35,7 +35,7 @@ async fn disable_one(app: &Arc<AppState>, id: &str) -> Option<String> {
 /// Connect and register `id`'s integration root (and its children), if it's
 /// currently enabled and permission-satisfied. No-op otherwise.
 async fn enable_one(app: &Arc<AppState>, id: &str) {
-    integration_scan::discover_one(app, id).await;
+    let _ = integration_scan::discover_one(app, id).await;
 }
 
 /// Enable or disable a single integration, independent of the generic plugin

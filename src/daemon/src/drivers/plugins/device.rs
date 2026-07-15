@@ -443,6 +443,10 @@ pub(super) enum RuntimeState {
     Initializing,
     Online,
     Degraded(DegradeReason),
+    /// A deterministic failure (for example denied host access or a plugin
+    /// escaping its declared I/O scope). Automatic calls and reconnects stop
+    /// until an explicit lifecycle action constructs a fresh runtime.
+    Unrecoverable,
     Closing,
     Closed,
 }
@@ -466,6 +470,11 @@ pub struct LuaDevice {
     /// Local registry lifetime. Dynamic children share their root's runtime,
     /// so closing a child must be tracked separately from closing the root.
     closed: Arc<AtomicBool>,
+    /// One-shot latch for cleanup/reporting during a failing call episode.
+    call_failed: Arc<AtomicBool>,
+    /// Terminal transport failure for every plugin kind, including plain
+    /// device plugins that do not have an integration runtime.
+    unrecoverable: Arc<AtomicBool>,
     /// For integration roots only: the manifest each controller child is
     /// reported by the child's own `initialize` callback.
     root_manifest: Option<Arc<PluginManifest>>,
@@ -600,6 +609,30 @@ impl Drop for LuaDevice {
 }
 
 impl LuaDevice {
+    fn transport_is_unrecoverable(&self) -> bool {
+        self.transport
+            .as_ref()
+            .and_then(PluginIo::unrecoverable_error)
+            .is_some()
+    }
+
+    fn set_call_failure_state(&self, reason: DegradeReason) {
+        let unrecoverable = self.transport_is_unrecoverable();
+        if unrecoverable {
+            self.unrecoverable.store(true, Ordering::Release);
+        }
+        if let Some(runtime) = &self.runtime {
+            let mut state = runtime.lock_recover();
+            if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed) {
+                *state = if unrecoverable {
+                    RuntimeState::Unrecoverable
+                } else {
+                    RuntimeState::Degraded(reason)
+                };
+            }
+        }
+    }
+
     pub(super) fn new(parts: LuaDeviceParts<'_>) -> Self {
         let LuaDeviceParts {
             id,
@@ -703,6 +736,8 @@ impl LuaDevice {
             let paused = dev.event_paused.clone();
             let resume = dev.event_resume.clone();
             let closed = dev.closed.clone();
+            let unrecoverable = dev.unrecoverable.clone();
+            let event_runtime = dev.runtime.clone();
             let event_worker = worker.clone();
             let event_notify = poll_notify.clone();
             let root_id = poll_device_id.clone();
@@ -722,7 +757,12 @@ impl LuaDevice {
                             continue;
                         }
                     }
-                    if closed.load(Ordering::Acquire) {
+                    if closed.load(Ordering::Acquire)
+                        || unrecoverable.load(Ordering::Acquire)
+                        || event_runtime.as_ref().is_some_and(|runtime| {
+                            matches!(*runtime.lock_recover(), RuntimeState::Unrecoverable)
+                        })
+                    {
                         break;
                     }
                     while paused.load(Ordering::Acquire) {
@@ -804,14 +844,40 @@ impl LuaDevice {
             let connection_cache = dev.connection_cache.clone();
             let eq_cache = dev.eq_cache.clone();
             let closed = dev.closed.clone();
+            let unrecoverable = dev.unrecoverable.clone();
             let runtime = dev.runtime.clone();
+            let poll_transport = dev.transport.clone();
+            let poll_plugin_id = dev.plugin_id.clone();
             dev.poll_task = Some(handle.spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 let mut consecutive_failures = 0u8;
                 loop {
                     ticker.tick().await;
-                    if closed.load(Ordering::Acquire) {
+                    if let Some(detail) = poll_transport
+                        .as_ref()
+                        .and_then(PluginIo::unrecoverable_error)
+                    {
+                        unrecoverable.store(true, Ordering::Release);
+                        if let Some(runtime) = &runtime {
+                            *runtime.lock_recover() = RuntimeState::Unrecoverable;
+                        }
+                        if let Some(app) = poll_notify.upgrade() {
+                            app.registry
+                                .report_runtime_error(
+                                    &app,
+                                    &poll_plugin_id,
+                                    &poll_device_id,
+                                    detail,
+                                )
+                                .await;
+                            app.broadcast_state().await;
+                        }
+                        break;
+                    }
+                    if closed.load(Ordering::Acquire)
+                        || unrecoverable.load(Ordering::Acquire)
+                    {
                         break;
                     }
                     if paused.load(Ordering::Relaxed) {
@@ -824,7 +890,12 @@ impl LuaDevice {
                             if recovered {
                                 if let Some(runtime) = &runtime {
                                     let mut state = runtime.lock_recover();
-                                    if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed)
+                                    if !matches!(
+                                        *state,
+                                        RuntimeState::Unrecoverable
+                                            | RuntimeState::Closing
+                                            | RuntimeState::Closed
+                                    )
                                     {
                                         *state = RuntimeState::Online;
                                     }
@@ -852,6 +923,29 @@ impl LuaDevice {
                             }
                         }
                         Err(error) => {
+                            if poll_transport
+                                .as_ref()
+                                .and_then(PluginIo::unrecoverable_error)
+                                .is_some()
+                            {
+                                unrecoverable.store(true, Ordering::Release);
+                                if let Some(runtime) = &runtime {
+                                    *runtime.lock_recover() = RuntimeState::Unrecoverable;
+                                }
+                                let detail = format!("{error:#}");
+                                if let Some(app) = poll_notify.upgrade() {
+                                    app.registry
+                                        .report_runtime_error(
+                                            &app,
+                                            &poll_plugin_id,
+                                            &poll_device_id,
+                                            detail,
+                                        )
+                                        .await;
+                                    app.broadcast_state().await;
+                                }
+                                break;
+                            }
                             consecutive_failures = consecutive_failures.saturating_add(1);
                             if consecutive_failures == POLL_FAILURE_DEGRADE_THRESHOLD {
                                 log::warn!(
@@ -934,6 +1028,8 @@ impl LuaDevice {
             worker,
             transport,
             closed: Arc::new(AtomicBool::new(false)),
+            call_failed: Arc::new(AtomicBool::new(false)),
+            unrecoverable: Arc::new(AtomicBool::new(false)),
             root_manifest: None,
             runtime: None,
             allowed_caps: declared_caps(manifest),
@@ -1016,21 +1112,38 @@ impl LuaDevice {
     /// fan duty, sensor poll) otherwise only log the failure, so a broken plugin
     /// is invisible — this turns the first failure of an episode into one toast.
     async fn track<T>(&self, result: Result<T>) -> Result<T> {
-        if result.is_err() {
-            if let Some(transport) = &self.transport {
-                transport.restore_safety_state();
-            }
+        let unrecoverable = result.is_err() && self.transport_is_unrecoverable();
+        let first_failure = if result.is_err() {
+            !self.call_failed.swap(true, Ordering::AcqRel)
+        } else {
+            self.call_failed.store(false, Ordering::Release);
+            false
+        };
+        if unrecoverable {
+            self.unrecoverable.store(true, Ordering::Release);
         }
-        // A failing call greys the integration; a success self-heals it —
-        // unless the device already closed, which is terminal.
+        // Restore once when an error episode begins. Repeated engine calls can
+        // race with the state broadcast, so `call_failed` is the latch.
         if let Some(r) = &self.runtime {
             let mut state = r.lock_recover();
-            if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed) {
-                *state = if result.is_ok() {
-                    RuntimeState::Online
+            if !matches!(
+                *state,
+                RuntimeState::Unrecoverable | RuntimeState::Closing | RuntimeState::Closed
+            ) {
+                if result.is_ok() {
+                    *state = RuntimeState::Online;
                 } else {
-                    RuntimeState::Degraded(DegradeReason::CallFailed)
-                };
+                    *state = if unrecoverable {
+                        RuntimeState::Unrecoverable
+                    } else {
+                        RuntimeState::Degraded(DegradeReason::CallFailed)
+                    };
+                }
+            }
+        }
+        if first_failure {
+            if let Some(transport) = &self.transport {
+                transport.restore_safety_state();
             }
         }
         let Some(app) = self.notify.upgrade() else {
@@ -1368,7 +1481,7 @@ impl Device for LuaDevice {
     }
 
     fn is_live(&self) -> bool {
-        if self.closed.load(Ordering::Acquire) {
+        if self.closed.load(Ordering::Acquire) || self.unrecoverable.load(Ordering::Acquire) {
             return false;
         }
         self.runtime
@@ -1378,7 +1491,15 @@ impl Device for LuaDevice {
                 | RuntimeState::Initializing
                 | RuntimeState::Online => true,
                 RuntimeState::Degraded(_) => false,
+                RuntimeState::Unrecoverable => false,
                 RuntimeState::Closing | RuntimeState::Closed => false,
+            })
+    }
+
+    fn is_unrecoverable(&self) -> bool {
+        self.unrecoverable.load(Ordering::Acquire)
+            || self.runtime.as_ref().is_some_and(|runtime| {
+                matches!(*runtime.lock_recover(), RuntimeState::Unrecoverable)
             })
     }
 
@@ -1393,8 +1514,11 @@ impl Device for LuaDevice {
         let outcome = match w.initialize().await {
             Ok(outcome) => outcome,
             Err(error) => {
-                if let Some(runtime) = &self.runtime {
-                    *runtime.lock_recover() = RuntimeState::Degraded(DegradeReason::CallFailed);
+                self.set_call_failure_state(DegradeReason::CallFailed);
+                if !self.call_failed.swap(true, Ordering::AcqRel) {
+                    if let Some(transport) = &self.transport {
+                        transport.restore_safety_state();
+                    }
                 }
                 return Err(error);
             }
@@ -1506,6 +1630,19 @@ impl Device for LuaDevice {
             for (key, selected) in choices {
                 self.active_controls().choice_cache.record(&key, selected);
             }
+        }
+        if let Some(detail) = self
+            .transport
+            .as_ref()
+            .and_then(PluginIo::unrecoverable_error)
+        {
+            self.set_call_failure_state(DegradeReason::CallFailed);
+            if !self.call_failed.swap(true, Ordering::AcqRel) {
+                if let Some(transport) = &self.transport {
+                    transport.restore_safety_state();
+                }
+            }
+            anyhow::bail!("unrecoverable plugin transport error: {detail}");
         }
         if outcome.ok {
             if let Some(runtime) = &self.runtime {
@@ -1782,12 +1919,7 @@ impl Controller for LuaDevice {
         let detected = match self.worker()?.enumerate_controllers().await {
             Ok(d) => d,
             Err(e) => {
-                if let Some(r) = &self.runtime {
-                    let mut state = r.lock_recover();
-                    if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed) {
-                        *state = RuntimeState::Degraded(DegradeReason::EnumerateFailed);
-                    }
-                }
+                self.set_call_failure_state(DegradeReason::EnumerateFailed);
                 return Err(e);
             }
         };

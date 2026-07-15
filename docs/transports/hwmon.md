@@ -71,3 +71,6 @@ Missing modules produce missing sensors, not errors. NixOS users: the NixOS modu
 - Opt-in plugin — install and approve the official hwmon integration before
   sensors and fan headers appear.
 - Module dependency — sensors and fan headers only appear if the corresponding kernel module is loaded. Missing modules produce missing devices, not errors.
+- Permission and contract failures are unrecoverable for the current plugin
+  runtime. HaloDaemon reports them once and stops automatic calls/reconnects;
+  fix the permissions, then re-enable or rediscover the integration.

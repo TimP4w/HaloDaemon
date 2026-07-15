@@ -154,7 +154,11 @@ Transports are scoped by catalog declaration:
 The daemon applies memory, instruction, wall-clock, queue, payload, allocation,
 and hardware-write protections. Health is tracked per plugin and optionally per
 device; an equivalent failure notifies once until a successful operation clears
-the episode.
+the episode. Deterministic transport failures (such as denied hwmon access,
+undeclared command execution, or an SMBus address outside the declared scope)
+are marked unrecoverable: engines stop calling that plugin instance and an
+integration monitor will not reconnect it indefinitely. Re-enabling,
+reconfiguring, or explicitly rediscovering the plugin creates a fresh runtime.
 
 ## Built-in boundary
 

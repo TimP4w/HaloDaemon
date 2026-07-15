@@ -53,6 +53,18 @@ pub enum PluginIo {
 }
 
 impl PluginIo {
+    /// A deterministic transport failure that cannot be fixed by retrying the
+    /// same plugin instance. The first such failure latches for its lifetime.
+    pub fn unrecoverable_error(&self) -> Option<String> {
+        match self {
+            PluginIo::Register(bus) => bus.unrecoverable_error(),
+            PluginIo::Command(command) => command.unrecoverable_error(),
+            #[cfg(target_os = "linux")]
+            PluginIo::Hwmon(bus) => bus.unrecoverable_error(),
+            _ => None,
+        }
+    }
+
     /// Live write-rate/throughput for the Info UI, regardless of backend.
     pub fn rate_status(&self) -> WriteRateStatus {
         match self {
@@ -98,6 +110,7 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
 #[derive(Clone)]
 pub struct CommandExecutor {
     allowed: Arc<[String]>,
+    unrecoverable: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl CommandExecutor {
@@ -107,24 +120,39 @@ impl CommandExecutor {
         allowed.dedup();
         Self {
             allowed: allowed.into(),
+            unrecoverable: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    fn reject<T>(&self, detail: String) -> Result<T> {
+        self.unrecoverable
+            .lock()
+            .unwrap()
+            .get_or_insert(detail.clone());
+        anyhow::bail!(detail)
+    }
+
+    fn unrecoverable_error(&self) -> Option<String> {
+        self.unrecoverable.lock().unwrap().clone()
     }
 
     pub fn run(&self, executable: &str, args: &[String]) -> Result<Vec<u8>> {
         if !self.allowed.iter().any(|name| name == executable) {
-            anyhow::bail!("command '{executable}' is outside the declared transport scope");
+            return self.reject(format!(
+                "command '{executable}' is outside the declared transport scope"
+            ));
         }
         if super::manifest::is_disallowed_command(executable) {
-            anyhow::bail!(
+            return self.reject(format!(
                 "command '{executable}' is a shell, interpreter, or command launcher and cannot be run by a plugin"
-            );
+            ));
         }
         if args.len() > MAX_COMMAND_ARGS
             || args
                 .iter()
                 .any(|arg| arg.len() > MAX_COMMAND_ARG_BYTES || arg.contains('\0'))
         {
-            anyhow::bail!("command arguments exceed the declared execution limits");
+            return self.reject("command arguments exceed the declared execution limits".into());
         }
         let mut child = Command::new(executable)
             .args(args)
@@ -132,7 +160,19 @@ impl CommandExecutor {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| anyhow::anyhow!("spawning '{executable}' failed: {e}"))?;
+            .map_err(|error| {
+                let detail = format!("spawning '{executable}' failed: {error}");
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) {
+                    self.unrecoverable
+                        .lock()
+                        .unwrap()
+                        .get_or_insert(detail.clone());
+                }
+                anyhow::anyhow!(detail)
+            })?;
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
         let read = |pipe: std::process::ChildStdout| -> Result<Vec<u8>> {
@@ -187,6 +227,7 @@ impl CommandExecutor {
 #[derive(Clone)]
 pub struct AddrScope {
     allowed: Arc<[u8]>,
+    unrecoverable: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl AddrScope {
@@ -194,7 +235,10 @@ impl AddrScope {
         let mut v: Vec<u8> = addrs.into_iter().collect();
         v.sort_unstable();
         v.dedup();
-        Self { allowed: v.into() }
+        Self {
+            allowed: v.into(),
+            unrecoverable: Arc::new(std::sync::Mutex::new(None)),
+        }
     }
 
     pub fn single(addr: u8) -> Self {
@@ -209,10 +253,19 @@ impl AddrScope {
         if self.permits(addr) {
             Ok(())
         } else {
-            anyhow::bail!(
+            let detail = format!(
                 "plugin SMBus access to address 0x{addr:02x} is outside its declared scope"
-            )
+            );
+            self.unrecoverable
+                .lock()
+                .unwrap()
+                .get_or_insert(detail.clone());
+            anyhow::bail!(detail)
         }
+    }
+
+    fn unrecoverable_error(&self) -> Option<String> {
+        self.unrecoverable.lock().unwrap().clone()
     }
 }
 
@@ -231,6 +284,10 @@ impl RegisterBus {
 
     pub fn rate_status(&self) -> WriteRateStatus {
         self.bus.rate_status().unwrap_or_default()
+    }
+
+    fn unrecoverable_error(&self) -> Option<String> {
+        self.scope.unrecoverable_error()
     }
 
     /// Run `f` against the raw ops and the address scope in one atomic bus-lock
@@ -304,6 +361,7 @@ mod tests {
         assert!(error
             .to_string()
             .contains("outside the declared transport scope"));
+        assert!(commands.unrecoverable_error().is_some());
     }
 
     #[test]
@@ -315,5 +373,13 @@ mod tests {
         assert!(error
             .to_string()
             .contains("shell, interpreter, or command launcher"));
+        assert!(commands.unrecoverable_error().is_some());
+    }
+
+    #[test]
+    fn smbus_scope_violation_is_unrecoverable() {
+        let scope = super::AddrScope::single(0x50);
+        assert!(scope.check(0x51).is_err());
+        assert!(scope.unrecoverable_error().is_some());
     }
 }

@@ -67,6 +67,7 @@ impl HwmonChip {
 pub struct HwmonTransport {
     chips: Metered<HashMap<String, HwmonChip>>,
     original_pwm_enable: Arc<Mutex<HashMap<(String, String), String>>>,
+    unrecoverable: Arc<Mutex<Option<String>>>,
 }
 
 impl HwmonTransport {
@@ -126,6 +127,7 @@ impl HwmonTransport {
         Ok(Self {
             chips: Metered::new(chips, limit),
             original_pwm_enable: Arc::new(Mutex::new(HashMap::new())),
+            unrecoverable: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -161,6 +163,7 @@ impl HwmonTransport {
         Self {
             chips: Metered::new(chips, None),
             original_pwm_enable: Arc::new(Mutex::new(HashMap::new())),
+            unrecoverable: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -176,7 +179,9 @@ impl HwmonTransport {
     }
 
     pub fn read(&self, key: &str, attribute: &str) -> Result<Option<String>> {
-        anyhow::ensure!(readable_attribute(attribute), "unsupported hwmon attribute");
+        if !readable_attribute(attribute) {
+            return self.reject(format!("unsupported hwmon attribute '{attribute}'"));
+        }
         let chip = self
             .chips
             .read_access()
@@ -189,47 +194,78 @@ impl HwmonTransport {
             Ok(value) => Ok(Some(value)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => {
+                let detail = format!("reading hwmon attribute {attribute}: {error}");
+                if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    self.unrecoverable
+                        .lock()
+                        .unwrap()
+                        .get_or_insert(detail.clone());
+                }
                 Err(error).with_context(|| format!("reading hwmon attribute {attribute}"))
             }
         }
     }
 
     pub fn write(&self, key: &str, attribute: &str, value: &str) -> Result<()> {
-        anyhow::ensure!(
-            writable_attribute(attribute),
-            "hwmon attribute is read-only"
-        );
-        anyhow::ensure!(
-            !value.is_empty()
-                && value.len() <= 32
-                && value.bytes().all(|byte| byte.is_ascii_digit()),
-            "hwmon value must be a bounded unsigned integer"
-        );
+        if !writable_attribute(attribute) {
+            return self.reject(format!("hwmon attribute '{attribute}' is read-only"));
+        }
+        if value.is_empty() || value.len() > 32 || !value.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return self.reject("hwmon value must be a bounded unsigned integer".into());
+        }
         let chips = self.chips.write_access_blocking(value.len())?;
         let chip = chips
             .get(key)
             .ok_or_else(|| anyhow::anyhow!("unknown hwmon device key"))?;
-        anyhow::ensure!(
-            chip.info.attributes.iter().any(|item| item == attribute),
-            "hwmon attribute is unavailable on this device"
-        );
+        if !chip.info.attributes.iter().any(|item| item == attribute) {
+            return self.reject(format!(
+                "hwmon attribute '{attribute}' is unavailable on this device"
+            ));
+        }
         if attribute.ends_with("_enable") {
             let mut originals = self.original_pwm_enable.lock().unwrap();
             let restore_key = (key.to_owned(), attribute.to_owned());
             if let std::collections::hash_map::Entry::Vacant(entry) = originals.entry(restore_key) {
-                let original = chip.read(attribute)?;
+                let original = chip.read(attribute).map_err(|error| {
+                    let detail = format!("reading original hwmon attribute {attribute}: {error}");
+                    if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        self.unrecoverable
+                            .lock()
+                            .unwrap()
+                            .get_or_insert(detail.clone());
+                    }
+                    anyhow::anyhow!(detail)
+                })?;
                 entry.insert(original);
             }
         }
         chip.write(attribute, value.to_owned()).map_err(|error| {
             if error.kind() == std::io::ErrorKind::PermissionDenied {
-                anyhow::anyhow!(
+                let detail = format!(
                     "writing hwmon attribute {attribute}: permission denied; add the daemon user to the 'halod' group, reload the installed udev rules, and run `sudo udevadm trigger --action=change --subsystem-match=hwmon`"
-                )
+                );
+                self.unrecoverable
+                    .lock()
+                    .unwrap()
+                    .get_or_insert(detail.clone());
+                anyhow::anyhow!(detail)
             } else {
                 anyhow::Error::new(error).context(format!("writing hwmon attribute {attribute}"))
             }
         })
+    }
+
+    fn reject<T>(&self, detail: String) -> Result<T> {
+        self.unrecoverable
+            .lock()
+            .unwrap()
+            .get_or_insert(detail.clone());
+        anyhow::bail!(detail)
+    }
+
+    pub fn unrecoverable_error(&self) -> Option<String> {
+        self.unrecoverable.lock().unwrap().clone()
     }
 
     pub fn restore(&self) -> Result<()> {
@@ -245,7 +281,6 @@ impl HwmonTransport {
                         .with_context(|| format!("restoring hwmon attribute {attribute}"))
                 });
             if let Err(error) = result {
-                log::warn!("{error:#}");
                 first_error.get_or_insert(error);
             }
         }
@@ -344,6 +379,16 @@ mod tests {
         assert!(transport.read("0", "../name").is_err());
         assert!(transport.write("0", "temp1_input", "1").is_err());
         assert!(transport.write("missing", "pwm1", "1").is_err());
+    }
+
+    #[test]
+    fn invalid_plugin_write_latches_an_unrecoverable_error() {
+        let (_root, transport) = fixture();
+        assert!(transport.write("0", "temp1_input", "1").is_err());
+        assert_eq!(
+            transport.unrecoverable_error().as_deref(),
+            Some("hwmon attribute 'temp1_input' is read-only")
+        );
     }
 
     #[test]

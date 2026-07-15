@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use halod_shared::types::Permission;
 
+use crate::drivers::Device;
 use crate::ipc::broadcast_state;
 use crate::registry::discovery::{DiscoveryHandle, TransportScanner};
 use crate::registry::usecases::registration::register_device_and_children;
@@ -19,6 +20,13 @@ use crate::state::AppState;
 use super::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
 use super::manifest::PluginManifest;
 use super::transport::PluginIo;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiscoveryOutcome {
+    Registered,
+    TransientFailure,
+    Unrecoverable,
+}
 
 /// Sanitize a config value for use in a device id: keep it stable and
 /// collision-resistant without leaking odd characters into the id.
@@ -82,13 +90,13 @@ pub(super) fn open_probe(
     }
 }
 
-async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
+async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> DiscoveryOutcome {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         log::warn!(
             "integration plugin '{}' needs a runtime but none is available",
             manifest.plugin_id
         );
-        return;
+        return DiscoveryOutcome::TransientFailure;
     };
     let plugin_id = manifest.plugin_id.clone();
     let granted = app.registry.granted_for(&manifest.plugin_id);
@@ -98,7 +106,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
     let id = root_device_id(&manifest, &config);
 
     if app.devices.read().await.iter().any(|d| d.id() == id) {
-        return;
+        return DiscoveryOutcome::Registered;
     }
 
     // Opens one fresh connection to the configured server. A real connect can
@@ -135,7 +143,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
                 manifest.plugin_id
             );
             report_connect_failure(app, &manifest, format!("{e:#}")).await;
-            return;
+            return DiscoveryOutcome::TransientFailure;
         }
         Err(e) => {
             log::warn!(
@@ -143,14 +151,14 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
                 manifest.plugin_id
             );
             report_connect_failure(app, &manifest, format!("connect task panicked: {e}")).await;
-            return;
+            return DiscoveryOutcome::TransientFailure;
         }
     };
     // The user may have disabled the integration while the blocking connect
     // was in flight. Drop the newly-opened transport and never register a root
     // from that stale activation attempt.
     if app.registry.integration_manifest(&plugin_id).is_none() {
-        return;
+        return DiscoveryOutcome::TransientFailure;
     }
     let transport_kind = manifest
         .transports
@@ -179,8 +187,23 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
         dev.set_self_ref(weak.clone());
         dev
     });
-    register_device_and_children(app, device).await;
-    app.registry.clear_connect_error(&plugin_id);
+    let registered = register_device_and_children(app, device.clone()).await;
+    if registered {
+        app.registry.clear_connect_error(&plugin_id);
+        DiscoveryOutcome::Registered
+    } else {
+        let unrecoverable = device.is_unrecoverable();
+        if unrecoverable {
+            // Keep a terminal root visible so the monitor can retain the
+            // unrecoverable state even when this happened during the initial
+            // full scan. Engines skip it through `is_live()`.
+            app.devices.write().await.push(device);
+            DiscoveryOutcome::Unrecoverable
+        } else {
+            device.close().await;
+            DiscoveryOutcome::TransientFailure
+        }
+    }
 }
 
 /// Emit a deduplicated connect-failure notification + persisted plugin issue,
@@ -194,7 +217,7 @@ async fn report_connect_failure(app: &Arc<AppState>, manifest: &PluginManifest, 
 
 async fn discover(app: Arc<AppState>) {
     for manifest in app.registry.integration_manifests() {
-        build_and_register(&app, manifest).await;
+        let _ = build_and_register(&app, manifest).await;
     }
 }
 
@@ -202,9 +225,11 @@ async fn discover(app: Arc<AppState>) {
 /// reconnect (enable toggle, config change) that must not touch any other
 /// device. No-op if `plugin_id` isn't currently an enabled, permission-
 /// satisfied integration.
-pub(crate) async fn discover_one(app: &Arc<AppState>, plugin_id: &str) {
+pub(crate) async fn discover_one(app: &Arc<AppState>, plugin_id: &str) -> DiscoveryOutcome {
     if let Some(manifest) = app.registry.integration_manifest(plugin_id) {
-        build_and_register(app, manifest).await;
+        build_and_register(app, manifest).await
+    } else {
+        DiscoveryOutcome::TransientFailure
     }
 }
 

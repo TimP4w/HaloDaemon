@@ -182,6 +182,13 @@ pub trait Device: Send + Sync {
         true
     }
 
+    /// A permanent runtime failure that must not be retried automatically.
+    /// Recovery requires an explicit lifecycle action such as re-enabling,
+    /// reconfiguring, or rediscovering the device/plugin.
+    fn is_unrecoverable(&self) -> bool {
+        false
+    }
+
     async fn wire_device_name(&self) -> String {
         self.name().to_string()
     }
