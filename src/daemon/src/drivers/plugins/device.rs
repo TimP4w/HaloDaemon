@@ -2953,6 +2953,44 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deterministic_transport_error_makes_initialize_unrecoverable() {
+        let (_tmp, manifest) = test_manifest(
+            "fatal_init",
+            &[],
+            r#"return {
+                initialize = function(dev)
+                    dev.transport:run("sh", {})
+                    return true
+                end,
+            }"#,
+        );
+        let runtime = Arc::new(Mutex::new(RuntimeState::OpeningTransport));
+        let command = super::super::transport::CommandExecutor::new(["nvidia-smi".to_owned()]);
+        let dev = LuaDevice::new(LuaDeviceParts {
+            id: "fatal_init-0".into(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: Some(runtime.clone()),
+            worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
+                dev_match: DevMatch {
+                    transport: "command".into(),
+                    ..Default::default()
+                },
+                transport: PluginIo::Command(command),
+                handle: tokio::runtime::Handle::current(),
+                granted: Vec::new(),
+                config: HashMap::new(),
+            })),
+        });
+
+        assert!(dev.initialize().await.is_err());
+        assert!(dev.is_unrecoverable());
+        assert_eq!(*runtime.lock_recover(), RuntimeState::Unrecoverable);
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn initialize_false_stays_degraded_and_not_live() {
         let (_tmp, manifest) = test_manifest(
             "not_ready",
