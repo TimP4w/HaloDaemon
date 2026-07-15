@@ -1573,6 +1573,11 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
         let mut names = HashSet::new();
         for name in &command.commands {
             validate_component("command executable", name)?;
+            if is_disallowed_command(name) {
+                bail!(
+                    "command executable '{name}' is a shell, interpreter, or command launcher and cannot be granted to a plugin"
+                );
+            }
             if !names.insert(name.as_str()) {
                 bail!("command executable '{name}' is declared more than once");
             }
@@ -1595,6 +1600,41 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
         bail!("a command match requires a transports.command declaration");
     }
     Ok(())
+}
+
+fn is_disallowed_command(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    let normalized = normalized.strip_suffix(".exe").unwrap_or(&normalized);
+    matches!(
+        normalized,
+        "sh" | "bash"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+            | "env"
+            | "busybox"
+            | "python"
+            | "python2"
+            | "python3"
+            | "perl"
+            | "ruby"
+            | "node"
+            | "nodejs"
+            | "deno"
+            | "bun"
+            | "lua"
+            | "luajit"
+            | "php"
+            | "java"
+            | "wscript"
+            | "cscript"
+            | "mshta"
+            | "rundll32"
+            | "regsvr32"
+    )
 }
 
 fn validate_controls(manifest: &PluginManifest) -> Result<()> {
@@ -1754,6 +1794,15 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_launchers_are_disallowed_case_insensitively() {
+        for name in ["sh", "bash", "python3", "env", "perl", "node", "CMD.EXE"] {
+            assert!(is_disallowed_command(name), "{name} must be rejected");
+        }
+        assert!(!is_disallowed_command("nvidia-smi"));
+        assert!(!is_disallowed_command("liquidctl"));
+    }
 
     // ── directory plugins (`plugin.yaml` is authoritative) ─────────────
 

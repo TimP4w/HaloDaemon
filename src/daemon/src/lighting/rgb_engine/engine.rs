@@ -750,6 +750,20 @@ impl RgbEngine {
         }
     }
 
+    #[cfg(test)]
+    async fn drain_writes(&self) {
+        let handles: Vec<_> = self
+            .write_slots
+            .lock()
+            .expect("write slots poisoned")
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
     fn publish_frame(&self, canvas_srgb: &[u8], frame_id: u64, led_colors: Vec<LedFrameEntry>) {
         if self.frame_tx.receiver_count() == 0 {
             return;
@@ -766,11 +780,12 @@ impl RgbEngine {
     }
 }
 
-#[cfg(all(test, any()))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
     use crate::drivers::{CapabilityRef, RgbCapability, RgbStateSlot, VisibilitySlot};
+    use crate::lighting::rgb_engine::color::LinearColor;
     use anyhow::Result;
     use async_trait::async_trait;
     use halod_shared::types::{
@@ -1349,8 +1364,10 @@ mod tests {
         )
         .unwrap();
         app.registry.load_all(tmp.path());
-        app.registry
-            .replace_policy(&crate::config::PluginPolicy::default());
+        app.registry.replace_policy(&crate::config::PluginPolicy {
+            enabled: vec!["engine_sensor_fx".into()],
+            ..Default::default()
+        });
         tmp
     }
 
@@ -1718,8 +1735,10 @@ mod tests {
         )
         .unwrap();
         app.registry.load_all(tmp.path());
-        app.registry
-            .replace_policy(&crate::config::PluginPolicy::default());
+        app.registry.replace_policy(&crate::config::PluginPolicy {
+            enabled: vec!["engine_test_fx".into()],
+            ..Default::default()
+        });
         tmp
     }
 

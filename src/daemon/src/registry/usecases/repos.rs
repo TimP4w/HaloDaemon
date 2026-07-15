@@ -607,9 +607,10 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     apply_repo_plugins(app, plugin_ids).await
 }
 
-#[cfg(all(test, any()))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::usecases::plugins::reload_registry;
 
     #[cfg(feature = "dev-plugin-repo")]
     #[tokio::test]
@@ -832,8 +833,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            let hash_before = app.registry.content_hash_for(&slug).unwrap();
-            assert!(app.registry.content_hash_for(&slug).is_some());
+            let hash_before = app
+                .config
+                .read()
+                .await
+                .plugins
+                .installed_hashes
+                .get(&slug)
+                .cloned()
+                .unwrap();
 
             // Advance the upstream repo with a content change.
             let repo = git2::Repository::open(src.path()).unwrap();
@@ -849,9 +857,9 @@ mod tests {
                 "locked_sha advances to the new tip"
             );
 
-            let hash_after = app.registry.content_hash_for(&slug).unwrap();
+            let hash_after = cfg.plugins.installed_hashes.get(&slug).unwrap();
             assert_ne!(
-                hash_before, hash_after,
+                &hash_before, hash_after,
                 "content_hash must change once the script content changed"
             );
         })

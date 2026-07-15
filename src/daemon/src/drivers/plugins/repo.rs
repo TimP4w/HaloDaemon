@@ -590,7 +590,7 @@ struct MetaEntryVersion {
     version: Option<String>,
 }
 
-#[cfg(all(test, any()))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;

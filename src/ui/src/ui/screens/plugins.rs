@@ -961,6 +961,11 @@ impl PluginsUi {
                     permission_card(ui, *perm);
                     ui.add_space(8.0);
                 }
+                let commands = command_scope_names(&p.authority);
+                if !commands.is_empty() {
+                    command_authority_card(ui, &commands);
+                    ui.add_space(8.0);
+                }
                 ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new(t!("plugins.consent_warning"))
@@ -2075,6 +2080,45 @@ fn permission_card(ui: &mut egui::Ui, perm: halod_shared::types::Permission) {
         });
 }
 
+fn command_scope_names(authority: &halod_shared::types::PluginAuthority) -> Vec<&str> {
+    authority
+        .transport_scopes
+        .iter()
+        .filter_map(|scope| scope.strip_prefix("command:"))
+        .collect()
+}
+
+fn command_authority_card(ui: &mut egui::Ui, commands: &[&str]) {
+    egui::Frame::NONE
+        .fill(theme::INNER_BG)
+        .stroke(Stroke::new(1.0, theme::STAT_AMBER))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                egui::RichText::new("Can run programs")
+                    .font(theme::body(12.0))
+                    .strong()
+                    .color(theme::STAT_AMBER),
+            );
+            ui.add_space(3.0);
+            ui.label(
+                egui::RichText::new(
+                    "This plugin can start the following programs as your user account, with arguments it controls:",
+                )
+                .font(theme::body(11.5))
+                .color(theme::TEXT_MUT),
+            );
+            ui.add_space(5.0);
+            ui.label(
+                egui::RichText::new(commands.join(", "))
+                    .font(theme::mono(12.0))
+                    .color(theme::TEXT),
+            );
+        });
+}
+
 /// Side-by-side "TARGET DEVICES | PERMISSIONS" row of the detail view. Either
 /// column is omitted when empty.
 fn targets_permissions_row(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
@@ -2739,6 +2783,22 @@ fn spawn_import_plugin(ctx: &egui::Context, cmd: CommandTx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_scopes_are_presented_as_executable_names() {
+        let authority = halod_shared::types::PluginAuthority {
+            permissions: vec![],
+            transport_scopes: vec![
+                "hid".into(),
+                "command:nvidia-smi".into(),
+                "command:liquidctl".into(),
+            ],
+        };
+        assert_eq!(
+            command_scope_names(&authority),
+            vec!["nvidia-smi", "liquidctl"]
+        );
+    }
 
     fn status(id: &str, update_available: bool) -> PluginUpdateStatus {
         PluginUpdateStatus {
