@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+//! Built-in direct effects are reserved for daemon-owned host features.
+//!
+//! The designer is built in so its typed, shared parameter model is always
+//! available to the editor. Portable direct effects belong in effect plugins.
+
 use std::collections::HashMap;
 
 use halod_shared::effect_designer::{self, DesignerParams, DESIGNER_EFFECT_ID};
@@ -58,7 +63,7 @@ impl DirectLedEffect for Designer {
     }
 }
 
-pub fn build_direct(
+pub fn build_builtin(
     id: &str,
     params: &HashMap<String, EffectParamValue>,
 ) -> Option<Box<dyn DirectLedEffect>> {
@@ -68,7 +73,7 @@ pub fn build_direct(
     }
 }
 
-pub fn direct_descriptors() -> Vec<Animation> {
+pub fn builtin_descriptors() -> Vec<Animation> {
     vec![Designer::descriptor()]
 }
 
@@ -78,14 +83,14 @@ mod tests {
 
     #[test]
     fn build_dispatches_known_ids_only() {
-        assert!(build_direct(DESIGNER_EFFECT_ID, &HashMap::new()).is_some());
-        assert!(build_direct("breathing", &HashMap::new()).is_none());
-        assert!(build_direct("nope", &HashMap::new()).is_none());
+        assert!(build_builtin(DESIGNER_EFFECT_ID, &HashMap::new()).is_some());
+        assert!(build_builtin("breathing", &HashMap::new()).is_none());
+        assert!(build_builtin("nope", &HashMap::new()).is_none());
     }
 
     #[test]
     fn descriptors_list_designer_only() {
-        let ids: Vec<String> = direct_descriptors().into_iter().map(|d| d.id).collect();
+        let ids: Vec<String> = builtin_descriptors().into_iter().map(|d| d.id).collect();
         assert_eq!(ids, vec![DESIGNER_EFFECT_ID.to_string()]);
     }
 }
@@ -102,7 +107,7 @@ mod prop_tests {
             ny in 0.0f32..1.0,
             t in 0.0f32..1000.0,
         ) {
-            let fx = build_direct(DESIGNER_EFFECT_ID, &HashMap::new()).unwrap();
+            let fx = build_builtin(DESIGNER_EFFECT_ID, &HashMap::new()).unwrap();
             let c = fx.led_color(nx, nx, nx, ny, t);
             for ch in [c.r, c.g, c.b] {
                 prop_assert!((0.0..=1.0).contains(&ch), "channel {ch} out of gamut");

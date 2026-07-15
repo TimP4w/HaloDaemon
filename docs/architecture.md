@@ -226,7 +226,10 @@ and are the reason device state evolves without the user touching anything.
 The set (full internals in [engines.md](engines.md)):
 
 - **canvas** — unified RGB effect loop; renders a tiny-skia pixmap per tick and
-  samples each placed zone to per-LED RGB. Drives every `Rgb` capability.
+  samples each placed zone to per-LED RGB. Drives every `Rgb` capability. Its
+  effect runtime has an intentional two-domain boundary: daemon-owned built-ins
+  only for host services/the always-available designer, and runtime plugins for
+  portable effects; see [engines.md](engines.md#effects).
 - **fan_curve** — closed-loop temp→PWM with hysteresis, deadband, and a failsafe
   duty when the sensor is missing.
 - **lcd** — renders template images / video frames to Kraken-style LCD panels.

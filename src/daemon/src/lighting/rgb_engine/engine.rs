@@ -57,7 +57,7 @@ struct LivePixmap {
 }
 
 enum PixmapRuntime {
-    Native(Box<dyn FrameSource>),
+    BuiltIn(Box<dyn FrameSource>),
     Plugin(crate::drivers::plugins::PluginEffectHandle),
     Off,
 }
@@ -68,7 +68,7 @@ struct LiveDirect {
 }
 
 enum DirectRuntime {
-    Native(Box<dyn DirectLedEffect>),
+    BuiltIn(Box<dyn DirectLedEffect>),
     Plugin(crate::drivers::plugins::PluginEffectHandle),
     Off,
 }
@@ -111,8 +111,8 @@ fn build_pixmap_effect(app: &Arc<AppState>, def: Option<&EffectDef>) -> PixmapRu
     let Some(d) = def else {
         return PixmapRuntime::Off;
     };
-    if let Some(fx) = canvas::build(&d.effect_id, &d.params) {
-        return PixmapRuntime::Native(fx);
+    if let Some(fx) = canvas::build_builtin(&d.effect_id, &d.params) {
+        return PixmapRuntime::BuiltIn(fx);
     }
     app.registry
         .build_pixmap_effect(app.secret_store.as_ref(), &d.effect_id, &d.params)
@@ -136,8 +136,8 @@ fn ring_count_for(zone: &RgbZone) -> usize {
 }
 
 /// Per-LED chain/spatial coordinates for a zone — the `(p, p_ring, nx, ny)`
-/// tuple every direct effect (native or plugin) computes its color from.
-/// Shared by `direct_zone_colors` (native, calls `led_color` inline) and the
+/// tuple every direct effect (built-in or plugin) computes its color from.
+/// Shared by `direct_zone_colors` (built-in, calls `led_color` inline) and the
 /// plugin path (batches these into one `led_colors` round-trip).
 fn zone_led_coords(zone: &RgbZone) -> Vec<(f32, f32, f32, f32)> {
     let n = zone.leds.len();
@@ -230,23 +230,23 @@ impl RgbEngine {
         self.frame_tx.subscribe()
     }
 
-    /// Native + plugin-declared pixmap effects. Not memoized (unlike the
-    /// pre-plugin `LazyLock`) since plugins can load/unload at runtime; the
-    /// merge itself is a cheap `RwLock` read + small-struct clone.
+    /// Built-in host effects plus plugin-declared pixmap effects. The built-in
+    /// boundary is intentionally narrow; see `canvas::effects`. Not memoized
+    /// because plugins can load/unload at runtime.
     pub fn available_effect_descriptors(
         registry: &crate::drivers::plugins::Registry,
     ) -> Vec<Animation> {
-        let mut v = canvas::all_descriptors();
+        let mut v = canvas::builtin_descriptors();
         v.extend(registry.pixmap_effect_descriptors());
         v
     }
 
-    /// Native + plugin-declared direct effects. See
+    /// Built-in host effects plus plugin-declared direct effects. See
     /// [`Self::available_effect_descriptors`] for why this isn't memoized.
     pub fn direct_effect_descriptors(
         registry: &crate::drivers::plugins::Registry,
     ) -> Vec<Animation> {
-        let mut v = direct::direct_descriptors();
+        let mut v = direct::builtin_descriptors();
         v.extend(registry.direct_effect_descriptors());
         v
     }
@@ -424,7 +424,7 @@ impl RgbEngine {
                         true
                     }
                 },
-                PixmapRuntime::Native(effect) => {
+                PixmapRuntime::BuiltIn(effect) => {
                     effect.render(&mut lp.pixmap, t, dt);
                     false
                 }
@@ -497,8 +497,8 @@ impl RgbEngine {
             let want = format!("{id}|{}", params_key(params));
             let stale = live.get(dev.id()).map(|ld| ld.key != want).unwrap_or(true);
             if stale {
-                let runtime = match direct::build_direct(id, params) {
-                    Some(fx) => DirectRuntime::Native(fx),
+                let runtime = match direct::build_builtin(id, params) {
+                    Some(fx) => DirectRuntime::BuiltIn(fx),
                     None => match self.app_state.registry.build_direct_effect(
                         self.app_state.secret_store.as_ref(),
                         id,
@@ -583,7 +583,7 @@ impl RgbEngine {
                 continue;
             }
 
-            let DirectRuntime::Native(effect) = &mut ld.runtime else {
+            let DirectRuntime::BuiltIn(effect) = &mut ld.runtime else {
                 for rgb_zone in &rgb.descriptor().zones {
                     let colors = vec![RgbColor { r: 0, g: 0, b: 0 }; rgb_zone.leds.len()];
                     if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
@@ -1029,7 +1029,7 @@ mod tests {
     /// Position-independent pulse `sin(t*0.5*pi)^2` (black at t=0, peak at
     /// t=1), brightness-scaling a fixed color — a minimal `DirectLedEffect`
     /// fixture for exercising `direct_zone_colors`'s coordinate/gamma math
-    /// (breathing itself is now a plugin effect, not native; see
+    /// (breathing itself is now a plugin effect, not built in; see
     /// `halo_effects.lua`).
     struct PulseTestEffect;
     impl DirectLedEffect for PulseTestEffect {
@@ -1106,7 +1106,7 @@ mod tests {
             "color_mode".to_string(),
             EffectParamValue::Str("solid".to_string()),
         );
-        let fx = direct::build_direct(halod_shared::effect_designer::DESIGNER_EFFECT_ID, &params)
+        let fx = direct::build_builtin(halod_shared::effect_designer::DESIGNER_EFFECT_ID, &params)
             .unwrap();
         let zone = RgbZone {
             id: "ring".into(),
@@ -1162,7 +1162,7 @@ mod tests {
             m
         };
 
-        let per_ring = direct::build_direct(
+        let per_ring = direct::build_builtin(
             halod_shared::effect_designer::DESIGNER_EFFECT_ID,
             &params("per_ring"),
         )
@@ -1174,7 +1174,7 @@ mod tests {
         );
         assert_eq!(colors[2], colors[4]);
 
-        let whole_zone = direct::build_direct(
+        let whole_zone = direct::build_builtin(
             halod_shared::effect_designer::DESIGNER_EFFECT_ID,
             &params("zone"),
         )

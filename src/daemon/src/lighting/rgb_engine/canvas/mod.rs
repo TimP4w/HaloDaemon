@@ -3,5 +3,5 @@ mod effects;
 mod sampler;
 pub(crate) mod screen_capture;
 
-pub use effects::{all_descriptors, build, FrameSource};
+pub use effects::{build_builtin, builtin_descriptors, FrameSource};
 pub use sampler::Sampler;
