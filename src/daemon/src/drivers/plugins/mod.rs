@@ -15,6 +15,7 @@ mod audio_api;
 pub(crate) mod backends;
 mod bytebuf;
 mod chain_leaf;
+pub mod contract;
 mod device;
 mod effect_worker;
 mod ffi;
@@ -37,6 +38,10 @@ use device::{LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
 pub use effect_worker::{LedCoord, PluginEffectHandle};
 pub use manifest::{parse_manifest_from_dir, DeviceSpec, EffectKind, PluginManifest, ProbeMode};
 pub use worker::run_pre_scan;
+
+/// Lua host/plugin ABI implemented by this daemon. Repository compatibility
+/// and [`contract::PLUGIN_API_CONTRACT`] deliberately share this one value.
+pub const PLUGIN_API: u32 = 1;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -1181,6 +1186,45 @@ fn try_load_plugin_dir(dir: &Path, scan: &mut LoadScan) {
     scan.manifests.push(m);
 }
 
+fn record_invalid_plugin_dir(
+    dir: &Path,
+    package_id: String,
+    package_version: String,
+    reason: &str,
+    scan: &mut LoadScan,
+) {
+    match manifest::build_manifest_from_dir(dir) {
+        Ok(manifest) => scan.invalid.push((manifest, reason.to_owned())),
+        Err(error) => scan.invalid.push((
+            PluginManifest {
+                plugin_id: package_id.clone(),
+                source_path: dir.join("main.lua"),
+                script_source: String::new(),
+                module_sources: Default::default(),
+                plugin_dir: dir.to_path_buf(),
+                devices: vec![],
+                identity: manifest::Identity {
+                    name: Some(package_id.clone()),
+                    id: Some(package_id),
+                    version: Some(package_version),
+                    ..Default::default()
+                },
+                logo: None,
+                effect_thumbnails: vec![],
+                plugin_type: PluginKind::Device,
+                dynamic_children: false,
+                effects: vec![],
+                transports: Default::default(),
+                permissions: vec![],
+                platforms: vec![],
+                capabilities: vec![],
+                config: None,
+            },
+            format!("{reason}; package manifest also failed to parse: {error:#}"),
+        )),
+    }
+}
+
 /// Scan every immediate subdirectory of `root` that contains a `plugin.yaml`.
 fn scan_plugin_subdirs(root: &Path, scan: &mut LoadScan) {
     match std::fs::read_dir(root) {
@@ -1215,6 +1259,18 @@ fn scan_repo(repo_dir: &Path, scan: &mut LoadScan) {
                 "Ignoring invalid plugin repository {}: {error:#}",
                 repo_dir.display()
             );
+            if let Ok(repository) = repo::read_repository_index(repo_dir) {
+                let reason = format!("repository package failed integrity validation: {error:#}");
+                for package in repository.packages {
+                    record_invalid_plugin_dir(
+                        &repo_dir.join(package.path),
+                        package.id,
+                        package.version,
+                        &reason,
+                        scan,
+                    );
+                }
+            }
             return;
         }
         Err(_) => {}

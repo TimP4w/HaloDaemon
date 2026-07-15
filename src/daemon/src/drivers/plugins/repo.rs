@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::constants::OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS;
 const REPOSITORY_SCHEMA: u32 = 1;
-const PLUGIN_API: u32 = 1;
+use super::PLUGIN_API;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,11 +54,20 @@ struct RepositorySignature {
 /// can also validate third-party repositories and the explicit development
 /// override.
 pub fn read_repository_manifest(repo_dir: &Path) -> Result<RepositoryManifest> {
+    let manifest = read_repository_index(repo_dir)?;
+    validate_repository_manifest(repo_dir, &manifest)?;
+    Ok(manifest)
+}
+
+/// Read only the repository index fields that are safe and useful for update
+/// diagnostics. This does not authorize package execution; callers that load
+/// packages must use [`read_repository_manifest`] so digests are enforced.
+pub fn read_repository_index(repo_dir: &Path) -> Result<RepositoryManifest> {
     let path = repo_dir.join("repository.yaml");
     let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
     let manifest: RepositoryManifest =
         serde_yaml::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
-    validate_repository_manifest(repo_dir, &manifest)?;
+    validate_repository_index(&manifest)?;
     Ok(manifest)
 }
 

@@ -466,6 +466,10 @@ type Job = Box<dyn FnOnce(&WorkerCtx) -> ControlFlow<()> + Send>;
 
 /// Look up a plugin callback by name, or `None` if the plugin didn't declare it.
 fn func(manifest: &Table, name: &str) -> Option<Function> {
+    debug_assert!(
+        super::contract::callback(name).is_some(),
+        "uncatalogued plugin callback: {name}"
+    );
     match manifest.get::<Value>(name) {
         Ok(Value::Function(f)) => Some(f),
         _ => None,
@@ -474,7 +478,16 @@ fn func(manifest: &Table, name: &str) -> Option<Function> {
 
 /// A callback the operation requires; errors with a uniform message if absent.
 fn required(manifest: &Table, name: &str) -> Result<Function> {
-    func(manifest, name).ok_or_else(|| anyhow!("plugin has no {name}()"))
+    debug_assert!(
+        super::contract::callback(name).is_some(),
+        "uncatalogued plugin callback: {name}"
+    );
+    func(manifest, name).ok_or_else(|| {
+        anyhow!(
+            "plugin API {} has no {name}()",
+            super::contract::active().version
+        )
+    })
 }
 
 fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
@@ -1289,6 +1302,7 @@ fn build_ctx(
     zones: &[RgbZone],
     audio_registry: super::audio_api::SinkRegistry,
 ) -> Result<WorkerCtx> {
+    debug_assert!(!super::contract::active().tables.is_empty());
     let controller_index = dev_match.index;
     let (lua, budget) = sandbox::bootstrap_vm(
         granted,
@@ -1877,11 +1891,11 @@ mod tests {
 
     #[tokio::test]
     async fn missing_required_callback_errors_uniformly() {
-        // A plugin with no `apply` yields the shared "plugin has no apply()" error.
+        // A plugin with no `apply` identifies the active ABI in its error.
         let h = spawn("return {}", vec![]);
         let err = h.rgb_apply(static_state()).await.unwrap_err();
         assert!(
-            err.to_string().contains("plugin has no apply()"),
+            err.to_string().contains("plugin API 1 has no apply()"),
             "unexpected error: {err}"
         );
     }

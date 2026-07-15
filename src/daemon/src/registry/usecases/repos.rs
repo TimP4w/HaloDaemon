@@ -442,7 +442,7 @@ async fn compute_on_disk_changes(
         let active_dir = repo::active_revision_dir(&r);
         let manifest = match tokio::task::spawn_blocking({
             let active_dir = active_dir.clone();
-            move || repo::read_repository_manifest(&active_dir)
+            move || repo::read_repository_index(&active_dir)
         })
         .await
         {
@@ -537,7 +537,7 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     let dir = crate::config::plugin_repos_dir().join(&slug);
     let old_plugin_ids = {
         let active_dir = repo::active_revision_dir(&record);
-        tokio::task::spawn_blocking(move || repo::read_repository_manifest(&active_dir))
+        tokio::task::spawn_blocking(move || repo::read_repository_index(&active_dir))
             .await
             .ok()
             .and_then(Result::ok)

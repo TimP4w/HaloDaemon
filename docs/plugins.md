@@ -99,6 +99,28 @@ without the flag to return to the installed official revision.
 
 ## Runtime and containment
 
+### Lua callback contract (plugin API 1)
+
+`repository.yaml` must declare `compatibility.plugin_api: 1`. The matching
+machine-readable callback and table-shape catalog lives in
+`drivers/plugins/contract.rs`; repository validation and that catalog use the
+same `PLUGIN_API` constant, so changing the ABI requires changing its version.
+
+Every device callback receives `dev` first. Its stable fields are `transport`
+and `match`; `status`, `zones`, and `audio` are present only on the paths that
+provide them. `dev.match` contains `transport` and the applicable `bus`, `addr`,
+`vid`, `pid`, `index`, `key`, and `name` fields plus declared transport extras.
+
+The lifecycle callbacks are `initialize(dev)`, `close(dev)`,
+`close_child(dev)`, and SMBus `pre_scan(dev)`. Host polling invokes
+`read_status(dev)`; there is no Lua callback named `poll`. HID input invokes
+`event(dev, event)` and may first invoke `event_source(event)`. Integration
+roots use `enumerate_controllers(dev)`. Capability callbacks and effect
+patterns (`render_<id>` and `led_colors_<id>`) are listed with their exact
+argument and return shapes in the in-code catalog. Structured callback results
+are decoded using the Rust serde types named there; unknown or malformed fields
+therefore follow those types' serde rules.
+
 `discover(host)` creates physical roots. Each root owns one serialized Lua
 worker and its transport handles. `initialize`, capability calls, `children`,
 `on_event`, and `close` run through that worker; receiver children use opaque
