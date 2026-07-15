@@ -142,6 +142,7 @@ type TransportScan = fn(Arc<crate::state::AppState>) -> Pin<Box<dyn Future<Outpu
 
 pub struct TransportScanner {
     pub name: &'static str,
+    pub detail: halod_shared::types::DiscoveryDetail,
     /// `std::env::consts::OS` value to restrict to one platform, or `None`.
     pub platform: Option<&'static str>,
     pub scan: TransportScan,
@@ -150,6 +151,7 @@ inventory::collect!(TransportScanner);
 
 inventory::submit!(TransportScanner {
     name: "USB non-HID",
+    detail: halod_shared::types::DiscoveryDetail::Usb,
     platform: None,
     scan: |app| Box::pin(async move {
         use rusb::{Context, UsbContext};
@@ -239,10 +241,13 @@ use crate::{ipc::broadcast_state, state::AppState};
 /// Push a free-form status line describing the current discovery step to any
 /// connected UI. Transport scanners call this to report finer-grained progress
 /// (e.g. the specific bus being probed) than the top-level per-transport label.
-pub async fn set_discovery_detail(app: &Arc<AppState>, detail: impl Into<String>) {
+pub async fn set_discovery_detail(
+    app: &Arc<AppState>,
+    detail: halod_shared::types::DiscoveryDetail,
+) {
     {
         let mut discovery = app.discovery.lock().await;
-        discovery.detail = detail.into();
+        discovery.detail = detail;
     }
     broadcast_state(app).await;
 }
@@ -279,7 +284,7 @@ pub async fn discover_devices(app: Arc<AppState>) {
                 }
             }
             log::debug!("Running transport scanner: {}", scanner.name);
-            set_discovery_detail(&app, scanner.name).await;
+            set_discovery_detail(&app, scanner.detail.clone()).await;
             if tokio::time::timeout(
                 std::time::Duration::from_secs(30),
                 (scanner.scan)(Arc::clone(&app)),
@@ -297,7 +302,7 @@ pub async fn discover_devices(app: Arc<AppState>) {
     {
         let mut discovery = app.discovery.lock().await;
         discovery.phase = DiscoveryPhase::Complete;
-        discovery.detail = String::new();
+        discovery.detail = Default::default();
     }
     broadcast_state(&app).await;
 

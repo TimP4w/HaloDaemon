@@ -137,6 +137,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
 
 inventory::submit!(TransportScanner {
     name: "HID",
+    detail: halod_shared::types::DiscoveryDetail::Hid,
     platform: None,
     scan: |app| Box::pin(async move {
         if let Err(e) = discover(app).await {

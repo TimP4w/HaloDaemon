@@ -97,6 +97,7 @@ mod tests {
 
 inventory::submit!(crate::registry::discovery::TransportScanner {
     name: "hwmon",
+    detail: halod_shared::types::DiscoveryDetail::Hwmon,
     platform: Some("linux"),
     scan: |app| Box::pin(async move {
         if let Err(e) = HwmonTransport::discover(app).await {

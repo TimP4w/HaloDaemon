@@ -10,6 +10,7 @@ use crate::{
 
 inventory::submit!(TransportScanner {
     name: "Plugin host transports",
+    detail: halod_shared::types::DiscoveryDetail::PluginHostTransports,
     platform: None,
     scan: |app| Box::pin(scan(app)),
 });

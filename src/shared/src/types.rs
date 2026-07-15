@@ -1118,15 +1118,35 @@ pub enum DiscoveryPhase {
     Error,
 }
 
+/// The current discovery operation. This stays structured on the wire so the
+/// UI can translate the step instead of displaying daemon-authored prose.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DiscoveryDetail {
+    #[default]
+    None,
+    Usb,
+    PluginHostTransports,
+    Hid,
+    PluginIntegrations,
+    Hwmon,
+    Computer,
+    Smbus,
+    SmbusAdapter {
+        name: String,
+    },
+    SmbusBus {
+        number: u32,
+    },
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiscoveryStatus {
     #[serde(default)]
     pub phase: DiscoveryPhase,
-    /// Free-form, human-readable description of the current discovery step
-    /// (e.g. which transport is being scanned), pushed by the daemon so the UI
-    /// can show live progress. Empty when idle or complete.
+    /// Structured current step, translated by the UI.
     #[serde(default)]
-    pub detail: String,
+    pub detail: DiscoveryDetail,
     /// True while a background plugin-update check is in flight, so the radar
     /// can show a "checking for updates" step. Independent of `phase`: it may
     /// still be true after device discovery completes.

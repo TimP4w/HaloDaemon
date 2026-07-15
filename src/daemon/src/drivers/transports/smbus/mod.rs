@@ -209,11 +209,15 @@ impl SmBusTransport {
 /// Label for the discovery status line while probing one bus, preferring the
 /// adapter name and falling back to the bus number. The UI prefixes this with
 /// its translated "Scanning …" wording.
-fn bus_scan_label(bus: &BusInfo) -> String {
+fn bus_scan_label(bus: &BusInfo) -> halod_shared::types::DiscoveryDetail {
     if bus.adapter_name.trim().is_empty() {
-        format!("SMBus bus {}", bus.bus_number)
+        halod_shared::types::DiscoveryDetail::SmbusBus {
+            number: u32::from(bus.bus_number),
+        }
     } else {
-        format!("SMBus · {}", bus.adapter_name.trim())
+        halod_shared::types::DiscoveryDetail::SmbusAdapter {
+            name: bus.adapter_name.trim().to_owned(),
+        }
     }
 }
 
@@ -461,6 +465,7 @@ async fn run_pre_scan(
 
 inventory::submit!(TransportScanner {
     name: "SMBus",
+    detail: halod_shared::types::DiscoveryDetail::Smbus,
     platform: None,
     scan: |app| Box::pin(async move {
         if let Err(e) = discover(app).await {
@@ -625,13 +630,24 @@ mod tests {
 
     #[test]
     fn bus_scan_label_prefers_adapter_name() {
-        assert_eq!(bus_scan_label(&bus(3, "i801 SMBus")), "SMBus · i801 SMBus");
+        assert_eq!(
+            bus_scan_label(&bus(3, "i801 SMBus")),
+            halod_shared::types::DiscoveryDetail::SmbusAdapter {
+                name: "i801 SMBus".into()
+            }
+        );
     }
 
     #[test]
     fn bus_scan_label_falls_back_to_bus_number() {
-        assert_eq!(bus_scan_label(&bus(5, "   ")), "SMBus bus 5");
-        assert_eq!(bus_scan_label(&bus(0, "")), "SMBus bus 0");
+        assert_eq!(
+            bus_scan_label(&bus(5, "   ")),
+            halod_shared::types::DiscoveryDetail::SmbusBus { number: 5 }
+        );
+        assert_eq!(
+            bus_scan_label(&bus(0, "")),
+            halod_shared::types::DiscoveryDetail::SmbusBus { number: 0 }
+        );
     }
 
     // ── PCI gate ─────────────────────────────────────────────────────────────

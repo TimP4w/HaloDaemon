@@ -50,8 +50,7 @@ misc:
   designer_phase_spread: Phase spread
   designer_ambient_color: Ambient color
   # radar.rs
-  radar_daemon_down: Daemon not running
-  radar_daemon_down_sub: Start discovery to detect your devices
+  radar_daemon_down_sub: Start daemon
   radar_one_device_ready: 1 device ready
   radar_devices_ready: "%{found} devices ready"
   radar_all_connected: All peripherals connected to the engine
@@ -59,6 +58,15 @@ misc:
   radar_scanning: "Scanning for devices…"
   radar_scan_fallback: "%{found} found · scanning…"
   radar_scan_detail: "%{found} found · Scanning %{detail}"
+  radar_phase_usb: USB devices
+  radar_phase_plugin_hosts: Plugin host transports
+  radar_phase_hid: HID devices
+  radar_phase_plugin_integrations: Plugin integrations
+  radar_phase_hwmon: Hardware monitoring devices
+  radar_phase_computer: Computer sensors
+  radar_phase_smbus: SMBus devices
+  radar_phase_smbus_adapter: "SMBus adapter %{name}"
+  radar_phase_smbus_bus: "SMBus bus %{number}"
   # device/macro_editor.rs
   macro_full: The sequence is full. Remove some steps to add more.
   macro_unreleased: Some keys are still held at the end of the sequence. They will be released automatically after playback.

@@ -6,7 +6,7 @@
 use std::hash::{Hash, Hasher};
 
 use egui::{epaint::Vertex, Align2, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Vec2};
-use halod_shared::types::{AppState, DiscoveryPhase, WireDevice};
+use halod_shared::types::{AppState, DiscoveryDetail, DiscoveryPhase, WireDevice};
 
 use crate::domain::models::device as model;
 use crate::ui::theme::{self, a};
@@ -81,7 +81,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
             let icon_size = 48.0_f32;
             let total = icon_size + 14.0 + halo.size().x + daemon.size().x;
             let logo_height = icon_size;
-            let gap = 28.0_f32;
+            let gap = 56.0_f32;
             let checking = connected && state.discovery.checking_updates;
             let status_height = if checking { 68.0 } else { 48.0 };
             let fixed_height = logo_height + gap * 2.0 + status_height;
@@ -120,10 +120,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
             // so prompt the user to start it instead.
             let title_y = center.y + radius + gap + 10.0;
             let (title, sub) = if !connected {
-                (
-                    t!("misc.radar_daemon_down").to_string(),
-                    t!("misc.radar_daemon_down_sub").to_string(),
-                )
+                (String::new(), t!("misc.radar_daemon_down_sub").to_string())
             } else if complete {
                 let title = if found == 1 {
                     t!("misc.radar_one_device_ready").to_string()
@@ -137,13 +134,17 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                     scan_subtitle(found, &state.discovery.detail),
                 )
             };
-            p.text(
-                Pos2::new(center.x, title_y),
-                Align2::CENTER_CENTER,
-                title,
-                theme::semibold(19.0),
-                theme::TEXT,
-            );
+            if connected {
+                p.text(
+                    Pos2::new(center.x, title_y),
+                    Align2::CENTER_CENTER,
+                    title,
+                    theme::semibold(19.0),
+                    theme::TEXT,
+                );
+            } else {
+                draw_power_icon(&p, Pos2::new(center.x, title_y), 9.0);
+            }
             p.text(
                 Pos2::new(center.x, title_y + 24.0),
                 Align2::CENTER_CENTER,
@@ -166,6 +167,17 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
             }
         });
     dismissed
+}
+
+fn draw_power_icon(p: &egui::Painter, center: Pos2, radius: f32) {
+    p.circle_stroke(center, radius, Stroke::new(2.0, theme::OFFLINE_TEXT));
+    p.line_segment(
+        [
+            Pos2::new(center.x, center.y - radius - 3.0),
+            Pos2::new(center.x, center.y + 1.0),
+        ],
+        Stroke::new(2.4, theme::OFFLINE_TEXT),
+    );
 }
 
 fn draw_radar(p: &egui::Painter, center: Pos2, radius: f32, time: f64) {
@@ -274,12 +286,26 @@ fn blip_pos(center: Pos2, radius: f32, id: &str) -> Pos2 {
 
 /// Subtitle shown while scanning: the live step the daemon is on (e.g. which
 /// transport), falling back to a generic label before the first detail arrives.
-fn scan_subtitle(found: usize, detail: &str) -> String {
-    if detail.is_empty() {
-        t!("misc.radar_scan_fallback", found = found).to_string()
-    } else {
-        t!("misc.radar_scan_detail", found = found, detail = detail).to_string()
-    }
+fn scan_subtitle(found: usize, detail: &DiscoveryDetail) -> String {
+    let detail = match detail {
+        DiscoveryDetail::None => return t!("misc.radar_scan_fallback", found = found).to_string(),
+        DiscoveryDetail::Usb => t!("misc.radar_phase_usb").to_string(),
+        DiscoveryDetail::PluginHostTransports => t!("misc.radar_phase_plugin_hosts").to_string(),
+        DiscoveryDetail::Hid => t!("misc.radar_phase_hid").to_string(),
+        DiscoveryDetail::PluginIntegrations => {
+            t!("misc.radar_phase_plugin_integrations").to_string()
+        }
+        DiscoveryDetail::Hwmon => t!("misc.radar_phase_hwmon").to_string(),
+        DiscoveryDetail::Computer => t!("misc.radar_phase_computer").to_string(),
+        DiscoveryDetail::Smbus => t!("misc.radar_phase_smbus").to_string(),
+        DiscoveryDetail::SmbusAdapter { name } => {
+            t!("misc.radar_phase_smbus_adapter", name = name).to_string()
+        }
+        DiscoveryDetail::SmbusBus { number } => {
+            t!("misc.radar_phase_smbus_bus", number = number).to_string()
+        }
+    };
+    t!("misc.radar_scan_detail", found = found, detail = detail).to_string()
 }
 
 #[cfg(test)]
@@ -307,12 +333,26 @@ mod tests {
 
     #[test]
     fn scan_subtitle_shows_daemon_detail_when_present() {
-        assert_eq!(scan_subtitle(2, "SMBus"), "2 found · Scanning SMBus");
+        assert_eq!(
+            scan_subtitle(2, &DiscoveryDetail::Smbus),
+            "2 found · Scanning SMBus devices"
+        );
     }
 
     #[test]
     fn scan_subtitle_falls_back_when_detail_empty() {
-        assert_eq!(scan_subtitle(0, ""), "0 found · scanning…");
+        assert_eq!(
+            scan_subtitle(0, &DiscoveryDetail::None),
+            "0 found · scanning…"
+        );
+    }
+
+    #[test]
+    fn scan_subtitle_translates_dynamic_smbus_steps() {
+        assert_eq!(
+            scan_subtitle(1, &DiscoveryDetail::SmbusBus { number: 5 }),
+            "1 found · Scanning SMBus bus 5"
+        );
     }
 
     #[test]
