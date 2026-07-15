@@ -16,6 +16,8 @@ pub struct HwmonChipInfo {
     pub stable_id: String,
     pub name: String,
     pub attributes: Vec<String>,
+    /// Allowlisted attributes the daemon process can currently write.
+    pub writable_attributes: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -108,12 +110,20 @@ impl HwmonTransport {
                 .collect();
             attributes.sort();
             attributes.dedup();
+            let writable_attributes = attributes
+                .iter()
+                .filter(|attribute| {
+                    writable_attribute(attribute) && path_writable(&path.join(attribute))
+                })
+                .cloned()
+                .collect();
             let key = index.to_string();
             let info = HwmonChipInfo {
                 key: key.clone(),
                 stable_id,
                 name,
                 attributes,
+                writable_attributes,
             };
             chips.insert(
                 key,
@@ -132,33 +142,43 @@ impl HwmonTransport {
     }
 
     #[cfg(feature = "plugin-test")]
-    pub fn from_fixture(fixtures: Vec<(String, String, HashMap<String, String>)>) -> Self {
+    pub fn from_fixture(
+        fixtures: Vec<(String, String, HashMap<String, String>, Vec<String>)>,
+    ) -> Self {
         let chips = fixtures
             .into_iter()
             .enumerate()
-            .map(|(index, (stable_id, name, mut values))| {
-                values.insert("name".to_owned(), format!("{name}\n"));
-                let key = index.to_string();
-                let mut attributes: Vec<_> = values
-                    .keys()
-                    .filter(|attribute| readable_attribute(attribute))
-                    .cloned()
-                    .collect();
-                attributes.sort();
-                let info = HwmonChipInfo {
-                    key: key.clone(),
-                    stable_id,
-                    name,
-                    attributes,
-                };
-                (
-                    key,
-                    HwmonChip {
-                        info,
-                        storage: HwmonStorage::Memory(Arc::new(Mutex::new(values))),
-                    },
-                )
-            })
+            .map(
+                |(index, (stable_id, name, mut values, mut writable_attributes))| {
+                    values.insert("name".to_owned(), format!("{name}\n"));
+                    let key = index.to_string();
+                    let mut attributes: Vec<_> = values
+                        .keys()
+                        .filter(|attribute| readable_attribute(attribute))
+                        .cloned()
+                        .collect();
+                    attributes.sort();
+                    writable_attributes.retain(|attribute| {
+                        attributes.contains(attribute) && writable_attribute(attribute)
+                    });
+                    writable_attributes.sort();
+                    writable_attributes.dedup();
+                    let info = HwmonChipInfo {
+                        key: key.clone(),
+                        stable_id,
+                        name,
+                        attributes,
+                        writable_attributes,
+                    };
+                    (
+                        key,
+                        HwmonChip {
+                            info,
+                            storage: HwmonStorage::Memory(Arc::new(Mutex::new(values))),
+                        },
+                    )
+                },
+            )
             .collect();
         Self {
             chips: Metered::new(chips, None),
@@ -240,20 +260,8 @@ impl HwmonTransport {
                 entry.insert(original);
             }
         }
-        chip.write(attribute, value.to_owned()).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::PermissionDenied {
-                let detail = format!(
-                    "writing hwmon attribute {attribute}: permission denied; add the daemon user to the 'halod' group, reload the installed udev rules, and run `sudo udevadm trigger --action=change --subsystem-match=hwmon`"
-                );
-                self.unrecoverable
-                    .lock()
-                    .unwrap()
-                    .get_or_insert(detail.clone());
-                anyhow::anyhow!(detail)
-            } else {
-                anyhow::Error::new(error).context(format!("writing hwmon attribute {attribute}"))
-            }
-        })
+        chip.write(attribute, value.to_owned())
+            .map_err(|error| self.write_error(key, attribute, error))
     }
 
     fn reject<T>(&self, detail: String) -> Result<T> {
@@ -266,6 +274,24 @@ impl HwmonTransport {
 
     pub fn unrecoverable_error(&self) -> Option<String> {
         self.unrecoverable.lock().unwrap().clone()
+    }
+
+    /// Convert a failed write without turning a readable hwmon device into an
+    /// unrecoverable transport. If switching a PWM to manual mode never
+    /// succeeded, there is no state to restore; retaining its saved value would
+    /// make every later cleanup pass retry the same denied write.
+    fn write_error(&self, key: &str, attribute: &str, error: std::io::Error) -> anyhow::Error {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            self.original_pwm_enable
+                .lock()
+                .unwrap()
+                .remove(&(key.to_owned(), attribute.to_owned()));
+            anyhow::anyhow!(
+                "writing hwmon attribute {attribute}: permission denied; add the daemon user to the 'halod' group, reload the installed udev rules, and run `sudo udevadm trigger --action=change --subsystem-match=hwmon`"
+            )
+        } else {
+            anyhow::Error::new(error).context(format!("writing hwmon attribute {attribute}"))
+        }
     }
 
     pub fn restore(&self) -> Result<()> {
@@ -342,6 +368,16 @@ fn writable_attribute(attribute: &str) -> bool {
     numbered_attribute(attribute, "pwm", &["", "_enable"])
 }
 
+fn path_writable(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is NUL-terminated and remains alive for the call.
+    unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +429,30 @@ mod tests {
         assert_eq!(
             transport.unrecoverable_error().as_deref(),
             Some("hwmon attribute 'temp1_input' is read-only")
+        );
+    }
+
+    #[test]
+    fn denied_pwm_write_does_not_latch_an_unrecoverable_error() {
+        let (_root, transport) = fixture();
+        transport
+            .original_pwm_enable
+            .lock()
+            .unwrap()
+            .insert(("0".to_owned(), "pwm1_enable".to_owned()), "2\n".to_owned());
+        let error = transport.write_error(
+            "0",
+            "pwm1_enable",
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+
+        assert!(error.to_string().contains("permission denied"));
+        assert_eq!(transport.unrecoverable_error(), None);
+        assert!(transport.original_pwm_enable.lock().unwrap().is_empty());
+        assert!(transport.restore().is_ok());
+        assert_eq!(
+            transport.read("0", "pwm1").unwrap().as_deref(),
+            Some("128\n")
         );
     }
 

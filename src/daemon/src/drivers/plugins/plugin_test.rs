@@ -664,7 +664,14 @@ fn integration_child_table(
 #[cfg(target_os = "linux")]
 fn hwmon_fixtures_from_spec(
     spec: &Option<Table>,
-) -> Result<Vec<(String, String, std::collections::HashMap<String, String>)>> {
+) -> Result<
+    Vec<(
+        String,
+        String,
+        std::collections::HashMap<String, String>,
+        Vec<String>,
+    )>,
+> {
     let Some(spec) = spec else {
         return Ok(Vec::new());
     };
@@ -683,7 +690,18 @@ fn hwmon_fixtures_from_spec(
                 let (attribute, value) = pair.anyhow()?;
                 values.insert(attribute, value);
             }
-            Ok((stable_id, name, values))
+            let writable_attributes = match fixture.get::<Table>("writable_attributes") {
+                Ok(attributes) => attributes
+                    .sequence_values::<String>()
+                    .collect::<mlua::Result<Vec<_>>>()
+                    .anyhow()?,
+                Err(_) => values
+                    .keys()
+                    .filter(|attribute| attribute.starts_with("pwm"))
+                    .cloned()
+                    .collect(),
+            };
+            Ok((stable_id, name, values, writable_attributes))
         })
         .collect()
 }
