@@ -35,6 +35,13 @@ pub enum OverrideTarget {
     Canvas,
 }
 
+/// One authority snapshot in a batch plugin-enable confirmation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginEnableConfirmation {
+    pub id: String,
+    pub authority: PluginAuthority,
+}
+
 /// Typed LCD screen rotation values. Only 90° multiples are physically supported.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -142,6 +149,12 @@ pub enum DaemonCommand {
         id: String,
         authority: PluginAuthority,
     },
+    /// Confirm and enable several plugins as one operation. Every authority is
+    /// validated independently; valid plugins are enabled together even when
+    /// another entry fails validation.
+    ConfirmPluginEnableBatch {
+        plugins: Vec<PluginEnableConfirmation>,
+    },
     /// Replace a plugin's user-editable config values (see `ConfigFieldDef`).
     /// A `secure` field's key is included only when the user typed a new
     /// value; an absent secure key leaves the previously stored secret
@@ -199,8 +212,8 @@ pub enum DaemonCommand {
         hide_window_controls: bool,
     },
     /// Allow or deny the daemon contacting GitHub for official plugins and
-    /// automatic update checks. Granting triggers the deferred official-repo
-    /// clone and a startup update check.
+    /// automatic update checks. An allowed request also retries a missing
+    /// official-repo checkout and starts an update check.
     SetPluginDownloadConsent {
         allowed: bool,
     },
@@ -699,6 +712,18 @@ mod tests {
             id: "my_driver".into(),
         });
         assert_eq!(v, json!({"type": "delete_plugin", "id": "my_driver"}));
+    }
+
+    #[test]
+    fn confirm_plugin_enable_batch_wire_format() {
+        let v = roundtrip(&DaemonCommand::ConfirmPluginEnableBatch {
+            plugins: vec![PluginEnableConfirmation {
+                id: "halo_effects".into(),
+                authority: PluginAuthority::default(),
+            }],
+        });
+        assert_eq!(v["type"], "confirm_plugin_enable_batch");
+        assert_eq!(v["plugins"][0]["id"], "halo_effects");
     }
 
     #[test]

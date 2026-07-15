@@ -76,6 +76,16 @@ plugins:
   status_active: Attivo
   status_disabled: Disattivato
   status_needs_permission: Richiede permessi
+  status_inactive: Configurazione richiesta
+  status_degraded: Funzionalità limitate
+  req_command_missing: "Il daemon non trova '%{name}' nel PATH."
+  req_module_not_loaded: "Carica il modulo del kernel '%{name}': sudo modprobe %{name}"
+  req_module_unavailable: "Il modulo del kernel '%{name}' non è disponibile per il kernel in uso."
+  req_pawnio_missing: "Installa PawnIO per usare questo plugin su Windows."
+  req_i2c_missing: "Nessun dispositivo SMBus/I2C accessibile. Verifica che i2c-dev sia caricato e che i permessi siano corretti."
+  req_hwmon_missing: "Nessun sensore hardware rilevato in /sys/class/hwmon."
+  req_hwmon_read_permission: "HaloDaemon non può leggere i sensori disponibili. Verifica i permessi sysfs e udev."
+  req_hwmon_pwm_permission: "Il controllo delle ventole richiede l'accesso in scrittura ai file PWM in /sys/class/hwmon."
   enable: Attiva
   disable: Disattiva
   delete: Elimina script
@@ -117,12 +127,6 @@ plugins:
   consent_grant_enable: Concedi e attiva
   consent_cancel: Annulla
   consent_deny: Non ora
-  # Consenso iniziale per contattare GitHub per plugin ufficiali e aggiornamenti
-  download_consent_title: Vuoi scaricare i plugin ufficiali?
-  download_consent_body: I plugin ufficiali di HaloDaemon sono ospitati su GitHub. Per proteggere la tua privacy, HaloDaemon non effettua richieste di rete per questi plugin se non lo autorizzi esplicitamente.
-  download_consent_note: Se autorizzi, HaloDaemon scarica automaticamente i plugin ufficiali e controlla periodicamente su GitHub la presenza di aggiornamenti. Se non autorizzi, non contatta mai GitHub e dovrai aggiungere i plugin manualmente. Puoi cambiare la scelta nelle Impostazioni.
-  download_consent_allow: Consenti
-  download_consent_deny: Non consentire
   # Finestra di aggiunta
   add_title: Aggiungi un plugin
   add_sub: Installa un pacchetto plugin, cioè una cartella contenente plugin.yaml e lo script principale.

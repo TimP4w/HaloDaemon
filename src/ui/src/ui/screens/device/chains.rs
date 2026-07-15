@@ -220,7 +220,7 @@ fn channel_header(
         p.rect_stroke(
             badge,
             8.0,
-            Stroke::new(1.0, theme::hex(0x232a39)),
+            Stroke::new(1.0, theme::BORDER),
             egui::StrokeKind::Middle,
         );
         p.text(
@@ -326,7 +326,7 @@ fn channel_header(
 
 fn empty_placeholder(ui: &mut egui::Ui) {
     egui::Frame::NONE
-        .stroke(Stroke::new(1.0, theme::hex(0x232a39)))
+        .stroke(Stroke::new(1.0, theme::BORDER))
         .corner_radius(10.0)
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
@@ -414,7 +414,7 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &ChainLinkInfo) {
             p.rect_stroke(
                 chip,
                 6.0,
-                Stroke::new(1.0, theme::hex(0x232a39)),
+                Stroke::new(1.0, theme::BORDER),
                 egui::StrokeKind::Middle,
             );
             p.text(

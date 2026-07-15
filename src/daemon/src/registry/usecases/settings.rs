@@ -130,22 +130,20 @@ pub async fn set_ui_config(
 }
 
 /// Allow or deny the daemon contacting GitHub for official plugins and
-/// automatic update checks. On a fresh grant, download the (previously
-/// deferred) official repo and kick off a background update check.
+/// automatic update checks. An allowed request also retries a missing official
+/// checkout, which lets first-run onboarding recover from an offline bootstrap.
 pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> Result<()> {
     use halod_shared::types::PluginDownloadConsent;
-    let newly_allowed = {
+    {
         let mut cfg = app.config.write().await;
-        let was_allowed = cfg.gui.plugin_downloads == PluginDownloadConsent::Allowed;
         cfg.gui.plugin_downloads = if allowed {
             PluginDownloadConsent::Allowed
         } else {
             PluginDownloadConsent::Denied
         };
-        allowed && !was_allowed
-    };
+    }
     app.request_config_save();
-    if newly_allowed {
+    if allowed {
         #[cfg(feature = "dev-plugin-repo")]
         if app.development_plugin_repo.read().await.is_some() {
             log::info!("skipping official plugin download because --dev-plugin-repo is active");

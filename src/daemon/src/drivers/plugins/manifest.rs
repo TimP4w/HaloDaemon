@@ -184,6 +184,26 @@ pub struct CommandConfig {
     pub commands: Vec<String>,
 }
 
+/// A command or Linux kernel module that cannot be inferred from a transport.
+/// Transport requirements are derived by the host.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequirementDef {
+    pub kind: RequirementDefKind,
+    pub name: String,
+    /// Platforms the requirement applies to; empty means all. A requirement not
+    /// applicable to the running host is omitted, never reported as failing.
+    #[serde(default)]
+    pub platforms: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementDefKind {
+    Command,
+    KernelModule,
+}
+
 /// AMD SMN is deliberately read-only.  Keeping an explicit transport section
 /// makes the authority visible in the manifest just like the other privileged
 /// transports, while leaving room for future, narrowly-scoped options.
@@ -717,6 +737,9 @@ pub struct PluginManifest {
     pub dynamic_children: bool,
     pub effects: Vec<EffectManifest>,
     pub transports: TransportsConfig,
+    /// Explicitly declared host requirements (see [`RequirementDef`]). Auto-
+    /// derived requirements are computed on demand, not stored here.
+    pub requirements: Vec<RequirementDef>,
     /// Privileged capabilities this plugin needs, gated by user consent.
     pub permissions: Vec<Permission>,
     /// Platforms on which this package may execute. An omitted list means all
@@ -762,6 +785,8 @@ pub struct PluginMeta {
     pub devices: Vec<DeviceSpec>,
     #[serde(default)]
     pub transports: TransportsConfig,
+    #[serde(default)]
+    pub requirements: Vec<RequirementDef>,
     #[serde(default)]
     pub platforms: Vec<String>,
     #[serde(default)]
@@ -1064,6 +1089,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     validate_effects(&manifest.effects, "effect")?;
     validate_effect_assets(manifest)?;
     validate_transports(manifest)?;
+    validate_requirements(manifest)?;
     validate_controls(manifest)?;
     match manifest.plugin_type {
         PluginKind::Device => {
@@ -1338,6 +1364,59 @@ fn validate_catalog(manifest: &PluginManifest) -> Result<()> {
 fn check_count(what: &str, count: usize, max: usize) -> Result<()> {
     if count > max {
         bail!("declares {count} {what}, exceeding the {max} limit");
+    }
+    Ok(())
+}
+
+/// A safe requirement component name: a bare module/executable name, never a
+/// path, argument, or shell fragment (those belong to runtime data). Mirrors the
+/// bare-name rule already enforced on command transport names.
+fn validate_requirement_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 128 {
+        bail!("requirement name '{name}' must be 1-128 characters");
+    }
+    if name == "." || name == ".." {
+        bail!("requirement name '{name}' is not a valid component");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        bail!("requirement name '{name}' may only contain letters, digits, '.', '_', '-'");
+    }
+    Ok(())
+}
+
+fn validate_requirements(manifest: &PluginManifest) -> Result<()> {
+    let mut seen = HashSet::new();
+    for req in &manifest.requirements {
+        validate_requirement_name(&req.name)?;
+        let mut platforms = HashSet::new();
+        for platform in &req.platforms {
+            if !matches!(platform.as_str(), "linux" | "windows" | "macos") {
+                bail!("unsupported requirement platform '{platform}'");
+            }
+            if !platforms.insert(platform) {
+                bail!("requirement platform '{platform}' is declared more than once");
+            }
+        }
+        if req.kind == RequirementDefKind::KernelModule
+            && (req.platforms.is_empty() || req.platforms.iter().any(|p| p != "linux"))
+        {
+            bail!(
+                "kernel_module requirement '{}' must declare platforms: [linux]",
+                req.name
+            );
+        }
+        // Reject duplicate normalized requirements (same kind + name), which
+        // would otherwise produce two contradictory rows for one component.
+        let key = (req.kind, req.name.to_ascii_lowercase());
+        if !seen.insert(key) {
+            bail!(
+                "duplicate requirement '{}' declared more than once",
+                req.name
+            );
+        }
     }
     Ok(())
 }
@@ -1809,6 +1888,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         dynamic_children: meta.dynamic_children,
         effects: meta.effects,
         transports: meta.transports,
+        requirements: meta.requirements,
         permissions: meta.permissions,
         platforms: meta.platforms,
         capabilities: meta.capabilities,
@@ -1860,6 +1940,92 @@ mod tests {
                 .contains("shell, interpreter, or command launcher"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn requirement_rejects_unsafe_name_and_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A path is runtime data, never a requirement component name.
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "unsafe_req",
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\nrequirements:\n  - { kind: kernel_module, name: ../evil, platforms: [linux] }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&dir).is_err());
+
+        // An unknown requirement kind is rejected outright.
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "unknown_req",
+            "type: integration\ntransports:\n  hwmon: {}\nrequirements:\n  - { kind: firmware, name: x }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&dir).is_err());
+    }
+
+    #[test]
+    fn kernel_module_requirement_must_be_linux_scoped() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No platforms declared → could be evaluated on Windows where it can
+        // never apply; reject it.
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "unscoped_module",
+            "type: integration\ntransports:\n  hwmon: {}\nrequirements:\n  - { kind: kernel_module, name: nct6775 }\n",
+            ENTRY_LUA,
+        );
+        let err = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(err.to_string().contains("platforms: [linux]"), "{err:#}");
+    }
+
+    #[test]
+    fn duplicate_requirements_are_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "dup_req",
+            "type: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [pactl]\nrequirements:\n  - { kind: command, name: pactl }\n  - { kind: command, name: PACTL }\n",
+            ENTRY_LUA,
+        );
+        let err = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(err.to_string().contains("duplicate requirement"), "{err:#}");
+    }
+
+    #[test]
+    fn command_requirement_can_be_a_presence_only_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "presence_req",
+            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\nrequirements:\n  - { kind: command, name: openrgb }
+",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert!(manifest.transports.command.is_none());
+        assert!(!manifest.permissions.contains(&Permission::Command));
+        assert_eq!(manifest.requirements[0].name, "openrgb");
+    }
+
+    #[test]
+    fn host_inferred_requirement_kinds_are_not_manifest_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bad_broker = write_plugin_dir(
+            tmp.path(),
+            "bad_broker",
+            "requirements:\n  - { kind: broker_capability, name: pawnio.lpcio, platforms: [linux] }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&bad_broker).is_err());
+
+        let bad_hwmon = write_plugin_dir(
+            tmp.path(),
+            "bad_hwmon",
+            "requirements:\n  - { kind: linux_hwmon, name: other, platforms: [linux] }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&bad_hwmon).is_err());
     }
 
     #[test]

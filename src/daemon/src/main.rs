@@ -233,6 +233,14 @@ async fn run_daemon(
     .await;
     log::info!("Device discovery complete");
 
+    // Prime the requirement cache so the first UI poll doesn't trigger a probe
+    // per plugin; refreshed thereafter only at reconcile (no continuous polling).
+    crate::registry::usecases::plugins::refresh_requirements(&app).await?;
+
+    // Compute passive HID/USB/SMBus recommendations once at startup. The same
+    // snapshot is refreshed when repository manifests change.
+    crate::registry::usecases::plugins::refresh_recommendations(&app).await;
+
     // Started only once startup is done — the grace clock must not elapse
     // before a client has had any chance to connect.
     let idle_app = Arc::clone(&app);

@@ -447,24 +447,17 @@ fn title_bar_chrome(ui: &mut egui::Ui, state: &AppState) -> (ChromeConfig, Optio
         (Side::Left, Some((_, right))) => right + 14.0,
         _ => rect.left() + 16.0,
     };
-    let mark = Rect::from_min_size(Pos2::new(logo_left, cy - 9.0), Vec2::splat(18.0));
     let time = ui.input(|i| i.time) as f32;
-    theme::logo_icon(p, ui.ctx(), mark, time);
+    let logo_size = crate::ui::components::logo_size(p, 18.0, 14.0);
+    crate::ui::components::paint_logo(
+        p,
+        ui.ctx(),
+        Pos2::new(logo_left, cy - logo_size.y / 2.0),
+        18.0,
+        14.0,
+        time,
+    );
     ui.ctx().request_repaint();
-    let r1 = p.text(
-        Pos2::new(mark.right() + 10.0, cy),
-        Align2::LEFT_CENTER,
-        "halo",
-        theme::bold(14.0),
-        theme::TEXT,
-    );
-    p.text(
-        Pos2::new(r1.right(), cy),
-        Align2::LEFT_CENTER,
-        "daemon",
-        theme::bold(14.0),
-        theme::hex(0x9b7fe0),
-    );
 
     (cfg, ctl_span)
 }

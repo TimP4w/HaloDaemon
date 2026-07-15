@@ -164,7 +164,7 @@ pub fn chip(ui: &mut egui::Ui, label: &str) {
         label,
         theme::TEXT_DIM,
         theme::hex(0x181d29),
-        theme::hex(0x232a39),
+        theme::BORDER,
     );
 }
 

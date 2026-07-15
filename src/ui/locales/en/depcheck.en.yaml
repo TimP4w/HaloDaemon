@@ -28,10 +28,10 @@ depcheck:
       title: I2C access
       impact: Chipset SMBus RGB (DRAM and GPU)
       fix: Load the i2c-dev module and add your user to the 'i2c' group
-    fan_control_access:
-      title: Fan control access
-      impact: Motherboard PWM fan control
-      fix: "Load your SuperIO module (e.g. nct6775) and add your user to the 'halod' group"
+    halod_group:
+      title: halod group membership
+      impact: Fan and pump control without root privileges
+      fix: "Add your user to the 'halod' group, then sign out and back in"
     powerprofilesctl:
       title: powerprofilesctl
       impact: System power-profile switching

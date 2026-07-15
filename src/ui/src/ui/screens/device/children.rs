@@ -373,7 +373,7 @@ fn pair_slot_row(
             });
         });
     } else {
-        p.rect_filled(badge_rect, 7.0, theme::hex(0x232a39));
+        p.rect_filled(badge_rect, 7.0, theme::BORDER);
         p.text(
             Pos2::new(name_x, cy),
             Align2::LEFT_CENTER,

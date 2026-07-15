@@ -42,8 +42,49 @@ notify:
     title: "Il plugin non si connette: %{plugin}"
     message: "Non è riuscito a raggiungere l'indirizzo configurato. Apri Dettagli per saperne di più."
 
+  plugin_recommended:
+    title: Plugin consigliato disponibile
+    message: "%{plugin} è consigliato per questo sistema. Apri Plugin per attivarlo."
+
 tray:
   open: Apri HaloDaemon
   quit: Esci
   tooltip: HaloDaemon
   profile: Profilo
+
+onboarding:
+  welcome_title: Benvenuto in HaloDaemon
+  welcome_body: "Gestisci luci, ventole, pompe e sensori da un unico posto. Sarà tutto pronto in circa un minuto."
+  health_title: Stato del sistema
+  health_sub: HaloDaemon verifica l'accesso al sistema necessario per gestire l'hardware. Gli elementi opzionali mancanti disabilitano solo le funzioni associate.
+  health_checking: Controllo del sistema…
+  health_ok: Il sistema è pronto.
+  prefs_title: Alcune preferenze
+  prefs_sub: Puoi modificarle in qualsiasi momento dalle Impostazioni.
+  tray_title: Chiudi nell'area di notifica
+  tray_desc: Nascondi la finestra invece di uscire dall'applicazione quando premi il pulsante di chiusura.
+  plugins_title: Plugin ufficiali e aggiornamenti
+  plugins_desc: Consenti a HaloDaemon di scaricare i plugin ufficiali da GitHub e controllare gli aggiornamenti all'avvio.
+  scanning: Ricerca plugin compatibili…
+  plugins_page_title: Scegli i plugin
+  plugins_page_sub: I plugin consigliati sono già selezionati. Scegli eventuali altri plugin da attivare.
+  plugins_loading: Il download dei plugin ufficiali è ancora in corso. Potrai attivarli in seguito dalla scheda Plugin.
+  plugins_error: Impossibile scaricare i plugin ufficiali. Controlla la connessione a Internet e riprova.
+  plugins_retry: Riprova
+  plugins_retrying: Nuovo tentativo di download dei plugin ufficiali…
+  permissions_title: Controlla i permessi
+  permissions_sub: Controlla l'accesso al sistema richiesto dai plugin selezionati prima di attivarli.
+  permissions_none: Non richiede accesso aggiuntivo al sistema.
+  done_title: Tutto pronto
+  done_summary_plugins: "I plugin sono pronti e verranno aggiornati automaticamente. Puoi gestirli dalla scheda Plugin."
+  done_summary_basic: "HaloDaemon è pronto. Puoi attivare i plugin in seguito dalla scheda Plugin."
+  back: Indietro
+  please_wait: Ricerca in corso…
+  p_get_started: Inizia
+  p_scan: Trova plugin
+  p_finish_setup: Completa configurazione
+  p_review_permissions: Controlla permessi
+  p_grant_enable: Concedi e attiva
+  p_finish: Completa
+  p_enter: Apri HaloDaemon
+  p_continue: Continua

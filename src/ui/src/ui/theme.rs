@@ -14,14 +14,17 @@ pub const BODY: Color32 = hex(0x090b11);
 pub const WIN_TOP: Color32 = hex(0x0e0d15);
 pub const TITLE_BG: Color32 = hex(0x0b0e15);
 pub const SIDEBAR_BG: Color32 = hex(0x0c0f17);
-pub const CARD_BG: Color32 = hex(0x121823);
+/// Raised cards throughout the application.
+pub const CARD_BG: Color32 = hex(0x181521);
+/// Dialog, modal, menu, and popup shells.
+pub const MODAL_BG: Color32 = hex(0x110f18);
 pub const INNER_BG: Color32 = hex(0x0d1119);
-pub const ROW_ACTIVE: Color32 = hex(0x1d2433);
+pub const ROW_ACTIVE: Color32 = hex(0x211c2c);
 
 // ── Borders ──────────────────────────────────────────────────────────────────
-pub const BORDER: Color32 = hex(0x273043);
-pub const BORDER_SOFT: Color32 = hex(0x1d2534);
-pub const BORDER_INNER: Color32 = hex(0x202938);
+pub const BORDER: Color32 = hex(0x262231);
+pub const BORDER_SOFT: Color32 = hex(0x1e1a27);
+pub const BORDER_INNER: Color32 = hex(0x2b2637);
 /// Subtle chrome divider (title bar / sidebar edges) — barely above the bg.
 pub const DIVIDER: Color32 = hex(0x0c0b12);
 
@@ -176,10 +179,10 @@ pub fn install(ctx: &Context) {
     v.selection.bg_fill = a(CYAN, 0.25);
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, DIVIDER);
 
-    // Context-menu / popover styling to match the design (#0d1119 popover with
-    // a hairline border and rounded corners). Input fields keep a subtle border.
-    v.window_fill = hex(0x0f0e17);
-    v.window_stroke = Stroke::new(1.0, hex(0x282636));
+    // Context menus and native egui windows share the same raised shell as the
+    // application's explicit modal component.
+    v.window_fill = MODAL_BG;
+    v.window_stroke = Stroke::new(1.0, BORDER);
     v.window_corner_radius = egui::CornerRadius::same(11);
     v.menu_corner_radius = egui::CornerRadius::same(11);
     v.widgets.inactive.weak_bg_fill = INNER_BG;

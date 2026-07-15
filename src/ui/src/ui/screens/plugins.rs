@@ -9,8 +9,9 @@ use std::collections::{HashMap, HashSet};
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
     AppState, PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
-    PluginRepoInfo, PluginSource, PluginUpdateStatus, RepoCompatibilityStatus, RepoSignatureStatus,
-    RepoUpdateStatus,
+    PluginRecommendation, PluginRepoInfo, PluginRequirement, PluginRequirementStatus, PluginSource,
+    PluginUpdateStatus, RepoCompatibilityStatus, RepoSignatureStatus, RepoUpdateStatus,
+    RequirementImpact,
 };
 
 use crate::domain::models::plugin_issues::plugin_issue_detail;
@@ -278,12 +279,7 @@ impl PluginsUi {
         plugin_updates: &[PluginUpdateStatus],
     ) {
         widgets::card(ui, |ui| {
-            let active = state
-                .plugins
-                .plugins
-                .iter()
-                .filter(|p| plugin_active(p))
-                .count();
+            let active = state.plugins.plugins.iter().filter(|p| p.active).count();
             egui::Sides::new().show(
                 ui,
                 |ui| {
@@ -959,15 +955,7 @@ impl PluginsUi {
                     ConsentReason::New => {}
                 }
                 ui.add_space(12.0);
-                for perm in &p.declared_permissions {
-                    permission_card(ui, *perm);
-                    ui.add_space(8.0);
-                }
-                let commands = command_scope_names(&p.authority);
-                if !commands.is_empty() {
-                    command_authority_card(ui, &commands);
-                    ui.add_space(8.0);
-                }
+                authority_review_cards(ui, p);
                 ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new(t!("plugins.consent_warning"))
@@ -1429,6 +1417,73 @@ pub(crate) fn quarantine_toasts(
         .collect()
 }
 
+/// Persistence key marking the first-run onboarding as seen. Reuses the
+/// `seen_tours` set (via `MarkTourSeen`), so recommendations need no extra config.
+pub(crate) const ONBOARDING_KEY: &str = halod_shared::types::ONBOARDING_TOUR_KEY;
+
+/// Stable dedup key for a recommendation, persisted in `seen_tours` so a given
+/// (plugin, device) is announced at most once across restarts.
+pub(crate) fn recommendation_key(rec: &PluginRecommendation) -> String {
+    use halod_shared::types::PluginRecommendationMatch;
+    match &rec.hardware {
+        PluginRecommendationMatch::Always => format!("rec:{}:always", rec.plugin_id),
+        PluginRecommendationMatch::Command { executable } => {
+            format!("rec:{}:command:{executable}", rec.plugin_id)
+        }
+        PluginRecommendationMatch::Hid { vid, pid } => {
+            format!("rec:{}:hid:{vid:04x}:{pid:04x}", rec.plugin_id)
+        }
+        PluginRecommendationMatch::Usb { vid, pid } => {
+            format!("rec:{}:usb:{vid:04x}:{pid:04x}", rec.plugin_id)
+        }
+        PluginRecommendationMatch::SmbusGpu {
+            pci_vendor,
+            pci_device,
+            pci_sub_vendor,
+            pci_sub_device,
+        } => format!(
+            "rec:{}:smbus_gpu:{pci_vendor:04x}:{pci_device:04x}:{pci_sub_vendor:04x}:{pci_sub_device:04x}",
+            rec.plugin_id
+        ),
+    }
+}
+
+/// Whether the first-run onboarding should still be shown.
+pub(crate) fn onboarding_pending(seen: &std::collections::BTreeSet<String>) -> bool {
+    !seen.contains(ONBOARDING_KEY)
+}
+
+/// Toasts for newly available recommendations: one per stable match identity
+/// not already surfaced (persisted `seen`) and not yet shown this session
+/// (`toasted`). Each toast is paired with its persistence key so the caller can
+/// `MarkTourSeen` it. Mirrors [`quarantine_toasts`].
+pub(crate) fn recommendation_toasts(
+    recommendations: &[PluginRecommendation],
+    seen: &std::collections::BTreeSet<String>,
+    toasted: &mut HashSet<String>,
+    timestamp_ms: u64,
+) -> Vec<(String, halod_shared::types::Notification)> {
+    use halod_shared::types::{Notification, NotificationCode};
+    recommendations
+        .iter()
+        .filter_map(|rec| {
+            let key = recommendation_key(rec);
+            if seen.contains(&key) || !toasted.insert(key.clone()) {
+                return None;
+            }
+            Some((
+                key,
+                Notification {
+                    code: NotificationCode::PluginRecommended {
+                        plugin: rec.plugin_name.clone(),
+                    },
+                    timestamp_ms,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// True when `p` declares permissions the user hasn't consented to (never
 /// granted, or the script changed since it was granted). It stays inert until
 /// the user grants them. Shared with the Integrations screen, whose
@@ -1484,9 +1539,9 @@ fn newly_required_permissions(p: &PluginInfo) -> Vec<halod_shared::types::Permis
         .collect()
 }
 
-/// True when the plugin is actually running: toggled on AND consent-satisfied
-/// (a permissioned plugin needs its grant; a permission-free one always is).
-fn plugin_active(p: &PluginInfo) -> bool {
+/// True when the user's enable intent is consent-satisfied. Runtime `active`
+/// additionally depends on host requirements and is reported by the daemon.
+fn plugin_enabled_with_consent(p: &PluginInfo) -> bool {
     p.enabled && p.consented
 }
 
@@ -1503,7 +1558,7 @@ enum ToggleDecision {
 /// to permission-free plugins too: transports and supported-device scope are
 /// still meaningful authority for the user to review.
 fn toggle_decision(p: &PluginInfo) -> ToggleDecision {
-    if plugin_active(p) {
+    if plugin_enabled_with_consent(p) {
         ToggleDecision::Disable
     } else {
         ToggleDecision::NeedsConsent
@@ -1552,7 +1607,7 @@ fn apply_and_lock(in_flight: &mut HashMap<String, bool>, id: &str, target: bool)
 /// has finished — so the toggle stays locked for the whole
 /// (multi-second) device scan, not just until the config flag flips.
 fn plugin_toggle_landed(p: &PluginInfo, target: bool, discovering: bool) -> bool {
-    plugin_active(p) == target && !discovering
+    plugin_enabled_with_consent(p) == target && !discovering
 }
 
 /// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
@@ -1567,11 +1622,96 @@ fn reconcile_in_flight(
     });
 }
 
-fn status_dot(p: &PluginInfo) -> egui::Color32 {
-    if plugin_active(p) {
-        theme::ONLINE
+/// Effective status shown to the user: distinct from the toggle position, which
+/// reflects intent (`p.enabled`). Requirement gating and degrade rows come from
+/// the daemon (`p.active` / `p.activation_blocker` / `p.requirements`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginStatus {
+    /// Running normally.
+    Active,
+    /// Running, but a degrading requirement is unmet (a feature is off).
+    Degraded,
+    /// Enabled by the user but held inactive by a missing blocking requirement.
+    Inactive,
+    /// Off — disabled, unconsented, or unsupported.
+    Disabled,
+}
+
+fn plugin_status(p: &PluginInfo) -> PluginStatus {
+    if p.activation_blocker.is_some() {
+        PluginStatus::Inactive
+    } else if p.active {
+        let degraded = p
+            .requirements
+            .iter()
+            .any(|r| !r.satisfied && r.impact == RequirementImpact::Degrade);
+        if degraded {
+            PluginStatus::Degraded
+        } else {
+            PluginStatus::Active
+        }
     } else {
-        theme::TEXT_FAINT2
+        PluginStatus::Disabled
+    }
+}
+
+/// Dot colour, label, and text colour for a plugin's effective status.
+fn status_visual(status: PluginStatus) -> (egui::Color32, String, egui::Color32) {
+    match status {
+        PluginStatus::Active => (
+            theme::ONLINE,
+            t!("plugins.status_active").to_string(),
+            theme::ONLINE_TEXT,
+        ),
+        PluginStatus::Degraded => (
+            theme::STAT_AMBER,
+            t!("plugins.status_degraded").to_string(),
+            theme::STAT_AMBER,
+        ),
+        PluginStatus::Inactive => (
+            theme::OFFLINE,
+            t!("plugins.status_inactive").to_string(),
+            theme::OFFLINE,
+        ),
+        PluginStatus::Disabled => (
+            theme::TEXT_FAINT2,
+            t!("plugins.status_disabled").to_string(),
+            theme::TEXT_MUT,
+        ),
+    }
+}
+
+fn status_dot(p: &PluginInfo) -> egui::Color32 {
+    status_visual(plugin_status(p)).0
+}
+
+/// One line of user-facing remediation for an unmet requirement. Structured
+/// reason codes from the daemon map to localized copy here (the UI owns text).
+fn requirement_line(s: &PluginRequirementStatus) -> String {
+    match &s.requirement {
+        PluginRequirement::Command { executable } => {
+            t!("plugins.req_command_missing", name = executable).to_string()
+        }
+        PluginRequirement::KernelModule { name } => {
+            match s.reason {
+                // Available but not loaded → an actionable modprobe hint.
+                Some(halod_shared::types::RequirementFailureReason::NotLoaded) => {
+                    t!("plugins.req_module_not_loaded", name = name).to_string()
+                }
+                _ => t!("plugins.req_module_unavailable", name = name).to_string(),
+            }
+        }
+        PluginRequirement::PawnIo => t!("plugins.req_pawnio_missing").to_string(),
+        PluginRequirement::LinuxI2c => t!("plugins.req_i2c_missing").to_string(),
+        PluginRequirement::LinuxHwmon { access } => match (access.as_str(), s.reason) {
+            ("pwm", Some(halod_shared::types::RequirementFailureReason::PermissionDenied)) => {
+                t!("plugins.req_hwmon_pwm_permission").to_string()
+            }
+            (_, Some(halod_shared::types::RequirementFailureReason::PermissionDenied)) => {
+                t!("plugins.req_hwmon_read_permission").to_string()
+            }
+            _ => t!("plugins.req_hwmon_missing").to_string(),
+        },
     }
 }
 
@@ -1657,7 +1797,7 @@ fn list_row(
         crate::domain::tour::AnchorId::PluginsToggle,
         toggle_rect,
     );
-    let toggle_on = locked_target.unwrap_or_else(|| plugin_active(p));
+    let toggle_on = locked_target.unwrap_or_else(|| plugin_enabled_with_consent(p));
     let t = ui.ctx().animate_bool_with_time(tresp.id, toggle_on, 0.15);
     widgets::paint_toggle(ui.painter(), toggle_rect, t);
     if locked {
@@ -1882,7 +2022,7 @@ fn detail_body(
     // accepts the current content (and re-prompts consent if it declares perms).
     // Only while the plugin is held inactive: once re-enabled, the risk is
     // accepted and the banner is gone.
-    if update.is_some_and(|u| u.on_disk_changed) && !plugin_active(p) {
+    if update.is_some_and(|u| u.on_disk_changed) && !plugin_enabled_with_consent(p) {
         ui.add_space(14.0);
         modified_on_disk_banner(ui);
     } else if let Some(update) =
@@ -1954,7 +2094,7 @@ fn detail_body(
     ui.separator();
     ui.add_space(14.0);
     ui.horizontal(|ui| {
-        let active = plugin_active(p);
+        let active = plugin_enabled_with_consent(p);
         let locked = in_flight.contains_key(&p.id);
         let label = if active {
             t!("plugins.disable")
@@ -2156,6 +2296,21 @@ fn command_authority_card(ui: &mut egui::Ui, commands: &[&str]) {
         });
 }
 
+/// Render the exact permission and command authority summarized by the normal
+/// consent dialog. The onboarding review page reuses this so both enable paths
+/// present the same security-sensitive information.
+pub(crate) fn authority_review_cards(ui: &mut egui::Ui, plugin: &PluginInfo) {
+    for permission in &plugin.declared_permissions {
+        permission_card(ui, *permission);
+        ui.add_space(8.0);
+    }
+    let commands = command_scope_names(&plugin.authority);
+    if !commands.is_empty() {
+        command_authority_card(ui, &commands);
+        ui.add_space(8.0);
+    }
+}
+
 /// Side-by-side "TARGET DEVICES | PERMISSIONS" row of the detail view. Either
 /// column is omitted when empty.
 fn targets_permissions_row(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
@@ -2247,19 +2402,11 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
 }
 
 fn status_banner(ui: &mut egui::Ui, p: &PluginInfo) {
-    let (dot, text, color) = if plugin_active(p) {
-        (
-            theme::ONLINE,
-            t!("plugins.status_active"),
-            theme::ONLINE_TEXT,
-        )
-    } else {
-        (
-            theme::TEXT_FAINT2,
-            t!("plugins.status_disabled"),
-            theme::TEXT_MUT,
-        )
-    };
+    let (dot, text, color) = status_visual(plugin_status(p));
+    // Every unmet requirement (blocking or degrading) is worth surfacing so the
+    // user can act; the pill above already signals which kind.
+    let unmet: Vec<&PluginRequirementStatus> =
+        p.requirements.iter().filter(|r| !r.satisfied).collect();
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
@@ -2275,6 +2422,14 @@ fn status_banner(ui: &mut egui::Ui, p: &PluginInfo) {
                         .color(color),
                 );
             });
+            for req in unmet {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(requirement_line(req))
+                        .font(theme::body(11.0))
+                        .color(theme::TEXT_MUT),
+                );
+            }
         });
 }
 
@@ -3046,6 +3201,9 @@ mod tests {
             secret_set: Default::default(),
             integration_enabled: true,
             consented: true,
+            active: enabled,
+            requirements: vec![],
+            activation_blocker: None,
             health: Default::default(),
         }
     }
@@ -3085,6 +3243,46 @@ mod tests {
         let mut in_flight = HashMap::from([("done".to_string(), true)]);
         reconcile_in_flight(&mut in_flight, &plugins, true);
         assert!(in_flight.contains_key("done"), "scanning → locked");
+    }
+
+    #[test]
+    fn recommendation_toasts_fire_once_and_respect_persisted_seen() {
+        use std::collections::BTreeSet;
+        let rec = PluginRecommendation {
+            plugin_id: "nzxt_kraken".into(),
+            plugin_name: "NZXT Kraken".into(),
+            hardware: halod_shared::types::PluginRecommendationMatch::Hid {
+                vid: 0x1e71,
+                pid: 0x2007,
+            },
+            accessible: true,
+        };
+        let key = recommendation_key(&rec);
+
+        // First surfacing this session fires a toast paired with its key.
+        let mut toasted = HashSet::new();
+        let seen = BTreeSet::new();
+        let out = recommendation_toasts(std::slice::from_ref(&rec), &seen, &mut toasted, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, key);
+
+        // Same session → already toasted, no repeat.
+        assert!(
+            recommendation_toasts(std::slice::from_ref(&rec), &seen, &mut toasted, 0).is_empty()
+        );
+
+        // Persisted seen from a previous run → never toasts again, fresh session.
+        let mut fresh = HashSet::new();
+        let seen: BTreeSet<String> = [key].into_iter().collect();
+        assert!(recommendation_toasts(&[rec], &seen, &mut fresh, 0).is_empty());
+    }
+
+    #[test]
+    fn onboarding_pending_until_marked_seen() {
+        use std::collections::BTreeSet;
+        assert!(onboarding_pending(&BTreeSet::new()));
+        let seen: BTreeSet<String> = [ONBOARDING_KEY.to_string()].into_iter().collect();
+        assert!(!onboarding_pending(&seen));
     }
 
     #[test]
@@ -3407,6 +3605,52 @@ mod tests {
     }
 
     #[test]
+    fn plugin_status_classifies_effective_state() {
+        use halod_shared::types::{
+            PluginActivationBlocker, PluginRequirement, PluginRequirementStatus, RequirementImpact,
+        };
+
+        assert_eq!(plugin_status(&info("a", true)), PluginStatus::Active);
+
+        let mut disabled = info("d", false);
+        disabled.active = false;
+        assert_eq!(plugin_status(&disabled), PluginStatus::Disabled);
+
+        // Enabled by intent but blocked → inactive; the toggle still reads on.
+        let mut blocked = info("b", true);
+        blocked.active = false;
+        let missing = PluginRequirementStatus {
+            requirement: PluginRequirement::Command {
+                executable: "liquidctl".into(),
+            },
+            impact: RequirementImpact::Block,
+            satisfied: false,
+            reason: None,
+            feature: None,
+        };
+        blocked.activation_blocker = Some(PluginActivationBlocker::MissingRequirements {
+            requirements: vec![missing.clone()],
+        });
+        assert_eq!(plugin_status(&blocked), PluginStatus::Inactive);
+        assert_eq!(status_dot(&blocked), theme::OFFLINE);
+        assert!(blocked.enabled, "a blocked plugin's toggle stays on");
+        assert!(requirement_line(&missing).contains("liquidctl"));
+
+        // Active but a degrading requirement is unmet → limited functionality.
+        let mut degraded = info("g", true);
+        degraded.requirements = vec![PluginRequirementStatus {
+            requirement: PluginRequirement::Command {
+                executable: "pactl".into(),
+            },
+            impact: RequirementImpact::Degrade,
+            satisfied: false,
+            reason: None,
+            feature: Some("audio_routing".into()),
+        }];
+        assert_eq!(plugin_status(&degraded), PluginStatus::Degraded);
+    }
+
+    #[test]
     fn needs_permission_only_when_declaring_ungranted_permissions() {
         use halod_shared::types::Permission;
         // No declared permissions → never needs permission (runs freely).
@@ -3484,14 +3728,17 @@ mod tests {
     }
 
     #[test]
-    fn plugin_active_requires_enabled_and_consented() {
+    fn enabled_with_consent_requires_both_flags() {
         let mut p = info("a", true);
-        assert!(plugin_active(&p));
+        assert!(plugin_enabled_with_consent(&p));
         p.consented = false;
-        assert!(!plugin_active(&p), "unconsented is inert even if enabled");
+        assert!(
+            !plugin_enabled_with_consent(&p),
+            "unconsented is inert even if enabled"
+        );
         p.consented = true;
         p.enabled = false;
-        assert!(!plugin_active(&p), "disabled is not active");
+        assert!(!plugin_enabled_with_consent(&p), "disabled is not active");
     }
 
     #[test]

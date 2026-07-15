@@ -15,6 +15,7 @@ mod audio_api;
 pub(crate) mod backends;
 mod bytebuf;
 mod chain_leaf;
+pub(crate) mod command_resolve;
 pub mod contract;
 mod device;
 mod effect_worker;
@@ -27,7 +28,10 @@ mod lua_worker;
 pub(crate) mod manifest;
 #[cfg(feature = "plugin-test")]
 pub mod plugin_test;
+pub(crate) mod probes;
+pub(crate) mod recommend;
 pub mod repo;
+pub(crate) mod requirements;
 mod sandbox;
 mod transport;
 mod transport_api;
@@ -113,6 +117,9 @@ struct ReadyPlugin {
 enum ActivationState {
     /// The user disabled the plugin.
     Disabled,
+    /// A blocking host requirement is unmet (e.g. a declared command is not on
+    /// PATH). The plugin stays enabled but cannot execute until it is satisfied.
+    MissingRequirements(Vec<halod_shared::types::PluginRequirementStatus>),
     /// Declared permissions have not been granted.
     AwaitingConsent,
     /// Cleared to spawn, carrying its resolved grants + config.
@@ -170,6 +177,13 @@ pub struct Registry {
     health: RwLock<HashMap<String, HealthState>>,
     invalid_manifests: RwLock<Vec<(PluginManifest, PluginIssue)>>,
     skipped: RwLock<Vec<SkippedPlugin>>,
+    /// Hardware recommendations, computed once at startup (and on plugin reload)
+    /// from connected HID devices — not recomputed per state poll.
+    recommendations: RwLock<Vec<halod_shared::types::PluginRecommendation>>,
+    /// Cached requirement statuses per plugin id. Populated lazily and refreshed
+    /// at event points (startup, reconcile) so probes — some of which spawn
+    /// processes or open device nodes — never run on every state poll.
+    requirement_cache: RwLock<HashMap<String, Vec<halod_shared::types::PluginRequirementStatus>>>,
 }
 
 /// Recover the guard if a panicked plugin poisoned the lock, so one bad plugin
@@ -821,12 +835,20 @@ impl Registry {
             ActivationState::Disabled
         } else if self.is_disabled(&manifest.plugin_id) {
             ActivationState::Disabled
-        } else if !self.consent_satisfied(manifest) {
-            ActivationState::AwaitingConsent
         } else {
-            let granted = self.granted_for(&manifest.plugin_id);
-            let config = self.resolved_config_for(secrets, &manifest.plugin_id, &granted);
-            ActivationState::Ready(ReadyPlugin { granted, config })
+            // Requirements are evaluated before consent: a plugin that cannot run
+            // shows its missing requirement instead of prompting for consent it
+            // could not use. Requirement probing is inert host access, never Lua.
+            let missing = requirements::blocking_missing(&self.requirement_statuses(manifest));
+            if !missing.is_empty() {
+                ActivationState::MissingRequirements(missing)
+            } else if !self.consent_satisfied(manifest) {
+                ActivationState::AwaitingConsent
+            } else {
+                let granted = self.granted_for(&manifest.plugin_id);
+                let config = self.resolved_config_for(secrets, &manifest.plugin_id, &granted);
+                ActivationState::Ready(ReadyPlugin { granted, config })
+            }
         }
     }
 }
@@ -847,6 +869,7 @@ impl Registry {
                     && !state.integrations_disabled.contains(&m.plugin_id)
                     && !state.disabled.contains(&m.plugin_id)
                     && consent_satisfied_in(&state, m)
+                    && self.blocking_requirements_met(m)
             })
             .cloned()
             .collect()
@@ -943,6 +966,8 @@ impl Registry {
             info.enabled = false;
             info.consented = false;
             info.integration_enabled = false;
+            info.active = false;
+            info.activation_blocker = None;
             info.health = HealthState {
                 status: HealthStatus::Degraded,
                 issue: Some(issue.clone()),
@@ -951,6 +976,84 @@ impl Registry {
             infos.push(info);
         }
         infos
+    }
+
+    /// Blocking host requirements currently unmet for `plugin_id` (empty when
+    /// satisfied or the plugin is unknown). Freshly evaluated — the daemon-
+    /// authoritative check the enable flow force-refreshes so a stale GUI cannot
+    /// bypass the gate.
+    pub fn missing_blocking_requirements(
+        &self,
+        plugin_id: &str,
+    ) -> Vec<halod_shared::types::PluginRequirementStatus> {
+        let state = self.snapshot();
+        state
+            .manifests
+            .iter()
+            .find(|m| m.plugin_id == plugin_id)
+            .map(|m| requirements::blocking_missing(&requirements::evaluate(m)))
+            .unwrap_or_default()
+    }
+
+    /// Cached requirement statuses for `m`, evaluating and caching on first use.
+    /// The gate and UI read this so probes don't run on every state poll; event
+    /// points (startup, reconcile) call [`refresh_requirements`] to recompute.
+    fn requirement_statuses(
+        &self,
+        m: &PluginManifest,
+    ) -> Vec<halod_shared::types::PluginRequirementStatus> {
+        if let Some(cached) = read_recover(&self.requirement_cache).get(&m.plugin_id) {
+            return cached.clone();
+        }
+        let statuses = requirements::evaluate(m);
+        write_recover(&self.requirement_cache).insert(m.plugin_id.clone(), statuses.clone());
+        statuses
+    }
+
+    /// Recompute and cache every loaded plugin's requirement statuses. Called at
+    /// startup and after reconcile so satisfied↔missing transitions are picked up
+    /// without any continuous polling.
+    pub fn refresh_requirements(&self) {
+        let state = self.snapshot();
+        let fresh: HashMap<String, Vec<halod_shared::types::PluginRequirementStatus>> = state
+            .manifests
+            .iter()
+            .map(|m| (m.plugin_id.clone(), requirements::evaluate(m)))
+            .collect();
+        *write_recover(&self.requirement_cache) = fresh;
+    }
+
+    /// Whether every blocking host requirement for `m` is currently satisfied.
+    /// The single predicate every activation path shares, so device plugins and
+    /// integrations gate on requirements identically. Reads the cache.
+    fn blocking_requirements_met(&self, m: &PluginManifest) -> bool {
+        requirements::blocking_missing(&self.requirement_statuses(m)).is_empty()
+    }
+
+    /// Recompute host/plugin recommendations and cache them. Called at startup
+    /// and on plugin reload — never per state poll. Independent of the activation
+    /// matcher, which excludes disabled plugins.
+    pub fn refresh_recommendations(
+        &self,
+        hid: &[halod_shared::debug_info::HidEntryDebugInfo],
+        usb: &[recommend::UsbEntry],
+        gpu_smbus: &[crate::drivers::transports::smbus::BusInfo],
+    ) {
+        let state = self.snapshot();
+        let recs = recommend::recommendations(
+            &state.manifests,
+            &|id| !state.disabled.contains(id),
+            hid,
+            usb,
+            gpu_smbus,
+            &|executable| command_resolve::resolve(executable).is_some(),
+        );
+        *write_recover(&self.recommendations) = recs;
+    }
+
+    /// The cached host recommendations (see [`refresh_recommendations`]).
+    pub fn recommendations(&self) -> Vec<halod_shared::types::PluginRecommendation> {
+        read_recover(&self.recommendations).clone()
     }
 
     fn build_plugin_info(
@@ -980,6 +1083,22 @@ impl Registry {
             .collect();
         let consented = self.consent_satisfied(m);
         let health = self.health_for(&m.plugin_id);
+        // Requirement status drives the effective activation and the "Enabled,
+        // but inactive" blocker. A disabled/unsupported plugin has no blocker —
+        // it is simply off.
+        let requirements = self.requirement_statuses(m);
+        let blocking = requirements::blocking_missing(&requirements);
+        let intent = m.supports_current_platform() && !self.is_disabled(&m.plugin_id);
+        let integration_enabled = !self.is_integration_disabled(&m.plugin_id);
+        let active = intent
+            && consented
+            && blocking.is_empty()
+            && (m.plugin_type != PluginKind::Integration || integration_enabled);
+        let activation_blocker = (intent && !blocking.is_empty()).then_some(
+            halod_shared::types::PluginActivationBlocker::MissingRequirements {
+                requirements: blocking,
+            },
+        );
         PluginInfo {
             id: m.plugin_id.clone(),
             name: m.display_name(),
@@ -1026,8 +1145,11 @@ impl Registry {
             config_fields: m.config_fields().iter().map(Into::into).collect(),
             config_values: config_values_for(state, m),
             secret_set,
-            integration_enabled: !self.is_integration_disabled(&m.plugin_id),
+            integration_enabled,
             consented,
+            active,
+            requirements,
+            activation_blocker,
             health,
         }
     }
@@ -1219,6 +1341,7 @@ fn record_invalid_plugin_dir(
                 dynamic_children: false,
                 effects: vec![],
                 transports: Default::default(),
+                requirements: vec![],
                 permissions: vec![],
                 platforms: vec![],
                 capabilities: vec![],
@@ -1602,12 +1725,21 @@ impl Registry {
             let Some(spec) = manifest.device_for(handle) else {
                 continue;
             };
-            // Only a `Ready` plugin (enabled + consent-satisfied) shadows a native
-            // driver; a disabled/ungranted one falls through to the native path.
-            if let ActivationState::Ready(ready) =
-                self.activation_status(app.secret_store.as_ref(), manifest)
-            {
-                return self.build_device(app, manifest, spec, handle, ready);
+            // Only a `Ready` plugin (enabled + consent-satisfied + requirements
+            // met) shadows a native driver; a disabled/ungranted/blocked one
+            // falls through to the native path.
+            match self.activation_status(app.secret_store.as_ref(), manifest) {
+                ActivationState::Ready(ready) => {
+                    return self.build_device(app, manifest, spec, handle, ready);
+                }
+                ActivationState::MissingRequirements(missing) => {
+                    log::debug!(
+                        "plugin '{}' matches this device but is inactive: {} unmet blocking requirement(s)",
+                        manifest.plugin_id,
+                        missing.len()
+                    );
+                }
+                ActivationState::Disabled | ActivationState::AwaitingConsent => {}
             }
         }
         None

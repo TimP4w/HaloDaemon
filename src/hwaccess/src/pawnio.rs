@@ -61,13 +61,7 @@ fn init_api() -> Result<PawnioApi> {
     // "PawnIOLib.dll" would trigger the Windows DLL search order (CWD, %PATH%),
     // letting an attacker drop a malicious DLL that this elevated process would
     // load — so it is deliberately excluded.
-    let mut candidates = vec![r"C:\Program Files\PawnIO\PawnIOLib.dll".to_string()];
-    if let Ok(pf) = std::env::var("ProgramFiles") {
-        candidates.push(format!(r"{pf}\PawnIO\PawnIOLib.dll"));
-    }
-    if let Ok(pf) = std::env::var("ProgramW6432") {
-        candidates.push(format!(r"{pf}\PawnIO\PawnIOLib.dll"));
-    }
+    let candidates = library_candidates();
     let lib = candidates
         .iter()
         .find_map(|p| unsafe { libloading::Library::new(p).ok() })
@@ -97,6 +91,25 @@ fn init_api() -> Result<PawnioApi> {
         execute,
         close,
     })
+}
+
+fn library_candidates() -> Vec<String> {
+    let mut candidates = vec![r"C:\Program Files\PawnIO\PawnIOLib.dll".to_string()];
+    if let Ok(pf) = std::env::var("ProgramFiles") {
+        candidates.push(format!(r"{pf}\PawnIO\PawnIOLib.dll"));
+    }
+    if let Ok(pf) = std::env::var("ProgramW6432") {
+        candidates.push(format!(r"{pf}\PawnIO\PawnIOLib.dll"));
+    }
+    candidates
+}
+
+/// Whether PawnIO is installed in a trusted system location. This only checks
+/// for the DLL and never loads code into the probing process.
+pub fn installation_present() -> bool {
+    library_candidates()
+        .iter()
+        .any(|path| std::path::Path::new(path).is_file())
 }
 
 // ── Blob loading ─────────────────────────────────────────────────────────────

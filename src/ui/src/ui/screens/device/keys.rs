@@ -273,14 +273,7 @@ fn button_selector_card(
             p.rect_stroke(
                 chip,
                 7.0,
-                Stroke::new(
-                    1.0,
-                    if selected {
-                        type_color
-                    } else {
-                        theme::hex(0x232a39)
-                    },
-                ),
+                Stroke::new(1.0, if selected { type_color } else { theme::BORDER }),
                 egui::StrokeKind::Middle,
             );
             p.galley(
@@ -315,7 +308,7 @@ fn button_selector_card(
             p.rect_stroke(
                 tag_rect,
                 7.0,
-                Stroke::new(1.0, theme::hex(0x232a39)),
+                Stroke::new(1.0, theme::BORDER),
                 egui::StrokeKind::Middle,
             );
             p.galley(

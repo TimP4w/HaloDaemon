@@ -76,6 +76,16 @@ plugins:
   status_active: Active
   status_disabled: Disabled
   status_needs_permission: Needs permission
+  status_inactive: Setup required
+  status_degraded: Limited functionality
+  req_command_missing: "The daemon cannot find '%{name}' in PATH."
+  req_module_not_loaded: "Load the '%{name}' kernel module: sudo modprobe %{name}"
+  req_module_unavailable: "The '%{name}' kernel module is not available for the running kernel."
+  req_pawnio_missing: "Install PawnIO to use this plugin on Windows."
+  req_i2c_missing: "No accessible SMBus/I2C device was found. Check that i2c-dev is loaded and permissions are correct."
+  req_hwmon_missing: "No hardware sensors were found in /sys/class/hwmon."
+  req_hwmon_read_permission: "HaloDaemon cannot read the available hardware sensors. Check the sysfs and udev permissions."
+  req_hwmon_pwm_permission: "Fan control requires write access to the PWM files in /sys/class/hwmon."
   enable: Enable
   disable: Disable
   delete: Delete script
@@ -117,12 +127,6 @@ plugins:
   consent_grant_enable: Grant & enable
   consent_cancel: Cancel
   consent_deny: Not now
-  # First-run consent to contact GitHub for official plugins and updates
-  download_consent_title: Download official plugins?
-  download_consent_body: Official HaloDaemon plugins are hosted on GitHub. To protect your privacy, HaloDaemon makes no network requests for them unless you explicitly allow it.
-  download_consent_note: If allowed, HaloDaemon downloads official plugins automatically and periodically checks GitHub for updates. If not allowed, it never contacts GitHub and you must add plugins manually. You can change this anytime in Settings.
-  download_consent_allow: Allow
-  download_consent_deny: Don't allow
   # Add dialog
   add_title: Add a plugin
   add_sub: Install a plugin package, which is a folder containing plugin.yaml and its entry script.

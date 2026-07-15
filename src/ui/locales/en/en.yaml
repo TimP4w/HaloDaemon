@@ -42,8 +42,49 @@ notify:
     title: "Plugin can't connect: %{plugin}"
     message: "It couldn't reach its configured address. Open Details for more."
 
+  plugin_recommended:
+    title: Recommended plugin available
+    message: "%{plugin} is recommended for this system. Open Plugins to enable it."
+
 tray:
   open: Open HaloDaemon
   quit: Quit
   tooltip: HaloDaemon
   profile: Profile
+
+onboarding:
+  welcome_title: Welcome to HaloDaemon
+  welcome_body: "Control your lights, fans, pumps, and sensors from one place. We'll get everything ready in about a minute."
+  health_title: System health
+  health_sub: HaloDaemon checks the system access needed for your hardware. Missing optional items only disable related features.
+  health_checking: Checking your system…
+  health_ok: Your system is ready.
+  prefs_title: A few preferences
+  prefs_sub: You can change these at any time in Settings.
+  tray_title: Close to tray
+  tray_desc: Hide the window instead of quitting when the close button is pressed.
+  plugins_title: Official plugins & updates
+  plugins_desc: Allow HaloDaemon to download official plugins from GitHub and check for updates on startup.
+  scanning: Finding compatible plugins…
+  plugins_page_title: Choose your plugins
+  plugins_page_sub: Recommended plugins are already selected. Choose any others you want to enable.
+  plugins_loading: Official plugins are still downloading. You can enable them later from the Plugins tab.
+  plugins_error: We couldn't download the official plugins. Check your internet connection, then try again.
+  plugins_retry: Retry
+  plugins_retrying: Retrying the official plugin download…
+  permissions_title: Review permissions
+  permissions_sub: Review the system access requested by the selected plugins before enabling them.
+  permissions_none: No additional system access required.
+  done_title: You're all set
+  done_summary_plugins: "Your plugins are ready and will stay up to date. You can manage them from the Plugins tab."
+  done_summary_basic: "HaloDaemon is ready. You can enable plugins later from the Plugins tab."
+  back: Back
+  please_wait: Scanning…
+  p_get_started: Get started
+  p_scan: Find plugins
+  p_finish_setup: Finish setup
+  p_review_permissions: Review permissions
+  p_grant_enable: Grant & enable
+  p_finish: Finish
+  p_enter: Open HaloDaemon
+  p_continue: Continue

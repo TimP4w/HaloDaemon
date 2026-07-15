@@ -28,10 +28,10 @@ depcheck:
       title: Accesso I2C
       impact: RGB SMBus del chipset (DRAM e GPU)
       fix: Carica il modulo i2c-dev e aggiungi il tuo utente al gruppo 'i2c'
-    fan_control_access:
-      title: Accesso al controllo delle ventole
-      impact: Controllo ventole PWM della scheda madre
-      fix: "Carica il tuo modulo SuperIO (es. nct6775) e aggiungi il tuo utente al gruppo 'halod'"
+    halod_group:
+      title: Appartenenza al gruppo halod
+      impact: Controllo di ventole e pompe senza privilegi root
+      fix: "Aggiungi il tuo utente al gruppo 'halod', quindi disconnettiti e accedi di nuovo"
     powerprofilesctl:
       title: powerprofilesctl
       impact: Cambio del profilo energetico del sistema

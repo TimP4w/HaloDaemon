@@ -32,6 +32,90 @@ fn init_failure_is_aggregated_and_clears_after_recovery() {
     );
 }
 
+#[test]
+fn missing_command_requirement_is_daemon_authoritative() {
+    let manifest = command_manifest(&["definitely-not-a-real-binary-xyz-42"]);
+    let registry = super::Registry::default();
+    registry.update(|s| s.manifests = vec![manifest.clone()]);
+
+    // The force-refreshed gate the enable flow consults reports the unmet
+    // requirement, so a stale GUI cannot enable past it.
+    let missing = registry.missing_blocking_requirements(&manifest.plugin_id);
+    assert_eq!(missing.len(), 1);
+    assert!(!missing[0].satisfied);
+
+    // An unknown plugin has no requirements rather than erroring.
+    assert!(registry.missing_blocking_requirements("nope").is_empty());
+}
+
+#[test]
+fn refresh_requirements_caches_evaluated_statuses() {
+    let manifest = command_manifest(&["definitely-not-a-real-binary-xyz-42"]);
+    let registry = super::Registry::default();
+    registry.update(|s| s.manifests = vec![manifest.clone()]);
+
+    registry.refresh_requirements();
+    // The cache is read (no re-probe) and reflects the missing command.
+    let statuses = registry.requirement_statuses(&manifest);
+    assert!(statuses.iter().any(|s| !s.satisfied));
+}
+
+#[test]
+fn consented_integration_with_missing_command_is_gated_out() {
+    let manifest = command_manifest(&["definitely-not-a-real-binary-xyz-42"]);
+    let registry = super::Registry::default();
+    let authority = super::authority_for_manifest(&manifest);
+    registry.update(|s| {
+        s.manifests = vec![manifest.clone()];
+        s.accepted_authorities
+            .insert(manifest.plugin_id.clone(), authority);
+    });
+
+    // Consent is satisfied, so exclusion is purely the requirement gate — a
+    // blocked integration must not be handed to the integration scanner/monitor.
+    assert!(registry.consent_satisfied(&manifest));
+    assert!(
+        registry.integration_manifests().is_empty(),
+        "an enabled, consented integration whose command is missing must be inactive"
+    );
+    assert!(registry.integration_manifest(&manifest.plugin_id).is_none());
+}
+
+#[test]
+fn disabled_integration_is_not_reported_active() {
+    struct NoSecrets;
+    impl crate::secrets::SecretStore for NoSecrets {
+        fn set(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn get(&self, _: &str, _: &str) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+        fn delete(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut manifest = command_manifest(&["definitely-not-a-real-binary-xyz-42"]);
+    manifest.requirements.push(super::manifest::RequirementDef {
+        kind: super::manifest::RequirementDefKind::Command,
+        name: "definitely-not-a-real-binary-xyz-42".into(),
+        platforms: vec![],
+    });
+    let registry = super::Registry::default();
+    let authority = super::authority_for_manifest(&manifest);
+    registry.update(|s| {
+        s.manifests = vec![manifest.clone()];
+        s.accepted_authorities
+            .insert(manifest.plugin_id.clone(), authority);
+        s.integrations_disabled.insert(manifest.plugin_id.clone());
+    });
+    let info = registry.list(&NoSecrets).pop().unwrap();
+    assert!(info.enabled, "the plugin-level toggle remains enabled");
+    assert!(!info.integration_enabled);
+    assert!(!info.active);
+}
+
 fn command_manifest(commands: &[&str]) -> super::PluginManifest {
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("command_scope_test");

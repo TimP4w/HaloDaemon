@@ -5,7 +5,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use egui::{epaint::Vertex, Align2, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Vec2};
+use egui::{epaint::Vertex, Align2, Color32, Mesh, Pos2, Sense, Shape, Stroke, Vec2};
 use halod_shared::types::{AppState, DiscoveryDetail, DiscoveryPhase, WireDevice};
 
 use crate::domain::models::device as model;
@@ -72,14 +72,8 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
             // Build the screen as one centered vertical composition. Keeping the
             // logo, radar and status copy in the same layout calculation avoids
             // the uneven gaps caused by independent percentage offsets.
-            let halo = p.layout_no_wrap("halo".to_string(), theme::bold(22.0), theme::TEXT);
-            let daemon = p.layout_no_wrap(
-                "daemon".to_string(),
-                theme::bold(22.0),
-                theme::hex(0x9b7fe0),
-            );
             let icon_size = 48.0_f32;
-            let total = icon_size + 14.0 + halo.size().x + daemon.size().x;
+            let logo_size = crate::ui::components::logo_size(&p, icon_size, 22.0);
             let logo_height = icon_size;
             let gap = 56.0_f32;
             let checking = connected && state.discovery.checking_updates;
@@ -91,20 +85,16 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
             let composition_height = fixed_height + radius * 2.0;
             let top = full.center().y - composition_height / 2.0;
 
-            let mark = Rect::from_min_size(
-                Pos2::new(full.center().x - total / 2.0, top),
-                Vec2::splat(icon_size),
-            );
-            theme::logo_icon(&p, &ctx, mark, time as f32);
-            let halo_pos = Pos2::new(mark.right() + 14.0, mark.center().y - halo.size().y / 2.0);
-            p.galley(halo_pos, halo.clone(), theme::TEXT);
-            p.galley(
-                Pos2::new(halo_pos.x + halo.size().x, halo_pos.y),
-                daemon,
-                theme::hex(0x9b7fe0),
+            let logo = crate::ui::components::paint_logo(
+                &p,
+                &ctx,
+                Pos2::new(full.center().x - logo_size.x / 2.0, top),
+                icon_size,
+                22.0,
+                time as f32,
             );
 
-            let center = Pos2::new(full.center().x, mark.bottom() + gap + radius);
+            let center = Pos2::new(full.center().x, logo.bottom() + gap + radius);
             draw_radar(&p, center, radius, time);
 
             for (i, d) in state
@@ -180,7 +170,7 @@ fn draw_power_icon(p: &egui::Painter, center: Pos2, radius: f32) {
     );
 }
 
-fn draw_radar(p: &egui::Painter, center: Pos2, radius: f32, time: f64) {
+pub(crate) fn draw_radar(p: &egui::Painter, center: Pos2, radius: f32, time: f64) {
     // Concentric rings (ratios + alphas from the design).
     for (ratio, alpha) in [(1.0, 0.16), (0.686, 0.13), (0.371, 0.11), (0.114, 0.22)] {
         p.circle_stroke(

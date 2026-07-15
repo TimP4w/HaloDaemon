@@ -17,6 +17,7 @@ pub enum Icon {
     Plugins,
     Integrations,
     Lock,
+    Check,
 }
 
 impl Icon {
@@ -29,6 +30,7 @@ impl Icon {
             Icon::Plugins => include_bytes!("../../assets/icons/plugins.svg"),
             Icon::Integrations => include_bytes!("../../assets/icons/integrations.svg"),
             Icon::Lock => include_bytes!("../../assets/icons/lock.svg"),
+            Icon::Check => include_bytes!("../../assets/icons/check.svg"),
         }
     }
 
@@ -41,6 +43,7 @@ impl Icon {
             Icon::Plugins => "nav_plugins",
             Icon::Integrations => "nav_integrations",
             Icon::Lock => "lock",
+            Icon::Check => "check",
         }
     }
 }
@@ -100,8 +103,12 @@ fn texture(ctx: &egui::Context, icon: Icon) -> egui::TextureHandle {
             .borrow_mut()
             .entry(icon)
             .or_insert_with(|| {
-                let img = rasterize(icon.svg(), ICON_PX)
-                    .unwrap_or_else(|| egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0; 4]));
+                let img = if matches!(icon, Icon::Lock | Icon::Check) {
+                    rasterize_mask(icon.svg(), ICON_PX)
+                } else {
+                    rasterize(icon.svg(), ICON_PX)
+                }
+                .unwrap_or_else(|| egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0; 4]));
                 ctx.load_texture(icon.key(), img, egui::TextureOptions::LINEAR)
             })
             .clone()
@@ -246,6 +253,7 @@ mod tests {
             Icon::Settings,
             Icon::Integrations,
             Icon::Lock,
+            Icon::Check,
         ] {
             let img = rasterize(icon.svg(), ICON_PX)
                 .unwrap_or_else(|| panic!("{} failed to rasterize", icon.key()));

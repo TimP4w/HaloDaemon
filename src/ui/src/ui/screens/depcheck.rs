@@ -15,6 +15,12 @@ pub struct DepCheckUi {
     dont_show_again: bool,
 }
 
+impl DepCheckUi {
+    pub fn dismiss_for_session(&mut self) {
+        self.dismissed = true;
+    }
+}
+
 pub enum GraceAction {
     None,
     Recheck,
@@ -185,8 +191,17 @@ pub(crate) fn fix_text(dep: &DependencyStatus) -> String {
     }
 }
 
-fn issue_card(ui: &mut egui::Ui, dep: &DependencyStatus) {
-    widgets::card(ui, |ui| {
+pub(crate) fn issue_card(ui: &mut egui::Ui, dep: &DependencyStatus) {
+    issue_card_with_surface(ui, dep, theme::CARD_BG, theme::BORDER);
+}
+
+pub(crate) fn issue_card_with_surface(
+    ui: &mut egui::Ui,
+    dep: &DependencyStatus,
+    fill: egui::Color32,
+    border: egui::Color32,
+) {
+    widgets::card_with_surface(ui, egui::Margin::same(20), fill, border, |ui| {
         ui.set_width(ui.available_width());
         egui::Sides::new().show(
             ui,

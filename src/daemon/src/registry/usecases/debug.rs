@@ -119,10 +119,10 @@ fn health_rules(ffmpeg_available: bool) -> Vec<HealthRule> {
             check: Box::new(i2c_reachable),
         },
         HealthRule {
-            id: DependencyRule::FanControlAccess,
+            id: DependencyRule::HalodGroup,
             required: false,
             platform: "Linux",
-            check: Box::new(fan_control_accessible),
+            check: Box::new(halod_group_assigned),
         },
         HealthRule {
             id: DependencyRule::Powerprofilesctl,
@@ -217,45 +217,69 @@ fn i2c_reachable() -> bool {
     })
 }
 
-/// Usable PWM fan control. Only a fault when PWM files exist but none are
-/// writable (missing `halod` group); no controllable fans reports OK.
+/// Whether the daemon process has the `halod` group assigned. Group lookup uses
+/// NSS rather than parsing `/etc/group`, so centrally managed users work too.
 #[cfg(target_os = "linux")]
-fn fan_control_accessible() -> bool {
-    let files = hwmon_pwm_enable_files();
-    files.is_empty() || files.iter().any(|p| path_writable(p))
-}
-
-#[cfg(target_os = "linux")]
-fn hwmon_pwm_enable_files() -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    let Ok(hwmons) = std::fs::read_dir("/sys/class/hwmon") else {
-        return out;
-    };
-    for h in hwmons.flatten() {
-        let Ok(files) = std::fs::read_dir(h.path()) else {
-            continue;
-        };
-        for f in files.flatten() {
-            if f.file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with("pwm") && n.ends_with("_enable"))
-            {
-                out.push(f.path());
-            }
-        }
-    }
-    out
-}
-
-/// `access(2)` W_OK probe: real-uid write permission, no side effects.
-#[cfg(target_os = "linux")]
-fn path_writable(path: &std::path::Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+fn halod_group_assigned() -> bool {
+    let name = c"halod";
+    let Some(gid) = lookup_group_gid(name) else {
         return false;
     };
-    // SAFETY: `c` is a valid NUL-terminated string that outlives the call.
-    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+    // SAFETY: `getegid` has no preconditions.
+    let effective = unsafe { libc::getegid() };
+    if effective == gid {
+        return true;
+    }
+    // SAFETY: a zero-sized query requires a null output pointer.
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    if count <= 0 {
+        return false;
+    }
+    let mut groups = vec![0; count as usize];
+    // SAFETY: `groups` has capacity for `count` group IDs.
+    let written = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+    written >= 0 && gid_is_assigned(gid, effective, &groups[..written as usize])
+}
+
+#[cfg(target_os = "linux")]
+fn gid_is_assigned(gid: libc::gid_t, effective: libc::gid_t, groups: &[libc::gid_t]) -> bool {
+    effective == gid || groups.contains(&gid)
+}
+
+#[cfg(target_os = "linux")]
+fn lookup_group_gid(name: &std::ffi::CStr) -> Option<libc::gid_t> {
+    const MAX_BUFFER: usize = 1024 * 1024;
+    // SAFETY: `sysconf` has no pointer arguments or additional preconditions.
+    let initial = unsafe { libc::sysconf(libc::_SC_GETGR_R_SIZE_MAX) };
+    let initial = usize::try_from(initial)
+        .unwrap_or(16 * 1024)
+        .clamp(1024, MAX_BUFFER);
+    let mut buffer = vec![0_u8; initial];
+    loop {
+        let mut group = std::mem::MaybeUninit::<libc::group>::uninit();
+        let mut result = std::ptr::null_mut();
+        // SAFETY: all pointers reference live storage for the duration of the
+        // call, and `buffer.len()` matches the writable buffer allocation.
+        let rc = unsafe {
+            libc::getgrnam_r(
+                name.as_ptr(),
+                group.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if rc == libc::ERANGE && buffer.len() < MAX_BUFFER {
+            buffer.resize((buffer.len() * 2).min(MAX_BUFFER), 0);
+            continue;
+        }
+        if rc != 0 || result.is_null() {
+            return None;
+        }
+        // SAFETY: POSIX guarantees the group structure was initialized when
+        // `getgrnam_r` succeeds and returns a non-null result.
+        return Some(unsafe { group.assume_init() }.gr_gid);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -424,7 +448,7 @@ fn source_fields(device: &dyn crate::drivers::Device) -> Vec<(String, String)> {
     fields
 }
 
-fn enumerate_hid() -> Vec<HidEntryDebugInfo> {
+pub(crate) fn enumerate_hid() -> Vec<HidEntryDebugInfo> {
     let api = match hidapi::HidApi::new() {
         Ok(a) => a,
         Err(e) => {
@@ -552,19 +576,7 @@ fn is_elevated() -> bool {
 /// on Windows; returns `None` elsewhere so the UI hides the row.
 #[cfg(windows)]
 fn pawnio_present() -> Option<bool> {
-    let candidates = [
-        "PawnIOLib.dll".to_string(),
-        r"C:\Program Files\PawnIO\PawnIOLib.dll".to_string(),
-    ];
-    let mut paths: Vec<String> = candidates.to_vec();
-    if let Ok(pf) = std::env::var("ProgramFiles") {
-        paths.push(format!(r"{pf}\PawnIO\PawnIOLib.dll"));
-    }
-    // SAFETY: libloading::Library::new on a missing DLL just returns Err.
-    let found = paths
-        .iter()
-        .any(|p| unsafe { libloading::Library::new(p).is_ok() });
-    Some(found)
+    Some(halod_hwaccess::pawnio::installation_present())
 }
 
 #[cfg(not(windows))]
@@ -673,7 +685,7 @@ mod tests {
         assert!(deps.iter().any(|d| d.id == Pactl));
         assert!(deps.iter().any(|d| d.id == UdevRules && d.required));
         assert!(deps.iter().any(|d| d.id == I2cAccess));
-        assert!(deps.iter().any(|d| d.id == FanControlAccess));
+        assert!(deps.iter().any(|d| d.id == HalodGroup));
         assert!(deps.iter().any(|d| d.id == Powerprofilesctl));
         assert!(deps.iter().any(|d| d.id == XdgDesktopPortal));
     }
@@ -697,13 +709,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn path_writable_detects_write_permission() {
-        let p = std::env::temp_dir().join("halod-path-writable-test");
-        std::fs::write(&p, b"x").unwrap();
-        assert!(path_writable(&p));
-        let _ = std::fs::remove_file(&p);
-        assert!(!path_writable(
-            &std::env::temp_dir().join("halod-nonexistent-xyz")
-        ));
+    fn group_assignment_accepts_effective_or_supplementary_gid() {
+        assert!(gid_is_assigned(42, 42, &[]));
+        assert!(gid_is_assigned(42, 1, &[2, 42]));
+        assert!(!gid_is_assigned(42, 1, &[2, 3]));
     }
 }

@@ -154,7 +154,18 @@ impl CommandExecutor {
         {
             return self.reject("command arguments exceed the declared execution limits".into());
         }
-        let mut child = Command::new(executable)
+        // Resolve once and execute that exact path. This keeps the runtime
+        // behavior identical to the requirement probe and avoids a second,
+        // potentially different PATH lookup between readiness and execution.
+        let resolved = super::command_resolve::resolve(executable).ok_or_else(|| {
+            let detail = format!("command '{executable}' is not executable on PATH");
+            self.unrecoverable
+                .lock()
+                .unwrap()
+                .get_or_insert(detail.clone());
+            anyhow::anyhow!(detail)
+        })?;
+        let mut child = Command::new(&resolved)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

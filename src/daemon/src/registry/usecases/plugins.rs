@@ -305,6 +305,44 @@ pub(crate) async fn reload_registry(app: &Arc<AppState>) {
         &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
     );
     app.registry.replace_policy(&cfg.plugins);
+    drop(cfg);
+    // Manifests just changed, so their derived requirements may have too.
+    if let Err(error) = refresh_requirements(app).await {
+        log::warn!("refreshing plugin requirements after registry reload failed: {error:#}");
+    }
+    refresh_recommendations(app).await;
+}
+
+/// Run host requirement probes away from Tokio's worker threads. A kernel
+/// module probe may wait up to its process timeout, so even this synchronous
+/// cache refresh must be treated as blocking work by async callers.
+pub(crate) async fn refresh_requirements(app: &Arc<AppState>) -> Result<()> {
+    let app = Arc::clone(app);
+    tokio::task::spawn_blocking(move || app.registry.refresh_requirements())
+        .await
+        .context("plugin requirement probe task failed")
+}
+
+/// Refresh the passive hardware snapshot used by plugin recommendations. HID
+/// and USB enumeration are blocking; SMBus enumeration only lists controllers
+/// and does not probe device addresses.
+pub(crate) async fn refresh_recommendations(app: &Arc<AppState>) {
+    let hid_usb = tokio::task::spawn_blocking(|| {
+        (
+            crate::registry::usecases::debug::enumerate_hid(),
+            crate::drivers::plugins::recommend::enumerate_usb(),
+        )
+    });
+    let (_, gpu_smbus) =
+        crate::drivers::transports::smbus::SmBusTransport::enumerate_for_debug().await;
+    let (hid, usb) = match hid_usb.await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            log::warn!("HID/USB recommendation scan task failed: {error}");
+            Default::default()
+        }
+    };
+    app.registry.refresh_recommendations(&hid, &usb, &gpu_smbus);
 }
 
 /// Apply a repo-driven registry change immediately.
@@ -367,25 +405,78 @@ pub async fn confirm_enable(
     authority: halod_shared::types::PluginAuthority,
     app: Arc<AppState>,
 ) -> Result<()> {
-    let current = app
-        .registry
-        .authority_for(&id)
-        .ok_or_else(|| anyhow::anyhow!("unknown plugin '{id}'"))?;
-    if authority.normalized() != current {
-        bail!("plugin '{id}' authority changed; reopen the enable confirmation");
-    }
-    {
-        let mut cfg = app.config.write().await;
-        if !cfg.plugins.enabled.contains(&id) {
-            cfg.plugins.enabled.push(id.clone());
+    confirm_enable_batch(
+        vec![halod_shared::commands::PluginEnableConfirmation { id, authority }],
+        app,
+    )
+    .await
+}
+
+/// Validate a set of consent snapshots against one registry generation, commit
+/// every valid entry together, then reconcile the successful plugins once.
+/// Invalid entries are collected rather than short-circuiting the batch.
+pub async fn confirm_enable_batch(
+    confirmations: Vec<halod_shared::commands::PluginEnableConfirmation>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    refresh_requirements(&app).await?;
+    let mut approved = Vec::new();
+    let mut failures = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for confirmation in confirmations {
+        let id = confirmation.id;
+        if !seen.insert(id.clone()) {
+            failures.push(format!(
+                "plugin '{id}' appears more than once in enable batch"
+            ));
+            continue;
         }
-        cfg.plugins
-            .accepted_authorities
-            .insert(id.clone(), current.clone());
-        app.registry.replace_policy(&cfg.plugins);
+        let Some(current) = app.registry.authority_for(&id) else {
+            failures.push(format!("unknown plugin '{id}'"));
+            continue;
+        };
+        if confirmation.authority.normalized() != current {
+            failures.push(format!(
+                "plugin '{id}' authority changed; reopen the enable confirmation"
+            ));
+            continue;
+        }
+        let missing = app.registry.missing_blocking_requirements(&id);
+        if !missing.is_empty() {
+            failures.push(format!(
+                "plugin '{id}' has {} unmet blocking requirement(s)",
+                missing.len()
+            ));
+            continue;
+        }
+        approved.push((id, current));
     }
-    app.request_config_save();
-    reconcile_plugins(&app, &[id]).await;
+
+    let approved_ids: Vec<String> = approved.iter().map(|(id, _)| id.clone()).collect();
+    if !approved.is_empty() {
+        {
+            let mut cfg = app.config.write().await;
+            for (id, authority) in approved {
+                if !cfg.plugins.enabled.contains(&id) {
+                    cfg.plugins.enabled.push(id.clone());
+                }
+                cfg.plugins.accepted_authorities.insert(id, authority);
+            }
+            app.registry.replace_policy(&cfg.plugins);
+        }
+        app.request_config_save();
+        reconcile_plugins(&app, &approved_ids).await;
+    }
+
+    if !failures.is_empty() {
+        bail!(
+            "failed to enable {} plugin(s): {}",
+            failures.len(),
+            failures.join("; ")
+        );
+    }
+
     Ok(())
 }
 
@@ -421,6 +512,12 @@ async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
 /// left untouched.
 pub(crate) async fn reconcile_plugins(app: &Arc<AppState>, plugins: &[String]) {
     use crate::registry::discovery::PendingRediscovery;
+    // Refresh the requirement cache before rediscovery so a satisfied↔missing
+    // transition gates activation this cycle (recovery reactivates, loss tears down).
+    if let Err(error) = refresh_requirements(app).await {
+        log::warn!("refreshing plugin requirements before rediscovery failed: {error:#}");
+        return;
+    }
     app.merge_rediscovery(PendingRediscovery::PluginSet(
         plugins.iter().cloned().collect(),
     ))
@@ -429,6 +526,10 @@ pub(crate) async fn reconcile_plugins(app: &Arc<AppState>, plugins: &[String]) {
 }
 
 pub(crate) async fn reconcile_full(app: &Arc<AppState>) {
+    if let Err(error) = refresh_requirements(app).await {
+        log::warn!("refreshing plugin requirements before full rediscovery failed: {error:#}");
+        return;
+    }
     app.merge_rediscovery(crate::registry::discovery::PendingRediscovery::Full)
         .await;
     drain_rediscovery(app).await;
@@ -813,6 +914,76 @@ mod tests {
         app.registry.load_all(&dir);
         f().await;
         app.registry.load_all(std::path::Path::new("/nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn enable_batch_commits_valid_plugins_when_another_entry_fails() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(&app, || async {
+                let authority = app.registry.authority_for("cfgtest").unwrap();
+                let result = confirm_enable_batch(
+                    vec![
+                        halod_shared::commands::PluginEnableConfirmation {
+                            id: "missing".into(),
+                            authority: Default::default(),
+                        },
+                        halod_shared::commands::PluginEnableConfirmation {
+                            id: "cfgtest".into(),
+                            authority: authority.clone(),
+                        },
+                    ],
+                    app.clone(),
+                )
+                .await;
+
+                assert!(result.is_err(), "the failed entry is still reported");
+                let cfg = app.config.read().await;
+                assert!(cfg.plugins.enabled.contains(&"cfgtest".to_owned()));
+                assert_eq!(
+                    cfg.plugins.accepted_authorities.get("cfgtest"),
+                    Some(&authority)
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn enable_batch_reports_duplicate_plugin_ids() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(&app, || async {
+                let authority = app.registry.authority_for("cfgtest").unwrap();
+                let result = confirm_enable_batch(
+                    vec![
+                        halod_shared::commands::PluginEnableConfirmation {
+                            id: "cfgtest".into(),
+                            authority: authority.clone(),
+                        },
+                        halod_shared::commands::PluginEnableConfirmation {
+                            id: "cfgtest".into(),
+                            authority,
+                        },
+                    ],
+                    app.clone(),
+                )
+                .await;
+
+                let error = result.expect_err("the duplicate entry must be reported");
+                assert!(error.to_string().contains("appears more than once"));
+                assert!(
+                    app.config
+                        .read()
+                        .await
+                        .plugins
+                        .enabled
+                        .contains(&"cfgtest".to_owned()),
+                    "the first valid entry is still committed"
+                );
+            })
+            .await;
+        })
+        .await;
     }
 
     fn test_client() -> (

@@ -37,8 +37,8 @@ fn modal_shell(
     let resp = egui::Modal::new(egui::Id::new((id, "modal")))
         .frame(
             egui::Frame::NONE
-                .fill(theme::hex(0x0d1119))
-                .stroke(Stroke::new(1.0, theme::hex(0x232a39)))
+                .fill(theme::MODAL_BG)
+                .stroke(Stroke::new(1.0, theme::BORDER))
                 .corner_radius(12.0)
                 .inner_margin(egui::Margin::same(18)),
         )

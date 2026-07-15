@@ -169,12 +169,32 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     }
 
     let dest = crate::config::plugin_repos_dir().join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
-    if dest.join(".git").exists() {
+    let has_active_revision = app
+        .config
+        .read()
+        .await
+        .plugins
+        .repos
+        .iter()
+        .find(|repo| repo.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+        .and_then(|repo| repo.active_revision.as_deref())
+        .is_some_and(|revision| !revision.is_empty());
+    if has_active_revision {
         return;
     }
     let url = url.to_owned();
     let dest2 = dest.clone();
-    match tokio::task::spawn_blocking(move || repo::clone(&url, &dest2, None)).await {
+    match tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        // libgit2 may leave a partial checkout behind after an interrupted or
+        // failed first clone. It has no trusted active revision, so retry from
+        // a clean generated directory instead of repeatedly failing on it.
+        if dest2.exists() {
+            std::fs::remove_dir_all(&dest2)?;
+        }
+        repo::clone(&url, &dest2, None)
+    })
+    .await
+    {
         Ok(Ok(sha)) => {
             let sha = {
                 let dest = dest.clone();
@@ -282,7 +302,20 @@ pub(crate) async fn start_update_check(app: Arc<AppState>) {
 pub(crate) async fn notify_ungranted_plugins(app: &Arc<AppState>) {
     use crate::drivers::plugins::UngrantedReason;
     use halod_shared::types::NotificationCode;
-    for (plugin, reason) in app.registry.take_newly_ungranted_plugins() {
+    let notices = app.registry.take_newly_ungranted_plugins();
+    // First-run onboarding owns initial plugin selection and authority review.
+    // Consume the dedup entries but do not race it with desktop/toast notices.
+    if !app
+        .config
+        .read()
+        .await
+        .gui
+        .seen_tours
+        .contains(halod_shared::types::ONBOARDING_TOUR_KEY)
+    {
+        return;
+    }
+    for (plugin, reason) in notices {
         let code = match reason {
             UngrantedReason::NeedsPermission => NotificationCode::PluginNeedsPermission { plugin },
         };

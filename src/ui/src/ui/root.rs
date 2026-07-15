@@ -23,6 +23,9 @@ impl App {
             crate::ui::screens::settings::apply_locale(&self.state_cache.gui.language);
         }
         let state = std::sync::Arc::clone(&self.state_cache);
+        let onboarding_active =
+            crate::ui::screens::plugins::onboarding_pending(&state.gui.seen_tours)
+                && !self.onboarding_completed;
         self.tray.sync(ctx, &state);
         // Close handling (hide-to-tray vs quit) is decided by `close_action` and
         // applied by each backend after `draw` — not here, so it isn't run twice.
@@ -123,12 +126,22 @@ impl App {
         }
 
         // Move any daemon-pushed notifications into the toast stack.
-        let incoming: Vec<_> = self
+        let mut incoming: Vec<_> = self
             .ui
             .notifications
             .lock()
             .map(|mut q| q.drain(..).collect())
             .unwrap_or_default();
+        if onboarding_active {
+            incoming.retain(|notification| {
+                !matches!(
+                    notification.code,
+                    halod_shared::types::NotificationCode::PluginNeedsPermission { .. }
+                        | halod_shared::types::NotificationCode::PluginContentChanged { .. }
+                        | halod_shared::types::NotificationCode::PluginRecommended { .. }
+                )
+            });
+        }
         crate::ui::screens::profile::observe_notifications(&mut self.profile_ui, &incoming);
         self.toasts.ingest(incoming, time);
 
@@ -170,13 +183,15 @@ impl App {
         }
 
         // After the radar gate (which returns before toasts.show) so it renders.
-        let quarantine = crate::ui::screens::plugins::quarantine_toasts(
-            &state.plugins.plugins,
-            &self.plugin_updates_cache,
-            &mut self.quarantine_toasted,
-            (time * 1000.0) as u64,
-        );
-        self.toasts.ingest(quarantine, time);
+        if !onboarding_active {
+            let quarantine = crate::ui::screens::plugins::quarantine_toasts(
+                &state.plugins.plugins,
+                &self.plugin_updates_cache,
+                &mut self.quarantine_toasted,
+                (time * 1000.0) as u64,
+            );
+            self.toasts.ingest(quarantine, time);
+        }
 
         // Prevent desktop bleed-through under transparent panels.
         let screen = ui.max_rect();
@@ -248,9 +263,8 @@ impl App {
             }
         }
 
-        // Start the page tour before rendering any modal. This lets the tour
-        // establish precedence on its first frame, even though its spotlight
-        // is painted after the page widgets have registered their anchors.
+        // Resolve the page tour early so its anchors can be registered during
+        // page rendering, but onboarding always has first-run precedence.
         let tour_key = tour_key_for(
             &self.page,
             &self.device_ui,
@@ -258,16 +272,14 @@ impl App {
             &self.tour,
             &state.gui.seen_tours,
         );
-        if let Some(key) = tour_key {
-            domain::tour::maybe_start(&mut self.tour, &state.gui.seen_tours, key);
+        if !onboarding_active {
+            if let Some(key) = tour_key {
+                domain::tour::maybe_start(&mut self.tour, &state.gui.seen_tours, key);
+            }
         }
-        let tour_active = domain::tour::is_active(&self.tour);
-        let download_prompt = !tour_active
-            && crate::ui::screens::download_consent::should_prompt(
-                &state,
-                connected,
-                self.consent_prompt_deferred,
-            );
+        // An already-active tour is suspended while onboarding is pending. It
+        // resumes on the frame after onboarding is explicitly completed.
+        let tour_active = !onboarding_active && domain::tour::is_active(&self.tour);
 
         egui::Panel::left("sidebar")
             .exact_size(236.0)
@@ -292,26 +304,6 @@ impl App {
                     &self.plugin_updates_cache,
                 );
             });
-
-        if download_prompt {
-            use crate::ui::screens::download_consent::Decision;
-            match crate::ui::screens::download_consent::prompt(ctx, &self.cmd) {
-                Decision::Allow => crate::runtime::ipc::send(
-                    &self.cmd,
-                    halod_shared::commands::DaemonCommand::SetPluginDownloadConsent {
-                        allowed: true,
-                    },
-                ),
-                Decision::Deny => crate::runtime::ipc::send(
-                    &self.cmd,
-                    halod_shared::commands::DaemonCommand::SetPluginDownloadConsent {
-                        allowed: false,
-                    },
-                ),
-                Decision::Defer => self.consent_prompt_deferred = true,
-                Decision::Pending => {}
-            }
-        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -340,7 +332,7 @@ impl App {
                             &mut self.conflict_resolve,
                             &self.sensor_history,
                             &mut self.page,
-                            !tour_active && !download_prompt,
+                            !tour_active && !onboarding_active,
                         );
                     }
                     Page::Device(id) => {
@@ -434,7 +426,7 @@ impl App {
                 }
 
                 // Modal overlays rendered unconditionally so they work from any page.
-                if !tour_active && !download_prompt {
+                if !tour_active && !onboarding_active {
                     crate::ui::screens::profile::add_modal(
                         ui.ctx(),
                         &state,
@@ -444,7 +436,40 @@ impl App {
                 }
             });
 
-        if !tour_active && !download_prompt {
+        // Onboarding owns first-run health, plugin selection, and authority
+        // consent, so their standalone surfaces are suppressed for this session.
+        let mut onboarding_shown = false;
+        if onboarding_active {
+            use crate::ui::screens::plugins as plugins_screen;
+            use halod_shared::commands::DaemonCommand::MarkTourSeen;
+            let recs = &state.plugins.recommendations;
+            onboarding_shown = true;
+            self.depcheck_ui.dismiss_for_session();
+            let outcome = crate::ui::screens::onboarding::show(
+                ctx,
+                &state,
+                debug.as_ref(),
+                &self.cmd,
+                &mut self.onboarding_ui,
+                time,
+            );
+            if !matches!(outcome, crate::ui::screens::onboarding::Outcome::Pending) {
+                self.onboarding_completed = true;
+                crate::runtime::ipc::send(
+                    &self.cmd,
+                    MarkTourSeen {
+                        tour: plugins_screen::ONBOARDING_KEY.to_string(),
+                    },
+                );
+                for rec in recs {
+                    let key = plugins_screen::recommendation_key(rec);
+                    self.recommendation_toasted.insert(key.clone());
+                    crate::runtime::ipc::send(&self.cmd, MarkTourSeen { tour: key });
+                }
+            }
+        }
+
+        if !onboarding_shown && !tour_active {
             crate::ui::screens::depcheck::show(
                 ctx,
                 &state,
@@ -455,13 +480,8 @@ impl App {
                 &mut self.depcheck_ui,
             );
         }
-
-        // The tutorial tour: suppressed while the healthcheck dialog is up so
-        // the two overlays don't fight over the screen.
-        // The dependency dialog is deliberately not rendered while a tour is
-        // active. Keep the same gate here, otherwise the stale dependency
-        // state would suppress the tour indefinitely.
-        let depcheck_visible = !tour_active
+        let depcheck_visible = !onboarding_shown
+            && !tour_active
             && crate::ui::screens::depcheck::visible(
                 &state,
                 debug.as_ref(),
@@ -469,6 +489,26 @@ impl App {
                 within_grace,
                 &self.depcheck_ui,
             );
+
+        if !onboarding_shown && !tour_active && !depcheck_visible {
+            use crate::ui::screens::plugins as plugins_screen;
+            use halod_shared::commands::DaemonCommand::MarkTourSeen;
+            let toasts = plugins_screen::recommendation_toasts(
+                &state.plugins.recommendations,
+                &state.gui.seen_tours,
+                &mut self.recommendation_toasted,
+                (time * 1000.0) as u64,
+            );
+            if !toasts.is_empty() {
+                let mut notifications = Vec::with_capacity(toasts.len());
+                for (key, notification) in toasts {
+                    crate::runtime::ipc::send(&self.cmd, MarkTourSeen { tour: key });
+                    notifications.push(notification);
+                }
+                self.toasts.ingest(notifications, time);
+            }
+        }
+
         crate::ui::tour::show(
             ctx,
             &mut self.tour,
@@ -476,7 +516,7 @@ impl App {
             &self.cmd,
             tour_key,
             connected,
-            depcheck_visible,
+            depcheck_visible || onboarding_shown,
         );
 
         // Toasts overlay everything, including the daemon-down scrim.
@@ -490,7 +530,7 @@ impl App {
                 });
             }
         }
-        if !domain::tour::is_active(&self.tour) && !download_prompt {
+        if !domain::tour::is_active(&self.tour) && !onboarding_active {
             if let Some(modal) = &self.issue_details_modal {
                 let dismissed = crate::ui::components::issue_modal(
                     ctx,

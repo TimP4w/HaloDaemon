@@ -58,6 +58,10 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
             t!("notify.plugin_connect_failed.title", plugin = plugin).to_string(),
             t!("notify.plugin_connect_failed.message").to_string(),
         ),
+        PluginRecommended { plugin } => (
+            t!("notify.plugin_recommended.title").to_string(),
+            t!("notify.plugin_recommended.message", plugin = plugin).to_string(),
+        ),
         Generic { message } => (t!("notify.error_title").to_string(), message.clone()),
     }
 }
@@ -108,6 +112,9 @@ mod tests {
             PluginConnectFailed {
                 plugin: "wled_udp".into(),
                 detail: "boom".into(),
+            },
+            PluginRecommended {
+                plugin: "NZXT Kraken".into(),
             },
             Generic {
                 message: "boom".into(),

@@ -392,6 +392,9 @@ async fn dispatch(
         DaemonCommand::ConfirmPluginEnable { id, authority } => {
             registry::usecases::plugins::confirm_enable(id, authority, app).await
         }
+        DaemonCommand::ConfirmPluginEnableBatch { plugins } => {
+            registry::usecases::plugins::confirm_enable_batch(plugins, app).await
+        }
         DaemonCommand::SetPluginConfig { id, values } => {
             registry::usecases::plugins::set_config(id, values, app).await
         }

@@ -459,8 +459,8 @@ pub fn title_dropdown(
     let mut nav_to_settings_page = false;
 
     let frame = egui::Frame::NONE
-        .fill(theme::hex(0x0d1119))
-        .stroke(Stroke::new(1.0, theme::hex(0x232a39)))
+        .fill(theme::MODAL_BG)
+        .stroke(Stroke::new(1.0, theme::BORDER))
         .corner_radius(12.0)
         .inner_margin(egui::Margin::same(8))
         .shadow(egui::epaint::Shadow {

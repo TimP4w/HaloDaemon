@@ -110,6 +110,7 @@ pub async fn serialize_state(
                 })
                 .collect(),
             skipped: app.registry.skipped(),
+            recommendations: app.registry.recommendations(),
         },
     };
     match serde_json::to_value(wire) {

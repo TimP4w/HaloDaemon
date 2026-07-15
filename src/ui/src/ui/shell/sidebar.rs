@@ -510,6 +510,9 @@ mod tests {
             secret_set: Default::default(),
             integration_enabled: true,
             consented,
+            active: consented,
+            requirements: vec![],
+            activation_blocker: None,
             health: Default::default(),
         }
     }

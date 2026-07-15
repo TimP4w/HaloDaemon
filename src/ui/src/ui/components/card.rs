@@ -5,8 +5,7 @@ use egui::Stroke;
 
 use crate::ui::theme;
 
-/// The `#10141d`/`#1c2230` rounded card used everywhere. `body` paints inside
-/// the 20 px inner margin.
+/// The shared raised card surface. `body` paints inside the 20 px inner margin.
 pub fn card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     card_with_margin(ui, egui::Margin::same(20), body)
 }
@@ -24,9 +23,21 @@ pub fn card_with_margin<R>(
     margin: egui::Margin,
     body: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
+    card_with_surface(ui, margin, theme::CARD_BG, theme::BORDER, body)
+}
+
+/// A card using caller-selected theme surfaces while retaining the shared
+/// spacing, border width and corner radius.
+pub fn card_with_surface<R>(
+    ui: &mut egui::Ui,
+    margin: egui::Margin,
+    fill: egui::Color32,
+    border: egui::Color32,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     egui::Frame::NONE
-        .fill(theme::CARD_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
+        .fill(fill)
+        .stroke(Stroke::new(1.0, border))
         .corner_radius(14.0)
         .inner_margin(margin)
         .show(ui, body)

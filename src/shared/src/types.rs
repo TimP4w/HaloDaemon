@@ -411,16 +411,19 @@ impl Default for LcdConfig {
 }
 
 /// Whether the daemon may contact GitHub to download official plugins and
-/// check for updates automatically. `Unset` until the user is first asked, so
-/// the GUI knows to show the first-run consent prompt.
+/// check for updates automatically. New installations allow this by default;
+/// `Unset` remains readable for configs written by older versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginDownloadConsent {
-    #[default]
     Unset,
+    #[default]
     Allowed,
     Denied,
 }
+
+/// Persisted first-run onboarding completion key shared by daemon and GUI.
+pub const ONBOARDING_TOUR_KEY: &str = "onboarding";
 
 /// GUI-facing preferences and daemon log level, sent as `AppState.gui` and
 /// persisted on the daemon under `config.yaml`'s `gui` key.
@@ -450,7 +453,7 @@ impl Default for GuiConfig {
             hide_window_controls: DEFAULT_HIDE_WINDOW_CONTROLS,
             seen_tours: BTreeSet::new(),
             log_level: DEFAULT_LOG_LEVEL.to_string(),
-            plugin_downloads: PluginDownloadConsent::Unset,
+            plugin_downloads: PluginDownloadConsent::Allowed,
         }
     }
 }
@@ -529,6 +532,12 @@ pub enum NotificationCode {
         plugin: String,
         detail: String,
     },
+    /// A disabled plugin is recommended for this host. First run surfaces it in
+    /// onboarding; later discoveries use a notification. `plugin` is the
+    /// display name and never includes device paths or serials.
+    PluginRecommended {
+        plugin: String,
+    },
     /// A generic error surfaced as free text (e.g. a failed command's error).
     /// The GUI translates only the title and shows `message` verbatim.
     Generic {
@@ -552,7 +561,7 @@ impl NotificationCode {
             | PluginContentChanged { .. }
             | PluginRuntimeError { .. }
             | PluginConnectFailed { .. } => NotificationSeverity::Warning,
-            ProfileSwitched { .. } => NotificationSeverity::Info,
+            ProfileSwitched { .. } | PluginRecommended { .. } => NotificationSeverity::Info,
         }
     }
 
@@ -659,6 +668,11 @@ pub struct PluginsState {
     /// notice rather than a plugin entry.
     #[serde(default)]
     pub skipped: Vec<SkippedPlugin>,
+    /// Disabled plugins whose declared HID identity matches connected hardware,
+    /// computed once at startup — the recommendation surface (onboarding / "a new
+    /// plugin you may activate").
+    #[serde(default)]
+    pub recommendations: Vec<PluginRecommendation>,
 }
 
 /// A plugin directory that couldn't be parsed into a manifest.
@@ -972,6 +986,120 @@ pub struct HealthState {
     pub notification_sent: bool,
 }
 
+/// Whether a missing host requirement blocks all activation or only degrades a
+/// feature/device path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementImpact {
+    #[default]
+    Block,
+    Degrade,
+}
+
+/// Why a host requirement is unsatisfied. The UI owns the localized remediation
+/// text; the daemon only reports the structured reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementFailureReason {
+    NotInstalled,
+    NotLoaded,
+    NotFound,
+    PermissionDenied,
+    Unavailable,
+    Incompatible,
+    Busy,
+}
+
+/// A host capability a plugin needs before it can execute. Requirements are
+/// **not** permissions: they describe host readiness and never enter the
+/// consented authority snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginRequirement {
+    /// An executable that must resolve on the daemon's `PATH`.
+    Command { executable: String },
+    /// A Linux kernel module explicitly required by an integration.
+    KernelModule { name: String },
+    /// PawnIO, inferred for Windows transports backed by the bundled modules.
+    PawnIo,
+    /// A usable Linux i2c-dev node, inferred from an SMBus device match.
+    LinuxI2c,
+    /// Access to Linux's hwmon class. `access` is `read` for sensor discovery
+    /// or `pwm` for writable fan-control attributes.
+    LinuxHwmon { access: String },
+}
+
+/// One host-requirement row for a plugin, blocking or degrading.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRequirementStatus {
+    pub requirement: PluginRequirement,
+    #[serde(default)]
+    pub impact: RequirementImpact,
+    pub satisfied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<RequirementFailureReason>,
+    /// The feature label a degrading requirement gates, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature: Option<String>,
+}
+
+/// Why an enabled plugin is currently inactive. Distinct from consent and from
+/// runtime health — the source of truth for the "Enabled, but inactive" state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PluginActivationBlocker {
+    /// One or more blocking host requirements are unmet.
+    MissingRequirements {
+        requirements: Vec<PluginRequirementStatus>,
+    },
+}
+
+/// The passive hardware identity that caused a plugin recommendation. It never
+/// includes device paths or serial numbers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "transport", rename_all = "snake_case")]
+pub enum PluginRecommendationMatch {
+    /// A host-independent recommendation, currently reserved for the stock
+    /// Halo Effects library.
+    Always,
+    /// A command-backed device whose executable resolves on the daemon PATH.
+    Command {
+        executable: String,
+    },
+    Hid {
+        vid: u16,
+        pid: u16,
+    },
+    Usb {
+        vid: u16,
+        pid: u16,
+    },
+    /// A GPU SMBus controller passively matched by its PCI identity. Chipset
+    /// SMBus plugins are not recommended from controller presence alone because
+    /// that would produce false positives on nearly every desktop.
+    SmbusGpu {
+        pci_vendor: u16,
+        pci_device: u16,
+        pci_sub_vendor: u16,
+        pci_sub_device: u16,
+    },
+}
+
+/// A disabled plugin recommended from a host capability, concrete hardware
+/// identity, or a small host-owned default such as Halo Effects. Enabling still
+/// requires explicit authority consent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRecommendation {
+    pub plugin_id: String,
+    pub plugin_name: String,
+    pub hardware: PluginRecommendationMatch,
+    /// False when the matching device was found but is not openable by the
+    /// daemon (combine with the udev/access remediation). Always true until the
+    /// access probe lands.
+    #[serde(default = "default_true")]
+    pub accessible: bool,
+}
+
 /// One plugin as shown in the GUI's Plugins screen.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInfo {
@@ -1057,6 +1185,18 @@ pub struct PluginInfo {
     /// never a consent gate.
     #[serde(default = "default_true")]
     pub consented: bool,
+    /// True only when every blocking activation gate currently passes. Distinct
+    /// from `enabled` (persisted user intent): an enabled plugin is inactive
+    /// while a blocking host requirement is missing.
+    #[serde(default)]
+    pub active: bool,
+    /// Host-requirement rows (blocking and degrading), for UI remediation.
+    /// Empty when the plugin declares no requirements or none are evaluated.
+    #[serde(default)]
+    pub requirements: Vec<PluginRequirementStatus>,
+    /// Why an enabled plugin is currently inactive, if it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_blocker: Option<PluginActivationBlocker>,
     /// Aggregate operational health for this plugin. Device-specific records
     /// remain scoped in the daemon registry and may be added to wire devices.
     #[serde(default)]
@@ -2304,6 +2444,104 @@ mod tests {
     }
 
     #[test]
+    fn plugin_info_defaults_active_requirements_and_blocker() {
+        // A payload from an older daemon (no requirement fields) stays inert:
+        // inactive, no requirements, no blocker — never accidentally "active".
+        let info: PluginInfo = serde_json::from_value(serde_json::json!({
+            "id": "p", "name": "P", "path": "", "enabled": true
+        }))
+        .unwrap();
+        assert!(!info.active);
+        assert!(info.requirements.is_empty());
+        assert!(info.activation_blocker.is_none());
+    }
+
+    #[test]
+    fn requirement_status_and_blocker_round_trip_snake_case() {
+        let status = PluginRequirementStatus {
+            requirement: PluginRequirement::KernelModule {
+                name: "nct6775".into(),
+            },
+            impact: RequirementImpact::Block,
+            satisfied: false,
+            reason: Some(RequirementFailureReason::NotLoaded),
+            feature: None,
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["requirement"]["kind"], "kernel_module");
+        assert_eq!(value["impact"], "block");
+        assert_eq!(value["reason"], "not_loaded");
+
+        let blocker = PluginActivationBlocker::MissingRequirements {
+            requirements: vec![status.clone()],
+        };
+        let back: PluginActivationBlocker =
+            serde_json::from_str(&serde_json::to_string(&blocker).unwrap()).unwrap();
+        assert_eq!(back, blocker);
+        assert_eq!(
+            serde_json::to_value(&blocker).unwrap()["type"],
+            "missing_requirements"
+        );
+
+        // A degrading command requirement keeps its feature label.
+        let degrade = PluginRequirementStatus {
+            requirement: PluginRequirement::Command {
+                executable: "pactl".into(),
+            },
+            impact: RequirementImpact::Degrade,
+            satisfied: false,
+            reason: Some(RequirementFailureReason::NotFound),
+            feature: Some("audio_routing".into()),
+        };
+        let back: PluginRequirementStatus =
+            serde_json::from_str(&serde_json::to_string(&degrade).unwrap()).unwrap();
+        assert_eq!(back, degrade);
+
+        assert_eq!(
+            serde_json::to_value(PluginRequirement::PawnIo).unwrap()["kind"],
+            "pawn_io"
+        );
+        assert_eq!(
+            serde_json::to_value(PluginRequirement::LinuxI2c).unwrap()["kind"],
+            "linux_i2c"
+        );
+    }
+
+    #[test]
+    fn plugin_recommendation_round_trips_and_defaults_accessible() {
+        let rec = PluginRecommendation {
+            plugin_id: "nzxt_kraken".into(),
+            plugin_name: "NZXT Kraken".into(),
+            hardware: PluginRecommendationMatch::Hid {
+                vid: 0x1e71,
+                pid: 0x2007,
+            },
+            accessible: false,
+        };
+        let back: PluginRecommendation =
+            serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
+        assert_eq!(back, rec);
+        // An older payload without `accessible` defaults to accessible.
+        let old: PluginRecommendation = serde_json::from_value(serde_json::json!({
+            "plugin_id": "p", "plugin_name": "P",
+            "hardware": { "transport": "usb", "vid": 1, "pid": 2 }
+        }))
+        .unwrap();
+        assert!(old.accessible);
+
+        for hardware in [
+            PluginRecommendationMatch::Always,
+            PluginRecommendationMatch::Command {
+                executable: "nvidia-smi".into(),
+            },
+        ] {
+            let value = serde_json::to_value(&hardware).unwrap();
+            let back: PluginRecommendationMatch = serde_json::from_value(value).unwrap();
+            assert_eq!(back, hardware);
+        }
+    }
+
+    #[test]
     fn load_failed_and_skipped_round_trip() {
         let failed = PluginIssue {
             kind: PluginIssueKind::LoadFailed,
@@ -2769,9 +3007,9 @@ mod default_tests {
     }
 
     #[test]
-    fn gui_config_defaults_plugin_downloads_to_unset_when_omitted() {
+    fn gui_config_defaults_plugin_downloads_to_allowed_when_omitted() {
         let c: GuiConfig = serde_json::from_str(r#"{"language":"en","log_level":"info"}"#).unwrap();
-        assert_eq!(c.plugin_downloads, PluginDownloadConsent::Unset);
+        assert_eq!(c.plugin_downloads, PluginDownloadConsent::Allowed);
     }
 
     #[test]

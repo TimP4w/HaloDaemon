@@ -544,6 +544,13 @@ async fn compute_on_disk_changes(
     let repos = policy.repos.clone();
     let mut out = Vec::new();
     for r in repos {
+        // A seeded repository whose initial clone failed has no immutable
+        // revision to inspect. Treat it as unavailable instead of reading the
+        // deliberately nonexistent `__inactive__` sentinel path and logging a
+        // misleading warning on every update pass.
+        if r.active_revision.as_deref().is_none_or(str::is_empty) {
+            continue;
+        }
         let active_dir = repo::active_revision_dir(&r);
         let manifest = match tokio::task::spawn_blocking({
             let active_dir = active_dir.clone();
@@ -1567,6 +1574,10 @@ mod tests {
             assert!(
                 plugin_statuses.iter().all(|s| s.slug != "never-cloned"),
                 "an uncloned repo yields no plugin update statuses"
+            );
+            assert!(
+                compute_on_disk_changes(&app).await.is_empty(),
+                "an uncloned repo has no active revision to inspect"
             );
         })
         .await;
