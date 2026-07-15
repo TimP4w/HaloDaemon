@@ -457,7 +457,7 @@ async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[String]) {
     use crate::registry::discovery::{DiscoveryFilter, DiscoveryScope};
 
     // Keep both sides of a manifest change in scope. Deleted/disabled plugins
-    // need their old specs so a native driver can reclaim the hardware, while
+    // need their old specs so a built-in host device can reclaim the hardware, while
     // newly imported or updated plugins need their new specs to claim it.
     let mut specs = app.registry.device_specs_for(plugins);
 

@@ -7,10 +7,9 @@
 //! evaluated during manifest loading. Plugins expose
 //! only *existing* capability kinds; Halo owns the capability taxonomy.
 //!
-//! Registration is at runtime (not the compile-time `inventory` path native
-//! drivers use): `load_all` reads the plugins directory into the registry
-//! snapshot, and `make_device` consults `match_handle` before the native
-//! descriptors, so a plugin shadows a native driver for the same hardware.
+//! Registration is at runtime: `load_all` reads the plugins directory into the
+//! registry snapshot, and `make_device` consults `match_handle` before built-in
+//! host descriptors, so a plugin shadows a built-in device for the same hardware.
 
 mod audio_api;
 pub(crate) mod backends;
@@ -125,7 +124,7 @@ struct PluginState {
     manifests: Vec<PluginManifest>,
     effects: Vec<PluginEffectEntry>,
     /// Plugin ids the user disabled. `match_handle` skips these, so a disabled
-    /// plugin no longer shadows its native driver.
+    /// plugin no longer shadows its built-in host device.
     disabled: HashSet<String>,
     /// Integration ids disabled *as an integration* — independent of `disabled`
     /// (which governs whether the Lua may run at all). Only meaningful for
@@ -815,7 +814,7 @@ impl Registry {
     ) -> ActivationState {
         if !manifest.supports_current_platform() {
             // Catalog-visible but inert: it must neither request consent nor
-            // shadow an otherwise applicable native driver.
+            // shadow an otherwise applicable built-in host device.
             ActivationState::Disabled
         } else if self.is_disabled(&manifest.plugin_id) {
             ActivationState::Disabled

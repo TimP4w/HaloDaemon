@@ -414,7 +414,7 @@ fn source_fields(device: &dyn crate::drivers::Device) -> Vec<(String, String)> {
             ("source_kind".into(), "plugin".into()),
             ("plugin_id".into(), id.clone()),
         ],
-        (DeviceOrigin::Native, None) => vec![("source_kind".into(), "native_driver".into())],
+        (DeviceOrigin::Builtin, None) => vec![("source_kind".into(), "builtin".into())],
     };
     if let Some(plugin_id) = device.owning_plugin_id() {
         if !fields.iter().any(|(key, _)| key == "plugin_id") {
@@ -616,11 +616,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_fields_identify_native_plugin_and_integration_roots() {
+    fn source_fields_identify_builtin_plugin_and_integration_roots() {
         use crate::test_support::MockDevice;
 
-        assert!(source_fields(&MockDevice::new("native"))
-            .contains(&("source_kind".into(), "native_driver".into())));
+        assert!(source_fields(&MockDevice::new("builtin"))
+            .contains(&("source_kind".into(), "builtin".into())));
         assert!(
             source_fields(&MockDevice::new("plugin").with_owning_plugin_id("foo"))
                 .contains(&("plugin_id".into(), "foo".into()))

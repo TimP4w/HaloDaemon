@@ -78,7 +78,7 @@ impl DeviceIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceOrigin {
-    Native,
+    Builtin,
     Plugin(String),
     Integration(String),
 }
@@ -86,7 +86,7 @@ pub enum DeviceOrigin {
 impl DeviceOrigin {
     fn conflict_source(&self) -> ConflictDeviceSource {
         match self {
-            Self::Native => ConflictDeviceSource::Native,
+            Self::Builtin => ConflictDeviceSource::Builtin,
             Self::Plugin(id) => ConflictDeviceSource::Plugin(id.clone()),
             Self::Integration(id) => ConflictDeviceSource::Integration(id.clone()),
         }
@@ -96,7 +96,7 @@ impl DeviceOrigin {
 impl DeviceOrigin {
     fn weakly_distinct_from(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Native, Self::Native) => false,
+            (Self::Builtin, Self::Builtin) => false,
             (Self::Plugin(a), Self::Plugin(b)) | (Self::Integration(a), Self::Integration(b)) => {
                 a != b
             }
@@ -227,7 +227,7 @@ pub fn compare(
     }
     if a.location.is_some() && a.location == b.location {
         let opaque = matches!(a.location, Some(LocationKey::Opaque(_)));
-        if !opaque || (a_origin == b_origin && !matches!(a_origin, DeviceOrigin::Native)) {
+        if !opaque || (a_origin == b_origin && !matches!(a_origin, DeviceOrigin::Builtin)) {
             return MatchEvidence::ConfirmedLocation;
         }
     }
@@ -551,7 +551,7 @@ impl Device for IdentifiedDevice {
         fields.push((
             "identity_origin".into(),
             match &self.origin {
-                DeviceOrigin::Native => "native".into(),
+                DeviceOrigin::Builtin => "builtin".into(),
                 DeviceOrigin::Plugin(id) => format!("plugin:{id}"),
                 DeviceOrigin::Integration(id) => format!("integration:{id}"),
             },
@@ -582,7 +582,7 @@ mod tests {
                 usb: None,
                 usb_address: None,
             },
-            origin: DeviceOrigin::Native,
+            origin: DeviceOrigin::Builtin,
             connected: true,
             active_state: VisibilityState::Visible,
             integration_root: false,

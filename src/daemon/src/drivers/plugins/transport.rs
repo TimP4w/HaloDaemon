@@ -8,7 +8,7 @@
 //!
 //! Which backend a plugin gets is decided by a [`PluginTransportDescriptor`]
 //! registered next to the transport via `inventory::submit!` — the same
-//! pattern native drivers use for `DeviceDescriptor`. Adding a bus is one
+//! pattern built-in discovery roots use for `DeviceDescriptor`. Adding a bus is one
 //! descriptor plus, if its I/O shape is new, a new `PluginIo` variant; the
 //! plugin core (`manifest`/`worker`/`mod`) never grows a per-bus branch.
 

@@ -199,7 +199,7 @@ pub trait Device: Send + Sync {
     fn conflict_origin(&self) -> DeviceOrigin {
         self.owning_plugin_id()
             .map(DeviceOrigin::Plugin)
-            .unwrap_or(DeviceOrigin::Native)
+            .unwrap_or(DeviceOrigin::Builtin)
     }
 
     /// All capabilities this device exposes.  Add a `CapabilityRef` variant when

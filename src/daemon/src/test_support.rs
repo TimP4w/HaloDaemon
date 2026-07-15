@@ -102,7 +102,7 @@ pub struct MockDevice {
     /// (see `Device::integration_id`). `None` for a normal device.
     pub integration_id: Option<String>,
     /// Owning plugin id for scoped teardown (see `Device::owning_plugin_id`).
-    /// `None` for a normal native device.
+    /// `None` for a normal built-in host device.
     pub owning_plugin_id: Option<String>,
     // Capability slots — `None` means the capability is absent.
     pub fan: Option<FanStateSlot>,

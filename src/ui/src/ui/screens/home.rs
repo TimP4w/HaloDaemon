@@ -366,7 +366,7 @@ fn ellipsize(painter: &egui::Painter, text: &str, font: &egui::FontId, max_width
 
 fn conflict_source_label(source: &ConflictDeviceSource) -> String {
     match source {
-        ConflictDeviceSource::Native => t!("home.conflict_source_native").into_owned(),
+        ConflictDeviceSource::Builtin => t!("home.conflict_source_builtin").into_owned(),
         ConflictDeviceSource::Plugin(id) => {
             t!("home.conflict_source_plugin", name = id).into_owned()
         }
@@ -1461,10 +1461,10 @@ mod tests {
         let choice = ConflictChoice {
             devices: vec![
                 ConflictChoiceDevice {
-                    id: "native".into(),
-                    name: "Native driver".into(),
+                    id: "builtin".into(),
+                    name: "Built-in host device".into(),
                     device_type: DeviceType::Mouse,
-                    source: ConflictDeviceSource::Native,
+                    source: ConflictDeviceSource::Builtin,
                 },
                 ConflictChoiceDevice {
                     id: "openrgb".into(),
@@ -1473,11 +1473,11 @@ mod tests {
                     source: ConflictDeviceSource::Integration("openrgb".into()),
                 },
             ],
-            recommended_id: "native".into(),
+            recommended_id: "builtin".into(),
             confidence: halod_shared::types::ConflictConfidence::Confirmed,
         };
-        assert_eq!(ids_to_disable(&choice, "native"), vec!["openrgb"]);
-        assert_eq!(ids_to_disable(&choice, "openrgb"), vec!["native"]);
+        assert_eq!(ids_to_disable(&choice, "builtin"), vec!["openrgb"]);
+        assert_eq!(ids_to_disable(&choice, "openrgb"), vec!["builtin"]);
     }
 
     #[test]

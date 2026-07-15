@@ -178,7 +178,7 @@ mod tests {
         use crate::registry::identity::{DeviceIdentity, DeviceOrigin, IdentifiedDevice};
         let app = Arc::new(AppState::new(Config::default()));
         for (id, origin) in [
-            ("native", DeviceOrigin::Native),
+            ("builtin", DeviceOrigin::Builtin),
             ("openrgb", DeviceOrigin::Integration("openrgb".into())),
         ] {
             let identity = DeviceIdentity {
@@ -195,12 +195,12 @@ mod tests {
         }
         let cfg = app.config.read().await.clone();
         let snapshot = app.snapshot_devices(&cfg).await;
-        let native = snapshot.devices.iter().find(|d| d.id == "native").unwrap();
+        let builtin = snapshot.devices.iter().find(|d| d.id == "builtin").unwrap();
         let openrgb = snapshot.devices.iter().find(|d| d.id == "openrgb").unwrap();
-        assert_eq!(native.conflict.as_ref().unwrap().recommended_id, "native");
-        assert_eq!(openrgb.conflict.as_ref().unwrap().recommended_id, "native");
+        assert_eq!(builtin.conflict.as_ref().unwrap().recommended_id, "builtin");
+        assert_eq!(openrgb.conflict.as_ref().unwrap().recommended_id, "builtin");
         assert_eq!(
-            native.conflict.as_ref().unwrap().confidence,
+            builtin.conflict.as_ref().unwrap().confidence,
             halod_shared::types::ConflictConfidence::Confirmed
         );
     }

@@ -1240,7 +1240,7 @@ pub struct ConflictParticipant {
 #[serde(rename_all = "snake_case")]
 pub enum ConflictDeviceSource {
     #[default]
-    Native,
+    Builtin,
     Plugin(String),
     Integration(String),
 }

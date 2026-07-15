@@ -146,12 +146,12 @@ it in `AppState`, restores its saved config, runs `discover_children()`, and cal
 
 ### Plugins — devices without recompiling
 
-Native drivers register at **compile time** via `inventory`. **Device plugins**
+Built-in host devices register at **compile time** via `inventory`. **Device plugins**
 ([drivers/plugins/](../src/daemon/src/drivers/plugins/)) add a parallel **runtime**
 registry: `load_all_with_repos()` reads directory packages (`plugin.yaml` + entry
 script) from the local plugins directory and every registered git-repo source, and
-`make_device()` consults `plugins::match_handle()` *before* the native descriptors —
-so a plugin **shadows** a native driver for the same hardware. A single generic
+`make_device()` consults `plugins::match_handle()` *before* built-in descriptors —
+so a plugin **shadows** a built-in host device for the same hardware. A single generic
 `LuaDevice` implements the `Device` + capability traits and forwards each call into a
 per-physical-root Lua worker thread (which owns the VM + transport). Dynamic children
 use persistent routed `dev` tables on that same serialized worker. Plugins expose only

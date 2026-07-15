@@ -1158,7 +1158,7 @@ mod tests {
                 .join(&slug);
             std::fs::write(
                 active_package.join("plugin.yaml"),
-                format!("id: {slug}\nversion: 1.0.0\ntype: effect\n"),
+                "id: broken\nid: duplicate\n",
             )
             .unwrap();
             reload_registry(&app).await;

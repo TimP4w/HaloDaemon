@@ -32,7 +32,7 @@ home:
   conflict_keep: "Mantieni %{name}"
   conflict_keep_recommended: "Mantieni %{name} (consigliato)"
   conflict_choose_owner: Scegli questo proprietario del dispositivo
-  conflict_source_native: Driver nativo
+  conflict_source_builtin: Dispositivo host integrato
   conflict_source_plugin: "Plugin: %{name}"
   conflict_source_integration: "Integrazione: %{name}"
   no_matching: Nessun dispositivo trovato

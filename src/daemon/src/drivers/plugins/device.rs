@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The generic device a plugin instantiates. It sits behind the same `Device`
-//! seam as every native driver and forwards capability calls into the per-device
+//! seam as every built-in host device and forwards capability calls into the per-device
 //! Lua worker. The manifest defines the maximum capability set; `initialize`
 //! may narrow it to the subset supported by one physical device.
 
@@ -1179,7 +1179,7 @@ fn build_dynamic_descriptor(
                 z.led_ids.len() as u32
             };
             // `ring_led_positions` only lays out ring topologies; linear zones use
-            // the evenly-spaced strip layout (as the native drivers did).
+            // the evenly-spaced strip layout (as the former built-in drivers did).
             if !z.leds.is_empty() {
                 RgbZone {
                     leds: z.leds,
