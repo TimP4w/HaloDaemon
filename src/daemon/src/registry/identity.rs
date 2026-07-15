@@ -29,6 +29,10 @@ pub enum LocationKey {
         port_path: Vec<u8>,
         interface: u8,
     },
+    Smbus {
+        bus: u8,
+        address: u8,
+    },
     Opaque(String),
 }
 
@@ -189,7 +193,15 @@ pub fn identity_from_handle(handle: &DiscoveryHandle<'_>) -> DeviceIdentity {
             });
             identity.usb_address = Some(*address);
         }
-        DiscoveryHandle::Smbus { .. } | DiscoveryHandle::Command { .. } => {}
+        DiscoveryHandle::Smbus {
+            addr, bus_number, ..
+        } => {
+            identity.location = Some(LocationKey::Smbus {
+                bus: *bus_number,
+                address: *addr,
+            });
+        }
+        DiscoveryHandle::Command { .. } => {}
         #[cfg(target_os = "windows")]
         DiscoveryHandle::AmdSmn { .. } | DiscoveryHandle::Lpcio { .. } => {}
     }
@@ -524,6 +536,9 @@ impl Device for IdentifiedDevice {
                             .collect::<Vec<_>>()
                             .join(".")
                     ),
+                    LocationKey::Smbus { bus, address } => {
+                        format!("smbus:i2c-{bus}@0x{address:02x}")
+                    }
                     LocationKey::Opaque(value) => format!("opaque:{value}"),
                 },
             ));
@@ -605,6 +620,68 @@ mod tests {
         let found = detect_conflicts(&entries);
         assert!(found[0].is_none());
         assert!(found[2].is_none());
+    }
+
+    fn smbus_identity(bus: u8, address: u8) -> DeviceIdentity {
+        DeviceIdentity {
+            scope: Some(IdentityScope::Local),
+            location: Some(LocationKey::Smbus { bus, address }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn smbus_location_confirms_the_same_hardware_across_sources() {
+        // Same (bus, address) is the same physical device, confirmed even across
+        // differing origins — unlike an opaque location, which requires a
+        // matching non-builtin origin.
+        assert_eq!(
+            compare(
+                &smbus_identity(1, 0x70),
+                &DeviceOrigin::Plugin("ene_smbus".into()),
+                &smbus_identity(1, 0x70),
+                &DeviceOrigin::Integration("openrgb".into()),
+            ),
+            MatchEvidence::ConfirmedLocation
+        );
+        // A different address (or bus) is a different device.
+        assert_eq!(
+            compare(
+                &smbus_identity(1, 0x70),
+                &DeviceOrigin::Builtin,
+                &smbus_identity(1, 0x71),
+                &DeviceOrigin::Builtin,
+            ),
+            MatchEvidence::None
+        );
+    }
+
+    #[test]
+    fn smbus_duplicates_across_sources_form_a_conflict_group() {
+        let smbus_entry = |id: &str, origin| ConflictEntry {
+            id: id.into(),
+            identity: smbus_identity(1, 0x70),
+            origin,
+            connected: true,
+            active_state: VisibilityState::Visible,
+            integration_root: false,
+        };
+        let entries = vec![
+            smbus_entry("ene_smbus-addr70", DeviceOrigin::Plugin("ene_smbus".into())),
+            smbus_entry(
+                "openrgb-ctrl_0",
+                DeviceOrigin::Integration("openrgb".into()),
+            ),
+        ];
+        let found = detect_conflicts(&entries);
+        assert_eq!(
+            found[0].as_ref().unwrap().peer_ids,
+            vec!["openrgb-ctrl_0".to_string()]
+        );
+        assert_eq!(
+            found[1].as_ref().unwrap().peer_ids,
+            vec!["ene_smbus-addr70".to_string()]
+        );
     }
 
     #[test]

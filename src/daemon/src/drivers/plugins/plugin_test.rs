@@ -604,8 +604,17 @@ fn integration_child_table(
         let handle = handle.clone();
         table.set(
             "initialize",
-            lua.create_function(move |_, _self: Table| {
-                Ok(handle.block_on(child.initialize()).map_err(mlua_err)?.ok)
+            lua.create_function(move |lua, _self: Table| {
+                let outcome = handle.block_on(child.initialize()).map_err(mlua_err)?;
+                let zones = lua.create_table()?;
+                for (i, zone) in outcome.zones.unwrap_or_default().iter().enumerate() {
+                    let item = lua.create_table()?;
+                    item.set("id", zone.id.clone())?;
+                    item.set("name", zone.name.clone())?;
+                    item.set("led_count", zone.led_count)?;
+                    zones.set(i + 1, item)?;
+                }
+                Ok((outcome.ok, zones))
             })?,
         )?;
     }

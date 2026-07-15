@@ -386,6 +386,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
                     DiscoveryHandle::Smbus {
                         bus: Arc::clone(&bus),
                         addr,
+                        bus_number: bus_info.bus_number,
                         bus_kind: job.bus_kind,
                     },
                 )
