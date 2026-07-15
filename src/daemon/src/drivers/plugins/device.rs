@@ -1470,7 +1470,8 @@ impl Device for LuaDevice {
     }
 
     fn integration_id(&self) -> Option<String> {
-        (self.plugin_type == PluginKind::Integration).then(|| self.plugin_id.clone())
+        let is_child = self.worker.as_ref().is_some_and(|w| w.is_child());
+        integration_root_id(self.plugin_type, &self.plugin_id, is_child)
     }
 
     fn owning_plugin_id(&self) -> Option<String> {
@@ -2176,6 +2177,15 @@ impl LuaDevice {
     }
 }
 
+/// The `integration_id` a plugin device advertises: `Some(plugin_id)` only for
+/// the integration *root* (the SDK client the GUI hides under Integrations).
+/// The controllers it exposes as children report `None` so they stay listable
+/// and remain eligible for duplicate-device conflict detection against the
+/// native driver for the same hardware.
+fn integration_root_id(plugin_type: PluginKind, plugin_id: &str, is_child: bool) -> Option<String> {
+    (plugin_type == PluginKind::Integration && !is_child).then(|| plugin_id.to_owned())
+}
+
 fn degrees_to_rotation(degrees: u32) -> ScreenRotation {
     match degrees % 360 {
         90 => ScreenRotation::R90,
@@ -2786,6 +2796,22 @@ mod tests {
             caps,
             vec![Cap::Choice, Cap::Range, Cap::Boolean, Cap::Action, Cap::Rgb,]
         );
+    }
+
+    #[test]
+    fn integration_id_names_only_the_root_not_child_controllers() {
+        // The root (non-child worker) is hidden under Integrations; the
+        // controllers it exposes as children stay listable and conflict-eligible.
+        assert_eq!(
+            integration_root_id(PluginKind::Integration, "openrgb", false).as_deref(),
+            Some("openrgb")
+        );
+        assert_eq!(
+            integration_root_id(PluginKind::Integration, "openrgb", true),
+            None
+        );
+        // A plain device plugin never claims an integration id.
+        assert_eq!(integration_root_id(PluginKind::Device, "acme", false), None);
     }
 
     #[test]

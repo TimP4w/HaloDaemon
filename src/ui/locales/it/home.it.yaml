@@ -35,6 +35,17 @@ home:
   conflict_source_builtin: Dispositivo host integrato
   conflict_source_plugin: "Plugin: %{name}"
   conflict_source_integration: "Integrazione: %{name}"
+  conflict_banner_title_one: 1 dispositivo presenta un conflitto di controllo
+  conflict_banner_title_many: "%{count} dispositivi presentano conflitti di controllo"
+  conflict_banner_sub: Un dispositivo può essere controllato da una sola sorgente. Scegli quale mantiene il controllo.
+  conflict_resolve: Risolvi
+  conflict_modal_title: Risolvi i conflitti di controllo
+  conflict_modal_intro: "Ogni dispositivo elencato è controllato da più sorgenti. Scegli quale sorgente deve mantenere il controllo; le altre rilasceranno il dispositivo."
+  conflict_modal_note: "Le sorgenti non selezionate continueranno a controllare gli altri dispositivi. La modifica riguarda solo il controllo dei dispositivi elencati qui."
+  conflict_sources: "%{count} sorgenti"
+  conflict_tag_recommended: Consigliata
+  conflict_decide_later: Decidi in seguito
+  conflict_keep_selected: "Applica le selezioni · %{count}"
   no_matching: Nessun dispositivo trovato
   no_matching_sub: Nessun dispositivo connesso corrisponde alla ricerca
   no_devices: Nessun dispositivo connesso

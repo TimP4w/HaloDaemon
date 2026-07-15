@@ -47,10 +47,9 @@ pub struct App {
     pub(crate) rename: Option<Rename>,
     /// Pending confirmation to unlink a chained device from the Home view.
     pub(crate) confirm_remove: Option<ui::screens::home::ConfirmRemove>,
-    /// Pending selection of the owner to retain for a duplicate-device conflict.
-    pub(crate) conflict_choice: Option<ui::screens::home::ConflictChoice>,
-    /// Conflict groups already offered for resolution this GUI session.
-    pub(crate) conflict_prompted: std::collections::HashSet<String>,
+    /// Open duplicate-device resolve dialog: every conflict group with the
+    /// owner the user has picked to keep. `None` when the dialog is closed.
+    pub(crate) conflict_resolve: Option<Vec<ui::screens::home::ConflictGroup>>,
     pub(crate) sensor_history: HashMap<String, VecDeque<f32>>,
     /// Rolling write-rate throughput (bytes/sec) per device id.
     pub(crate) write_rate_history: HashMap<String, VecDeque<f32>>,
@@ -125,8 +124,7 @@ impl App {
             search: String::new(),
             rename: None,
             confirm_remove: None,
-            conflict_choice: None,
-            conflict_prompted: std::collections::HashSet::new(),
+            conflict_resolve: None,
             sensor_history: HashMap::new(),
             write_rate_history: HashMap::new(),
             last_sample: 0.0,
