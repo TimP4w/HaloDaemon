@@ -16,6 +16,7 @@ pub struct PluginScanEntry {
     pub plugin_id: String,
     /// Full script text, so the scanner can build a throwaway VM for `pre_scan`.
     pub script_source: String,
+    pub module_sources: std::collections::BTreeMap<String, String>,
     pub bus_kind: SmbusBusKind,
     pub addresses: Vec<u8>,
     /// Addresses `pre_scan` may additionally write (e.g. an ENE broadcast addr).
@@ -44,7 +45,10 @@ impl super::Registry {
         let state = self.snapshot();
         let mut out = Vec::new();
         for m in state.manifests.iter() {
-            if state.activation.get(&m.plugin_id) != Some(&super::ActivationPhase::Ready) {
+            if !m.supports_current_platform()
+                || state.disabled.contains(&m.plugin_id)
+                || !super::consent_satisfied_in(&state, m)
+            {
                 continue;
             }
             for spec in m.smbus_devices() {
@@ -54,6 +58,7 @@ impl super::Registry {
                 out.push(PluginScanEntry {
                     plugin_id: m.plugin_id.clone(),
                     script_source: m.script_source.clone(),
+                    module_sources: m.module_sources.clone(),
                     bus_kind,
                     addresses: spec.addresses.clone().unwrap_or_default(),
                     extra_addresses: spec.extra_addresses.clone().unwrap_or_default(),

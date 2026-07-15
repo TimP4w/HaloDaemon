@@ -34,7 +34,7 @@ pub async fn set_device_visibility(
         }
 
         if new_state == VisibilityState::Disabled {
-            device.close().await;
+            super::registration::close_device(&app, device).await;
         }
 
         if new_state != VisibilityState::Disabled {

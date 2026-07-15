@@ -4,7 +4,15 @@ use std::sync::Arc;
 
 use crate::drivers::Device;
 use crate::state::AppState;
-use halod_shared::types::{VisibilityState, DEFAULT_PROFILE_NAME};
+use halod_shared::types::{ConnectionType, VisibilityState, DEFAULT_PROFILE_NAME};
+
+/// Close a device after releasing any global input state it owns. Every
+/// registry removal path must use this instead of calling `Device::close`
+/// directly so a disconnected layer-shift key cannot remain latched.
+pub async fn close_device(app: &Arc<AppState>, device: &Arc<dyn Device>) {
+    app.input.layer_shift_clear_device(device.id());
+    device.close().await;
+}
 
 /// Load the device's effective saved state, then re-apply its per-zone RGB
 /// transforms (which `load_state` does not cover). Active devices only: state
@@ -92,8 +100,20 @@ pub async fn seed_keyboard_layout(app: &Arc<AppState>, device: &Arc<dyn Device>)
 /// Returns the original result so callers keep existing Ok/Err branching.
 pub async fn init_device(app: &Arc<AppState>, device: &Arc<dyn Device>) -> Result<bool> {
     match device.initialize().await {
-        Ok(v) => Ok(v),
+        Ok(v) => {
+            if let Some(plugin_id) = device.owning_plugin_id() {
+                app.registry.clear_init_error(&plugin_id, device.id());
+            }
+            Ok(v)
+        }
         Err(e) => {
+            if let Some(plugin_id) = device.owning_plugin_id() {
+                app.registry.report_init_error(
+                    &plugin_id,
+                    device.id(),
+                    format!("{}: {e:#}", device.name()),
+                );
+            }
             crate::platform::notify::send(
                 app,
                 halod_shared::types::NotificationCode::DeviceInitFailed {
@@ -143,7 +163,6 @@ async fn ensure_default_baseline(app: &Arc<AppState>, device: &dyn Device) {
 ///   3. Init     — initialize; skip if Err or Ok(false)
 ///   4. State    — load saved state (sensor visibility, fan curves, …)
 ///   5. Push     — add to app.devices
-///   6. Hook     — call device.after_register
 ///
 /// Returns `true` when the device is now active in app.devices.
 pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bool {
@@ -163,6 +182,10 @@ pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bo
             return false;
         }
     }
+    if !prefer_wired_transport(app, &device).await {
+        finish_registration(app, &device_id).await;
+        return false;
+    }
     // baseline before overrides
     ensure_default_baseline(app, device.as_ref()).await;
     restore_saved_state(app, &device).await;
@@ -170,8 +193,87 @@ pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bo
     log_registration_conflicts(app, &device).await;
     finish_registration(app, &device_id).await;
     log::info!("[{}] registered", device.name());
-    if let Some(hook) = device.as_post_register_hook() {
-        hook.on_registered(Arc::clone(app)).await;
+    true
+}
+
+/// Keep one plugin-owned representation of a physical device when its wired
+/// HID interface and receiver child are both visible. Native Logitech devices
+/// switch transports in-place; Lua plugin devices cannot, so the wired instance
+/// displaces the same-plugin wireless instance until receiver reconciliation
+/// creates it again after the cable is removed.
+async fn prefer_wired_transport(app: &Arc<AppState>, device: &Arc<dyn Device>) -> bool {
+    let Some(plugin_id) = device.owning_plugin_id() else {
+        return true;
+    };
+    let identity = device.identity();
+    if identity.serial.is_none() {
+        return true;
+    }
+    let Some(connection_type) = device.wire_connection_type().await else {
+        return true;
+    };
+
+    let candidates: Vec<Arc<dyn Device>> = app
+        .devices
+        .read()
+        .await
+        .iter()
+        .filter(|other| {
+            other.owning_plugin_id().as_deref() == Some(plugin_id.as_str())
+                && matches!(
+                    crate::registry::identity::compare(
+                        &identity,
+                        &device.conflict_origin(),
+                        &other.identity(),
+                        &other.conflict_origin(),
+                    ),
+                    crate::registry::identity::MatchEvidence::ConfirmedSerial
+                )
+        })
+        .cloned()
+        .collect();
+
+    let mut wireless = Vec::new();
+    for candidate in candidates {
+        match (connection_type, candidate.wire_connection_type().await) {
+            (ConnectionType::Wireless, Some(ConnectionType::Wired)) => {
+                log::info!(
+                    "[{}] keeping wired device '{}' instead of wireless duplicate '{}'",
+                    plugin_id,
+                    candidate.id(),
+                    device.id()
+                );
+                close_device(app, device).await;
+                return false;
+            }
+            (ConnectionType::Wired, Some(ConnectionType::Wireless)) => wireless.push(candidate),
+            _ => {}
+        }
+    }
+    if wireless.is_empty() {
+        return true;
+    }
+
+    let displaced_ids: std::collections::HashSet<String> =
+        wireless.iter().map(|d| d.id().to_owned()).collect();
+    app.devices
+        .write()
+        .await
+        .retain(|d| !displaced_ids.contains(d.id()));
+    {
+        let mut owners = app.device_children.lock().await;
+        for children in owners.values_mut() {
+            children.retain(|id| !displaced_ids.contains(id));
+        }
+    }
+    for displaced in wireless {
+        log::info!(
+            "[{}] wired device '{}' replaced wireless duplicate '{}'",
+            plugin_id,
+            device.id(),
+            displaced.id()
+        );
+        close_device(app, &displaced).await;
     }
     true
 }
@@ -244,8 +346,20 @@ pub async fn register_device_and_children(app: &Arc<AppState>, device: Arc<dyn D
         return true;
     }
     if let Some(ctrl) = device.as_controller() {
+        let mut child_ids = std::collections::HashSet::new();
         for child in ctrl.discover_children().await {
-            register_device(app, child).await;
+            let child_id = child.id().to_owned();
+            if register_device(app, child).await {
+                child_ids.insert(child_id);
+            }
+        }
+        if !child_ids.is_empty() {
+            app.device_children
+                .lock()
+                .await
+                .entry(device.id().to_owned())
+                .or_default()
+                .extend(child_ids);
         }
     }
     true
@@ -270,11 +384,25 @@ fn is_registered_child(id: &str, root_id: &str) -> bool {
 /// scoped reload of one integration or plugin. Returns the removed ids so the
 /// caller can prune their (shared) HID-tracking entry.
 pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) -> Vec<String> {
+    let explicit_children = {
+        let mut owners = app.device_children.lock().await;
+        let owned = owners.remove(root_id).unwrap_or_default();
+        for children in owners.values_mut() {
+            children.remove(root_id);
+            for id in &owned {
+                children.remove(id);
+            }
+        }
+        owned
+    };
     let removed: Vec<Arc<dyn Device>> = {
         let mut devices = app.devices.write().await;
         let mut removed = Vec::new();
         devices.retain(|d| {
-            if d.id() == root_id || is_registered_child(d.id(), root_id) {
+            if d.id() == root_id
+                || explicit_children.contains(d.id())
+                || is_registered_child(d.id(), root_id)
+            {
                 removed.push(d.clone());
                 false
             } else {
@@ -283,8 +411,13 @@ pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) 
         });
         removed
     };
-    for device in &removed {
-        device.close().await;
+    // Dynamic children share their root's Lua worker. Close them first so
+    // close_child hooks run before the root close hook terminates the worker.
+    for device in removed.iter().filter(|device| device.id() != root_id) {
+        close_device(app, device).await;
+    }
+    for device in removed.iter().filter(|device| device.id() == root_id) {
+        close_device(app, device).await;
     }
     removed.iter().map(|d| d.id().to_owned()).collect()
 }
@@ -293,13 +426,121 @@ pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) 
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::drivers::CapabilityRef;
     use crate::registry::config::DeviceRecord;
+    use crate::registry::identity::DeviceIdentity;
     use crate::test_support::MockDevice;
     use halod_shared::types::VisibilityState;
     use std::sync::{atomic::Ordering, Arc};
 
+    struct PluginTransportDevice {
+        id: String,
+        connection_type: ConnectionType,
+        closed: std::sync::atomic::AtomicBool,
+    }
+
+    impl PluginTransportDevice {
+        fn new(id: &str, connection_type: ConnectionType) -> Self {
+            Self {
+                id: id.into(),
+                connection_type,
+                closed: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Device for PluginTransportDevice {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn name(&self) -> &str {
+            &self.id
+        }
+        fn vendor(&self) -> &str {
+            "Logitech"
+        }
+        fn model(&self) -> &str {
+            "Test"
+        }
+        async fn initialize(&self) -> Result<bool> {
+            Ok(true)
+        }
+        async fn close(&self) {
+            self.closed.store(true, Ordering::SeqCst);
+        }
+        fn owning_plugin_id(&self) -> Option<String> {
+            Some("logitech".into())
+        }
+        fn identity(&self) -> DeviceIdentity {
+            DeviceIdentity::serial(Some("AABB1122".into()))
+        }
+        async fn wire_connection_type(&self) -> Option<ConnectionType> {
+            Some(self.connection_type)
+        }
+        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
+            Vec::new()
+        }
+    }
+
     fn make_app() -> Arc<AppState> {
         Arc::new(AppState::new(Config::default()))
+    }
+
+    #[tokio::test]
+    async fn wired_plugin_device_replaces_same_serial_wireless_child() {
+        let app = make_app();
+        let wireless = Arc::new(PluginTransportDevice::new(
+            "logitech_AABB1122",
+            ConnectionType::Wireless,
+        ));
+        assert!(register_device(&app, wireless.clone()).await);
+        app.device_children
+            .lock()
+            .await
+            .entry("logitech-receiver".into())
+            .or_default()
+            .insert(wireless.id().into());
+
+        let wired = Arc::new(PluginTransportDevice::new(
+            "logitech-046d-c095-0",
+            ConnectionType::Wired,
+        ));
+        assert!(register_device(&app, wired.clone()).await);
+
+        let devices = app.devices.read().await;
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id(), wired.id());
+        drop(devices);
+        assert!(wireless.closed.load(Ordering::SeqCst));
+        assert!(!app
+            .device_children
+            .lock()
+            .await
+            .get("logitech-receiver")
+            .unwrap()
+            .contains(wireless.id()));
+    }
+
+    #[tokio::test]
+    async fn wireless_plugin_child_does_not_displace_same_serial_wired_device() {
+        let app = make_app();
+        let wired = Arc::new(PluginTransportDevice::new(
+            "logitech-046d-c095-0",
+            ConnectionType::Wired,
+        ));
+        assert!(register_device(&app, wired.clone()).await);
+
+        let wireless = Arc::new(PluginTransportDevice::new(
+            "logitech_AABB1122",
+            ConnectionType::Wireless,
+        ));
+        assert!(!register_device(&app, wireless.clone()).await);
+
+        let devices = app.devices.read().await;
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id(), wired.id());
+        assert!(wireless.closed.load(Ordering::SeqCst));
     }
 
     #[test]

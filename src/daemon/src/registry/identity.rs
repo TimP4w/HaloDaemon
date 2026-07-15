@@ -11,7 +11,7 @@ use halod_shared::types::{
 };
 
 use crate::{
-    drivers::{CapabilityRef, Device, PostRegisterHook, VisibilitySlot},
+    drivers::{CapabilityRef, Device, VisibilitySlot},
     registry::discovery::DiscoveryHandle,
 };
 
@@ -24,6 +24,15 @@ pub enum IdentityScope {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LocationKey {
     HidPath(String),
+    UsbPort {
+        bus: u8,
+        port_path: Vec<u8>,
+        interface: u8,
+    },
+    Smbus {
+        bus: u8,
+        address: u8,
+    },
     Opaque(String),
 }
 
@@ -33,6 +42,9 @@ pub struct DeviceIdentity {
     pub serial: Option<String>,
     pub location: Option<LocationKey>,
     pub usb: Option<(u16, u16)>,
+    /// Ephemeral libusb address, retained for diagnostics/routing but excluded
+    /// from the stable physical location key.
+    pub usb_address: Option<u8>,
 }
 
 impl DeviceIdentity {
@@ -70,7 +82,7 @@ impl DeviceIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceOrigin {
-    Native,
+    Builtin,
     Plugin(String),
     Integration(String),
 }
@@ -78,7 +90,7 @@ pub enum DeviceOrigin {
 impl DeviceOrigin {
     fn conflict_source(&self) -> ConflictDeviceSource {
         match self {
-            Self::Native => ConflictDeviceSource::Native,
+            Self::Builtin => ConflictDeviceSource::Builtin,
             Self::Plugin(id) => ConflictDeviceSource::Plugin(id.clone()),
             Self::Integration(id) => ConflictDeviceSource::Integration(id.clone()),
         }
@@ -88,7 +100,7 @@ impl DeviceOrigin {
 impl DeviceOrigin {
     fn weakly_distinct_from(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Native, Self::Native) => false,
+            (Self::Builtin, Self::Builtin) => false,
             (Self::Plugin(a), Self::Plugin(b)) | (Self::Integration(a), Self::Integration(b)) => {
                 a != b
             }
@@ -163,9 +175,35 @@ pub fn identity_from_handle(handle: &DiscoveryHandle<'_>) -> DeviceIdentity {
             identity.usb = Some((*vid, *pid));
             identity.location = Some(LocationKey::HidPath(normalize_hid_path(path)));
         }
-        DiscoveryHandle::UsbNonHid { vid, pid } => identity.usb = Some((*vid, *pid)),
-        DiscoveryHandle::LogitechSlot { serial, .. } => identity.serial = normalize_serial(*serial),
-        DiscoveryHandle::Smbus { .. } | DiscoveryHandle::ChainAccessory { .. } => {}
+        DiscoveryHandle::UsbNonHid {
+            vid,
+            pid,
+            bus,
+            address,
+            port_path,
+            serial,
+            interface_number,
+        } => {
+            identity.usb = Some((*vid, *pid));
+            identity.serial = normalize_serial(*serial);
+            identity.location = Some(LocationKey::UsbPort {
+                bus: *bus,
+                port_path: port_path.to_vec(),
+                interface: *interface_number,
+            });
+            identity.usb_address = Some(*address);
+        }
+        DiscoveryHandle::Smbus {
+            addr, bus_number, ..
+        } => {
+            identity.location = Some(LocationKey::Smbus {
+                bus: *bus_number,
+                address: *addr,
+            });
+        }
+        DiscoveryHandle::Command { .. } => {}
+        #[cfg(target_os = "windows")]
+        DiscoveryHandle::AmdSmn { .. } | DiscoveryHandle::Lpcio { .. } => {}
     }
     identity
 }
@@ -200,7 +238,7 @@ pub fn compare(
     }
     if a.location.is_some() && a.location == b.location {
         let opaque = matches!(a.location, Some(LocationKey::Opaque(_)));
-        if !opaque || (a_origin == b_origin && !matches!(a_origin, DeviceOrigin::Native)) {
+        if !opaque || (a_origin == b_origin && !matches!(a_origin, DeviceOrigin::Builtin)) {
             return MatchEvidence::ConfirmedLocation;
         }
     }
@@ -434,10 +472,12 @@ impl Device for IdentifiedDevice {
         self.inner.wire_connection_type().await
     }
     fn wire_serial_number(&self) -> Option<String> {
-        self.inner.wire_serial_number()
+        self.inner
+            .wire_serial_number()
+            .or_else(|| self.identity.serial.clone())
     }
-    async fn wire_device_connected(&self) -> bool {
-        self.inner.wire_device_connected().await
+    fn wire_device_connected(&self) -> bool {
+        self.inner.wire_device_connected()
     }
     fn is_live(&self) -> bool {
         self.inner.is_live()
@@ -446,7 +486,9 @@ impl Device for IdentifiedDevice {
         self.inner.wire_device_name().await
     }
     fn hardware_serial(&self) -> Option<String> {
-        self.inner.hardware_serial()
+        self.inner
+            .hardware_serial()
+            .or_else(|| self.identity.serial.clone())
     }
     fn identity(&self) -> DeviceIdentity {
         self.identity.clone()
@@ -482,12 +524,30 @@ impl Device for IdentifiedDevice {
                 "identity_location".into(),
                 match location {
                     LocationKey::HidPath(path) => format!("hid:{path}"),
+                    LocationKey::UsbPort {
+                        bus,
+                        port_path,
+                        interface,
+                    } => format!(
+                        "usb:{bus}-{}:if{interface}",
+                        port_path
+                            .iter()
+                            .map(u8::to_string)
+                            .collect::<Vec<_>>()
+                            .join(".")
+                    ),
+                    LocationKey::Smbus { bus, address } => {
+                        format!("smbus:i2c-{bus}@0x{address:02x}")
+                    }
                     LocationKey::Opaque(value) => format!("opaque:{value}"),
                 },
             ));
         }
         if let Some((vid, pid)) = self.identity.usb {
             fields.push(("identity_usb".into(), format!("{vid:04x}:{pid:04x}")));
+        }
+        if let Some(address) = self.identity.usb_address {
+            fields.push(("identity_usb_address".into(), address.to_string()));
         }
         if let Some(scope) = &self.identity.scope {
             fields.push((
@@ -505,7 +565,7 @@ impl Device for IdentifiedDevice {
         fields.push((
             "identity_origin".into(),
             match &self.origin {
-                DeviceOrigin::Native => "native".into(),
+                DeviceOrigin::Builtin => "builtin".into(),
                 DeviceOrigin::Plugin(id) => format!("plugin:{id}"),
                 DeviceOrigin::Integration(id) => format!("integration:{id}"),
             },
@@ -517,9 +577,6 @@ impl Device for IdentifiedDevice {
     }
     fn write_rate_status(&self) -> Option<halod_shared::types::WriteRateStatus> {
         self.inner.write_rate_status()
-    }
-    fn as_post_register_hook(&self) -> Option<&dyn PostRegisterHook> {
-        self.inner.as_post_register_hook()
     }
 }
 
@@ -534,8 +591,9 @@ mod tests {
                 serial: normalize_serial(serial),
                 location: location_from_openrgb(location),
                 usb: None,
+                usb_address: None,
             },
-            origin: DeviceOrigin::Native,
+            origin: DeviceOrigin::Builtin,
             connected: true,
             active_state: VisibilityState::Visible,
             integration_root: false,
@@ -562,5 +620,101 @@ mod tests {
         let found = detect_conflicts(&entries);
         assert!(found[0].is_none());
         assert!(found[2].is_none());
+    }
+
+    fn smbus_identity(bus: u8, address: u8) -> DeviceIdentity {
+        DeviceIdentity {
+            scope: Some(IdentityScope::Local),
+            location: Some(LocationKey::Smbus { bus, address }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn smbus_location_confirms_the_same_hardware_across_sources() {
+        // Same (bus, address) is the same physical device, confirmed even across
+        // differing origins — unlike an opaque location, which requires a
+        // matching non-builtin origin.
+        assert_eq!(
+            compare(
+                &smbus_identity(1, 0x70),
+                &DeviceOrigin::Plugin("ene_smbus".into()),
+                &smbus_identity(1, 0x70),
+                &DeviceOrigin::Integration("openrgb".into()),
+            ),
+            MatchEvidence::ConfirmedLocation
+        );
+        // A different address (or bus) is a different device.
+        assert_eq!(
+            compare(
+                &smbus_identity(1, 0x70),
+                &DeviceOrigin::Builtin,
+                &smbus_identity(1, 0x71),
+                &DeviceOrigin::Builtin,
+            ),
+            MatchEvidence::None
+        );
+    }
+
+    #[test]
+    fn smbus_duplicates_across_sources_form_a_conflict_group() {
+        let smbus_entry = |id: &str, origin| ConflictEntry {
+            id: id.into(),
+            identity: smbus_identity(1, 0x70),
+            origin,
+            connected: true,
+            active_state: VisibilityState::Visible,
+            integration_root: false,
+        };
+        let entries = vec![
+            smbus_entry("ene_smbus-addr70", DeviceOrigin::Plugin("ene_smbus".into())),
+            smbus_entry(
+                "openrgb-ctrl_0",
+                DeviceOrigin::Integration("openrgb".into()),
+            ),
+        ];
+        let found = detect_conflicts(&entries);
+        assert_eq!(
+            found[0].as_ref().unwrap().peer_ids,
+            vec!["openrgb-ctrl_0".to_string()]
+        );
+        assert_eq!(
+            found[1].as_ref().unwrap().peer_ids,
+            vec!["ene_smbus-addr70".to_string()]
+        );
+    }
+
+    #[test]
+    fn usb_identity_is_stable_across_address_changes_and_distinct_by_port() {
+        let a = identity_from_handle(&DiscoveryHandle::UsbNonHid {
+            vid: 0x1234,
+            pid: 0x5678,
+            bus: 1,
+            address: 4,
+            port_path: &[2, 3],
+            serial: None,
+            interface_number: 1,
+        });
+        let moved = identity_from_handle(&DiscoveryHandle::UsbNonHid {
+            vid: 0x1234,
+            pid: 0x5678,
+            bus: 1,
+            address: 9,
+            port_path: &[2, 3],
+            serial: None,
+            interface_number: 1,
+        });
+        let other = identity_from_handle(&DiscoveryHandle::UsbNonHid {
+            vid: 0x1234,
+            pid: 0x5678,
+            bus: 1,
+            address: 5,
+            port_path: &[2, 4],
+            serial: None,
+            interface_number: 1,
+        });
+        assert_eq!(a.location, moved.location);
+        assert_ne!(a.usb_address, moved.usb_address);
+        assert_ne!(a.location, other.location);
     }
 }

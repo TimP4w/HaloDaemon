@@ -124,7 +124,7 @@ impl AppState {
                     }
                     // Visibility is authoritative in config, not on the device:
                     // overlay it here so every sensor source (device-native,
-                    // synthesized fan, PawnIO CPU/superio) hides uniformly.
+                    // synthesized fan and plugin-owned hardware hide uniformly.
                     DeviceCapability::Sensors(sensors) => {
                         for s in sensors {
                             if let Some(state) = cfg.sensor_visibility.get(&s.id) {
@@ -178,7 +178,7 @@ mod tests {
         use crate::registry::identity::{DeviceIdentity, DeviceOrigin, IdentifiedDevice};
         let app = Arc::new(AppState::new(Config::default()));
         for (id, origin) in [
-            ("native", DeviceOrigin::Native),
+            ("builtin", DeviceOrigin::Builtin),
             ("openrgb", DeviceOrigin::Integration("openrgb".into())),
         ] {
             let identity = DeviceIdentity {
@@ -195,12 +195,12 @@ mod tests {
         }
         let cfg = app.config.read().await.clone();
         let snapshot = app.snapshot_devices(&cfg).await;
-        let native = snapshot.devices.iter().find(|d| d.id == "native").unwrap();
+        let builtin = snapshot.devices.iter().find(|d| d.id == "builtin").unwrap();
         let openrgb = snapshot.devices.iter().find(|d| d.id == "openrgb").unwrap();
-        assert_eq!(native.conflict.as_ref().unwrap().recommended_id, "native");
-        assert_eq!(openrgb.conflict.as_ref().unwrap().recommended_id, "native");
+        assert_eq!(builtin.conflict.as_ref().unwrap().recommended_id, "builtin");
+        assert_eq!(openrgb.conflict.as_ref().unwrap().recommended_id, "builtin");
         assert_eq!(
-            native.conflict.as_ref().unwrap().confidence,
+            builtin.conflict.as_ref().unwrap().confidence,
             halod_shared::types::ConflictConfidence::Confirmed
         );
     }
@@ -250,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn serialize_applies_saved_visibility_to_device_native_sensors() {
-        // Device-native SensorCapability sensors (e.g. PawnIO CPU/superio) report
+        // Device SensorCapability sensors report
         // Visible from get_sensors; the config overlay must hide them at snapshot.
         use halod_shared::types::{Sensor, SensorType, SensorUnit, VisibilityState};
         let mut cfg = Config::default();

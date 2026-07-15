@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::collections::VecDeque;
+#[cfg(feature = "dev-plugin-repo")]
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 
 use crate::config::Config;
 use crate::ipc::ClientHandle;
 use crate::registry::discovery::{DiscoveryScope, PendingRediscovery};
-use halod_shared::types::{DiscoveryStatus, LogEntry};
+use halod_shared::types::DiscoveryStatus;
 
 mod persistence;
 mod workers;
@@ -31,6 +32,11 @@ pub struct AppState {
     /// transport scanners run concurrently, so checking only `devices` leaves
     /// a window where the same physical device can be initialized twice.
     pub device_registrations: Mutex<std::collections::HashSet<String>>,
+    /// Dynamically discovered child ids owned by each controller. Stable child
+    /// ids need not share their root's prefix, so prefix matching alone cannot
+    /// remove them during a plugin reload.
+    pub device_children:
+        Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>,
 
     // --- Domains ---
     pub discovery: Mutex<DiscoveryStatus>,
@@ -48,9 +54,11 @@ pub struct AppState {
     /// different devices run concurrently, so one slow/timing-out device can't
     /// stall the whole IPC command stream.
     pub device_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+    /// Coalesces full IPC snapshots. Periodic ticks and command-triggered
+    /// broadcasts can otherwise serialize the same plugin devices concurrently,
+    /// filling their single-threaded worker queues ahead of interactive writes.
+    pub ipc_broadcast_lock: Mutex<()>,
     pub clients: Mutex<Vec<ClientHandle>>,
-    /// Ring-buffer of recent log entries written by the custom logger.
-    pub log_buffer: Arc<std::sync::Mutex<VecDeque<LogEntry>>>,
     /// Flipped to `true` once every domain's engine has been set
     pub engines_ready: watch::Sender<bool>,
     /// Notified to request a graceful daemon shutdown (e.g. an IPC `shutdown`
@@ -68,6 +76,11 @@ pub struct AppState {
     /// The device-plugin registry (loaded manifests, consent/config, notice
     /// dedup, load warnings).
     pub registry: crate::drivers::plugins::Registry,
+    #[cfg(feature = "dev-plugin-repo")]
+    /// Process-local development repository selected with `--dev-plugin-repo`.
+    /// Registry rebuilds must retain this priority source rather than falling
+    /// back to the managed official checkout.
+    pub development_plugin_repo: RwLock<Option<PathBuf>>,
     /// Backing store for plugin-declared secret config values.
     pub secret_store: Arc<dyn crate::secrets::SecretStore>,
 }
@@ -78,6 +91,7 @@ impl AppState {
             config: RwLock::new(cfg),
             devices: RwLock::new(Vec::new()),
             device_registrations: Mutex::new(std::collections::HashSet::new()),
+            device_children: Mutex::new(std::collections::HashMap::new()),
             discovery: Mutex::new(DiscoveryStatus::default()),
             hid: HidTracking::new(),
             lighting: LightingState::default(),
@@ -87,10 +101,8 @@ impl AppState {
             input: InputState::new(),
             persistence: Persistence::new(),
             device_locks: Mutex::new(std::collections::HashMap::new()),
+            ipc_broadcast_lock: Mutex::new(()),
             clients: Mutex::new(Vec::new()),
-            log_buffer: Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(
-                crate::logger::BUFFER_CAP,
-            ))),
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
             discovery_scope: RwLock::new(DiscoveryScope::Clean),
@@ -98,6 +110,8 @@ impl AppState {
             rediscovery_runner: Mutex::new(()),
             plugin_update_status: Mutex::new(Vec::new()),
             registry: crate::drivers::plugins::Registry::default(),
+            #[cfg(feature = "dev-plugin-repo")]
+            development_plugin_repo: RwLock::new(None),
             secret_store: Arc::new(crate::secrets::FileKeyStore::new()),
         }
     }
@@ -137,17 +151,6 @@ impl AppState {
     /// IPC layer out of the driver layer.
     pub async fn broadcast_state(self: &Arc<Self>) {
         crate::ipc::broadcast_state(self).await;
-    }
-
-    /// Last `n` log entries from the ring buffer (empty if the lock is poisoned).
-    pub fn recent_logs(&self, n: usize) -> Vec<LogEntry> {
-        self.log_buffer
-            .lock()
-            .map(|buf| {
-                let skip = buf.len().saturating_sub(n);
-                buf.iter().skip(skip).cloned().collect()
-            })
-            .unwrap_or_default()
     }
 
     pub async fn set_discovery_scope(&self, scope: DiscoveryScope) {
@@ -346,27 +349,6 @@ mod tests {
     }
 
     #[test]
-    fn recent_logs_truncates_to_n_most_recent() {
-        let app = make_test_app();
-        {
-            let mut buf = app.log_buffer.lock().unwrap();
-            for i in 0..5 {
-                buf.push_back(LogEntry {
-                    level: "INFO".to_string(),
-                    target: String::new(),
-                    message: format!("entry {i}"),
-                    timestamp_ms: 0,
-                });
-            }
-        }
-
-        let logs = app.recent_logs(2);
-        assert_eq!(logs.len(), 2);
-        assert_eq!(logs[0].message, "entry 3");
-        assert_eq!(logs[1].message, "entry 4");
-    }
-
-    #[test]
     fn canvas_and_lcd_fps_are_clamped_to_1_240() {
         use crate::config::{LcdConfig, RgbConfig};
 
@@ -481,10 +463,15 @@ mod tests {
         // Clean — every handle passes.
         assert!(app.handle_in_scope(&handle).await);
 
-        let spec = serde_json::from_value(serde_json::json!({
-            "vendor": "x", "model": "y", "transport": "hid", "vid": 9, "pid": 9,
-        }))
-        .unwrap();
+        let mut spec: crate::drivers::plugins::DeviceSpec =
+            serde_json::from_value(serde_json::json!({
+            "vendor": "x", "model": "y",
+            "match": { "hid": { "vid": 9, "pid": 9 } }
+            }))
+            .unwrap();
+        spec.transport = "hid".to_owned();
+        spec.vid = Some(9);
+        spec.pid = Some(9);
         app.set_discovery_scope(DiscoveryScope::PluginSet {
             plugin_ids: ["p".to_string()].into_iter().collect(),
             filter: Arc::new(DiscoveryFilter { specs: vec![spec] }),

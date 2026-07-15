@@ -11,7 +11,7 @@
 use mlua::{Lua, UserData, UserDataMethods};
 
 /// Upper bound on any single plugin-driven native allocation (`halod.buffer`,
-/// `transport:control_read`, image-codec output). `set_memory_limit` only tracks
+/// `transport:usb_read`/`usb_control`, image-codec output). `set_memory_limit` only tracks
 /// Lua's own allocator, so an unbounded `vec![0u8; n]` from a Lua-supplied length
 /// would OOM/abort the (root) daemon; this caps every such allocation. Shares the
 /// plugin-VM heap ceiling so the two never drift — see [`super::PLUGIN_VM_MEMORY_BYTES`].
@@ -66,7 +66,12 @@ impl ByteBuf {
 pub fn register(lua: &Lua) -> mlua::Result<()> {
     let halod = lua.create_table()?;
     let buffer = lua.create_function(|_, arg: mlua::Value| match arg {
-        mlua::Value::Integer(n) if n >= 0 => Ok(ByteBuf::from_bytes(alloc_zeroed(n as usize)?)),
+        mlua::Value::Integer(n) if n >= 0 => {
+            let n = usize::try_from(n).map_err(|_| {
+                mlua::Error::RuntimeError("halod.buffer length does not fit this platform".into())
+            })?;
+            Ok(ByteBuf::from_bytes(alloc_zeroed(n)?))
+        }
         mlua::Value::String(s) => Ok(ByteBuf::from_bytes(s.as_bytes().to_vec())),
         _ => Err(mlua::Error::RuntimeError(
             "halod.buffer expects a non-negative length or a string".into(),

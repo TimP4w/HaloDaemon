@@ -6,4 +6,5 @@
 pub mod device;
 pub mod device_tabs;
 pub mod notifications;
+pub mod plugin_issues;
 pub mod sensors;

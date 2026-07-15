@@ -3,13 +3,11 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use halod_shared::types::{
-    Animation, ButtonDescriptor, ButtonMapping, ChoiceDisplay, ChoiceOption, DeviceType,
-    EffectParamDescriptor, EffectParamValue, NativeEffect, ParamKind, Permission,
-    PluginConfigFieldKind, PluginKind, RangeDisplay, RgbDescriptor, RgbZone, ZoneTopology,
+    Animation, ChoiceDisplay, ChoiceOption, DeviceType, EffectParamDescriptor, EffectParamValue,
+    ParamKind, Permission, PluginConfigFieldKind, PluginKind, RangeDisplay, RgbDescriptor, RgbZone,
+    ZoneTopology,
 };
-#[cfg(test)]
-use mlua::{DeserializeOptions, LuaSerdeExt};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -36,6 +34,17 @@ pub struct HidConfig {
     pub timeout_ms: i32,
     #[serde(default)]
     pub feature_report: bool,
+    /// Optional second HID collection belonging to the same physical device.
+    /// Reports whose IDs are listed here are written through that collection;
+    /// reads from both collections are exposed as one logical HID stream.
+    #[serde(default)]
+    pub companion: Option<HidCompanionConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HidCompanionConfig {
+    pub usage_page: u16,
+    pub usage: u16,
 }
 
 impl Default for HidConfig {
@@ -44,6 +53,7 @@ impl Default for HidConfig {
             report_size: default_report_size(),
             timeout_ms: default_timeout_ms(),
             feature_report: false,
+            companion: None,
         }
     }
 }
@@ -89,29 +99,107 @@ impl Default for TcpConfig {
     }
 }
 
-/// A secondary USB vendor-control device a plugin bundles alongside its matched
-/// device, so several physical chips present as one merged device. Opened by
-/// VID/PID and reached from Lua by `id` (the matched device is the unnamed
-/// primary endpoint).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsbTransferType {
+    Bulk,
+    Interrupt,
+}
+
+fn default_usb_transfer_size() -> usize {
+    1024 * 1024
+}
+fn default_usb_timeout_ms() -> u64 {
+    10_000
+}
+
+/// One endpoint a plugin may use. The address includes the USB direction bit;
+/// undeclared endpoint addresses are never exposed to Lua.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsbControlEndpoint {
+#[serde(deny_unknown_fields)]
+pub struct UsbEndpointConfig {
+    pub address: u8,
+    #[serde(rename = "type")]
+    pub transfer_type: UsbTransferType,
+    #[serde(default = "default_usb_transfer_size")]
+    pub max_transfer_size: usize,
+    #[serde(default = "default_usb_timeout_ms")]
+    pub max_timeout_ms: u64,
+}
+
+/// Opt-in policy for endpoint-zero transfers on one named USB device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbControlConfig {
+    #[serde(default = "default_usb_transfer_size")]
+    pub max_transfer_size: usize,
+    #[serde(default = "default_usb_timeout_ms")]
+    pub max_timeout_ms: u64,
+}
+
+/// A named physical USB device. `primary` inherits VID/PID and physical
+/// identity from discovery; companion devices declare their own VID/PID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbDeviceConfig {
     pub id: String,
+    #[serde(default)]
+    pub vid: Option<u16>,
+    #[serde(default)]
+    pub pid: Option<u16>,
+    #[serde(default)]
+    pub interface: Option<u8>,
+    #[serde(default)]
+    pub alternate_setting: Option<u8>,
+    #[serde(default)]
+    pub endpoints: Vec<UsbEndpointConfig>,
+    #[serde(default)]
+    pub control: Option<UsbControlConfig>,
+}
+
+/// General endpoint-oriented USB authority attached to either a USB-primary
+/// worker or a composite device whose primary stream remains HID.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbConfig {
+    #[serde(default)]
+    pub devices: Vec<UsbDeviceConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbMatch {
     pub vid: u16,
     pub pid: u16,
     #[serde(default)]
     pub interface: u8,
 }
 
-/// USB vendor-control transport parameters. `interface` claims the matched
-/// device's interface; `endpoints` lists any extra control devices the plugin
-/// drives (the DDC controller + Ambiglow LED controller of one monitor, say).
+/// Executables a command plugin may launch. Names are deliberately bare
+/// program names: a path, shell fragment, or argument belongs to runtime data
+/// and is rejected before a process is spawned.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct UsbControlConfig {
+pub struct CommandConfig {
     #[serde(default)]
-    pub interface: u8,
-    #[serde(default)]
-    pub endpoints: Vec<UsbControlEndpoint>,
+    pub commands: Vec<String>,
 }
+
+/// AMD SMN is deliberately read-only.  Keeping an explicit transport section
+/// makes the authority visible in the manifest just like the other privileged
+/// transports, while leaving room for future, narrowly-scoped options.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AmdSmnConfig {}
+
+/// LPCIO exposes typed PawnIO operations only; plugins never receive a raw
+/// driver handle.  The empty configuration is still significant: it records
+/// that the package asks to use this privileged transport.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LpcioConfig {}
+
+/// Linux hwmon is a host-enumerated integration transport. Its empty config is
+/// still part of the package's declared authority.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HwmonConfig {}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransportsConfig {
@@ -120,56 +208,40 @@ pub struct TransportsConfig {
     #[serde(default)]
     pub tcp: Option<TcpConfig>,
     #[serde(default)]
-    pub usb_control: Option<UsbControlConfig>,
+    pub usb: Option<UsbConfig>,
+    #[serde(default)]
+    pub command: Option<CommandConfig>,
+    #[serde(default)]
+    pub hwmon: Option<HwmonConfig>,
+    #[serde(default)]
+    pub amd_smn: Option<AmdSmnConfig>,
+    #[serde(default)]
+    pub lpcio: Option<LpcioConfig>,
 }
 
 impl TransportsConfig {
     fn is_empty(&self) -> bool {
-        self.hid.is_none() && self.tcp.is_none() && self.usb_control.is_none()
+        self.hid.is_none()
+            && self.tcp.is_none()
+            && self.usb.is_none()
+            && self.command.is_none()
+            && self.hwmon.is_none()
+            && self.amd_smn.is_none()
+            && self.lpcio.is_none()
     }
-}
 
-/// RGB capability data (zones + native effects). Callbacks (`apply`,
-/// `write_frame`) live as sibling functions the worker reads separately.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RgbManifest {
-    pub zones: Vec<RgbZone>,
-    #[serde(default)]
-    pub native_effects: Vec<NativeEffect>,
-}
-
-/// Fan capability marker (pump/fan channel). Presence enables the capability.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct FanManifest {
-    #[serde(default)]
-    pub channel: u8,
-}
-
-/// Readings come from the `get_sensors` callback.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct SensorManifest {}
-
-/// LCD capability marker. The panel descriptor (resolution, rotations, …) is
-/// reported dynamically by `initialize` (it can vary by device variant), so this
-/// carries only device-wide LCD policy.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct LcdManifest {
-    /// Re-apply the RGB state after an image upload (some panels reset the LEDs).
-    #[serde(default)]
-    pub needs_rgb_restore: bool,
-}
-
-/// DPI capability. The host owns the step-list state machine (clamp/index); the
-/// plugin only writes the chosen value through its `set_dpi(dev, dpi)` callback.
-#[derive(Debug, Clone, Deserialize)]
-pub struct DpiManifest {
-    pub min: u16,
-    pub max: u16,
-    /// Ordered DPI steps the step-cycle walks.
-    pub steps: Vec<u16>,
-    /// `true` = steps live in the device's onboard profile; default host-managed.
-    #[serde(default)]
-    pub onboard: bool,
+    pub fn integration_transport_kind(&self) -> Option<&'static str> {
+        match (
+            self.tcp.is_some(),
+            self.hwmon.is_some(),
+            self.command.is_some(),
+        ) {
+            (true, false, false) => Some("tcp"),
+            (false, true, false) => Some("hwmon"),
+            (false, false, true) => Some("command"),
+            _ => None,
+        }
+    }
 }
 
 /// One choice control the device exposes (e.g. a polling-rate selector).
@@ -185,13 +257,6 @@ pub struct ChoiceDef {
     /// Index selected before the user picks one.
     #[serde(default)]
     pub default: usize,
-}
-
-/// Choice capability: a set of discrete selectors. The host caches the selection
-/// and calls `set_choice(dev, key, selected)` to apply it.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ChoiceManifest {
-    pub choices: Vec<ChoiceDef>,
 }
 
 /// One user-editable setting a plugin declares (e.g. a server IP/port). Shown by
@@ -253,13 +318,6 @@ fn default_range_step() -> i32 {
     1
 }
 
-/// Range capability: a set of integer controls. The host caches the current
-/// value and calls `set_range(dev, key, value)` to apply it.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RangeManifest {
-    pub ranges: Vec<RangeDef>,
-}
-
 /// One boolean toggle control.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BooleanDef {
@@ -271,15 +329,6 @@ pub struct BooleanDef {
     pub category: String,
 }
 
-/// Boolean capability: a set of toggles. The plugin's `get_booleans(dev)`
-/// reports current values (readable state may be live, unlike range/choice);
-/// `set_boolean(dev, key, value)` applies a write.
-#[derive(Debug, Clone, Deserialize)]
-pub struct BooleanManifest {
-    #[serde(default)]
-    pub booleans: Vec<BooleanDef>,
-}
-
 /// One fire-and-forget action (button).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ActionDef {
@@ -287,52 +336,6 @@ pub struct ActionDef {
     pub label: String,
     #[serde(default)]
     pub category: String,
-}
-
-/// Action capability: a set of triggerable buttons, applied via
-/// `trigger_action(dev, key)`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActionManifest {
-    #[serde(default)]
-    pub actions: Vec<ActionDef>,
-}
-
-/// Readings come from the `get_batteries` callback.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct BatteryManifest {}
-
-/// State comes from the `connection_status` callback.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ConnectionManifest {}
-
-/// State comes from the `get_equalizer` callback.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct EqualizerManifest {}
-
-/// State comes from the `pairing_status` callback. Unpairing a slot does not
-/// (yet) remove a live child `Device` from the registry — wiring paired slots
-/// to owned children is a follow-up once a plugin needs it.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct PairingManifest {}
-
-/// State comes from the `onboard_profiles_status` callback.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct OnboardProfilesManifest {}
-
-/// Key-remap capability: the device's remappable buttons + policy, declared
-/// statically since they're fixed hardware. Cached mappings are host-owned;
-/// writes go through `set_button_mapping`/`reset_button_mapping`.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct KeyRemapManifest {
-    pub buttons: Vec<ButtonDescriptor>,
-    /// True when remapping only takes effect in the device's host mode (as for
-    /// Logitech HID++); the GUI shows a "requires host mode" notice.
-    #[serde(default)]
-    pub requires_host_mode: bool,
-    /// Out-of-the-box mappings, seeded on first run and restored by the reset
-    /// callbacks.
-    #[serde(default)]
-    pub default_mappings: Vec<ButtonMapping>,
 }
 
 /// Which RGB engine pass a declared effect plugs into.
@@ -392,14 +395,6 @@ fn default_topology() -> String {
     "ring".to_owned()
 }
 
-/// One chainable output channel the parent exposes (e.g. an ARGB/accessory port).
-#[derive(Debug, Clone, Deserialize)]
-pub struct ChannelManifest {
-    pub id: String,
-    pub name: String,
-    pub max_leds: u32,
-}
-
 /// A recognizable accessory that can attach to a channel. `detect_accessories`
 /// returns ids; the host looks them up here to build the child device.
 #[derive(Debug, Clone, Deserialize)]
@@ -450,30 +445,6 @@ impl AccessoryManifest {
     }
 }
 
-/// Chainable-children capability: the parent hosts child accessories on one or
-/// more channels. Requires `detect_accessories` + `write_ext_frame` (and, for
-/// accessories with fans, the fan-hub callbacks).
-#[derive(Debug, Clone, Deserialize)]
-pub struct ChainManifest {
-    pub channels: Vec<ChannelManifest>,
-    #[serde(default)]
-    pub accessories: Vec<AccessoryManifest>,
-}
-
-fn default_poll_interval_ms() -> u64 {
-    1000
-}
-
-/// Background polling. The host runs the loop on the declared interval and calls
-/// the plugin's `read_status(dev)` callback; the returned table is stored as
-/// `dev.status` for other callbacks (sensors/fan) to read without hitting
-/// hardware on every call.
-#[derive(Debug, Clone, Deserialize)]
-pub struct PollManifest {
-    #[serde(default = "default_poll_interval_ms")]
-    pub interval_ms: u64,
-}
-
 /// How the SMBus scanner probes a declared address before emitting a handle.
 /// Openness knob: some controllers NAK a quick-write but answer a read, and a
 /// few must not be probed at all (detection is left entirely to `initialize`).
@@ -491,6 +462,7 @@ pub enum ProbeMode {
 
 /// Declarative device match + per-device identity (`None` match fields mean "don't care").
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceSpec {
     /// Required (validated non-empty in `validate_manifest`).
     #[serde(default)]
@@ -501,18 +473,144 @@ pub struct DeviceSpec {
     /// Display-name override; defaults to `model`.
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "type")]
     pub device_type: Option<DeviceType>,
 
+    #[serde(skip)]
     pub transport: String,
+    /// Nested transport matcher. It is normalized into the runtime matcher
+    /// fields while worker interfaces are being replaced.
+    #[serde(default, rename = "match")]
+    pub r#match: DeviceMatch,
 
     // ── HID ──────────────────────────────────────────────────────────────
+    #[serde(skip)]
+    pub vid: Option<u16>,
+    #[serde(skip)]
+    pub pid: Option<u16>,
+    /// Match any of several product ids (for device families). Takes precedence
+    /// over `pid` when non-empty.
+    #[serde(skip)]
+    pub pids: Vec<u16>,
+    #[serde(skip)]
+    pub usage_page: Option<u16>,
+    #[serde(skip)]
+    pub usage: Option<u16>,
+    #[serde(skip)]
+    pub interface: Option<i32>,
+    #[serde(skip)]
+    pub generic_hid: bool,
+
+    // ── SMBus (match + scan declaration in one) ──────────────────────────
+    /// Bus family to scan/match: "chipset" or "gpu".
+    #[serde(skip)]
+    pub bus: Option<String>,
+    /// Addresses the host may probe on the bus (the security boundary).
+    #[serde(skip)]
+    pub addresses: Option<Vec<u8>>,
+    /// Extra addresses `pre_scan` may write beyond `addresses` (e.g. an ENE
+    /// DRAM broadcast address). Never probed or matched — only in `pre_scan`.
+    #[serde(skip)]
+    pub extra_addresses: Option<Vec<u8>>,
+    /// Bus write-rate ceiling applied before any scan traffic.
+    #[serde(skip)]
+    pub max_bytes_per_sec: Option<u32>,
+    /// Run the plugin's `pre_scan` callback on each matching bus before probing.
+    #[serde(skip)]
+    pub pre_scan: bool,
+    #[serde(skip)]
+    pub probe: ProbeMode,
+    /// PCI-identity gate for GPU buses. Each entry is a `{ vendor, device,
+    /// sub_vendor, sub_device, confirmed }` tuple (unset fields are wildcards).
+    /// A `bus = "gpu"` spec MUST declare at least one; chipset specs leave it
+    /// empty. See [`PciMatch`] and the smbus backend's `validate`.
+    #[serde(skip)]
+    pub pci_match: Vec<PciMatch>,
+}
+
+/// Device matcher. A device declares exactly one transport key; unknown
+/// transport matchers are rejected during normalization instead of being
+/// ignored by serde and accidentally becoming broad matches.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceMatch {
+    #[serde(default)]
+    pub hid: Option<HidMatch>,
+    #[serde(default)]
+    pub usb: Option<UsbMatch>,
+    #[serde(default)]
+    pub smbus: Option<SmbusMatch>,
+    #[serde(default)]
+    pub command: Option<CommandMatch>,
+    #[serde(default)]
+    pub amd_smn: Option<AmdSmnMatch>,
+    #[serde(default)]
+    pub lpcio: Option<LpcioMatch>,
+}
+
+/// A command-backed device is identified by the exact executable that reports
+/// it. The executable must also appear in `transports.command.commands`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CommandMatch {
+    Name(String),
+    Detail { command: String },
+}
+
+impl CommandMatch {
+    pub(crate) fn command(&self) -> &str {
+        match self {
+            Self::Name(command) | Self::Detail { command } => command,
+        }
+    }
+}
+
+/// AMD SMN is intentionally a generic family probe. Concrete CPU families are
+/// validated from the runtime descriptors returned after a scoped read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmdSmnMatch {
+    #[serde(default)]
+    pub any: bool,
+}
+
+/// LPCIO matching requires concrete chip identifiers unless a package
+/// deliberately declares a generic catch-all.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LpcioMatch {
+    #[serde(default)]
+    pub any: bool,
+    #[serde(default)]
+    pub chip_ids: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmbusMatch {
+    pub bus: String,
+    pub addresses: Vec<u8>,
+    #[serde(default)]
+    pub extra_addresses: Vec<u8>,
+    #[serde(default)]
+    pub max_bytes_per_sec: Option<u32>,
+    #[serde(default)]
+    pub pre_scan: bool,
+    #[serde(default)]
+    pub probe: ProbeMode,
+    #[serde(default)]
+    pub pci_match: Vec<PciMatch>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HidMatch {
+    #[serde(default)]
+    pub any: bool,
     #[serde(default)]
     pub vid: Option<u16>,
     #[serde(default)]
     pub pid: Option<u16>,
-    /// Match any of several product ids (for device families). Takes precedence
-    /// over `pid` when non-empty.
     #[serde(default)]
     pub pids: Vec<u16>,
     #[serde(default)]
@@ -521,49 +619,22 @@ pub struct DeviceSpec {
     pub usage: Option<u16>,
     #[serde(default)]
     pub interface: Option<i32>,
-
-    // ── SMBus (match + scan declaration in one) ──────────────────────────
-    /// Bus family to scan/match: "chipset" or "gpu".
-    #[serde(default)]
-    pub bus: Option<String>,
-    /// Addresses the host may probe on the bus (the security boundary).
-    #[serde(default)]
-    pub addresses: Option<Vec<u8>>,
-    /// Extra addresses `pre_scan` may write beyond `addresses` (e.g. an ENE
-    /// DRAM broadcast address). Never probed or matched — only in `pre_scan`.
-    #[serde(default)]
-    pub extra_addresses: Option<Vec<u8>>,
-    /// Bus write-rate ceiling applied before any scan traffic.
+    /// Per-device HID write ceiling.  This belongs beside the HID identity so
+    /// packages can preserve protocol-specific pacing (for example G560's
+    /// 1500 B/s vendor-report limit) without granting a global transport rate.
     #[serde(default)]
     pub max_bytes_per_sec: Option<u32>,
-    /// Run the plugin's `pre_scan` callback on each matching bus before probing.
-    #[serde(default)]
-    pub pre_scan: bool,
-    #[serde(default)]
-    pub probe: ProbeMode,
-    /// PCI-identity gate for GPU buses. Each entry is a `{ vendor, device,
-    /// sub_vendor, sub_device, confirmed }` tuple (unset fields are wildcards).
-    /// A `bus = "gpu"` spec MUST declare at least one; chipset specs leave it
-    /// empty. See [`PciMatch`] and the smbus backend's `validate`.
-    #[serde(default)]
-    pub pci_match: Vec<PciMatch>,
 }
 
-/// Deserialize `devices` as either a single device table or an array of them.
-fn de_device_specs<'de, D>(deserializer: D) -> Result<Vec<DeviceSpec>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum OneOrMany {
-        One(Box<DeviceSpec>),
-        Many(Vec<DeviceSpec>),
+impl DeviceMatch {
+    fn count(&self) -> usize {
+        usize::from(self.hid.is_some())
+            + usize::from(self.usb.is_some())
+            + usize::from(self.smbus.is_some())
+            + usize::from(self.command.is_some())
+            + usize::from(self.amd_smn.is_some())
+            + usize::from(self.lpcio.is_some())
     }
-    Ok(match OneOrMany::deserialize(deserializer)? {
-        OneOrMany::One(m) => vec![*m],
-        OneOrMany::Many(v) => v,
-    })
 }
 
 impl DeviceSpec {
@@ -597,43 +668,6 @@ pub struct EffectAssetRef {
     pub thumbnail: String,
 }
 
-/// Host compatibility declared by every directory plugin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginCompatibility {
-    /// SemVer requirement matched against the HaloDaemon package version.
-    pub halod: String,
-    /// Exact generation of the Lua plugin API expected by this plugin.
-    pub plugin_api: u32,
-}
-
-/// Lua/plugin manifest API implemented by this daemon build.
-pub const PLUGIN_API_VERSION: u32 = 1;
-
-impl PluginCompatibility {
-    /// Reject malformed requirements and hosts that cannot safely run the plugin.
-    pub fn ensure_supported(&self) -> Result<()> {
-        let requirement = semver::VersionReq::parse(&self.halod)
-            .with_context(|| format!("invalid HaloDaemon version requirement '{}'", self.halod))?;
-        let daemon_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
-            .context("parsing this HaloDaemon build's version")?;
-        if !requirement.matches(&daemon_version) {
-            bail!(
-                "requires HaloDaemon '{}', but this daemon is {}",
-                self.halod,
-                daemon_version
-            );
-        }
-        if self.plugin_api != PLUGIN_API_VERSION {
-            bail!(
-                "requires plugin API {}, but this daemon provides plugin API {}",
-                self.plugin_api,
-                PLUGIN_API_VERSION
-            );
-        }
-        Ok(())
-    }
-}
-
 /// Plugin-level metadata only — vendor/model live on each [`DeviceSpec`] instead.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Identity {
@@ -656,80 +690,43 @@ pub struct Identity {
     pub description: Option<String>,
 }
 
-/// A parsed, validated plugin, built by [`parse_manifest`] or [`parse_manifest_from_dir`].
-#[derive(Debug, Clone, Deserialize)]
+/// A parsed, validated plugin package built from its canonical directory
+/// catalog. The inline-Lua helper exists only for isolated runtime tests.
+#[derive(Debug, Clone)]
 pub struct PluginManifest {
-    /// Unique per plugin: the directory name, or the script file stem for a built-in.
-    #[serde(skip)]
+    /// Unique package id, equal to its directory name for external packages.
     pub plugin_id: String,
-    #[serde(skip)]
     pub source_path: PathBuf,
     /// Full entry-script text, re-executed by the worker to build its own VM.
-    #[serde(skip)]
     pub script_source: String,
-    /// Directory a plugin was loaded from; empty for a built-in / single-file import.
-    #[serde(skip)]
+    /// Package-local Lua modules indexed from `lib/**/*.lua`, keyed by dotted
+    /// module name (for example `lib.hidpp.v1`). Sources are read before the VM
+    /// starts, so module loading never performs runtime filesystem access.
+    pub module_sources: std::collections::BTreeMap<String, String>,
+    /// Directory a plugin package was loaded from; empty only for an internal
+    /// test fixture.
     pub plugin_dir: PathBuf,
-    /// Raw bytes of `plugin.yaml`, folded into [`Self::content_hash`]; empty otherwise.
-    #[serde(skip)]
-    pub manifest_bytes: Vec<u8>,
-    /// Required for directory plugins; built-in test manifests have no package metadata.
-    #[serde(skip)]
-    pub compatibility: Option<PluginCompatibility>,
-    #[serde(rename = "devices", default, deserialize_with = "de_device_specs")]
     pub devices: Vec<DeviceSpec>,
-    #[serde(default)]
     pub identity: Identity,
     /// Display-only logo asset; directory plugins only, empty for a built-in.
-    #[serde(skip)]
     pub logo: Option<String>,
     /// Per-effect thumbnails; directory plugins only, empty for a built-in.
-    #[serde(skip)]
     pub effect_thumbnails: Vec<EffectAssetRef>,
-    #[serde(rename = "type", default)]
     pub plugin_type: PluginKind,
-    #[serde(default)]
+    /// Opt in to runtime child devices returned by `enumerate_controllers`.
+    pub dynamic_children: bool,
     pub effects: Vec<EffectManifest>,
-    #[serde(default)]
     pub transports: TransportsConfig,
-    #[serde(default)]
-    pub rgb: Option<RgbManifest>,
-    #[serde(default)]
-    pub fan: Option<FanManifest>,
-    #[serde(default)]
-    pub sensor: Option<SensorManifest>,
-    #[serde(default)]
-    pub lcd: Option<LcdManifest>,
-    #[serde(default)]
-    pub dpi: Option<DpiManifest>,
-    #[serde(default)]
-    pub choice: Option<ChoiceManifest>,
-    #[serde(default)]
-    pub range: Option<RangeManifest>,
-    #[serde(default)]
-    pub boolean: Option<BooleanManifest>,
-    #[serde(default)]
-    pub action: Option<ActionManifest>,
-    #[serde(default)]
-    pub battery: Option<BatteryManifest>,
-    #[serde(default)]
-    pub connection: Option<ConnectionManifest>,
-    #[serde(default)]
-    pub equalizer: Option<EqualizerManifest>,
-    #[serde(default)]
-    pub pairing: Option<PairingManifest>,
-    #[serde(default)]
-    pub onboard_profiles: Option<OnboardProfilesManifest>,
-    #[serde(default)]
-    pub key_remap: Option<KeyRemapManifest>,
     /// Privileged capabilities this plugin needs, gated by user consent.
-    #[serde(default)]
     pub permissions: Vec<Permission>,
-    #[serde(default)]
-    pub poll: Option<PollManifest>,
-    #[serde(default)]
-    pub chain: Option<ChainManifest>,
-    #[serde(default)]
+    /// Platforms on which this package may execute. An omitted list means all
+    /// platforms, allowing catalog visibility without making platform support
+    /// an implicit runtime failure.
+    pub platforms: Vec<String>,
+    /// The complete capability vocabulary this package may return at runtime.
+    /// Runtime descriptors remain device-specific; this is the inert catalog
+    /// and authority boundary used before Lua is started.
+    pub capabilities: Vec<String>,
     pub config: Option<ConfigManifest>,
 }
 
@@ -738,12 +735,11 @@ pub struct PluginManifest {
 /// directly into [`PluginManifest`] from the same YAML document. The entry Lua
 /// is never evaluated while loading a manifest; it is only read as inert source
 /// for hashing and for a later, consent-gated runtime worker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginMeta {
     /// Required; must equal the plugin's directory name.
     pub id: String,
-    /// Host versions and plugin API generation this package can run against.
-    pub compatibility: Option<PluginCompatibility>,
     #[serde(rename = "type", default)]
     pub plugin_type: PluginKind,
     #[serde(default)]
@@ -756,14 +752,26 @@ pub struct PluginMeta {
     pub license: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub identity: Identity,
     #[serde(default = "default_entry")]
     pub entry: String,
     #[serde(default)]
     pub permissions: Vec<Permission>,
-    #[serde(default, deserialize_with = "de_device_specs")]
+    #[serde(default)]
     pub devices: Vec<DeviceSpec>,
     #[serde(default)]
     pub transports: TransportsConfig,
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub dynamic_children: bool,
+    #[serde(default)]
+    pub effects: Vec<EffectManifest>,
+    #[serde(default)]
+    pub config: Option<ConfigManifest>,
     /// Display-only logo, a bare filename under the plugin's `assets/` directory.
     #[serde(default)]
     pub logo: Option<String>,
@@ -784,11 +792,6 @@ impl PluginManifest {
     /// The first declared device spec that accepts `handle`, if any.
     pub fn device_for(&self, handle: &DiscoveryHandle<'_>) -> Option<&DeviceSpec> {
         self.devices.iter().find(|s| s.matches(handle))
-    }
-
-    /// Hex SHA-256 of `manifest_bytes` + `script_source`; consent is pinned to this.
-    pub fn content_hash(&self) -> String {
-        plugin_content_hash(&self.manifest_bytes, self.script_source.as_bytes())
     }
 
     /// Device specs that request an SMBus scan.
@@ -844,85 +847,28 @@ impl PluginManifest {
             .collect()
     }
 
-    /// The RGB descriptor a matched device advertises, if it has RGB.
-    pub fn rgb_descriptor(&self) -> Option<RgbDescriptor> {
-        self.rgb.as_ref().map(|r| RgbDescriptor {
-            zones: r.zones.clone(),
-            native_effects: r.native_effects.clone(),
-        })
-    }
-
     /// True when the plugin declares any capability that needs a live transport
     /// + worker. Device-only plugins skip the worker.
     pub fn needs_worker(&self) -> bool {
-        // An integration plugin declares no capability section (it isn't a
-        // capability-bearing device itself), but its root always needs a live
-        // transport + Lua worker for `enumerate_controllers`/frame writes.
-        self.plugin_type == PluginKind::Integration
-            || self.rgb.is_some()
-            || self.fan.is_some()
-            || self.sensor.is_some()
-            || self.lcd.is_some()
-            || self.dpi.is_some()
-            || self.choice.is_some()
-            || self.range.is_some()
-            || self.boolean.is_some()
-            || self.action.is_some()
-            || self.battery.is_some()
-            || self.connection.is_some()
-            || self.equalizer.is_some()
-            || self.pairing.is_some()
-            || self.onboard_profiles.is_some()
-            || self.key_remap.is_some()
-            || self.chain.is_some()
+        // An integration root is not itself capability-bearing, but its
+        // manifest still advertises the maximum union its children may expose.
+        // It always needs a worker for enumeration and routed callbacks.
+        self.plugin_type == PluginKind::Integration || !self.capabilities.is_empty()
+    }
+
+    /// Whether this package may execute on the current host. Unsupported
+    /// packages remain catalog-visible but discovery must leave them inert.
+    pub fn supports_current_platform(&self) -> bool {
+        self.platforms.is_empty()
+            || self
+                .platforms
+                .iter()
+                .any(|platform| platform == std::env::consts::OS)
     }
 
     /// Human-readable capability labels for the management UI.
     pub fn capability_labels(&self) -> Vec<String> {
-        let mut labels = Vec::new();
-        if self.rgb.is_some() {
-            labels.push("RGB".to_owned());
-        }
-        if self.fan.is_some() {
-            labels.push("Fan".to_owned());
-        }
-        if self.sensor.is_some() {
-            labels.push("Sensor".to_owned());
-        }
-        if self.lcd.is_some() {
-            labels.push("LCD".to_owned());
-        }
-        if self.dpi.is_some() {
-            labels.push("DPI".to_owned());
-        }
-        if self.choice.is_some() {
-            labels.push("Settings".to_owned());
-        }
-        if self.range.is_some() || self.boolean.is_some() || self.action.is_some() {
-            labels.push("Controls".to_owned());
-        }
-        if self.battery.is_some() {
-            labels.push("Battery".to_owned());
-        }
-        if self.connection.is_some() {
-            labels.push("Connection".to_owned());
-        }
-        if self.equalizer.is_some() {
-            labels.push("Equalizer".to_owned());
-        }
-        if self.pairing.is_some() {
-            labels.push("Pairing".to_owned());
-        }
-        if self.onboard_profiles.is_some() {
-            labels.push("Onboard".to_owned());
-        }
-        if self.key_remap.is_some() {
-            labels.push("Keys".to_owned());
-        }
-        if self.chain.is_some() {
-            labels.push("Accessories".to_owned());
-        }
-        labels
+        self.capabilities.clone()
     }
 
     /// Every user-editable config field this plugin declares (empty if none).
@@ -943,114 +889,9 @@ impl PluginManifest {
     }
 }
 
-/// Hash the two text files that define a plugin package. Git may materialize
-/// LF blobs as CRLF in a Windows working tree, so normalize CRLF before hashing
-/// to keep consent and tamper baselines stable across checkout configurations.
-pub(super) fn plugin_content_hash(manifest: &[u8], script: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-
-    fn update_text(hasher: &mut Sha256, bytes: &[u8]) {
-        let mut start = 0;
-        for (i, pair) in bytes.windows(2).enumerate() {
-            if pair == b"\r\n" {
-                hasher.update(&bytes[start..i]);
-                hasher.update(b"\n");
-                start = i + 2;
-            }
-        }
-        hasher.update(&bytes[start..]);
-    }
-
-    let mut hasher = Sha256::new();
-    update_text(&mut hasher, manifest);
-    update_text(&mut hasher, script);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// Test-only cap for legacy inline-Lua fixtures. Real package manifests are
-/// parsed exclusively from YAML and never create a Lua VM.
-#[cfg(test)]
-const MANIFEST_MEMORY_LIMIT: usize = 8 * 1024 * 1024;
-
-/// Test-only instruction budget for legacy inline-Lua fixtures.
-#[cfg(test)]
-const MANIFEST_INSTRUCTION_BUDGET: u64 = 5_000_000;
-
-/// Test-only timeout for legacy inline-Lua fixtures.
-#[cfg(test)]
-const MANIFEST_EVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Build old inline-Lua unit-test fixtures. No package or production load path
-/// reaches this helper.
-#[cfg(test)]
-fn parse_legacy_lua_fixture_threaded(source: &str) -> Result<PluginManifest> {
-    let source = source.to_owned();
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::Builder::new()
-        .name("halod-manifest-eval".into())
-        .spawn(move || {
-            let _ = tx.send(parse_legacy_lua_fixture_inner(&source));
-        })
-        .map_err(|e| anyhow!("spawning manifest eval thread failed: {e}"))?;
-    match rx.recv_timeout(MANIFEST_EVAL_TIMEOUT) {
-        Ok(res) => res,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            bail!("legacy Lua fixture exceeded its {MANIFEST_EVAL_TIMEOUT:?} deadline")
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            bail!("manifest eval thread died")
-        }
-    }
-}
-
-#[cfg(test)]
-fn parse_legacy_lua_fixture_inner(source: &str) -> Result<PluginManifest> {
-    // Old unit fixtures predate package YAML. Keep them sandboxed and bounded;
-    // no on-disk package or production load path reaches this helper.
-    let (lua, _budget) = super::sandbox::bootstrap_vm(
-        super::sandbox::InjectSurface::StripOnly,
-        MANIFEST_MEMORY_LIMIT,
-        MANIFEST_INSTRUCTION_BUDGET,
-    )
-    .map_err(|e| anyhow!("sandbox setup failed: {e}"))?;
-    let value: mlua::Value = lua
-        .load(source)
-        .eval()
-        .map_err(|e| anyhow!("lua evaluation failed: {e}"))?;
-    // The manifest table also holds callback *functions* as sibling keys; skip
-    // unsupported types (functions → nil) so serde ignores them, rather than
-    // erroring on the first function it meets.
-    let options = DeserializeOptions::new().deny_unsupported_types(false);
-    lua.from_value_with(value, options)
-        .map_err(|e| anyhow!("manifest table is malformed: {e}"))
-}
-
-/// Upper bound on a plugin-declared LED count for one zone/accessory/channel.
-/// Plugins return these as `u32`; the daemon turns each into a native LED-position
-/// table and per-frame color buffer, so an unbounded value like `u32::MAX` drives a
-/// multi-gigabyte allocation in the root daemon. Rejected (not clamped) so a
-/// misdeclaring plugin fails loudly instead of silently truncating.
 pub const MAX_PLUGIN_LEDS: u32 = 4_096;
-
-/// Upper bound on a plugin-declared LCD panel dimension. Matches the image-decoder
-/// limit in [`crate::util::image`]; bounds the `width * height * 4` host buffers the
-/// LCD path allocates from a dynamically-reported panel size.
 pub const MAX_PLUGIN_LCD_DIM: u32 = 8_192;
-
-/// Upper bound on the number of RGB zones one device/controller may declare. Each
-/// zone's `led_count` is capped, but the daemon builds one native LED-position table
-/// *per zone* **after** the plugin VM's memory cap no longer applies, so an unbounded
-/// zone count multiplies `MAX_PLUGIN_LEDS` into a multi-gigabyte host allocation.
 pub const MAX_PLUGIN_ZONES: usize = 256;
-
-/// Upper bound on the number of controllers one integration may enumerate. Each
-/// controller becomes a child device with its own transport connection, VM, and
-/// worker thread, so an unbounded count is a memory/connection/thread-exhaustion
-/// vector (the deeper thread-ceiling / process-isolation fix is tracked as ARCH-R1).
 pub const MAX_PLUGIN_CONTROLLERS: usize = 256;
 
 const MAX_PLUGIN_DEVICES: usize = 256;
@@ -1058,10 +899,8 @@ const MAX_PLUGIN_EFFECTS: usize = 256;
 const MAX_EFFECT_PARAMS: usize = 64;
 const MAX_CONFIG_FIELDS: usize = 128;
 const MAX_USB_ENDPOINTS: usize = 32;
-const MAX_CHAIN_CHANNELS: usize = 64;
 const MAX_CHAIN_ACCESSORIES: usize = 256;
 const MAX_CONTROL_DEFS: usize = 256;
-const MAX_KEY_MAPPINGS: usize = 256;
 const MAX_TEXT_BYTES: usize = 256;
 const MAX_LONG_TEXT_BYTES: usize = 4_096;
 
@@ -1095,6 +934,8 @@ pub fn check_lcd_dims(width: u32, height: u32) -> Result<()> {
 /// symlinked/pathological `entry` (e.g.
 /// `/dev/zero`) would drive an unbounded `read_to_string`.
 const MAX_ENTRY_BYTES: u64 = 1024 * 1024;
+const MAX_MODULE_BYTES: u64 = 1024 * 1024;
+const MAX_MODULES: usize = 256;
 
 /// A plugin-package file (`plugin.yaml` / the entry Lua) must be a regular file no
 /// larger than `max`. Rejects a symlink (a manually-placed local plugin could point
@@ -1115,6 +956,76 @@ fn check_package_file(path: &Path, max: u64) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn read_package_modules(dir: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        out: &mut std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+        let stat =
+            std::fs::symlink_metadata(dir).with_context(|| format!("reading {}", dir.display()))?;
+        if stat.file_type().is_symlink() || !stat.is_dir() {
+            bail!("{} must be a directory, not a symlink", dir.display());
+        }
+        for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+            let entry = entry?;
+            let path = entry.path();
+            let stat = std::fs::symlink_metadata(&path)?;
+            if stat.file_type().is_symlink() {
+                bail!("{} must not be a symlink", path.display());
+            }
+            if stat.is_dir() {
+                visit(root, &path, out)?;
+                continue;
+            }
+            if path.extension().and_then(|v| v.to_str()) != Some("lua") {
+                continue;
+            }
+            check_package_file(&path, MAX_MODULE_BYTES)?;
+            let relative = path
+                .strip_prefix(root)
+                .expect("visited module stays under root");
+            let module_path = relative.with_extension("");
+            let mut components = Vec::new();
+            for component in module_path.components() {
+                let value = component
+                    .as_os_str()
+                    .to_str()
+                    .ok_or_else(|| anyhow!("module path is not valid UTF-8: {}", path.display()))?;
+                if value.is_empty()
+                    || !value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+                {
+                    bail!(
+                        "invalid Lua module path component '{value}' in {}",
+                        path.display()
+                    );
+                }
+                components.push(value);
+            }
+            let name = components.join(".");
+            let source = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            if out.insert(name.clone(), source).is_some() {
+                bail!("duplicate Lua module '{name}'");
+            }
+            if out.len() > MAX_MODULES {
+                bail!("plugin contains more than {MAX_MODULES} Lua modules");
+            }
+        }
+        Ok(())
+    }
+
+    let root = dir.join("lib");
+    let mut modules = std::collections::BTreeMap::new();
+    visit(dir, &root, &mut modules)?;
+    Ok(modules)
 }
 
 /// The `entry` is joined onto the plugin dir and read, so it must be a relative
@@ -1140,13 +1051,6 @@ fn validate_entry_path(entry: &str) -> Result<()> {
 
 /// Cross-field validation, gated by `plugin_type`.
 pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
-    if !manifest.plugin_dir.as_os_str().is_empty() {
-        manifest
-            .compatibility
-            .as_ref()
-            .ok_or_else(|| anyhow!("plugin.yaml must declare compatibility"))?
-            .ensure_supported()?;
-    }
     check_count("devices", manifest.devices.len(), MAX_PLUGIN_DEVICES)?;
     check_count("effects", manifest.effects.len(), MAX_PLUGIN_EFFECTS)?;
     check_count(
@@ -1155,59 +1059,12 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         MAX_PLUGIN_EFFECTS,
     )?;
     validate_identity(&manifest.identity)?;
+    validate_catalog(manifest)?;
+    validate_device_identifiers(manifest)?;
     validate_effects(&manifest.effects, "effect")?;
     validate_effect_assets(manifest)?;
     validate_transports(manifest)?;
     validate_controls(manifest)?;
-    if let Some(rgb) = &manifest.rgb {
-        check_zone_count(rgb.zones.len())?;
-        validate_rgb(rgb)?;
-    }
-    if let Some(chain) = &manifest.chain {
-        check_count("chain channels", chain.channels.len(), MAX_CHAIN_CHANNELS)?;
-        check_count(
-            "chain accessories",
-            chain.accessories.len(),
-            MAX_CHAIN_ACCESSORIES,
-        )?;
-        let mut channels = HashSet::new();
-        for ch in &chain.channels {
-            validate_component("chain channel id", &ch.id)?;
-            validate_short_text("chain channel name", &ch.name)?;
-            if !channels.insert(&ch.id) {
-                bail!("chain channel id '{}' is declared more than once", ch.id);
-            }
-            check_led_count(&ch.id, ch.max_leds)?;
-        }
-        let mut accessories = HashSet::new();
-        for acc in &chain.accessories {
-            validate_short_text("accessory name", &acc.name)?;
-            if !accessories.insert(acc.id) {
-                bail!("chain accessory id '{}' is declared more than once", acc.id);
-            }
-            check_led_count(&acc.name, acc.led_count)?;
-            match acc.topology.as_str() {
-                "ring" | "linear" | "grid" => {
-                    if acc.rings != 0 {
-                        bail!(
-                            "accessory '{}' declares rings for non-rings topology",
-                            acc.name
-                        );
-                    }
-                }
-                "rings" if acc.rings > 0 => {}
-                "rings" => bail!(
-                    "accessory '{}' with rings topology must declare rings",
-                    acc.name
-                ),
-                _ => bail!(
-                    "accessory '{}' has unsupported topology '{}'",
-                    acc.name,
-                    acc.topology
-                ),
-            }
-        }
-    }
     match manifest.plugin_type {
         PluginKind::Device => {
             if manifest.devices.is_empty() {
@@ -1232,6 +1089,26 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 if spec.transport == "smbus" && !manifest.permissions.contains(&Permission::Smbus) {
                     bail!("a device using the smbus transport must declare the `smbus` permission");
                 }
+                if spec.transport == "hid" && !manifest.permissions.contains(&Permission::Hid) {
+                    bail!("a device using the hid transport must declare the `hid` permission");
+                }
+                if spec.transport == "usb" && !manifest.permissions.contains(&Permission::Usb) {
+                    bail!("a device using the usb transport must declare the `usb` permission");
+                }
+                let required_permission = match spec.transport.as_str() {
+                    "command" => Some(Permission::Command),
+                    "amd_smn" => Some(Permission::AmdSmn),
+                    "lpcio" => Some(Permission::Lpcio),
+                    _ => None,
+                };
+                if let Some(permission) = required_permission {
+                    if !manifest.permissions.contains(&permission) {
+                        bail!(
+                            "a device using the {} transport requires its matching permission",
+                            spec.transport
+                        );
+                    }
+                }
             }
         }
         PluginKind::Effect => {
@@ -1249,11 +1126,17 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
             if !manifest.devices.is_empty() {
                 bail!("integration plugin must not declare devices");
             }
-            if !manifest.capability_labels().is_empty() {
+            if manifest.transports.integration_transport_kind().is_none() {
                 bail!(
-                    "integration plugin must not declare capability sections; capabilities are \
-                     reported per controller by enumerate_controllers"
+                    "integration plugin must declare exactly one tcp, hwmon, or command transport"
                 );
+            }
+            if manifest.transports.hid.is_some()
+                || manifest.transports.usb.is_some()
+                || manifest.transports.amd_smn.is_some()
+                || manifest.transports.lpcio.is_some()
+            {
+                bail!("integration plugin declares a non-integration transport");
             }
         }
     }
@@ -1264,7 +1147,191 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     if manifest.transports.tcp.is_some() && !manifest.permissions.contains(&Permission::Network) {
         bail!("a tcp transport requires the 'network' permission to be declared");
     }
+    if manifest.transports.hwmon.is_some() {
+        if !manifest.permissions.contains(&Permission::Hwmon) {
+            bail!("an hwmon transport requires the 'hwmon' permission to be declared");
+        }
+        if manifest.platforms.is_empty()
+            || manifest
+                .platforms
+                .iter()
+                .any(|platform| platform != "linux")
+        {
+            bail!("an hwmon integration must declare platforms: [linux]");
+        }
+    }
+    if manifest.transports.amd_smn.is_some() && !manifest.permissions.contains(&Permission::AmdSmn)
+    {
+        bail!("an amd_smn transport requires the 'amd_smn' permission to be declared");
+    }
+    if manifest.transports.lpcio.is_some() && !manifest.permissions.contains(&Permission::Lpcio) {
+        bail!("an lpcio transport requires the 'lpcio' permission to be declared");
+    }
+    if manifest.transports.usb.is_some() && !manifest.permissions.contains(&Permission::Usb) {
+        bail!("a usb transport requires the 'usb' permission to be declared");
+    }
     validate_component("plugin id", &manifest.plugin_id)?;
+    Ok(())
+}
+
+pub(super) fn validate_accessories(accessories: &[AccessoryManifest]) -> Result<()> {
+    check_count(
+        "chain accessories",
+        accessories.len(),
+        MAX_CHAIN_ACCESSORIES,
+    )?;
+    let mut ids = HashSet::new();
+    for acc in accessories {
+        validate_short_text("accessory name", &acc.name)?;
+        if !ids.insert(acc.id) {
+            bail!("chain accessory id '{}' is declared more than once", acc.id);
+        }
+        check_led_count(&acc.name, acc.led_count)?;
+        match acc.topology.as_str() {
+            "ring" | "linear" | "grid" if acc.rings == 0 => {}
+            "ring" | "linear" | "grid" => bail!(
+                "accessory '{}' declares rings for non-rings topology",
+                acc.name
+            ),
+            "rings" if acc.rings > 0 => {}
+            "rings" => bail!(
+                "accessory '{}' with rings topology must declare rings",
+                acc.name
+            ),
+            _ => bail!(
+                "accessory '{}' has unsupported topology '{}'",
+                acc.name,
+                acc.topology
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn normalize_device_matches(manifest: &mut PluginManifest) -> Result<()> {
+    for device in &mut manifest.devices {
+        let count = device.r#match.count();
+        if count == 0 {
+            continue;
+        }
+        if count != 1 || !device.transport.is_empty() {
+            bail!("a device must declare exactly one nested match and no `transport`");
+        }
+        if let Some(hid) = &device.r#match.hid {
+            if hid.any && (hid.vid.is_some() || hid.pid.is_some() || !hid.pids.is_empty()) {
+                bail!("generic hid match cannot also declare identifiers");
+            }
+            if !hid.any && hid.vid.is_none() {
+                bail!("hid match requires a `vid` or explicit `any`");
+            }
+            device.transport = "hid".to_owned();
+            device.vid = hid.vid;
+            device.pid = hid.pid;
+            device.pids = hid.pids.clone();
+            device.usage_page = hid.usage_page;
+            device.usage = hid.usage;
+            device.interface = hid.interface;
+            device.max_bytes_per_sec = hid.max_bytes_per_sec;
+            device.generic_hid = hid.any;
+        } else if let Some(usb) = &device.r#match.usb {
+            if usb.vid == 0 || usb.pid == 0 {
+                bail!("usb match requires non-zero vid and pid");
+            }
+            device.transport = "usb".to_owned();
+            device.vid = Some(usb.vid);
+            device.pid = Some(usb.pid);
+            device.interface = Some(usb.interface.into());
+        } else if let Some(smbus) = &device.r#match.smbus {
+            device.transport = "smbus".to_owned();
+            device.bus = Some(smbus.bus.clone());
+            device.addresses = Some(smbus.addresses.clone());
+            device.extra_addresses = Some(smbus.extra_addresses.clone());
+            device.max_bytes_per_sec = smbus.max_bytes_per_sec;
+            device.pre_scan = smbus.pre_scan;
+            device.probe = smbus.probe;
+            device.pci_match = smbus.pci_match.clone();
+        } else if let Some(command) = &device.r#match.command {
+            if command.command().is_empty() {
+                bail!("command match must name an executable");
+            }
+            device.transport = "command".to_owned();
+        } else if let Some(amd_smn) = &device.r#match.amd_smn {
+            if !amd_smn.any {
+                bail!("amd_smn match must explicitly declare `any: true`");
+            }
+            device.transport = "amd_smn".to_owned();
+        } else if let Some(lpcio) = &device.r#match.lpcio {
+            if lpcio.any != lpcio.chip_ids.is_empty() {
+                bail!("lpcio match must declare chip_ids or explicit `any: true`");
+            }
+            device.transport = "lpcio".to_owned();
+        } else {
+            bail!("the declared transport match is not implemented by this daemon build");
+        }
+    }
+    Ok(())
+}
+
+fn validate_device_identifiers(manifest: &PluginManifest) -> Result<()> {
+    let mut hid_identifiers = HashSet::new();
+    for device in &manifest.devices {
+        if device.transport != "hid" || device.generic_hid {
+            continue;
+        }
+        for pid in device.pids.iter().copied().chain(device.pid) {
+            let Some(vid) = device.vid else { continue };
+            if !hid_identifiers.insert((
+                vid,
+                pid,
+                device.usage_page,
+                device.usage,
+                device.interface,
+            )) {
+                bail!("duplicate concrete HID match {vid:04x}:{pid:04x}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Capability identifiers accepted by the canonical package contract.
+const SUPPORTED_CAPABILITIES: &[&str] = &[
+    "rgb",
+    "fan",
+    "sensors",
+    "battery",
+    "connection",
+    "dpi",
+    "report_rate",
+    "key_remap",
+    "keyboard_layout",
+    "onboard_profiles",
+    "lcd",
+    "equalizer",
+    "pairing",
+    "controls",
+    "chain",
+];
+
+fn validate_catalog(manifest: &PluginManifest) -> Result<()> {
+    let mut platforms = HashSet::new();
+    for platform in &manifest.platforms {
+        if !matches!(platform.as_str(), "linux" | "windows" | "macos") {
+            bail!("unsupported plugin platform '{platform}'");
+        }
+        if !platforms.insert(platform) {
+            bail!("plugin platform '{platform}' is declared more than once");
+        }
+    }
+    let mut capabilities = HashSet::new();
+    for capability in &manifest.capabilities {
+        if !SUPPORTED_CAPABILITIES.contains(&capability.as_str()) {
+            bail!("unknown advertised capability '{capability}'");
+        }
+        if !capabilities.insert(capability) {
+            bail!("advertised capability '{capability}' is declared more than once");
+        }
+    }
     Ok(())
 }
 
@@ -1275,7 +1342,7 @@ fn check_count(what: &str, count: usize, max: usize) -> Result<()> {
     Ok(())
 }
 
-fn validate_short_text(what: &str, value: &str) -> Result<()> {
+pub(super) fn validate_short_text(what: &str, value: &str) -> Result<()> {
     if value.is_empty() || value.len() > MAX_TEXT_BYTES || value.contains('\0') {
         bail!("{what} must be non-empty, contain no NUL, and be at most {MAX_TEXT_BYTES} bytes");
     }
@@ -1400,30 +1467,6 @@ fn validate_numeric_param(
     Ok(())
 }
 
-fn validate_rgb(rgb: &RgbManifest) -> Result<()> {
-    let mut zones = HashSet::new();
-    for zone in &rgb.zones {
-        validate_component("RGB zone id", &zone.id)?;
-        validate_short_text("RGB zone name", &zone.name)?;
-        if !zones.insert(&zone.id) {
-            bail!("RGB zone id '{}' is declared more than once", zone.id);
-        }
-        check_led_count(&zone.id, u32::try_from(zone.leds.len()).unwrap_or(u32::MAX))?;
-    }
-    let effects: Vec<EffectManifest> = rgb
-        .native_effects
-        .iter()
-        .map(|effect| EffectManifest {
-            kind: EffectKind::Pixmap,
-            id: effect.id.clone(),
-            name: effect.name.clone(),
-            params: effect.params.clone(),
-        })
-        .collect();
-    check_count("native effects", effects.len(), MAX_PLUGIN_EFFECTS)?;
-    validate_effects(&effects, "native effect")
-}
-
 fn validate_effect_assets(manifest: &PluginManifest) -> Result<()> {
     let mut thumbnails = HashSet::new();
     for asset in &manifest.effect_thumbnails {
@@ -1479,50 +1522,150 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
             }
         }
     }
-    if let Some(usb) = &manifest.transports.usb_control {
+    if let Some(usb) = &manifest.transports.usb {
         if manifest.plugin_type != PluginKind::Device {
-            bail!("usb_control transport is only valid for a device plugin");
+            bail!("usb transport is only valid for a device plugin");
         }
-        check_count(
-            "usb_control endpoints",
-            usb.endpoints.len(),
-            MAX_USB_ENDPOINTS,
-        )?;
-        let mut seen = HashSet::new();
-        for ep in &usb.endpoints {
-            validate_component("usb_control endpoint id", &ep.id)?;
-            if !seen.insert(&ep.id) {
+        check_count("usb devices", usb.devices.len(), MAX_USB_ENDPOINTS)?;
+        if usb.devices.is_empty() {
+            bail!("usb transport must declare a named `primary` device");
+        }
+        let mut device_ids = HashSet::new();
+        for device in &usb.devices {
+            validate_component("usb device id", &device.id)?;
+            if !device_ids.insert(device.id.as_str()) {
+                bail!("usb device id '{}' is declared more than once", device.id);
+            }
+            if device.id == "primary" {
+                if device.vid.is_some() || device.pid.is_some() {
+                    bail!("usb device `primary` inherits vid/pid from discovery");
+                }
+            } else if device.vid.is_none_or(|v| v == 0) || device.pid.is_none_or(|p| p == 0) {
                 bail!(
-                    "usb_control endpoint id '{}' is declared more than once",
-                    ep.id
+                    "companion usb device '{}' requires non-zero vid and pid",
+                    device.id
                 );
             }
-            if ep.vid == 0 || ep.pid == 0 {
+            if device.endpoints.is_empty() && device.control.is_none() {
                 bail!(
-                    "usb_control endpoint '{}' must declare a non-zero vid and pid",
-                    ep.id
+                    "usb device '{}' declares no endpoint or control authority",
+                    device.id
                 );
             }
+            let mut addresses = HashSet::new();
+            for endpoint in &device.endpoints {
+                if !addresses.insert(endpoint.address) {
+                    bail!(
+                        "usb device '{}' repeats endpoint 0x{:02x}",
+                        device.id,
+                        endpoint.address
+                    );
+                }
+                if endpoint.address & 0x0f == 0 || endpoint.address & 0x70 != 0 {
+                    bail!("usb endpoint address 0x{:02x} is invalid", endpoint.address);
+                }
+                if endpoint.max_transfer_size == 0 || endpoint.max_transfer_size > 16 * 1024 * 1024
+                {
+                    bail!(
+                        "usb endpoint 0x{:02x} max_transfer_size must be 1..=16777216",
+                        endpoint.address
+                    );
+                }
+                if !(1..=60_000).contains(&endpoint.max_timeout_ms) {
+                    bail!(
+                        "usb endpoint 0x{:02x} max_timeout_ms must be 1..=60000",
+                        endpoint.address
+                    );
+                }
+            }
+            if let Some(control) = &device.control {
+                if control.max_transfer_size == 0 || control.max_transfer_size > 1024 * 1024 {
+                    bail!("usb control max_transfer_size must be 1..=1048576");
+                }
+                if !(1..=60_000).contains(&control.max_timeout_ms) {
+                    bail!("usb control max_timeout_ms must be 1..=60000");
+                }
+            }
         }
+        if !device_ids.contains("primary") {
+            bail!("usb transport must declare a device named `primary`");
+        }
+    }
+    if let Some(command) = &manifest.transports.command {
+        if !manifest.permissions.contains(&Permission::Command) {
+            bail!("a command transport requires the 'command' permission");
+        }
+        if command.commands.is_empty() {
+            bail!("command transport must declare at least one executable");
+        }
+        let mut names = HashSet::new();
+        for name in &command.commands {
+            validate_component("command executable", name)?;
+            if is_disallowed_command(name) {
+                bail!(
+                    "command executable '{name}' is a shell, interpreter, or command launcher and cannot be granted to a plugin"
+                );
+            }
+            if !names.insert(name.as_str()) {
+                bail!("command executable '{name}' is declared more than once");
+            }
+        }
+        for device in &manifest.devices {
+            if let Some(command_match) = &device.r#match.command {
+                if !names.contains(command_match.command()) {
+                    bail!(
+                        "command match '{}' is not declared by transports.command",
+                        command_match.command()
+                    );
+                }
+            }
+        }
+    } else if manifest
+        .devices
+        .iter()
+        .any(|device| device.r#match.command.is_some())
+    {
+        bail!("a command match requires a transports.command declaration");
     }
     Ok(())
 }
 
+pub(super) fn is_disallowed_command(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    let normalized = normalized.strip_suffix(".exe").unwrap_or(&normalized);
+    matches!(
+        normalized,
+        "sh" | "bash"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+            | "env"
+            | "busybox"
+            | "python"
+            | "python2"
+            | "python3"
+            | "perl"
+            | "ruby"
+            | "node"
+            | "nodejs"
+            | "deno"
+            | "bun"
+            | "lua"
+            | "luajit"
+            | "php"
+            | "java"
+            | "wscript"
+            | "cscript"
+            | "mshta"
+            | "rundll32"
+            | "regsvr32"
+    )
+}
+
 fn validate_controls(manifest: &PluginManifest) -> Result<()> {
-    if let Some(dpi) = &manifest.dpi {
-        check_count("DPI steps", dpi.steps.len(), MAX_CONTROL_DEFS)?;
-        if dpi.min > dpi.max
-            || dpi.steps.is_empty()
-            || dpi.steps.windows(2).any(|pair| pair[0] >= pair[1])
-            || dpi
-                .steps
-                .iter()
-                .any(|step| *step < dpi.min || *step > dpi.max)
-        {
-            bail!("DPI steps must be non-empty, strictly increasing, and within min/max");
-        }
-    }
-    validate_keyed_controls(manifest)?;
     if let Some(config) = &manifest.config {
         check_count("config fields", config.fields.len(), MAX_CONFIG_FIELDS)?;
         let mut keys = HashSet::new();
@@ -1576,96 +1719,6 @@ fn validate_controls(manifest: &PluginManifest) -> Result<()> {
             }
         }
     }
-    if let Some(poll) = &manifest.poll {
-        if !(100..=60_000).contains(&poll.interval_ms) {
-            bail!("poll interval_ms must be 100..=60000");
-        }
-    }
-    if let Some(remap) = &manifest.key_remap {
-        check_count("key remap buttons", remap.buttons.len(), MAX_KEY_MAPPINGS)?;
-        check_count(
-            "key remap default mappings",
-            remap.default_mappings.len(),
-            MAX_KEY_MAPPINGS,
-        )?;
-        let mut buttons = HashSet::new();
-        for button in &remap.buttons {
-            validate_short_text("key remap button label", &button.label)?;
-            if !buttons.insert(button.cid) {
-                bail!("key remap CID {} is declared more than once", button.cid);
-            }
-        }
-        let mut mappings = HashSet::new();
-        for mapping in &remap.default_mappings {
-            if !mappings.insert(mapping.cid) || !buttons.contains(&mapping.cid) {
-                bail!(
-                    "key remap default mapping references duplicate or unknown CID {}",
-                    mapping.cid
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_keyed_controls(manifest: &PluginManifest) -> Result<()> {
-    let mut keys = HashSet::new();
-    if let Some(choice) = &manifest.choice {
-        check_count("choices", choice.choices.len(), MAX_CONTROL_DEFS)?;
-        for value in &choice.choices {
-            validate_component("choice key", &value.key)?;
-            validate_short_text("choice label", &value.label)?;
-            if !keys.insert(&value.key)
-                || value.options.is_empty()
-                || value.options.len() > MAX_CONTROL_DEFS
-                || value.default >= value.options.len()
-            {
-                bail!(
-                    "choice '{}' has duplicate key, invalid option count, or invalid default",
-                    value.key
-                );
-            }
-        }
-    }
-    if let Some(range) = &manifest.range {
-        check_count("ranges", range.ranges.len(), MAX_CONTROL_DEFS)?;
-        for value in &range.ranges {
-            validate_component("range key", &value.key)?;
-            validate_short_text("range label", &value.label)?;
-            if !keys.insert(&value.key)
-                || value.min > value.max
-                || value.step <= 0
-                || value.default < value.min
-                || value.default > value.max
-                || (value.default - value.min) % value.step != 0
-            {
-                bail!(
-                    "range '{}' has duplicate key or invalid bounds, step, or default",
-                    value.key
-                );
-            }
-        }
-    }
-    if let Some(boolean) = &manifest.boolean {
-        check_count("boolean controls", boolean.booleans.len(), MAX_CONTROL_DEFS)?;
-        for value in &boolean.booleans {
-            validate_component("boolean key", &value.key)?;
-            validate_short_text("boolean label", &value.label)?;
-            if !keys.insert(&value.key) {
-                bail!("control key '{}' is declared more than once", value.key);
-            }
-        }
-    }
-    if let Some(action) = &manifest.action {
-        check_count("action controls", action.actions.len(), MAX_CONTROL_DEFS)?;
-        for value in &action.actions {
-            validate_component("action key", &value.key)?;
-            validate_short_text("action label", &value.label)?;
-            if !keys.insert(&value.key) {
-                bail!("control key '{}' is declared more than once", value.key);
-            }
-        }
-    }
     Ok(())
 }
 
@@ -1675,7 +1728,7 @@ fn validate_keyed_controls(manifest: &PluginManifest) -> Result<()> {
 /// stray `:`/`/` could otherwise forge another plugin's namespace or make the
 /// catalog id ambiguous, so every component is pinned to `[A-Za-z0-9._-]` at the
 /// manifest — the point where each value is born.
-fn validate_component(what: &str, value: &str) -> Result<()> {
+pub(super) fn validate_component(what: &str, value: &str) -> Result<()> {
     if value.is_empty() {
         bail!("{what} is empty");
     }
@@ -1686,26 +1739,6 @@ fn validate_component(what: &str, value: &str) -> Result<()> {
         bail!("{what} '{value}' contains characters outside [A-Za-z0-9._-]");
     }
     Ok(())
-}
-
-/// Build a legacy inline-Lua unit-test fixture. Every real plugin is a YAML
-/// directory package (see [`parse_manifest_from_dir`]); production code never
-/// evaluates Lua to obtain manifest declarations.
-#[cfg(test)]
-pub fn parse_manifest(source: &str, path: &Path) -> Result<PluginManifest> {
-    let plugin_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("plugin path has no file stem: {}", path.display()))?;
-
-    let mut manifest = parse_legacy_lua_fixture_threaded(source)?;
-    manifest.plugin_id = plugin_id;
-    manifest.source_path = path.to_path_buf();
-    manifest.script_source = source.to_owned();
-
-    validate_manifest(&manifest)?;
-    Ok(manifest)
 }
 
 /// Parse a directory plugin. `plugin.yaml` is the only declarative manifest;
@@ -1729,8 +1762,6 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         std::fs::read(&meta_path).with_context(|| format!("reading {}", meta_path.display()))?;
     let meta: PluginMeta = serde_yaml::from_slice(&manifest_bytes)
         .with_context(|| format!("parsing {}", meta_path.display()))?;
-    let mut manifest: PluginManifest = serde_yaml::from_slice(&manifest_bytes)
-        .with_context(|| format!("parsing declarative fields in {}", meta_path.display()))?;
 
     if meta.id.is_empty() {
         bail!("{} declares an empty id", meta_path.display());
@@ -1749,30 +1780,41 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
     let source = std::fs::read_to_string(&entry_path)
         .with_context(|| format!("reading {}", entry_path.display()))?;
 
-    manifest.compatibility = meta.compatibility;
-    manifest.identity = Identity {
-        name: meta.name,
-        id: Some(meta.id.clone()),
-        author: meta.author,
-        version: meta.version,
-        license: meta.license,
-        description: meta.description,
-    };
     // An undeclared logo defaults to the conventional `assets/logo.png` if one
     // is present, so a plugin author only needs to drop the file in.
-    manifest.logo = meta.logo.or_else(|| {
+    let logo = meta.logo.or_else(|| {
         dir.join("assets")
             .join(DEFAULT_LOGO_NAME)
             .is_file()
             .then(|| DEFAULT_LOGO_NAME.to_owned())
     });
-    manifest.effect_thumbnails = meta.effect_assets;
-
-    manifest.plugin_id = meta.id;
-    manifest.source_path = entry_path;
-    manifest.script_source = source;
-    manifest.plugin_dir = dir.to_path_buf();
-    manifest.manifest_bytes = manifest_bytes;
+    let mut manifest = PluginManifest {
+        plugin_id: meta.id.clone(),
+        source_path: entry_path,
+        script_source: source,
+        module_sources: read_package_modules(dir)?,
+        plugin_dir: dir.to_path_buf(),
+        devices: meta.devices,
+        identity: Identity {
+            name: meta.name.or(meta.identity.name),
+            id: meta.identity.id.or(Some(meta.id)),
+            author: meta.author.or(meta.identity.author),
+            version: meta.version.or(meta.identity.version),
+            license: meta.license.or(meta.identity.license),
+            description: meta.description.or(meta.identity.description),
+        },
+        logo,
+        effect_thumbnails: meta.effect_assets,
+        plugin_type: meta.plugin_type,
+        dynamic_children: meta.dynamic_children,
+        effects: meta.effects,
+        transports: meta.transports,
+        permissions: meta.permissions,
+        platforms: meta.platforms,
+        capabilities: meta.capabilities,
+        config: meta.config,
+    };
+    normalize_device_matches(&mut manifest)?;
 
     Ok(manifest)
 }
@@ -1781,721 +1823,13 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r#"
-        return {
-          devices = { { transport = "hid", vid = 0x1234, pid = 0x5678, vendor = "Acme", model = "K1" } },
-          identity = { name = "Acme K1" },
+    #[test]
+    fn command_launchers_are_disallowed_case_insensitively() {
+        for name in ["sh", "bash", "python3", "env", "perl", "node", "CMD.EXE"] {
+            assert!(is_disallowed_command(name), "{name} must be rejected");
         }
-    "#;
-
-    fn hid<'a>(vid: u16, pid: u16, serial: Option<&'a str>) -> DiscoveryHandle<'a> {
-        DiscoveryHandle::Hid {
-            vid,
-            pid,
-            path: "p",
-            serial,
-            idx: 0,
-            usage_page: 0,
-            usage: 0,
-            interface_number: None,
-        }
-    }
-
-    #[test]
-    fn parses_devices_and_identity() {
-        let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
-        assert_eq!(m.plugin_id, "acme_k1");
-        assert_eq!(m.devices[0].vendor, "Acme");
-        assert_eq!(m.devices[0].model, "K1");
-        assert_eq!(m.display_name_for(&m.devices[0]), "K1");
-        assert_eq!(m.devices[0].vid, Some(0x1234));
-        assert_eq!(m.devices[0].pid, Some(0x5678));
-        assert_eq!(m.id_prefix(), "acme_k1");
-        assert_eq!(m.author(), "");
-        assert_eq!(m.version(), "");
-        assert_eq!(m.license(), "");
-        assert_eq!(m.description(), "");
-    }
-
-    #[test]
-    fn led_and_lcd_caps_reject_oversize_declarations() {
-        assert!(check_led_count("z", MAX_PLUGIN_LEDS).is_ok());
-        assert!(check_led_count("z", MAX_PLUGIN_LEDS + 1).is_err());
-        assert!(check_led_count("z", u32::MAX).is_err());
-        assert!(check_lcd_dims(MAX_PLUGIN_LCD_DIM, MAX_PLUGIN_LCD_DIM).is_ok());
-        assert!(check_lcd_dims(MAX_PLUGIN_LCD_DIM + 1, 1).is_err());
-        assert!(check_lcd_dims(1, u32::MAX).is_err());
-    }
-
-    #[test]
-    fn zone_count_cap_rejects_oversize_and_allows_boundary() {
-        assert!(check_zone_count(MAX_PLUGIN_ZONES).is_ok());
-        assert!(check_zone_count(MAX_PLUGIN_ZONES + 1).is_err());
-    }
-
-    #[test]
-    fn validate_manifest_rejects_too_many_static_rgb_zones() {
-        let zones = (0..MAX_PLUGIN_ZONES + 1)
-            .map(|i| format!(r#"{{ id = "z{i}", name = "Z{i}", topology = "ring", leds = {{}} }}"#))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let src = format!(
-            r#"return {{
-              devices = {{ {{ transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" }} }},
-              rgb = {{ zones = {{ {zones} }} }},
-            }}"#
-        );
-        assert!(parse_manifest(&src, Path::new("zones.lua")).is_err());
-    }
-
-    #[test]
-    fn validate_manifest_rejects_oversize_chain_accessory() {
-        let src = format!(
-            r#"return {{
-              devices = {{ {{ transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" }} }},
-              chain = {{
-                channels = {{ {{ id = "c0", name = "C0", max_leds = 8 }} }},
-                accessories = {{ {{ id = 1, name = "Strip", led_count = {} }} }},
-              }},
-            }}"#,
-            u32::MAX
-        );
-        assert!(parse_manifest(&src, Path::new("chain.lua")).is_err());
-    }
-
-    #[test]
-    fn validate_entry_path_rejects_traversal_and_absolute() {
-        assert!(validate_entry_path("main.lua").is_ok());
-        assert!(validate_entry_path("sub/main.lua").is_ok());
-        assert!(validate_entry_path("./main.lua").is_ok());
-        assert!(validate_entry_path("../main.lua").is_err());
-        assert!(validate_entry_path("a/../../etc/passwd").is_err());
-        assert!(validate_entry_path("/etc/shadow").is_err());
-        assert!(validate_entry_path("").is_err());
-    }
-
-    #[test]
-    fn validate_component_pins_charset() {
-        assert!(validate_component("id", "abc_1.2-x").is_ok());
-        assert!(validate_component("id", "a:b").is_err());
-        assert!(validate_component("id", "a/b").is_err());
-        assert!(validate_component("id", "a b").is_err());
-        assert!(validate_component("id", "").is_err());
-    }
-
-    #[test]
-    fn hid_raw_report_size_zero_remains_a_supported_transport_mode() {
-        let raw = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
-            transports = { hid = { report_size = 0, timeout_ms = 1000 } },
-        }"#;
-        assert!(parse_manifest(raw, Path::new("raw_hid.lua")).is_ok());
-
-        let oversized = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
-            transports = { hid = { report_size = 1025, timeout_ms = 1000 } },
-        }"#;
-        assert!(parse_manifest(oversized, Path::new("oversized_hid.lua")).is_err());
-    }
-
-    #[test]
-    fn validate_manifest_rejects_bad_usb_endpoints() {
-        let dup = r#"return {
-            devices = { { transport = "usb_control", vid = 1, pid = 2, vendor = "V", model = "M" } },
-            transports = { usb_control = { endpoints = {
-              { id = "e", vid = 3, pid = 4 }, { id = "e", vid = 5, pid = 6 } } } },
-        }"#;
-        assert!(parse_manifest(dup, Path::new("usb.lua")).is_err());
-
-        let zero = r#"return {
-            devices = { { transport = "usb_control", vid = 1, pid = 2, vendor = "V", model = "M" } },
-            transports = { usb_control = { endpoints = { { id = "e", vid = 0, pid = 4 } } } },
-        }"#;
-        assert!(parse_manifest(zero, Path::new("usb.lua")).is_err());
-    }
-
-    #[test]
-    fn manifest_rejects_duplicate_and_invalid_control_declarations() {
-        let duplicate = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
-            range = { ranges = {
-              { key = "speed", label = "Speed", min = 1, max = 10, step = 1, default = 5 },
-              { key = "speed", label = "Again", min = 1, max = 10, step = 1, default = 5 },
-            } },
-        }"#;
-        assert!(parse_manifest(duplicate, Path::new("controls.lua")).is_err());
-
-        let bad_range = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
-            range = { ranges = { { key = "speed", label = "Speed", min = 10, max = 1, default = 5 } } },
-        }"#;
-        assert!(parse_manifest(bad_range, Path::new("range.lua")).is_err());
-    }
-
-    #[test]
-    fn manifest_rejects_invalid_config_and_tcp_cross_fields() {
-        let bad_default = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
-            config = { fields = { { key = "port", label = "Port", kind = "number", default = "99999", min = 1, max = 65535 } } },
-        }"#;
-        assert!(parse_manifest(bad_default, Path::new("config.lua")).is_err());
-
-        let missing_tcp_field = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
-            permissions = { "network" },
-            config = { fields = { { key = "host", label = "Host" } } },
-            transports = { tcp = { host_key = "host", port_key = "port" } },
-        }"#;
-        assert!(parse_manifest(missing_tcp_field, Path::new("tcp.lua")).is_err());
-    }
-
-    #[test]
-    fn manifest_rejects_invalid_effect_parameter_definition() {
-        let src = r#"return {
-            type = "effect",
-            effects = { { id = "wave", name = "Wave", params = {
-                { id = "speed", label = "Speed", kind = { kind = "range", min = 10, max = 1, step = 1 }, default = 5 },
-            } } },
-        }"#;
-        assert!(parse_manifest(src, Path::new("effect.lua")).is_err());
-    }
-
-    #[test]
-    fn manifest_rejects_duplicate_key_remap_defaults() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "V", model = "M" } },
-            key_remap = {
-              buttons = { { cid = 1, label = "Primary", divertable = true, group = 0 } },
-              default_mappings = { { cid = 1 }, { cid = 1 } },
-            },
-        }"#;
-        assert!(parse_manifest(src, Path::new("remap.lua")).is_err());
-    }
-
-    #[test]
-    fn author_version_license_description_parse() {
-        let src = r#"
-            return {
-              devices = { { transport = "hid", vid = 1, pid = 2, vendor = "Acme", model = "K1" } },
-              identity = {
-                author = "Jane", version = "2.1.0", license = "MIT",
-                description = "A keyboard.",
-              },
-            }
-        "#;
-        let m = parse_manifest(src, Path::new("k.lua")).unwrap();
-        assert_eq!(m.author(), "Jane");
-        assert_eq!(m.version(), "2.1.0");
-        assert_eq!(m.license(), "MIT");
-        assert_eq!(m.description(), "A keyboard.");
-    }
-
-    #[test]
-    fn target_labels_dedupe_per_device_names() {
-        let src = r#"
-            return {
-              devices = {
-                { transport = "hid", vid = 1, pid = 2, vendor = "Acme", model = "K1", name = "Acme K1" },
-                { transport = "hid", vid = 1, pid = 3, vendor = "Acme", model = "K2", name = "Acme K2" },
-                { transport = "hid", vid = 1, pid = 4, vendor = "Acme", model = "K1b", name = "Acme K1" },
-              },
-            }
-        "#;
-        let m = parse_manifest(src, Path::new("k.lua")).unwrap();
-        assert_eq!(m.target_labels(), vec!["Acme K1", "Acme K2"]);
-    }
-
-    #[test]
-    fn multi_device_plugin_parses_distinct_vendor_model() {
-        let src = r#"
-            return {
-              devices = {
-                { transport = "hid", vid = 1, pid = 2, vendor = "Acme", model = "K1" },
-                { transport = "hid", vid = 1, pid = 3, vendor = "Acme", model = "K2" },
-              },
-            }
-        "#;
-        let m = parse_manifest(src, Path::new("multi.lua")).unwrap();
-        assert_eq!(m.devices.len(), 2);
-        assert_eq!(m.devices[0].model, "K1");
-        assert_eq!(m.devices[1].model, "K2");
-
-        let a = m
-            .device_for(&hid(1, 2, None))
-            .expect("first device matches");
-        assert_eq!(a.model, "K1");
-        let b = m
-            .device_for(&hid(1, 3, None))
-            .expect("second device matches");
-        assert_eq!(b.model, "K2");
-    }
-
-    #[test]
-    fn match_predicate_respects_wildcards_and_specifics() {
-        let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
-        assert!(m.device_for(&hid(0x1234, 0x5678, None)).is_some());
-        assert!(
-            m.device_for(&hid(0x1234, 0x9999, None)).is_none(),
-            "pid differs"
-        );
-        assert!(
-            m.device_for(&hid(0x9999, 0x5678, None)).is_none(),
-            "vid differs"
-        );
-    }
-
-    #[test]
-    fn pids_list_matches_any_listed_product() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 0x1E71, pids = { 0x3008, 0x300C },
-                          vendor = "NZXT", model = "Kraken" } },
-        }"#;
-        let m = parse_manifest(src, Path::new("k.lua")).unwrap();
-        assert!(m.device_for(&hid(0x1E71, 0x3008, None)).is_some());
-        assert!(m.device_for(&hid(0x1E71, 0x300C, None)).is_some());
-        assert!(
-            m.device_for(&hid(0x1E71, 0x2007, None)).is_none(),
-            "unlisted pid"
-        );
-    }
-
-    #[test]
-    fn non_table_return_is_error() {
-        assert!(parse_manifest("return 42", Path::new("bad.lua")).is_err());
-    }
-
-    #[test]
-    fn parse_vm_has_no_escape_hatches() {
-        // A dropped-in file that tries to run `os`/`io`/`require` at load
-        // time must not reach them — evaluating its manifest errors instead.
-        for hatch in [
-            "os.execute('touch /tmp/pwned')",
-            "io.open('/tmp/x', 'w')",
-            "require('os')",
-        ] {
-            let src = format!(
-                r#"{hatch}
-                   return {{ devices = {{ transport = "hid", vid = 1, pid = 2,
-                                           vendor = "x", model = "y" }} }}"#
-            );
-            assert!(
-                parse_manifest(&src, Path::new("evil.lua")).is_err(),
-                "escape hatch reachable at parse time: {hatch}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_vm_bounds_a_runaway_loop() {
-        let src = r#"while true do end
-                     return { devices = { transport = "hid", vid = 1, pid = 2,
-                                           vendor = "x", model = "y" } }"#;
-        assert!(
-            parse_manifest(src, Path::new("loop.lua")).is_err(),
-            "an infinite top-level loop must be bounded, not hang"
-        );
-    }
-
-    #[test]
-    fn device_without_vendor_or_model_is_rejected() {
-        let src = r#"return { devices = { transport = "hid", vid = 1 } }"#;
-        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
-    }
-
-    #[test]
-    fn unknown_transport_kind_rejected() {
-        let src = r#"return {
-            devices = { { transport = "carrier_pigeon", vid = 1, vendor = "x", model = "y" } },
-        }"#;
-        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
-    }
-
-    #[test]
-    fn tcp_transport_requires_the_network_permission() {
-        // A tcp transport without a declared `network` permission is rejected,
-        // so a plugin can't open a socket without the consent prompt firing.
-        let without = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            transports = { tcp = {} },
-        }"#;
-        assert!(parse_manifest(without, Path::new("bad.lua")).is_err());
-
-        let with = r#"return {
-            permissions = {"network"},
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            transports = { tcp = {} },
-        }"#;
-        assert!(parse_manifest(with, Path::new("ok.lua")).is_ok());
-    }
-
-    #[test]
-    fn smbus_requires_bus_and_addresses() {
-        // Missing bus/addresses is rejected by the smbus backend's validate.
-        let src = r#"return {
-            devices = { { transport = "smbus", vendor = "x", model = "y" } },
-        }"#;
-        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
-    }
-
-    #[test]
-    fn array_of_devices_parses() {
-        let src = r#"return {
-            permissions = { "smbus" },
-            devices = {
-              { transport = "smbus", bus = "chipset", addresses = { 0x70, 0x71 },
-                device_type = "ram", vendor = "ENE", model = "DRAM", name = "DRAM" },
-              { transport = "smbus", bus = "gpu", addresses = { 0x67 },
-                device_type = "gpu", vendor = "ENE", model = "GPU",
-                pci_match = { { vendor = 0x10DE, sub_vendor = 0x1043, confirmed = true } } },
-            },
-          }"#;
-        let m = parse_manifest(src, Path::new("ene.lua")).unwrap();
-        assert_eq!(m.devices.len(), 2);
-        assert_eq!(m.smbus_devices().count(), 2);
-        assert_eq!(m.devices[0].device_type, Some(DeviceType::Ram));
-    }
-
-    #[test]
-    fn device_type_aio_serializes_as_a_i_o_not_aio() {
-        // Regression guard: serde's snake_case rename inserts an underscore
-        // before every uppercase letter (not just word boundaries), so the
-        // all-caps `AIO` variant becomes "a_i_o", not the more intuitive
-        // "aio" — a real footgun for plugin authors declaring `device_type`.
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, device_type = "a_i_o",
-                           vendor = "x", model = "y" } },
-        }"#;
-        let m = parse_manifest(src, Path::new("k.lua")).unwrap();
-        assert_eq!(m.devices[0].device_type, Some(DeviceType::AIO));
-    }
-
-    #[test]
-    fn gpu_spec_without_pci_match_is_rejected() {
-        // The GPU I²C bus is shared with the display; a gate is mandatory.
-        let src = r#"return {
-            devices = { { transport = "smbus", bus = "gpu", addresses = { 0x67 },
-                           vendor = "x", model = "y" } },
-        }"#;
-        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
-    }
-
-    #[test]
-    fn smbus_device_requires_smbus_permission() {
-        let base = r#"return {
-            PERMS
-            devices = { { transport = "smbus", bus = "chipset", addresses = { 0x70 },
-                           vendor = "x", model = "y" } },
-        }"#;
-        assert!(parse_manifest(&base.replace("PERMS", ""), Path::new("no.lua")).is_err());
-        assert!(parse_manifest(
-            &base.replace("PERMS", "permissions = { \"smbus\" },"),
-            Path::new("yes.lua")
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn gpu_spec_with_pci_match_parses_and_round_trips() {
-        let src = r#"return {
-            permissions = { "smbus" },
-            devices = { { transport = "smbus", bus = "gpu", addresses = { 0x67 },
-              vendor = "ENE", model = "GPU",
-              pci_match = {
-                { vendor = 0x10DE, device = 0x2684, sub_vendor = 0x1043,
-                  sub_device = 0x88BF, confirmed = true },
-              } } },
-        }"#;
-        let m = parse_manifest(src, Path::new("ene.lua")).unwrap();
-        let gate = &m.devices[0].pci_match;
-        assert_eq!(gate.len(), 1);
-        assert_eq!(gate[0].vendor, Some(0x10DE));
-        assert_eq!(gate[0].sub_device, Some(0x88BF));
-        assert!(gate[0].confirmed);
-    }
-
-    #[test]
-    fn range_boolean_action_battery_connection_equalizer_sections_parse() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            range = { ranges = { { key = "hz", label = "Hz", min = 125, max = 1000, default = 500 } } },
-            boolean = { booleans = { { key = "sniper", label = "Sniper" } } },
-            action = { actions = { { key = "cal", label = "Calibrate" } } },
-            battery = {},
-            connection = {},
-            equalizer = {},
-        }"#;
-        let m = parse_manifest(src, Path::new("controls.lua")).unwrap();
-        assert!(m.needs_worker());
-        let labels = m.capability_labels();
-        assert!(labels.contains(&"Controls".to_owned()));
-        assert!(labels.contains(&"Battery".to_owned()));
-        assert!(labels.contains(&"Connection".to_owned()));
-        assert!(labels.contains(&"Equalizer".to_owned()));
-        assert_eq!(m.range.unwrap().ranges[0].key, "hz");
-        assert_eq!(m.boolean.unwrap().booleans[0].key, "sniper");
-        assert_eq!(m.action.unwrap().actions[0].key, "cal");
-        assert!(m.battery.is_some());
-        assert!(m.connection.is_some());
-        assert!(m.equalizer.is_some());
-    }
-
-    #[test]
-    fn pairing_onboard_profiles_key_remap_sections_parse() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            pairing = {},
-            onboard_profiles = {},
-            key_remap = {
-              buttons = { { cid = 1, label = "Left", divertable = true, group = 0 } },
-              requires_host_mode = true,
-            },
-        }"#;
-        let m = parse_manifest(src, Path::new("receiver.lua")).unwrap();
-        assert!(m.needs_worker());
-        let labels = m.capability_labels();
-        assert!(labels.contains(&"Pairing".to_owned()));
-        assert!(labels.contains(&"Onboard".to_owned()));
-        assert!(labels.contains(&"Keys".to_owned()));
-        assert!(m.pairing.is_some());
-        assert!(m.onboard_profiles.is_some());
-        let key_remap = m.key_remap.unwrap();
-        assert_eq!(key_remap.buttons[0].cid, 1);
-        assert!(key_remap.requires_host_mode);
-    }
-
-    #[test]
-    fn permissions_section_parses_and_defaults_to_empty() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            permissions = { "network", "os" },
-        }"#;
-        let m = parse_manifest(src, Path::new("net.lua")).unwrap();
-        assert_eq!(m.permissions, vec![Permission::Network, Permission::Os]);
-
-        let no_perms = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-        }"#;
-        let m = parse_manifest(no_perms, Path::new("no_perms.lua")).unwrap();
-        assert!(m.permissions.is_empty());
-    }
-
-    #[test]
-    fn effect_only_plugin_needs_no_devices() {
-        let src = r#"return {
-            identity = { name = "Effects" },
-            type = "effect",
-            effects = {
-              { kind = "pixmap", id = "plasma", name = "Plasma",
-                params = { { id = "speed", label = "Speed",
-                             kind = { kind = "range", min = 0.1, max = 3.0, step = 0.1 },
-                             default = 0.5 } } },
-              { kind = "direct", id = "comet", name = "Comet" },
-            },
-        }"#;
-        let m = parse_manifest(src, Path::new("fx.lua")).unwrap();
-        assert!(m.devices.is_empty());
-        assert_eq!(m.plugin_type, PluginKind::Effect);
-        assert!(!m.needs_worker(), "effects never need the device worker");
-        assert!(
-            m.capability_labels().is_empty(),
-            "effects aren't a capability"
-        );
-        assert_eq!(m.effects.len(), 2);
-        assert_eq!(m.effects[0].catalog_id("fx"), "fx:plasma");
-        assert_eq!(m.effects[0].kind, EffectKind::Pixmap);
-        assert_eq!(m.effects[1].kind, EffectKind::Direct);
-
-        let descriptor = m.effects[0].descriptor("fx");
-        assert_eq!(descriptor.id, "fx:plasma");
-        assert_eq!(descriptor.params.len(), 1);
-    }
-
-    #[test]
-    fn effect_plugin_with_devices_is_rejected() {
-        let src = r#"return {
-            type = "effect",
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            effects = { { kind = "direct", id = "pulse", name = "Pulse" } },
-        }"#;
-        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
-    }
-
-    #[test]
-    fn integration_plugin_with_devices_is_rejected() {
-        let src = r#"return {
-            type = "integration",
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-        }"#;
-        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
-    }
-
-    #[test]
-    fn integration_plugin_with_static_capability_section_is_rejected() {
-        // Use a simple capability section (fan) that deserialises cleanly
-        // without needing complex sub-types, so the error comes from the
-        // integration validation rule, not from field-level parsing.
-        let src = r#"return {
-            type = "integration",
-            fan = { channels = 1 },
-        }"#;
-        let err = parse_manifest(src, Path::new("bad.lua")).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("integration plugin must not declare capability sections"),
-            "expected capability-section rejection, got: {err}"
-        );
-    }
-
-    #[test]
-    fn device_plugin_with_empty_devices_is_rejected() {
-        let src = r#"return { identity = { name = "y" } }"#;
-        assert!(parse_manifest(src, Path::new("bad.lua")).is_err());
-    }
-
-    #[test]
-    fn effect_with_empty_id_is_rejected() {
-        let src = r#"return {
-            type = "effect",
-            effects = { { kind = "pixmap", id = "", name = "Nope" } },
-        }"#;
-        assert!(parse_manifest(src, Path::new("bad2.lua")).is_err());
-    }
-
-    #[test]
-    fn plugin_type_defaults_to_device() {
-        let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
-        assert_eq!(m.plugin_type, PluginKind::Device);
-    }
-
-    #[test]
-    fn device_plugin_can_also_bundle_effects() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            effects = { { kind = "direct", id = "pulse", name = "Pulse" } },
-        }"#;
-        let m = parse_manifest(src, Path::new("bundled.lua")).unwrap();
-        assert_eq!(m.devices.len(), 1);
-        assert_eq!(m.effects.len(), 1);
-    }
-
-    #[test]
-    fn config_section_parses_fields_with_defaults() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            config = { fields = {
-              { key = "host", label = "Host", default = "127.0.0.1" },
-              { key = "port", label = "Port", kind = "number", default = "6742" },
-              { key = "token", label = "API Token", secure = true },
-            } },
-        }"#;
-        let m = parse_manifest(src, Path::new("cfg.lua")).unwrap();
-        let fields = m.config_fields();
-        assert_eq!(fields.len(), 3);
-        assert_eq!(fields[0].key, "host");
-        assert_eq!(fields[0].kind, PluginConfigFieldKind::Text);
-        assert_eq!(fields[0].default, "127.0.0.1");
-        assert!(!fields[0].secure);
-        assert_eq!(fields[1].kind, PluginConfigFieldKind::Number);
-        assert!(fields[2].secure);
-    }
-
-    #[test]
-    fn secure_config_keys_returns_only_secure_fields() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            config = { fields = {
-              { key = "host", label = "Host" },
-              { key = "token", label = "Token", secure = true },
-              { key = "secret2", label = "Secret 2", secure = true },
-            } },
-        }"#;
-        let m = parse_manifest(src, Path::new("cfg2.lua")).unwrap();
-        assert_eq!(m.secure_config_keys(), vec!["token", "secret2"]);
-    }
-
-    #[test]
-    fn config_fields_empty_when_no_config_section() {
-        let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
-        assert!(m.config_fields().is_empty());
-        assert!(m.secure_config_keys().is_empty());
-    }
-
-    #[test]
-    fn config_section_does_not_affect_capability_labels_or_needs_worker() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            config = { fields = { { key = "host", label = "Host" } } },
-        }"#;
-        let m = parse_manifest(src, Path::new("cfg3.lua")).unwrap();
-        assert!(m.capability_labels().is_empty());
-        assert!(!m.needs_worker());
-    }
-
-    #[test]
-    fn tcp_transport_config_parses_with_defaults() {
-        let src = r#"return {
-            permissions = {"network"},
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            transports = { tcp = { host_key = "ip", port_key = "svc_port" } },
-        }"#;
-        let m = parse_manifest(src, Path::new("tcpcfg.lua")).unwrap();
-        let tcp = m.transports.tcp.expect("tcp transport config");
-        assert_eq!(tcp.host_key, "ip");
-        assert_eq!(tcp.port_key, "svc_port");
-        assert_eq!(tcp.timeout_ms, 5000);
-    }
-
-    #[test]
-    fn tcp_transport_config_defaults_keys_when_omitted() {
-        let src = r#"return {
-            permissions = {"network"},
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            transports = { tcp = { timeout_ms = 2000 } },
-        }"#;
-        let m = parse_manifest(src, Path::new("tcpcfg2.lua")).unwrap();
-        let tcp = m.transports.tcp.expect("tcp transport config");
-        assert_eq!(tcp.host_key, "host");
-        assert_eq!(tcp.port_key, "port");
-        assert_eq!(tcp.timeout_ms, 2000);
-    }
-
-    #[test]
-    fn integration_plugin_parses_with_no_devices() {
-        let src = r#"return {
-            identity = { name = "OpenRGB" },
-            type = "integration",
-            permissions = { "network" },
-            config = { fields = {
-              { key = "host", label = "Host", default = "127.0.0.1" },
-              { key = "port", label = "Port", default = "6742" },
-            } },
-            transports = { tcp = {} },
-        }"#;
-        let m = parse_manifest(src, Path::new("integ.lua")).unwrap();
-        assert!(m.devices.is_empty());
-        assert_eq!(m.plugin_type, PluginKind::Integration);
-    }
-
-    #[test]
-    fn integration_plugin_needs_a_worker_even_with_no_capability_sections() {
-        let src = r#"return {
-            type = "integration",
-        }"#;
-        let m = parse_manifest(src, Path::new("integ2.lua")).unwrap();
-        assert!(m.needs_worker());
-        assert!(
-            m.capability_labels().is_empty(),
-            "an integration root isn't a capability-bearing device itself"
-        );
-    }
-
-    #[test]
-    fn integration_plugin_with_neither_devices_nor_config_still_parses() {
-        // Integration only exempts the devices guard, not config fields.
-        let src = r#"return {
-            type = "integration",
-        }"#;
-        assert!(parse_manifest(src, Path::new("integ3.lua")).is_ok());
+        assert!(!is_disallowed_command("nvidia-smi"));
+        assert!(!is_disallowed_command("liquidctl"));
     }
 
     // ── directory plugins (`plugin.yaml` is authoritative) ─────────────
@@ -2505,15 +1839,27 @@ mod tests {
     fn write_plugin_dir(root: &Path, id: &str, yaml_extra: &str, lua: &str) -> PathBuf {
         let dir = root.join(id);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("plugin.yaml"),
-            format!(
-                "id: {id}\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\n{yaml_extra}"
-            ),
-        )
-        .unwrap();
+        std::fs::write(dir.join("plugin.yaml"), format!("id: {id}\n{yaml_extra}")).unwrap();
         std::fs::write(dir.join("main.lua"), lua).unwrap();
         dir
+    }
+
+    #[test]
+    fn command_transport_rejects_interpreters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "unsafe_command",
+            "type: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [python3]\n",
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("shell, interpreter, or command launcher"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -2522,72 +1868,54 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "dirplug",
-            "devices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\nrgb:\n  zones: []\n",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
         assert_eq!(m.plugin_id, "dirplug");
         assert_eq!(m.devices.len(), 1);
         assert_eq!(m.devices[0].vendor, "Acme");
-        assert!(m.rgb.is_some(), "YAML capability sections are loaded");
-        let compatibility = m.compatibility.as_ref().unwrap();
-        assert_eq!(compatibility.halod, ">=0.2.0, <0.3.0");
-        assert_eq!(compatibility.plugin_api, PLUGIN_API_VERSION);
+        assert_eq!(m.capabilities, vec!["rgb"]);
     }
 
     #[test]
-    fn directory_plugin_requires_compatibility() {
+    fn directory_plugin_indexes_only_its_package_local_lib_modules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integration = "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n";
+        let dir = write_plugin_dir(tmp.path(), "modules", integration, "return {}");
+        std::fs::create_dir_all(dir.join("lib").join("hidpp")).unwrap();
+        std::fs::write(
+            dir.join("lib").join("hidpp").join("v1.lua"),
+            "return { version = 1 }",
+        )
+        .unwrap();
+        let sibling = write_plugin_dir(tmp.path(), "sibling", integration, "return {}");
+        std::fs::create_dir_all(sibling.join("lib")).unwrap();
+        std::fs::write(sibling.join("lib").join("secret.lua"), "return 42").unwrap();
+
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest.module_sources.keys().collect::<Vec<_>>(),
+            vec!["lib.hidpp.v1"]
+        );
+        assert!(!manifest.module_sources.contains_key("lib.secret"));
+    }
+
+    #[test]
+    fn package_rejects_repository_only_compatibility_field() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("missing_compatibility");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: missing_compatibility\ntype: integration\n",
+            "id: missing_compatibility\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: integration\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return { type = 'integration' }").unwrap();
 
         let error = parse_manifest_from_dir(&dir).unwrap_err();
         assert!(
-            error.to_string().contains("must declare compatibility"),
-            "{error:#}"
-        );
-    }
-
-    #[test]
-    fn directory_plugin_rejects_incompatible_daemon_and_plugin_api() {
-        let tmp = tempfile::tempdir().unwrap();
-        let daemon_dir = write_plugin_dir(
-            tmp.path(),
-            "future_daemon",
-            "type: integration\n",
-            "return { type = 'integration' }",
-        );
-        std::fs::write(
-            daemon_dir.join("plugin.yaml"),
-            "id: future_daemon\ncompatibility:\n  halod: '>=999.0.0'\n  plugin_api: 1\ntype: integration\n",
-        )
-        .unwrap();
-        let error = parse_manifest_from_dir(&daemon_dir).unwrap_err();
-        assert!(
-            error.to_string().contains("requires HaloDaemon"),
-            "{error:#}"
-        );
-
-        let api_dir = write_plugin_dir(
-            tmp.path(),
-            "future_api",
-            "type: integration\n",
-            "return { type = 'integration' }",
-        );
-        std::fs::write(
-            api_dir.join("plugin.yaml"),
-            "id: future_api\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 2\ntype: integration\n",
-        )
-        .unwrap();
-        let error = parse_manifest_from_dir(&api_dir).unwrap_err();
-        assert!(
-            error.to_string().contains("requires plugin API 2"),
+            format!("{error:#}").contains("unknown field `compatibility`"),
             "{error:#}"
         );
     }
@@ -2599,7 +1927,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: dirplug2\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\nentry: driver.lua\nlicense: GPL-3.0-or-later\ndevices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: dirplug2\nentry: driver.lua\nlicense: GPL-3.0-or-later\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("driver.lua"), ENTRY_LUA).unwrap();
@@ -2623,7 +1951,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "overlaid",
-            "type: device\nname: Real Name\ndevices:\n  - vendor: Real\n    model: K1\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "type: device\nname: Real Name\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Real\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             lua,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
@@ -2631,10 +1959,6 @@ mod tests {
         assert_eq!(m.devices.len(), 1);
         assert_eq!(m.devices[0].vendor, "Real");
         assert_eq!(m.identity.name.as_deref(), Some("Real Name"));
-        assert!(
-            m.rgb.is_none(),
-            "Lua capability declarations must be ignored"
-        );
     }
 
     #[test]
@@ -2643,7 +1967,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "inert_entry",
-            "type: integration\n",
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n",
             "this is deliberately not valid Lua",
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -2652,18 +1976,75 @@ mod tests {
     }
 
     #[test]
+    fn linux_hwmon_integration_is_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "hwmon",
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ncapabilities: [sensors, fan]\ntransports:\n  hwmon: {}\n",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest.transports.integration_transport_kind(),
+            Some("hwmon")
+        );
+    }
+
+    #[test]
+    fn hwmon_integration_requires_permission_and_linux_platform() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing_permission = write_plugin_dir(
+            tmp.path(),
+            "missing_permission",
+            "type: integration\nplatforms: [linux]\ntransports:\n  hwmon: {}\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&missing_permission)
+            .unwrap_err()
+            .to_string()
+            .contains("hwmon"));
+
+        let wrong_platform = write_plugin_dir(
+            tmp.path(),
+            "wrong_platform",
+            "type: integration\nplatforms: [windows]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&wrong_platform)
+            .unwrap_err()
+            .to_string()
+            .contains("platforms: [linux]"));
+    }
+
+    #[test]
+    fn integration_rejects_multiple_root_transports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "multiple_roots",
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon, network]\ntransports:\n  hwmon: {}\n  tcp:\n    host_key: host\n    port_key: port\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&dir)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one"));
+    }
+
+    #[test]
     fn directory_name_mismatch_with_yaml_id_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = write_plugin_dir(
             tmp.path(),
             "actual-dir-name",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         // Rewrite plugin.yaml claiming a different id than the directory name.
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: someone-else\ndevices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: someone-else\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
         )
         .unwrap();
         assert!(parse_manifest_from_dir(&dir).is_err());
@@ -2680,7 +2061,7 @@ mod tests {
         let no_entry = write_plugin_dir(
             tmp.path(),
             "no_entry",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         std::fs::remove_file(no_entry.join("main.lua")).unwrap();
@@ -2688,46 +2069,8 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_changes_when_plugin_yaml_or_entry_lua_changes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = write_plugin_dir(
-            tmp.path(),
-            "hashtest",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
-            ENTRY_LUA,
-        );
-        let original = parse_manifest_from_dir(&dir).unwrap().content_hash();
-
-        // Entry Lua changes, plugin.yaml unchanged.
-        std::fs::write(
-            dir.join("main.lua"),
-            "return { rgb = { zones = {} }, x = 1 }",
-        )
-        .unwrap();
-        let lua_changed = parse_manifest_from_dir(&dir).unwrap().content_hash();
-        assert_ne!(
-            original, lua_changed,
-            "editing the entry Lua must move the hash"
-        );
-
-        // plugin.yaml changes, entry Lua restored.
-        std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
-        std::fs::write(
-            dir.join("plugin.yaml"),
-            "id: hashtest\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: A\n    model: C\n    transport: hid\n    vid: 1\n    pid: 2\n",
-        )
-        .unwrap();
-        let yaml_changed = parse_manifest_from_dir(&dir).unwrap().content_hash();
-        assert_ne!(
-            original, yaml_changed,
-            "editing plugin.yaml must move the hash"
-        );
-    }
-
-    #[test]
     fn plugin_meta_devices_round_trip_through_yaml() {
-        // `devices:` accepts a plain YAML list, same as the Lua one-or-many helper.
-        let yaml = "id: rt\ndevices:\n  - vendor: Acme\n    model: K1\n    transport: hid\n    vid: 1\n  - vendor: Acme\n    model: K2\n    transport: hid\n    vid: 2\n";
+        let yaml = "id: rt\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1 }\n  - vendor: Acme\n    model: K2\n    type: led_strip\n    match:\n      hid: { vid: 2 }\n";
         let parsed: PluginMeta = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.devices.len(), 2);
         assert_eq!(parsed.devices[0].vendor, "Acme");
@@ -2741,7 +2084,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "noassets",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
@@ -2755,7 +2098,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "withassets",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n\
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
              logo: logo.png\n\
              effects:\n  - kind: pixmap\n    id: rainbow\n    name: Rainbow\n\
              effect_assets:\n  - id: rainbow\n    thumbnail: rainbow.png\n",
@@ -2774,7 +2117,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "conv",
-            "devices:\n  - vendor: A\n    model: B\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         // No `logo:` in the manifest, but the file is present.
@@ -2787,18 +2130,93 @@ mod tests {
     }
 
     #[test]
-    fn builtin_plugin_never_sets_logo_or_thumbnails() {
-        // No `plugin.yaml` overlay for a built-in, so these stay at their defaults.
-        let m = parse_manifest(SAMPLE, Path::new("acme_k1.lua")).unwrap();
-        assert!(m.logo.is_none());
-        assert!(m.effect_thumbnails.is_empty());
+    fn directory_plugin_uses_nested_hid_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("nested_match");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: nested_match\nname: Nested Match\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: mouse\n    match:\n      hid:\n        vid: 0x1234\n        pid: 0x5678\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
+
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(manifest.devices[0].transport, "hid");
+        assert_eq!(manifest.devices[0].vid, Some(0x1234));
+        assert_eq!(manifest.devices[0].pid, Some(0x5678));
     }
 
     #[test]
-    fn plugin_meta_single_device_may_be_a_bare_table() {
-        let yaml = "id: rt2\ndevices:\n  vendor: Acme\n  model: K1\n  transport: hid\n  vid: 1\n";
-        let parsed: PluginMeta = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(parsed.devices.len(), 1);
-        assert_eq!(parsed.devices[0].vendor, "Acme");
+    fn directory_plugin_uses_nested_smbus_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("nested_smbus");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: nested_smbus\npermissions: [smbus]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: DRAM\n    type: ram\n    match:\n      smbus:\n        bus: chipset\n        addresses: [0x50]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
+
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(manifest.devices[0].transport, "smbus");
+        assert_eq!(manifest.devices[0].bus.as_deref(), Some("chipset"));
+        assert_eq!(manifest.devices[0].addresses.as_deref(), Some(&[0x50][..]));
+    }
+
+    #[test]
+    fn directory_plugin_uses_nested_usb_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("nested_usb");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: nested_usb\npermissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: Panel\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pid: 0x5678, interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(manifest.devices[0].transport, "usb");
+        assert_eq!(manifest.devices[0].vid, Some(0x1234));
+    }
+
+    #[test]
+    fn usb_manifest_requires_permission_and_primary_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "usb_no_permission",
+            "capabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 1, pid: 2, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(format!("{error:#}").contains("usb` permission"));
+    }
+
+    #[test]
+    fn usb_manifest_rejects_undeclared_or_duplicate_endpoint_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "usb_bad_endpoints",
+            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 1, pid: 2, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        endpoints:\n          - { address: 0x02, type: bulk, max_transfer_size: 64, max_timeout_ms: 1000 }\n          - { address: 0x02, type: interrupt, max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(format!("{error:#}").contains("repeats endpoint 0x02"));
+    }
+
+    #[test]
+    fn removed_usb_control_manifest_field_has_no_compatibility_shim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "old_usb",
+            "capabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb_control: { vid: 1, pid: 2 } }\n",
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field `usb_control`"));
     }
 }

@@ -220,6 +220,7 @@ impl ChoiceCapability for ComputerDevice {
 
 inventory::submit!(crate::registry::discovery::TransportScanner {
     name: "computer",
+    detail: halod_shared::types::DiscoveryDetail::Computer,
     platform: None,
     scan: |app| Box::pin(async move { discover(app).await }),
 });

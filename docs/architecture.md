@@ -34,7 +34,7 @@ concerns. A single physical device is the composition of all four.
 vendor/   organizational namespace (nzxt, corsair, logitech, asus, …)
   device      implements Device, declares capabilities()        ← what the rest of the daemon sees
     protocol    encodes/decodes the vendor wire format           ← "how do I phrase a 'set color' for this chip"
-      transport   moves raw bytes (HID, SMBus, USB control, …)   ← "how do those bytes reach the wire"
+      transport   moves raw bytes (HID, SMBus, USB, …)           ← "how do those bytes reach the wire"
 ```
 
 ### Transport — moving bytes
@@ -42,10 +42,14 @@ vendor/   organizational namespace (nzxt, corsair, logitech, asus, …)
 A transport implements the `Transport` trait
 ([transports/mod.rs](../src/daemon/src/drivers/transports/mod.rs)): at its core
 just `write(&[u8])` and `read(size)`, with default-implemented conveniences
-(`write_then_read`, `write_many`, feature-report helpers) that HID overrides with
-hardware-backed versions. Available transports: `hid`, `smbus`, `usb_control`,
-`usb_bulk`, `hwmon` (Linux), `lpcio`/`pawnio` (Windows SuperIO), and `mock` (for
-tests). A transport knows nothing about colors, fans, or vendors — only bytes.
+(`write_then_read`, `write_many`) that transports may override with
+hardware-backed versions. HID feature reports, companion collections, nonblocking
+reads, and event delivery live on the `HidTransport` sub-trait and are reached
+through an explicit capability downcast. Available transports: `hid`, `smbus`,
+endpoint-oriented `usb`, `hwmon` (Linux), `lpcio`/`pawnio` (Windows SuperIO),
+and `mock` (for tests). Hwmon and LPCIO expose narrow typed operations rather
+than raw paths or broker handles; transports still know nothing about colors,
+fans, or vendors.
 
 For that same reason, a per-device write-rate ceiling is enforced at this
 boundary rather than in a usecase or engine: `HidTransport` (and `SmBusDevice`
@@ -75,10 +79,10 @@ A protocol module sits on top of a transport and turns intent ("set zone 2 to
 red", "read fan RPM") into the exact byte sequences the chip expects, and parses
 replies back. Protocols hold a transport (often `Mutex<Option<T>>` so it can be
 opened/closed) and expose typed methods. See the
-[HID++ protocol implementation](../src/daemon/src/drivers/vendors/logitech/protocols/hidpp/mod.rs)
+[Logitech HID++ plugin](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/logitech)
 for an example. When you port a wire format from third-party code, add the
 SPDX attribution header (`CLAUDE.md` → *Licensing & attribution*) and document the
-format in [docs/protocols/](protocols/).
+format beside its package in the [official plugin repository](https://github.com/TimP4w/HaloDaemon-plugins).
 
 ### Device — the unit the daemon understands
 
@@ -143,16 +147,22 @@ it in `AppState`, restores its saved config, runs `discover_children()`, and cal
 
 ### Plugins — devices without recompiling
 
-Native drivers register at **compile time** via `inventory`. **Device plugins**
+Built-in host devices register at **compile time** via `inventory`. **Device plugins**
 ([drivers/plugins/](../src/daemon/src/drivers/plugins/)) add a parallel **runtime**
 registry: `load_all_with_repos()` reads directory packages (`plugin.yaml` + entry
 script) from the local plugins directory and every registered git-repo source, and
-`make_device()` consults `plugins::match_handle()` *before* the native descriptors —
-so a plugin **shadows** a native driver for the same hardware. A single generic
+`make_device()` consults `plugins::match_handle()` *before* built-in descriptors —
+so a plugin **shadows** a built-in host device for the same hardware. A single generic
 `LuaDevice` implements the `Device` + capability traits and forwards each call into a
-per-device Lua worker thread (which owns the VM + transport). Plugins expose only
+per-physical-root Lua worker thread (which owns the VM + transport). Dynamic children
+use persistent routed `dev` tables on that same serialized worker. Plugins expose only
 existing capability *kinds*; the capability taxonomy and engines stay native and
 type-safe. See [docs/plugins.md](plugins.md) for the authoring guide.
+
+Integration plugins have host-instantiated roots rather than hardware matches.
+TCP roots connect from plugin config; the Linux hwmon root receives a scoped
+local collection and enumerates stable sensor/fan children. In both cases the
+host owns child relationships, reconciliation, and transport safety cleanup.
 
 **Trust boundary.** Untrusted plugin Lua runs **in-process** in the daemon today.
 Runtime VMs strip filesystem/process/native-loading globals and enforce heap,
@@ -166,22 +176,18 @@ There are no plugins compiled into the daemon binary. At startup the daemon seed
 a non-removable **official plugin repo** record and clones it over the network
 (`registry::ensure_official_repo`) — a clone failure (e.g. no network on first
 launch) is logged and never fails boot, so the daemon simply has no official
-plugins until a later successful clone. Official plugins use the same gate as
-all other sources: permissionless packages activate directly, while permissioned
-packages require every declared grant and current-content acknowledgement. A plugin id
+plugins until a later successful clone. Official plugins use the same
+enable-confirmation gate as all other sources. A plugin id
 is owned by whichever source loads it first (official repo, then local
 `plugins/`, then other repos in config order — see `load_all_with_repos`), so a
 community repo can never shadow an existing plugin id; a collision is rejected
 and surfaced via `take_plugin_load_warnings` rather than silently dropped.
 
-Repo-sourced plugins support **per-plugin update detection**: `repo::remote_plugin_content`
-reads a plugin's `plugin.yaml` + entry script straight out of git's object
-database at the repo's fetched remote tip (no working-tree checkout) and
-compares its content hash to the loaded manifest's — finer-grained than a
-whole-repo SHA compare, since a repo can be behind while a given plugin's own
-files are unchanged. Accepting an update (`repo::checkout_subtree`) checks out
-only that plugin's subtree, leaving sibling plugins in the same repo untouched;
-updates are never automatic.
+Repo updates are atomic and repository-scoped. Git object storage is separate
+from immutable executable revisions: Halo fetches, verifies the root index and
+official signature, materializes and validates a proposed revision, then atomically
+selects it. Update checks never modify executable files, and a failed update
+leaves the previously selected revision running.
 
 ## IPC and usecases — the daemon's public API
 
@@ -226,7 +232,10 @@ and are the reason device state evolves without the user touching anything.
 The set (full internals in [engines.md](engines.md)):
 
 - **canvas** — unified RGB effect loop; renders a tiny-skia pixmap per tick and
-  samples each placed zone to per-LED RGB. Drives every `Rgb` capability.
+  samples each placed zone to per-LED RGB. Drives every `Rgb` capability. Its
+  effect runtime has an intentional two-domain boundary: daemon-owned built-ins
+  only for host services/the always-available designer, and runtime plugins for
+  portable effects; see [engines.md](engines.md#effects).
 - **fan_curve** — closed-loop temp→PWM with hysteresis, deadband, and a failsafe
   duty when the sensor is missing.
 - **lcd** — renders template images / video frames to Kraken-style LCD panels.

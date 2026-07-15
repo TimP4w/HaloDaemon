@@ -389,11 +389,9 @@ async fn dispatch(
             registry::usecases::plugins::import(source_dir, app).await
         }
         DaemonCommand::DeletePlugin { id } => registry::usecases::plugins::delete(id, app).await,
-        DaemonCommand::SetPluginTrust {
-            id,
-            granted,
-            enabled,
-        } => registry::usecases::plugins::set_trust(id, granted, enabled, app).await,
+        DaemonCommand::ConfirmPluginEnable { id, authority } => {
+            registry::usecases::plugins::confirm_enable(id, authority, app).await
+        }
         DaemonCommand::SetPluginConfig { id, values } => {
             registry::usecases::plugins::set_config(id, values, app).await
         }
@@ -411,15 +409,6 @@ async fn dispatch(
         }
         DaemonCommand::UpdatePluginRepo { slug } => {
             registry::usecases::repos::update_repo(slug, app).await
-        }
-        DaemonCommand::RepairPluginRepoDir { slug, subpath } => {
-            registry::usecases::repos::repair_plugin_dir(slug, subpath, app).await
-        }
-        DaemonCommand::CheckPluginUpdates { slug } => {
-            registry::usecases::repos::check_plugin_updates(slug, app, client).await
-        }
-        DaemonCommand::UpdatePlugin { plugin_id } => {
-            registry::usecases::repos::update_plugin(plugin_id, app).await
         }
         DaemonCommand::UpdateAllPlugins => registry::usecases::repos::update_all_plugins(app).await,
         DaemonCommand::SetIntegrationEnabled { id, enabled } => {

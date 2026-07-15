@@ -1,0 +1,26 @@
+[package]
+name = "halod-plugin-signing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Canonical HaloDaemon plugin repository hashing and signing tool"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+semver = { workspace = true }
+serde_yaml = "0.9"
+sha2 = "0.10"
+base64 = "0.22"
+ed25519-dalek = "3.0.0"
+getrandom = "0.4.3"
+tempfile = "3"
+zeroize = "1.9.0"
+
+[dev-dependencies]
+proptest = "1"

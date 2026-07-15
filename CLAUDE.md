@@ -81,7 +81,7 @@ Devices are organized as **vendor → device → protocol → transport**, all u
 
 1. **Supported-devices table** — add a row under the right category in [docs/supported-devices.md](docs/supported-devices.md) (Vendor, Model, VID:PID, Protocol link, Transport link, Platform). This is the user-facing source of truth for supported hardware (linked from [README.md](README.md)).
 2. **udev rule** (Linux) — add the VID:PID to [udev/60-halod.rules](udev/60-halod.rules), grouped by vendor, or the device won't be reachable without root.
-3. **Docs** — if you added a new protocol or transport, write `docs/protocols/<name>.md` / `docs/transports/<name>.md` and link it from the README table; note any vendor-specific setup (kernel module, PawnIO, etc.) in `docs/development.md`.
+3. **Docs** — plugin protocols belong in `<plugin>/docs/protocol.md` in the official plugin repository (large protocols may split into local pages); transport docs stay in `docs/transports/<name>.md`. Note vendor-specific setup (kernel module, PawnIO, etc.) in `docs/development.md`.
 4. **Test** — exercise the new frame encode/decode and any parsing with a unit test (`MockDevice` in [daemon/src/test_support.rs](src/daemon/src/test_support.rs) covers capability-level tests).
 
 ### GUI

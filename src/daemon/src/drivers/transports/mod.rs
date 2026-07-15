@@ -10,13 +10,11 @@ pub mod mock;
 pub mod register_ops;
 pub mod smbus;
 pub mod tcp;
-pub mod usb_bulk;
-pub mod usb_control;
+pub mod usb;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
-use rusb::UsbContext;
 
 /// Shared USB interface claim guard with automatic detach/reattach of kernel drivers on Linux.
 pub struct UsbClaim {
@@ -30,15 +28,6 @@ pub struct UsbClaim {
 }
 
 impl UsbClaim {
-    /// Open a USB device by VID/PID and claim the interface.
-    pub fn open(vid: u16, pid: u16, interface: u8) -> Result<Self> {
-        let ctx = rusb::Context::new()?;
-        let handle = ctx
-            .open_device_with_vid_pid(vid, pid)
-            .ok_or_else(|| anyhow::anyhow!("USB device {:04x}:{:04x} not found", vid, pid))?;
-        Self::claim(handle, interface)
-    }
-
     /// Claim an interface on an already-opened device handle.
     pub fn claim(handle: rusb::DeviceHandle<rusb::Context>, interface: u8) -> Result<Self> {
         #[cfg(target_os = "linux")]
@@ -56,7 +45,17 @@ impl UsbClaim {
             ),
         }
 
-        handle.claim_interface(interface)?;
+        if let Err(error) = handle.claim_interface(interface) {
+            #[cfg(target_os = "linux")]
+            if had_kernel_driver {
+                if let Err(attach_error) = handle.attach_kernel_driver(interface) {
+                    log::warn!(
+                        "UsbClaim: reattach after failed claim({interface}) failed: {attach_error}"
+                    );
+                }
+            }
+            return Err(error.into());
+        }
         Ok(Self {
             handle,
             interface,
@@ -93,68 +92,10 @@ impl Drop for UsbClaim {
     }
 }
 
-/// Lets device code accept `impl BulkTransport` and be tested with a mock instead of real hardware.
-#[async_trait]
-#[expect(dead_code, reason = "plugin-facing bulk transport protocol")]
-pub trait BulkTransport: Send + Sync {
-    /// Write all bytes to the bulk-OUT endpoint, looping until every byte is
-    /// delivered. Returns the total number of bytes sent.
-    fn write(&self, data: &[u8]) -> anyhow::Result<usize>;
-
-    /// Async wrapper that runs [`write`] on a `spawn_blocking` thread so the
-    /// tokio executor is not stalled by the blocking transfer.
-    async fn write_async(&self, data: Vec<u8>) -> anyhow::Result<usize>;
-
-    /// Live write-rate limit and throughput. No default: every implementor
-    /// must back this with a real `Metered` gate rather than silently
-    /// reporting nothing.
-    fn rate_status(&self) -> WriteRateStatus;
-
-    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>);
-}
-
-/// Abstraction over synchronous USB vendor-control transports.
-///
-/// `UsbControlTransport` implements this trait. Device code that accepts
-/// `impl ControlTransport` (or `dyn ControlTransport`) can be tested with a
-/// mock without opening real hardware.
-#[expect(dead_code, reason = "rate-limit hook is optional transport protocol")]
-pub trait ControlTransport: Send + Sync {
-    /// Issue a vendor control OUT transfer.
-    fn write_control(
-        &self,
-        bm_request_type: u8,
-        b_request: u8,
-        w_value: u16,
-        w_index: u16,
-        data: &[u8],
-    ) -> anyhow::Result<()>;
-
-    /// Issue a vendor control IN transfer. Returns the number of bytes read.
-    fn read_control(
-        &self,
-        bm_request_type: u8,
-        b_request: u8,
-        w_value: u16,
-        w_index: u16,
-        buf: &mut [u8],
-    ) -> anyhow::Result<usize>;
-
-    /// Live write-rate limit and throughput. No default: every implementor
-    /// must back this with a real `Metered` gate rather than silently
-    /// reporting nothing.
-    fn rate_status(&self) -> WriteRateStatus;
-
-    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>);
-}
-
 #[async_trait]
 pub trait Transport: Send + Sync {
     async fn write(&self, data: &[u8]) -> Result<()>;
     async fn read(&self, size: usize) -> Result<Vec<u8>>;
-
-    // Extended methods — default impls for non-HID transports / mocks.
-    // HidTransport overrides these with optimized hardware-backed versions.
 
     async fn write_then_read(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
         self.write(data).await?;
@@ -168,22 +109,11 @@ pub trait Transport: Send + Sync {
         Ok(())
     }
 
-    /// Send a feature report and read the reply; unlike `write_then_read`,
-    /// `response_size` excludes the leading report-ID byte.
-    async fn feature_exchange(&self, _data: &[u8], _response_size: usize) -> Result<Vec<u8>> {
-        anyhow::bail!("feature_exchange not supported by this transport")
-    }
-
-    async fn read_nonblocking(&self, size: usize) -> Result<Vec<u8>> {
-        self.read(size).await
-    }
-
-    fn has_long_handle(&self) -> bool {
-        false
-    }
-
-    async fn read_long(&self, size: usize) -> Result<Vec<u8>> {
-        self.read(size).await
+    /// Expose the HID-specific surface when this byte stream supports it.
+    /// Keeping the downcast here leaves the base trait object-safe without
+    /// giving non-HID transports stub operations that can only fail at runtime.
+    fn as_hid(&self) -> Option<&dyn HidTransport> {
+        None
     }
 
     /// Live write-rate limit and throughput. No default: every implementor
@@ -193,4 +123,79 @@ pub trait Transport: Send + Sync {
     fn rate_status(&self) -> WriteRateStatus;
 
     fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>);
+}
+
+/// HID-only byte-stream operations, including companion collections and
+/// unsolicited report delivery. Callers holding only [`Transport`] must first
+/// opt into this capability through [`Transport::as_hid`].
+#[async_trait]
+pub trait HidTransport: Transport {
+    /// Send a feature report and read the reply; unlike `write_then_read`,
+    /// `response_size` excludes the leading report-ID byte.
+    async fn feature_exchange(&self, data: &[u8], response_size: usize) -> Result<Vec<u8>>;
+
+    async fn read_nonblocking(&self, size: usize) -> Result<Vec<u8>> {
+        self.read(size).await
+    }
+
+    /// Pop the next inbound report regardless of which endpoint it arrived on.
+    /// Single-node transports have only one endpoint, so this defaults to
+    /// `read`; multi-collection transports (HID short/long on Windows) merge
+    /// both queues so protocol code can match a reply wherever it lands.
+    async fn read_any(&self, size: usize) -> Result<Vec<u8>> {
+        self.read(size).await
+    }
+
+    /// Hand back a report that was read but did not belong to the in-flight
+    /// request, so it is delivered through the event path (`drain_events`)
+    /// instead of being dropped. The transport never interprets the bytes.
+    async fn defer_event(&self, data: &[u8]) -> Result<()>;
+
+    /// Write to an explicitly opened companion HID collection. Protocol code
+    /// chooses the collection; the transport never interprets report IDs.
+    async fn write_companion(&self, data: &[u8]) -> Result<()>;
+
+    /// Batch writes to an explicitly opened companion collection. HID
+    /// protocols with split short/long collections use this for streaming.
+    async fn write_many_companion(&self, packets: &[Vec<u8>]) -> Result<()> {
+        for packet in packets {
+            self.write_companion(packet).await?;
+        }
+        Ok(())
+    }
+
+    async fn read_companion(&self, size: usize) -> Result<Vec<u8>>;
+
+    async fn write_then_read_companion(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
+        self.write_companion(data).await?;
+        self.read_companion(size).await
+    }
+
+    fn has_companion(&self) -> bool {
+        false
+    }
+
+    /// Subscribe to dispatcher wakeups for event-driven transports. Request
+    /// reads use a separate input handle and never consume this event stream.
+    fn event_receiver(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
+
+    /// Drain unsolicited input in arrival order for delivery to Lua `event()`.
+    async fn drain_events(&self, _limit: usize) -> Result<Vec<TransportEvent>> {
+        Ok(Vec::new())
+    }
+
+    /// Start dispatching unsolicited input reports. HID opens a dedicated
+    /// event handle lazily; request/reply reads retain their own input handle.
+    /// Called only when the owning plugin declares an `event()` callback.
+    fn enable_event_listener(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TransportEvent {
+    pub endpoint: &'static str,
+    pub data: Vec<u8>,
 }

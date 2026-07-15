@@ -28,7 +28,7 @@ cooling:
   curve_hint: "Drag a point to reshape · click empty space to add · right-click a point to delete"
   status_no_sensor: "No temperature sensor is assigned. The fan will remain at 75%."
   status_sensor_malfunction: "A sensor malfunction was detected. The fan will remain at 75%."
-  status_permission_denied: "Permission denied while writing PWM values. Run: sudo udevadm trigger --subsystem-match=hwmon"
+  status_permission_denied: "Permission denied while writing PWM values. Join the halod group, log in again, then run: sudo udevadm trigger --action=change --subsystem-match=hwmon"
   status_write_error: Failed to set the fan speed. Check the daemon logs.
   status_fan_stalled: "The fan is not spinning (0 RPM). Check its connections or replace it."
   status_no_device: The fan is not connected. Its curve will resume when it becomes available again.

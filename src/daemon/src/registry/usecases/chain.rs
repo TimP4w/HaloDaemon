@@ -1,26 +1,27 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! IPC use cases for chainable ARGB channels. Each handler forwards to
-//! [`crate::drivers::ChainCapability`] then persists + broadcasts.
+//! IPC use cases for chainable ARGB channels. Each handler forwards to the
+//! device's shared [`crate::drivers::chain::ChainHost`], then persists and broadcasts.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
-use crate::drivers::{ChainCapability, ChainLinkSpec, Device};
+use crate::drivers::chain::ChainHost;
+use crate::drivers::{ChainLinkSpec, Device};
 use crate::ipc;
 use crate::platform::notify;
 use crate::registry::config::{ChainLinkRecord, ChannelLayoutRecord, DeviceLayout};
 use crate::state::AppState;
 use halod_shared::types::ZoneTopology;
 
-fn require_chain(device: &Arc<dyn Device>) -> Result<&dyn ChainCapability> {
+fn require_chain(device: &Arc<dyn Device>) -> Result<&Arc<ChainHost>> {
     device
-        .as_chain()
+        .chain_host()
         .context("device does not support chainable channels")
 }
 
 /// Locked (hardware-detected) links are skipped — rediscovered each boot.
 pub(super) async fn persist_layout(app: &Arc<AppState>, device: &dyn Device) -> Result<()> {
-    let Some(chain) = device.as_chain() else {
+    let Some(chain) = device.chain_host() else {
         return Ok(());
     };
     let dev_id = device.id().to_owned();
@@ -83,7 +84,7 @@ pub async fn rgb_chain_add_link(
 
     {
         let chain = require_chain(&device)?;
-        let (_child_id, child_device) = chain.add_chain_link(&channel_id, spec).await?;
+        let (_child_id, child_device) = chain.add_link(&channel_id, spec).await?;
         app.devices.write().await.push(child_device);
     }
 
@@ -102,9 +103,7 @@ pub async fn rgb_chain_remove_link(
 
     {
         let chain = require_chain(&device)?;
-        let removed_id = chain
-            .remove_chain_link(&channel_id, &child_device_id)
-            .await?;
+        let removed_id = chain.remove_link(&channel_id, &child_device_id).await?;
         app.devices.write().await.retain(|d| d.id() != removed_id);
     }
 
@@ -124,9 +123,7 @@ pub async fn rgb_chain_reorder_link(
 
     {
         let chain = require_chain(&device)?;
-        chain
-            .reorder_chain_link(&channel_id, &child_device_id, new_index)
-            .await?;
+        chain.reorder_link(&channel_id, &child_device_id, new_index)?;
     }
 
     persist_layout(&app, device.as_ref()).await?;
@@ -166,16 +163,16 @@ pub async fn restore_saved_chains(app: Arc<AppState>) {
         let Some(layout) = layouts.get(device.id()) else {
             continue;
         };
-        let Some(chain) = device.as_chain() else {
+        let Some(chain) = device.chain_host() else {
             log::warn!(
-                "[chain restore] device {} has saved layout but no ChainCapability, skipping",
+                "[chain restore] device {} has saved layout but no chain host, skipping",
                 device.id()
             );
             continue;
         };
         for (channel_id, channel_layout) in &layout.channels {
             for record in &channel_layout.chain_links {
-                match chain.restore_chain_link(channel_id, record).await {
+                match chain.restore_link(channel_id, record).await {
                     Ok(child_device) => {
                         crate::registry::usecases::registration::register_device(
                             &app,
@@ -230,7 +227,8 @@ pub async fn restore_saved_chains(app: Arc<AppState>) {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::drivers::{chain, CapabilityRef, Device};
+    use crate::drivers::chain::{ChainAdapter, ChainHost, ChainLinkRuntime, ChannelDescriptor};
+    use crate::drivers::{CapabilityRef, Device};
     use crate::registry::config::{ChannelLayoutRecord, DeviceLayout};
     use async_trait::async_trait;
     use halod_shared::types::{ChainLinkInfo, ChainableChannelInfo, ZoneTopology};
@@ -242,27 +240,82 @@ mod tests {
         app
     }
 
-    /// Minimal Device + ChainCapability controlled by the test.
+    struct MockAdapter {
+        id: String,
+        channels: Vec<ChannelDescriptor>,
+    }
+
+    #[async_trait]
+    impl ChainAdapter for MockAdapter {
+        fn parent_id(&self) -> String {
+            self.id.clone()
+        }
+
+        fn channels(&self) -> Vec<ChannelDescriptor> {
+            self.channels.clone()
+        }
+
+        async fn write_composed_frame(
+            &self,
+            _channel_id: &str,
+            _composed: &[halod_shared::types::RgbColor],
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Minimal Device with a real ChainHost controlled by the test.
     struct MockChainDevice {
         id: String,
-        channels: Vec<ChainableChannelInfo>,
-        restore_fails: bool,
+        host: Arc<ChainHost>,
     }
 
     impl MockChainDevice {
         fn new(id: &str) -> Self {
+            let host = ChainHost::new(Arc::new(MockAdapter {
+                id: id.to_owned(),
+                channels: vec![],
+            }));
             Self {
                 id: id.to_string(),
-                channels: vec![],
-                restore_fails: false,
+                host,
             }
         }
-        fn with_channels(mut self, channels: Vec<ChainableChannelInfo>) -> Self {
-            self.channels = channels;
-            self
+        fn with_channels(self, channels: Vec<ChainableChannelInfo>) -> Self {
+            let descriptors = channels
+                .iter()
+                .map(|channel| ChannelDescriptor {
+                    channel_id: channel.channel_id.clone(),
+                    display_name: channel.name.clone(),
+                    max_leds: channel.max_leds,
+                })
+                .collect();
+            let host = ChainHost::new(Arc::new(MockAdapter {
+                id: self.id.clone(),
+                channels: descriptors,
+            }));
+            {
+                let mut state = host.state.lock().unwrap();
+                for channel in channels {
+                    let target = state.get_mut(&channel.channel_id).unwrap();
+                    target.links = channel
+                        .links
+                        .into_iter()
+                        .map(|link| {
+                            ChainLinkRuntime::new(
+                                link.child_device_id,
+                                link.name,
+                                link.topology,
+                                link.led_count,
+                                link.locked,
+                            )
+                        })
+                        .collect();
+                }
+            }
+            Self { id: self.id, host }
         }
-        fn restore_fails(mut self) -> Self {
-            self.restore_fails = true;
+        fn restore_fails(self) -> Self {
             self
         }
     }
@@ -286,29 +339,10 @@ mod tests {
         }
         async fn close(&self) {}
         fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![CapabilityRef::Chain(self)]
+            vec![]
         }
-    }
-
-    #[async_trait]
-    impl ChainCapability for MockChainDevice {
-        fn chain_host(&self) -> Option<&Arc<chain::ChainHost>> {
-            None
-        }
-
-        fn chainable_channels(&self) -> Vec<ChainableChannelInfo> {
-            self.channels.clone()
-        }
-
-        async fn restore_chain_link(
-            &self,
-            _channel_id: &str,
-            _record: &ChainLinkRecord,
-        ) -> anyhow::Result<Arc<dyn Device>> {
-            if self.restore_fails {
-                anyhow::bail!("simulated restore failure");
-            }
-            Err(anyhow::anyhow!("mock cannot restore"))
+        fn chain_host(&self) -> Option<&Arc<ChainHost>> {
+            Some(&self.host)
         }
     }
 

@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Plugins page — a master–detail view of the Lua device plugins found in the
-//! plugins directory (plus built-ins). The left column lists every plugin with
-//! an enable toggle; the right column shows the selected plugin's detail. User
-//! scripts can be added (upload a `.lua` file or paste source) and deleted;
-//! built-ins can be toggled but not deleted.
+//! Plugins page — a master–detail view of canonical plugin packages. The left
+//! column lists every plugin with an enable toggle; the right column shows the
+//! manifest catalog, authority, and provenance. Packages may be imported or
+//! supplied by repositories; only standalone local packages can be deleted.
 
 use std::collections::{HashMap, HashSet};
 
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
-    AppState, PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginRepoInfo,
-    PluginSource, PluginUpdateStatus, RepoUpdateStatus,
+    AppState, PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
+    PluginRepoInfo, PluginSource, PluginUpdateStatus, RepoUpdateStatus,
 };
 
+use crate::domain::models::plugin_issues::plugin_issue_detail;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::icons;
@@ -56,8 +56,6 @@ struct RepoCheck {
 #[derive(Clone)]
 struct PendingRepoRepair {
     slug: String,
-    subpath: String,
-    name: String,
 }
 
 /// What the detail column shows: a plugin, a repo, or nothing (empty state).
@@ -82,7 +80,7 @@ pub struct PluginsUi {
     pending_delete: Option<String>,
     /// Repo slug pending a remove confirmation, when the dialog is open.
     pending_repo_delete: Option<String>,
-    /// Malformed repo package pending a scoped recovery confirmation.
+    /// Repository pending a whole-repository recovery confirmation.
     pending_repo_repair: Option<PendingRepoRepair>,
     /// The repo whose "check for updates" is currently in flight, if any.
     checking_repo: Option<RepoCheck>,
@@ -440,9 +438,7 @@ impl PluginsUi {
                     });
                 },
                 |ui| {
-                    if let Some((slug, subpath)) =
-                        skipped_repo_location(&s.path, &state.plugins.repos)
-                    {
+                    if let Some((slug, _)) = skipped_repo_location(&s.path, &state.plugins.repos) {
                         if widgets::button(
                             ui,
                             &t!("plugins.repos_repair"),
@@ -451,11 +447,7 @@ impl PluginsUi {
                         )
                         .clicked()
                         {
-                            self.pending_repo_repair = Some(PendingRepoRepair {
-                                slug,
-                                subpath,
-                                name: name.to_owned(),
-                            });
+                            self.pending_repo_repair = Some(PendingRepoRepair { slug });
                         }
                         ui.add_space(6.0);
                     }
@@ -574,9 +566,7 @@ impl PluginsUi {
                     });
                     crate::runtime::ipc::send(
                         cmd,
-                        halod_shared::commands::DaemonCommand::CheckPluginUpdates {
-                            slug: Some(r.slug.clone()),
-                        },
+                        halod_shared::commands::DaemonCommand::CheckPluginRepoUpdates,
                     );
                 }
                 if self.checking_repo.is_some() {
@@ -874,12 +864,12 @@ impl PluginsUi {
         }
     }
 
-    /// Confirm restoring only the malformed package directory, leaving every
-    /// sibling path in the repository untouched.
+    /// Confirm restoring the active immutable repository revision. Recovery
+    /// is repository-scoped: packages are never repaired in isolation.
     fn repo_repair_modal(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
-        let Some(pending) = self.pending_repo_repair.clone() else {
+        if self.pending_repo_repair.is_none() {
             return;
-        };
+        }
 
         let mut confirm = false;
         let mut cancel = false;
@@ -890,12 +880,9 @@ impl PluginsUi {
             440.0,
             |ui| {
                 ui.label(
-                    egui::RichText::new(t!(
-                        "plugins.repos_repair_body",
-                        name = pending.name.clone()
-                    ))
-                    .font(theme::body(12.5))
-                    .color(theme::TEXT_DIM),
+                    egui::RichText::new(t!("plugins.repos_repair_body"))
+                        .font(theme::body(12.5))
+                        .color(theme::TEXT_DIM),
                 );
             },
             |ui| {
@@ -928,10 +915,7 @@ impl PluginsUi {
         ) {
             crate::runtime::ipc::send(
                 cmd,
-                halod_shared::commands::DaemonCommand::RepairPluginRepoDir {
-                    slug: pending.slug,
-                    subpath: pending.subpath,
-                },
+                halod_shared::commands::DaemonCommand::UpdatePluginRepo { slug: pending.slug },
             );
         }
     }
@@ -963,18 +947,10 @@ impl PluginsUi {
                         .color(theme::TEXT_DIM),
                 );
                 match consent_reason(p) {
-                    ConsentReason::PermissionAdded => {
+                    ConsentReason::AuthorityExpanded => {
                         ui.add_space(8.0);
                         ui.label(
                             egui::RichText::new(t!("plugins.consent_permission_added"))
-                                .font(theme::body(11.5))
-                                .color(theme::STAT_AMBER),
-                        );
-                    }
-                    ConsentReason::ContentChanged => {
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(t!("plugins.consent_modified"))
                                 .font(theme::body(11.5))
                                 .color(theme::STAT_AMBER),
                         );
@@ -984,6 +960,11 @@ impl PluginsUi {
                 ui.add_space(12.0);
                 for perm in &p.declared_permissions {
                     permission_card(ui, *perm);
+                    ui.add_space(8.0);
+                }
+                let commands = command_scope_names(&p.authority);
+                if !commands.is_empty() {
+                    command_authority_card(ui, &commands);
                     ui.add_space(8.0);
                 }
                 ui.add_space(2.0);
@@ -1020,10 +1001,9 @@ impl PluginsUi {
         if grant {
             crate::runtime::ipc::send(
                 cmd,
-                halod_shared::commands::DaemonCommand::SetPluginTrust {
+                halod_shared::commands::DaemonCommand::ConfirmPluginEnable {
                     id: id.clone(),
-                    granted: p.declared_permissions.clone(),
-                    enabled: true,
+                    authority: p.authority.clone(),
                 },
             );
             // Granting enables the plugin — apply and lock like a direct enable.
@@ -1425,12 +1405,10 @@ pub(crate) fn plugin_needs_permission(p: &PluginInfo) -> bool {
 /// permissions again after an update or edit. Unlike [`plugin_needs_permission`],
 /// this deliberately excludes a newly installed plugin's first-time consent.
 pub(crate) fn plugin_requires_regrant(p: &PluginInfo) -> bool {
-    let has_new_permission = p
-        .declared_permissions
-        .iter()
-        .any(|perm| !p.granted_permissions.contains(perm));
-    let was_approved = !p.granted_permissions.is_empty();
-    !p.enabled && (p.content_changed || (was_approved && has_new_permission))
+    !p.enabled
+        && p.accepted_authority
+            .as_ref()
+            .is_some_and(|accepted| !p.authority.is_subset_of(accepted))
 }
 
 /// Why the consent modal is being shown, so it can explain the cause.
@@ -1438,27 +1416,18 @@ pub(crate) fn plugin_requires_regrant(p: &PluginInfo) -> bool {
 pub(crate) enum ConsentReason {
     /// Never approved before — a first-time grant.
     New,
-    /// Previously approved, and an update/edit added permissions beyond those
-    /// already granted.
-    PermissionAdded,
-    /// Previously approved, but the script content changed since (no new
-    /// permissions).
-    ContentChanged,
+    /// Previously approved, and the current package expands its authority.
+    AuthorityExpanded,
 }
 
 /// Classify why `p` is asking for consent, from its granted vs declared
 /// permissions and whether its content changed since the last acknowledgment.
 pub(crate) fn consent_reason(p: &PluginInfo) -> ConsentReason {
-    let has_new_permission = p
-        .declared_permissions
-        .iter()
-        .any(|perm| !p.granted_permissions.contains(perm));
-    // A non-empty granted set means the user approved this plugin before.
-    let approved_before = !p.granted_permissions.is_empty();
-    if approved_before && has_new_permission {
-        ConsentReason::PermissionAdded
-    } else if p.content_changed && !has_new_permission {
-        ConsentReason::ContentChanged
+    if p.accepted_authority
+        .as_ref()
+        .is_some_and(|accepted| !p.authority.is_subset_of(accepted))
+    {
+        ConsentReason::AuthorityExpanded
     } else {
         ConsentReason::New
     }
@@ -1470,7 +1439,11 @@ pub(crate) fn consent_reason(p: &PluginInfo) -> ConsentReason {
 fn newly_required_permissions(p: &PluginInfo) -> Vec<halod_shared::types::Permission> {
     p.declared_permissions
         .iter()
-        .filter(|perm| !p.granted_permissions.contains(perm))
+        .filter(|perm| {
+            !p.accepted_authority
+                .as_ref()
+                .is_some_and(|accepted| accepted.permissions.contains(perm))
+        })
         .copied()
         .collect()
 }
@@ -1486,21 +1459,18 @@ fn plugin_active(p: &PluginInfo) -> bool {
 enum ToggleDecision {
     /// Active → turn it off.
     Disable,
-    /// Off and consent-satisfied → turn it on.
-    Enable,
-    /// Off and declares ungranted permissions → open the grant modal first.
+    /// Every disabled-to-enabled transition opens the authority review modal.
     NeedsConsent,
 }
 
-/// Pure toggle logic: an active plugin turns off; a permission-free (or already
-/// granted) one turns on; one needing permission must be granted first.
+/// Every enable is an explicit, current authority confirmation. This applies
+/// to permission-free plugins too: transports and supported-device scope are
+/// still meaningful authority for the user to review.
 fn toggle_decision(p: &PluginInfo) -> ToggleDecision {
     if plugin_active(p) {
         ToggleDecision::Disable
-    } else if plugin_needs_permission(p) {
-        ToggleDecision::NeedsConsent
     } else {
-        ToggleDecision::Enable
+        ToggleDecision::NeedsConsent
     }
 }
 
@@ -1528,19 +1498,6 @@ fn request_toggle(cmd: &CommandTx, p: &PluginInfo, pending: Option<String>) -> T
             ToggleOutcome {
                 pending_consent: pending,
                 dispatched: Some(false),
-            }
-        }
-        ToggleDecision::Enable => {
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::SetPluginEnabled {
-                    id: p.id.clone(),
-                    enabled: true,
-                },
-            );
-            ToggleOutcome {
-                pending_consent: pending,
-                dispatched: Some(true),
             }
         }
         ToggleDecision::NeedsConsent => ToggleOutcome {
@@ -1634,7 +1591,7 @@ fn list_row(
             theme::STAT_AMBER,
         );
     }
-    if p.issue.is_some() {
+    if p.health.issue.is_some() {
         ui.painter().circle_filled(
             Pos2::new(tile_rect.left() + 2.0, tile_rect.top() + 2.0),
             4.0,
@@ -1816,12 +1773,12 @@ fn detail_body(
     );
 
     if is_load_failed(p) {
-        if let Some(issue) = &p.issue {
+        if let Some(issue) = &p.health.issue {
             ui.add_space(14.0);
             if issue_banner(ui, issue) {
                 *issue_modal = Some((
                     t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
-                    issue.detail.clone(),
+                    plugin_issue_detail(issue),
                 ));
             }
         }
@@ -1829,7 +1786,9 @@ fn detail_body(
         // update may be the only way to make it compatible again. Keep that
         // recovery action available even when the checked-out files also count
         // as modified on disk.
-        if let Some(update) = update.filter(|u| u.update_available) {
+        if let Some(update) = update
+            .filter(|u| u.update_available && p.provenance != PluginProvenance::LocalDevelopment)
+        {
             ui.add_space(14.0);
             let in_flight = updating.contains_key(&update.plugin_id);
             if update_banner(
@@ -1841,8 +1800,8 @@ fn detail_body(
                 updating.insert(update.plugin_id.clone(), now);
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::UpdatePlugin {
-                        plugin_id: update.plugin_id.clone(),
+                    halod_shared::commands::DaemonCommand::UpdatePluginRepo {
+                        slug: update.slug.clone(),
                     },
                 );
             }
@@ -1858,12 +1817,12 @@ fn detail_body(
     ui.add_space(14.0);
     status_banner(ui, p);
 
-    if let Some(issue) = &p.issue {
+    if let Some(issue) = &p.health.issue {
         ui.add_space(14.0);
         if issue_banner(ui, issue) {
             *issue_modal = Some((
                 t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
-                issue.detail.clone(),
+                plugin_issue_detail(issue),
             ));
         }
     }
@@ -1877,6 +1836,7 @@ fn detail_body(
             if let PluginSource::Repo { slug } = &p.source {
                 widgets::chip(ui, slug);
             }
+            widgets::chip(ui, &provenance_label(p.provenance));
         });
     }
 
@@ -1889,7 +1849,9 @@ fn detail_body(
     if update.is_some_and(|u| u.on_disk_changed) && !plugin_active(p) {
         ui.add_space(14.0);
         modified_on_disk_banner(ui);
-    } else if let Some(update) = update.filter(|u| u.update_available) {
+    } else if let Some(update) =
+        update.filter(|u| u.update_available && p.provenance != PluginProvenance::LocalDevelopment)
+    {
         ui.add_space(14.0);
         let in_flight = updating.contains_key(&update.plugin_id);
         if update_banner(
@@ -1901,8 +1863,8 @@ fn detail_body(
             updating.insert(update.plugin_id.clone(), now);
             crate::runtime::ipc::send(
                 cmd,
-                halod_shared::commands::DaemonCommand::UpdatePlugin {
-                    plugin_id: update.plugin_id.clone(),
+                halod_shared::commands::DaemonCommand::UpdatePluginRepo {
+                    slug: update.slug.clone(),
                 },
             );
         }
@@ -2015,9 +1977,25 @@ fn plugin_type_color(kind: halod_shared::types::PluginKind) -> egui::Color32 {
     }
 }
 
+fn provenance_label(provenance: PluginProvenance) -> std::borrow::Cow<'static, str> {
+    match provenance {
+        PluginProvenance::VerifiedOfficial => t!("plugins.provenance_official"),
+        PluginProvenance::UnsignedRepository => t!("plugins.provenance_repository"),
+        PluginProvenance::LocalDevelopment => t!("plugins.provenance_development"),
+        PluginProvenance::LocalUnsigned => t!("plugins.provenance_local"),
+        PluginProvenance::InvalidSignature => t!("plugins.provenance_invalid"),
+    }
+}
+
 fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'static, str> {
     use halod_shared::types::Permission;
     match perm {
+        Permission::Hid => "HID device access".into(),
+        Permission::Usb => "USB device access".into(),
+        Permission::Hwmon => "Hardware monitoring".into(),
+        Permission::Lpcio => "LPC/SuperIO access".into(),
+        Permission::AmdSmn => "AMD SMN access".into(),
+        Permission::Command => "Run approved commands".into(),
         Permission::Network => t!("plugins.permission_network"),
         Permission::Os => t!("plugins.permission_os"),
         Permission::SecureStorage => t!("plugins.permission_secure_storage"),
@@ -2031,6 +2009,12 @@ fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'
 fn permission_description(perm: halod_shared::types::Permission) -> std::borrow::Cow<'static, str> {
     use halod_shared::types::Permission;
     match perm {
+        Permission::Hid => "Lets the plugin communicate with the matching HID device and receive its input reports.".into(),
+        Permission::Usb => "Lets the plugin claim only its declared USB devices and use allowlisted endpoints and bounded control transfers.".into(),
+        Permission::Hwmon => "Lets the plugin access the scoped Linux hardware-monitoring collection, including approved fan controls.".into(),
+        Permission::Lpcio => "Lets the plugin use the typed broker interface for motherboard SuperIO hardware.".into(),
+        Permission::AmdSmn => "Lets the plugin read supported AMD SMN registers through the broker.".into(),
+        Permission::Command => "Lets the plugin run only the executable names declared in its manifest, without a shell.".into(),
         Permission::Network => t!("plugins.permission_network_desc"),
         Permission::Os => t!("plugins.permission_os_desc"),
         Permission::SecureStorage => t!("plugins.permission_secure_storage_desc"),
@@ -2097,6 +2081,45 @@ fn permission_card(ui: &mut egui::Ui, perm: halod_shared::types::Permission) {
         });
 }
 
+fn command_scope_names(authority: &halod_shared::types::PluginAuthority) -> Vec<&str> {
+    authority
+        .transport_scopes
+        .iter()
+        .filter_map(|scope| scope.strip_prefix("command:"))
+        .collect()
+}
+
+fn command_authority_card(ui: &mut egui::Ui, commands: &[&str]) {
+    egui::Frame::NONE
+        .fill(theme::INNER_BG)
+        .stroke(Stroke::new(1.0, theme::STAT_AMBER))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                egui::RichText::new("Can run programs")
+                    .font(theme::body(12.0))
+                    .strong()
+                    .color(theme::STAT_AMBER),
+            );
+            ui.add_space(3.0);
+            ui.label(
+                egui::RichText::new(
+                    "This plugin can start the following programs as your user account, with arguments it controls:",
+                )
+                .font(theme::body(11.5))
+                .color(theme::TEXT_MUT),
+            );
+            ui.add_space(5.0);
+            ui.label(
+                egui::RichText::new(commands.join(", "))
+                    .font(theme::mono(12.0))
+                    .color(theme::TEXT),
+            );
+        });
+}
+
 /// Side-by-side "TARGET DEVICES | PERMISSIONS" row of the detail view. Either
 /// column is omitted when empty.
 fn targets_permissions_row(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
@@ -2150,7 +2173,11 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
     ui.add_space(6.0);
 
     for perm in &p.declared_permissions {
-        let color = if p.granted_permissions.contains(perm) {
+        let color = if p
+            .accepted_authority
+            .as_ref()
+            .is_some_and(|accepted| accepted.permissions.contains(perm))
+        {
             theme::ONLINE
         } else {
             theme::STAT_AMBER
@@ -2160,19 +2187,11 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
     }
 
     if !p.consented {
-        if p.content_changed {
-            ui.label(
-                egui::RichText::new(t!("plugins.consent_modified"))
-                    .font(theme::body(11.0))
-                    .color(theme::STAT_AMBER),
-            );
-        } else {
-            ui.label(
-                egui::RichText::new(t!("plugins.permissions_enable_hint"))
-                    .font(theme::body(11.0))
-                    .color(theme::TEXT_MUT),
-            );
-        }
+        ui.label(
+            egui::RichText::new(t!("plugins.permissions_enable_hint"))
+                .font(theme::body(11.0))
+                .color(theme::TEXT_MUT),
+        );
     } else if widgets::button(
         ui,
         &t!("plugins.revoke"),
@@ -2183,9 +2202,8 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
     {
         crate::runtime::ipc::send(
             cmd,
-            halod_shared::commands::DaemonCommand::SetPluginTrust {
+            halod_shared::commands::DaemonCommand::SetPluginEnabled {
                 id: p.id.clone(),
-                granted: Vec::new(),
                 enabled: false,
             },
         );
@@ -2305,8 +2323,8 @@ fn modified_on_disk_banner(ui: &mut egui::Ui) {
 /// banner makes the required action explicit before the normal detail content.
 fn regrant_warning_banner(ui: &mut egui::Ui, p: &PluginInfo) {
     let detail = match consent_reason(p) {
-        ConsentReason::PermissionAdded => t!("plugins.consent_permission_added"),
-        ConsentReason::ContentChanged | ConsentReason::New => t!("plugins.consent_modified"),
+        ConsentReason::AuthorityExpanded => t!("plugins.consent_permission_added"),
+        ConsentReason::New => t!("plugins.consent_modified"),
     };
     egui::Frame::NONE
         .fill(theme::a(theme::STAT_AMBER, 0.10))
@@ -2332,6 +2350,7 @@ fn regrant_warning_banner(ui: &mut egui::Ui, p: &PluginInfo) {
 fn issue_label_key(kind: &PluginIssueKind) -> &'static str {
     match kind {
         PluginIssueKind::ConnectFailed => "plugins.issue_connect_failed",
+        PluginIssueKind::InitFailed => "plugins.issue_init_failed",
         PluginIssueKind::RuntimeError => "plugins.issue_runtime_error",
         PluginIssueKind::LoadWarning => "plugins.issue_load_warning",
         PluginIssueKind::LoadFailed => "plugins.issue_load_failed",
@@ -2339,7 +2358,8 @@ fn issue_label_key(kind: &PluginIssueKind) -> &'static str {
 }
 
 fn is_load_failed(p: &PluginInfo) -> bool {
-    p.issue
+    p.health
+        .issue
         .as_ref()
         .is_some_and(|i| i.kind == PluginIssueKind::LoadFailed)
 }
@@ -2765,6 +2785,22 @@ fn spawn_import_plugin(ctx: &egui::Context, cmd: CommandTx) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn command_scopes_are_presented_as_executable_names() {
+        let authority = halod_shared::types::PluginAuthority {
+            permissions: vec![],
+            transport_scopes: vec![
+                "hid".into(),
+                "command:nvidia-smi".into(),
+                "command:liquidctl".into(),
+            ],
+        };
+        assert_eq!(
+            command_scope_names(&authority),
+            vec!["nvidia-smi", "liquidctl"]
+        );
+    }
+
     fn status(id: &str, update_available: bool) -> PluginUpdateStatus {
         PluginUpdateStatus {
             plugin_id: id.to_owned(),
@@ -2926,6 +2962,8 @@ mod tests {
             path: format!("/home/u/.config/halod/plugins/{id}.lua"),
             plugin_type: halod_shared::types::PluginKind::Device,
             capabilities: vec!["RGB".into()],
+            platforms: vec![],
+            platform_supported: true,
             effect_names: vec![],
             enabled,
             author: "Someone".into(),
@@ -2937,16 +2975,16 @@ mod tests {
             logo: None,
             effect_thumbnails: vec![],
             source: Default::default(),
+            provenance: Default::default(),
             declared_permissions: vec![],
-            granted_permissions: vec![],
+            authority: Default::default(),
+            accepted_authority: None,
             config_fields: vec![],
             config_values: Default::default(),
             secret_set: Default::default(),
             integration_enabled: true,
             consented: true,
-            content_changed: false,
-            issue: None,
-            integration_issue: None,
+            health: Default::default(),
         }
     }
 
@@ -3024,6 +3062,10 @@ mod tests {
             "plugins.issue_connect_failed"
         );
         assert_eq!(
+            issue_label_key(&PluginIssueKind::InitFailed),
+            "plugins.issue_init_failed"
+        );
+        assert_eq!(
             issue_label_key(&PluginIssueKind::RuntimeError),
             "plugins.issue_runtime_error"
         );
@@ -3041,15 +3083,17 @@ mod tests {
     fn is_load_failed_only_for_load_failed_issue() {
         let mut p = info("p", true);
         assert!(!is_load_failed(&p));
-        p.issue = Some(PluginIssue {
+        p.health.issue = Some(PluginIssue {
             kind: PluginIssueKind::RuntimeError,
             detail: "x".into(),
+            context: None,
             timestamp_ms: 0,
         });
         assert!(!is_load_failed(&p));
-        p.issue = Some(PluginIssue {
+        p.health.issue = Some(PluginIssue {
             kind: PluginIssueKind::LoadFailed,
             detail: "x".into(),
+            context: None,
             timestamp_ms: 0,
         });
         assert!(is_load_failed(&p));
@@ -3062,23 +3106,28 @@ mod tests {
         // Never approved: a first-time grant.
         let mut p = info("a", false);
         p.declared_permissions = vec![Permission::Network];
-        p.granted_permissions = vec![];
         assert_eq!(consent_reason(&p), ConsentReason::New);
 
         // Approved before (has a granted perm) and an update declares a new one.
         let mut p = info("a", false);
         p.declared_permissions = vec![Permission::Network, Permission::Os];
-        p.granted_permissions = vec![Permission::Network];
-        p.content_changed = true;
-        assert_eq!(consent_reason(&p), ConsentReason::PermissionAdded);
+        p.authority.permissions = p.declared_permissions.clone();
+        p.accepted_authority = Some(halod_shared::types::PluginAuthority {
+            permissions: vec![Permission::Network],
+            transport_scopes: vec![],
+        });
+        assert_eq!(consent_reason(&p), ConsentReason::AuthorityExpanded);
         assert_eq!(newly_required_permissions(&p), vec![Permission::Os]);
 
         // Approved before, content changed, but no new permission.
         let mut p = info("a", false);
         p.declared_permissions = vec![Permission::Network];
-        p.granted_permissions = vec![Permission::Network];
-        p.content_changed = true;
-        assert_eq!(consent_reason(&p), ConsentReason::ContentChanged);
+        p.authority.permissions = p.declared_permissions.clone();
+        p.accepted_authority = Some(halod_shared::types::PluginAuthority {
+            permissions: vec![Permission::Network],
+            transport_scopes: vec![],
+        });
+        assert_eq!(consent_reason(&p), ConsentReason::New);
         assert!(newly_required_permissions(&p).is_empty());
     }
 
@@ -3140,8 +3189,11 @@ mod tests {
         PluginRepoInfo {
             url: format!("https://example.com/{slug}.git"),
             slug: slug.to_owned(),
+            repository_id: None,
             branch: None,
             locked_sha: locked_sha.to_owned(),
+            active_revision: None,
+            previous_verified_sha: None,
             last_sync: None,
             official: false,
         }
@@ -3310,9 +3362,15 @@ mod tests {
     fn regrant_attention_only_marks_previously_approved_plugins() {
         let mut updated = info("updated", false);
         updated.declared_permissions = vec![halod_shared::types::Permission::Os];
-        updated.granted_permissions = vec![halod_shared::types::Permission::Os];
+        updated.authority.permissions = vec![
+            halod_shared::types::Permission::Os,
+            halod_shared::types::Permission::Network,
+        ];
+        updated.accepted_authority = Some(halod_shared::types::PluginAuthority {
+            permissions: vec![halod_shared::types::Permission::Os],
+            transport_scopes: vec![],
+        });
         updated.consented = false;
-        updated.content_changed = true;
         assert!(plugin_requires_regrant(&updated));
 
         let mut added_permission = info("added-permission", false);
@@ -3320,7 +3378,11 @@ mod tests {
             halod_shared::types::Permission::Os,
             halod_shared::types::Permission::Network,
         ];
-        added_permission.granted_permissions = vec![halod_shared::types::Permission::Os];
+        added_permission.authority.permissions = added_permission.declared_permissions.clone();
+        added_permission.accepted_authority = Some(halod_shared::types::PluginAuthority {
+            permissions: vec![halod_shared::types::Permission::Os],
+            transport_scopes: vec![],
+        });
         added_permission.consented = false;
         assert!(plugin_requires_regrant(&added_permission));
 
@@ -3333,9 +3395,9 @@ mod tests {
     #[test]
     fn toggle_decision_routes_through_the_consent_gate() {
         use halod_shared::types::Permission;
-        // Permission-free, off → straight enable.
+        // Permission-free, off → authority review.
         let mut p = info("a", false);
-        assert_eq!(toggle_decision(&p), ToggleDecision::Enable);
+        assert_eq!(toggle_decision(&p), ToggleDecision::NeedsConsent);
 
         // Permission-free, on → disable.
         p.enabled = true;

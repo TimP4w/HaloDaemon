@@ -32,9 +32,20 @@ home:
   conflict_keep: "Keep %{name}"
   conflict_keep_recommended: "Keep %{name} (recommended)"
   conflict_choose_owner: Choose this device owner
-  conflict_source_native: Native driver
+  conflict_source_builtin: Built-in host device
   conflict_source_plugin: "Plugin: %{name}"
   conflict_source_integration: "Integration: %{name}"
+  conflict_banner_title_one: 1 device has a control conflict
+  conflict_banner_title_many: "%{count} devices have control conflicts"
+  conflict_banner_sub: A device can only be controlled by one source. Choose which source keeps control.
+  conflict_resolve: Resolve
+  conflict_modal_title: Resolve control conflicts
+  conflict_modal_intro: "Each device below is controlled by multiple sources. Choose which source should keep control; the others will release that device."
+  conflict_modal_note: Unselected sources will continue controlling their other devices. This only changes control of the devices listed here.
+  conflict_sources: "%{count} sources"
+  conflict_tag_recommended: Recommended
+  conflict_decide_later: Decide later
+  conflict_keep_selected: "Apply selections · %{count}"
   no_matching: No matching devices
   no_matching_sub: None of your connected devices match this search
   no_devices: No devices connected

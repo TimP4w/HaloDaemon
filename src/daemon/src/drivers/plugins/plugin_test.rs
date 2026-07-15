@@ -5,27 +5,26 @@
 //! daemon owns the Lua worker + transport machinery here; the test *cases*
 //! live in the plugin repo, one `test.lua` per package.
 //!
-//! Scope today: `hid`/`tcp`-transport (`PluginIo::Stream`) device plugins,
-//! exercising `initialize()` and `apply()` (static color) against the first
-//! declared device. SMBus/usb_control support can be added the same way
-//! (a new recording backend + `PluginIo` arm) when a package needs it.
+//! Covers HID/TCP streams and scoped USB endpoint/control collections against
+//! the first declared device without opening host hardware.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use mlua::{Function, Lua, Table, Value};
+use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 
 use crate::drivers::chain::ChainAdapter;
-use crate::drivers::transports::Transport;
+use crate::drivers::transports::usb::{UsbCollection, UsbControlResult};
+use crate::drivers::transports::{HidTransport, Transport, TransportEvent};
 use crate::drivers::{Metered, RgbCapability};
 use std::collections::HashMap;
 
 use halod_shared::types::{EffectParamValue, RgbColor, RgbState, WriteRateLimit, WriteRateStatus};
 
-use super::device::LuaDevice;
-use super::manifest::{parse_manifest_from_dir, PluginManifest};
+use super::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
+use super::manifest::{parse_manifest_from_dir, PluginManifest, UsbConfig};
 use super::transport::PluginIo;
 use super::worker::{DevMatch, PluginHandle};
 
@@ -45,20 +44,57 @@ fn mlua_err(e: anyhow::Error) -> mlua::Error {
     mlua::Error::RuntimeError(format!("{e:#}"))
 }
 
-/// Records every write; replays scripted reads in order. Never touches real hardware.
+/// One recorded write, tagged with the collection it was routed to so a test
+/// can assert long frames went to the companion and short frames to primary.
+struct WriteRecord {
+    endpoint: &'static str,
+    data: Vec<u8>,
+}
+
+/// Records every write; replays scripted reads in order. Never touches real
+/// hardware. When `companion` is set it advertises a companion collection so a
+/// package's Windows short/long routing can be exercised, and it buffers
+/// `defer_event` reports for delivery through the event path (`drain_events`).
 struct RecordingStream {
-    written: Mutex<Vec<Vec<u8>>>,
+    written: Mutex<Vec<WriteRecord>>,
     reads: Mutex<std::collections::VecDeque<Vec<u8>>>,
+    deferred: Mutex<std::collections::VecDeque<Vec<u8>>>,
+    companion: bool,
     rate: Metered<()>,
 }
 
 impl RecordingStream {
     fn new(reads: Vec<Vec<u8>>) -> Self {
+        Self::with_companion(reads, false)
+    }
+
+    fn with_companion(reads: Vec<Vec<u8>>, companion: bool) -> Self {
         Self {
             written: Mutex::new(Vec::new()),
             reads: Mutex::new(reads.into()),
+            deferred: Mutex::new(std::collections::VecDeque::new()),
+            companion,
             rate: Metered::new((), None),
         }
+    }
+
+    fn record(&self, endpoint: &'static str, data: &[u8]) {
+        self.written
+            .lock()
+            .expect("recording stream poisoned")
+            .push(WriteRecord {
+                endpoint,
+                data: data.to_vec(),
+            });
+    }
+
+    /// Push a report onto the event queue as if a reader thread had received it
+    /// unsolicited — lets a test drive `event()` without a real device.
+    fn queue_event(&self, data: Vec<u8>) {
+        self.deferred
+            .lock()
+            .expect("recording stream poisoned")
+            .push_back(data);
     }
 }
 
@@ -66,10 +102,7 @@ impl RecordingStream {
 impl Transport for RecordingStream {
     async fn write(&self, data: &[u8]) -> Result<()> {
         self.rate.write_access(data.len()).await?;
-        self.written
-            .lock()
-            .expect("recording stream poisoned")
-            .push(data.to_vec());
+        self.record("primary", data);
         Ok(())
     }
 
@@ -81,12 +114,201 @@ impl Transport for RecordingStream {
             .ok_or_else(|| anyhow::anyhow!("no more scripted reads queued for this device"))
     }
 
+    fn as_hid(&self) -> Option<&dyn HidTransport> {
+        Some(self)
+    }
+
     fn rate_status(&self) -> WriteRateStatus {
         self.rate.status()
     }
 
     fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
         self.rate.set_limit(limit);
+    }
+}
+
+#[async_trait]
+impl HidTransport for RecordingStream {
+    async fn feature_exchange(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
+        self.write_then_read(data, size).await
+    }
+
+    async fn write_companion(&self, data: &[u8]) -> Result<()> {
+        if !self.companion {
+            anyhow::bail!("companion collection not available on this recording stream");
+        }
+        self.rate.write_access(data.len()).await?;
+        self.record("companion", data);
+        Ok(())
+    }
+
+    async fn defer_event(&self, data: &[u8]) -> Result<()> {
+        self.queue_event(data.to_vec());
+        Ok(())
+    }
+
+    async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+        let mut deferred = self.deferred.lock().expect("recording stream poisoned");
+        let count = deferred.len().min(limit);
+        Ok(deferred
+            .drain(..count)
+            .map(|data| TransportEvent {
+                endpoint: "deferred",
+                data,
+            })
+            .collect())
+    }
+
+    fn has_companion(&self) -> bool {
+        self.companion
+    }
+
+    async fn read_companion(&self, size: usize) -> Result<Vec<u8>> {
+        self.read(size).await
+    }
+}
+
+struct UsbWriteRecord {
+    device: String,
+    endpoint: Option<u8>,
+    request_type: Option<u8>,
+    request: Option<u8>,
+    data: Vec<u8>,
+}
+
+struct RecordingUsb {
+    config: UsbConfig,
+    written: Mutex<Vec<UsbWriteRecord>>,
+    reads: Mutex<std::collections::VecDeque<Vec<u8>>>,
+    rate: Metered<()>,
+}
+
+impl RecordingUsb {
+    fn new(config: UsbConfig, reads: Vec<Vec<u8>>) -> Self {
+        Self {
+            config,
+            written: Mutex::new(Vec::new()),
+            reads: Mutex::new(reads.into()),
+            rate: Metered::new((), None),
+        }
+    }
+    fn device(&self, id: Option<&str>) -> Result<&super::manifest::UsbDeviceConfig> {
+        let id = id.unwrap_or("primary");
+        self.config
+            .devices
+            .iter()
+            .find(|d| d.id == id)
+            .ok_or_else(|| anyhow::anyhow!("unknown USB device '{id}'"))
+    }
+    fn scripted_read(&self, length: usize) -> Result<Vec<u8>> {
+        let mut data = self
+            .reads
+            .lock()
+            .expect("recording USB poisoned")
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("no more scripted USB reads"))?;
+        data.truncate(length);
+        Ok(data)
+    }
+}
+
+impl UsbCollection for RecordingUsb {
+    fn write(
+        &self,
+        device_id: Option<&str>,
+        endpoint: u8,
+        data: &[u8],
+        timeout_ms: u64,
+    ) -> Result<usize> {
+        let device = self.device(device_id)?;
+        let policy = device
+            .endpoints
+            .iter()
+            .find(|e| e.address == endpoint)
+            .ok_or_else(|| anyhow::anyhow!("USB endpoint outside recording allowlist"))?;
+        if endpoint & 0x80 != 0
+            || data.len() > policy.max_transfer_size
+            || timeout_ms == 0
+            || timeout_ms > policy.max_timeout_ms
+        {
+            anyhow::bail!("USB recording write exceeds endpoint policy");
+        }
+        self.rate.write_access_blocking(data.len())?;
+        self.written
+            .lock()
+            .expect("recording USB poisoned")
+            .push(UsbWriteRecord {
+                device: device.id.clone(),
+                endpoint: Some(endpoint),
+                request_type: None,
+                request: None,
+                data: data.to_vec(),
+            });
+        Ok(data.len())
+    }
+    fn read(
+        &self,
+        device_id: Option<&str>,
+        endpoint: u8,
+        length: usize,
+        timeout_ms: u64,
+    ) -> Result<Vec<u8>> {
+        let device = self.device(device_id)?;
+        let policy = device
+            .endpoints
+            .iter()
+            .find(|e| e.address == endpoint)
+            .ok_or_else(|| anyhow::anyhow!("USB endpoint outside recording allowlist"))?;
+        if endpoint & 0x80 == 0
+            || length > policy.max_transfer_size
+            || timeout_ms == 0
+            || timeout_ms > policy.max_timeout_ms
+        {
+            anyhow::bail!("USB recording read exceeds endpoint policy");
+        }
+        self.scripted_read(length)
+    }
+    fn control(
+        &self,
+        device_id: Option<&str>,
+        request_type: u8,
+        request: u8,
+        _value: u16,
+        _index: u16,
+        bytes: &[u8],
+        read_length: usize,
+        timeout_ms: u64,
+    ) -> Result<UsbControlResult> {
+        let device = self.device(device_id)?;
+        let policy = device
+            .control
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("USB control outside recording allowlist"))?;
+        let length = bytes.len().max(read_length);
+        if length > policy.max_transfer_size
+            || timeout_ms == 0
+            || timeout_ms > policy.max_timeout_ms
+        {
+            anyhow::bail!("USB recording control exceeds policy");
+        }
+        if request_type & 0x80 != 0 {
+            return Ok(UsbControlResult::Read(self.scripted_read(read_length)?));
+        }
+        self.rate.write_access_blocking(bytes.len())?;
+        self.written
+            .lock()
+            .expect("recording USB poisoned")
+            .push(UsbWriteRecord {
+                device: device.id.clone(),
+                endpoint: None,
+                request_type: Some(request_type),
+                request: Some(request),
+                data: bytes.to_vec(),
+            });
+        Ok(UsbControlResult::Written(bytes.len()))
+    }
+    fn rate_status(&self) -> WriteRateStatus {
+        self.rate.status()
     }
 }
 
@@ -224,14 +446,39 @@ fn open_integration(
         anyhow::bail!("open_integration requires an integration plugin");
     }
     let recording = Arc::new(RecordingStream::new(reads_from_spec(&spec_table)));
+    #[cfg(target_os = "linux")]
+    let hwmon = if manifest.transports.hwmon.is_some() {
+        Some(Arc::new(
+            crate::drivers::transports::hwmon::HwmonTransport::from_fixture(
+                hwmon_fixtures_from_spec(&spec_table)?,
+            ),
+        ))
+    } else {
+        None
+    };
+    #[cfg(target_os = "linux")]
+    let io = hwmon
+        .clone()
+        .map(PluginIo::Hwmon)
+        .unwrap_or_else(|| PluginIo::Stream {
+            transport: recording.clone() as Arc<dyn Transport>,
+            usb: None,
+        });
+    #[cfg(not(target_os = "linux"))]
+    let io = PluginIo::Stream {
+        transport: recording.clone() as Arc<dyn Transport>,
+        usb: None,
+    };
+    let transport_kind = manifest
+        .transports
+        .integration_transport_kind()
+        .unwrap_or("tcp");
     let worker = PluginHandle::spawn(
         manifest.script_source.clone(),
-        PluginIo::Stream {
-            transport: recording.clone() as Arc<dyn Transport>,
-            bulk: None,
-        },
+        manifest.module_sources.clone(),
+        io,
         DevMatch {
-            transport: "tcp".into(),
+            transport: transport_kind.into(),
             ..Default::default()
         },
         manifest.permissions.clone(),
@@ -266,9 +513,12 @@ fn open_integration(
                 for (i, controller) in controllers.iter().enumerate() {
                     let item = lua.create_table()?;
                     item.set("index", controller.index)?;
+                    item.set("id", controller.id.clone())?;
+                    item.set("key", controller.key.clone())?;
                     item.set("name", controller.name.clone())?;
                     item.set("serial", controller.serial.clone())?;
                     item.set("location", controller.location.clone())?;
+                    item.set("extra", lua.to_value(&controller.extra)?)?;
                     let zones = lua.create_table()?;
                     for (z, zone) in controller.zones.iter().enumerate() {
                         let zone_t = lua.create_table()?;
@@ -287,14 +537,52 @@ fn open_integration(
         .anyhow()?;
     }
     {
+        let worker = worker.clone();
+        let handle = handle.clone();
+        dev.set(
+            "open_controller",
+            lua.create_function(move |lua, (_self, wanted): (Table, u32)| {
+                let controllers = handle
+                    .block_on(worker.enumerate_controllers())
+                    .map_err(mlua_err)?;
+                let controller = controllers
+                    .into_iter()
+                    .find(|controller| controller.index == wanted)
+                    .ok_or_else(|| mlua::Error::RuntimeError("unknown controller index".into()))?;
+                let child = worker.child(DevMatch {
+                    transport: transport_kind.into(),
+                    index: Some(controller.index),
+                    key: controller.key,
+                    name: Some(controller.name),
+                    extra: controller.extra,
+                    ..Default::default()
+                });
+                integration_child_table(lua, child, handle.clone())
+            })
+            .anyhow()?,
+        )
+        .anyhow()?;
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(hwmon) = hwmon {
+        dev.set(
+            "hwmon_read",
+            lua.create_function(move |_, (_self, key, attribute): (Table, String, String)| {
+                hwmon.read(&key, &attribute).map_err(mlua_err)
+            })
+            .anyhow()?,
+        )
+        .anyhow()?;
+    }
+    {
         let recording = recording.clone();
         dev.set(
             "writes",
             lua.create_function(move |lua, _self: Table| {
                 let written = recording.written.lock().expect("recording poisoned");
                 let out = lua.create_table()?;
-                for (i, bytes) in written.iter().enumerate() {
-                    out.set(i + 1, lua.create_sequence_from(bytes.iter().copied())?)?;
+                for (i, rec) in written.iter().enumerate() {
+                    out.set(i + 1, lua.create_sequence_from(rec.data.iter().copied())?)?;
                 }
                 Ok(out)
             })
@@ -303,6 +591,101 @@ fn open_integration(
         .anyhow()?;
     }
     Ok(dev)
+}
+
+fn integration_child_table(
+    lua: &Lua,
+    child: PluginHandle,
+    handle: tokio::runtime::Handle,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    {
+        let child = child.clone();
+        let handle = handle.clone();
+        table.set(
+            "initialize",
+            lua.create_function(move |lua, _self: Table| {
+                let outcome = handle.block_on(child.initialize()).map_err(mlua_err)?;
+                let zones = lua.create_table()?;
+                for (i, zone) in outcome.zones.unwrap_or_default().iter().enumerate() {
+                    let item = lua.create_table()?;
+                    item.set("id", zone.id.clone())?;
+                    item.set("name", zone.name.clone())?;
+                    item.set("led_count", zone.led_count)?;
+                    zones.set(i + 1, item)?;
+                }
+                Ok((outcome.ok, zones))
+            })?,
+        )?;
+    }
+    {
+        let child = child.clone();
+        let handle = handle.clone();
+        table.set(
+            "get_sensors",
+            lua.create_function(move |lua, _self: Table| {
+                let sensors = handle.block_on(child.get_sensors()).map_err(mlua_err)?;
+                lua.to_value(&sensors)
+            })?,
+        )?;
+    }
+    {
+        let child = child.clone();
+        let handle = handle.clone();
+        table.set(
+            "get_duty",
+            lua.create_function(move |_, _self: Table| {
+                handle.block_on(child.fan_get_duty()).map_err(mlua_err)
+            })?,
+        )?;
+    }
+    {
+        let child = child.clone();
+        let handle = handle.clone();
+        table.set(
+            "get_rpm",
+            lua.create_function(move |_, _self: Table| {
+                handle.block_on(child.fan_get_rpm()).map_err(mlua_err)
+            })?,
+        )?;
+    }
+    {
+        let handle = handle.clone();
+        table.set(
+            "set_duty",
+            lua.create_function(move |_, (_self, duty): (Table, u8)| {
+                handle.block_on(child.fan_set_duty(duty)).map_err(mlua_err)
+            })?,
+        )?;
+    }
+    Ok(table)
+}
+
+#[cfg(target_os = "linux")]
+fn hwmon_fixtures_from_spec(
+    spec: &Option<Table>,
+) -> Result<Vec<(String, String, std::collections::HashMap<String, String>)>> {
+    let Some(spec) = spec else {
+        return Ok(Vec::new());
+    };
+    let Ok(fixtures) = spec.get::<Table>("hwmon") else {
+        return Ok(Vec::new());
+    };
+    fixtures
+        .sequence_values::<Table>()
+        .map(|fixture| {
+            let fixture = fixture.anyhow()?;
+            let stable_id = fixture.get::<String>("stable_id").anyhow()?;
+            let name = fixture.get::<String>("name").anyhow()?;
+            let attributes = fixture.get::<Table>("attributes").anyhow()?;
+            let mut values = std::collections::HashMap::new();
+            for pair in attributes.pairs::<String, String>() {
+                let (attribute, value) = pair.anyhow()?;
+                values.insert(attribute, value);
+            }
+            Ok((stable_id, name, values))
+        })
+        .collect()
 }
 
 /// `serde`-compare two Lua values (mlua's `serialize` feature makes `Value` `Serialize`).
@@ -344,41 +727,71 @@ fn open_device(
         .devices
         .first()
         .context("plugin declares no devices")?;
-    if !matches!(spec.transport.as_str(), "hid" | "tcp") {
+    if !matches!(spec.transport.as_str(), "hid" | "tcp" | "usb") {
         anyhow::bail!(
-            "plugin-test harness only supports hid/tcp transports today (got '{}')",
+            "plugin-test harness only supports hid/tcp/usb transports today (got '{}')",
             spec.transport
         );
     }
 
-    let recording = Arc::new(RecordingStream::new(reads_from_spec(&spec_table)));
+    let companion = spec_table
+        .as_ref()
+        .and_then(|table| table.get::<Option<bool>>("companion").ok().flatten())
+        .unwrap_or(false);
+    let recording = Arc::new(RecordingStream::with_companion(
+        reads_from_spec(&spec_table),
+        companion,
+    ));
+    let usb_recording = manifest
+        .transports
+        .usb
+        .clone()
+        .map(|config| Arc::new(RecordingUsb::new(config, reads_from_spec(&spec_table))));
+    let pid = spec_table
+        .as_ref()
+        .and_then(|table| table.get::<Option<u16>>("pid").ok().flatten())
+        .or(spec.pid);
+    let key = spec_table
+        .as_ref()
+        .and_then(|table| table.get::<Option<String>>("key").ok().flatten());
     let dev_match = DevMatch {
         transport: spec.transport.clone(),
         bus: spec.bus.clone(),
         addr: None,
         vid: spec.vid,
-        pid: spec.pid,
+        pid,
         index: None,
+        key,
+        name: None,
+        extra: Default::default(),
     };
-    let device = Arc::new(LuaDevice::with_transport(
-        "plugin-test".to_owned(),
+    let device = Arc::new(LuaDevice::new(LuaDeviceParts {
+        id: "plugin-test".to_owned(),
         manifest,
-        spec,
-        dev_match,
-        PluginIo::Stream {
-            transport: recording.clone() as Arc<dyn Transport>,
-            bulk: None,
-        },
-        handle.clone(),
-        // The harness grants every declared permission (so gated transports
-        // open), uses no config, and has no `AppState` to notify.
-        manifest.permissions.clone(),
-        std::collections::HashMap::new(),
-        std::sync::Weak::new(),
-        Arc::new(std::sync::Mutex::new(
+        spec: Some(spec),
+        notify: std::sync::Weak::new(),
+        runtime: Some(Arc::new(std::sync::Mutex::new(
             super::device::RuntimeState::OpeningTransport,
-        )),
-    ));
+        ))),
+        worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
+            dev_match,
+            transport: if spec.transport == "usb" {
+                PluginIo::Usb(usb_recording.clone().expect("USB manifest config"))
+            } else {
+                PluginIo::Stream {
+                    transport: recording.clone() as Arc<dyn Transport>,
+                    usb: usb_recording
+                        .clone()
+                        .map(|usb| usb as Arc<dyn UsbCollection>),
+                }
+            },
+            handle: handle.clone(),
+            // The harness grants every declared permission (so gated transports
+            // open), uses no config, and has no `AppState` to notify.
+            granted: manifest.permissions.clone(),
+            config: std::collections::HashMap::new(),
+        })),
+    }));
 
     let dev_table = lua.create_table().anyhow()?;
 
@@ -391,6 +804,286 @@ fn open_device(
                 lua.create_function(move |_, _self: Table| {
                     handle
                         .block_on(crate::drivers::Device::initialize(&*device))
+                        .map_err(mlua_err)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "lcd_stream_frame",
+                lua.create_function(
+                    move |_,
+                          (_self, bytes, width, height, _rotation, _raw, _brightness): (
+                        Table,
+                        Table,
+                        u32,
+                        u32,
+                        u32,
+                        bool,
+                        u8,
+                    )| {
+                        let rgba = bytes
+                            .sequence_values::<u8>()
+                            .collect::<mlua::Result<Vec<_>>>()?;
+                        handle
+                            .block_on(crate::drivers::LcdCapability::stream_frame(
+                                &*device, &rgba, width, height,
+                            ))
+                            .map_err(mlua_err)
+                    },
+                )
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "keyboard_layout_status",
+                lua.create_function(move |lua, _self: Table| {
+                    let status = handle.block_on(
+                        crate::drivers::KeyboardLayoutCapability::keyboard_layout_status(&*device),
+                    );
+                    lua.to_value(&status)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "serialize",
+                lua.create_function(move |lua, _self: Table| {
+                    let wire = handle.block_on(crate::drivers::Device::serialize(&*device));
+                    lua.to_value(&wire)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        dev_table
+            .set(
+                "rgb_descriptor",
+                lua.create_function(move |lua, _self: Table| {
+                    lua.to_value(crate::drivers::RgbCapability::descriptor(&*device))
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "write_frame",
+                lua.create_function(move |_, (_self, zone, colors): (Table, String, Table)| {
+                    let colors: Vec<RgbColor> = colors
+                        .sequence_values::<Table>()
+                        .filter_map(|color| color.ok().map(|table| table_to_color(&table)))
+                        .collect();
+                    handle
+                        .block_on(crate::drivers::RgbCapability::write_frame(
+                            &*device, &zone, &colors,
+                        ))
+                        .map_err(mlua_err)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "dpi_status",
+                lua.create_function(move |lua, _self: Table| {
+                    let status =
+                        handle.block_on(crate::drivers::DpiCapability::dpi_status(&*device));
+                    lua.to_value(&status)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "key_remap_status",
+                lua.create_function(move |lua, _self: Table| {
+                    let status = handle.block_on(
+                        crate::drivers::KeyRemapCapability::get_key_remap_status(&*device),
+                    );
+                    lua.to_value(&status)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "connection_status",
+                lua.create_function(move |lua, _self: Table| {
+                    let status = handle.block_on(
+                        crate::drivers::ConnectionCapability::connection_status(&*device),
+                    );
+                    lua.to_value(&status)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "get_equalizer",
+                lua.create_function(move |lua, _self: Table| {
+                    let equalizer = handle
+                        .block_on(crate::drivers::EqualizerCapability::get_equalizer(&*device))
+                        .map_err(mlua_err)?;
+                    lua.to_value(&equalizer)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "set_eq_bands",
+                lua.create_function(move |_, (_self, values): (Table, Table)| {
+                    let values = values
+                        .sequence_values::<f32>()
+                        .collect::<mlua::Result<Vec<_>>>()?;
+                    handle
+                        .block_on(crate::drivers::EqualizerCapability::set_eq_bands(
+                            &*device, &values,
+                        ))
+                        .map_err(mlua_err)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "set_choice",
+                lua.create_function(move |_, (_self, key, selected): (Table, String, usize)| {
+                    handle
+                        .block_on(crate::drivers::ChoiceCapability::set_choice(
+                            &*device, &key, selected,
+                        ))
+                        .map_err(mlua_err)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "enumerate_controllers",
+                lua.create_function(move |lua, _self: Table| {
+                    let controllers =
+                        handle.block_on(crate::drivers::Controller::discover_children(&*device));
+                    let out = lua.create_table()?;
+                    for (i, controller) in controllers.iter().enumerate() {
+                        let item = lua.create_table()?;
+                        item.set("id", controller.id())?;
+                        item.set("name", controller.name())?;
+                        item.set("device_type", lua.to_value(&controller.wire_device_type())?)?;
+                        out.set(i + 1, item)?;
+                    }
+                    Ok(out)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "set_dpi",
+                lua.create_function(move |_, (_self, dpi): (Table, u16)| {
+                    handle
+                        .block_on(crate::drivers::DpiCapability::set_dpi_direct(&*device, dpi))
+                        .map_err(mlua_err)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "get_batteries",
+                lua.create_function(move |lua, _self: Table| {
+                    let batteries = handle
+                        .block_on(crate::drivers::BatteryCapability::get_batteries(&*device))
+                        .map_err(mlua_err)?;
+                    lua.to_value(&batteries)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "set_range",
+                lua.create_function(move |_, (_self, key, value): (Table, String, i32)| {
+                    handle
+                        .block_on(crate::drivers::RangeCapability::set_range(
+                            &*device, &key, value,
+                        ))
                         .map_err(mlua_err)
                 })
                 .anyhow()?,
@@ -421,9 +1114,72 @@ fn open_device(
                 lua.create_function(move |lua, _self: Table| {
                     let written = recording.written.lock().expect("recording poisoned");
                     let out = lua.create_table()?;
-                    for (i, bytes) in written.iter().enumerate() {
+                    for (i, rec) in written.iter().enumerate() {
                         let entry = lua.create_table()?;
-                        entry.set("data", lua.create_sequence_from(bytes.iter().copied())?)?;
+                        entry.set("data", lua.create_sequence_from(rec.data.iter().copied())?)?;
+                        entry.set("endpoint", rec.endpoint)?;
+                        out.set(i + 1, entry)?;
+                    }
+                    Ok(out)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "poll_sensors",
+                lua.create_function(move |lua, _self: Table| {
+                    handle.block_on(device.poll_once()).map_err(mlua_err)?;
+                    let sensors = handle
+                        .block_on(crate::drivers::SensorCapability::get_sensors(&*device))
+                        .map_err(mlua_err)?;
+                    lua.to_value(&sensors)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let recording = recording.clone();
+        dev_table
+            .set(
+                "queue_read",
+                lua.create_function(move |_, (_self, bytes): (Table, Table)| {
+                    let data = bytes
+                        .sequence_values::<u8>()
+                        .collect::<mlua::Result<Vec<_>>>()?;
+                    recording
+                        .reads
+                        .lock()
+                        .expect("recording poisoned")
+                        .push_back(data);
+                    Ok(())
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    if let Some(usb) = usb_recording.clone() {
+        dev_table
+            .set(
+                "usb_writes",
+                lua.create_function(move |lua, _self: Table| {
+                    let written = usb.written.lock().expect("recording USB poisoned");
+                    let out = lua.create_table()?;
+                    for (i, rec) in written.iter().enumerate() {
+                        let entry = lua.create_table()?;
+                        entry.set("device", rec.device.clone())?;
+                        entry.set("endpoint", rec.endpoint)?;
+                        entry.set("request_type", rec.request_type)?;
+                        entry.set("request", rec.request)?;
+                        entry.set("data", lua.create_sequence_from(rec.data.iter().copied())?)?;
                         out.set(i + 1, entry)?;
                     }
                     Ok(out)
@@ -455,6 +1211,7 @@ fn open_device(
 
     {
         let recording = recording.clone();
+        let usb = usb_recording.clone();
         dev_table
             .set(
                 "clear",
@@ -464,7 +1221,66 @@ fn open_device(
                         .lock()
                         .expect("recording poisoned")
                         .clear();
+                    if let Some(usb) = &usb {
+                        usb.written.lock().expect("recording USB poisoned").clear();
+                    }
                     Ok(())
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    // Push an unsolicited report onto the event queue (as a reader thread
+    // would), then drain it through `event()` — exercising the push-based
+    // notification path without real hardware.
+    {
+        let recording = recording.clone();
+        dev_table
+            .set(
+                "queue_event",
+                lua.create_function(move |_, (_self, bytes): (Table, Table)| {
+                    let data: Vec<u8> =
+                        bytes.sequence_values::<u8>().collect::<mlua::Result<_>>()?;
+                    recording.queue_event(data);
+                    Ok(())
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "pump_events",
+                lua.create_function(move |lua, _self: Table| {
+                    let outcomes = handle.block_on(device.pump_events()).map_err(mlua_err)?;
+                    let out = lua.create_table()?;
+                    for (i, outcome) in outcomes.iter().enumerate() {
+                        let item = lua.create_table()?;
+                        item.set(
+                            "pressed",
+                            lua.create_sequence_from(
+                                outcome.button_events.pressed.iter().copied(),
+                            )?,
+                        )?;
+                        item.set(
+                            "released",
+                            lua.create_sequence_from(
+                                outcome.button_events.released.iter().copied(),
+                            )?,
+                        )?;
+                        if let Some(index) = outcome.child_index {
+                            item.set("child_index", index)?;
+                        }
+                        item.set("state_changed", outcome.state_changed)?;
+                        item.set("children_changed", outcome.children_changed)?;
+                        out.set(i + 1, item)?;
+                    }
+                    Ok(out)
                 })
                 .anyhow()?,
             )
@@ -558,7 +1374,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: fixture\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: fixture\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
         )
         .unwrap();
         std::fs::write(
@@ -633,7 +1449,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: fixture\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: fixture\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();

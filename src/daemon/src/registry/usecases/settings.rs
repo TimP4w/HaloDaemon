@@ -84,8 +84,11 @@ pub async fn set_log_level(level: String, app: Arc<AppState>) -> Result<()> {
     let level_filter = level
         .parse::<log::LevelFilter>()
         .map_err(|_| anyhow::anyhow!("invalid log level: {level}"))?;
+    if level_filter == log::LevelFilter::Trace {
+        anyhow::bail!("trace logging is not supported");
+    }
 
-    log::set_max_level(level_filter);
+    log::set_max_level(crate::logger::without_trace(level_filter));
 
     {
         let mut cfg = app.config.write().await;
@@ -143,6 +146,11 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
     };
     app.request_config_save();
     if newly_allowed {
+        #[cfg(feature = "dev-plugin-repo")]
+        if app.development_plugin_repo.read().await.is_some() {
+            log::info!("skipping official plugin download because --dev-plugin-repo is active");
+            return Ok(());
+        }
         crate::registry::ensure_official_repo(&app).await;
         super::plugins::reload_registry(&app).await;
         crate::registry::notify_ungranted_plugins(&app).await;
@@ -185,16 +193,10 @@ pub async fn reset_tours_seen(app: Arc<AppState>) -> Result<()> {
 
 pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     log::info!("Rediscovery triggered via UI");
-    // Re-read the plugins directory so a freshly-dropped script is picked up by
-    // a "Scan now" without restarting the daemon.
-    {
-        let cfg = app.config.read().await;
-        app.registry.load_all_with_repos(
-            &crate::config::plugins_dir(),
-            &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
-        );
-        app.registry.replace_policy(&cfg.plugins);
-    }
+    // Re-read all sources so a freshly-dropped package is picked up by a
+    // "Scan now" without restarting the daemon. This must use the shared
+    // reload path to retain a process-local development repository.
+    super::plugins::reload_registry(&app).await;
     crate::registry::notify_ungranted_plugins(&app).await;
     crate::registry::usecases::plugins::reconcile_full(&app).await;
 
@@ -202,9 +204,56 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
         app.devices.read().await.clone();
     for dev in controllers {
         if let Some(ctrl) = dev.as_controller() {
-            let children = ctrl.rescan_children().await;
-            for child in children {
-                crate::registry::usecases::registration::register_device(&app, child).await;
+            // Child ids from plugin packages are stable hardware ids (for
+            // example a Logitech serial or NVIDIA UUID), not necessarily
+            // strings prefixed by the controller id. Keep the ownership set
+            // established at registration and let the controller perform an
+            // exact live diff against it.
+            let existing = app
+                .device_children
+                .lock()
+                .await
+                .get(dev.id())
+                .cloned()
+                .unwrap_or_default();
+            let Ok((added, gone)) = ctrl.resync_children(&existing).await else {
+                continue;
+            };
+
+            let mut registered = std::collections::HashSet::new();
+            for child in added {
+                let child_id = child.id().to_owned();
+                if crate::registry::usecases::registration::register_device(&app, child).await {
+                    registered.insert(child_id);
+                }
+            }
+
+            if !gone.is_empty() {
+                let removed: Vec<std::sync::Arc<dyn crate::drivers::Device>> = {
+                    let mut devices = app.devices.write().await;
+                    let mut removed = Vec::new();
+                    devices.retain(|device| {
+                        if gone.iter().any(|id| id == device.id()) {
+                            removed.push(device.clone());
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    removed
+                };
+                for child in removed {
+                    super::registration::close_device(&app, &child).await;
+                }
+            }
+
+            if !gone.is_empty() || !registered.is_empty() {
+                let mut owners = app.device_children.lock().await;
+                let children = owners.entry(dev.id().to_owned()).or_default();
+                for id in gone {
+                    children.remove(&id);
+                }
+                children.extend(registered);
             }
         }
     }
@@ -267,7 +316,8 @@ mod tests {
     #[tokio::test]
     async fn set_log_level_invalid_level_returns_error() {
         with_tmp_config(|app| async move {
-            assert!(set_log_level("nonsense".into(), app).await.is_err());
+            assert!(set_log_level("nonsense".into(), app.clone()).await.is_err());
+            assert!(set_log_level("trace".into(), app).await.is_err());
         })
         .await;
     }

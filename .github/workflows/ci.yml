@@ -15,6 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
+      - name: Reject silently disabled test modules
+        shell: bash
+        run: |
+          if grep -R -n -F 'cfg(all(test,' src | grep -F 'any()))'; then
+            echo 'Tests must not be disabled with an always-false cfg.' >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

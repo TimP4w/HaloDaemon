@@ -95,6 +95,7 @@ impl PluginEffectHandle {
     /// `render_<id>` / `led_colors_<id>` callback lookup.
     pub fn spawn(
         script_source: String,
+        module_sources: std::collections::BTreeMap<String, String>,
         effect_id: String,
         params: HashMap<String, EffectParamValue>,
         granted: Vec<Permission>,
@@ -106,7 +107,16 @@ impl PluginEffectHandle {
             // An effect render must finish well inside a frame; a wedged one is
             // killed fast so it can't stall the engine tick every frame.
             std::time::Duration::from_secs(2),
-            move || build_ctx(&script_source, &effect_id, &params, &granted, &config),
+            move || {
+                build_ctx(
+                    &script_source,
+                    &module_sources,
+                    &effect_id,
+                    &params,
+                    &granted,
+                    &config,
+                )
+            },
             |call, ctx: &EffectCtx| {
                 ctx.budget.set(0);
                 super::sandbox::set_call_deadline(&ctx.lua, std::time::Duration::from_secs(2));
@@ -240,17 +250,21 @@ fn register_effect_helpers(lua: &Lua) -> mlua::Result<()> {
 /// [`EffectCtx`].
 fn build_ctx(
     source: &str,
+    module_sources: &std::collections::BTreeMap<String, String>,
     effect_id: &str,
     params: &HashMap<String, EffectParamValue>,
     granted: &[Permission],
     config: &HashMap<String, String>,
 ) -> Result<EffectCtx> {
     let (lua, budget) = sandbox::bootstrap_vm(
-        sandbox::InjectSurface::FullRuntime { granted, config },
+        granted,
+        config,
         PLUGIN_VM_MEMORY_BYTES,
         PLUGIN_INSTRUCTION_BUDGET,
     )
     .map_err(|e| lua_err("sandbox setup", e))?;
+    sandbox::install_package_modules(&lua, module_sources)
+        .map_err(|e| lua_err("package modules", e))?;
     register_effect_helpers(&lua).map_err(|e| lua_err("effect helpers", e))?;
 
     let manifest: Table = lua
@@ -341,6 +355,7 @@ mod tests {
         }"#;
         let handle = PluginEffectHandle::spawn(
             src.to_string(),
+            Default::default(),
             "plasma".to_string(),
             params(),
             vec![],
@@ -365,6 +380,7 @@ mod tests {
         }"#;
         let handle = PluginEffectHandle::spawn(
             src.to_string(),
+            Default::default(),
             "comet".to_string(),
             params(),
             vec![],
@@ -406,6 +422,7 @@ mod tests {
         }"#;
         let handle = PluginEffectHandle::spawn(
             src.to_string(),
+            Default::default(),
             "over".to_string(),
             params(),
             vec![],
@@ -435,6 +452,7 @@ mod tests {
         let src = r#"return {}"#;
         let handle = PluginEffectHandle::spawn(
             src.to_string(),
+            Default::default(),
             "nope".to_string(),
             params(),
             vec![],
@@ -451,6 +469,7 @@ mod tests {
         }"#;
         let handle = PluginEffectHandle::spawn(
             src.to_string(),
+            Default::default(),
             "boom".to_string(),
             params(),
             vec![],
@@ -468,6 +487,7 @@ mod tests {
         }"#;
         let handle = PluginEffectHandle::spawn(
             src.to_string(),
+            Default::default(),
             "spin".to_string(),
             params(),
             vec![],
@@ -511,6 +531,7 @@ mod tests {
     async fn mini_effect_plugin_renders_pixmap_and_led_colors_without_error() {
         let pixmap = PluginEffectHandle::spawn(
             MINI_FX.to_string(),
+            Default::default(),
             "plasma".to_string(),
             [("speed".to_string(), EffectParamValue::Float(0.8))]
                 .into_iter()
@@ -527,6 +548,7 @@ mod tests {
 
         let direct = PluginEffectHandle::spawn(
             MINI_FX.to_string(),
+            Default::default(),
             "comet".to_string(),
             params(),
             vec![],
@@ -567,6 +589,7 @@ mod tests {
         fwd_params.insert("speed".to_string(), EffectParamValue::Float(1.0));
         let forward = PluginEffectHandle::spawn(
             MINI_FX.to_string(),
+            Default::default(),
             "comet".to_string(),
             fwd_params,
             vec![],
@@ -585,6 +608,7 @@ mod tests {
         back_params.insert("speed".to_string(), EffectParamValue::Float(1.0));
         let backward = PluginEffectHandle::spawn(
             MINI_FX.to_string(),
+            Default::default(),
             "comet".to_string(),
             back_params,
             vec![],

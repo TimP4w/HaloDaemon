@@ -10,17 +10,16 @@ use halod_shared::keyboard::{
     is_iso_language, KeyVariant, KeyboardLayoutSelection, KeyboardLayoutStatus,
 };
 use halod_shared::types::{
-    Battery, Boolean, ButtonMapping, ChainableChannelInfo, ConnectionStatus, DeviceCapability,
-    DpiStatus, EffectParamValue, Equalizer, FanStatus, KeyRemapStatus, KeyboardLayout,
-    LcdDescriptor, LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType,
-    SensorUnit, VisibilityState, ZoneTopology,
+    Battery, Boolean, ButtonMapping, ConnectionStatus, DeviceCapability, DpiStatus,
+    EffectParamValue, Equalizer, FanStatus, KeyRemapStatus, KeyboardLayout, LcdDescriptor,
+    LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType, SensorUnit,
+    VisibilityState, ZoneTopology,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 #[async_trait]
-#[expect(dead_code, reason = "optional controller persistence protocol")]
 pub trait Controller: Send + Sync {
     async fn discover_children(&self) -> Vec<Arc<dyn Device>> {
         vec![]
@@ -43,14 +42,6 @@ pub trait Controller: Send + Sync {
     async fn to_wire(&self) -> Option<DeviceCapability> {
         None
     }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
 }
 
 /// Pair/unpair wireless devices on a receiver and surface pairing state to the UI.
@@ -71,51 +62,6 @@ pub trait PairingCapability: Send + Sync {
     }
 }
 
-/// Direction of a transport switch — passed to the transport hook so the
-/// device's owner can react without the device touching `AppState`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportMode {
-    /// The device now owns its own transport path (e.g. direct USB).
-    Direct,
-    /// The device communicates through a hub/receiver.
-    HubMediated,
-}
-
-/// Devices that can hot-swap between wireless and wired transport without
-/// changing Arc identity in app.devices.
-#[async_trait]
-#[expect(dead_code, reason = "optional transport persistence protocol")]
-pub trait TransportSwitchable: Send + Sync {
-    /// Switch to a new direct HID transport at `path`.
-    /// Re-initializes the device through the new transport. `app` lets the device
-    /// restart its notification watcher app-aware, so button/DPI events on the
-    /// wired transport still reach the key-remap engine and the state broadcast.
-    async fn connect_direct(
-        &self,
-        path: &str,
-        pid: u16,
-        app: &Arc<crate::state::AppState>,
-    ) -> Result<()>;
-    /// Revert to the saved hub-mediated transport.
-    /// Returns true if a fallback existed (caller spawns reinit retry).
-    /// Returns false if there was no fallback (caller should close + remove the device).
-    async fn disconnect_direct(&self) -> bool;
-    /// True while the device is actively using its direct transport.
-    async fn is_direct(&self) -> bool;
-
-    async fn to_wire(&self) -> Option<DeviceCapability> {
-        None
-    }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
-}
-
 // Chain support — chainable ARGB channels with daisy-chained child devices.
 
 #[derive(Debug, Clone)]
@@ -125,153 +71,10 @@ pub struct ChainLinkSpec {
     pub led_count: u32,
 }
 
-/// Parent-side capability for managing chainable channels; the CRUD surface
-/// delegates to a shared [`chain::ChainHost`] exposed via [`ChainCapability::chain_host`].
-#[async_trait]
-#[expect(dead_code, reason = "optional chain persistence protocol")]
-pub trait ChainCapability: Send + Sync {
-    /// The driver's chain host. Returning `None` is treated as "no chainable
-    /// channels yet" by every default impl below.
-    fn chain_host(&self) -> Option<&Arc<chain::ChainHost>>;
-
-    fn chainable_channels(&self) -> Vec<ChainableChannelInfo> {
-        self.chain_host()
-            .map(|h| h.chainable_channels())
-            .unwrap_or_default()
-    }
-
-    async fn add_chain_link(
-        &self,
-        channel_id: &str,
-        spec: ChainLinkSpec,
-    ) -> Result<(String, Arc<dyn Device>)> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.add_link(channel_id, spec).await
-    }
-
-    async fn remove_chain_link(&self, channel_id: &str, child_id: &str) -> Result<String> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.remove_link(channel_id, child_id).await
-    }
-
-    async fn rename_chain_link(
-        &self,
-        channel_id: &str,
-        child_id: &str,
-        new_name: &str,
-    ) -> Result<()> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.rename_link(channel_id, child_id, new_name)
-    }
-
-    async fn reorder_chain_link(
-        &self,
-        channel_id: &str,
-        child_id: &str,
-        new_index: usize,
-    ) -> Result<()> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.reorder_link(channel_id, child_id, new_index)
-    }
-
-    async fn detect_channel(&self, channel_id: &str) -> Result<()> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.detect_channel(channel_id).await
-    }
-
-    /// Replays a persisted layout at startup. Skips broadcast + persist — the
-    /// caller already owns both responsibilities at boot time.
-    async fn restore_chain_link(
-        &self,
-        channel_id: &str,
-        record: &crate::registry::config::ChainLinkRecord,
-    ) -> Result<Arc<dyn Device>> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.restore_link(channel_id, record).await
-    }
-
-    async fn to_wire(&self) -> Option<DeviceCapability> {
-        let host = self.chain_host()?;
-        let children = host.children().await;
-        if children.is_empty() {
-            return None;
-        }
-        let mut wires = Vec::with_capacity(children.len());
-        for child in &children {
-            wires.push(child.serialize().await);
-        }
-        Some(DeviceCapability::Children(wires))
-    }
-
-    /// Merges `chainable_channels` into an existing `Rgb` wire capability, or
-    /// prepends a minimal `Rgb` carrier if none exists yet.
-    fn enrich_wire_capabilities(&self, caps: &mut Vec<DeviceCapability>) {
-        let channels = self.chainable_channels();
-        if channels.is_empty() {
-            return;
-        }
-        let has_rgb = caps.iter().any(|c| matches!(c, DeviceCapability::Rgb(_)));
-        if has_rgb {
-            for cap in caps.iter_mut() {
-                if let DeviceCapability::Rgb(rgb) = cap {
-                    rgb.chainable_channels = channels;
-                    break;
-                }
-            }
-        } else {
-            caps.insert(
-                0,
-                DeviceCapability::Rgb(RgbStatus {
-                    descriptor: RgbDescriptor {
-                        zones: vec![],
-                        native_effects: vec![],
-                    },
-                    state: None,
-                    zone_transforms: std::collections::HashMap::new(),
-                    chainable_channels: channels,
-                }),
-            );
-        }
-    }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
-}
-
-/// Opt-in hook for devices needing application-level setup after registration
-/// in `AppState` (e.g. notification watchers, dynamic children).
-/// Accessed via [`Device::as_post_register_hook`] to avoid coupling every device to `AppState`.
-#[async_trait]
-pub trait PostRegisterHook: Send + Sync {
-    async fn on_registered(&self, app: std::sync::Arc<crate::state::AppState>);
-}
-
 /// Fan status/speed surface for chain accessory drivers with fan hardware
 /// alongside their ARGB channels; chain writes go through [`chain::ChainHub`] instead.
 #[async_trait]
-#[expect(
-    dead_code,
-    reason = "capability identity reserved for fan-hub discovery"
-)]
 pub trait FanHub: Send + Sync + 'static {
-    fn id(&self) -> &str;
     async fn get_fan_rpm(&self, channel: u8) -> Result<u32>;
     async fn get_fan_duty(&self, channel: u8) -> Result<u8>;
     async fn get_fan_controllable(&self, channel: u8) -> Result<bool>;
@@ -480,25 +283,15 @@ pub trait BooleanCapability: Send + Sync {
 }
 
 #[async_trait]
-#[expect(dead_code, reason = "optional action persistence protocol")]
 pub trait ActionCapability: Send + Sync {
     async fn trigger_action(&self, key: &str) -> Result<()>;
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
         None
     }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
 }
 
 #[async_trait]
-#[expect(dead_code, reason = "optional battery persistence protocol")]
 pub trait BatteryCapability: Send + Sync {
     async fn get_batteries(&self) -> Result<Vec<Battery>>;
 
@@ -513,14 +306,6 @@ pub trait BatteryCapability: Send + Sync {
             Some(DeviceCapability::Battery(batteries))
         }
     }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
 }
 
 #[async_trait]
@@ -621,7 +406,7 @@ pub trait FanCapability: Send + Sync {
             channel: self.fan_channel_id(),
             rpm: self.get_rpm().await.unwrap_or(0),
             duty: self.get_duty().await.unwrap_or_else(|e| {
-                log::debug!("[FanCapability::to_wire] get_duty: {e}");
+                log::trace!("[FanCapability::to_wire] get_duty: {e}");
                 0
             }),
             controllable: self.fan_controllable().await,
@@ -647,7 +432,6 @@ pub trait FanCapability: Send + Sync {
 }
 
 #[async_trait]
-#[expect(dead_code, reason = "optional sensor persistence protocol")]
 pub trait SensorCapability: Send + Sync {
     async fn get_sensors(&self) -> Result<Vec<Sensor>>;
 
@@ -659,14 +443,6 @@ pub trait SensorCapability: Send + Sync {
             }),
         ))
     }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
 }
 
 /// Deterministic id for a fan's synthesized duty-percent sensor reading.
@@ -690,7 +466,7 @@ pub async fn fan_sensors(device: &dyn Device) -> Vec<Sensor> {
         id: fan_duty_sensor_id(device.id()),
         name: format!("{} Duty", device.name()),
         value: fan.get_duty().await.unwrap_or_else(|e| {
-            log::debug!("[fan_sensors] get_duty: {e}");
+            log::trace!("[fan_sensors] get_duty: {e}");
             0
         }) as f64,
         unit: SensorUnit::Percent,
@@ -969,12 +745,6 @@ pub trait KeyRemapCapability: Send + Sync {
     async fn set_button_mapping(&self, mapping: ButtonMapping) -> Result<()>;
     async fn reset_button_mapping(&self, cid: u16) -> Result<()>;
     async fn reset_all_button_mappings(&self) -> Result<()>;
-
-    /// The device's out-of-the-box button mappings. Seeded on first run and
-    /// restored by the reset methods. Empty by default (every button Native).
-    async fn default_mappings(&self) -> Vec<ButtonMapping> {
-        Vec::new()
-    }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
         let status = self.get_key_remap_status().await;

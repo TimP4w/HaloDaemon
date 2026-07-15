@@ -301,23 +301,17 @@ fn smbus_to_wire(b: BusInfo, kind: DebugSmbusBusKind) -> SmbusBusDebugInfo {
     }
 }
 
-/// `(device_id, hid_key)` pairs for every device the HID transport is tracking,
-/// in either Primary or WiredOverride form. The HID key has the shape
+/// `(device_id, hid_key)` pairs for every device the HID transport is tracking.
+/// The HID key has the shape
 /// `vid:pid:serial` (all hex, serial may be empty).
 async fn snapshot_tracking_keys(app: &Arc<AppState>) -> Vec<(String, String)> {
     use crate::state::HidTrackingEntry;
     let tracking = app.hid.snapshot().await;
     let mut out = Vec::new();
     for (key, entry) in &tracking {
-        match entry {
-            HidTrackingEntry::Primary(arcs) => {
-                for d in arcs {
-                    out.push((d.id().to_owned(), key.clone()));
-                }
-            }
-            HidTrackingEntry::WiredOverride(d) => {
-                out.push((d.id().to_owned(), key.clone()));
-            }
+        let HidTrackingEntry::Primary(arcs) = entry;
+        for d in arcs {
+            out.push((d.id().to_owned(), key.clone()));
         }
     }
     out
@@ -420,7 +414,7 @@ fn source_fields(device: &dyn crate::drivers::Device) -> Vec<(String, String)> {
             ("source_kind".into(), "plugin".into()),
             ("plugin_id".into(), id.clone()),
         ],
-        (DeviceOrigin::Native, None) => vec![("source_kind".into(), "native_driver".into())],
+        (DeviceOrigin::Builtin, None) => vec![("source_kind".into(), "builtin".into())],
     };
     if let Some(plugin_id) = device.owning_plugin_id() {
         if !fields.iter().any(|(key, _)| key == "plugin_id") {
@@ -622,11 +616,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_fields_identify_native_plugin_and_integration_roots() {
+    fn source_fields_identify_builtin_plugin_and_integration_roots() {
         use crate::test_support::MockDevice;
 
-        assert!(source_fields(&MockDevice::new("native"))
-            .contains(&("source_kind".into(), "native_driver".into())));
+        assert!(source_fields(&MockDevice::new("builtin"))
+            .contains(&("source_kind".into(), "builtin".into())));
         assert!(
             source_fields(&MockDevice::new("plugin").with_owning_plugin_id("foo"))
                 .contains(&("plugin_id".into(), "foo".into()))

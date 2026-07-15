@@ -44,7 +44,6 @@ pub async fn serialize_state(
         lighting,
         lcd,
         gui: cfg.gui.clone(),
-        log_entries: app.recent_logs(100),
         config_dir: crate::config::config_dir().display().to_string(),
         health: HealthCheckState {
             focus_watcher_supported: app.focus.supported(),
@@ -60,8 +59,11 @@ pub async fn serialize_state(
                 .map(|r| PluginRepoInfo {
                     url: r.url.clone(),
                     slug: r.slug.clone(),
+                    repository_id: r.repository_id.clone(),
                     branch: r.branch.clone(),
                     locked_sha: r.locked_sha.clone(),
+                    active_revision: r.active_revision.clone(),
+                    previous_verified_sha: r.previous_verified_sha.clone(),
                     last_sync: r.last_sync.clone(),
                     official: r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG,
                 })

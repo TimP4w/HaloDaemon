@@ -162,7 +162,6 @@ fn page_body(
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         log_level_row(ui, state, cmd);
-        log_viewer_row(ui, state);
     });
     ui.add_space(18.0);
 
@@ -767,7 +766,7 @@ fn language_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
 
 // ── LOGGING rows ──────────────────────────────────────────────────────────────
 
-const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
+const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug"];
 
 fn log_level_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     let rect = row_rect(ui);
@@ -810,72 +809,6 @@ fn log_level_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             );
         }
     }
-
-    bottom_border(ui, rect);
-}
-
-fn log_viewer_row(ui: &mut egui::Ui, state: &AppState) {
-    let header_h = 40.0;
-    let viewer_h = 240.0;
-    let total_h = header_h + viewer_h;
-
-    let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), total_h), Sense::hover());
-
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 6.0),
-        Align2::LEFT_TOP,
-        t!("settings.live_log_title"),
-        theme::body(12.5),
-        theme::TEXT,
-    );
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 24.0),
-        Align2::LEFT_TOP,
-        t!("settings.log_entries", n = state.log_entries.len()),
-        theme::body(10.5),
-        theme::TEXT_FAINT,
-    );
-
-    let log_rect = Rect::from_min_size(
-        Pos2::new(rect.left(), rect.top() + header_h),
-        Vec2::new(rect.width(), viewer_h),
-    );
-    ui.painter()
-        .rect_filled(log_rect, 8.0, theme::hex(0x080b10));
-    ui.painter().rect_stroke(
-        log_rect,
-        8.0,
-        Stroke::new(1.0, theme::hex(0x1c2230)),
-        egui::StrokeKind::Middle,
-    );
-
-    let mut log_ui = ui.new_child(egui::UiBuilder::new().max_rect(log_rect.shrink(8.0)));
-    log_ui.shrink_clip_rect(log_rect);
-    log_ui.spacing_mut().item_spacing.y = 1.0;
-    egui::ScrollArea::both()
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .show(&mut log_ui, |ui| {
-            for entry in &state.log_entries {
-                let level_color = match entry.level.to_lowercase().as_str() {
-                    "error" | "err" => theme::OFFLINE,
-                    "warn" | "warning" => theme::STAT_AMBER,
-                    "info" => theme::CYAN,
-                    _ => theme::TEXT_FAINT,
-                };
-                let text = format!("[{}] {}: {}", entry.level, entry.target, entry.message);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(text)
-                            .font(theme::mono(10.0))
-                            .color(level_color),
-                    )
-                    .selectable(true)
-                    .wrap_mode(egui::TextWrapMode::Extend),
-                );
-            }
-        });
 
     bottom_border(ui, rect);
 }

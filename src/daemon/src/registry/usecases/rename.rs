@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Unified device-rename IPC. Routes chain-link children (whose name lives in
-//! the parent's `ChainHost`) through `ChainCapability::rename_chain_link`, and
+//! the parent's `ChainHost`) through that host, and
 //! every other device through its `DeviceRecord.name` in the persisted config.
 
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
-use crate::drivers::{ChainCapability, Device};
+use crate::drivers::Device;
 use crate::ipc::broadcast_state;
 use crate::registry::config::ensure_record;
 use crate::state::AppState;
@@ -52,7 +52,7 @@ async fn rename_chain_link(
     let devices = app.devices.read().await.clone();
     let mut found: Option<(Arc<dyn Device>, String)> = None;
     for parent in &devices {
-        let Some(chain) = parent.as_chain() else {
+        let Some(chain) = parent.chain_host() else {
             continue;
         };
         for channel in chain.chainable_channels() {
@@ -69,12 +69,10 @@ async fn rename_chain_link(
     let (parent, channel_id) =
         found.ok_or_else(|| anyhow!("chain parent not found for child {child_id}"))?;
 
-    let chain: &dyn ChainCapability = parent
-        .as_chain()
-        .expect("parent passed has_chain() check above");
-    chain
-        .rename_chain_link(&channel_id, child_id, &new_name)
-        .await?;
+    let chain = parent
+        .chain_host()
+        .expect("parent passed chain-host check above");
+    chain.rename_link(&channel_id, child_id, &new_name)?;
 
     super::chain::persist_layout(app, parent.as_ref()).await?;
     broadcast_state(app).await;
@@ -114,7 +112,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::drivers::chain::{ChainAdapter, ChainHost, ChannelDescriptor};
-    use crate::drivers::{CapabilityRef, ChainCapability, ChainLinkSpec, Device};
+    use crate::drivers::{CapabilityRef, ChainLinkSpec, Device};
     use async_trait::async_trait;
     use halod_shared::types::{RgbColor, ZoneTopology};
 
@@ -275,11 +273,8 @@ mod tests {
         }
         async fn close(&self) {}
         fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![CapabilityRef::Chain(self)]
+            vec![]
         }
-    }
-
-    impl ChainCapability for ChainParent {
         fn chain_host(&self) -> Option<&Arc<ChainHost>> {
             Some(&self.host)
         }
@@ -317,7 +312,7 @@ mod tests {
 
         let devices = app.devices.read().await;
         let parent = devices.iter().find(|d| d.id() == "parent_x").unwrap();
-        let chain = parent.as_chain().unwrap();
+        let chain = parent.chain_host().unwrap();
         let info = chain.chainable_channels();
         assert_eq!(info[0].links.last().unwrap().name, "Top Strip");
 

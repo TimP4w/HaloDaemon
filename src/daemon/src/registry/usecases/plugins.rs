@@ -6,116 +6,35 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
-use halod_shared::types::Permission;
 use serde_json::json;
 
 use crate::ipc::ClientHandle;
 use crate::state::AppState;
 
-/// Enable or disable a plugin, persist the choice, and reconcile its devices.
+/// Disable a plugin immediately. Enabling is only allowed through
+/// [`confirm_enable`], which verifies the authority snapshot shown to the user.
 pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
     if enabled {
-        // Re-enabling a plugin accepts its current on-disk content as the new
-        // baseline (stage it into the index), so a plugin that was quarantined
-        // for a local edit — or that the user is intentionally editing — isn't
-        // re-disabled on the next startup tamper check. No-op for a pristine or
-        // non-repo plugin.
-        accept_on_disk_content(&app, &id).await;
+        bail!("enabling a plugin requires ConfirmPluginEnable");
     }
     {
         let mut cfg = app.config.write().await;
-        cfg.plugins.disabled.retain(|x| x != &id);
-        if !enabled {
-            cfg.plugins.disabled.push(id.clone());
-        }
+        cfg.plugins.enabled.retain(|x| x != &id);
     }
     app.request_config_save();
-    if !enabled {
-        let device_ids = {
-            let devices = app.devices.read().await;
-            devices
-                .iter()
-                .filter(|device| {
-                    device.owning_plugin_id().as_deref() == Some(id.as_str())
-                        || device.integration_id().as_deref() == Some(id.as_str())
-                })
-                .map(|device| device.id().to_owned())
-                .collect::<Vec<_>>()
-        };
-        app.registry.clear_operational_errors(&id, &device_ids);
-    }
-    reconcile_plugins(&app, std::slice::from_ref(&id)).await;
-    Ok(())
-}
-
-/// Stage a repo plugin's working-tree files into its git index, making the
-/// tamper-check baseline match what's on disk. Local, best-effort: a failure
-/// (or a non-repo plugin) is logged and ignored.
-async fn accept_on_disk_content(app: &Arc<AppState>, id: &str) {
-    let Some((slug, subpath)) = app.registry.repo_location_for(id) else {
-        return;
+    let device_ids = {
+        let devices = app.devices.read().await;
+        devices
+            .iter()
+            .filter(|device| {
+                device.owning_plugin_id().as_deref() == Some(id.as_str())
+                    || device.integration_id().as_deref() == Some(id.as_str())
+            })
+            .map(|device| device.id().to_owned())
+            .collect::<Vec<_>>()
     };
-    let dir = crate::config::plugin_repos_dir().join(&slug);
-    if let Err(e) = tokio::task::spawn_blocking(move || {
-        crate::drivers::plugins::repo::stage_subtree(&dir, &subpath)
-    })
-    .await
-    .unwrap_or_else(|e| Err(anyhow::anyhow!("stage task panicked: {e}")))
-    {
-        log::warn!("accepting on-disk content for plugin '{id}': {e:#}");
-    }
-}
-
-/// Replace the set of permissions granted to a plugin and persist the choice.
-/// Also records the plugin's current script hash as acknowledged: granting is
-/// an explicit consent to run *this* script, so the plugin activates and stays
-/// active only until its content changes (trust-on-first-use). The grant and
-/// enabled state are committed together before devices are reconciled.
-pub async fn set_trust(
-    id: String,
-    granted: Vec<Permission>,
-    enabled: bool,
-    app: Arc<AppState>,
-) -> Result<()> {
-    let hash = app.registry.content_hash_for(&id);
-    let declared = app.registry.declared_permissions_for(&id);
-    let effective: Vec<Permission> = granted
-        .iter()
-        .copied()
-        .filter(|permission| declared.contains(permission))
-        .collect();
-    if effective.len() != granted.len() {
-        let dropped: Vec<Permission> = granted
-            .into_iter()
-            .filter(|permission| !declared.contains(permission))
-            .collect();
-        log::warn!("ignoring undeclared permissions for plugin '{id}': {dropped:?}");
-    }
-    {
-        let mut cfg = app.config.write().await;
-        if effective.is_empty() {
-            // Revoke: drop the grant and its content pin, back to pristine.
-            cfg.plugins.granted.remove(&id);
-            cfg.plugins.acknowledged.remove(&id);
-        } else {
-            cfg.plugins.granted.insert(id.clone(), effective);
-            // Pin the grant to the exact script the user is consenting to.
-            match hash {
-                Some(h) => {
-                    cfg.plugins.acknowledged.insert(id.clone(), h);
-                }
-                None => {
-                    cfg.plugins.acknowledged.remove(&id);
-                }
-            }
-        }
-        cfg.plugins.disabled.retain(|x| x != &id);
-        if !enabled {
-            cfg.plugins.disabled.push(id.clone());
-        }
-    }
-    app.request_config_save();
-    reconcile_plugins(&app, &[id]).await;
+    app.registry.clear_operational_errors(&id, &device_ids);
+    reconcile_plugins(&app, std::slice::from_ref(&id)).await;
     Ok(())
 }
 
@@ -339,7 +258,7 @@ pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
 }
 
 /// Purge every id-keyed piece of plugin state — secret, disabled flag, plaintext
-/// config, granted permissions, acknowledged content hash, and integration
+/// config, granted permissions, installed content hash, and integration
 /// disable — returning whether config changed. Shared by [`delete`] and
 /// `repos::remove_repo`, so a reinstall of identical content can't inherit an
 /// old grant or acknowledgement.
@@ -351,29 +270,38 @@ pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     }
 
     let mut cfg = app.config.write().await;
-    let before = cfg.plugins.disabled.len();
-    cfg.plugins.disabled.retain(|x| x != id);
-    let disabled_changed = cfg.plugins.disabled.len() != before;
+    let before = cfg.plugins.enabled.len();
+    cfg.plugins.enabled.retain(|x| x != id);
+    let enabled_changed = cfg.plugins.enabled.len() != before;
     let config_changed = cfg.plugins.config.remove(id).is_some();
-    let perms_changed = cfg.plugins.granted.remove(id).is_some();
-    let ack_changed = cfg.plugins.acknowledged.remove(id).is_some();
-    let integ_before = cfg.plugins.integrations_disabled.len();
-    cfg.plugins.integrations_disabled.retain(|x| x != id);
-    let integ_changed = cfg.plugins.integrations_disabled.len() != integ_before;
+    let authority_changed = cfg.plugins.accepted_authorities.remove(id).is_some();
+    let hash_changed = cfg.plugins.installed_hashes.remove(id).is_some();
+    let integ_before = cfg.plugins.integrations_enabled.len();
+    cfg.plugins.integrations_enabled.retain(|x| x != id);
+    let integ_changed = cfg.plugins.integrations_enabled.len() != integ_before;
 
     let changed =
-        disabled_changed || config_changed || perms_changed || ack_changed || integ_changed;
+        enabled_changed || config_changed || authority_changed || hash_changed || integ_changed;
     if changed {
         app.registry.replace_policy(&cfg.plugins);
     }
     changed
 }
 
-/// Re-read the plugins directory and every configured git-repo source, and re-apply the disabled/granted sets. Shared with `repos.rs`.
+/// Re-read plugins while preserving the process-local development source, then
+/// re-apply the enabled and accepted-authority policy. Shared with `repos.rs`.
 pub(crate) async fn reload_registry(app: &Arc<AppState>) {
     let cfg = app.config.read().await;
-    app.registry.load_all_with_repos(
+    #[cfg(feature = "dev-plugin-repo")]
+    let development_repo = app.development_plugin_repo.read().await.clone();
+    #[cfg(not(feature = "dev-plugin-repo"))]
+    let development_repo: Option<&std::path::Path> = None;
+    app.registry.load_all_with_priority_repo(
         &crate::config::plugins_dir(),
+        #[cfg(feature = "dev-plugin-repo")]
+        development_repo.as_deref(),
+        #[cfg(not(feature = "dev-plugin-repo"))]
+        development_repo,
         &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
     );
     app.registry.replace_policy(&cfg.plugins);
@@ -384,11 +312,80 @@ pub(crate) async fn reload_registry(app: &Arc<AppState>) {
 /// Repository installs and updates are explicit user actions, so reconcile
 /// their affected devices before returning success.
 pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<String>) -> Result<()> {
+    // A repository update has changed files on disk. Rebuild the registry
+    // before reconciliation so workers use the newly accepted code rather
+    // than stale manifest/source snapshots.
+    reload_registry(&app).await;
+    // An explicit update is allowed to replace code, but not to silently widen
+    // a plugin's authority. Compare the new inert manifest against the exact
+    // snapshot accepted through the enable modal and disable only affected
+    // plugins. A package without an accepted snapshot is inert until the user
+    // explicitly enables it.
+    let expanded: Vec<String> = {
+        let mut cfg = app.config.write().await;
+        let mut expanded = Vec::new();
+        for id in &plugin_ids {
+            let Some(accepted) = cfg.plugins.accepted_authorities.get(id) else {
+                continue;
+            };
+            let Some(current) = app.registry.authority_for(id) else {
+                continue;
+            };
+            if !current.is_subset_of(accepted) {
+                if cfg.plugins.enabled.contains(id) {
+                    cfg.plugins.enabled.retain(|enabled| enabled != id);
+                }
+                expanded.push(id.clone());
+            }
+        }
+        if !expanded.is_empty() {
+            app.registry.replace_policy(&cfg.plugins);
+        }
+        expanded
+    };
+    if !expanded.is_empty() {
+        app.request_config_save();
+        log::warn!(
+            "plugin update expanded authority; disabled pending fresh consent: {}",
+            expanded.join(", ")
+        );
+    }
     if plugin_ids.is_empty() {
         crate::ipc::broadcast_state(&app).await;
-        return Ok(());
+    } else {
+        reconcile_plugins(&app, &plugin_ids).await;
     }
-    reconcile_plugins(&app, &plugin_ids).await;
+    Ok(())
+}
+
+/// Enable a plugin only when the caller confirmed the exact authority that is
+/// currently declared by its inert manifest.  The runtime still receives the
+/// permission projection, while the complete snapshot is retained for later
+/// repository-update authority comparisons.
+pub async fn confirm_enable(
+    id: String,
+    authority: halod_shared::types::PluginAuthority,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let current = app
+        .registry
+        .authority_for(&id)
+        .ok_or_else(|| anyhow::anyhow!("unknown plugin '{id}'"))?;
+    if authority.normalized() != current {
+        bail!("plugin '{id}' authority changed; reopen the enable confirmation");
+    }
+    {
+        let mut cfg = app.config.write().await;
+        if !cfg.plugins.enabled.contains(&id) {
+            cfg.plugins.enabled.push(id.clone());
+        }
+        cfg.plugins
+            .accepted_authorities
+            .insert(id.clone(), current.clone());
+        app.registry.replace_policy(&cfg.plugins);
+    }
+    app.request_config_save();
+    reconcile_plugins(&app, &[id]).await;
     Ok(())
 }
 
@@ -460,7 +457,7 @@ async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[String]) {
     use crate::registry::discovery::{DiscoveryFilter, DiscoveryScope};
 
     // Keep both sides of a manifest change in scope. Deleted/disabled plugins
-    // need their old specs so a native driver can reclaim the hardware, while
+    // need their old specs so a built-in host device can reclaim the hardware, while
     // newly imported or updated plugins need their new specs to claim it.
     let mut specs = app.registry.device_specs_for(plugins);
 
@@ -521,6 +518,39 @@ pub(crate) fn sanitize_slug(filename: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[cfg(feature = "dev-plugin-repo")]
+    #[tokio::test]
+    async fn reload_registry_keeps_the_development_repository_as_the_priority_source() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let development_repo = tempfile::tempdir().unwrap();
+            let package = development_repo.path().join("devplug");
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(
+                package.join("plugin.yaml"),
+                "id: devplug\nname: Development Plugin\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Example\n    model: Device\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678 }\n",
+            )
+            .unwrap();
+            std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
+            *app.development_plugin_repo.write().await =
+                Some(development_repo.path().to_path_buf());
+
+            reload_registry(&app).await;
+
+            let plugin = app
+                .registry
+                .list(app.secret_store.as_ref())
+                .into_iter()
+                .find(|plugin| plugin.id == "devplug")
+                .expect("development package must remain loaded after a registry reload");
+            assert_eq!(
+                plugin.provenance,
+                halod_shared::types::PluginProvenance::LocalDevelopment
+            );
+            assert!(plugin.path.starts_with(development_repo.path().to_string_lossy().as_ref()));
+        })
+        .await;
+    }
 
     #[test]
     fn import_guard_serializes_same_id() {
@@ -613,12 +643,12 @@ mod tests {
                 1,
                 "scoped reconciliation must leave unrelated devices alone"
             );
-            assert!(app
+            assert!(!app
                 .config
                 .read()
                 .await
                 .plugins
-                .disabled
+                .enabled
                 .contains(&"some_plugin".to_string()));
         })
         .await;
@@ -760,7 +790,7 @@ mod tests {
 
     /// Every declaration lives in YAML; the Lua entry contains callbacks only.
     const CONFIG_TEST_PLUGIN_YAML: &str =
-        "id: cfgtest\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\npermissions:\n  - network\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
+        "id: cfgtest\npermissions: [network, hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
 
     fn write_config_test_plugin(root: &std::path::Path) {
         let dir = root.join("cfgtest");
@@ -806,7 +836,7 @@ mod tests {
         std::fs::create_dir_all(plugin_dir.join("assets")).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: assetplug\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n\
+            "id: assetplug\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
              logo: logo.png\n",
         )
         .unwrap();
@@ -848,95 +878,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown plugin"));
-    }
-
-    #[tokio::test]
-    async fn set_trust_records_the_acknowledged_content_hash() {
-        crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(&app, || async {
-                set_trust(
-                    "cfgtest".into(),
-                    vec![Permission::Network],
-                    true,
-                    app.clone(),
-                )
-                .await
-                .unwrap();
-                let expected = app.registry.content_hash_for("cfgtest");
-                assert!(expected.is_some());
-                let cfg = app.config.read().await;
-                assert_eq!(cfg.plugins.acknowledged.get("cfgtest"), expected.as_ref());
-                assert_eq!(
-                    cfg.plugins.granted.get("cfgtest"),
-                    Some(&vec![Permission::Network])
-                );
-            })
-            .await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn set_trust_discards_undeclared_permissions() {
-        crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(&app, || async {
-                set_trust(
-                    "cfgtest".into(),
-                    vec![Permission::Network, Permission::Os],
-                    true,
-                    app.clone(),
-                )
-                .await
-                .unwrap();
-
-                let cfg = app.config.read().await;
-                assert_eq!(
-                    cfg.plugins.granted.get("cfgtest"),
-                    Some(&vec![Permission::Network]),
-                    "an undeclared permission must never be persisted"
-                );
-                drop(cfg);
-                assert_eq!(
-                    app.registry.granted_for("cfgtest"),
-                    vec![Permission::Network]
-                );
-            })
-            .await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn revoking_clears_both_the_grant_and_the_content_pin() {
-        crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(&app, || async {
-                set_trust(
-                    "cfgtest".into(),
-                    vec![Permission::Network],
-                    true,
-                    app.clone(),
-                )
-                .await
-                .unwrap();
-                assert!(app
-                    .config
-                    .read()
-                    .await
-                    .plugins
-                    .acknowledged
-                    .contains_key("cfgtest"));
-
-                // Empty grant = revoke: both the grant and its pin are dropped.
-                set_trust("cfgtest".into(), vec![], false, app.clone())
-                    .await
-                    .unwrap();
-                let cfg = app.config.read().await;
-                assert!(!cfg.plugins.granted.contains_key("cfgtest"));
-                assert!(!cfg.plugins.acknowledged.contains_key("cfgtest"));
-            })
-            .await;
-        })
-        .await;
     }
 
     #[tokio::test]
@@ -1011,7 +952,7 @@ mod tests {
             std::fs::create_dir_all(&pdir).unwrap();
             std::fs::write(
                 pdir.join("plugin.yaml"),
-                "id: numcfg\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\nconfig:\n  fields:\n    - key: hz\n      label: Hz\n      kind: number\n      min: 1\n      max: 100\n",
+                "id: numcfg\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: hz\n      label: Hz\n      kind: number\n      min: 1\n      max: 100\n",
             )
             .unwrap();
             std::fs::write(

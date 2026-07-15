@@ -1,9 +1,9 @@
 plugins:
   title: Plugin
   subtitle: I plugin aggiungono il supporto a nuovi dispositivi senza ricompilare il daemon.
-  counts: "%{count} script · %{active} attivi"
+  counts: "%{count} pacchetti · %{active} attivi"
   empty_title: Nessun plugin installato
-  empty_hint: Aggiungi uno script Lua per estendere HaloDaemon con nuovi dispositivi.
+  empty_hint: Aggiungi un pacchetto plugin per estendere HaloDaemon con nuovi dispositivi.
   add: Aggiungi plugin
   # Repository dei plugin
   repos_title: Repository
@@ -22,8 +22,8 @@ plugins:
   repos_empty: Nessun repository di plugin registrato.
   repos_update: Aggiorna
   repos_repair: Pull forzato
-  repos_repair_title: Forzare il pull del plugin?
-  repos_repair_body: Questa operazione scarica il repository e ripristina dal remoto solo la directory %{name}. Le modifiche locali al suo interno andranno perse; gli altri plugin non verranno modificati.
+  repos_repair_title: Riparare il repository?
+  repos_repair_body: Questa operazione ripristina la revisione attiva del repository dalla sua sorgente verificata. Tutte le modifiche locali nel repository andranno perse.
   repos_remove: Rimuovi repository
   repos_remove_title: Vuoi rimuovere il repository?
   repos_remove_body: In questo modo rimuoverai %{name} e disinstallerai tutti i plugin forniti dal repository.
@@ -48,9 +48,11 @@ plugins:
   modified_on_disk_sub: I file di questo plugin sono cambiati dall'installazione, quindi è stato disabilitato per sicurezza. Riabilitalo per accettare la modifica.
   # Problemi del plugin (errori di connessione/runtime, avvisi di caricamento)
   issue_connect_failed: Impossibile connettersi
+  issue_init_failed: Inizializzazione del dispositivo non riuscita
   issue_runtime_error: Errore di runtime
   issue_load_warning: Caricato con un avviso
   issue_load_failed: Caricamento non riuscito
+  repository_hash_mismatch: "Il pacchetto plugin '%{package}' non ha superato il controllo di integrità. SHA-256 previsto: %{expected}; SHA-256 rilevato: %{actual}."
   issue_details: Dettagli
   issue_modal_title: "Il plugin %{plugin} sta riscontrando un problema"
   issue_copy: Copia
@@ -73,6 +75,11 @@ plugins:
   disable: Disattiva
   delete: Elimina script
   repo_sourced_note: Questo plugin proviene da un repository. Rimuovi il repository per disinstallarlo.
+  provenance_official: Ufficiale verificato
+  provenance_repository: Repository non firmato
+  provenance_development: Sorgente di sviluppo
+  provenance_local: Pacchetto locale
+  provenance_invalid: Firma non valida
   # Permessi
   permissions: PERMESSI
   permissions_pending: Questo plugin richiede permessi che non hai ancora concesso. Resterà inattivo finché non deciderai se concederli.

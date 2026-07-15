@@ -26,15 +26,15 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::drivers::transports::hid;
-use crate::registry::initialize_app_state;
 use crate::state::EngineRunConfig;
 
 /// How this process was invoked, decided purely from argv.
 ///
 /// The daemon is always a plain user process now — Windows service registration
 /// and the elevated register-bus broker live in `halod-broker.exe`, and the GUI
-/// launches this daemon directly. The only knob is `--headless`, which opts out
-/// of idle-shutdown (see [`crate::lifecycle`]) for a frontend-less deployment.
+/// launches this daemon directly. `--headless` opts out of idle-shutdown (see
+/// [`crate::lifecycle`]); the development-only `--dev-plugin-repo <DIR>` flag
+/// replaces the official plugin checkout with a directly loaded working tree.
 ///
 /// `plugin-test <package-dir>` (behind the `plugin-test` cargo feature) is a
 /// separate mode entirely: it drives one plugin package's `test.lua` against
@@ -45,34 +45,78 @@ use crate::state::EngineRunConfig;
 enum ProcessRole {
     Server {
         headless: bool,
+        #[cfg(feature = "dev-plugin-repo")]
+        dev_plugin_repo: Option<std::path::PathBuf>,
     },
     #[cfg(feature = "plugin-test")]
-    PluginTest {
-        package: std::path::PathBuf,
-    },
+    PluginTest { package: std::path::PathBuf },
 }
 
-fn process_role(args: &[String]) -> ProcessRole {
+#[cfg(feature = "dev-plugin-repo")]
+const USAGE: &str = "usage: halod [--headless] [--dev-plugin-repo <DIR>]";
+#[cfg(not(feature = "dev-plugin-repo"))]
+const USAGE: &str = "usage: halod [--headless]";
+
+fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
     #[cfg(feature = "plugin-test")]
     if args.first().map(String::as_str) == Some("plugin-test") {
         let package = args
             .get(1)
-            .unwrap_or_else(|| {
-                eprintln!("usage: halod plugin-test <package-dir>");
-                std::process::exit(2);
-            })
+            .ok_or_else(|| "usage: halod plugin-test <package-dir>".to_owned())?
             .into();
-        return ProcessRole::PluginTest { package };
+        if args.len() != 2 {
+            return Err("usage: halod plugin-test <package-dir>".to_owned());
+        }
+        return Ok(ProcessRole::PluginTest { package });
     }
-    let has = |flag: &str| args.iter().any(|a| a == flag);
-    ProcessRole::Server {
-        headless: has(halod_shared::lifecycle::HEADLESS_ARG),
+    let mut headless = false;
+    #[cfg(feature = "dev-plugin-repo")]
+    let mut dev_plugin_repo = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--headless" => {
+                if headless {
+                    return Err("--headless may only be provided once".to_owned());
+                }
+                headless = true;
+            }
+            #[cfg(feature = "dev-plugin-repo")]
+            "--dev-plugin-repo" => {
+                let Some(path) = args.get(i + 1) else {
+                    return Err("--dev-plugin-repo requires a directory".to_owned());
+                };
+                if path.starts_with('-')
+                    || dev_plugin_repo
+                        .replace(std::path::PathBuf::from(path))
+                        .is_some()
+                {
+                    return Err(
+                        "--dev-plugin-repo requires one directory and may only be provided once"
+                            .to_owned(),
+                    );
+                }
+                i += 1;
+            }
+            _ => {
+                return Err(format!("unknown argument '{}'", args[i]));
+            }
+        }
+        i += 1;
     }
+    Ok(ProcessRole::Server {
+        headless,
+        #[cfg(feature = "dev-plugin-repo")]
+        dev_plugin_repo,
+    })
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let role = process_role(&args);
+    let role = process_role(&args).unwrap_or_else(|error| {
+        eprintln!("{error}\n{USAGE}");
+        std::process::exit(2);
+    });
 
     #[cfg(feature = "plugin-test")]
     if let ProcessRole::PluginTest { package } = &role {
@@ -85,7 +129,27 @@ fn main() -> Result<()> {
         std::process::exit(exit_code);
     }
 
-    let headless = matches!(role, ProcessRole::Server { headless: true });
+    let headless = match &role {
+        ProcessRole::Server { headless, .. } => *headless,
+        #[cfg(feature = "plugin-test")]
+        ProcessRole::PluginTest { .. } => unreachable!("handled above"),
+    };
+    #[cfg(feature = "dev-plugin-repo")]
+    let dev_plugin_repo = match role {
+        ProcessRole::Server {
+            dev_plugin_repo, ..
+        } => dev_plugin_repo,
+        #[cfg(feature = "plugin-test")]
+        ProcessRole::PluginTest { .. } => unreachable!("handled above"),
+    };
+    #[cfg(feature = "dev-plugin-repo")]
+    let dev_plugin_repo = dev_plugin_repo.map(|path| {
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|e| {
+            eprintln!("invalid --dev-plugin-repo '{}': {e}", path.display());
+            std::process::exit(2);
+        });
+        canonical
+    });
 
     // Before the runtime starts (still single-threaded, no env-reader race).
     #[cfg(target_os = "linux")]
@@ -114,30 +178,30 @@ fn main() -> Result<()> {
         .worker_threads(4)
         .enable_all()
         .build()?;
-    runtime.block_on(run_daemon(headless, cfg))
+    runtime.block_on(run_daemon(
+        headless,
+        #[cfg(feature = "dev-plugin-repo")]
+        dev_plugin_repo,
+        cfg,
+    ))
 }
 
 /// The actual device server — always a plain, unprivileged user process.
 /// On Windows, register-bus access is delegated to the elevated `halod-broker`
 /// on demand (see `drivers::transports::register_ops`); nothing here elevates.
-async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
+async fn run_daemon(
+    headless: bool,
+    #[cfg(feature = "dev-plugin-repo")] dev_plugin_repo: Option<std::path::PathBuf>,
+    cfg: crate::config::Config,
+) -> Result<()> {
     let initial_level: log::LevelFilter =
         cfg.gui.log_level.parse().unwrap_or(log::LevelFilter::Info);
-
-    let env_logger = env_logger::Builder::new()
-        .filter_level(initial_level)
-        .parse_default_env()
-        .build();
 
     let app = Arc::new(state::AppState::new(cfg).with_secret_store(secrets::open_secret_store()));
     let save_worker = crate::state::start_config_save_worker(app.clone());
     let persist_worker = crate::state::start_persist_worker(app.clone());
 
-    let buffering_logger = logger::BufferingLogger::new(env_logger, Arc::clone(&app.log_buffer));
-    if let Err(e) = log::set_boxed_logger(Box::new(buffering_logger)) {
-        log::warn!("logger already installed: {e}");
-    }
-    log::set_max_level(initial_level);
+    logger::init(crate::config::config_dir().join("halod.log"), initial_level);
 
     log::info!(
         "Starting halod v{} (build {})",
@@ -161,7 +225,12 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
     services::audio::sink::cleanup_orphaned_sinks().await;
 
     log::info!("Discovering devices...");
-    initialize_app_state(app.clone()).await;
+    crate::registry::initialize_app_state(
+        app.clone(),
+        #[cfg(feature = "dev-plugin-repo")]
+        dev_plugin_repo,
+    )
+    .await;
     log::info!("Device discovery complete");
 
     // Started only once startup is done — the grace clock must not elapse
@@ -386,42 +455,52 @@ mod tests {
     #[test]
     fn no_args_runs_a_plain_server() {
         assert_eq!(
-            process_role(&argv(&[])),
-            ProcessRole::Server { headless: false }
+            process_role(&argv(&[])).unwrap(),
+            ProcessRole::Server {
+                headless: false,
+                #[cfg(feature = "dev-plugin-repo")]
+                dev_plugin_repo: None
+            }
         );
     }
 
     #[test]
     fn headless_flag_marks_a_headless_server() {
         assert_eq!(
-            process_role(&argv(&["--headless"])),
-            ProcessRole::Server { headless: true }
+            process_role(&argv(&["--headless"])).unwrap(),
+            ProcessRole::Server {
+                headless: true,
+                #[cfg(feature = "dev-plugin-repo")]
+                dev_plugin_repo: None
+            }
         );
     }
 
+    #[cfg(feature = "dev-plugin-repo")]
     #[test]
-    fn former_service_and_worker_flags_are_now_ignored() {
-        // Service registration + the elevated broker moved to halod-broker.exe;
-        // these flags no longer mean anything to the daemon.
-        for flag in [
-            "--service",
-            "--install-service",
-            "--uninstall-service",
-            "--worker",
-        ] {
-            assert_eq!(
-                process_role(&argv(&[flag])),
-                ProcessRole::Server { headless: false },
-                "{flag} should be ignored",
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_arguments_are_ignored() {
+    fn development_plugin_repository_is_parsed() {
         assert_eq!(
-            process_role(&argv(&["--frobnicate", "foo"])),
-            ProcessRole::Server { headless: false }
+            process_role(&argv(&["--dev-plugin-repo", "C:/plugins"])).unwrap(),
+            ProcessRole::Server {
+                headless: false,
+                dev_plugin_repo: Some("C:/plugins".into()),
+            }
         );
+    }
+
+    #[test]
+    fn invalid_server_arguments_return_usage_errors() {
+        let mut cases = vec![vec!["--unknown"], vec!["--headless", "--headless"]];
+        #[cfg(feature = "dev-plugin-repo")]
+        cases.extend([
+            vec!["--dev-plugin-repo"],
+            vec!["--dev-plugin-repo", "--headless"],
+            vec!["--dev-plugin-repo", "one", "--dev-plugin-repo", "two"],
+        ]);
+        #[cfg(not(feature = "dev-plugin-repo"))]
+        cases.push(vec!["--dev-plugin-repo", "C:/plugins"]);
+        for args in cases {
+            assert!(process_role(&argv(&args)).is_err(), "{args:?}");
+        }
     }
 }

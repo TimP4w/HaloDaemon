@@ -3,7 +3,7 @@
 //! Re-exported from `drivers/mod.rs` so call sites keep using `crate::drivers::*`.
 
 use halod_shared::keyboard::KeyboardLayoutSelection;
-use halod_shared::types::{KeyboardLayout, RgbState, VisibilityState};
+use halod_shared::types::{RgbState, VisibilityState};
 use halod_shared::zone_transform::ZoneContentTransform;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
@@ -68,18 +68,9 @@ impl VisibilitySlot {
 #[derive(Default)]
 pub struct KeyboardLayoutSlot(Slot<KeyboardLayoutInner>);
 
+#[derive(Default)]
 struct KeyboardLayoutInner {
     selection: KeyboardLayoutSelection,
-    detected: KeyboardLayout,
-}
-
-impl Default for KeyboardLayoutInner {
-    fn default() -> Self {
-        Self {
-            selection: KeyboardLayoutSelection::default(),
-            detected: KeyboardLayout::Unknown,
-        }
-    }
 }
 
 impl KeyboardLayoutSlot {
@@ -88,12 +79,6 @@ impl KeyboardLayoutSlot {
     }
     pub fn set_selection(&self, selection: KeyboardLayoutSelection) {
         self.0.update(|s| s.selection = selection);
-    }
-    pub fn detected(&self) -> KeyboardLayout {
-        self.0.with(|s| s.detected)
-    }
-    pub fn set_detected(&self, detected: KeyboardLayout) {
-        self.0.update(|s| s.detected = detected);
     }
 }
 

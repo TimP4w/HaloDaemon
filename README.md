@@ -126,7 +126,7 @@ Both guides cover the runtime dependencies, permissions/PawnIO setup, and the ve
 - [Development guide](docs/development.md) — build, add devices, add protocols
 - [Device plugins](docs/plugins.md) — declare packages in YAML and implement hardware callbacks in Lua
 - [Engines](docs/engines.md) — canvas, fan curve, LCD, key remap
-- [Protocols](docs/protocols/) — HID++, NZXT, ENE SMBus, DDC/CI, ASUS Aura USB, Corsair, SteelSeries, NCT677x SuperIO, NVIDIA GPU sensors, OpenRGB SDK
+- [Plugin protocols](https://github.com/TimP4w/HaloDaemon-plugins) — each official plugin keeps its protocol documentation in its own `docs/` directory
 - [Transports](docs/transports/) — HID, SMBus, hwmon, LpcIO, USB control, TCP
 
 ---

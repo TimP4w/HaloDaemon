@@ -42,7 +42,7 @@ pub struct LcdUploadProgress {
     pub percent: Option<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LcdUploadStage {
     /// Decoding / resizing the uploaded file (GIFs report per-frame percent).
@@ -455,14 +455,6 @@ impl Default for GuiConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogEntry {
-    pub level: String,
-    pub target: String,
-    pub message: String,
-    pub timestamp_ms: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationSeverity {
@@ -483,9 +475,6 @@ pub enum NotificationCode {
     },
     KeyRemapUnavailable {
         detail: String,
-    },
-    WirelessReinitFailed {
-        device: String,
     },
     DeviceReconnectFailed {
         device: String,
@@ -516,10 +505,9 @@ pub enum NotificationCode {
     PluginNeedsPermission {
         plugin: String,
     },
-    /// A plugin's on-disk content hash changed since it was last acknowledged,
-    /// without going through the update flow (e.g. a manual edit). Emitted for
-    /// plugins that declare no permissions, so the change is still surfaced —
-    /// permission-declaring plugins are covered by `PluginNeedsPermission`.
+    /// A plugin's on-disk content hash differs from the installed package
+    /// revision, for example after a manual edit. This is dirty-update
+    /// metadata, not a consent decision.
     PluginContentChanged {
         plugin: String,
     },
@@ -558,7 +546,6 @@ impl NotificationCode {
             | DeviceWriteFailed { .. }
             | Generic { .. } => NotificationSeverity::Error,
             KeyRemapUnavailable { .. }
-            | WirelessReinitFailed { .. }
             | DeviceReconnectFailed { .. }
             | FanStalled { .. }
             | PluginNeedsPermission { .. }
@@ -687,8 +674,14 @@ pub struct PluginRepoInfo {
     pub url: String,
     pub slug: String,
     #[serde(default)]
+    pub repository_id: Option<String>,
+    #[serde(default)]
     pub branch: Option<String>,
     pub locked_sha: String,
+    #[serde(default)]
+    pub active_revision: Option<String>,
+    #[serde(default)]
+    pub previous_verified_sha: Option<String>,
     /// When this repo was last cloned/fetched/checked out (RFC 3339), if ever.
     #[serde(default)]
     pub last_sync: Option<String>,
@@ -706,9 +699,8 @@ pub struct RepoUpdateStatus {
     pub behind: bool,
 }
 
-/// One plugin's update-availability, reported in reply to
-/// `DaemonCommand::CheckPluginUpdates` — finer-grained than [`RepoUpdateStatus`]:
-/// a repo can be behind while a given plugin's own content is unchanged.
+/// One package's update-availability inside a repository update check. A
+/// repository can be behind while a given package's content is unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginUpdateStatus {
     pub plugin_id: String,
@@ -742,8 +734,6 @@ pub struct AppState {
     pub lcd: LcdState,
     #[serde(default)]
     pub gui: GuiConfig,
-    #[serde(default)]
-    pub log_entries: Vec<LogEntry>,
     /// Filesystem path to the daemon's config directory; the UI displays and
     /// opens it without recomputing client-side.
     #[serde(default)]
@@ -763,9 +753,22 @@ pub struct AppState {
 /// A privileged capability a plugin must declare before the daemon grants it —
 /// the enforcement boundary between "trusted to talk to its matched device"
 /// (every plugin) and "trusted to reach outside it".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
+    /// Open a matched HID endpoint and receive its input reports.
+    Hid,
+    /// Claim explicitly declared USB interfaces and use only their allowlisted
+    /// bulk/interrupt endpoints or bounded control-transfer policy.
+    Usb,
+    /// Enumerate and access the scoped Linux hwmon handle selected by discovery.
+    Hwmon,
+    /// Access the typed, broker-backed LPC/SuperIO operations.
+    Lpcio,
+    /// Access the typed, read-only AMD SMN broker operations.
+    AmdSmn,
+    /// Spawn one of the executable names advertised by the command transport.
+    Command,
     /// Open network connections (e.g. a TCP client to a local SDK server).
     Network,
     /// Reach OS-level primitives beyond pure computation (currently: clock
@@ -782,6 +785,63 @@ pub enum Permission {
     /// registry. Gates `AudioApi` so plugins cannot spawn host audio modules
     /// without consent.
     AudioRouting,
+}
+
+/// Provenance established for a loaded plugin package.  It is deliberately
+/// separate from [`PluginSource`]: source describes where the bytes live while
+/// provenance describes what Halo was able to verify about them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginProvenance {
+    /// A package from the official repository whose signed index and digest
+    /// both verify against an embedded Halo key.
+    VerifiedOfficial,
+    /// A configured third-party repository with no official signature claim.
+    UnsignedRepository,
+    /// A directly loaded repository supplied through `--dev-plugin-repo`.
+    LocalDevelopment,
+    /// A standalone package copied in through the import flow.
+    #[default]
+    LocalUnsigned,
+    /// A package associated with the official repository that failed signature
+    /// or digest verification. It is visible for repair but never executable.
+    InvalidSignature,
+}
+
+/// The authority a plugin asks the user to approve.  Transport scopes are
+/// canonical display/enforcement strings (for example `command:nvidia-smi`)
+/// and are sorted before persistence, making equality and subset checks stable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginAuthority {
+    #[serde(default)]
+    pub permissions: Vec<Permission>,
+    #[serde(default)]
+    pub transport_scopes: Vec<String>,
+}
+
+impl PluginAuthority {
+    pub fn normalized(mut self) -> Self {
+        self.permissions.sort_unstable();
+        self.permissions.dedup();
+        self.transport_scopes.sort();
+        self.transport_scopes.dedup();
+        self
+    }
+
+    /// `self` is safe under a previous acceptance when every requested
+    /// permission and transport scope was already approved.
+    pub fn is_subset_of(&self, accepted: &Self) -> bool {
+        let requested = self.clone().normalized();
+        let accepted = accepted.clone().normalized();
+        requested
+            .permissions
+            .iter()
+            .all(|permission| accepted.permissions.binary_search(permission).is_ok())
+            && requested
+                .transport_scopes
+                .iter()
+                .all(|scope| accepted.transport_scopes.binary_search(scope).is_ok())
+    }
 }
 
 /// Which discovery path a plugin registers into.
@@ -824,12 +884,26 @@ pub enum PluginSource {
 pub enum PluginIssueKind {
     /// A config-instantiated integration could not open its connection.
     ConnectFailed,
+    /// A plugin-owned physical device failed its initialize callback.
+    InitFailed,
     /// A device callback failed at runtime on a background path.
     RuntimeError,
     /// The plugin loaded with a non-fatal warning (bad logo, id collision).
     LoadWarning,
     /// The plugin's manifest built but failed validation, so it can't be enabled.
     LoadFailed,
+}
+
+/// Structured context for plugin issues whose user-facing detail is translated
+/// by the UI. Unknown/unstructured failures continue to use `PluginIssue::detail`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PluginIssueContext {
+    RepositoryHashMismatch {
+        package: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 /// A plugin's most recent outstanding issue, persisted daemon-side and surfaced
@@ -839,7 +913,33 @@ pub enum PluginIssueKind {
 pub struct PluginIssue {
     pub kind: PluginIssueKind,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<PluginIssueContext>,
     pub timestamp_ms: u64,
+}
+
+/// Operational severity for a plugin or one of its devices. Health records are
+/// scoped by the daemon; identical failures update an existing episode without
+/// producing another notification.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    #[default]
+    Healthy,
+    Degraded,
+    Failed,
+}
+
+/// A scoped health episode. A successful operation resets it to `Healthy` and
+/// clears `notification_sent`, allowing the next failure episode to notify once.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthState {
+    #[serde(default)]
+    pub status: HealthStatus,
+    #[serde(default)]
+    pub issue: Option<PluginIssue>,
+    #[serde(default)]
+    pub notification_sent: bool,
 }
 
 /// One plugin as shown in the GUI's Plugins screen.
@@ -854,6 +954,12 @@ pub struct PluginInfo {
     /// Human-readable capability labels the plugin declares (e.g. "RGB", "Fan").
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Platforms declared by the package; an empty list means all platforms.
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// False when the catalog is visible on this host but must stay inert.
+    #[serde(default = "default_true")]
+    pub platform_supported: bool,
     /// Display names of the RGB effects the plugin declares (device plugins
     /// may bundle effects alongside their hardware capabilities).
     #[serde(default)]
@@ -886,14 +992,18 @@ pub struct PluginInfo {
     /// Where this plugin came from (local disk vs. a registered git repo).
     #[serde(default)]
     pub source: PluginSource,
+    /// The verification status of the package currently selected for loading.
+    #[serde(default)]
+    pub provenance: PluginProvenance,
     /// Privileged capabilities the manifest declares.
     #[serde(default)]
     pub declared_permissions: Vec<Permission>,
-    /// Subset of `declared_permissions` the user has granted. A plugin whose
-    /// declared permissions aren't fully granted is inert (discovered but not
-    /// activated) until the user accepts them.
+    /// Complete authority snapshot rendered by the enable modal.
     #[serde(default)]
-    pub granted_permissions: Vec<Permission>,
+    pub authority: PluginAuthority,
+    /// The snapshot accepted during the last successful enable, if any.
+    #[serde(default)]
+    pub accepted_authority: Option<PluginAuthority>,
     /// User-editable config fields the plugin declares (e.g. a server IP).
     #[serde(default)]
     pub config_fields: Vec<PluginConfigField>,
@@ -912,27 +1022,15 @@ pub struct PluginInfo {
     /// plugin, where the field is meaningless.
     #[serde(default = "default_true")]
     pub integration_enabled: bool,
-    /// Whether the user has consented to running this exact script: its content
-    /// hash matches the acknowledged one and every declared permission is
-    /// granted. `false` for a never-acknowledged or since-modified disk plugin
-    /// (which stays inert until re-consented). Always `true` for built-ins.
+    /// Whether the currently declared authority has been accepted and the
+    /// package is eligible to run. Content hashes are update/dirty metadata,
+    /// never a consent gate.
     #[serde(default = "default_true")]
     pub consented: bool,
-    /// Whether the script on disk differs from the version the user last
-    /// consented to (a grant existed but the content hash no longer matches).
-    /// Drives the "this plugin was modified since you allowed it" prompt.
+    /// Aggregate operational health for this plugin. Device-specific records
+    /// remain scoped in the daemon registry and may be added to wire devices.
     #[serde(default)]
-    pub content_changed: bool,
-    /// The plugin package's most recent outstanding issue (device runtime
-    /// failure, load failure, or load warning), if any. Integration connection
-    /// and runtime failures are exposed separately via `integration_issue`.
-    #[serde(default)]
-    pub issue: Option<PluginIssue>,
-    /// For an integration plugin, its current connection/runtime failure.
-    /// Kept separate so operational integration state is surfaced on the
-    /// Integrations page rather than as a plugin package problem.
-    #[serde(default)]
-    pub integration_issue: Option<PluginIssue>,
+    pub health: HealthState,
 }
 
 fn default_true() -> bool {
@@ -1020,15 +1118,35 @@ pub enum DiscoveryPhase {
     Error,
 }
 
+/// The current discovery operation. This stays structured on the wire so the
+/// UI can translate the step instead of displaying daemon-authored prose.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DiscoveryDetail {
+    #[default]
+    None,
+    Usb,
+    PluginHostTransports,
+    Hid,
+    PluginIntegrations,
+    Hwmon,
+    Computer,
+    Smbus,
+    SmbusAdapter {
+        name: String,
+    },
+    SmbusBus {
+        number: u32,
+    },
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiscoveryStatus {
     #[serde(default)]
     pub phase: DiscoveryPhase,
-    /// Free-form, human-readable description of the current discovery step
-    /// (e.g. which transport is being scanned), pushed by the daemon so the UI
-    /// can show live progress. Empty when idle or complete.
+    /// Structured current step, translated by the UI.
     #[serde(default)]
-    pub detail: String,
+    pub detail: DiscoveryDetail,
     /// True while a background plugin-update check is in flight, so the radar
     /// can show a "checking for updates" step. Independent of `phase`: it may
     /// still be true after device discovery completes.
@@ -1146,7 +1264,7 @@ pub struct ConflictParticipant {
 #[serde(rename_all = "snake_case")]
 pub enum ConflictDeviceSource {
     #[default]
-    Native,
+    Builtin,
     Plugin(String),
     Integration(String),
 }
@@ -2121,10 +2239,11 @@ mod tests {
     }
 
     #[test]
-    fn plugin_issue_round_trips_and_info_defaults_none() {
+    fn plugin_issue_round_trips_and_info_defaults_to_healthy() {
         let issue = PluginIssue {
             kind: PluginIssueKind::ConnectFailed,
             detail: "boom".into(),
+            context: None,
             timestamp_ms: 42,
         };
         let back: PluginIssue =
@@ -2135,12 +2254,23 @@ mod tests {
             serde_json::to_value(&issue).unwrap()["kind"],
             "connect_failed"
         );
-        // A PluginInfo payload without `issue` deserializes to None.
+        // A PluginInfo payload without `health` deserializes to healthy.
         let info: PluginInfo = serde_json::from_value(serde_json::json!({
             "id": "p", "name": "P", "path": "", "enabled": true
         }))
         .unwrap();
-        assert_eq!(info.issue, None);
+        assert_eq!(info.health, HealthState::default());
+
+        let init_failed = PluginIssue {
+            kind: PluginIssueKind::InitFailed,
+            detail: "HID++ timeout".into(),
+            context: None,
+            timestamp_ms: 43,
+        };
+        assert_eq!(
+            serde_json::to_value(&init_failed).unwrap()["kind"],
+            "init_failed"
+        );
     }
 
     #[test]
@@ -2148,6 +2278,7 @@ mod tests {
         let failed = PluginIssue {
             kind: PluginIssueKind::LoadFailed,
             detail: "needs network".into(),
+            context: None,
             timestamp_ms: 1,
         };
         assert_eq!(
@@ -2303,7 +2434,6 @@ mod tests {
         let variants = [
             EngineStopped { detail: "e".into() },
             KeyRemapUnavailable { detail: "e".into() },
-            WirelessReinitFailed { device: "d".into() },
             DeviceReconnectFailed { device: "d".into() },
             ProfileSwitched {
                 profile: "p".into(),

@@ -165,7 +165,13 @@ pub fn code(d: &WireDevice) -> std::borrow::Cow<'static, str> {
 /// Human-readable device-category label, translated GUI-side from the
 /// `DeviceType` enum the daemon ships — the daemon never sends prose.
 pub fn type_label(d: &WireDevice) -> std::borrow::Cow<'static, str> {
-    match d.device_type {
+    device_type_label(d.device_type)
+}
+
+/// Like [`type_label`] but from a bare [`DeviceType`], for contexts that only
+/// carry the enum (e.g. a captured conflict group).
+pub fn device_type_label(ty: DeviceType) -> std::borrow::Cow<'static, str> {
+    match ty {
         DeviceType::AIO => t!("device_type.aio"),
         DeviceType::Fan => t!("device_type.fan"),
         DeviceType::Hub => t!("device_type.hub"),

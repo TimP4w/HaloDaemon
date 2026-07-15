@@ -11,9 +11,6 @@ notify:
   key_remap_unavailable:
     title: Rimappatura tasti non disponibile
     message: "Impossibile inizializzare il sistema di esecuzione delle azioni: %{detail}"
-  wireless_reinit_failed:
-    title: Il dispositivo non è tornato wireless
-    message: "%{device} non è tornato online dopo 6 tentativi di reinizializzazione della connessione wireless."
   device_reconnect_failed:
     title: Il dispositivo non si è riconnesso
     message: "%{device} non è risultato disponibile dopo 6 tentativi di riconnessione."

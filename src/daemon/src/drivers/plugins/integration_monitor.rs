@@ -33,6 +33,8 @@ fn tick_delay(attempt: u32) -> Duration {
 /// Per-plugin reconnect state, replacing the old `failures: HashMap<_, u32>` +
 /// `in_progress: HashSet<_>` pair. Transitions: `Offline -> Connecting ->
 /// Online | Backoff`; `Backoff -> Connecting -> Online | Backoff` (attempt+1);
+/// a deterministic runtime failure transitions to `Unrecoverable`, which is
+/// held until an explicit disable/re-enable or scoped rediscovery;
 /// any -> `Disabled` once no longer enabled/granted, back to `Offline` if
 /// re-enabled. A live root dropping mid-diff (Case C) doesn't transition this
 /// state — it stays `Online` until next tick's liveness check routes it
@@ -43,6 +45,7 @@ pub(super) enum MonitorState {
     Connecting,
     Online,
     Backoff { attempt: u32, deadline: Instant },
+    Unrecoverable,
     Disabled,
     Stopping,
 }
@@ -127,6 +130,16 @@ pub(super) async fn tick_once(app: &Arc<AppState>, states: &mut HashMap<String, 
         {
             continue;
         }
+        if matches!(states.get(&plugin_id), Some(MonitorState::Unrecoverable)) {
+            let explicitly_rebuilt = find_root(app, &plugin_id)
+                .await
+                .is_some_and(|root| root.is_live() && !root.is_unrecoverable());
+            if explicitly_rebuilt {
+                states.insert(plugin_id.clone(), MonitorState::Online);
+            } else {
+                continue;
+            }
+        }
         if states.get(&plugin_id).is_some_and(|state| {
             matches!(state, MonitorState::Backoff { deadline, .. } if *deadline > Instant::now())
         }) {
@@ -144,14 +157,21 @@ pub(super) async fn tick_once(app: &Arc<AppState>, states: &mut HashMap<String, 
                 // `discover_one` registers only on a successful connect.
                 let prev_attempt = attempt_of(states, &plugin_id);
                 states.insert(plugin_id.clone(), MonitorState::Connecting);
-                integration_scan::discover_one(app, &plugin_id).await;
-                let registered = find_root(app, &plugin_id).await.is_some();
-                if registered {
-                    states.insert(plugin_id, MonitorState::Online);
-                    broadcast_state(app).await;
-                } else {
-                    backoff(states, &plugin_id, prev_attempt);
+                match integration_scan::discover_one(app, &plugin_id).await {
+                    integration_scan::DiscoveryOutcome::Registered => {
+                        states.insert(plugin_id, MonitorState::Online);
+                        broadcast_state(app).await;
+                    }
+                    integration_scan::DiscoveryOutcome::Unrecoverable => {
+                        states.insert(plugin_id, MonitorState::Unrecoverable);
+                    }
+                    integration_scan::DiscoveryOutcome::TransientFailure => {
+                        backoff(states, &plugin_id, prev_attempt);
+                    }
                 }
+            }
+            Some(root) if root.is_unrecoverable() => {
+                states.insert(plugin_id, MonitorState::Unrecoverable);
             }
             Some(root) if root.is_live() => {
                 // Case C: alive — diff children (also detects a server drop).
@@ -186,8 +206,20 @@ async fn reconcile_live_root(
         }
         Ok((added, gone)) => {
             let changed = !added.is_empty() || !gone.is_empty();
+            let mut registered = Vec::new();
             for child in added {
-                register_device(app, child).await;
+                let id = child.id().to_owned();
+                if register_device(app, child).await {
+                    registered.push(id);
+                }
+            }
+            if !registered.is_empty() {
+                app.device_children
+                    .lock()
+                    .await
+                    .entry(root.id().to_owned())
+                    .or_default()
+                    .extend(registered);
             }
             remove_children(app, &gone).await;
             if changed {
@@ -225,10 +257,19 @@ async fn reconnect_offline_root(
     match probe {
         Ok(Ok(_io)) => {
             unregister_device_and_children(app, root.id()).await;
-            integration_scan::discover_one(app, &plugin_id).await;
-            states.insert(plugin_id.clone(), MonitorState::Online);
-            app.registry.clear_connect_error(&plugin_id);
-            broadcast_state(app).await;
+            match integration_scan::discover_one(app, &plugin_id).await {
+                integration_scan::DiscoveryOutcome::Registered => {
+                    states.insert(plugin_id.clone(), MonitorState::Online);
+                    app.registry.clear_connect_error(&plugin_id);
+                    broadcast_state(app).await;
+                }
+                integration_scan::DiscoveryOutcome::Unrecoverable => {
+                    states.insert(plugin_id, MonitorState::Unrecoverable);
+                }
+                integration_scan::DiscoveryOutcome::TransientFailure => {
+                    backoff(states, &plugin_id, prev_attempt);
+                }
+            }
         }
         Ok(Err(e)) => {
             backoff(states, &plugin_id, prev_attempt);
@@ -271,17 +312,15 @@ async fn find_root(app: &Arc<AppState>, plugin_id: &str) -> Option<Arc<dyn Devic
         .cloned()
 }
 
-/// Ids of the currently-registered children of integration root `root_id`
-/// (`{root_id}_ctrl_*`, the scheme `build_child` uses).
+/// Ids explicitly registered as children of integration root `root_id`.
+/// Controller-provided stable IDs need not share the root's prefix.
 async fn child_ids_of(app: &Arc<AppState>, root_id: &str) -> HashSet<String> {
-    let prefix = format!("{root_id}_ctrl_");
-    app.devices
-        .read()
+    app.device_children
+        .lock()
         .await
-        .iter()
-        .filter(|d| d.id().starts_with(&prefix))
-        .map(|d| d.id().to_owned())
-        .collect()
+        .get(root_id)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Remove exactly the `gone` ids from `app.devices` and close them, leaving
@@ -304,7 +343,11 @@ async fn remove_children(app: &Arc<AppState>, gone: &[String]) {
         removed
     };
     for d in &removed {
-        d.close().await;
+        crate::registry::usecases::registration::close_device(app, d).await;
+    }
+    let gone: HashSet<&str> = gone.iter().map(String::as_str).collect();
+    for children in app.device_children.lock().await.values_mut() {
+        children.retain(|id| !gone.contains(id.as_str()));
     }
 }
 
@@ -327,6 +370,7 @@ mod tests {
         id: String,
         integration_id: String,
         live: Arc<AtomicBool>,
+        unrecoverable: Arc<AtomicBool>,
         script: Mutex<Option<ScriptedResync>>,
     }
 
@@ -336,6 +380,7 @@ mod tests {
                 id: format!("{plugin_id}-root"),
                 integration_id: plugin_id.to_string(),
                 live: Arc::new(AtomicBool::new(true)),
+                unrecoverable: Arc::new(AtomicBool::new(false)),
                 script: Mutex::new(None),
             })
         }
@@ -368,6 +413,9 @@ mod tests {
         }
         fn is_live(&self) -> bool {
             self.live.load(Ordering::Relaxed)
+        }
+        fn is_unrecoverable(&self) -> bool {
+            self.unrecoverable.load(Ordering::Relaxed)
         }
         fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
             vec![CapabilityRef::Controller(self)]
@@ -455,6 +503,44 @@ mod tests {
             assert!(drop.closed.load(Ordering::SeqCst), "departed child closed");
             assert!(ids.iter().any(|id| id == &keep.id), "sibling survives");
             assert!(!keep.closed.load(Ordering::SeqCst), "sibling not closed");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn explicit_child_ids_are_tracked_without_ctrl_prefixes() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let root = MockRoot::new("hwmon");
+            let existing = Arc::new(MockDevice::new("hwmon_pci_temp"));
+            let added = Arc::new(MockDevice::new("hwmon_pci_fan1"));
+            root.scripted(Ok((vec![added.clone() as Arc<dyn Device>], vec![])));
+            app.devices.write().await.extend([
+                root.clone() as Arc<dyn Device>,
+                existing.clone() as Arc<dyn Device>,
+            ]);
+            app.device_children
+                .lock()
+                .await
+                .insert(root.id.clone(), [existing.id.clone()].into_iter().collect());
+
+            assert_eq!(
+                child_ids_of(&app, &root.id).await,
+                [existing.id.clone()].into_iter().collect()
+            );
+            reconcile_live_root(
+                &app,
+                &(root.clone() as Arc<dyn Device>),
+                &mut HashMap::new(),
+            )
+            .await;
+            let owned = child_ids_of(&app, &root.id).await;
+            assert!(owned.contains(&existing.id));
+            assert!(owned.contains(&added.id));
+
+            unregister_device_and_children(&app, &root.id).await;
+            assert!(app.devices.read().await.is_empty());
+            assert!(existing.closed.load(Ordering::SeqCst));
+            assert!(added.closed.load(Ordering::SeqCst));
         })
         .await;
     }
@@ -578,21 +664,27 @@ mod tests {
     /// Register a consent-satisfied integration manifest for `id` in `app`'s
     /// registry, so `tick_once`'s manifest-driven loop reaches it.
     fn register_integration(app: &Arc<AppState>, id: &str) {
-        let manifest = crate::drivers::plugins::parse_manifest(
-            &format!(
-                r#"return {{ type = "integration", identity = {{ name = "{id}" }}, permissions = {{"network"}}, transports = {{ tcp = {{}} }} }}"#
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(id);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!(
+                "id: {id}\ntype: integration\npermissions: [network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: text\n    - key: port\n      label: Port\n      kind: number\n"
             ),
-            std::path::Path::new(&format!("{id}.lua")),
         )
         .unwrap();
+        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+        let manifest = crate::drivers::plugins::parse_manifest_from_dir(&dir).unwrap();
         app.registry
             .update(|s| s.manifests = vec![manifest.clone()]);
-        app.registry.set_granted(&HashMap::from([(
-            id.to_string(),
-            vec![halod_shared::types::Permission::Network],
-        )]));
-        app.registry
-            .set_acknowledged(&HashMap::from([(id.to_string(), manifest.content_hash())]));
+        let mut policy = crate::config::PluginPolicy::default();
+        policy.enabled.push(id.to_string());
+        policy.integrations_enabled.push(id.to_string());
+        policy
+            .accepted_authorities
+            .insert(id.to_string(), app.registry.authority_for(id).unwrap());
+        app.registry.replace_policy(&policy);
     }
 
     #[tokio::test]
@@ -627,6 +719,32 @@ mod tests {
 
             // Disabled -> Offline (seeded) -> Case C (root live, no-op resync) -> Online.
             assert_eq!(states.get("openrgb"), Some(&MonitorState::Online));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unrecoverable_root_is_not_reconnected_automatically() {
+        crate::test_support::with_tmp_config(|app| async move {
+            register_integration(&app, "openrgb");
+            let root = MockRoot::new("openrgb");
+            root.live.store(false, Ordering::Relaxed);
+            root.unrecoverable.store(true, Ordering::Relaxed);
+            app.devices
+                .write()
+                .await
+                .push(root.clone() as Arc<dyn Device>);
+
+            let mut states = HashMap::new();
+            tick_once(&app, &mut states).await;
+            assert_eq!(states.get("openrgb"), Some(&MonitorState::Unrecoverable));
+
+            // Even if the root disappears, the monitor keeps the terminal
+            // latch instead of constructing the same doomed runtime again.
+            app.devices.write().await.clear();
+            tick_once(&app, &mut states).await;
+            assert_eq!(states.get("openrgb"), Some(&MonitorState::Unrecoverable));
+            assert!(app.devices.read().await.is_empty());
         })
         .await;
     }

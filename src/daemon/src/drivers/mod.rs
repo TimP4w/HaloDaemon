@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use halod_shared::types::{
     ConnectionType, DeviceCapability, DeviceType, VisibilityState, WireDevice, WriteRateStatus,
 };
+use std::sync::Arc;
 
 mod slots;
 pub use slots::*;
@@ -37,10 +38,8 @@ pub enum CapabilityRef<'a> {
     Lcd(&'a dyn LcdCapability),
     KeyRemap(&'a dyn KeyRemapCapability),
     KeyboardLayout(&'a dyn KeyboardLayoutCapability),
-    Chain(&'a dyn ChainCapability),
     Controller(&'a dyn Controller),
     Pairing(&'a dyn PairingCapability),
-    TransportSwitchable(&'a dyn TransportSwitchable),
 }
 
 macro_rules! capability_dispatch {
@@ -83,7 +82,7 @@ macro_rules! capability_dispatch {
 
 capability_dispatch!(
     persisting: [Fan, Rgb, Range, Choice, Boolean, Equalizer, Dpi, Lcd, KeyRemap, OnboardProfiles],
-    wire_only:  [Sensor, Action, Battery, Connection, KeyboardLayout, Chain, Controller, Pairing, TransportSwitchable],
+    wire_only:  [Sensor, Action, Battery, Connection, KeyboardLayout, Controller, Pairing],
 );
 
 macro_rules! as_capability {
@@ -106,7 +105,7 @@ pub trait Device: Send + Sync {
 
     /// True if the device's display name is owned by a parent (e.g. a
     /// `ChainHost`) rather than the descriptor/`DeviceRecord`. `set_device_name`
-    /// routes these through `ChainCapability::rename_chain_link`, and the
+    /// routes these through the owning host, and the
     /// serializer's name-patch skips them so the parent's name wins.
     fn has_external_name(&self) -> bool {
         false
@@ -128,8 +127,11 @@ pub trait Device: Send + Sync {
                 caps.push(w);
             }
         }
-        if let Some(chain) = self.as_chain() {
-            chain.enrich_wire_capabilities(&mut caps);
+        if let Some(host) = self.chain_host() {
+            if let Some(children) = chain::children_to_wire(host).await {
+                caps.push(children);
+            }
+            chain::enrich_wire_capabilities(host, &mut caps);
         }
         WireDeviceBuilder::from_parts(
             self.id().to_owned(),
@@ -140,7 +142,7 @@ pub trait Device: Send + Sync {
         .device_type(self.wire_device_type())
         .connection_type(self.wire_connection_type().await)
         .serial_number(self.wire_serial_number())
-        .connected(self.wire_device_connected().await)
+        .connected(self.wire_device_connected())
         .capabilities(caps)
         .integration_id(self.integration_id())
         .build()
@@ -170,7 +172,7 @@ pub trait Device: Send + Sync {
         None
     }
 
-    async fn wire_device_connected(&self) -> bool {
+    fn wire_device_connected(&self) -> bool {
         true
     }
 
@@ -178,6 +180,13 @@ pub trait Device: Send + Sync {
     /// server dropped): engines skip it and the GUI greys it. Default `true`.
     fn is_live(&self) -> bool {
         true
+    }
+
+    /// A permanent runtime failure that must not be retried automatically.
+    /// Recovery requires an explicit lifecycle action such as re-enabling,
+    /// reconfiguring, or rediscovering the device/plugin.
+    fn is_unrecoverable(&self) -> bool {
+        false
     }
 
     async fn wire_device_name(&self) -> String {
@@ -199,12 +208,17 @@ pub trait Device: Send + Sync {
     fn conflict_origin(&self) -> DeviceOrigin {
         self.owning_plugin_id()
             .map(DeviceOrigin::Plugin)
-            .unwrap_or(DeviceOrigin::Native)
+            .unwrap_or(DeviceOrigin::Builtin)
     }
 
     /// All capabilities this device exposes.  Add a `CapabilityRef` variant when
     /// a new capability is introduced; this method never grows for existing ones.
     fn capabilities(&self) -> Vec<CapabilityRef<'_>>;
+
+    /// Shared chain runtime, when this device owns chainable channels.
+    fn chain_host(&self) -> Option<&Arc<chain::ChainHost>> {
+        None
+    }
 
     as_capability!(as_fan, Fan, FanCapability);
     as_capability!(as_rgb, Rgb, RgbCapability);
@@ -213,8 +227,6 @@ pub trait Device: Send + Sync {
     as_capability!(as_choice, Choice, ChoiceCapability);
     as_capability!(as_boolean, Boolean, BooleanCapability);
     as_capability!(as_action, Action, ActionCapability);
-    #[cfg(test)]
-    as_capability!(as_battery, Battery, BatteryCapability);
     as_capability!(as_equalizer, Equalizer, EqualizerCapability);
     as_capability!(as_dpi, Dpi, DpiCapability);
     as_capability!(
@@ -225,15 +237,8 @@ pub trait Device: Send + Sync {
     as_capability!(as_lcd, Lcd, LcdCapability);
     as_capability!(as_key_remap, KeyRemap, KeyRemapCapability);
     as_capability!(as_keyboard_layout, KeyboardLayout, KeyboardLayoutCapability);
-    as_capability!(as_chain, Chain, ChainCapability);
     as_capability!(as_controller, Controller, Controller);
     as_capability!(as_pairing, Pairing, PairingCapability);
-    as_capability!(
-        as_transport_switchable,
-        TransportSwitchable,
-        TransportSwitchable
-    );
-
     fn visibility_slot(&self) -> Option<&VisibilitySlot> {
         None
     }
@@ -304,15 +309,6 @@ pub trait Device: Send + Sync {
     /// Live write-rate limit and throughput for the debug/Info UI. `None`
     /// when the device hasn't wired up live stats from its transport.
     fn write_rate_status(&self) -> Option<WriteRateStatus> {
-        None
-    }
-
-    /// Devices that need application-level setup after registration (e.g. starting
-    /// notification watchers, registering dynamic children) implement
-    /// [`PostRegisterHook`] and return `Some(self)` here. The registration usecase
-    /// calls the hook after the device is pushed to `AppState::devices`, so the
-    /// device itself never holds a direct reference to `AppState`.
-    fn as_post_register_hook(&self) -> Option<&dyn PostRegisterHook> {
         None
     }
 }

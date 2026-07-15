@@ -51,15 +51,30 @@ The engine broadcasts a PNG preview and per-LED RGB data on a high-frequency cha
 
 ### Effects
 
-Only `screen_sampler` and the effect designer's `designer` pixmap are native
-Rust (`daemon/src/lighting/rgb_engine/canvas/effects.rs`). Every other pixmap
-effect ships in the official repository's
+The engine deliberately supports two effect trust domains:
+
+- **Built-in host effects** are limited to features that require daemon-owned
+  services or must exist without an installed package. `screen_sampler` owns
+  platform capture handles that are not exposed to the Lua sandbox. The effect
+  designer uses the shared typed Rust model in both pixmap and direct modes.
+- **Plugin effects** are the extension point for every portable visual effect.
+  They are runtime-loaded, permission-scoped, and namespaced by package.
+
+This is a maintained boundary, not a migration fallback: do not add an ordinary
+effect to `canvas/effects.rs` or `direct.rs`. Add it to the official
+[`halo_effects`](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/halo_effects)
+package instead. A new built-in is justified only when it needs a daemon-owned
+host capability that the effect sandbox intentionally does not expose.
+
+Only `screen_sampler` and the effect designer's hidden `designer` pixmap are
+built-in Rust (`daemon/src/lighting/rgb_engine/canvas/effects.rs`). Every other
+pixmap effect ships in the official repository's
 [`halo_effects`](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/halo_effects)
 package—see [plugins.md](plugins.md#rgb-effects) for the plugin effect API.
 
 | Effect | Kind | Description | Parameters |
 |--------|------|-------------|------------|
-| `screen_sampler` | native | Mirror monitor content | — |
+| `screen_sampler` | built-in | Mirror monitor content | Monitor |
 | `plasma` | plugin | Animated plasma noise | Speed |
 | `rainbow` | plugin | Horizontal hue scroll across the canvas | Speed, scale |
 | `random_flash` | plugin | Deterministic per-cell flash, decaying exponentially | Cells, interval, decay, random color, color |
@@ -69,7 +84,7 @@ The `screen_sampler` effect captures the screen via XDG Desktop Portal (Linux, W
 
 ### Direct effect: Sensor Gradient
 
-`sensor_gradient` and its sibling `sensor_steps` are direct effects—no pixmap—shipped in the official `halo_effects` package (not native Rust). They color a zone from a live sensor reading, delivered each tick as the 5th argument to the effect's `led_colors_<id>` callback (`nil` when the sensor is unset or unavailable)—the plugin-effect equivalent of the native `DirectLedEffect::sensor_id`/`set_sensor_value` pair used by the `designer` effect below.
+`sensor_gradient` and its sibling `sensor_steps` are direct effects—no pixmap—shipped in the official `halo_effects` package (not built-in Rust). They color a zone from a live sensor reading, delivered each tick as the 5th argument to the effect's `led_colors_<id>` callback (`nil` when the sensor is unset or unavailable)—the plugin-effect equivalent of the built-in `DirectLedEffect::sensor_id`/`set_sensor_value` pair used by the `designer` effect below.
 
 `sensor_gradient` picks any sensor via a `Sensor`-kind param (including the synthesized fan readings below), normalizes the reading against a configurable `[min, max]` range, smooths it (0–5 s time constant), and blends along a two-stop `color_a`→`color_b` gradient:
 

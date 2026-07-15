@@ -38,23 +38,85 @@ pub async fn seed_known_devices(app: Arc<AppState>) {
     }
 }
 
-pub async fn initialize_app_state(app: Arc<AppState>) {
-    ensure_official_repo(&app).await;
+/// Initialize devices using an optional development checkout in place of the
+/// managed official repository. The override is process-local and never
+/// persists in config.
+pub async fn initialize_app_state(
+    app: Arc<AppState>,
+    #[cfg(feature = "dev-plugin-repo")] dev_plugin_repo: Option<std::path::PathBuf>,
+) {
+    #[cfg(feature = "dev-plugin-repo")]
+    if let Some(dir) = &dev_plugin_repo {
+        log::warn!("Using development plugin repository at {}", dir.display());
+    } else {
+        ensure_official_repo(&app).await;
+    }
+    #[cfg(not(feature = "dev-plugin-repo"))]
+    let dev_plugin_repo: Option<std::path::PathBuf> = {
+        ensure_official_repo(&app).await;
+        None
+    };
+    #[cfg(feature = "dev-plugin-repo")]
+    {
+        *app.development_plugin_repo.write().await = dev_plugin_repo.clone();
+    }
+    let mut discovered_hashes = Vec::new();
     {
         let cfg = app.config.read().await;
-        app.registry.load_all_with_repos(
+        let mut repo_dirs = crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos);
+        if dev_plugin_repo.is_none() {
+            let official_dir = cfg
+                .plugins
+                .repos
+                .iter()
+                .find(|repo| repo.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+                .map(crate::drivers::plugins::repo::active_revision_dir)
+                .unwrap_or_else(|| {
+                    crate::config::plugin_repos_dir()
+                        .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+                });
+            if official_dir.is_dir() {
+                match crate::drivers::plugins::repo::verify_official_repository(&official_dir) {
+                    Ok(manifest) => discovered_hashes.extend(
+                        manifest
+                            .packages
+                            .into_iter()
+                            .map(|package| (package.id, package.sha256)),
+                    ),
+                    Err(e) => {
+                        log::warn!(
+                            "official plugin repository is not signed or failed verification: {e:#}"
+                        );
+                        repo_dirs.retain(|dir| dir != &official_dir);
+                    }
+                }
+            }
+        }
+        app.registry.load_all_with_priority_repo(
             &crate::config::plugins_dir(),
-            &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
+            dev_plugin_repo.as_deref(),
+            &repo_dirs,
         );
         app.registry.replace_policy(&cfg.plugins);
     }
-    // Security: disable any plugin whose files changed on disk since checkout,
-    // BEFORE discovery so a tampered plugin never activates. No network, so it
-    // runs regardless of GitHub consent. Suppresses the ungranted notice for
-    // those it handles, so it must precede `notify_ungranted_plugins`.
-    usecases::repos::quarantine_changed_plugins(app.clone()).await;
+    if !discovered_hashes.is_empty() {
+        let mut cfg = app.config.write().await;
+        for (id, hash) in discovered_hashes {
+            cfg.plugins.installed_hashes.entry(id).or_insert(hash);
+        }
+        app.registry.replace_policy(&cfg.plugins);
+        app.request_config_save();
+    }
+    // Surface packages whose active revision differs from its installed digest.
+    // This is dirty-update metadata, not a consent or activation gate, and it
+    // runs without network access.
+    if dev_plugin_repo.is_none() {
+        usecases::repos::quarantine_changed_plugins(app.clone()).await;
+    }
     notify_ungranted_plugins(&app).await;
-    start_update_check(app.clone()).await;
+    if dev_plugin_repo.is_none() {
+        start_update_check(app.clone()).await;
+    }
     discovery::discover_devices(app.clone()).await;
     seed_known_devices(app.clone()).await;
     usecases::chain::restore_saved_chains(app.clone()).await;
@@ -89,8 +151,11 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
             cfg.plugins.repos.push(PluginRepoRecord {
                 url: url.to_owned(),
                 slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
+                repository_id: None,
                 branch: None,
                 locked_sha: String::new(),
+                active_revision: None,
+                previous_verified_sha: None,
                 last_sync: None,
             });
             app.request_config_save();
@@ -113,20 +178,40 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     let dest2 = dest.clone();
     match tokio::task::spawn_blocking(move || repo::clone(&url, &dest2, None)).await {
         Ok(Ok(sha)) => {
-            let compatible_checkout = {
+            let revision = dest.join("revisions").join(&sha);
+            let materialized = {
                 let dest = dest.clone();
-                let tip = sha.clone();
-                tokio::task::spawn_blocking(move || {
-                    usecases::repos::checkout_latest_compatible_plugins(&dest, &tip)
+                let sha = sha.clone();
+                let revision = revision.clone();
+                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    if !revision.is_dir() {
+                        let staging = revision
+                            .parent()
+                            .expect("revision always has a parent")
+                            .join(format!(".{sha}.staging-bootstrap"));
+                        std::fs::create_dir_all(
+                            staging.parent().expect("staging always has a parent"),
+                        )?;
+                        repo::materialize_commit(&dest, &sha, &staging)?;
+                        repo::verify_official_repository(&staging)?;
+                        std::fs::rename(&staging, &revision)?;
+                    } else {
+                        repo::verify_official_repository(&revision)?;
+                    }
+                    Ok(())
                 })
                 .await
             };
-            match compatible_checkout {
-                Ok(Ok(_)) => {}
+            match materialized {
+                Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    log::warn!("official plugin compatibility checkout failed: {e:#}")
+                    log::warn!("official plugin signature verification failed: {e:#}");
+                    return;
                 }
-                Err(e) => log::warn!("official plugin compatibility task panicked: {e:#}"),
+                Err(e) => {
+                    log::warn!("official plugin revision materialization panicked: {e:#}");
+                    return;
+                }
             }
             let mut cfg = app.config.write().await;
             if let Some(r) = cfg
@@ -136,6 +221,8 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
                 .find(|r| r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
             {
                 r.locked_sha = sha;
+                r.active_revision = Some(r.locked_sha.clone());
+                r.previous_verified_sha = None;
                 r.last_sync = Some(chrono::Utc::now().to_rfc3339());
             }
             app.request_config_save();
@@ -167,17 +254,15 @@ pub(crate) async fn start_update_check(app: Arc<AppState>) {
 }
 
 /// Toast one notification per auto-discovered plugin that can't activate: a
-/// "needs permission" warning for one never approved, or a "content changed"
-/// warning for one whose on-disk hash changed since it was approved. A
-/// manually-imported plugin is pre-marked notified by the import usecase (the
-/// GUI shows a blocking consent modal for that flow instead).
+/// "needs permission" warning for each unapproved plugin. A manually-imported
+/// plugin is pre-marked notified by the import usecase (the GUI shows a
+/// blocking consent modal for that flow instead).
 pub(crate) async fn notify_ungranted_plugins(app: &Arc<AppState>) {
     use crate::drivers::plugins::UngrantedReason;
     use halod_shared::types::NotificationCode;
     for (plugin, reason) in app.registry.take_newly_ungranted_plugins() {
         let code = match reason {
             UngrantedReason::NeedsPermission => NotificationCode::PluginNeedsPermission { plugin },
-            UngrantedReason::ContentChanged => NotificationCode::PluginContentChanged { plugin },
         };
         crate::platform::notify::send(app, code).await;
     }

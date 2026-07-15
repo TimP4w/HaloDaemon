@@ -50,8 +50,7 @@ misc:
   designer_phase_spread: Sfasamento
   designer_ambient_color: Colore ambiente
   # radar.rs
-  radar_daemon_down: Daemon non in esecuzione
-  radar_daemon_down_sub: Avvia il rilevamento per trovare i tuoi dispositivi
+  radar_daemon_down_sub: Avvia il daemon
   radar_one_device_ready: 1 dispositivo pronto
   radar_devices_ready: "%{found} dispositivi pronti"
   radar_all_connected: Tutti i dispositivi connessi
@@ -59,6 +58,15 @@ misc:
   radar_scanning: "Scansione dispositivi…"
   radar_scan_fallback: "%{found} trovati · scansione…"
   radar_scan_detail: "%{found} trovati · scansione di %{detail}"
+  radar_phase_usb: dispositivi USB
+  radar_phase_plugin_hosts: trasporti host dei plugin
+  radar_phase_hid: dispositivi HID
+  radar_phase_plugin_integrations: integrazioni plugin
+  radar_phase_hwmon: dispositivi di monitoraggio hardware
+  radar_phase_computer: sensori del computer
+  radar_phase_smbus: dispositivi SMBus
+  radar_phase_smbus_adapter: "adattatore SMBus %{name}"
+  radar_phase_smbus_bus: "bus SMBus %{number}"
   # device/macro_editor.rs
   macro_full: La sequenza è completa. Rimuovi alcuni passaggi per aggiungerne altri.
   macro_unreleased: Al termine della sequenza alcuni tasti risultano ancora premuti. Verranno rilasciati automaticamente dopo la riproduzione.

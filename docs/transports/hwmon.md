@@ -1,6 +1,6 @@
-# hwmon Transport
+# hwmon Plugin Transport
 
-Linux hardware monitoring sysfs transport for temperature sensors.
+Scoped Linux hardware-monitoring transport for integration plugins.
 
 **Platform:** Linux only
 
@@ -8,19 +8,34 @@ Linux hardware monitoring sysfs transport for temperature sensors.
 
 ## Overview
 
-The Linux `hwmon` subsystem exposes sensor data from CPUs, GPUs, NVMe drives, and embedded controllers at `/sys/class/hwmon/hwmon*/`. HaloDaemon uses this transport for two purposes: reading `temp*_input` files (millidegrees Celsius) to surface temperatures as fan curve sources, and writing `pwm*` / `pwm*_enable` sysfs files to control motherboard fan header duty cycles. The udev rules in `udev/60-halod.rules` grant write permission to these files on device add.
+The Linux `hwmon` subsystem exposes sensor data from CPUs, GPUs, NVMe drives,
+and embedded controllers at `/sys/class/hwmon/hwmon*/`. The official
+[`hwmon`](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/hwmon)
+integration uses this host transport to surface temperatures and motherboard
+fan headers. The udev rules in `udev/60-halod.rules` grant write permission to
+approved PWM attributes on device add.
 
 ---
 
 ## Discovery
 
-`HwmonTransport::discover()` enumerates all `/sys/class/hwmon/hwmon*` directories, creates a `HwmonDevice` for each, and calls `initialize()`.
+The host enumerates every `hwmon*` directory and gives the integration an
+opaque key, stable identifier, display name, and allowlisted attribute names.
+Filesystem paths are never exposed to Lua. Reads are limited to `name`,
+`tempN_input`/`label`, `fanN_input`/`label`, and `pwmN`/`pwmN_enable`; only PWM
+and PWM-enable attributes are writable.
 
 ---
 
 ## Polling
 
-Each `HwmonDevice` spawns a Tokio task that reads all `temp*_input` files under its sysfs path every 1 second. The latest readings are cached in a `Mutex<Vec<Sensor>>`; the IPC serializer reads from this cache without triggering sysfs I/O.
+The generic plugin worker samples sensor and fan callbacks every second. The
+integration also caches each result for one second so multiple consumers share
+the same sysfs snapshot.
+
+Before the first `pwmN_enable` mutation, the host records its original value.
+Transport teardown restores every recorded value independently of Lua cleanup,
+including after a callback timeout or error.
 
 ---
 
@@ -30,7 +45,8 @@ The `hwmonN` index suffix is dynamic and changes across reboots. HaloDaemon deri
 
 Example: `/sys/devices/pci0000:00/0000:00:18.3/hwmon/hwmon6` → `pci0000_00_0000_00_18_3`
 
-This ID is used in fan curve sensor assignments so they survive reboots.
+The integration retains the former built-in device and sensor ID formats, so
+fan curve assignments and visibility settings survive the port.
 
 ---
 
@@ -52,4 +68,9 @@ Missing modules produce missing sensors, not errors. NixOS users: the NixOS modu
 ## Limitations
 
 - Linux only — excluded from Windows builds at the compiler level.
+- Opt-in plugin — install and approve the official hwmon integration before
+  sensors and fan headers appear.
 - Module dependency — sensors and fan headers only appear if the corresponding kernel module is loaded. Missing modules produce missing devices, not errors.
+- Permission and contract failures are unrecoverable for the current plugin
+  runtime. HaloDaemon reports them once and stops automatic calls/reconnects;
+  fix the permissions, then re-enable or rediscover the integration.

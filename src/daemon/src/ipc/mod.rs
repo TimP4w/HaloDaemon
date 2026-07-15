@@ -740,6 +740,7 @@ where
 pub fn broadcast_loop(app: Arc<AppState>) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_millis(250));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
             broadcast_state(&app).await;
@@ -748,6 +749,14 @@ pub fn broadcast_loop(app: Arc<AppState>) -> tokio::task::JoinHandle<Result<()>>
 }
 
 pub async fn broadcast_state(app: &Arc<AppState>) {
+    // Full snapshots walk every device capability. Many call sites can request
+    // one at once (including the periodic loop), but state is latest-wins: an
+    // already-running snapshot makes another concurrent pass redundant. More
+    // importantly, overlapping passes used to enqueue repeated read callbacks
+    // on each plugin's single worker ahead of GUI write commands.
+    let Ok(_broadcast) = app.ipc_broadcast_lock.try_lock() else {
+        return;
+    };
     let msg = build_state_msg(app).await;
     broadcast_json(app, &msg).await;
 }
@@ -825,6 +834,54 @@ mod pipe_security_tests {
 #[cfg(test)]
 mod handle_tests {
     use super::*;
+
+    struct SlowSnapshotDevice {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::drivers::Device for SlowSnapshotDevice {
+        fn id(&self) -> &str {
+            "slow-snapshot"
+        }
+
+        fn name(&self) -> &str {
+            "Slow snapshot"
+        }
+
+        fn vendor(&self) -> &str {
+            "test"
+        }
+
+        fn model(&self) -> &str {
+            "test"
+        }
+
+        async fn initialize(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        async fn close(&self) {}
+
+        async fn serialize(&self) -> halod_shared::types::WireDevice {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            crate::drivers::vendors::generic::devices::common::WireDeviceBuilder::from_parts(
+                self.id().to_string(),
+                self.name().to_string(),
+                self.vendor().to_string(),
+                self.model().to_string(),
+            )
+            .build()
+        }
+
+        fn capabilities(&self) -> Vec<crate::drivers::CapabilityRef<'_>> {
+            Vec::new()
+        }
+    }
 
     #[test]
     fn try_subscribe_canvas_first_call_returns_true() {
@@ -974,6 +1031,41 @@ mod handle_tests {
             1,
             "a stalled client's queue must not grow past capacity"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_state_broadcasts_are_coalesced() {
+        use crate::config::Config;
+        use crate::state::AppState;
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = Arc::new(AppState::new(Config::default()));
+        app.devices.write().await.push(Arc::new(SlowSnapshotDevice {
+            entered: entered.clone(),
+            release: release.clone(),
+            calls: calls.clone(),
+        }));
+
+        let first = tokio::spawn({
+            let app = app.clone();
+            async move { broadcast_state(&app).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("first snapshot did not start");
+
+        tokio::time::timeout(Duration::from_millis(100), broadcast_state(&app))
+            .await
+            .expect("redundant broadcast waited behind the active snapshot");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first snapshot did not finish")
+            .expect("snapshot task panicked");
     }
 
     #[test]

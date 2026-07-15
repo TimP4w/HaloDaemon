@@ -1,4 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+//! Built-in pixmap effects are reserved for daemon-owned host capabilities.
+//!
+//! `screen_sampler` needs platform capture handles that the Lua effect sandbox
+//! deliberately cannot access. The hidden designer pixmap shares the daemon's
+//! typed designer model and must remain available without an installed plugin.
+//! Portable visual effects belong in the official effect plugin, not here.
+
 use std::collections::HashMap;
 
 use halod_shared::effect_designer::{self, DesignerParams};
@@ -177,7 +184,10 @@ impl FrameSource for DesignerPixmapEffect {
     }
 }
 
-pub fn build(id: &str, params: &HashMap<String, EffectParamValue>) -> Option<Box<dyn FrameSource>> {
+pub fn build_builtin(
+    id: &str,
+    params: &HashMap<String, EffectParamValue>,
+) -> Option<Box<dyn FrameSource>> {
     match id {
         "screen_sampler" => Some(ScreenSamplerEffect::from_params(params)),
         effect_designer::DESIGNER_PIXMAP_EFFECT_ID => {
@@ -190,7 +200,7 @@ pub fn build(id: &str, params: &HashMap<String, EffectParamValue>) -> Option<Box
     }
 }
 
-pub fn all_descriptors() -> Vec<Animation> {
+pub fn builtin_descriptors() -> Vec<Animation> {
     vec![ScreenSamplerEffect::descriptor()]
 }
 
@@ -201,20 +211,25 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn build_dispatches_every_known_effect_id() {
+    fn builtin_builder_dispatches_every_known_effect_id() {
         for id in ["screen_sampler", effect_designer::DESIGNER_PIXMAP_EFFECT_ID] {
-            assert!(build(id, &HashMap::new()).is_some(), "{id} must build");
+            assert!(
+                build_builtin(id, &HashMap::new()).is_some(),
+                "{id} must build"
+            );
         }
         assert!(
-            build("does_not_exist", &HashMap::new()).is_none(),
+            build_builtin("does_not_exist", &HashMap::new()).is_none(),
             "unknown id must yield None"
         );
     }
 
     #[test]
     fn designer_pixmap_is_buildable_but_hidden_from_descriptors() {
-        assert!(build(effect_designer::DESIGNER_PIXMAP_EFFECT_ID, &HashMap::new()).is_some());
-        assert!(!all_descriptors()
+        assert!(
+            build_builtin(effect_designer::DESIGNER_PIXMAP_EFFECT_ID, &HashMap::new()).is_some()
+        );
+        assert!(!builtin_descriptors()
             .into_iter()
             .any(|d| d.id == effect_designer::DESIGNER_PIXMAP_EFFECT_ID));
     }
@@ -245,8 +260,8 @@ mod tests {
     }
 
     #[test]
-    fn all_descriptors_lists_screen_sampler_only() {
-        let ids: Vec<String> = all_descriptors().into_iter().map(|d| d.id).collect();
+    fn builtin_descriptors_list_screen_sampler_only() {
+        let ids: Vec<String> = builtin_descriptors().into_iter().map(|d| d.id).collect();
         assert_eq!(ids, vec!["screen_sampler".to_string()]);
     }
 

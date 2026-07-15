@@ -24,6 +24,9 @@ pub(crate) fn is_elevated() -> bool {
 /// Emit a loud, one-time warning if the daemon is running as root on Unix.
 #[cfg(unix)]
 pub(crate) fn warn_if_elevated() {
+    // TODO: we should probably just refuse to run elevated.
+    // We have the broker on windows, on linux we really don't have any usecase where running elevated is warranted.
+    // so let's close this hole and decrease the attack surface.
     if is_elevated() {
         log::warn!(
             "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"

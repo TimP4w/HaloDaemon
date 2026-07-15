@@ -3,9 +3,119 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use git2::build::RepoBuilder;
+use std::path::{Path, PathBuf};
+
+use super::PLUGIN_API;
+use crate::constants::OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS;
+pub use halod_plugin_signing::{package_hash, reject_symlinks, RepositoryManifest};
 #[cfg(test)]
-use git2::ResetType;
-use std::path::Path;
+use halod_plugin_signing::{RepositoryCompatibility, REPOSITORY_SCHEMA};
+
+/// Parse and validate a repository manifest and every indexed package digest
+/// from a working tree. This deliberately does not require a signature, so it
+/// can also validate third-party repositories and the explicit development
+/// override.
+pub fn read_repository_manifest(repo_dir: &Path) -> Result<RepositoryManifest> {
+    let manifest = read_repository_index(repo_dir)?;
+    validate_repository_manifest(repo_dir, &manifest)?;
+    Ok(manifest)
+}
+
+/// Read only the repository index fields that are safe and useful for update
+/// diagnostics. This does not authorize package execution; callers that load
+/// packages must use [`read_repository_manifest`] so digests are enforced.
+pub fn read_repository_index(repo_dir: &Path) -> Result<RepositoryManifest> {
+    let manifest = halod_plugin_signing::read_repository_index(repo_dir)?;
+    validate_repository_index(&manifest)?;
+    Ok(manifest)
+}
+
+/// Read the repository index directly from a fetched commit without changing
+/// the working tree.  This is used to advertise an explicit update before the
+/// user accepts it; the complete on-disk validation still runs after checkout.
+pub fn read_repository_manifest_at_commit(
+    repo_dir: &Path,
+    sha: &str,
+) -> Result<RepositoryManifest> {
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
+    let tree = repo
+        .find_commit(oid)
+        .with_context(|| format!("commit '{sha}' not found"))?
+        .tree()
+        .context("reading commit tree")?;
+    let bytes = read_blob_at(&repo, &tree, Path::new("repository.yaml"))?;
+    let manifest: RepositoryManifest =
+        serde_yaml::from_slice(&bytes).context("parsing repository.yaml from commit")?;
+    validate_repository_index(&manifest)?;
+    Ok(manifest)
+}
+
+/// Verify the official detached signature directly from fetched Git objects.
+/// This is intentionally lighter than [`verify_official_repository`]: update
+/// discovery must not touch the active checkout, while installation performs
+/// the complete package-digest validation after materializing the revision.
+pub fn verify_official_repository_at_commit(
+    repo_dir: &Path,
+    sha: &str,
+) -> Result<RepositoryManifest> {
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
+    let tree = repo
+        .find_commit(oid)
+        .with_context(|| format!("commit '{sha}' not found"))?
+        .tree()
+        .context("reading commit tree")?;
+    let yaml = read_blob_at(&repo, &tree, Path::new("repository.yaml"))?;
+    let manifest: RepositoryManifest =
+        serde_yaml::from_slice(&yaml).context("parsing repository.yaml from commit")?;
+    validate_repository_index(&manifest)?;
+    let signature = read_blob_at(&repo, &tree, Path::new("repository.sig"))?;
+    verify_official_signature(&yaml, &signature)?;
+    Ok(manifest)
+}
+
+/// Verify the official detached signature in a checked-out repository. Package
+/// digests are enforced for every repository by [`validate_repository_manifest`].
+/// The signature covers exact `repository.yaml` bytes, matching the standalone
+/// `halod-plugin-signing` tool.
+pub fn verify_official_repository(repo_dir: &Path) -> Result<RepositoryManifest> {
+    let yaml_path = repo_dir.join("repository.yaml");
+    let yaml =
+        std::fs::read(&yaml_path).with_context(|| format!("reading {}", yaml_path.display()))?;
+    let manifest: RepositoryManifest = serde_yaml::from_slice(&yaml)
+        .with_context(|| format!("parsing {}", yaml_path.display()))?;
+    validate_repository_manifest(repo_dir, &manifest)?;
+
+    let sig_path = repo_dir.join("repository.sig");
+    let sig_bytes =
+        std::fs::read(&sig_path).with_context(|| format!("reading {}", sig_path.display()))?;
+    verify_official_signature(&yaml, &sig_bytes)
+        .with_context(|| format!("verifying {}", sig_path.display()))?;
+
+    Ok(manifest)
+}
+
+/// Verify a detached official signature over the exact repository YAML bytes.
+/// Keeping this byte-oriented makes verification identical for a checkout and
+/// a fetched object, and avoids accidentally reserializing YAML before
+/// signature validation.
+fn verify_official_signature(yaml: &[u8], sig_bytes: &[u8]) -> Result<()> {
+    halod_plugin_signing::verify_signature(yaml, sig_bytes, OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS)
+}
+
+fn validate_repository_manifest(repo_dir: &Path, manifest: &RepositoryManifest) -> Result<()> {
+    validate_repository_index(manifest)?;
+    halod_plugin_signing::validate_repository_packages(repo_dir, manifest)
+}
+
+/// Checks fields that are meaningful before the commit is checked out.
+fn validate_repository_index(manifest: &RepositoryManifest) -> Result<()> {
+    halod_plugin_signing::validate_repository_index(manifest)?;
+    halod_plugin_signing::validate_compatibility(manifest, env!("CARGO_PKG_VERSION"), PLUGIN_API)
+}
 
 /// URL schemes a plugin repo may use. `file://` is a local clone (dev/test and
 /// the official-repo bootstrap); remote sources must be `https`/`ssh`.
@@ -109,41 +219,107 @@ pub fn fetch_remote_sha(repo_dir: &Path, branch: Option<&str>) -> Result<String>
     Ok(oid.to_string())
 }
 
-/// Hard-reset the working tree at `repo_dir` to `sha` (must already be fetched or cloned).
-#[cfg(test)]
-pub fn checkout_sha(repo_dir: &Path, sha: &str) -> Result<()> {
+/// Materialize one fetched commit into a fresh regular-file directory without
+/// changing the Git worktree. The caller validates the directory and atomically
+/// renames it into the immutable revision store before selecting it for plugin
+/// execution.
+pub fn materialize_commit(repo_dir: &Path, sha: &str, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        bail!("revision destination already exists: {}", dest.display());
+    }
     let repo = git2::Repository::open(repo_dir)
         .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
     let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
-    let commit = repo
+    let tree = repo
         .find_commit(oid)
-        .with_context(|| format!("commit '{sha}' not found (fetch it first)"))?;
-    repo.reset(commit.as_object(), ResetType::Hard, None)
-        .with_context(|| format!("resetting working tree to '{sha}'"))?;
-    reject_symlinks(repo_dir)
+        .with_context(|| format!("commit '{sha}' not found"))?
+        .tree()
+        .context("reading commit tree")?;
+    std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    materialize_tree(&repo, &tree, dest)
 }
 
-/// Bail if any symlink exists under `root` (skipping `.git`). A commit can carry
-/// a symlink and `checkout_*` writes it verbatim; the daemon later reads
-/// `plugin.yaml`/`main.lua` with symlink-following `std::fs`, so a link like
-/// `main.lua -> /etc/shadow` would leak a root-only file's contents through
-/// parse errors/hashes. The import path already rejects symlinks (`copy_dir_all`);
-/// this closes the same hole on the git-repo path.
-pub fn reject_symlinks(root: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(root).with_context(|| format!("reading {}", root.display()))? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            bail!("repo contains a symlink: {}", entry.path().display());
-        }
-        if file_type.is_dir() {
-            if entry.file_name() == ".git" {
-                continue;
+fn materialize_tree(repo: &git2::Repository, tree: &git2::Tree<'_>, dest: &Path) -> Result<()> {
+    for entry in tree {
+        let name = entry
+            .name()
+            .ok_or_else(|| anyhow!("repository tree contains a non-UTF-8 filename"))?;
+        let target = dest.join(name);
+        match entry.kind() {
+            Some(git2::ObjectType::Tree) => {
+                std::fs::create_dir(&target)
+                    .with_context(|| format!("creating {}", target.display()))?;
+                let child = repo.find_tree(entry.id())?;
+                materialize_tree(repo, &child, &target)?;
             }
-            reject_symlinks(&entry.path())?;
+            Some(git2::ObjectType::Blob) => {
+                // A Git symlink is stored as a blob with link file mode. It
+                // must never be materialized as a host symlink or followed by
+                // later package validation.
+                if entry.filemode() == 0o120000 {
+                    bail!("repository contains a symlink: {}", target.display());
+                }
+                let blob = repo.find_blob(entry.id())?;
+                std::fs::write(&target, blob.content())
+                    .with_context(|| format!("writing {}", target.display()))?;
+            }
+            _ => bail!(
+                "repository contains unsupported tree entry: {}",
+                target.display()
+            ),
         }
     }
     Ok(())
+}
+
+/// The immutable directory selected for a repository record. A source without
+/// an installed revision resolves to a deliberately nonexistent directory;
+/// the mutable Git worktree is never executable plugin input.
+pub fn active_revision_dir(record: &crate::config::PluginRepoRecord) -> PathBuf {
+    let root = crate::config::plugin_repos_dir().join(&record.slug);
+    root.join("revisions").join(
+        record
+            .active_revision
+            .as_deref()
+            .filter(|sha| !sha.is_empty())
+            .unwrap_or("__inactive__"),
+    )
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    fn manifest(halod: &str, plugin_api: u32) -> RepositoryManifest {
+        RepositoryManifest {
+            schema: REPOSITORY_SCHEMA,
+            id: "test".to_owned(),
+            name: "Test".to_owned(),
+            version: "1.0.0".to_owned(),
+            compatibility: RepositoryCompatibility {
+                halod: halod.to_owned(),
+                plugin_api,
+            },
+            packages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn accepts_matching_production_compatibility_gate() {
+        validate_repository_index(&manifest(">=0.2.0, <0.3.0", PLUGIN_API)).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_different_plugin_api() {
+        let error = validate_repository_index(&manifest(">=0.2.0", PLUGIN_API + 1)).unwrap_err();
+        assert!(error.to_string().contains("plugin API"));
+    }
+
+    #[test]
+    fn rejects_an_incompatible_daemon_version() {
+        let error = validate_repository_index(&manifest(">=99.0.0", PLUGIN_API)).unwrap_err();
+        assert!(error.to_string().contains("requires Halo"));
+    }
 }
 
 /// Read a blob's bytes at `path` (relative to `tree`'s root).
@@ -160,277 +336,6 @@ fn read_blob_at(repo: &git2::Repository, tree: &git2::Tree, path: &Path) -> Resu
     Ok(blob.content().to_vec())
 }
 
-#[derive(serde::Deserialize, Default)]
-struct MetaEntryVersion {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    entry: Option<String>,
-    #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    compatibility: Option<super::manifest::PluginCompatibility>,
-}
-
-/// Plugin packages present at `sha`, using the same three layouts as the
-/// runtime scanner: the repo root, immediate child directories, and children
-/// of `plugins/`. Reading the commit tree (rather than the working tree) also
-/// finds packages whose checked-out tip is incompatible with this daemon.
-pub fn plugin_packages_at_commit(
-    repo_dir: &Path,
-    sha: &str,
-) -> Result<Vec<(String, std::path::PathBuf)>> {
-    let repo = git2::Repository::open(repo_dir)
-        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
-    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
-    let tree = repo
-        .find_commit(oid)
-        .with_context(|| format!("commit '{sha}' not found (fetch it first)"))?
-        .tree()
-        .context("reading commit tree")?;
-
-    let mut candidates = vec![std::path::PathBuf::new()];
-    for entry in tree
-        .iter()
-        .filter(|entry| entry.kind() == Some(git2::ObjectType::Tree))
-    {
-        if let Some(name) = entry.name() {
-            candidates.push(std::path::PathBuf::from(name));
-        }
-    }
-    if let Ok(plugins_entry) = tree.get_path(Path::new("plugins")) {
-        if let Ok(plugins_tree) = plugins_entry
-            .to_object(&repo)
-            .and_then(|o| o.peel_to_tree())
-        {
-            for entry in plugins_tree
-                .iter()
-                .filter(|entry| entry.kind() == Some(git2::ObjectType::Tree))
-            {
-                if let Some(name) = entry.name() {
-                    candidates.push(Path::new("plugins").join(name));
-                }
-            }
-        }
-    }
-
-    let mut packages = Vec::new();
-    for subpath in candidates {
-        let yaml_path = subpath.join("plugin.yaml");
-        let Ok(yaml) = read_blob_at(&repo, &tree, &yaml_path) else {
-            continue;
-        };
-        let Ok(meta) = serde_yaml::from_slice::<MetaEntryVersion>(&yaml) else {
-            continue;
-        };
-        if let Some(id) = meta.id.filter(|id| !id.is_empty()) {
-            packages.push((id, subpath));
-        }
-    }
-    packages.sort_by(|a, b| a.1.cmp(&b.1));
-    packages.dedup_by(|a, b| a.1 == b.1);
-    Ok(packages)
-}
-
-/// Walk history newest-first from `tip_sha` and return the newest revision at
-/// which `subpath` declares compatibility with this daemon and plugin API.
-/// Missing/deleted packages and malformed manifests are skipped. This lets an
-/// older Halo release use the last compatible plugin instead of blindly using
-/// an incompatible branch tip.
-pub fn latest_compatible_plugin_sha(
-    repo_dir: &Path,
-    tip_sha: &str,
-    subpath: &Path,
-) -> Result<Option<String>> {
-    let repo = git2::Repository::open(repo_dir)
-        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
-    let tip = git2::Oid::from_str(tip_sha).with_context(|| format!("parsing sha '{tip_sha}'"))?;
-    let mut walk = repo.revwalk().context("creating revision walk")?;
-    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
-    walk.push(tip)
-        .with_context(|| format!("walking history from '{tip_sha}'"))?;
-
-    for oid in walk {
-        let oid = oid.context("walking plugin history")?;
-        let sha = oid.to_string();
-        let Ok((_, _, Some(compatibility))) = remote_plugin_content(repo_dir, &sha, subpath) else {
-            continue;
-        };
-        if compatibility.ensure_supported().is_ok() {
-            return Ok(Some(sha));
-        }
-    }
-    Ok(None)
-}
-
-/// A plugin package's content hash + declared version at a specific commit,
-/// read directly from git's object database — no working-tree checkout, so
-/// this never disturbs the current on-disk state. `subpath` is the plugin's
-/// path within the repo (empty for a root plugin, `plugins/<id>` for a
-/// subdir one). Mirrors `PluginManifest::content_hash()`
-/// (`sha256(plugin.yaml bytes || entry script bytes)`) byte-for-byte, so the
-/// result can be compared directly against a loaded manifest's hash.
-pub fn remote_plugin_content(
-    repo_dir: &Path,
-    sha: &str,
-    subpath: &Path,
-) -> Result<(String, String, Option<super::manifest::PluginCompatibility>)> {
-    let repo = git2::Repository::open(repo_dir)
-        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
-    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
-    let commit = repo
-        .find_commit(oid)
-        .with_context(|| format!("commit '{sha}' not found (fetch it first)"))?;
-    let tree = commit.tree().context("reading commit tree")?;
-
-    let yaml_path = subpath.join("plugin.yaml");
-    let yaml_bytes = read_blob_at(&repo, &tree, &yaml_path)?;
-    let meta: MetaEntryVersion = serde_yaml::from_slice(&yaml_bytes)
-        .with_context(|| format!("parsing {}", yaml_path.display()))?;
-    let entry = meta.entry.as_deref().unwrap_or("main.lua");
-    let entry_bytes = read_blob_at(&repo, &tree, &subpath.join(entry))?;
-
-    let hash = super::manifest::plugin_content_hash(&yaml_bytes, &entry_bytes);
-
-    Ok((hash, meta.version.unwrap_or_default(), meta.compatibility))
-}
-
-/// A plugin package's content hash from the git *index* (what the working tree
-/// was last checked out from / staged as), mirroring [`remote_plugin_content`]'s
-/// hashing. The index tracks checked-out content per-path exactly — even across
-/// partial per-plugin checkouts — so comparing it to the on-disk content
-/// detects a manual working-tree edit, and comparing it to the remote tip
-/// detects a real upstream update. `locked_sha` is *not* a safe per-plugin
-/// baseline (a per-plugin update advances it repo-wide), so the index is used.
-pub fn index_plugin_content(repo_dir: &Path, subpath: &Path) -> Result<String> {
-    let repo = git2::Repository::open(repo_dir)
-        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
-    let index = repo.index().context("reading index")?;
-    let read = |rel: &Path| -> Result<Vec<u8>> {
-        let entry = index
-            .get_path(rel, 0)
-            .ok_or_else(|| anyhow!("{} not staged in index", rel.display()))?;
-        let blob = repo
-            .find_blob(entry.id)
-            .with_context(|| format!("reading {} blob from index", rel.display()))?;
-        Ok(blob.content().to_vec())
-    };
-
-    let yaml_path = subpath.join("plugin.yaml");
-    let yaml_bytes = read(&yaml_path)?;
-    let meta: MetaEntryVersion = serde_yaml::from_slice(&yaml_bytes)
-        .with_context(|| format!("parsing {}", yaml_path.display()))?;
-    let entry = meta.entry.as_deref().unwrap_or("main.lua");
-    let entry_bytes = read(&subpath.join(entry))?;
-
-    Ok(super::manifest::plugin_content_hash(
-        &yaml_bytes,
-        &entry_bytes,
-    ))
-}
-
-/// Materialize one plugin subtree from a commit into an empty staging
-/// directory. Validation can run against this copy before the installed
-/// working tree is touched.
-pub fn export_plugin_subtree(
-    repo_dir: &Path,
-    sha: &str,
-    subpath: &Path,
-    destination: &Path,
-) -> Result<()> {
-    let repo = git2::Repository::open(repo_dir)
-        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
-    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
-    let commit = repo
-        .find_commit(oid)
-        .with_context(|| format!("commit '{sha}' not found (fetch it first)"))?;
-    let root = commit.tree().context("reading commit tree")?;
-    let tree = if subpath.as_os_str().is_empty() {
-        root
-    } else {
-        root.get_path(subpath)
-            .with_context(|| format!("{} not found in commit tree", subpath.display()))?
-            .to_object(&repo)?
-            .peel_to_tree()?
-    };
-
-    std::fs::create_dir_all(destination)
-        .with_context(|| format!("creating {}", destination.display()))?;
-    tree.walk(git2::TreeWalkMode::PreOrder, |prefix, entry| {
-        let Some(name) = entry.name() else {
-            return git2::TreeWalkResult::Abort;
-        };
-        let path = destination.join(prefix).join(name);
-        match entry.kind() {
-            Some(git2::ObjectType::Tree) => {
-                if std::fs::create_dir_all(&path).is_err() {
-                    return git2::TreeWalkResult::Abort;
-                }
-            }
-            Some(git2::ObjectType::Blob) => {
-                // Git mode 120000 denotes a symlink; never materialize it.
-                if entry.filemode() == 0o120000 {
-                    return git2::TreeWalkResult::Abort;
-                }
-                let write = repo
-                    .find_blob(entry.id())
-                    .ok()
-                    .and_then(|blob| std::fs::write(&path, blob.content()).ok());
-                if write.is_none() {
-                    return git2::TreeWalkResult::Abort;
-                }
-            }
-            _ => return git2::TreeWalkResult::Abort,
-        }
-        git2::TreeWalkResult::Ok
-    })
-    .map_err(|error| anyhow!("exporting plugin subtree: {error}"))?;
-    reject_symlinks(destination)
-}
-
-/// Stage `subpath`'s current working-tree content into the index, making the
-/// on-disk-change baseline ([`index_plugin_content`]) match the live files —
-/// i.e. accept a local edit as the new baseline so it stops being flagged as
-/// modified. Does not commit.
-pub fn stage_subtree(repo_dir: &Path, subpath: &Path) -> Result<()> {
-    let repo = git2::Repository::open(repo_dir)
-        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
-    let mut index = repo.index().context("reading index")?;
-    let pathspec = if subpath.as_os_str().is_empty() {
-        std::path::PathBuf::from("*")
-    } else {
-        subpath.to_path_buf()
-    };
-    index
-        .add_all([pathspec].iter(), git2::IndexAddOption::DEFAULT, None)
-        .with_context(|| format!("staging '{}'", subpath.display()))?;
-    index.write().context("writing index")
-}
-
-/// Check out only `subpath` (one plugin's files) from `sha` into the working
-/// tree, leaving every other path untouched — a per-plugin update, as opposed
-/// to [`checkout_sha`]'s whole-repo reset. `subpath` empty checks out the
-/// whole tree (a root-level plugin has no narrower subtree to scope to).
-pub fn checkout_subtree(repo_dir: &Path, sha: &str, subpath: &Path) -> Result<()> {
-    let repo = git2::Repository::open(repo_dir)
-        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
-    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
-    let commit = repo
-        .find_commit(oid)
-        .with_context(|| format!("commit '{sha}' not found (fetch it first)"))?;
-    let tree = commit.tree().context("reading commit tree")?;
-    let mut opts = git2::build::CheckoutBuilder::new();
-    opts.force();
-    if !subpath.as_os_str().is_empty() {
-        opts.path(subpath);
-    }
-    repo.checkout_tree(tree.as_object(), Some(&mut opts))
-        .with_context(|| format!("checking out '{}' at '{sha}'", subpath.display()))?;
-    // Only the checked-out subtree was (re)written, so scope the symlink scan to
-    // it (empty subpath = whole repo).
-    reject_symlinks(&repo_dir.join(subpath))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,7 +347,7 @@ mod tests {
         let repo = git2::Repository::init(dir).unwrap();
         fs::write(
             dir.join("plugin.yaml"),
-            "id: demo\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: demo\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
         )
         .unwrap();
         fs::write(dir.join("main.lua"), "return {}").unwrap();
@@ -475,6 +380,57 @@ mod tests {
         url::Url::from_file_path(path)
             .expect("temporary repository path must be absolute")
             .into()
+    }
+
+    fn write_repository_manifest(root: &Path, digest: &str) {
+        fs::write(
+            root.join("repository.yaml"),
+            format!(
+                "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {digest}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn repository_manifest_accepts_an_indexed_package() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("plugins").join("demo");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("plugin.yaml"), "id: demo\nversion: 1.0.0\n").unwrap();
+        fs::write(package.join("main.lua"), "return {}\n").unwrap();
+        let digest = package_hash(&package).unwrap();
+        write_repository_manifest(root.path(), &digest);
+
+        let manifest = read_repository_manifest(root.path()).unwrap();
+        assert_eq!(manifest.packages.len(), 1);
+        assert_eq!(manifest.packages[0].id, "demo");
+    }
+
+    #[test]
+    fn repository_manifest_rejects_an_indexed_package_hash_mismatch() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("plugins").join("demo");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("plugin.yaml"), "id: demo\nversion: 1.0.0\n").unwrap();
+        fs::write(package.join("main.lua"), "return {}\n").unwrap();
+        write_repository_manifest(root.path(), &"0".repeat(64));
+
+        let error = read_repository_manifest(root.path()).unwrap_err();
+        assert!(error.to_string().contains("hash mismatch"));
+    }
+
+    #[test]
+    fn package_hash_changes_when_any_package_file_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        fs::create_dir_all(package.join("lib")).unwrap();
+        fs::write(package.join("plugin.yaml"), "id: demo\n").unwrap();
+        fs::write(package.join("lib").join("protocol.lua"), "return 1\n").unwrap();
+        let before = package_hash(&package).unwrap();
+        fs::write(package.join("lib").join("protocol.lua"), "return 2\n").unwrap();
+        let after = package_hash(&package).unwrap();
+        assert_ne!(before, after);
     }
 
     #[test]
@@ -517,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_and_checkout_round_trip_a_new_commit() {
+    fn fetch_does_not_change_the_worktree() {
         let src = tempfile::tempdir().unwrap();
         let repo = git2::Repository::init(src.path()).unwrap();
         fs::write(src.path().join("plugin.yaml"), "id: demo\n").unwrap();
@@ -542,10 +498,6 @@ mod tests {
             contents, "return {}",
             "fetch must not change the working tree"
         );
-
-        checkout_sha(&clone_dir, &second_sha).unwrap();
-        let contents = fs::read_to_string(clone_dir.join("main.lua")).unwrap();
-        assert_eq!(contents, "return { extra = true }");
     }
 
     #[test]
@@ -598,179 +550,5 @@ mod tests {
         let err = clone(&file_url(src.path()), &clone_dir, None)
             .expect_err("a symlinked repo must be rejected");
         assert!(err.to_string().contains("symlink"), "{err}");
-    }
-
-    #[test]
-    fn checkout_unknown_sha_errors() {
-        let src = tempfile::tempdir().unwrap();
-        init_repo_with_plugin(src.path());
-        let dest = tempfile::tempdir().unwrap();
-        let clone_dir = dest.path().join("clone");
-        clone(&file_url(src.path()), &clone_dir, None).unwrap();
-
-        let err = checkout_sha(&clone_dir, "0000000000000000000000000000000000000f").unwrap_err();
-        assert!(err.to_string().contains("not found"));
-    }
-
-    /// A repo with two plugins under `plugins/<id>/`, for the per-plugin hash/checkout tests.
-    fn init_repo_with_two_plugins(dir: &Path) -> String {
-        fs::create_dir_all(dir).unwrap();
-        let repo = git2::Repository::init(dir).unwrap();
-        for id in ["alpha", "beta"] {
-            let plugin_dir = dir.join("plugins").join(id);
-            fs::create_dir_all(&plugin_dir).unwrap();
-            fs::write(
-                plugin_dir.join("plugin.yaml"),
-                format!("id: {id}\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"),
-            )
-            .unwrap();
-            fs::write(plugin_dir.join("main.lua"), "return {}").unwrap();
-        }
-        commit_all(&repo, "initial commit")
-    }
-
-    #[test]
-    fn remote_plugin_content_matches_the_daemon_side_content_hash() {
-        use crate::drivers::plugins::{parse_manifest_from_dir, PluginManifest};
-
-        let src = tempfile::tempdir().unwrap();
-        init_repo_with_two_plugins(src.path());
-
-        let local_manifest: PluginManifest =
-            parse_manifest_from_dir(&src.path().join("plugins").join("alpha")).unwrap();
-
-        let (remote_hash, _version, _compatibility) = remote_plugin_content(
-            src.path(),
-            &repo_head_sha(src.path()),
-            Path::new("plugins/alpha"),
-        )
-        .unwrap();
-
-        assert_eq!(
-            remote_hash,
-            local_manifest.content_hash(),
-            "the git-object-read hash must be byte-identical to the on-disk content_hash"
-        );
-    }
-
-    #[test]
-    fn remote_plugin_content_changes_only_for_the_modified_plugin() {
-        let src = tempfile::tempdir().unwrap();
-        let first_sha = init_repo_with_two_plugins(src.path());
-        let (alpha_before, _, _) =
-            remote_plugin_content(src.path(), &first_sha, Path::new("plugins/alpha")).unwrap();
-        let (beta_before, _, _) =
-            remote_plugin_content(src.path(), &first_sha, Path::new("plugins/beta")).unwrap();
-
-        fs::write(
-            src.path().join("plugins").join("alpha").join("main.lua"),
-            "return { extra = true }",
-        )
-        .unwrap();
-        let repo = git2::Repository::open(src.path()).unwrap();
-        let second_sha = commit_all(&repo, "change alpha only");
-
-        let (alpha_after, _, _) =
-            remote_plugin_content(src.path(), &second_sha, Path::new("plugins/alpha")).unwrap();
-        let (beta_after, _, _) =
-            remote_plugin_content(src.path(), &second_sha, Path::new("plugins/beta")).unwrap();
-
-        assert_ne!(alpha_before, alpha_after, "modified plugin's hash changes");
-        assert_eq!(
-            beta_before, beta_after,
-            "untouched sibling's hash is stable"
-        );
-    }
-
-    #[test]
-    fn latest_compatible_plugin_sha_falls_back_from_an_incompatible_tip() {
-        let src = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(src.path()).unwrap();
-        fs::write(
-            src.path().join("plugin.yaml"),
-            "id: demo\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
-        )
-        .unwrap();
-        fs::write(src.path().join("main.lua"), "return {}").unwrap();
-        let compatible_sha = commit_all(&repo, "compatible");
-
-        fs::write(
-            src.path().join("plugin.yaml"),
-            "id: demo\nversion: 2.0.0\ncompatibility:\n  halod: '>=0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
-        )
-        .unwrap();
-        let tip_sha = commit_all(&repo, "requires newer Halo");
-
-        assert_eq!(
-            latest_compatible_plugin_sha(
-                src.path(),
-                &tip_sha,
-                Path::new("plugin.yaml").parent().unwrap()
-            )
-            .unwrap(),
-            Some(compatible_sha)
-        );
-    }
-
-    #[test]
-    fn plugin_packages_are_discovered_from_a_commit_tree() {
-        let src = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(src.path()).unwrap();
-        for (subpath, id) in [("plugins/alpha", "alpha"), ("beta", "beta")] {
-            let dir = src.path().join(subpath);
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("plugin.yaml"), format!("id: {id}\n")).unwrap();
-            fs::write(dir.join("main.lua"), "return {}").unwrap();
-        }
-        let sha = commit_all(&repo, "packages");
-
-        assert_eq!(
-            plugin_packages_at_commit(src.path(), &sha).unwrap(),
-            vec![
-                ("beta".to_owned(), std::path::PathBuf::from("beta")),
-                (
-                    "alpha".to_owned(),
-                    std::path::PathBuf::from("plugins/alpha")
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn checkout_subtree_updates_only_the_named_plugin() {
-        let src = tempfile::tempdir().unwrap();
-        init_repo_with_two_plugins(src.path());
-
-        let dest = tempfile::tempdir().unwrap();
-        let clone_dir = dest.path().join("clone");
-        clone(&file_url(src.path()), &clone_dir, None).unwrap();
-
-        fs::write(
-            src.path().join("plugins").join("alpha").join("main.lua"),
-            "return { extra = true }",
-        )
-        .unwrap();
-        let repo = git2::Repository::open(src.path()).unwrap();
-        let second_sha = commit_all(&repo, "change alpha only");
-
-        fetch_remote_sha(&clone_dir, None).unwrap();
-        checkout_subtree(&clone_dir, &second_sha, Path::new("plugins/alpha")).unwrap();
-
-        let alpha =
-            fs::read_to_string(clone_dir.join("plugins").join("alpha").join("main.lua")).unwrap();
-        assert_eq!(alpha, "return { extra = true }");
-        let beta =
-            fs::read_to_string(clone_dir.join("plugins").join("beta").join("main.lua")).unwrap();
-        assert_eq!(
-            beta, "return {}",
-            "checkout_subtree must not touch a sibling plugin's files"
-        );
-    }
-
-    fn repo_head_sha(dir: &Path) -> String {
-        let repo = git2::Repository::open(dir).unwrap();
-        let head = repo.head().unwrap();
-        let oid = head.target().unwrap();
-        oid.to_string()
     }
 }

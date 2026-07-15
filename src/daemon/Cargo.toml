@@ -10,6 +10,9 @@ description = "Peripheral control daemon with an egui UI (fan curves, RGB, LCD, 
 workspace = true
 
 [features]
+# Development-only direct plugin repository override. Production builds must
+# not enable this feature.
+dev-plugin-repo = []
 # `halod plugin-test <package-dir>` — drives a plugin package's `test.lua`
 # against a recording mock transport, for the official plugin repo's own CI.
 plugin-test = []
@@ -21,16 +24,16 @@ path = "src/main.rs"
 [dependencies]
 halod-shared = { path = "../shared" }
 halod-hwaccess = { path = "../hwaccess" }
+halod-plugin-signing = { path = "../plugin-signing" }
 
 tokio      = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
+semver     = { workspace = true }
 anyhow     = { workspace = true }
 log        = { workspace = true }
 async-trait = { workspace = true }
-semver     = { workspace = true }
-env_logger = "0.11"
 fnv        = "1"
 hidapi     = "2"
 inventory  = "0.3"
@@ -52,7 +55,6 @@ resvg      = { version = "0.44", default-features = false }
 chrono     = { version = "0.4", default-features = false, features = ["clock"] }
 rustfft    = "6"
 chacha20poly1305 = "0.11.0"
-sha2 = "0.10"
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
 keyring = "4.1.4"
 # Fully vendored (libgit2/libssh2/openssl via `cc`), matching mlua's `vendored` Lua.

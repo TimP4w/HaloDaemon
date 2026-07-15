@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use crate::types::{
-    ButtonMapping, EffectDef, EffectParamValue, MacroStep, Permission, RgbState, SamplingMode,
+    ButtonMapping, EffectDef, EffectParamValue, MacroStep, PluginAuthority, RgbState, SamplingMode,
     VisibilityState, ZoneTopology,
 };
 use crate::zone_transform::ZoneContentTransform;
@@ -135,14 +135,12 @@ pub enum DaemonCommand {
     DeletePlugin {
         id: String,
     },
-    /// Replace the set of permissions granted to a plugin. An empty `granted`
-    /// revokes everything, leaving the plugin inert if it declares any
-    /// permission. Permission and enabled state change atomically before the
-    /// plugin's devices are reconciled.
-    SetPluginTrust {
+    /// Confirm the exact manifest-derived authority currently displayed in the
+    /// enable modal, then enable the plugin. The daemon rejects stale snapshots
+    /// so an update cannot race a user's confirmation.
+    ConfirmPluginEnable {
         id: String,
-        granted: Vec<Permission>,
-        enabled: bool,
+        authority: PluginAuthority,
     },
     /// Replace a plugin's user-editable config values (see `ConfigFieldDef`).
     /// A `secure` field's key is included only when the user typed a new
@@ -172,23 +170,6 @@ pub enum DaemonCommand {
     /// Fetch and check out a repo's remote tip, advancing `locked_sha`.
     UpdatePluginRepo {
         slug: String,
-    },
-    /// Fetch a repository and restore one skipped plugin directory from the
-    /// remote tip. Unlike `UpdatePluginRepo`, sibling paths are untouched.
-    RepairPluginRepoDir {
-        slug: String,
-        subpath: String,
-    },
-    /// Check repo-sourced plugins for a per-plugin content update, replying
-    /// with `plugin_updates`. `slug` scopes the check to one repo; `None`
-    /// checks every repo. Finer-grained than `CheckPluginRepoUpdates`.
-    CheckPluginUpdates {
-        slug: Option<String>,
-    },
-    /// Update one plugin: check out only its subtree from its repo's remote
-    /// tip, leaving sibling plugins in the same repo untouched. Never automatic.
-    UpdatePlugin {
-        plugin_id: String,
     },
     /// Update every plugin currently flagged with an update available, across every repo.
     UpdateAllPlugins,
@@ -771,34 +752,6 @@ mod tests {
     fn update_plugin_repo_wire_format() {
         let v = roundtrip(&DaemonCommand::UpdatePluginRepo { slug: "foo".into() });
         assert_eq!(v, json!({"type": "update_plugin_repo", "slug": "foo"}));
-    }
-
-    #[test]
-    fn repair_plugin_repo_dir_wire_format() {
-        let v = roundtrip(&DaemonCommand::RepairPluginRepoDir {
-            slug: "official".into(),
-            subpath: "nzxt_kraken".into(),
-        });
-        assert_eq!(
-            v,
-            json!({"type": "repair_plugin_repo_dir", "slug": "official", "subpath": "nzxt_kraken"})
-        );
-    }
-
-    #[test]
-    fn check_plugin_updates_wire_format() {
-        let v = roundtrip(&DaemonCommand::CheckPluginUpdates {
-            slug: Some("foo".into()),
-        });
-        assert_eq!(v, json!({"type": "check_plugin_updates", "slug": "foo"}));
-    }
-
-    #[test]
-    fn update_plugin_wire_format() {
-        let v = roundtrip(&DaemonCommand::UpdatePlugin {
-            plugin_id: "wled_udp".into(),
-        });
-        assert_eq!(v, json!({"type": "update_plugin", "plugin_id": "wled_udp"}));
     }
 
     #[test]

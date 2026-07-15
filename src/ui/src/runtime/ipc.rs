@@ -261,9 +261,6 @@ where
 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let _ = tx.connected.send(true);
-    repaint();
-
     // Bootstrap subscriptions. LCD preview lease keepalive is handled by the LCD tab.
     for cmd in [
         DaemonCommand::ListLcdImages,
@@ -578,7 +575,13 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
     let data = value.get("data").cloned().unwrap_or(value);
     match serde_json::from_value::<AppState>(data) {
         Ok(state) => {
+            // Make the first daemon-backed frame paint in the configured
+            // language. `connected` deliberately flips only after this point,
+            // so the radar never renders discovery phases using the default
+            // locale while the initial state is still in flight.
+            crate::ui::screens::settings::apply_locale(&state.gui.language);
             tx.state.send_replace(state);
+            tx.connected.send_replace(true);
             repaint();
         }
         Err(e) => log::warn!("state parse failed: {e}"),
@@ -620,6 +623,22 @@ mod tests {
         let got = rx.borrow().clone().expect("progress routed");
         assert_eq!(got.device_id, "lcd");
         assert_eq!(got.percent, Some(42));
+    }
+
+    #[test]
+    fn connection_becomes_ready_only_after_initial_state() {
+        let (tx, _upload_r) = test_tx();
+        let connected = tx.connected.subscribe();
+        assert!(!*connected.borrow());
+
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "type": "state",
+            "data": AppState::default(),
+        }))
+        .unwrap();
+        assert!(!handle_json(&payload, &tx, &|| {}));
+
+        assert!(*connected.borrow());
     }
 
     #[test]

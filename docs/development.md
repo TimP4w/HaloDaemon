@@ -184,7 +184,7 @@ Configuration lives in `~/.config/halod/config.yaml` (Linux) or `%APPDATA%\halod
 
 Implement the `Device` trait. Declare capabilities in `fn capabilities()` — the list of `Capability` variants the device supports (e.g. `Capability::Rgb`, `Capability::Fan`, `Capability::Battery`). Each capability variant has a matching accessor (`as_rgb()`, `as_fan()`, etc.) that returns a trait object.
 
-See any existing device (e.g. `logitech/devices/g560.rs`) for a complete example.
+See an official plugin package (for example [`logitech_g560`](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/logitech_g560)) for a complete device-protocol example.
 
 ### 2. Add a protocol module (if new)
 
@@ -220,7 +220,7 @@ sudo udevadm verify udev/60-halod.rules
 
 ### 5. Add a docs page
 
-Add a page under `docs/protocols/` (if a new protocol) and/or reference the device in the supported-devices table in `README.md`.
+Add `docs/protocol.md` inside the plugin package (with local split pages for a large protocol) and reference the device in the official plugin repository's supported-devices table.
 
 ---
 
@@ -228,29 +228,19 @@ Add a page under `docs/protocols/` (if a new protocol) and/or reference the devi
 
 1. Create `src/daemon/src/drivers/vendors/<vendor>/protocols/<name>.rs`.
 2. Implement frame builders (requests) and response parsers as plain functions or a small struct. Keep protocol logic separate from device state.
-3. Wire to the transport: take a `HidTransport`, `SmbusTransport`, or `UsbControlTransport` reference in the device struct and call it from the `Device` trait implementation.
-4. Add a page to `docs/protocols/` covering the frame format, key commands, credits/references, and known limitations. Use the uniform template the existing pages follow: **Overview**, **1. Packet structure**, **2. Functions / commands**, **3. Parameters per function**, **4. Ceremony / sequencing**, **Limitations**. The doc is the source of truth — every concrete value must trace to a `path:line` in the implementation.
-5. Register the protocol with the drift guard: add a unit (impl file(s) + doc(s)) to `.claude/hooks/protocol-units.json`, then `.claude/hooks/protocol-doc-guard.sh --bless <unit>`.
+3. Wire to the transport: take a HID, SMBus, or scoped endpoint-oriented USB transport reference in the device struct and call it from the `Device` trait implementation.
+4. Add `docs/protocol.md` to the owning package in the [official plugin repository](https://github.com/TimP4w/HaloDaemon-plugins), covering the frame format, key commands, credits/references, and known limitations. Large packages may use that page as a local index to split pages in the same `docs/` directory. The doc is the source of truth — every concrete value must trace to the implementation.
+5. Keep protocol documentation package-local; do not add a centralized protocol page to the daemon repository.
 
 ### Adding a new transport
 
 Every transport gets write-rate throughput, a limiter, and enforcement for free by wrapping its raw I/O handle in `Metered<T>` ([daemon/src/drivers/rate_limit.rs](../src/daemon/src/drivers/rate_limit.rs)) instead of holding the handle directly:
 
 1. Give the transport struct an `io: Metered<YourRawIo>` field; its `open(...)` takes a trailing `limit: Option<WriteRateLimit>` and builds it with `Metered::new(raw_io, limit)`.
-2. Route every write through `io.write_access(len).await` (async transports) or `io.write_access_blocking(len)` (sync transports, e.g. USB bulk/control — only from a thread that's allowed to block) to get the gated `&YourRawIo` back; route every read through the unmetered `io.read_access()`. For batch transports whose byte count is only known after the operation runs (e.g. SMBus), use `io.write_tallied(...)` instead.
+2. Route every write through `io.write_access(len).await` (async transports) or `io.write_access_blocking(len)` (sync USB transfers—only from a thread allowed to block) to get the gated `&YourRawIo` back; route every read through the unmetered `io.read_access()`. For batch transports whose byte count is only known after the operation runs (e.g. SMBus), use `io.write_tallied(...)` instead.
 3. Implement the transport trait's `rate_status()`/`set_write_rate_limit()` by delegating to `io.status()`/`io.set_limit()` — these are required methods, not optional ones, so a transport that skips this step won't compile.
 
 Because the raw handle only exists behind the gate, there's no separate step to "remember" metering — a write path that bypasses it simply has no handle to write through.
-
-### Protocol-doc drift guard
-
-`docs/protocols/*.md` is enforced as the source of truth by `.claude/hooks/protocol-doc-guard.sh` (wired as a `PostToolUse` hook in `.claude/settings.json`). When a protocol implementation file is edited and its content no longer matches the last reviewed (blessed) state, the hook **blocks** and directs you to run the `verify-protocol` skill, reconcile the doc, then `--bless` the unit to record the review. Useful commands:
-
-- `protocol-doc-guard.sh --list` — show the impl↔doc registry.
-- `protocol-doc-guard.sh --check` — non-zero exit on any drift (CI / pre-commit friendly).
-- `protocol-doc-guard.sh --bless <unit>` — record the current impl+doc as reviewed.
-
----
 
 ## Device registration flow
 

@@ -35,7 +35,7 @@ async fn disable_one(app: &Arc<AppState>, id: &str) -> Option<String> {
 /// Connect and register `id`'s integration root (and its children), if it's
 /// currently enabled and permission-satisfied. No-op otherwise.
 async fn enable_one(app: &Arc<AppState>, id: &str) {
-    integration_scan::discover_one(app, id).await;
+    let _ = integration_scan::discover_one(app, id).await;
 }
 
 /// Enable or disable a single integration, independent of the generic plugin
@@ -44,9 +44,9 @@ async fn enable_one(app: &Arc<AppState>, id: &str) {
 pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
     {
         let mut cfg = app.config.write().await;
-        cfg.plugins.integrations_disabled.retain(|x| x != &id);
-        if !enabled {
-            cfg.plugins.integrations_disabled.push(id.clone());
+        cfg.plugins.integrations_enabled.retain(|x| x != &id);
+        if enabled {
+            cfg.plugins.integrations_enabled.push(id.clone());
         }
         app.registry.replace_policy(&cfg.plugins);
     }
@@ -106,7 +106,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: inttest\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: integration\npermissions:\n  - network\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\nconfig:\n  fields:\n    - key: host\n      label: Host\n      default: 127.0.0.1\n    - key: port\n      label: Port\n      default: '12345'\n    - key: token\n      label: Token\n      secure: true\n",
+            "id: inttest\ntype: integration\npermissions: [network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\nconfig:\n  fields:\n    - key: host\n      label: Host\n      default: 127.0.0.1\n    - key: port\n      label: Port\n      default: '12345'\n    - key: token\n      label: Token\n      secure: true\n",
         )
         .unwrap();
         std::fs::write(plugin_dir.join("main.lua"), INTEGRATION_CONFIG_TEST_PLUGIN).unwrap();
@@ -132,12 +132,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(app
+            assert!(!app
                 .config
                 .read()
                 .await
                 .plugins
-                .integrations_disabled
+                .integrations_enabled
                 .contains(&"openrgb".to_string()));
             let remaining = app.devices.read().await;
             assert_eq!(

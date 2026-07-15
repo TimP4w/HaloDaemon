@@ -69,7 +69,7 @@ pub struct DeviceDebugInfo {
     pub model: String,
     pub connected: bool,
     /// Transport layer the device is registered through: "hid", "smbus",
-    /// "smbus_gpu", "usb_control", "hwmon", "child". "unknown" means
+    /// "smbus_gpu", "usb", "hwmon", "child". "unknown" means
     /// the driver did not override `debug_transport()`.
     pub transport: String,
     /// Free-form key/value pairs, ordered as the driver returned them.

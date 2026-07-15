@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #[cfg(test)]
 pub mod test_transport {
-    use crate::drivers::transports::Transport;
+    use crate::drivers::transports::{HidTransport, Transport};
     use crate::drivers::Metered;
     use anyhow::Result;
     use async_trait::async_trait;
@@ -57,6 +57,21 @@ pub mod test_transport {
                 .ok_or_else(|| anyhow::anyhow!("MockTransport: no more responses queued"))
         }
 
+        fn as_hid(&self) -> Option<&dyn HidTransport> {
+            Some(self)
+        }
+
+        fn rate_status(&self) -> WriteRateStatus {
+            self.rate.status()
+        }
+
+        fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
+            self.rate.set_limit(limit);
+        }
+    }
+
+    #[async_trait]
+    impl HidTransport for MockTransport {
         async fn feature_exchange(&self, data: &[u8], _response_size: usize) -> Result<Vec<u8>> {
             self.rate.write_access(data.len()).await?;
             self.written.lock().await.push(data.to_vec());
@@ -67,12 +82,16 @@ pub mod test_transport {
                 .ok_or_else(|| anyhow::anyhow!("MockTransport: no more responses queued"))
         }
 
-        fn rate_status(&self) -> WriteRateStatus {
-            self.rate.status()
+        async fn defer_event(&self, _data: &[u8]) -> Result<()> {
+            Ok(())
         }
 
-        fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
-            self.rate.set_limit(limit);
+        async fn write_companion(&self, _data: &[u8]) -> Result<()> {
+            anyhow::bail!("MockTransport: no companion collection")
+        }
+
+        async fn read_companion(&self, _size: usize) -> Result<Vec<u8>> {
+            anyhow::bail!("MockTransport: no companion collection")
         }
     }
 

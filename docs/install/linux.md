@@ -108,6 +108,17 @@ sudo usermod -aG halod $USER   # motherboard PWM fan control via hwmon
 sudo usermod -aG i2c $USER     # SMBus/DRAM + GPU RGB (ASUS/ENE, Corsair DRAM)
 ```
 For motherboard PWM fan control the udev rules scope the hwmon `pwm` files to the `halod` group (mode 0664) on device add.
+After adding the user to `halod`, log out and back in, then repair permissions
+for already-present devices with:
+
+```bash
+sudo udevadm control --reload-rules
+sudo udevadm trigger --action=change --subsystem-match=hwmon
+```
+
+Install and enable the official **Linux Hardware Monitoring** integration, then
+approve its hwmon permission. Sensors and fan headers are no longer built into
+the daemon and remain absent until the integration is enabled.
 
 ### Motherboard fans & sensors (NCT677x)
 

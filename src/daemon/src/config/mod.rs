@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::Result;
-use halod_shared::types::{AppRule, Permission, VisibilityState, DEFAULT_PROFILE_NAME};
+use halod_shared::types::{AppRule, PluginAuthority, VisibilityState, DEFAULT_PROFILE_NAME};
 // Types shared with wire protocol; re-exported for backward-compat.
 pub use halod_shared::types::{
     CanvasState, CoolingConfig, GuiConfig, LcdConfig, PlacedZone, RgbConfig,
@@ -270,7 +270,8 @@ pub fn lcd_images_dir() -> PathBuf {
     config_dir().join(halod_shared::types::LCD_IMAGES_SUBDIR)
 }
 
-/// Directory holding device plugin scripts (`*.lua`), read at startup.
+/// Directory holding standalone plugin packages (`plugin.yaml` plus entry
+/// source), read at startup.
 pub fn plugins_dir() -> PathBuf {
     config_dir().join("plugins")
 }
@@ -329,30 +330,30 @@ struct AppRulesFile {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginPolicy {
-    /// Plugin ids the user has disabled. Everything present-and-not-listed is
-    /// enabled.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub disabled: Vec<String>,
-    /// Permissions the user has granted per plugin id. A plugin's declared
-    /// permissions must be a subset of its entry here before it activates.
+    /// Authority snapshots accepted through the enable modal.  They are kept
+    /// separately from the runtime permission projection so repository updates
+    /// can decide whether a changed manifest expands authority.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub granted: HashMap<String, Vec<Permission>>,
+    pub accepted_authorities: HashMap<String, PluginAuthority>,
+    /// Plugin ids explicitly enabled through the authority confirmation flow.
+    /// An absent id is inert, which makes a fresh consent decision required.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled: Vec<String>,
     /// Non-secure user-editable config values per plugin id (key -> value).
     /// Fields declared `secure = true` never appear here — see the encrypted
     /// secret store instead.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub config: HashMap<String, HashMap<String, String>>,
-    /// Integration plugin ids the user has disabled *as an integration* —
-    /// independent of `disabled` (which governs whether the Lua may run at
-    /// all). Everything present-and-not-listed is active.
+    /// Integration ids explicitly enabled independently of package activation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub integrations_disabled: Vec<String>,
-    /// Content hash (hex SHA-256) of the exact script the user consented to,
-    /// per plugin id. A plugin whose current script hashes differently is
-    /// treated as not-yet-consented and stays inert until re-acknowledged.
+    pub integrations_enabled: Vec<String>,
+    /// Content hash (hex SHA-256) of the installed plugin package, keyed by
+    /// plugin id. This identifies updates and modified checkouts; it is never
+    /// used as a consent gate.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub acknowledged: HashMap<String, String>,
+    pub installed_hashes: HashMap<String, String>,
     /// Registered git-repo plugin sources. See `PluginRepoRecord`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<PluginRepoRecord>,
@@ -365,10 +366,21 @@ pub struct PluginRepoRecord {
     /// Directory name under `plugin_repos_dir()`, derived from the URL at `add_repo` time
     /// (fixed to `constants::OFFICIAL_PLUGIN_REPO_SLUG` for the seeded official repo).
     pub slug: String,
+    /// Stable identity declared by `repository.yaml`.  Pinning this prevents a
+    /// URL or branch from silently becoming a different repository.
+    #[serde(default)]
+    pub repository_id: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
     /// Commit SHA the checked-out working tree is pinned to.
     pub locked_sha: String,
+    /// Immutable revision directory currently selected for execution. `None`
+    /// means the source is registered but has not installed a revision yet.
+    #[serde(default)]
+    pub active_revision: Option<String>,
+    /// Last verified official revision retained for rollback diagnostics.
+    #[serde(default)]
+    pub previous_verified_sha: Option<String>,
     /// When this repo's clone directory was last cloned/fetched/checked out
     /// (RFC 3339), for the GUI's repo detail panel. `None` until the first sync.
     #[serde(default)]
@@ -534,28 +546,36 @@ mod tests {
         cfg.cooling.fan_failsafe_duty = 60;
         cfg.rgb.canvas_fps = 45;
         cfg.lcd.enabled = false;
-        cfg.plugins.disabled.push("nzxt_kraken".into());
-        cfg.plugins
-            .granted
-            .insert("wled_udp".into(), vec![Permission::Network]);
+        cfg.plugins.enabled.push("wled_udp".into());
+        cfg.plugins.accepted_authorities.insert(
+            "wled_udp".into(),
+            PluginAuthority {
+                permissions: vec![halod_shared::types::Permission::Network],
+                transport_scopes: vec![],
+            },
+        );
         cfg.plugins.config.insert(
             "openrgb".into(),
             HashMap::from([("host".to_string(), "127.0.0.1".to_string())]),
         );
         cfg.plugins
-            .acknowledged
+            .installed_hashes
             .insert("wled_udp".into(), "abc123".into());
 
         save(&cfg).unwrap();
         let reloaded = load().unwrap();
 
-        assert_eq!(reloaded.plugins.disabled, vec!["nzxt_kraken".to_string()]);
+        assert_eq!(reloaded.plugins.enabled, vec!["wled_udp".to_string()]);
         assert_eq!(
-            reloaded.plugins.granted.get("wled_udp"),
-            Some(&vec![Permission::Network])
+            reloaded
+                .plugins
+                .accepted_authorities
+                .get("wled_udp")
+                .map(|authority| &authority.permissions),
+            Some(&vec![halod_shared::types::Permission::Network])
         );
         assert_eq!(
-            reloaded.plugins.acknowledged.get("wled_udp"),
+            reloaded.plugins.installed_hashes.get("wled_udp"),
             Some(&"abc123".to_string())
         );
         assert_eq!(
@@ -668,9 +688,11 @@ mod tests {
     }
 
     #[test]
-    fn plugin_policy_accepts_a_sparse_current_file() {
-        let f: PluginPolicy = serde_yaml::from_str("disabled: [foo]\n").unwrap();
-        assert!(f.repos.is_empty());
+    fn plugin_policy_rejects_retired_fields() {
+        let current: PluginPolicy = serde_yaml::from_str("enabled: [foo]\n").unwrap();
+        assert_eq!(current.enabled, ["foo"]);
+        assert!(serde_yaml::from_str::<PluginPolicy>("disabled: [foo]\n").is_err());
+        assert!(serde_yaml::from_str::<PluginPolicy>("acknowledged: {}\n").is_err());
     }
 
     #[test]
@@ -685,8 +707,11 @@ mod tests {
         cfg.plugins.repos.push(PluginRepoRecord {
             url: "https://example.com/foo.git".into(),
             slug: "foo".into(),
+            repository_id: None,
             branch: Some("main".into()),
             locked_sha: "deadbeef".into(),
+            active_revision: Some("deadbeef".into()),
+            previous_verified_sha: None,
             last_sync: None,
         });
         save(&cfg).unwrap();

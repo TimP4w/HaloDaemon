@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use mlua::{HookTriggers, Lua, Table, VmState};
+use mlua::{HookTriggers, Lua, LuaOptions, StdLib, Table, VmState};
 
 use halod_shared::types::Permission;
 
@@ -26,6 +26,7 @@ const REMOVED: &[&str] = &[
     "load",
     "debug",
     "collectgarbage",
+    "print",
 ];
 
 /// Strip every escape hatch, then re-inject `halod`/`log`, then selectively
@@ -48,6 +49,7 @@ pub fn apply(
     })?;
     globals.set("log", logger)?;
     bytebuf::register(lua)?;
+    inject_platform(lua)?;
     register_sleep(lua)?;
     super::image_api::register(lua)?;
     inject_config(lua, config)?;
@@ -58,26 +60,63 @@ pub fn apply(
     Ok(())
 }
 
-/// Remove every filesystem/process/native escape hatch from `lua`'s globals.
-/// Shared by runtime VMs and legacy inline-Lua test fixtures. Real package
-/// manifests are pure YAML and never create a Lua VM.
+/// Install the package-local module loader. Module functions are compiled from
+/// the sources indexed while parsing this package; the VM never receives a
+/// filesystem path and cannot traverse into a sibling plugin. Results follow
+/// Lua `require` semantics and are cached once per VM.
+pub(super) fn install_package_modules(
+    lua: &Lua,
+    sources: &std::collections::BTreeMap<String, String>,
+) -> mlua::Result<()> {
+    let loaders = lua.create_table()?;
+    for (name, source) in sources {
+        let function = lua
+            .load(source)
+            .set_name(format!("@{name}"))
+            .into_function()?;
+        loaders.set(name.as_str(), function)?;
+    }
+    let cache = lua.create_table()?;
+    let loading = lua.create_table()?;
+    let require = lua.create_function(move |_, name: String| {
+        let loader = match loaders.get::<mlua::Value>(name.as_str())? {
+            mlua::Value::Function(loader) => loader,
+            _ => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "package-local Lua module '{name}' is not available"
+                )))
+            }
+        };
+        let cached = cache.get::<mlua::Value>(name.as_str())?;
+        if !matches!(cached, mlua::Value::Nil) {
+            return Ok(cached);
+        }
+        if loading.get::<bool>(name.as_str()).unwrap_or(false) {
+            return Err(mlua::Error::RuntimeError(format!(
+                "circular package-local Lua module dependency at '{name}'"
+            )));
+        }
+        loading.set(name.as_str(), true)?;
+        let result = loader.call::<mlua::Value>(());
+        loading.set(name.as_str(), false)?;
+        let mut value = result?;
+        if matches!(value, mlua::Value::Nil) {
+            value = mlua::Value::Boolean(true);
+        }
+        cache.set(name.as_str(), value.clone())?;
+        Ok(value)
+    })?;
+    let halod: Table = lua.globals().get("halod")?;
+    halod.set("require", require)
+}
+
+/// Remove every filesystem/process/native escape hatch from a runtime VM.
 pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
     let globals = lua.globals();
     for name in REMOVED {
         globals.set(*name, mlua::Value::Nil)?;
     }
     Ok(())
-}
-
-/// What surface a bootstrapped VM exposes. The device/effect workers get the
-/// full `halod` runtime API; `StripOnly` exists only for legacy test fixtures.
-pub(super) enum InjectSurface<'a> {
-    FullRuntime {
-        granted: &'a [Permission],
-        config: &'a HashMap<String, String>,
-    },
-    #[cfg(test)]
-    StripOnly,
 }
 
 /// Build a fresh sandboxed plugin VM: strip escape hatches (and, for a full
@@ -89,18 +128,16 @@ pub(super) enum InjectSurface<'a> {
 /// earlier drift left the effect VM with no memory cap; another the manifest
 /// parser hand-rolling the trio outside this chokepoint).
 pub(super) fn bootstrap_vm(
-    surface: InjectSurface<'_>,
+    granted: &[Permission],
+    config: &HashMap<String, String>,
     memory_limit: usize,
     instruction_budget: u64,
 ) -> mlua::Result<(Lua, Rc<Cell<u64>>)> {
-    let lua = Lua::new();
+    let libs = StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::COROUTINE | StdLib::UTF8;
+    let lua = Lua::new_with(libs, LuaOptions::default())?;
     lua.set_app_data(CallDeadline(Rc::new(Cell::new(None))));
-    match surface {
-        InjectSurface::FullRuntime { granted, config } => apply(&lua, granted, config)?,
-        #[cfg(test)]
-        InjectSurface::StripOnly => strip_escape_hatches(&lua)?,
-    }
-    let _ = lua.set_memory_limit(memory_limit);
+    apply(&lua, granted, config)?;
+    lua.set_memory_limit(memory_limit)?;
     let budget = install_instruction_budget_hook(&lua, instruction_budget);
     Ok((lua, budget))
 }
@@ -178,7 +215,23 @@ fn register_sleep(lua: &Lua) -> mlua::Result<()> {
         }
         Ok(())
     })?;
-    halod.set("sleep_ms", sleep)
+    halod.set("sleep_ms", sleep)?;
+    // A duration-only clock is safe to expose to every package: unlike wall
+    // time it conveys no host date/time information and is useful for polling
+    // coalescing without requesting the `os` permission.
+    let origin = std::sync::OnceLock::<std::time::Instant>::new();
+    let monotonic_ms = lua.create_function(move |_, ()| {
+        Ok(origin
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64)
+    })?;
+    halod.set("monotonic_ms", monotonic_ms)
+}
+
+fn inject_platform(lua: &Lua) -> mlua::Result<()> {
+    let halod: Table = lua.globals().get("halod")?;
+    halod.set("platform", std::env::consts::OS)
 }
 
 /// Populate `halod.config` with this plugin's resolved values. Read-only in
@@ -229,6 +282,28 @@ mod tests {
         // Encoding primitives survive.
         let out: String = lua.load(r#"return string.char(65, 66)"#).eval().unwrap();
         assert_eq!(out, "AB");
+    }
+
+    #[test]
+    fn bootstrap_never_loads_dangerous_stdlibs_internally() {
+        let (lua, _) = bootstrap_vm(&[], &HashMap::new(), 1024 * 1024, 1_000_000).unwrap();
+        let loaded: Table = lua.named_registry_value("_LOADED").unwrap();
+
+        for name in ["os", "io", "package", "debug"] {
+            let value: mlua::Value = loaded.get(name).unwrap();
+            assert!(value.is_nil(), "stdlib '{name}' was loaded internally");
+        }
+        for name in ["string", "table", "math", "coroutine", "utf8"] {
+            let value: mlua::Value = loaded.get(name).unwrap();
+            assert!(!value.is_nil(), "stdlib '{name}' was not loaded");
+        }
+    }
+
+    #[test]
+    fn print_is_not_available_to_plugins() {
+        let (lua, _) = bootstrap_vm(&[], &HashMap::new(), 1024 * 1024, 1_000_000).unwrap();
+        let print: mlua::Value = lua.globals().get("print").unwrap();
+        assert!(print.is_nil());
     }
 
     #[test]
@@ -298,6 +373,52 @@ mod tests {
         lua.load("assert(type(halod.config) == 'table')")
             .exec()
             .unwrap();
+    }
+
+    #[test]
+    fn package_modules_are_cached_and_cannot_escape_the_index() {
+        let lua = Lua::new();
+        apply(&lua, &[], &HashMap::new()).unwrap();
+        let sources = std::collections::BTreeMap::from([(
+            "lib.counter".to_owned(),
+            "local n = 0; return function() n = n + 1; return n end".to_owned(),
+        )]);
+        install_package_modules(&lua, &sources).unwrap();
+        let values: (u32, u32) = lua
+            .load(
+                "local a = halod.require('lib.counter'); \
+                 local b = halod.require('lib.counter'); return a(), b()",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(values, (1, 2), "the same module instance is cached");
+
+        for name in ["../other/main", "other.main", "C:\\other\\main"] {
+            let err = lua
+                .load(format!("return halod.require({name:?})"))
+                .eval::<mlua::Value>()
+                .unwrap_err();
+            assert!(err.to_string().contains("not available"), "{err}");
+        }
+    }
+
+    #[test]
+    fn monotonic_clock_is_available_without_os_permission() {
+        let lua = Lua::new();
+        apply(&lua, &[], &HashMap::new()).unwrap();
+        let first: u64 = lua.load("return halod.monotonic_ms()").eval().unwrap();
+        let second: u64 = lua.load("return halod.monotonic_ms()").eval().unwrap();
+        assert!(second >= first);
+        let os: mlua::Value = lua.load("return os").eval().unwrap();
+        assert!(os.is_nil());
+    }
+
+    #[test]
+    fn platform_is_available_without_os_permission() {
+        let lua = Lua::new();
+        apply(&lua, &[], &HashMap::new()).unwrap();
+        let platform: String = lua.load("return halod.platform").eval().unwrap();
+        assert_eq!(platform, std::env::consts::OS);
     }
 
     #[test]

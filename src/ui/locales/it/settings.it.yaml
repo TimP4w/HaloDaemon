@@ -44,8 +44,6 @@ settings:
   dep_required: Obbligatorio
   dep_optional: Facoltativo
   log_level_sub: Livello di dettaglio dei log del daemon
-  live_log_title: Log in tempo reale
-  log_entries: "%{n} voci"
   config_folder_title: Cartella di configurazione
   unknown: Sconosciuto
   open_external_button: "Apri ↗"

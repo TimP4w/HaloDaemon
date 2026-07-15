@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use egui::{Sense, Stroke, Vec2};
 use halod_shared::types::{AppState, PluginInfo, PluginIssue, PluginIssueKind, PluginKind};
 
+use crate::domain::models::plugin_issues::plugin_issue_detail;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::screens::plugin_config::{config_section, seed_config_edit_if_needed};
@@ -293,12 +294,12 @@ impl IntegrationsUi {
                 },
             );
 
-            if let Some(issue) = &p.integration_issue {
+            if let Some(issue) = &p.health.issue {
                 ui.add_space(10.0);
                 if integration_issue_bar(ui, issue) {
                     self.issue_modal = Some((
                         t!("integrations.issue_modal_title", integration = &p.name).to_string(),
-                        issue.detail.clone(),
+                        plugin_issue_detail(issue),
                     ));
                 }
             }
@@ -338,6 +339,7 @@ fn integration_issue_bar(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
     let mut clicked = false;
     let label = match issue.kind {
         PluginIssueKind::ConnectFailed => t!("integrations.issue_connect_failed"),
+        PluginIssueKind::InitFailed => t!("plugins.issue_init_failed"),
         PluginIssueKind::RuntimeError => t!("integrations.issue_runtime_error"),
         PluginIssueKind::LoadWarning => t!("plugins.issue_load_warning"),
         PluginIssueKind::LoadFailed => t!("plugins.issue_load_failed"),
@@ -440,6 +442,8 @@ mod tests {
             path: String::new(),
             plugin_type: PluginKind::Integration,
             capabilities: vec![],
+            platforms: vec![],
+            platform_supported: true,
             effect_names: vec![],
             enabled,
             author: String::new(),
@@ -451,16 +455,16 @@ mod tests {
             logo: None,
             effect_thumbnails: vec![],
             source: Default::default(),
+            provenance: Default::default(),
             declared_permissions: vec![],
-            granted_permissions: vec![],
+            authority: Default::default(),
+            accepted_authority: None,
             config_fields: vec![],
             config_values: Default::default(),
             secret_set: Default::default(),
             integration_enabled,
             consented: true,
-            content_changed: false,
-            issue: None,
-            integration_issue: None,
+            health: Default::default(),
         }
     }
 

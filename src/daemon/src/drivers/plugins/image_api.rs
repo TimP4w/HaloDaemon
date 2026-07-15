@@ -36,9 +36,12 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
     halod.set(
         "rgba_to_bgr888",
         lua.create_function(|_, rgba: Value| {
-            Ok(ByteBuf::from_bytes(image::rgba_to_bgr888(&bytes_of(
-                &rgba,
-            )?)))
+            let rgba = bytes_of(&rgba)?;
+            let output_len = (rgba.len() / 4)
+                .checked_mul(3)
+                .ok_or_else(|| mlua::Error::RuntimeError("BGR888 output length overflow".into()))?;
+            check_alloc(output_len)?;
+            Ok(ByteBuf::from_bytes(image::rgba_to_bgr888(&rgba)))
         })?,
     )?;
 

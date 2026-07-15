@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn every_canvas_effect_param_and_enum_option_is_translated() {
         // Mirrors the ids emitted by
-        // `daemon::engines::rgb_engine::canvas::effects::all_descriptors()`
+        // `daemon::engines::rgb_engine::canvas::effects::builtin_descriptors()`
         // (Range/Boolean params only — Color params render no label, and
         // `monitor`'s enum options are OS-provided device names, not copy).
         for id in [
