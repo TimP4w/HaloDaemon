@@ -31,6 +31,96 @@ pub const SWATCHES: [u32; 12] = [
     0x34d399, 0xfbbf24, 0xffffff,
 ];
 
+pub const MINI_SWATCHES: [u32; 7] = [
+    0xef5f63, 0xfbbf24, 0x34d399, 0x38bdf8, 0x8b6fd8, 0xf472b6, 0xffffff,
+];
+
+pub fn color_swatch_row(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor> {
+    const D: f32 = 22.0;
+    let mut out: Option<RgbColor> = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(9.0, 9.0);
+        let mut matched_preset = false;
+        for &hexv in &MINI_SWATCHES {
+            let sc = theme::hex(hexv);
+            let selected = color32_to_rgb(sc) == current;
+            matched_preset |= selected;
+            if mini_swatch(ui, D, sc, selected) {
+                out = Some(color32_to_rgb(sc));
+            }
+        }
+
+        let popup_id = ui.unique_id().with("mini_color");
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(D), Sense::click());
+        let c32 = rgb_to_color32(current);
+        let center = rect.center();
+        let p = ui.painter();
+        p.circle_filled(center, D / 2.0, c32);
+        let (ring_w, ring_c) = if matched_preset {
+            (1.5, theme::BORDER)
+        } else {
+            (2.0, theme::CYAN)
+        };
+        p.circle_stroke(center, D / 2.0, Stroke::new(ring_w, ring_c));
+        p.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            "+",
+            theme::mono(11.0),
+            mini_glyph_color(c32),
+        );
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let mut c_pick = c32;
+        egui::Popup::menu(&resp)
+            .id(popup_id)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                const W: f32 = 216.0;
+                ui.set_width(W);
+                ui.spacing_mut().slider_width = W - 8.0;
+                if egui::color_picker::color_picker_color32(
+                    ui,
+                    &mut c_pick,
+                    egui::color_picker::Alpha::Opaque,
+                ) {
+                    out = Some(color32_to_rgb(c_pick));
+                }
+            });
+    });
+    out
+}
+
+fn mini_swatch(ui: &mut egui::Ui, d: f32, color: Color32, selected: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(d), Sense::click());
+    let center = rect.center();
+    ui.painter().circle_filled(center, d / 2.0, color);
+    if selected {
+        ui.painter()
+            .circle_stroke(center, d / 2.0 + 1.5, Stroke::new(2.0, theme::CYAN));
+    } else if resp.hovered() {
+        ui.painter().circle_stroke(
+            center,
+            d / 2.0 + 1.5,
+            Stroke::new(2.0, theme::a(theme::CYAN, 0.4)),
+        );
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
+}
+
+fn mini_glyph_color(c: Color32) -> Color32 {
+    let luma = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
+    if luma > 140.0 {
+        theme::hex(0x0a0d13)
+    } else {
+        Color32::WHITE
+    }
+}
+
 fn preset_cols(avail: f32) -> usize {
     (((avail - 76.0 + 7.0) / 27.0).floor() as usize).clamp(1, 6)
 }
@@ -262,6 +352,13 @@ mod tests {
         // Narrow sidebar drops below 6 columns; wide panel keeps the full 6.
         assert!(preset_cols(208.0) < 6);
         assert_eq!(preset_cols(369.0), 6);
+    }
+
+    #[test]
+    fn mini_glyph_color_contrasts_with_fill() {
+        assert_eq!(mini_glyph_color(Color32::WHITE), theme::hex(0x0a0d13));
+        assert_eq!(mini_glyph_color(Color32::BLACK), Color32::WHITE);
+        assert_eq!(mini_glyph_color(theme::hex(0x8b6fd8)), Color32::WHITE);
     }
 
     #[test]

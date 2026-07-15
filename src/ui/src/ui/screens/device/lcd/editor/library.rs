@@ -71,23 +71,12 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
         crate::domain::tour::AnchorId::LcdEditorPalette,
         ui.max_rect(),
     );
-    egui::Sides::new().show(
-        ui,
-        |ui| {
-            ui.label(
-                egui::RichText::new(t!("lcd.widget_library"))
-                    .font(theme::semibold(13.0))
-                    .color(theme::TEXT),
-            );
-        },
-        |ui| {
-            ui.label(
-                egui::RichText::new(t!("lcd.drag_onto_screen"))
-                    .font(theme::body(9.5))
-                    .color(theme::TEXT_FAINT),
-            );
-        },
-    );
+    if library_header(ui, st.lcd.editor.library_collapsed).clicked() {
+        st.lcd.editor.library_collapsed = !st.lcd.editor.library_collapsed;
+    }
+    if st.lcd.editor.library_collapsed {
+        return;
+    }
     ui.add_space(14.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(9.0, 9.0);
@@ -228,6 +217,48 @@ pub(super) fn delete_template_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut De
     }
 }
 
+fn library_header(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::click());
+    let cy = rect.center().y;
+    let p = ui.painter();
+    p.text(
+        egui::pos2(rect.left(), cy),
+        egui::Align2::LEFT_CENTER,
+        t!("lcd.add_a_widget"),
+        theme::semibold(13.0),
+        theme::TEXT,
+    );
+    let box_rect = Rect::from_min_size(
+        egui::pos2(rect.right() - 22.0, cy - 11.0),
+        Vec2::splat(22.0),
+    );
+    p.rect_stroke(
+        box_rect,
+        6.0,
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Middle,
+    );
+    p.text(
+        box_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        if collapsed { "▸" } else { "▾" },
+        theme::mono(12.0),
+        theme::TEXT_MUT,
+    );
+    p.text(
+        egui::pos2(box_rect.left() - 10.0, cy),
+        egui::Align2::RIGHT_CENTER,
+        t!("lcd.drag_onto_screen"),
+        theme::body(10.0),
+        theme::TEXT_FAINT,
+    );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
 /// A library tile: an icon badge over a label, matching the design's
 /// `lcd.palette` tiles. Press-and-drag onto the stage to spawn a widget there.
 fn library_tile(ui: &mut egui::Ui, badge: &str, label: &str) -> egui::Response {
@@ -338,6 +369,11 @@ fn next_widget_id(widgets: &[WidgetDef]) -> String {
 mod tests {
     use super::*;
     use halod_shared::lcd_custom::{param_bool, param_f64, param_variant, CustomTemplateDef};
+
+    #[test]
+    fn library_starts_expanded() {
+        assert!(!super::super::EditorState::default().library_collapsed);
+    }
 
     #[test]
     fn resolve_delete_confirm_only_deletes_on_confirm() {

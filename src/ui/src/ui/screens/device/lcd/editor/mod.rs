@@ -65,6 +65,7 @@ pub struct EditorState {
     /// Active resize gesture's captured start state, so the outline/sprite can
     /// preview the new size instantly rather than lagging the daemon re-render.
     pub resize_preview: Option<ResizePreview>,
+    pub library_collapsed: bool,
 }
 
 impl EditorState {

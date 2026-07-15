@@ -208,7 +208,8 @@ pub(super) fn selected_widget_card(
                 .font(theme::body(11.0))
                 .color(theme::TEXT_MUT),
         );
-        if let Some(c) = widgets::color_picker(ui, cur) {
+        ui.add_space(6.0);
+        if let Some(c) = widgets::color_swatch_row(ui, cur) {
             st.lcd.editor.def.widgets[idx].color = Some(c);
             changed = true;
         }
@@ -333,12 +334,12 @@ pub(super) fn screen_style_card(
             .font(theme::body(11.0))
             .color(theme::TEXT_MUT),
     );
-    if let Some(c) = widgets::color_picker(ui, st.lcd.editor.def.style.accent) {
+    ui.add_space(6.0);
+    if let Some(c) = widgets::color_swatch_row(ui, st.lcd.editor.def.style.accent) {
         st.lcd.editor.def.style.accent = c;
         changed = true;
     }
-    ui.add_space(8.0);
-    ui.add_space(8.0);
+    ui.add_space(12.0);
 
     ui.label(
         egui::RichText::new(t!("lcd.background"))

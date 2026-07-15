@@ -43,6 +43,7 @@ lcd:
   preset_gauge: Indicatore
   start_from_preset: PARTI DA UN PRESET
   widget_library: Libreria widget
+  add_a_widget: Aggiungi un widget
   drag_onto_screen: trascina sullo schermo
   my_templates: I MIEI TEMPLATE
   template_name_hint: Nome del template

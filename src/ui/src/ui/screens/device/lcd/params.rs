@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 
-use egui::Color32;
 use halod_shared::lcd_custom::WidgetType;
 use halod_shared::types::{
     DeviceCapability, EffectParamDescriptor, EffectParamValue, ParamKind, RgbColor,
@@ -59,27 +58,21 @@ pub(super) fn render_param(
 
         ParamKind::Color => {
             let current = match values.get(&param.id) {
-                Some(EffectParamValue::Color(c)) => Color32::from_rgb(c.r, c.g, c.b),
-                _ => Color32::WHITE,
+                Some(EffectParamValue::Color(c)) => *c,
+                _ => RgbColor {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                },
             };
-            let mut c = current;
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(param_label(widget_type, param))
-                        .font(theme::body(11.0))
-                        .color(theme::TEXT_MUT),
-                );
-                ui.color_edit_button_srgba(&mut c);
-            });
-            if c != current {
-                values.insert(
-                    param.id.clone(),
-                    EffectParamValue::Color(RgbColor {
-                        r: c.r(),
-                        g: c.g(),
-                        b: c.b(),
-                    }),
-                );
+            ui.label(
+                egui::RichText::new(param_label(widget_type, param))
+                    .font(theme::body(11.0))
+                    .color(theme::TEXT_MUT),
+            );
+            ui.add_space(6.0);
+            if let Some(c) = widgets::color_swatch_row(ui, current) {
+                values.insert(param.id.clone(), EffectParamValue::Color(c));
                 return true;
             }
         }
@@ -111,9 +104,19 @@ pub(super) fn render_param(
                 _ => matches!(param.default, EffectParamValue::Bool(true)),
             };
             let mut b = current;
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut b, param_label(widget_type, param));
-            });
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(param_label(widget_type, param))
+                            .font(theme::body(12.0))
+                            .color(theme::TEXT_DIM),
+                    );
+                },
+                |ui| {
+                    b = widgets::toggle(ui, current);
+                },
+            );
             if b != current {
                 values.insert(param.id.clone(), EffectParamValue::Bool(b));
                 return true;

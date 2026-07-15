@@ -43,6 +43,7 @@ lcd:
   preset_gauge: Gauge
   start_from_preset: START FROM A PRESET
   widget_library: Widget library
+  add_a_widget: Add a widget
   drag_onto_screen: drag onto screen
   my_templates: MY TEMPLATES
   template_name_hint: Template name
