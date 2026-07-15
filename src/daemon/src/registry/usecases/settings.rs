@@ -316,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn set_log_level_invalid_level_returns_error() {
         with_tmp_config(|app| async move {
-            assert!(set_log_level("nonsense".into(), app).await.is_err());
+            assert!(set_log_level("nonsense".into(), app.clone()).await.is_err());
             assert!(set_log_level("trace".into(), app).await.is_err());
         })
         .await;
