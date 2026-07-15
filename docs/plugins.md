@@ -58,9 +58,10 @@ names. The GUI submits that exact snapshot and the daemon compares it to the
 current catalog before enabling atomically.
 
 Disabling is immediate. Each later enable requires the modal again. The daemon
-stores the accepted authority only to decide whether a repository update has
-expanded scope; it does not use a content hash as consent. Integration
-activation is a separate explicit switch.
+also checks the complete accepted authority before every runtime activation, so
+a package whose permissions or transport scopes expand remains inert until the
+new authority is accepted. A content hash is package integrity metadata, not
+consent. Integration activation is a separate explicit switch.
 
 ## Repositories
 
@@ -70,13 +71,22 @@ active revision, so a running package is never changed in place. Repository
 pages show provenance, validation status, and package diffs; update and repair
 are repository-wide actions.
 
-Official packages have a verified detached repository-index signature.
-Third-party repositories are unsigned but usable. Development repositories are
-loaded directly via `--dev-plugin-repo` in daemon builds compiled with the
+Official packages have a verified detached repository-index signature. Every
+indexed repository, including a third-party or development repository, must
+match each package SHA-256 declared by `repository.yaml`; a mismatch makes the
+repository inert. Development repositories are loaded directly via
+`--dev-plugin-repo` in daemon builds compiled with the
 non-default `dev-plugin-repo` Cargo feature; production builds omit the flag and
 its runtime state. Imported standalone packages are local unsigned packages.
 Invalid official content stays visible for repair but never loads or shadows
 native discovery.
+
+The digest check gives unsigned repositories tamper evidence and prevents an
+indexed package from silently differing from its own repository manifest. It
+does not authenticate a third-party publisher: the repository owner or an
+attacker able to replace both the package and `repository.yaml` can publish a
+new matching digest. Halo currently pins signing keys only for the official
+repository; third-party repositories do not use trust-on-first-use key pinning.
 
 Run a development build with
 `cargo run -p halod --features dev-plugin-repo -- --dev-plugin-repo <DIR>`.

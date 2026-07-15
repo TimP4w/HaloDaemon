@@ -33,6 +33,7 @@ mod transport_api;
 mod worker;
 
 pub use device::LuaDevice;
+use device::{LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
 pub use effect_worker::{LedCoord, PluginEffectHandle};
 pub use manifest::{parse_manifest_from_dir, DeviceSpec, EffectKind, PluginManifest, ProbeMode};
 pub use worker::run_pre_scan;
@@ -1202,11 +1203,21 @@ fn scan_plugin_subdirs(root: &Path, scan: &mut LoadScan) {
 /// immediate sibling subdirectories of `repo_dir`, and/or nested under a
 /// `plugins/` subdirectory — a repo may use any combination of the three.
 fn scan_repo(repo_dir: &Path, scan: &mut LoadScan) {
-    if let Ok(repository) = repo::read_repository_manifest(repo_dir) {
-        for package in repository.packages {
-            try_load_plugin_dir(&repo_dir.join(package.path), scan);
+    match repo::read_repository_manifest(repo_dir) {
+        Ok(repository) => {
+            for package in repository.packages {
+                try_load_plugin_dir(&repo_dir.join(package.path), scan);
+            }
+            return;
         }
-        return;
+        Err(error) if repo_dir.join("repository.yaml").is_file() => {
+            log::warn!(
+                "Ignoring invalid plugin repository {}: {error:#}",
+                repo_dir.display()
+            );
+            return;
+        }
+        Err(_) => {}
     }
     try_load_plugin_dir(repo_dir, scan);
     scan_plugin_subdirs(repo_dir, scan);
@@ -1394,7 +1405,14 @@ impl Registry {
         let id = device_id(manifest, spec, handle);
         let notify = Arc::downgrade(app);
         if !manifest.needs_worker() {
-            return Some(Arc::new(LuaDevice::device_only(id, manifest, spec, notify)));
+            return Some(Arc::new(LuaDevice::new(LuaDeviceParts {
+                id,
+                manifest,
+                spec: Some(spec),
+                notify,
+                runtime: None,
+                worker: LuaDeviceWorker::None,
+            })));
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             log::warn!(
@@ -1468,18 +1486,20 @@ impl Registry {
         // `new_cyclic` so the device can hand its children a `FanHub` back-reference
         // for the chain machinery (e.g. an NZXT Kraken/Control Hub accessory fan).
         let device = Arc::new_cyclic(|weak| {
-            let mut dev = LuaDevice::with_transport(
+            let mut dev = LuaDevice::new(LuaDeviceParts {
                 id,
                 manifest,
-                spec,
-                dev_match,
-                transport,
-                runtime,
-                granted,
-                config,
+                spec: Some(spec),
                 notify,
-                runtime_state,
-            );
+                runtime: Some(runtime_state),
+                worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
+                    dev_match,
+                    transport,
+                    handle: runtime,
+                    granted,
+                    config,
+                })),
+            });
             dev.set_self_ref(weak.clone());
             dev
         });

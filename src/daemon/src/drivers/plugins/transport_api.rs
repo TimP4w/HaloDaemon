@@ -338,6 +338,19 @@ struct ScopedOps<'a> {
     scope: &'a AddrScope,
 }
 
+impl ScopedOps<'_> {
+    fn write_block_data(&mut self, addr: u8, cmd: u8, data: &[u8]) -> mlua::Result<bool> {
+        self.scope.check(addr).map_err(to_lua_err)?;
+        if data.len() > halod_hwaccess::smbus::SMBUS_BLOCK_MAX {
+            return Err(mlua::Error::RuntimeError(format!(
+                "SMBus block write exceeds the {}-byte maximum",
+                halod_hwaccess::smbus::SMBUS_BLOCK_MAX
+            )));
+        }
+        Ok(self.ops.write_block_data(addr, cmd, data).is_ok())
+    }
+}
+
 impl UserData for ScopedOps<'_> {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method_mut("read_byte", |_, this, addr: u8| {
@@ -369,13 +382,76 @@ impl UserData for ScopedOps<'_> {
         methods.add_method_mut(
             "write_block_data",
             |_, this, (addr, cmd, data): (u8, u8, Value)| {
-                this.scope.check(addr).map_err(to_lua_err)?;
                 let bytes = bytes_from(&data)?;
-                Ok(this.ops.write_block_data(addr, cmd, &bytes).is_ok())
+                this.write_block_data(addr, cmd, &bytes)
             },
         );
         methods.add_method("supports_block_write", |_, this, ()| {
             Ok(this.ops.supports_block_write())
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct BlockWriteOps {
+        writes: usize,
+    }
+
+    impl SmBusSyncOps for BlockWriteOps {
+        fn read_byte(&mut self, _addr: u8) -> anyhow::Result<u8> {
+            unreachable!()
+        }
+
+        fn read_byte_data(&mut self, _addr: u8, _cmd: u8) -> anyhow::Result<u8> {
+            unreachable!()
+        }
+
+        fn write_quick(&mut self, _addr: u8) -> anyhow::Result<bool> {
+            unreachable!()
+        }
+
+        fn write_byte_data(&mut self, _addr: u8, _cmd: u8, _val: u8) -> anyhow::Result<()> {
+            unreachable!()
+        }
+
+        fn write_word_data(&mut self, _addr: u8, _cmd: u8, _val: u16) -> anyhow::Result<()> {
+            unreachable!()
+        }
+
+        fn write_block_data(&mut self, _addr: u8, _cmd: u8, _data: &[u8]) -> anyhow::Result<()> {
+            self.writes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn scoped_smbus_block_write_accepts_the_32_byte_maximum() {
+        let scope = AddrScope::single(0x50);
+        let mut ops = BlockWriteOps::default();
+        let mut scoped = ScopedOps {
+            ops: &mut ops,
+            scope: &scope,
+        };
+
+        assert!(scoped.write_block_data(0x50, 0, &[0; 32]).unwrap());
+        assert_eq!(ops.writes, 1);
+    }
+
+    #[test]
+    fn scoped_smbus_block_write_rejects_more_than_32_bytes_before_transport() {
+        let scope = AddrScope::single(0x50);
+        let mut ops = BlockWriteOps::default();
+        let mut scoped = ScopedOps {
+            ops: &mut ops,
+            scope: &scope,
+        };
+
+        let error = scoped.write_block_data(0x50, 0, &[0; 33]).unwrap_err();
+        assert!(error.to_string().contains("32-byte maximum"));
+        assert_eq!(ops.writes, 0);
     }
 }

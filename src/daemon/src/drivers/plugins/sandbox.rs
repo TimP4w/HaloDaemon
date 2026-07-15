@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use mlua::{HookTriggers, Lua, Table, VmState};
+use mlua::{HookTriggers, Lua, LuaOptions, StdLib, Table, VmState};
 
 use halod_shared::types::Permission;
 
@@ -26,6 +26,7 @@ const REMOVED: &[&str] = &[
     "load",
     "debug",
     "collectgarbage",
+    "print",
 ];
 
 /// Strip every escape hatch, then re-inject `halod`/`log`, then selectively
@@ -132,7 +133,8 @@ pub(super) fn bootstrap_vm(
     memory_limit: usize,
     instruction_budget: u64,
 ) -> mlua::Result<(Lua, Rc<Cell<u64>>)> {
-    let lua = Lua::new();
+    let libs = StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::COROUTINE | StdLib::UTF8;
+    let lua = Lua::new_with(libs, LuaOptions::default())?;
     lua.set_app_data(CallDeadline(Rc::new(Cell::new(None))));
     apply(&lua, granted, config)?;
     lua.set_memory_limit(memory_limit)?;
@@ -280,6 +282,28 @@ mod tests {
         // Encoding primitives survive.
         let out: String = lua.load(r#"return string.char(65, 66)"#).eval().unwrap();
         assert_eq!(out, "AB");
+    }
+
+    #[test]
+    fn bootstrap_never_loads_dangerous_stdlibs_internally() {
+        let (lua, _) = bootstrap_vm(&[], &HashMap::new(), 1024 * 1024, 1_000_000).unwrap();
+        let loaded: Table = lua.named_registry_value("_LOADED").unwrap();
+
+        for name in ["os", "io", "package", "debug"] {
+            let value: mlua::Value = loaded.get(name).unwrap();
+            assert!(value.is_nil(), "stdlib '{name}' was loaded internally");
+        }
+        for name in ["string", "table", "math", "coroutine", "utf8"] {
+            let value: mlua::Value = loaded.get(name).unwrap();
+            assert!(!value.is_nil(), "stdlib '{name}' was not loaded");
+        }
+    }
+
+    #[test]
+    fn print_is_not_available_to_plugins() {
+        let (lua, _) = bootstrap_vm(&[], &HashMap::new(), 1024 * 1024, 1_000_000).unwrap();
+        let print: mlua::Value = lua.globals().get("print").unwrap();
+        assert!(print.is_nil());
     }
 
     #[test]

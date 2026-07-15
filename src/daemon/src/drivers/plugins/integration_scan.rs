@@ -16,7 +16,7 @@ use crate::registry::discovery::{DiscoveryHandle, TransportScanner};
 use crate::registry::usecases::registration::register_device_and_children;
 use crate::state::AppState;
 
-use super::device::LuaDevice;
+use super::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
 use super::manifest::PluginManifest;
 use super::transport::PluginIo;
 
@@ -161,16 +161,23 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
 
     let notify = Arc::downgrade(app);
     let device = Arc::new_cyclic(move |weak| {
-        let mut dev = LuaDevice::integration_root(
+        let mut dev = LuaDevice::new(LuaDeviceParts {
             id,
-            &manifest,
-            transport,
-            runtime,
-            granted,
-            config,
+            manifest: &manifest,
+            spec: None,
             notify,
-            runtime_state,
-        );
+            runtime: Some(runtime_state),
+            worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
+                dev_match: super::worker::DevMatch {
+                    transport: "tcp".to_owned(),
+                    ..Default::default()
+                },
+                transport,
+                handle: runtime,
+                granted,
+                config,
+            })),
+        });
         dev.set_self_ref(weak.clone());
         dev
     });

@@ -20,7 +20,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::Mutex as TokioMutex;
 
-use halod_shared::types::{ChainLinkInfo, ChainableChannelInfo, RgbColor, ZoneTopology};
+use halod_shared::types::{
+    ChainLinkInfo, ChainableChannelInfo, DeviceCapability, RgbColor, RgbDescriptor, RgbStatus,
+    ZoneTopology,
+};
 
 use crate::drivers::vendors::generic::devices::generic_argb::GenericArgb;
 use crate::drivers::{ChainLinkSpec, Device};
@@ -185,14 +188,14 @@ pub trait ChainHub: Send + Sync + 'static {
 
     /// Look up the runtime name of a chain link. Children call this from
     /// `serialize()` so a `set_device_name` IPC (routed via
-    /// `ChainCapability::rename_chain_link` for external-name devices) reaches
+    /// the owning `ChainHost` for external-name devices) reaches
     /// the wire device label without per-child name storage.
     fn link_name(&self, channel_id: &str, child_device_id: &str) -> Option<String>;
 }
 
 /// Shared chain runtime. Owns state + adapter + the Arc handles to spawned
-/// children; drivers embed an `Arc<ChainHost>` and forward their
-/// [`crate::drivers::ChainCapability`] impls here.
+/// children; drivers expose their embedded `Arc<ChainHost>` through
+/// [`crate::drivers::Device::chain_host`].
 pub struct ChainHost {
     adapter: Arc<dyn ChainAdapter>,
     /// `std::sync::Mutex`: operations never cross `.await` while holding it.
@@ -487,6 +490,47 @@ impl ChainHost {
             led_count,
             hub,
         ))
+    }
+}
+
+/// Serialize chain children for the parent's wire capability list.
+pub async fn children_to_wire(host: &ChainHost) -> Option<DeviceCapability> {
+    let children = host.children().await;
+    if children.is_empty() {
+        return None;
+    }
+    let mut wires = Vec::with_capacity(children.len());
+    for child in &children {
+        wires.push(child.serialize().await);
+    }
+    Some(DeviceCapability::Children(wires))
+}
+
+/// Merge a host's chainable channels into an existing RGB capability, or
+/// prepend a minimal RGB carrier when the parent has no RGB capability.
+pub fn enrich_wire_capabilities(host: &ChainHost, caps: &mut Vec<DeviceCapability>) {
+    let channels = host.chainable_channels();
+    if channels.is_empty() {
+        return;
+    }
+    if let Some(rgb) = caps.iter_mut().find_map(|cap| match cap {
+        DeviceCapability::Rgb(rgb) => Some(rgb),
+        _ => None,
+    }) {
+        rgb.chainable_channels = channels;
+    } else {
+        caps.insert(
+            0,
+            DeviceCapability::Rgb(RgbStatus {
+                descriptor: RgbDescriptor {
+                    zones: vec![],
+                    native_effects: vec![],
+                },
+                state: None,
+                zone_transforms: HashMap::new(),
+                chainable_channels: channels,
+            }),
+        );
     }
 }
 

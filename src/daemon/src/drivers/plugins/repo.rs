@@ -49,9 +49,10 @@ struct RepositorySignature {
     signature: String,
 }
 
-/// Parse and structurally validate a repository manifest from a working tree.
-/// This deliberately does not require a signature, so it can also validate
-/// third-party repositories and the explicit development override.
+/// Parse and validate a repository manifest and every indexed package digest
+/// from a working tree. This deliberately does not require a signature, so it
+/// can also validate third-party repositories and the explicit development
+/// override.
 pub fn read_repository_manifest(repo_dir: &Path) -> Result<RepositoryManifest> {
     let path = repo_dir.join("repository.yaml");
     let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -108,9 +109,10 @@ pub fn verify_official_repository_at_commit(
     Ok(manifest)
 }
 
-/// Verify the official detached signature and every package digest in a
-/// checked-out repository. The signature covers exact `repository.yaml` bytes,
-/// matching the standalone `repo-sign` tool.
+/// Verify the official detached signature in a checked-out repository. Package
+/// digests are enforced for every repository by [`validate_repository_manifest`].
+/// The signature covers exact `repository.yaml` bytes, matching the standalone
+/// `repo-sign` tool.
 pub fn verify_official_repository(repo_dir: &Path) -> Result<RepositoryManifest> {
     let yaml_path = repo_dir.join("repository.yaml");
     let yaml =
@@ -125,17 +127,6 @@ pub fn verify_official_repository(repo_dir: &Path) -> Result<RepositoryManifest>
     verify_official_signature(&yaml, &sig_bytes)
         .with_context(|| format!("verifying {}", sig_path.display()))?;
 
-    for package in &manifest.packages {
-        let actual = package_hash(&repo_dir.join(&package.path))?;
-        if !actual.eq_ignore_ascii_case(&package.sha256) {
-            bail!(
-                "package '{}' hash mismatch: expected {}, got {}",
-                package.id,
-                package.sha256,
-                actual
-            );
-        }
-    }
     Ok(manifest)
 }
 
@@ -212,6 +203,16 @@ fn validate_repository_manifest(repo_dir: &Path, manifest: &RepositoryManifest) 
             bail!(
                 "repository package '{}' does not match its plugin.yaml version",
                 package.id
+            );
+        }
+        let actual = package_hash(&dir)
+            .with_context(|| format!("hashing repository package '{}'", package.id))?;
+        if !actual.eq_ignore_ascii_case(&package.sha256) {
+            bail!(
+                "package '{}' hash mismatch: expected {}, got {}",
+                package.id,
+                package.sha256,
+                actual
             );
         }
     }
@@ -659,6 +660,19 @@ mod tests {
         let manifest = read_repository_manifest(root.path()).unwrap();
         assert_eq!(manifest.packages.len(), 1);
         assert_eq!(manifest.packages[0].id, "demo");
+    }
+
+    #[test]
+    fn repository_manifest_rejects_an_indexed_package_hash_mismatch() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("plugins").join("demo");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("plugin.yaml"), "id: demo\nversion: 1.0.0\n").unwrap();
+        fs::write(package.join("main.lua"), "return {}\n").unwrap();
+        write_repository_manifest(root.path(), &"0".repeat(64));
+
+        let error = read_repository_manifest(root.path()).unwrap_err();
+        assert!(error.to_string().contains("hash mismatch"));
     }
 
     #[test]

@@ -10,10 +10,10 @@ use halod_shared::keyboard::{
     is_iso_language, KeyVariant, KeyboardLayoutSelection, KeyboardLayoutStatus,
 };
 use halod_shared::types::{
-    Battery, Boolean, ButtonMapping, ChainableChannelInfo, ConnectionStatus, DeviceCapability,
-    DpiStatus, EffectParamValue, Equalizer, FanStatus, KeyRemapStatus, KeyboardLayout,
-    LcdDescriptor, LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType,
-    SensorUnit, VisibilityState, ZoneTopology,
+    Battery, Boolean, ButtonMapping, ConnectionStatus, DeviceCapability, DpiStatus,
+    EffectParamValue, Equalizer, FanStatus, KeyRemapStatus, KeyboardLayout, LcdDescriptor,
+    LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType, SensorUnit,
+    VisibilityState, ZoneTopology,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 use std::collections::HashMap;
@@ -69,127 +69,6 @@ pub struct ChainLinkSpec {
     pub name: String,
     pub topology: ZoneTopology,
     pub led_count: u32,
-}
-
-/// Parent-side capability for managing chainable channels; the CRUD surface
-/// delegates to a shared [`chain::ChainHost`] exposed via [`ChainCapability::chain_host`].
-#[async_trait]
-pub trait ChainCapability: Send + Sync {
-    /// The driver's chain host. Returning `None` is treated as "no chainable
-    /// channels yet" by every default impl below.
-    fn chain_host(&self) -> Option<&Arc<chain::ChainHost>>;
-
-    fn chainable_channels(&self) -> Vec<ChainableChannelInfo> {
-        self.chain_host()
-            .map(|h| h.chainable_channels())
-            .unwrap_or_default()
-    }
-
-    async fn add_chain_link(
-        &self,
-        channel_id: &str,
-        spec: ChainLinkSpec,
-    ) -> Result<(String, Arc<dyn Device>)> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.add_link(channel_id, spec).await
-    }
-
-    async fn remove_chain_link(&self, channel_id: &str, child_id: &str) -> Result<String> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.remove_link(channel_id, child_id).await
-    }
-
-    async fn rename_chain_link(
-        &self,
-        channel_id: &str,
-        child_id: &str,
-        new_name: &str,
-    ) -> Result<()> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.rename_link(channel_id, child_id, new_name)
-    }
-
-    async fn reorder_chain_link(
-        &self,
-        channel_id: &str,
-        child_id: &str,
-        new_index: usize,
-    ) -> Result<()> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.reorder_link(channel_id, child_id, new_index)
-    }
-
-    async fn detect_channel(&self, channel_id: &str) -> Result<()> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.detect_channel(channel_id).await
-    }
-
-    /// Replays a persisted layout at startup. Skips broadcast + persist — the
-    /// caller already owns both responsibilities at boot time.
-    async fn restore_chain_link(
-        &self,
-        channel_id: &str,
-        record: &crate::registry::config::ChainLinkRecord,
-    ) -> Result<Arc<dyn Device>> {
-        let host = self
-            .chain_host()
-            .ok_or_else(|| anyhow::anyhow!("chain host not initialized"))?;
-        host.restore_link(channel_id, record).await
-    }
-
-    async fn to_wire(&self) -> Option<DeviceCapability> {
-        let host = self.chain_host()?;
-        let children = host.children().await;
-        if children.is_empty() {
-            return None;
-        }
-        let mut wires = Vec::with_capacity(children.len());
-        for child in &children {
-            wires.push(child.serialize().await);
-        }
-        Some(DeviceCapability::Children(wires))
-    }
-
-    /// Merges `chainable_channels` into an existing `Rgb` wire capability, or
-    /// prepends a minimal `Rgb` carrier if none exists yet.
-    fn enrich_wire_capabilities(&self, caps: &mut Vec<DeviceCapability>) {
-        let channels = self.chainable_channels();
-        if channels.is_empty() {
-            return;
-        }
-        let has_rgb = caps.iter().any(|c| matches!(c, DeviceCapability::Rgb(_)));
-        if has_rgb {
-            for cap in caps.iter_mut() {
-                if let DeviceCapability::Rgb(rgb) = cap {
-                    rgb.chainable_channels = channels;
-                    break;
-                }
-            }
-        } else {
-            caps.insert(
-                0,
-                DeviceCapability::Rgb(RgbStatus {
-                    descriptor: RgbDescriptor {
-                        zones: vec![],
-                        native_effects: vec![],
-                    },
-                    state: None,
-                    zone_transforms: std::collections::HashMap::new(),
-                    chainable_channels: channels,
-                }),
-            );
-        }
-    }
 }
 
 /// Opt-in hook for devices needing application-level setup after registration

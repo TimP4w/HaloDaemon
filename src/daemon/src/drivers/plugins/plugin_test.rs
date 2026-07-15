@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use halod_shared::types::{EffectParamValue, RgbColor, RgbState, WriteRateLimit, WriteRateStatus};
 
-use super::device::LuaDevice;
+use super::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
 use super::manifest::{parse_manifest_from_dir, PluginManifest, UsbConfig};
 use super::transport::PluginIo;
 use super::worker::{DevMatch, PluginHandle};
@@ -605,31 +605,33 @@ fn open_device(
         name: None,
         extra: Default::default(),
     };
-    let device = Arc::new(LuaDevice::with_transport(
-        "plugin-test".to_owned(),
+    let device = Arc::new(LuaDevice::new(LuaDeviceParts {
+        id: "plugin-test".to_owned(),
         manifest,
-        spec,
-        dev_match,
-        if spec.transport == "usb" {
-            PluginIo::Usb(usb_recording.clone().expect("USB manifest config"))
-        } else {
-            PluginIo::Stream {
-                transport: recording.clone() as Arc<dyn Transport>,
-                usb: usb_recording
-                    .clone()
-                    .map(|usb| usb as Arc<dyn UsbCollection>),
-            }
-        },
-        handle.clone(),
-        // The harness grants every declared permission (so gated transports
-        // open), uses no config, and has no `AppState` to notify.
-        manifest.permissions.clone(),
-        std::collections::HashMap::new(),
-        std::sync::Weak::new(),
-        Arc::new(std::sync::Mutex::new(
+        spec: Some(spec),
+        notify: std::sync::Weak::new(),
+        runtime: Some(Arc::new(std::sync::Mutex::new(
             super::device::RuntimeState::OpeningTransport,
-        )),
-    ));
+        ))),
+        worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
+            dev_match,
+            transport: if spec.transport == "usb" {
+                PluginIo::Usb(usb_recording.clone().expect("USB manifest config"))
+            } else {
+                PluginIo::Stream {
+                    transport: recording.clone() as Arc<dyn Transport>,
+                    usb: usb_recording
+                        .clone()
+                        .map(|usb| usb as Arc<dyn UsbCollection>),
+                }
+            },
+            handle: handle.clone(),
+            // The harness grants every declared permission (so gated transports
+            // open), uses no config, and has no `AppState` to notify.
+            granted: manifest.permissions.clone(),
+            config: std::collections::HashMap::new(),
+        })),
+    }));
 
     let dev_table = lua.create_table().anyhow()?;
 

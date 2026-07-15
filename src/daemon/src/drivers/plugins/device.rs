@@ -23,8 +23,8 @@ use halod_shared::zone_transform::build_permutation;
 use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor};
 use crate::drivers::{
     ActionCapability, BatteryCapability, BoolStateCache, BooleanCapability, CapabilityRef,
-    ChainCapability, ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, Device,
-    DpiCapability, EqualizerCapability, FanCapability, FanHub, FanStateSlot, KeyRemapCapability,
+    ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, Device, DpiCapability,
+    EqualizerCapability, FanCapability, FanHub, FanStateSlot, KeyRemapCapability,
     KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
     OnboardProfilesCapability, PairingCapability, RangeCapability, RangeStateCache, RgbCapability,
     RgbStateSlot, SensorCapability, VisibilitySlot,
@@ -108,38 +108,58 @@ enum Cap {
     Chain,
 }
 
+const CONTROL_CAPS: &[Cap] = &[Cap::Choice, Cap::Range, Cap::Boolean, Cap::Action];
+const CAPABILITY_NAMES: &[&str] = &[
+    "rgb",
+    "fan",
+    "sensors",
+    "lcd",
+    "dpi",
+    "controls",
+    "battery",
+    "connection",
+    "equalizer",
+    "pairing",
+    "onboard_profiles",
+    "key_remap",
+    "keyboard_layout",
+    "chain",
+];
+
+fn cap_for(name: &str) -> &'static [Cap] {
+    match name {
+        "rgb" => &[Cap::Rgb],
+        "fan" => &[Cap::Fan],
+        "sensors" => &[Cap::Sensor],
+        "lcd" => &[Cap::Lcd],
+        "dpi" => &[Cap::Dpi],
+        "controls" => CONTROL_CAPS,
+        "battery" => &[Cap::Battery],
+        "connection" => &[Cap::Connection],
+        "equalizer" => &[Cap::Equalizer],
+        "pairing" => &[Cap::Pairing],
+        "onboard_profiles" => &[Cap::OnboardProfiles],
+        "key_remap" => &[Cap::KeyRemap],
+        "keyboard_layout" => &[Cap::KeyboardLayout],
+        "chain" => &[Cap::Chain],
+        _ => &[],
+    }
+}
+
 /// Typed runtime capabilities permitted by the inert catalog. Descriptors and
 /// initial values still come from `initialize`; the catalog never supplies
 /// static runtime sections.
 fn declared_caps(manifest: &PluginManifest) -> Vec<Cap> {
-    let mut caps = Vec::new();
-    let mut push = |name: &str, cap: Cap| {
-        if manifest
-            .capabilities
-            .iter()
-            .any(|declared| declared == name)
-        {
-            caps.push(cap);
-        }
-    };
-    push("rgb", Cap::Rgb);
-    push("fan", Cap::Fan);
-    push("sensors", Cap::Sensor);
-    push("lcd", Cap::Lcd);
-    push("dpi", Cap::Dpi);
-    push("controls", Cap::Choice);
-    push("controls", Cap::Range);
-    push("controls", Cap::Boolean);
-    push("controls", Cap::Action);
-    push("battery", Cap::Battery);
-    push("connection", Cap::Connection);
-    push("equalizer", Cap::Equalizer);
-    push("pairing", Cap::Pairing);
-    push("onboard_profiles", Cap::OnboardProfiles);
-    push("key_remap", Cap::KeyRemap);
-    push("keyboard_layout", Cap::KeyboardLayout);
-    push("chain", Cap::Chain);
-    caps
+    CAPABILITY_NAMES
+        .iter()
+        .filter(|name| {
+            manifest
+                .capabilities
+                .iter()
+                .any(|declared| declared == **name)
+        })
+        .flat_map(|name| cap_for(name).iter().copied())
+        .collect()
 }
 
 fn caps_named(names: &[String]) -> Vec<Cap> {
@@ -150,27 +170,11 @@ fn caps_named(names: &[String]) -> Vec<Cap> {
         }
     };
     for name in names {
-        match name.as_str() {
-            "rgb" => add(Cap::Rgb),
-            "fan" => add(Cap::Fan),
-            "sensors" => add(Cap::Sensor),
-            "lcd" => add(Cap::Lcd),
-            "dpi" => add(Cap::Dpi),
-            "controls" => {
-                add(Cap::Choice);
-                add(Cap::Range);
-                add(Cap::Boolean);
-                add(Cap::Action);
-            }
-            "battery" => add(Cap::Battery),
-            "connection" => add(Cap::Connection),
-            "equalizer" => add(Cap::Equalizer),
-            "pairing" => add(Cap::Pairing),
-            "onboard_profiles" => add(Cap::OnboardProfiles),
-            "key_remap" => add(Cap::KeyRemap),
-            "keyboard_layout" => add(Cap::KeyboardLayout),
-            "chain" => add(Cap::Chain),
-            other => log::warn!("Lua initialize returned unknown capability '{other}'"),
+        let mapped = cap_for(name);
+        if mapped.is_empty() {
+            log::warn!("Lua initialize returned unknown capability '{name}'");
+        } else {
+            mapped.iter().copied().for_each(&mut add);
         }
     }
     caps
@@ -551,6 +555,39 @@ pub struct LuaDevice {
     notify: Weak<crate::state::AppState>,
 }
 
+pub(super) struct LuaDeviceParts<'a> {
+    pub id: String,
+    pub manifest: &'a PluginManifest,
+    pub spec: Option<&'a DeviceSpec>,
+    pub notify: Weak<crate::state::AppState>,
+    pub runtime: Option<Arc<Mutex<RuntimeState>>>,
+    pub worker: LuaDeviceWorker,
+}
+
+pub(super) enum LuaDeviceWorker {
+    None,
+    Spawn(Box<LuaDeviceSpawnParts>),
+    Child(Box<LuaDeviceChildParts>),
+}
+
+pub(super) struct LuaDeviceSpawnParts {
+    pub dev_match: DevMatch,
+    pub transport: PluginIo,
+    pub handle: tokio::runtime::Handle,
+    pub granted: Vec<Permission>,
+    pub config: HashMap<String, String>,
+}
+
+pub(super) struct LuaDeviceChildParts {
+    pub dev_match: DevMatch,
+    pub worker: PluginHandle,
+    pub transport: PluginIo,
+    pub name: String,
+    pub vendor: String,
+    pub device_type: DeviceType,
+    pub transport_kind: &'static str,
+}
+
 impl Drop for LuaDevice {
     fn drop(&mut self) {
         if let Some(task) = self.poll_task.take() {
@@ -563,163 +600,58 @@ impl Drop for LuaDevice {
 }
 
 impl LuaDevice {
-    /// A plugin that declares no capability — identity + lifecycle only.
-    pub fn device_only(
-        id: String,
-        manifest: &PluginManifest,
-        spec: &DeviceSpec,
-        notify: Weak<crate::state::AppState>,
-    ) -> Self {
-        Self::build(id, manifest, Some(spec), None, None, notify)
-    }
-
-    /// A plugin with capabilities, backed by a worker over `transport`.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn with_transport(
-        id: String,
-        manifest: &PluginManifest,
-        spec: &DeviceSpec,
-        dev_match: DevMatch,
-        transport: PluginIo,
-        handle: tokio::runtime::Handle,
-        granted: Vec<Permission>,
-        config: HashMap<String, String>,
-        notify: Weak<crate::state::AppState>,
-        runtime: Arc<Mutex<RuntimeState>>,
-    ) -> Self {
-        *runtime.lock_recover() = RuntimeState::Initializing;
+    pub(super) fn new(parts: LuaDeviceParts<'_>) -> Self {
+        let LuaDeviceParts {
+            id,
+            manifest,
+            spec,
+            notify,
+            runtime,
+            worker,
+        } = parts;
+        let LuaDeviceWorker::Spawn(spawn) = worker else {
+            return match worker {
+                LuaDeviceWorker::None => Self::build_base(id, manifest, spec, None, None, notify),
+                LuaDeviceWorker::Child(child) => {
+                    let LuaDeviceChildParts {
+                        dev_match,
+                        worker,
+                        transport,
+                        name,
+                        vendor,
+                        device_type,
+                        transport_kind,
+                    } = *child;
+                    let mut dev = Self::build_base(
+                        id,
+                        manifest,
+                        spec,
+                        Some(worker.child(dev_match)),
+                        Some(transport),
+                        notify,
+                    );
+                    dev.runtime = runtime;
+                    dev.name = name;
+                    dev.vendor = vendor;
+                    dev.device_type = device_type;
+                    dev.transport_kind = transport_kind;
+                    dev
+                }
+                LuaDeviceWorker::Spawn(_) => unreachable!(),
+            };
+        };
+        let LuaDeviceSpawnParts {
+            dev_match,
+            transport,
+            handle,
+            granted,
+            config,
+        } = *spawn;
+        if let Some(runtime) = &runtime {
+            *runtime.lock_recover() = RuntimeState::Initializing;
+        }
         let receiver_root = manifest.plugin_id == "logitech" && dev_match.pid == Some(0xc547);
         let nuvoton_sensor_root = manifest.plugin_id == "nuvoton_lpcio" && dev_match.key.is_none();
-        let mut dev = Self::with_worker(
-            id,
-            manifest,
-            Some(spec),
-            dev_match,
-            transport,
-            handle,
-            granted,
-            config,
-            notify,
-            Some(runtime),
-        );
-        if manifest.dynamic_children {
-            dev.root_manifest = Some(Arc::new(manifest.clone()));
-        }
-        if receiver_root {
-            dev.caps
-                .get_mut()
-                .unwrap()
-                .retain(|cap| matches!(cap, Cap::Pairing));
-        }
-        if nuvoton_sensor_root {
-            // The matched Super-I/O is the sensor controller. Its dynamic
-            // children own the individual PWM channels; retaining `Fan` here
-            // makes the controller itself appear in the Cooling UI.
-            dev.caps
-                .get_mut()
-                .unwrap()
-                .retain(|cap| !matches!(cap, Cap::Fan));
-        }
-        dev
-    }
-
-    /// The headless root of a config-instantiated integration plugin. `runtime`
-    /// is handled the same way as [`Self::with_transport`]; children share it.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn integration_root(
-        id: String,
-        manifest: &PluginManifest,
-        transport: PluginIo,
-        handle: tokio::runtime::Handle,
-        granted: Vec<Permission>,
-        config: HashMap<String, String>,
-        notify: Weak<crate::state::AppState>,
-        runtime: Arc<Mutex<RuntimeState>>,
-    ) -> Self {
-        let dev_match = DevMatch {
-            transport: "tcp".to_owned(),
-            ..Default::default()
-        };
-        let mut dev = Self::with_worker(
-            id,
-            manifest,
-            None,
-            dev_match,
-            transport,
-            handle,
-            granted,
-            config,
-            notify,
-            Some(runtime.clone()),
-        );
-        dev.root_manifest = Some(Arc::new(manifest.clone()));
-        *runtime.lock_recover() = RuntimeState::Initializing;
-        dev
-    }
-
-    /// One integration controller as a full `LuaDevice`: its capability set
-    /// comes from the root catalog plus the child's `initialize` result, and its
-    /// worker VM is seeded with the controller `index` in `dev.match.index`, so
-    /// the shared script routes each capability call to the right remote
-    /// controller.
-    #[allow(clippy::too_many_arguments)]
-    fn integration_child(
-        id: String,
-        name: String,
-        vendor: String,
-        device_type: DeviceType,
-        manifest: &PluginManifest,
-        controller_index: u32,
-        controller_key: Option<String>,
-        controller_extra: HashMap<String, u64>,
-        transport_kind: &'static str,
-        worker: PluginHandle,
-        transport: PluginIo,
-        notify: Weak<crate::state::AppState>,
-        runtime: Arc<Mutex<RuntimeState>>,
-    ) -> Self {
-        let dev_match = DevMatch {
-            transport: transport_kind.to_owned(),
-            index: Some(controller_index),
-            key: controller_key,
-            name: Some(name.clone()),
-            extra: controller_extra,
-            ..Default::default()
-        };
-        let mut dev = Self::build(
-            id,
-            manifest,
-            None,
-            Some(worker.child(dev_match)),
-            Some(transport),
-            notify,
-        );
-        dev.runtime = Some(runtime);
-        dev.name = name;
-        dev.vendor = vendor;
-        dev.device_type = device_type;
-        dev.transport_kind = transport_kind;
-        dev
-    }
-
-    /// `runtime` is stored as-is (already `OpeningTransport`, or a shared
-    /// root state for a child) — callers own the `OpeningTransport ->
-    /// Initializing` transition, since only they know whether they're
-    /// building the owner or sharing an already-running root's state. `None`
-    /// for plain device plugins (see [`Self::with_transport`]).
-    #[allow(clippy::too_many_arguments)]
-    fn with_worker(
-        id: String,
-        manifest: &PluginManifest,
-        spec: Option<&DeviceSpec>,
-        dev_match: DevMatch,
-        transport: PluginIo,
-        handle: tokio::runtime::Handle,
-        granted: Vec<Permission>,
-        config: HashMap<String, String>,
-        notify: Weak<crate::state::AppState>,
-        runtime: Option<Arc<Mutex<RuntimeState>>>,
-    ) -> Self {
         // Keep a handle to the (metered) transport so the device can report
         // write-rate/throughput; the worker owns the one it does I/O through.
         let rate_transport = transport.clone();
@@ -747,7 +679,7 @@ impl LuaDevice {
         );
         let poll_device_id = id.clone();
         let poll_notify = notify.clone();
-        let mut dev = Self::build(
+        let mut dev = Self::build_base(
             id,
             manifest,
             spec,
@@ -947,10 +879,28 @@ impl LuaDevice {
                 }
             }));
         }
+        if manifest.dynamic_children || spec.is_none() {
+            dev.root_manifest = Some(Arc::new(manifest.clone()));
+        }
+        if receiver_root {
+            dev.caps
+                .get_mut()
+                .unwrap()
+                .retain(|cap| matches!(cap, Cap::Pairing));
+        }
+        if nuvoton_sensor_root {
+            // The matched Super-I/O is the sensor controller. Its dynamic
+            // children own the individual PWM channels; retaining `Fan` here
+            // makes the controller itself appear in the Cooling UI.
+            dev.caps
+                .get_mut()
+                .unwrap()
+                .retain(|cap| !matches!(cap, Cap::Fan));
+        }
         dev
     }
 
-    fn build(
+    fn build_base(
         id: String,
         manifest: &PluginManifest,
         spec: Option<&DeviceSpec>,
@@ -1645,7 +1595,6 @@ impl Device for LuaDevice {
                 Cap::KeyboardLayout => caps.push(CapabilityRef::KeyboardLayout(self)),
                 Cap::Chain => {
                     caps.push(CapabilityRef::Controller(self));
-                    caps.push(CapabilityRef::Chain(self));
                 }
             }
         }
@@ -1653,6 +1602,10 @@ impl Device for LuaDevice {
             caps.push(CapabilityRef::Controller(self));
         }
         caps
+    }
+
+    fn chain_host(&self) -> Option<&Arc<ChainHost>> {
+        self.chain_host.get()
     }
 }
 
@@ -2028,23 +1981,31 @@ impl LuaDevice {
         // `new_cyclic` so a controller that itself declares `chain` can hand its
         // accessories a `FanHub` back-reference (nested chain).
         let child = Arc::new_cyclic(|weak| {
-            let mut d = LuaDevice::integration_child(
-                child_device_id(&self.id, controller),
-                controller.name.clone(),
-                self.vendor.clone(),
-                controller.device_type,
-                &ctx.root_manifest,
-                controller.index,
-                controller.key.clone(),
-                controller.extra.clone(),
-                self.transport_kind,
-                ctx.worker.clone(),
-                ctx.transport.clone(),
-                self.notify.clone(),
-                self.runtime
-                    .clone()
-                    .expect("integration root always has runtime state"),
-            );
+            let name = controller.name.clone();
+            let dev_match = DevMatch {
+                transport: self.transport_kind.to_owned(),
+                index: Some(controller.index),
+                key: controller.key.clone(),
+                name: Some(name.clone()),
+                extra: controller.extra.clone(),
+                ..Default::default()
+            };
+            let mut d = LuaDevice::new(LuaDeviceParts {
+                id: child_device_id(&self.id, controller),
+                manifest: &ctx.root_manifest,
+                spec: None,
+                notify: self.notify.clone(),
+                runtime: self.runtime.clone(),
+                worker: LuaDeviceWorker::Child(Box::new(LuaDeviceChildParts {
+                    dev_match,
+                    worker: ctx.worker.clone(),
+                    transport: ctx.transport.clone(),
+                    name,
+                    vendor: self.vendor.clone(),
+                    device_type: controller.device_type,
+                    transport_kind: self.transport_kind,
+                })),
+            });
             d.set_self_ref(weak.clone());
             d
         });
@@ -2066,12 +2027,6 @@ impl LuaDevice {
                 crate::registry::identity::DeviceOrigin::Plugin(self.plugin_id.clone())
             },
         )))
-    }
-}
-
-impl ChainCapability for LuaDevice {
-    fn chain_host(&self) -> Option<&Arc<ChainHost>> {
-        self.chain_host.get()
     }
 }
 
@@ -2633,21 +2588,23 @@ mod tests {
     }
 
     fn hid_device(id: &str, manifest: &PluginManifest, transport: Arc<dyn Transport>) -> LuaDevice {
-        LuaDevice::with_transport(
-            id.into(),
+        LuaDevice::new(LuaDeviceParts {
+            id: id.into(),
             manifest,
-            &manifest.devices[0],
-            hid_match(),
-            PluginIo::Stream {
-                transport,
-                usb: None,
-            },
-            tokio::runtime::Handle::current(),
-            Vec::new(),
-            HashMap::new(),
-            Weak::new(),
-            Arc::new(Mutex::new(RuntimeState::OpeningTransport)),
-        )
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: Some(Arc::new(Mutex::new(RuntimeState::OpeningTransport))),
+            worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
+                dev_match: hid_match(),
+                transport: PluginIo::Stream {
+                    transport,
+                    usb: None,
+                },
+                handle: tokio::runtime::Handle::current(),
+                granted: Vec::new(),
+                config: HashMap::new(),
+            })),
+        })
     }
 
     #[test]
@@ -2688,12 +2645,14 @@ mod tests {
     #[test]
     fn device_only_keeps_plugin_identity_without_capabilities() {
         let (_tmp, manifest) = test_manifest("identity_only", &[], "return {}");
-        let dev = LuaDevice::device_only(
-            "identity_only-0".into(),
-            &manifest,
-            &manifest.devices[0],
-            Weak::new(),
-        );
+        let dev = LuaDevice::new(LuaDeviceParts {
+            id: "identity_only-0".into(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
         assert!(dev.capabilities().is_empty());
         assert_eq!(dev.owning_plugin_id().as_deref(), Some("identity_only"));
         assert!(dev.is_live());

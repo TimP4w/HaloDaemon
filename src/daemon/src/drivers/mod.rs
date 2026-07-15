@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use halod_shared::types::{
     ConnectionType, DeviceCapability, DeviceType, VisibilityState, WireDevice, WriteRateStatus,
 };
+use std::sync::Arc;
 
 mod slots;
 pub use slots::*;
@@ -37,7 +38,6 @@ pub enum CapabilityRef<'a> {
     Lcd(&'a dyn LcdCapability),
     KeyRemap(&'a dyn KeyRemapCapability),
     KeyboardLayout(&'a dyn KeyboardLayoutCapability),
-    Chain(&'a dyn ChainCapability),
     Controller(&'a dyn Controller),
     Pairing(&'a dyn PairingCapability),
 }
@@ -82,7 +82,7 @@ macro_rules! capability_dispatch {
 
 capability_dispatch!(
     persisting: [Fan, Rgb, Range, Choice, Boolean, Equalizer, Dpi, Lcd, KeyRemap, OnboardProfiles],
-    wire_only:  [Sensor, Action, Battery, Connection, KeyboardLayout, Chain, Controller, Pairing],
+    wire_only:  [Sensor, Action, Battery, Connection, KeyboardLayout, Controller, Pairing],
 );
 
 macro_rules! as_capability {
@@ -105,7 +105,7 @@ pub trait Device: Send + Sync {
 
     /// True if the device's display name is owned by a parent (e.g. a
     /// `ChainHost`) rather than the descriptor/`DeviceRecord`. `set_device_name`
-    /// routes these through `ChainCapability::rename_chain_link`, and the
+    /// routes these through the owning host, and the
     /// serializer's name-patch skips them so the parent's name wins.
     fn has_external_name(&self) -> bool {
         false
@@ -127,8 +127,11 @@ pub trait Device: Send + Sync {
                 caps.push(w);
             }
         }
-        if let Some(chain) = self.as_chain() {
-            chain.enrich_wire_capabilities(&mut caps);
+        if let Some(host) = self.chain_host() {
+            if let Some(children) = chain::children_to_wire(host).await {
+                caps.push(children);
+            }
+            chain::enrich_wire_capabilities(host, &mut caps);
         }
         WireDeviceBuilder::from_parts(
             self.id().to_owned(),
@@ -205,6 +208,11 @@ pub trait Device: Send + Sync {
     /// a new capability is introduced; this method never grows for existing ones.
     fn capabilities(&self) -> Vec<CapabilityRef<'_>>;
 
+    /// Shared chain runtime, when this device owns chainable channels.
+    fn chain_host(&self) -> Option<&Arc<chain::ChainHost>> {
+        None
+    }
+
     as_capability!(as_fan, Fan, FanCapability);
     as_capability!(as_rgb, Rgb, RgbCapability);
     as_capability!(as_sensor_capability, Sensor, SensorCapability);
@@ -222,7 +230,6 @@ pub trait Device: Send + Sync {
     as_capability!(as_lcd, Lcd, LcdCapability);
     as_capability!(as_key_remap, KeyRemap, KeyRemapCapability);
     as_capability!(as_keyboard_layout, KeyboardLayout, KeyboardLayoutCapability);
-    as_capability!(as_chain, Chain, ChainCapability);
     as_capability!(as_controller, Controller, Controller);
     as_capability!(as_pairing, Pairing, PairingCapability);
     fn visibility_slot(&self) -> Option<&VisibilitySlot> {
