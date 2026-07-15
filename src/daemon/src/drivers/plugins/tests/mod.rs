@@ -33,6 +33,46 @@ fn init_failure_is_aggregated_and_clears_after_recovery() {
 }
 
 #[test]
+fn fresh_integration_runtime_clears_stale_device_errors() {
+    let registry = super::Registry::default();
+    registry.set_load_warning("openrgb", "logo is unavailable".into());
+    registry.set_health(
+        "openrgb::old-controller",
+        halod_shared::types::PluginIssueKind::RuntimeError,
+        "connection reset".into(),
+    );
+    registry.set_health(
+        "unrelated",
+        halod_shared::types::PluginIssueKind::ConnectFailed,
+        "still offline".into(),
+    );
+
+    registry.clear_integration_operational_errors("openrgb");
+
+    let recovered = registry.health_for("openrgb");
+    assert_eq!(
+        recovered.issue.unwrap().kind,
+        halod_shared::types::PluginIssueKind::LoadWarning,
+        "non-operational package warnings must survive a reconnect"
+    );
+    assert_eq!(
+        registry.health_for("unrelated").issue.unwrap().kind,
+        halod_shared::types::PluginIssueKind::ConnectFailed
+    );
+
+    registry.set_health(
+        "openrgb",
+        halod_shared::types::PluginIssueKind::ConnectFailed,
+        "old connect error".into(),
+    );
+    registry.clear_integration_operational_errors("openrgb");
+    assert_eq!(
+        registry.health_for("openrgb"),
+        halod_shared::types::HealthState::default()
+    );
+}
+
+#[test]
 fn missing_command_requirement_is_daemon_authoritative() {
     let manifest = command_manifest(&["definitely-not-a-real-binary-xyz-42"]);
     let registry = super::Registry::default();

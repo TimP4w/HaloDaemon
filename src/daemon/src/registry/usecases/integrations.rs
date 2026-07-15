@@ -55,9 +55,8 @@ pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppStat
     if enabled {
         enable_one(&app, &id).await;
     } else {
-        let root_id = disable_one(&app, &id).await;
-        app.registry
-            .clear_operational_errors(&id, root_id.as_slice());
+        disable_one(&app, &id).await;
+        app.registry.clear_integration_operational_errors(&id);
     }
     crate::ipc::broadcast_state(&app).await;
     Ok(())
@@ -74,9 +73,8 @@ pub async fn set_integration_config(
     super::plugins::persist_config_values(&id, &values, &app).await?;
     app.request_config_save();
 
-    let root_id = disable_one(&app, &id).await;
-    app.registry
-        .clear_operational_errors(&id, root_id.as_slice());
+    disable_one(&app, &id).await;
+    app.registry.clear_integration_operational_errors(&id);
     enable_one(&app, &id).await;
     crate::ipc::broadcast_state(&app).await;
     Ok(())

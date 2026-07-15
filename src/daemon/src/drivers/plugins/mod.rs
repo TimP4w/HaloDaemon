@@ -721,6 +721,27 @@ impl Registry {
         });
     }
 
+    /// End every connection/device failure episode from an integration's old
+    /// runtime. A freshly opened integration may expose a different set of
+    /// device ids, so waiting for successful callbacks from the old ids would
+    /// leave their aggregated sidebar issue stuck forever. Load diagnostics are
+    /// retained because reconnecting cannot resolve package-content problems.
+    pub(crate) fn clear_integration_operational_errors(&self, plugin_id: &str) {
+        let prefix = format!("{plugin_id}::");
+        write_recover(&self.health).retain(|scope, state| {
+            let belongs_to_integration = scope == plugin_id || scope.starts_with(&prefix);
+            let operational = state.issue.as_ref().is_some_and(|issue| {
+                matches!(
+                    issue.kind,
+                    PluginIssueKind::ConnectFailed
+                        | PluginIssueKind::InitFailed
+                        | PluginIssueKind::RuntimeError
+                )
+            });
+            !belongs_to_integration || !operational
+        });
+    }
+
     /// Record a non-fatal load warning (bad logo, id collision) as a persisted
     /// plugin issue, surfaced on the plugin page / sidebar without a toast.
     fn set_load_warning(&self, plugin_id: &str, reason: String) {

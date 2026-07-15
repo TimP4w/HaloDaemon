@@ -160,6 +160,12 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
     if app.registry.integration_manifest(&plugin_id).is_none() {
         return DiscoveryOutcome::TransientFailure;
     }
+    // Opening a fresh transport starts a new operational episode. Clear every
+    // device-scoped error belonging to the previous root before initialization;
+    // current initialization/runtime failures will immediately report fresh
+    // records of their own.
+    app.registry
+        .clear_integration_operational_errors(&plugin_id);
     let transport_kind = manifest
         .transports
         .integration_transport_kind()
@@ -189,7 +195,6 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
     });
     let registered = register_device_and_children(app, device.clone()).await;
     if registered {
-        app.registry.clear_connect_error(&plugin_id);
         DiscoveryOutcome::Registered
     } else {
         let unrecoverable = device.is_unrecoverable();
