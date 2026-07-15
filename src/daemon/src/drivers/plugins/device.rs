@@ -1629,20 +1629,36 @@ impl RgbCapability for LuaDevice {
     }
 
     async fn write_frame(&self, zone_id: &str, colors: &[RgbColor]) -> Result<()> {
-        if !self.descriptor().zones.iter().any(|z| z.id == zone_id) {
-            anyhow::bail!("unknown zone: {zone_id}");
-        }
-        let r = self.worker()?.rgb_write_frame(zone_id, colors).await;
+        let zone = self
+            .descriptor()
+            .zones
+            .iter()
+            .find(|z| z.id == zone_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown zone: {zone_id}"))?;
+        let led_ids: Vec<_> = zone.leds.iter().map(|led| led.id).collect();
+        let r = self
+            .worker()?
+            .rgb_write_frame(zone_id, colors, &led_ids)
+            .await;
         self.track(r).await
     }
 
     async fn write_frame_batch(&self, zones: &[(String, Vec<RgbColor>)]) -> Result<()> {
-        for (zone_id, _) in zones {
-            if !self.descriptor().zones.iter().any(|z| z.id == *zone_id) {
-                anyhow::bail!("unknown zone: {zone_id}");
-            }
+        let descriptor = self.descriptor();
+        let mut identified = Vec::with_capacity(zones.len());
+        for (zone_id, colors) in zones {
+            let zone = descriptor
+                .zones
+                .iter()
+                .find(|z| z.id == *zone_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown zone: {zone_id}"))?;
+            identified.push((
+                zone_id.clone(),
+                colors.clone(),
+                zone.leds.iter().map(|led| led.id).collect(),
+            ));
         }
-        let r = self.worker()?.rgb_write_frame_batch(zones).await;
+        let r = self.worker()?.rgb_write_frame_batch(&identified).await;
         self.track(r).await
     }
 

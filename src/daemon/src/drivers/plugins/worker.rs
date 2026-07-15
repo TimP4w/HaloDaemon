@@ -855,22 +855,35 @@ impl PluginHandle {
         .await
     }
 
-    pub async fn rgb_write_frame(&self, zone: &str, colors: &[RgbColor]) -> Result<()> {
+    pub async fn rgb_write_frame(
+        &self,
+        zone: &str,
+        colors: &[RgbColor],
+        led_ids: &[u32],
+    ) -> Result<()> {
         let zone = zone.to_owned();
         let colors = colors.to_vec();
+        let led_ids = led_ids.to_vec();
         self.run(move |ctx, dev, _| {
             let f = required(&ctx.manifest, "write_frame")?;
             let colors_v = ctx
                 .lua
                 .to_value(&colors)
                 .map_err(|e| lua_err("write_frame arg", e))?;
-            f.call::<()>((dev, zone, colors_v))
+            let led_ids_v = ctx
+                .lua
+                .to_value(&led_ids)
+                .map_err(|e| lua_err("write_frame arg", e))?;
+            f.call::<()>((dev, zone, colors_v, led_ids_v))
                 .map_err(|e| lua_err("write_frame", e))
         })
         .await
     }
 
-    pub async fn rgb_write_frame_batch(&self, zones: &[(String, Vec<RgbColor>)]) -> Result<()> {
+    pub async fn rgb_write_frame_batch(
+        &self,
+        zones: &[(String, Vec<RgbColor>, Vec<u32>)],
+    ) -> Result<()> {
         let zones = zones.to_vec();
         self.run(move |ctx, dev, _| {
             if let Some(f) = func(&ctx.manifest, "write_frame_batch") {
@@ -878,7 +891,7 @@ impl PluginHandle {
                     .lua
                     .create_table()
                     .map_err(|e| lua_err("write_frame_batch arg", e))?;
-                for (i, (zone_id, colors)) in zones.iter().enumerate() {
+                for (i, (zone_id, colors, led_ids)) in zones.iter().enumerate() {
                     let frame = ctx
                         .lua
                         .create_table()
@@ -894,6 +907,14 @@ impl PluginHandle {
                                 .map_err(|e| lua_err("write_frame_batch arg", e))?,
                         )
                         .map_err(|e| lua_err("write_frame_batch arg", e))?;
+                    frame
+                        .set(
+                            "led_ids",
+                            ctx.lua
+                                .to_value(led_ids)
+                                .map_err(|e| lua_err("write_frame_batch arg", e))?,
+                        )
+                        .map_err(|e| lua_err("write_frame_batch arg", e))?;
                     frames
                         .set(i + 1, frame)
                         .map_err(|e| lua_err("write_frame_batch arg", e))?;
@@ -904,12 +925,16 @@ impl PluginHandle {
             }
 
             let f = required(&ctx.manifest, "write_frame")?;
-            for (zone, colors) in &zones {
+            for (zone, colors, led_ids) in &zones {
                 let colors_v = ctx
                     .lua
                     .to_value(colors)
                     .map_err(|e| lua_err("write_frame arg", e))?;
-                f.call::<()>((dev.clone(), zone.as_str(), colors_v))
+                let led_ids_v = ctx
+                    .lua
+                    .to_value(led_ids)
+                    .map_err(|e| lua_err("write_frame arg", e))?;
+                f.call::<()>((dev.clone(), zone.as_str(), colors_v, led_ids_v))
                     .map_err(|e| lua_err("write_frame", e))?;
             }
             Ok(())
@@ -1866,16 +1891,17 @@ mod tests {
             apply = function(dev, state)
                 assert(dev.match.index == 7)
             end,
-            write_frame = function(dev, zone, colors)
+            write_frame = function(dev, zone, colors, led_ids)
                 assert(dev.match.index == 7)
                 assert(zone == "zone-1")
                 assert(#colors == 1)
+                assert(led_ids[1] == 42)
             end,
         }"#;
         let h = spawn_controller(source, 7);
 
         h.rgb_apply(static_state()).await.unwrap();
-        h.rgb_write_frame("zone-1", &[RgbColor { r: 1, g: 2, b: 3 }])
+        h.rgb_write_frame("zone-1", &[RgbColor { r: 1, g: 2, b: 3 }], &[42])
             .await
             .unwrap();
     }
@@ -1889,15 +1915,25 @@ mod tests {
                 assert(frames[1].zone_id == "zone-1")
                 assert(#frames[1].colors == 1)
                 assert(frames[1].colors[1].r == 1)
+                assert(frames[1].led_ids[1] == 42)
                 assert(frames[2].zone_id == "zone-2")
                 assert(frames[2].colors[1].b == 6)
+                assert(frames[2].led_ids[1] == 84)
             end,
         }"#;
         let h = spawn_controller(source, 7);
 
         h.rgb_write_frame_batch(&[
-            ("zone-1".into(), vec![RgbColor { r: 1, g: 2, b: 3 }]),
-            ("zone-2".into(), vec![RgbColor { r: 4, g: 5, b: 6 }]),
+            (
+                "zone-1".into(),
+                vec![RgbColor { r: 1, g: 2, b: 3 }],
+                vec![42],
+            ),
+            (
+                "zone-2".into(),
+                vec![RgbColor { r: 4, g: 5, b: 6 }],
+                vec![84],
+            ),
         ])
         .await
         .unwrap();
@@ -1907,17 +1943,26 @@ mod tests {
     async fn frame_batch_falls_back_to_per_zone_callback() {
         let source = r#"local calls = 0
         return {
-            write_frame = function(dev, zone, colors)
+            write_frame = function(dev, zone, colors, led_ids)
                 calls = calls + 1
                 assert(dev.match.index == 7)
                 assert(zone == "zone-" .. calls)
+                assert(led_ids[1] == calls * 42)
             end,
         }"#;
         let h = spawn_controller(source, 7);
 
         h.rgb_write_frame_batch(&[
-            ("zone-1".into(), vec![RgbColor { r: 1, g: 2, b: 3 }]),
-            ("zone-2".into(), vec![RgbColor { r: 4, g: 5, b: 6 }]),
+            (
+                "zone-1".into(),
+                vec![RgbColor { r: 1, g: 2, b: 3 }],
+                vec![42],
+            ),
+            (
+                "zone-2".into(),
+                vec![RgbColor { r: 4, g: 5, b: 6 }],
+                vec![84],
+            ),
         ])
         .await
         .unwrap();
