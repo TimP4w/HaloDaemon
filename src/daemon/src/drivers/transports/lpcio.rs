@@ -8,6 +8,7 @@
 //! `select_slot`/`find_bars` state isolated.
 
 use anyhow::Result;
+use std::sync::Mutex;
 
 use crate::drivers::transports::register_ops;
 use crate::drivers::Metered;
@@ -69,5 +70,156 @@ impl LpcIoBus {
 
     pub fn rate_status(&self) -> WriteRateStatus {
         self.io.status()
+    }
+}
+
+struct RestoreRegister {
+    base: u16,
+    register: u16,
+    value: u8,
+}
+
+struct LpcIoState {
+    bus: LpcIoBus,
+    originals: Vec<RestoreRegister>,
+}
+
+/// Plugin-facing LPCIO service. Every HWM register changed through Lua is
+/// snapshotted on first write and can be restored by the host even when the Lua
+/// worker is wedged and its `close()` callback cannot run.
+pub struct LpcIoTransport {
+    state: Mutex<LpcIoState>,
+}
+
+impl LpcIoTransport {
+    pub fn open(limit: Option<WriteRateLimit>) -> Result<Self> {
+        Ok(Self {
+            state: Mutex::new(LpcIoState {
+                bus: LpcIoBus::open(limit)?,
+                originals: Vec::new(),
+            }),
+        })
+    }
+
+    pub fn select_slot(&self, slot: u8) -> Result<()> {
+        self.state.lock().unwrap().bus.select_slot(slot)
+    }
+
+    pub fn find_bars(&self) -> Result<()> {
+        self.state.lock().unwrap().bus.find_bars()
+    }
+
+    pub fn prepare_hwm(&self, slot: u8, unlock: bool) -> Result<()> {
+        let state = self.state.lock().unwrap();
+        let bus = &state.bus;
+        bus.select_slot(slot)?;
+        let config_port = if slot == 0 { 0x2e } else { 0x4e };
+        bus.write_port(config_port, 0x87)?;
+        bus.write_port(config_port, 0x87)?;
+        let result: Result<()> = (|| {
+            bus.find_bars()?;
+            bus.superio_outb(0x07, 0x0b)?;
+            if unlock {
+                let options = bus.superio_inb(0x28)?;
+                if options & 0x10 != 0 {
+                    bus.superio_outb(0x28, options & !0x10)?;
+                }
+            }
+            Ok(())
+        })();
+        let exit = bus.write_port(config_port, 0xaa);
+        result?;
+        exit
+    }
+
+    pub fn read_port(&self, port: u16) -> Result<u8> {
+        self.state.lock().unwrap().bus.read_port(port)
+    }
+
+    pub fn write_port(&self, port: u16, value: u8) -> Result<()> {
+        self.state.lock().unwrap().bus.write_port(port, value)
+    }
+
+    pub fn superio_inb(&self, register: u8) -> Result<u8> {
+        self.state.lock().unwrap().bus.superio_inb(register)
+    }
+
+    pub fn superio_outb(&self, register: u8, value: u8) -> Result<()> {
+        self.state.lock().unwrap().bus.superio_outb(register, value)
+    }
+
+    fn hwm_read_raw(bus: &LpcIoBus, base: u16, register: u16) -> Result<u8> {
+        let addr = base + 5;
+        let data = base + 6;
+        bus.write_port(addr, 0x4e)?;
+        bus.write_port(data, (register >> 8) as u8)?;
+        bus.write_port(addr, register as u8)?;
+        bus.read_port(data)
+    }
+
+    fn hwm_write_raw(bus: &LpcIoBus, base: u16, register: u16, value: u8) -> Result<()> {
+        let addr = base + 5;
+        let data = base + 6;
+        bus.write_port(addr, 0x4e)?;
+        bus.write_port(data, (register >> 8) as u8)?;
+        bus.write_port(addr, register as u8)?;
+        bus.write_port(data, value)
+    }
+
+    pub fn hwm_read(&self, base: u16, register: u16) -> Result<u8> {
+        let state = self.state.lock().unwrap();
+        Self::hwm_read_raw(&state.bus, base, register)
+    }
+
+    pub fn hwm_write(&self, base: u16, register: u16, value: u8) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if !state
+            .originals
+            .iter()
+            .any(|entry| entry.base == base && entry.register == register)
+        {
+            let original = Self::hwm_read_raw(&state.bus, base, register)?;
+            state.originals.push(RestoreRegister {
+                base,
+                register,
+                value: original,
+            });
+        }
+        Self::hwm_write_raw(&state.bus, base, register, value)
+    }
+
+    pub fn restore(&self) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let originals = std::mem::take(&mut state.originals);
+        let mut first_error = None;
+        for entry in originals.into_iter().rev() {
+            if let Err(error) =
+                Self::hwm_write_raw(&state.bus, entry.base, entry.register, entry.value)
+            {
+                log::error!(
+                    "restoring LPCIO HWM register {:#06x}: {error:#}",
+                    entry.register
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    pub fn rate_status(&self) -> WriteRateStatus {
+        self.state.lock().unwrap().bus.rate_status()
+    }
+}
+
+impl Drop for LpcIoTransport {
+    fn drop(&mut self) {
+        if let Err(error) = self.restore() {
+            log::error!("restoring LPCIO state during transport drop: {error:#}");
+        }
     }
 }

@@ -1400,8 +1400,7 @@ pub(crate) fn plugin_needs_permission(p: &PluginInfo) -> bool {
 /// this deliberately excludes a newly installed plugin's first-time consent.
 pub(crate) fn plugin_requires_regrant(p: &PluginInfo) -> bool {
     !p.enabled
-        && p
-            .accepted_authority
+        && p.accepted_authority
             .as_ref()
             .is_some_and(|accepted| !p.authority.is_subset_of(accepted))
 }
@@ -1418,8 +1417,7 @@ pub(crate) enum ConsentReason {
 /// Classify why `p` is asking for consent, from its granted vs declared
 /// permissions and whether its content changed since the last acknowledgment.
 pub(crate) fn consent_reason(p: &PluginInfo) -> ConsentReason {
-    if p
-        .accepted_authority
+    if p.accepted_authority
         .as_ref()
         .is_some_and(|accepted| !p.authority.is_subset_of(accepted))
     {
@@ -3044,7 +3042,10 @@ mod tests {
         let mut p = info("a", false);
         p.declared_permissions = vec![Permission::Network, Permission::Os];
         p.authority.permissions = p.declared_permissions.clone();
-        p.accepted_authority = Some(halod_shared::types::PluginAuthority { permissions: vec![Permission::Network], transport_scopes: vec![] });
+        p.accepted_authority = Some(halod_shared::types::PluginAuthority {
+            permissions: vec![Permission::Network],
+            transport_scopes: vec![],
+        });
         assert_eq!(consent_reason(&p), ConsentReason::AuthorityExpanded);
         assert_eq!(newly_required_permissions(&p), vec![Permission::Os]);
 
@@ -3052,7 +3053,10 @@ mod tests {
         let mut p = info("a", false);
         p.declared_permissions = vec![Permission::Network];
         p.authority.permissions = p.declared_permissions.clone();
-        p.accepted_authority = Some(halod_shared::types::PluginAuthority { permissions: vec![Permission::Network], transport_scopes: vec![] });
+        p.accepted_authority = Some(halod_shared::types::PluginAuthority {
+            permissions: vec![Permission::Network],
+            transport_scopes: vec![],
+        });
         assert_eq!(consent_reason(&p), ConsentReason::New);
         assert!(newly_required_permissions(&p).is_empty());
     }
@@ -3292,7 +3296,10 @@ mod tests {
             halod_shared::types::Permission::Os,
             halod_shared::types::Permission::Network,
         ];
-        updated.accepted_authority = Some(halod_shared::types::PluginAuthority { permissions: vec![halod_shared::types::Permission::Os], transport_scopes: vec![] });
+        updated.accepted_authority = Some(halod_shared::types::PluginAuthority {
+            permissions: vec![halod_shared::types::Permission::Os],
+            transport_scopes: vec![],
+        });
         updated.consented = false;
         assert!(plugin_requires_regrant(&updated));
 
@@ -3302,7 +3309,10 @@ mod tests {
             halod_shared::types::Permission::Network,
         ];
         added_permission.authority.permissions = added_permission.declared_permissions.clone();
-        added_permission.accepted_authority = Some(halod_shared::types::PluginAuthority { permissions: vec![halod_shared::types::Permission::Os], transport_scopes: vec![] });
+        added_permission.accepted_authority = Some(halod_shared::types::PluginAuthority {
+            permissions: vec![halod_shared::types::Permission::Os],
+            transport_scopes: vec![],
+        });
         added_permission.consented = false;
         assert!(plugin_requires_regrant(&added_permission));
 

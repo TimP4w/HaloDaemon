@@ -200,9 +200,56 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
         app.devices.read().await.clone();
     for dev in controllers {
         if let Some(ctrl) = dev.as_controller() {
-            let children = ctrl.rescan_children().await;
-            for child in children {
-                crate::registry::usecases::registration::register_device(&app, child).await;
+            // Child ids from plugin packages are stable hardware ids (for
+            // example a Logitech serial or NVIDIA UUID), not necessarily
+            // strings prefixed by the controller id. Keep the ownership set
+            // established at registration and let the controller perform an
+            // exact live diff against it.
+            let existing = app
+                .device_children
+                .lock()
+                .await
+                .get(dev.id())
+                .cloned()
+                .unwrap_or_default();
+            let Ok((added, gone)) = ctrl.resync_children(&existing).await else {
+                continue;
+            };
+
+            let mut registered = std::collections::HashSet::new();
+            for child in added {
+                let child_id = child.id().to_owned();
+                if crate::registry::usecases::registration::register_device(&app, child).await {
+                    registered.insert(child_id);
+                }
+            }
+
+            if !gone.is_empty() {
+                let removed: Vec<std::sync::Arc<dyn crate::drivers::Device>> = {
+                    let mut devices = app.devices.write().await;
+                    let mut removed = Vec::new();
+                    devices.retain(|device| {
+                        if gone.iter().any(|id| id == device.id()) {
+                            removed.push(device.clone());
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    removed
+                };
+                for child in removed {
+                    child.close().await;
+                }
+            }
+
+            if !gone.is_empty() || !registered.is_empty() {
+                let mut owners = app.device_children.lock().await;
+                let children = owners.entry(dev.id().to_owned()).or_default();
+                for id in gone {
+                    children.remove(&id);
+                }
+                children.extend(registered);
             }
         }
     }

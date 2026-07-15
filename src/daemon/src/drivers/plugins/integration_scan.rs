@@ -16,10 +16,9 @@ use crate::registry::discovery::{DiscoveryHandle, TransportScanner};
 use crate::registry::usecases::registration::register_device_and_children;
 use crate::state::AppState;
 
-use super::device::{ChildWorkerFactory, LuaDevice};
+use super::device::LuaDevice;
 use super::manifest::PluginManifest;
 use super::transport::PluginIo;
-use crate::drivers::transports::Transport;
 
 /// Sanitize a config value for use in a device id: keep it stable and
 /// collision-resistant without leaking odd characters into the id.
@@ -148,8 +147,8 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
     if app.registry.integration_manifest(&plugin_id).is_none() {
         return;
     }
-    let shared: Arc<dyn Transport> = match &transport {
-        PluginIo::Stream { transport, .. } => transport.clone(),
+    match &transport {
+        PluginIo::Stream { .. } => {}
         _ => {
             log::error!(
                 "integration plugin '{}': root transport is not a stream",
@@ -158,14 +157,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
             report_connect_failure(app, &manifest, "root transport is not a stream".into()).await;
             return;
         }
-    };
-
-    let child_worker: ChildWorkerFactory = Arc::new(move |_index| {
-        Ok(PluginIo::Stream {
-            transport: shared.clone(),
-            bulk: None,
-        })
-    });
+    }
 
     let notify = Arc::downgrade(app);
     let device = Arc::new_cyclic(move |weak| {
@@ -173,7 +165,6 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
             id,
             &manifest,
             transport,
-            child_worker,
             runtime,
             granted,
             config,

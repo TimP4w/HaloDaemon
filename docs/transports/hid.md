@@ -12,11 +12,37 @@ USB HID is reused by peripheral manufacturers to carry vendor-specific binary pr
 
 ---
 
-## Dual file descriptors
+## Host readers and bounded input
 
-The device is opened twice — once for reading, once for writing — producing two independent file descriptors on the same `hidraw` node. This prevents the read side's blocking `read_timeout` from serialising writes, which would cap per-key RGB frame rates to the read timeout period.
+The device is opened twice — once for reading, once for writing — producing two independent file descriptors on the same `hidraw` node. A continuous host reader owns each input descriptor and feeds a bounded 256-report queue. This prevents input waits from serialising writes and prevents a slow Lua callback from growing memory without bound.
 
-Both fds are opened in non-blocking mode. All I/O is dispatched via `tokio::task::spawn_blocking`.
+Request/response reads consume the queue from the owning serialized Lua worker. Unsolicited reports wake that same worker, which drains them in arrival order through `on_event`. Lua never polls the HID descriptor.
+
+Plugins may also declare a companion top-level collection by usage page and
+usage. The host only opens and exposes that collection; Lua protocol code
+explicitly chooses primary or companion operations. The HID transport does not
+route or interpret vendor report IDs.
+
+### Merged input queue and dispatch (`read_any` / `defer_event`)
+
+Both collections' reader threads feed one host-owned queue, so a reply can be
+matched wherever its report ID lands it (a short request whose reply is a long
+report arrives on the companion collection — see
+[HID++](../protocols/hidpp.md)). Two endpoint-agnostic primitives let a Lua
+protocol implement request/response multiplexing without guessing a collection:
+
+- `read_any(size)` — pop the next inbound report from the merged queue,
+  regardless of which collection delivered it.
+- `defer_event(bytes)` — hand a report that was read but does not belong to the
+  in-flight request back to the event path (`on_event`), preserving arrival
+  order, instead of dropping it.
+
+The Lua protocol owns all dispatch semantics — what counts as a reply, an error,
+or an unsolicited notification. It writes once (routing the frame to the
+collection that accepts its report ID), then loops `read_any`, returning the
+matching reply and `defer_event`-ing everything else. This mirrors the native
+messenger's `dispatch_packet` and keeps the daemon free of any vendor-specific
+knowledge, so the same primitives serve any plugin's multiplexing scheme.
 
 ---
 

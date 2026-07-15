@@ -31,8 +31,13 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     };
     (spec.generic_hid || spec.vid == Some(*vid))
         && pid_ok
-        && spec.usage_page.is_none_or(|u| u == *usage_page)
-        && spec.usage.is_none_or(|u| u == *usage)
+        // Linux hidraw does not expose collection usages (both are zero), so
+        // usage selectors only narrow the split collections on platforms that
+        // actually report them.
+        && spec
+            .usage_page
+            .is_none_or(|u| *usage_page == 0 || u == *usage_page)
+        && spec.usage.is_none_or(|u| *usage == 0 || u == *usage)
         && spec.interface.is_none_or(|i| Some(i) == *interface_number)
 }
 
@@ -43,15 +48,47 @@ fn open(
     _granted: &[halod_shared::types::Permission],
     limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
-    let DiscoveryHandle::Hid { path, vid, pid, .. } = handle else {
+    let DiscoveryHandle::Hid {
+        path,
+        vid,
+        pid,
+        serial,
+        interface_number,
+        ..
+    } = handle
+    else {
         bail!("plugin '{}' matched a non-HID handle", manifest.plugin_id);
     };
     let hid = manifest.transports.hid.clone().unwrap_or_default();
     // `report_size = 0` means raw passthrough (no report-id prepend, no padding):
     // the plugin builds the exact wire buffer itself (e.g. the Razer 90-byte report).
     let report_size = (hid.report_size != 0).then_some(hid.report_size);
-    let transport =
-        HidTransport::open(path, report_size, hid.timeout_ms, hid.feature_report, limit)?;
+    let transport = if let Some(companion) = &hid.companion {
+        let api = hidapi::HidApi::new()?;
+        let serial = serial.filter(|value| !value.is_empty());
+        let companion_path = api
+            .device_list()
+            .filter(|device| device.vendor_id() == *vid && device.product_id() == *pid)
+            .filter(|device| {
+                interface_number.is_none_or(|interface| device.interface_number() == interface)
+            })
+            .filter(|device| serial.is_none_or(|value| device.serial_number() == Some(value)))
+            .find(|device| {
+                device.usage_page() == companion.usage_page && device.usage() == companion.usage
+            })
+            .map(|device| device.path().to_string_lossy().into_owned());
+
+        HidTransport::open_dual(
+            path,
+            companion_path.as_deref().unwrap_or(""),
+            report_size,
+            hid.timeout_ms,
+            hid.feature_report,
+            limit,
+        )?
+    } else {
+        HidTransport::open(path, report_size, hid.timeout_ms, hid.feature_report, limit)?
+    };
     Ok(PluginIo::Stream {
         transport: Arc::new(transport),
         // Lazy companion bulk endpoint (opened only if the plugin streams LCD).

@@ -3,12 +3,11 @@
 
 use std::collections::HashMap;
 
-use halod_shared::keyboard::KeyLayoutSpec;
 use std::f32::consts::PI;
 
 use halod_shared::types::{
-    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, KeyboardLayout, LedPosition,
-    RgbColor, RgbZone, WireDevice, ZoneTopology,
+    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, LedPosition, RgbColor, RgbZone,
+    WireDevice, ZoneTopology,
 };
 use halod_shared::zone_transform::transform_colors;
 
@@ -28,43 +27,6 @@ pub fn build_device_id(prefix: &str, serial: Option<&str>, index: usize) -> Stri
 /// an empty string is treated as "no serial" and becomes `None`.
 pub fn stable_serial(serial: Option<&str>) -> Option<String> {
     serial.filter(|s| !s.is_empty()).map(str::to_string)
-}
-
-fn key_positions(spec: &KeyLayoutSpec<'_>, col_max: f32) -> Vec<LedPosition> {
-    spec.resolve()
-        .iter()
-        .filter_map(|cell| {
-            let id = spec
-                .cid_map
-                .iter()
-                .find(|(_, kid)| *kid == cell.id)
-                .map(|(driver_id, _)| *driver_id)?;
-            Some(LedPosition {
-                id,
-                x: (cell.col + cell.w / 2.0) / col_max,
-                y: (cell.row + 1.5) / 7.0,
-            })
-        })
-        .collect()
-}
-
-/// Generate `LedPosition` entries for a TKL keyboard zone from a `KeyLayoutSpec`.
-///
-/// Grid coordinates are projected into `[0, 1]` space using the standard TKL
-/// bounds (`col ∈ [0, 17.5]`, `row ∈ [-1.5, 7.5]`).
-pub fn tkl_key_positions(spec: &KeyLayoutSpec<'_>) -> Vec<LedPosition> {
-    key_positions(spec, 18.0)
-}
-
-/// Swap the `layout` field on a `Keyboard` topology variant, leaving other topology variants unchanged.
-pub fn override_keyboard_layout(topology: ZoneTopology, layout: &KeyboardLayout) -> ZoneTopology {
-    match topology {
-        ZoneTopology::Keyboard { form_factor, .. } => ZoneTopology::Keyboard {
-            form_factor,
-            layout: *layout,
-        },
-        other => other,
-    }
 }
 
 /// Assemble a fixed-length per-LED colour frame from one zone's

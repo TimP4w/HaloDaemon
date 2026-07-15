@@ -178,12 +178,60 @@ pub trait Transport: Send + Sync {
         self.read(size).await
     }
 
-    fn has_long_handle(&self) -> bool {
+    /// Pop the next inbound report regardless of which endpoint it arrived on.
+    /// Single-node transports have only one endpoint, so this defaults to
+    /// `read`; multi-collection transports (HID short/long on Windows) merge
+    /// both queues so protocol code can match a reply wherever it lands.
+    async fn read_any(&self, size: usize) -> Result<Vec<u8>> {
+        self.read(size).await
+    }
+
+    /// Hand back a report that was read but did not belong to the in-flight
+    /// request, so it is delivered through the event path (`drain_events`)
+    /// instead of being dropped. The transport never interprets the bytes.
+    async fn defer_event(&self, _data: &[u8]) -> Result<()> {
+        anyhow::bail!("defer_event not supported by this transport")
+    }
+
+    /// Write to an explicitly opened companion HID collection. Protocol code
+    /// chooses the collection; the transport never interprets report IDs.
+    async fn write_companion(&self, _data: &[u8]) -> Result<()> {
+        anyhow::bail!("companion collection not supported by this transport")
+    }
+
+    /// Batch writes to an explicitly opened companion collection. HID
+    /// protocols with split short/long collections use this for streaming.
+    async fn write_many_companion(&self, packets: &[Vec<u8>]) -> Result<()> {
+        for packet in packets {
+            self.write_companion(packet).await?;
+        }
+        Ok(())
+    }
+
+    async fn read_companion(&self, _size: usize) -> Result<Vec<u8>> {
+        anyhow::bail!("companion collection not supported by this transport")
+    }
+
+    async fn write_then_read_companion(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
+        self.write_companion(data).await?;
+        self.read_companion(size).await
+    }
+
+    fn has_companion(&self) -> bool {
         false
     }
 
-    async fn read_long(&self, size: usize) -> Result<Vec<u8>> {
-        self.read(size).await
+    /// Subscribe to host-reader wakeups for event-driven transports. The
+    /// counter changes whenever at least one report is queued; consumers drain
+    /// reports from the serialized plugin worker via `drain_events`.
+    fn event_receiver(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
+
+    /// Drain queued unsolicited input in arrival order. Request/response reads
+    /// and this drain are serialized by the owning root worker.
+    async fn drain_events(&self, _limit: usize) -> Result<Vec<TransportEvent>> {
+        Ok(Vec::new())
     }
 
     /// Live write-rate limit and throughput. No default: every implementor
@@ -193,4 +241,10 @@ pub trait Transport: Send + Sync {
     fn rate_status(&self) -> WriteRateStatus;
 
     fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>);
+}
+
+#[derive(Debug, Clone)]
+pub struct TransportEvent {
+    pub endpoint: &'static str,
+    pub data: Vec<u8>,
 }

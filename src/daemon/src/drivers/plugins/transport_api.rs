@@ -86,6 +86,32 @@ impl TransportApi {
             )),
         }
     }
+
+    #[cfg(target_os = "windows")]
+    fn amd_smn(
+        &self,
+    ) -> mlua::Result<&std::sync::Arc<crate::drivers::transports::amd_smn::AmdSmnBus>> {
+        match &self.io {
+            PluginIo::AmdSmn(bus) => Ok(bus),
+            _ => Err(mlua::Error::RuntimeError(
+                "this transport is not AMD SMN; use amd_smn:read(offset) only on an amd_smn device"
+                    .into(),
+            )),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn lpcio(
+        &self,
+    ) -> mlua::Result<&std::sync::Arc<crate::drivers::transports::lpcio::LpcIoTransport>> {
+        match &self.io {
+            PluginIo::Lpcio(bus) => Ok(bus),
+            _ => Err(mlua::Error::RuntimeError(
+                "this transport is not LPCIO; use lpcio typed operations only on an lpcio device"
+                    .into(),
+            )),
+        }
+    }
 }
 
 impl UserData for TransportApi {
@@ -128,8 +154,17 @@ impl UserData for TransportApi {
         stream_method!(bytes_unit "write", write);
         stream_method!(size_str "read", read);
         stream_method!(size_str "read_nonblocking", read_nonblocking);
+        stream_method!(size_str "read_any", read_any);
+        stream_method!(bytes_unit "defer_event", defer_event);
         stream_method!(bytes_size_str "write_then_read", write_then_read);
         stream_method!(bytes_size_str "feature_exchange", feature_exchange);
+        stream_method!(bytes_unit "write_companion", write_companion);
+        stream_method!(size_str "read_companion", read_companion);
+        stream_method!(bytes_size_str "write_then_read_companion", write_then_read_companion);
+
+        methods.add_method("has_companion", |_, this, ()| {
+            Ok(this.stream()?.has_companion())
+        });
 
         methods.add_method("write_many", |_, this, packets: Vec<Value>| {
             let owned: Vec<Vec<u8>> = packets
@@ -138,6 +173,16 @@ impl UserData for TransportApi {
                 .collect::<mlua::Result<_>>()?;
             this.handle
                 .block_on(this.stream()?.write_many(&owned))
+                .map_err(to_lua_err)
+        });
+
+        methods.add_method("write_many_companion", |_, this, packets: Vec<Value>| {
+            let owned: Vec<Vec<u8>> = packets
+                .iter()
+                .map(bytes_from)
+                .collect::<mlua::Result<_>>()?;
+            this.handle
+                .block_on(this.stream()?.write_many_companion(&owned))
                 .map_err(to_lua_err)
         });
 
@@ -156,6 +201,72 @@ impl UserData for TransportApi {
                     .run(&executable, &args)
                     .map_err(to_lua_err)?;
                 lua.create_string(&output)
+            },
+        );
+
+        // ── Typed PawnIO services (Windows) ──────────────────────────────
+        // These are deliberately separate Lua objects rather than a raw port
+        // handle.  A package gets only the operations its manifest authority
+        // advertises, and every LPC write remains metered by LpcIoBus.
+        #[cfg(target_os = "windows")]
+        methods.add_method("amd_smn_read", |_, this, offset: u32| {
+            this.amd_smn()?.read_smn(offset).map_err(to_lua_err)
+        });
+
+        #[cfg(target_os = "windows")]
+        methods.add_method("lpcio_select_slot", |_, this, slot: u8| {
+            this.lpcio()?.select_slot(slot).map_err(to_lua_err)
+        });
+        #[cfg(target_os = "windows")]
+        methods.add_method("lpcio_find_bars", |_, this, ()| {
+            this.lpcio()?.find_bars().map_err(to_lua_err)
+        });
+        // Reopen the Nuvoton HWM I/O window through a single trusted operation.
+        // Packages may request this at poll boundaries, but cannot enter
+        // extended-function mode or touch Super-I/O config registers directly.
+        // Modern NCT679x firmware can reassert CR 0x28 bit 4 after discovery.
+        #[cfg(target_os = "windows")]
+        methods.add_method(
+            "lpcio_prepare_hwm",
+            |_, this, (slot, unlock): (u8, bool)| {
+                this.lpcio()?.prepare_hwm(slot, unlock).map_err(to_lua_err)
+            },
+        );
+        #[cfg(target_os = "windows")]
+        methods.add_method("lpcio_read_port", |_, this, port: u16| {
+            this.lpcio()?.read_port(port).map_err(to_lua_err)
+        });
+        // HWM index/data access is a stateful five-write transaction. Keep it
+        // under one bus mutex so sensor and fan child workers cannot interleave
+        // their register selectors and manufacture random readings.
+        #[cfg(target_os = "windows")]
+        methods.add_method("lpcio_hwm_read", |_, this, (base, register): (u16, u16)| {
+            this.lpcio()?.hwm_read(base, register).map_err(to_lua_err)
+        });
+        #[cfg(target_os = "windows")]
+        methods.add_method(
+            "lpcio_hwm_write",
+            |_, this, (base, register, value): (u16, u16, u8)| {
+                this.lpcio()?
+                    .hwm_write(base, register, value)
+                    .map_err(to_lua_err)
+            },
+        );
+        #[cfg(target_os = "windows")]
+        methods.add_method("lpcio_write_port", |_, this, (port, value): (u16, u8)| {
+            this.lpcio()?.write_port(port, value).map_err(to_lua_err)
+        });
+        #[cfg(target_os = "windows")]
+        methods.add_method("lpcio_superio_inb", |_, this, register: u8| {
+            this.lpcio()?.superio_inb(register).map_err(to_lua_err)
+        });
+        #[cfg(target_os = "windows")]
+        methods.add_method(
+            "lpcio_superio_outb",
+            |_, this, (register, value): (u8, u8)| {
+                this.lpcio()?
+                    .superio_outb(register, value)
+                    .map_err(to_lua_err)
             },
         );
 

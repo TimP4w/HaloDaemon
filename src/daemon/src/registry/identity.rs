@@ -164,8 +164,11 @@ pub fn identity_from_handle(handle: &DiscoveryHandle<'_>) -> DeviceIdentity {
             identity.location = Some(LocationKey::HidPath(normalize_hid_path(path)));
         }
         DiscoveryHandle::UsbNonHid { vid, pid } => identity.usb = Some((*vid, *pid)),
-        DiscoveryHandle::LogitechSlot { serial, .. } => identity.serial = normalize_serial(*serial),
-        DiscoveryHandle::Smbus { .. } | DiscoveryHandle::ChainAccessory { .. } => {}
+        DiscoveryHandle::Smbus { .. }
+        | DiscoveryHandle::ChainAccessory { .. }
+        | DiscoveryHandle::Command { .. }
+        | DiscoveryHandle::AmdSmn { .. }
+        | DiscoveryHandle::Lpcio { .. } => {}
     }
     identity
 }

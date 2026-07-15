@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-#[cfg(target_os = "windows")]
-pub mod amd;
+// Product drivers live in the plugin repository.  The daemon retains only
+// operating-system primitives and the computer special case.
 pub mod generic;
-pub mod logitech;
-pub mod nvidia;

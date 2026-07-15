@@ -11,6 +11,10 @@ use crate::registry::discovery::DiscoveryHandle;
 use super::super::manifest::{DeviceSpec, PluginManifest};
 use super::super::transport::{CommandExecutor, PluginIo, PluginTransportDescriptor};
 
+fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
+    matches!(handle, DiscoveryHandle::Command { executable } if spec.r#match.command.as_ref().is_some_and(|m| m.command() == *executable))
+}
+
 fn open(
     manifest: &PluginManifest,
     _: &DiscoveryHandle<'_>,
@@ -33,7 +37,7 @@ fn open(
 inventory::submit! {
     PluginTransportDescriptor {
         kind: "command",
-        matches: None,
+        matches: Some(matches),
         open,
         id_suffix: None,
         validate: Some(validate),

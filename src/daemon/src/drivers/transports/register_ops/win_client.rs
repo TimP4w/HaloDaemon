@@ -161,6 +161,14 @@ fn connect_or_spawn(scope: &CapabilityScope) -> Result<AuthorizedPipe> {
                                     + Duration::from_millis(expires_in_ms / 2),
                             });
                         }
+                        // A live broker with a different bootstrap token is
+                        // not still starting up. Retrying this same token 160
+                        // times only floods the log and cannot succeed; the
+                        // coordinator must be restarted (or the stale broker
+                        // stopped) to establish a matching session.
+                        Ok(Response::Error(error)) => {
+                            bail!("halod-broker rejected this daemon's bootstrap token: {error}");
+                        }
                         Ok(other) => log::debug!(
                             "[register_ops] broker authentication attempt {attempt} failed: {other:?}"
                         ),

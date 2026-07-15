@@ -89,6 +89,13 @@ worker and its transport handles. `initialize`, capability calls, `children`,
 `on_event`, and `close` run through that worker; receiver children use opaque
 keys and route through their root rather than creating a multiplexer.
 
+Device packages opt into this with `dynamic_children: true` and an
+`enumerate_controllers()` callback. Each returned record supplies a unique,
+stable `id`; `key` is opaque and is injected into every routed child table as
+`dev.match.key`. This is used for one NVIDIA child per UUID and one Logitech
+child per receiver slot. Children share the root transport but do not recurse
+into further dynamic discovery.
+
 `initialize` supplies device-specific RGB zones/effects, controls, DPI bounds
 and steps, LCD policy, and fan-channel identity. Those values are never static
 package catalog fields.
@@ -106,6 +113,13 @@ The daemon applies memory, instruction, wall-clock, queue, payload, allocation,
 and hardware-write protections. Health is tracked per plugin and optionally per
 device; an equivalent failure notifies once until a successful operation clears
 the episode.
+
+## Built-in boundary
+
+Device-vendor implementations are plugin-owned. AMD SMN, Nuvoton LPCIO,
+NVIDIA SMI, and Logitech HID++ are supplied by the official plugin repository;
+the daemon retains only transport brokers and discovery roots for them. The only
+native devices are the Linux hwmon path and the computer special case.
 
 ## Validation
 

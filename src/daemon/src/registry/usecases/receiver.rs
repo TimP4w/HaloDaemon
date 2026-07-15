@@ -6,6 +6,68 @@ use crate::ipc::broadcast_state;
 use crate::registry::require_device_owned_id;
 use crate::state::AppState;
 
+/// Reconcile the explicitly-owned children of a dynamic controller. Plugin
+/// children use stable hardware ids (for example a receiver serial), so a
+/// string-prefix scan cannot safely identify them.
+pub(crate) async fn reconcile_owned_children(
+    device: &Arc<dyn crate::drivers::Device>,
+    app: &Arc<AppState>,
+) -> bool {
+    let Some(controller) = device.as_controller() else {
+        return false;
+    };
+    let existing = app
+        .device_children
+        .lock()
+        .await
+        .get(device.id())
+        .cloned()
+        .unwrap_or_default();
+    let Ok((added, gone)) = controller.resync_children(&existing).await else {
+        return false;
+    };
+
+    let mut registered = std::collections::HashSet::new();
+    for child in added {
+        let child_id = child.id().to_owned();
+        if crate::registry::usecases::registration::register_device(app, child).await {
+            registered.insert(child_id);
+        }
+    }
+    if !gone.is_empty() {
+        let removed: Vec<Arc<dyn crate::drivers::Device>> = {
+            let mut devices = app.devices.write().await;
+            let mut removed = Vec::new();
+            devices.retain(|candidate| {
+                if gone.iter().any(|child_id| child_id == candidate.id()) {
+                    removed.push(candidate.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            removed
+        };
+        for child in removed {
+            log::info!(
+                "[receiver] Removed {} after receiver slot changed",
+                child.id()
+            );
+            child.close().await;
+        }
+    }
+    let changed = !gone.is_empty() || !registered.is_empty();
+    if changed {
+        let mut owners = app.device_children.lock().await;
+        let children = owners.entry(device.id().to_owned()).or_default();
+        for child_id in gone {
+            children.remove(&child_id);
+        }
+        children.extend(registered);
+    }
+    changed
+}
+
 pub async fn start_pairing(id: String, timeout_secs: u8, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
@@ -36,6 +98,11 @@ pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
         app.devices.write().await.retain(|d| d.id() != removed_id);
         removed.close().await;
         log::info!("[receiver] Removed {removed_id} after unpair");
+    } else {
+        // Lua/plugin controllers cannot return a concrete child `Arc` through
+        // the pairing ABI. Diff their owned children after the hardware write
+        // instead, which removes the slot that the plugin just cleared.
+        reconcile_owned_children(&device, &app).await;
     }
     broadcast_state(&app).await;
     Ok(())

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex as StdMutex, Weak};
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::drivers::transports::Transport;
+use crate::drivers::transports::{Transport, TransportEvent};
 use crate::drivers::Metered;
 use halod_shared::types::WriteRateLimit;
 use halod_shared::types::WriteRateStatus;
@@ -31,12 +32,6 @@ pub(super) fn build_frame(data: &[u8], report_size: Option<usize>) -> Vec<u8> {
         out.extend_from_slice(&payload);
         out
     }
-}
-
-/// Default routing hook: never route to the long handle. Vendor protocols that
-/// split reports across two collections supply their own via `with_routing`.
-fn route_short_only(_report_id: u8) -> bool {
-    false
 }
 
 /// One HID collection: two file descriptors for the same device path.
@@ -116,51 +111,207 @@ async fn write_batch(
     .context("spawn_blocking panicked")?
 }
 
-/// Read one packet from `dev` with `timeout_ms`. Empty vec on timeout.
-async fn read_io(
+const INPUT_QUEUE_CAPACITY: usize = 256;
+const INPUT_REPORT_MAX: usize = 4096;
+
+/// Endpoint label carried by an event report the protocol layer deferred: the
+/// original short/long collection is not recoverable once the bytes crossed the
+/// `read_any` boundary, and the label is informational only.
+const DEFERRED_ENDPOINT: &str = "deferred";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputEndpoint {
+    Primary,
+    Companion,
+}
+
+impl InputEndpoint {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Companion => "companion",
+        }
+    }
+}
+
+struct QueuedReport {
+    endpoint: InputEndpoint,
+    data: Vec<u8>,
+}
+
+/// Host-owned bounded report queue. Reader threads are the only code touching
+/// hidapi input handles; Lua request reads and event drains consume this queue.
+struct HidReaders {
+    reports: StdMutex<VecDeque<QueuedReport>>,
+    /// Reports popped by an endpoint-agnostic `read_any` that the protocol
+    /// layer handed back as not-its-own; delivered ahead of the live queue on
+    /// the next event drain so arrival order is preserved.
+    deferred: StdMutex<VecDeque<Vec<u8>>>,
+    available: Condvar,
+    wake: tokio::sync::watch::Sender<u64>,
+}
+
+impl HidReaders {
+    fn new() -> Self {
+        let (wake, _) = tokio::sync::watch::channel(0);
+        Self {
+            reports: StdMutex::new(VecDeque::with_capacity(INPUT_QUEUE_CAPACITY)),
+            deferred: StdMutex::new(VecDeque::with_capacity(INPUT_QUEUE_CAPACITY)),
+            available: Condvar::new(),
+            wake,
+        }
+    }
+
+    fn bump_wake(&self) {
+        let next = self.wake.borrow().wrapping_add(1);
+        self.wake.send_replace(next);
+    }
+
+    fn push(&self, report: QueuedReport) {
+        let mut reports = self.reports.lock().unwrap();
+        if reports.len() == INPUT_QUEUE_CAPACITY {
+            reports.pop_front();
+            log::debug!("[HidTransport] input queue full; dropping oldest report");
+        }
+        reports.push_back(report);
+        self.available.notify_all();
+        self.bump_wake();
+    }
+
+    /// Set a report aside for the event path (`drain`). Wakes the event watcher.
+    fn defer(&self, data: Vec<u8>) {
+        let mut deferred = self.deferred.lock().unwrap();
+        if deferred.len() == INPUT_QUEUE_CAPACITY {
+            deferred.pop_front();
+            log::debug!("[HidTransport] deferred input queue full; dropping oldest report");
+        }
+        deferred.push_back(data);
+        drop(deferred);
+        self.bump_wake();
+    }
+
+    fn pop(&self, endpoint: InputEndpoint, timeout_ms: i32, size: usize) -> Vec<u8> {
+        self.pop_matching(timeout_ms, size, |r| r.endpoint == endpoint)
+    }
+
+    /// Pop the next report from any endpoint (merged short/long queue), so a
+    /// reply is matched wherever the collection split delivered it.
+    fn pop_any(&self, timeout_ms: i32, size: usize) -> Vec<u8> {
+        self.pop_matching(timeout_ms, size, |_| true)
+    }
+
+    fn pop_matching(
+        &self,
+        timeout_ms: i32,
+        size: usize,
+        accept: impl Fn(&QueuedReport) -> bool,
+    ) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(0) as u64);
+        let mut reports = self.reports.lock().unwrap();
+        loop {
+            if let Some(index) = reports.iter().position(&accept) {
+                let mut data = reports
+                    .remove(index)
+                    .expect("position came from queue")
+                    .data;
+                data.truncate(size);
+                return data;
+            }
+            if timeout_ms <= 0 {
+                return Vec::new();
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Vec::new();
+            }
+            let (next, wait) = self
+                .available
+                .wait_timeout(reports, deadline - now)
+                .unwrap();
+            reports = next;
+            if wait.timed_out() {
+                return Vec::new();
+            }
+        }
+    }
+
+    fn drain(&self, limit: usize) -> Vec<TransportEvent> {
+        let mut events: Vec<TransportEvent> = {
+            let mut deferred = self.deferred.lock().unwrap();
+            let count = deferred.len().min(limit);
+            deferred
+                .drain(..count)
+                .map(|data| TransportEvent {
+                    endpoint: DEFERRED_ENDPOINT,
+                    data,
+                })
+                .collect()
+        };
+        if events.len() >= limit {
+            return events;
+        }
+        let mut reports = self.reports.lock().unwrap();
+        let count = reports.len().min(limit - events.len());
+        events.extend(reports.drain(..count).map(|report| TransportEvent {
+            endpoint: report.endpoint.name(),
+            data: report.data,
+        }));
+        events
+    }
+}
+
+fn spawn_reader(
     dev: Arc<Mutex<hidapi::HidDevice>>,
-    size: usize,
-    timeout_ms: i32,
-) -> Result<Vec<u8>> {
-    tokio::task::spawn_blocking(move || {
-        let guard = dev.blocking_lock();
-        let mut buf = vec![0u8; size];
-        let n = guard
-            .read_timeout(&mut buf, timeout_ms)
-            .map_err(|e| anyhow::anyhow!("HID read error: {}", e))?;
-        buf.truncate(n);
-        Ok(buf)
-    })
-    .await
-    .context("spawn_blocking panicked")?
+    endpoint: InputEndpoint,
+    readers: Weak<HidReaders>,
+) {
+    let _ = std::thread::Builder::new()
+        .name(format!("halod-hid-{}", endpoint.name()))
+        .spawn(move || loop {
+            let Some(readers) = readers.upgrade() else {
+                break;
+            };
+            let mut buf = vec![0; INPUT_REPORT_MAX];
+            let result = dev.blocking_lock().read_timeout(&mut buf, 100);
+            match result {
+                Ok(0) => {}
+                Ok(n) => {
+                    buf.truncate(n);
+                    readers.push(QueuedReport {
+                        endpoint,
+                        data: buf,
+                    });
+                }
+                Err(error) => {
+                    log::debug!("[HidTransport] {} reader stopped: {error}", endpoint.name());
+                    break;
+                }
+            }
+        });
 }
 
 /// The raw HID handles gated behind [`Metered`]: a `short` handle and, for
 /// devices that Windows splits into two collections, an optional `long`
 /// handle.
 struct HidState {
-    short: HidIo,
-    long: Option<HidIo>,
+    primary: HidIo,
+    companion: Option<HidIo>,
 }
 
 /// Async HID transport with optional platform-aware padding.
 ///
-/// Writes route by report ID via the `route_to_long` hook (supplied by the
-/// protocol, see [`Self::with_routing`]); single-handle devices and the
-/// identity hook always use `short`.
+/// The primary and optional companion collections are addressed explicitly;
+/// protocol code decides which one to use.
 #[derive(Clone)]
 pub struct HidTransport {
     io: Metered<HidState>,
+    readers: Arc<HidReaders>,
     report_size: Option<usize>,
     timeout_ms: i32,
     /// When true, writes use `send_feature_report()` (HIDIOCSFEATURE) instead of
     /// `write()` (output report); for devices whose vendor interface only accepts
     /// feature reports.
     use_feature_report: bool,
-    /// Per-device routing: true means a packet with this report ID must use the
-    /// `long` handle. Defaults to [`route_short_only`] (identity / short-only);
-    /// the protocol that opened a dual handle supplies the real predicate.
-    route_to_long: fn(u8) -> bool,
 }
 
 impl HidTransport {
@@ -180,72 +331,69 @@ impl HidTransport {
         limit: Option<WriteRateLimit>,
     ) -> Result<Self> {
         let api = hidapi::HidApi::new().context("failed to create HidApi")?;
-        let short = HidIo::open(&api, path)?;
+        let primary = HidIo::open(&api, path)?;
+        let readers = Arc::new(HidReaders::new());
+        spawn_reader(
+            Arc::clone(&primary.read_dev),
+            InputEndpoint::Primary,
+            Arc::downgrade(&readers),
+        );
         Ok(Self {
-            io: Metered::new(HidState { short, long: None }, limit),
+            io: Metered::new(
+                HidState {
+                    primary,
+                    companion: None,
+                },
+                limit,
+            ),
+            readers,
             report_size,
             timeout_ms,
             use_feature_report,
-            route_to_long: route_short_only,
         })
     }
 
     /// Open a device that Windows splits into two HID collections.
     ///
-    /// `short_path` carries short reports; `long_path` carries long reports. When
-    /// `long_path` is empty or equal to `short_path` — Linux hidraw exposes one
-    /// node carrying both report IDs — only the short handle is opened and the
+    /// `primary_path` is the discovery-matched collection and `companion_path`
+    /// is an optional second collection. When the companion path is empty or
+    /// equal to the primary path, only one handle is opened and the
     /// transport behaves exactly like `open`.
-    ///
-    /// The returned transport routes every packet to `short` until the protocol
-    /// installs a routing predicate via [`Self::with_routing`].
     pub fn open_dual(
-        short_path: &str,
-        long_path: &str,
+        primary_path: &str,
+        companion_path: &str,
         report_size: Option<usize>,
         timeout_ms: i32,
         use_feature_report: bool,
         limit: Option<WriteRateLimit>,
     ) -> Result<Self> {
         let api = hidapi::HidApi::new().context("failed to create HidApi")?;
-        let short = HidIo::open(&api, short_path)?;
-        let long = if long_path.is_empty() || long_path == short_path {
+        let primary = HidIo::open(&api, primary_path)?;
+        let companion = if companion_path.is_empty() || companion_path == primary_path {
             None
         } else {
-            Some(HidIo::open(&api, long_path)?)
+            Some(HidIo::open(&api, companion_path)?)
         };
+        let readers = Arc::new(HidReaders::new());
+        spawn_reader(
+            Arc::clone(&primary.read_dev),
+            InputEndpoint::Primary,
+            Arc::downgrade(&readers),
+        );
+        if let Some(companion) = &companion {
+            spawn_reader(
+                Arc::clone(&companion.read_dev),
+                InputEndpoint::Companion,
+                Arc::downgrade(&readers),
+            );
+        }
         Ok(Self {
-            io: Metered::new(HidState { short, long }, limit),
+            io: Metered::new(HidState { primary, companion }, limit),
+            readers,
             report_size,
             timeout_ms,
             use_feature_report,
-            route_to_long: route_short_only,
         })
-    }
-
-    /// Install the per-device report-ID routing predicate (true → long handle).
-    /// Only takes effect when a long handle is open; routes to `short` otherwise.
-    #[must_use]
-    pub fn with_routing(mut self, route_to_long: fn(u8) -> bool) -> Self {
-        self.route_to_long = route_to_long;
-        self
-    }
-
-    /// True when `report_id` must use the long handle (and one is open).
-    fn routes_long(&self, state: &HidState, report_id: u8) -> bool {
-        state.long.is_some() && (self.route_to_long)(report_id)
-    }
-
-    /// Pick the handle a packet with `report_id` must use.
-    fn pick_io<'a>(&self, state: &'a HidState, report_id: u8) -> &'a HidIo {
-        if self.routes_long(state, report_id) {
-            state
-                .long
-                .as_ref()
-                .expect("routes_long guarantees a long handle")
-        } else {
-            &state.short
-        }
     }
 
     fn frame(&self, data: &[u8]) -> Vec<u8> {
@@ -258,8 +406,7 @@ impl Transport for HidTransport {
     async fn write(&self, data: &[u8]) -> Result<()> {
         let framed = self.frame(data);
         let state = self.io.write_access(framed.len()).await?;
-        let report_id = framed.first().copied().unwrap_or(0);
-        let dev = Arc::clone(&self.pick_io(state, report_id).write_dev);
+        let dev = Arc::clone(&state.primary.write_dev);
         let use_feature_report = self.use_feature_report;
         tokio::task::spawn_blocking(move || {
             write_one(&dev.blocking_lock(), &framed, use_feature_report)
@@ -269,74 +416,95 @@ impl Transport for HidTransport {
     }
 
     async fn read(&self, size: usize) -> Result<Vec<u8>> {
-        read_io(
-            Arc::clone(&self.io.read_access().short.read_dev),
-            size,
-            self.timeout_ms,
-        )
-        .await
+        let readers = self.readers.clone();
+        let timeout_ms = self.timeout_ms;
+        tokio::task::spawn_blocking(move || readers.pop(InputEndpoint::Primary, timeout_ms, size))
+            .await
+            .context("spawn_blocking panicked")
     }
 
     async fn write_then_read(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
         let framed = self.frame(data);
         let state = self.io.write_access(framed.len()).await?;
-        let report_id = framed.first().copied().unwrap_or(0);
-        let timeout_ms = self.timeout_ms;
         let use_feature_report = self.use_feature_report;
-        let io = self.pick_io(state, report_id);
-        let write_dev = Arc::clone(&io.write_dev);
-        let read_dev = Arc::clone(&io.read_dev);
+        let write_dev = Arc::clone(&state.primary.write_dev);
         tokio::task::spawn_blocking(move || {
             let wguard = write_dev.blocking_lock();
-            write_one(&wguard, &framed, use_feature_report)?;
-            drop(wguard);
-            let rguard = read_dev.blocking_lock();
-            let mut buf = vec![0u8; size];
-            let n = rguard
-                .read_timeout(&mut buf, timeout_ms)
-                .map_err(|e| anyhow::anyhow!("HID read error: {}", e))?;
-            buf.truncate(n);
-            Ok(buf)
+            write_one(&wguard, &framed, use_feature_report)
+        })
+        .await
+        .context("spawn_blocking panicked")??;
+        self.read(size).await
+    }
+
+    async fn write_companion(&self, data: &[u8]) -> Result<()> {
+        let framed = self.frame(data);
+        let state = self.io.write_access(framed.len()).await?;
+        let companion = state
+            .companion
+            .as_ref()
+            .context("companion HID collection is not available")?;
+        let dev = Arc::clone(&companion.write_dev);
+        let use_feature_report = self.use_feature_report;
+        tokio::task::spawn_blocking(move || {
+            write_one(&dev.blocking_lock(), &framed, use_feature_report)
         })
         .await
         .context("spawn_blocking panicked")?
+    }
+
+    async fn read_companion(&self, size: usize) -> Result<Vec<u8>> {
+        if self.io.read_access().companion.is_none() {
+            anyhow::bail!("companion HID collection is not available");
+        }
+        let readers = self.readers.clone();
+        let timeout_ms = self.timeout_ms;
+        tokio::task::spawn_blocking(move || readers.pop(InputEndpoint::Companion, timeout_ms, size))
+            .await
+            .context("spawn_blocking panicked")
+    }
+
+    async fn write_then_read_companion(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
+        let framed = self.frame(data);
+        let state = self.io.write_access(framed.len()).await?;
+        let companion = state
+            .companion
+            .as_ref()
+            .context("companion HID collection is not available")?;
+        let write_dev = Arc::clone(&companion.write_dev);
+        let use_feature_report = self.use_feature_report;
+        tokio::task::spawn_blocking(move || {
+            let wguard = write_dev.blocking_lock();
+            write_one(&wguard, &framed, use_feature_report)
+        })
+        .await
+        .context("spawn_blocking panicked")??;
+        self.read_companion(size).await
     }
 
     async fn write_many(&self, packets: &[Vec<u8>]) -> Result<()> {
         let total_len: usize = packets.iter().map(Vec::len).sum();
         let state = self.io.write_access(total_len).await?;
 
-        // Partition framed packets by destination handle, preserving per-handle order.
-        let mut short_pkts: Vec<Vec<u8>> = Vec::new();
-        let mut long_pkts: Vec<Vec<u8>> = Vec::new();
-        for p in packets {
-            let framed = self.frame(p);
-            let report_id = framed.first().copied().unwrap_or(0);
-            if self.routes_long(state, report_id) {
-                long_pkts.push(framed);
-            } else {
-                short_pkts.push(framed);
-            }
-        }
-        if !short_pkts.is_empty() {
-            write_batch(
-                Arc::clone(&state.short.write_dev),
-                short_pkts,
-                self.use_feature_report,
-            )
-            .await?;
-        }
-        if !long_pkts.is_empty() {
-            if let Some(long) = &state.long {
-                write_batch(
-                    Arc::clone(&long.write_dev),
-                    long_pkts,
-                    self.use_feature_report,
-                )
-                .await?;
-            }
-        }
-        Ok(())
+        let framed = packets.iter().map(|packet| self.frame(packet)).collect();
+        write_batch(
+            Arc::clone(&state.primary.write_dev),
+            framed,
+            self.use_feature_report,
+        )
+        .await
+    }
+
+    async fn write_many_companion(&self, packets: &[Vec<u8>]) -> Result<()> {
+        let total_len: usize = packets.iter().map(Vec::len).sum();
+        let state = self.io.write_access(total_len).await?;
+        let companion = state
+            .companion
+            .as_ref()
+            .context("companion HID collection is not available")?;
+        let write_dev = Arc::clone(&companion.write_dev);
+        let framed = packets.iter().map(|packet| self.frame(packet)).collect();
+        write_batch(write_dev, framed, self.use_feature_report).await
     }
 
     /// Send a feature report and read back the response via `get_feature_report`.
@@ -352,7 +520,7 @@ impl Transport for HidTransport {
     async fn feature_exchange(&self, data: &[u8], response_size: usize) -> Result<Vec<u8>> {
         let framed = self.frame(data);
         let state = self.io.write_access(framed.len()).await?;
-        let dev = Arc::clone(&state.short.write_dev);
+        let dev = Arc::clone(&state.primary.write_dev);
         timeout(Duration::from_millis(500), async {
             tokio::task::spawn_blocking(move || {
                 let guard = dev.blocking_lock();
@@ -376,22 +544,32 @@ impl Transport for HidTransport {
     }
 
     async fn read_nonblocking(&self, size: usize) -> Result<Vec<u8>> {
-        read_io(Arc::clone(&self.io.read_access().short.read_dev), size, 0).await
+        Ok(self.readers.pop(InputEndpoint::Primary, 0, size))
     }
 
-    /// Read one packet from the long-report handle.
-    ///
-    /// Returns an empty vec when no long handle is open (single-handle / Linux);
-    /// callers must guard with `has_long_handle` to avoid a tight spin loop.
-    async fn read_long(&self, size: usize) -> Result<Vec<u8>> {
-        match &self.io.read_access().long {
-            Some(long) => read_io(Arc::clone(&long.read_dev), size, self.timeout_ms).await,
-            None => Ok(Vec::new()),
-        }
+    async fn read_any(&self, size: usize) -> Result<Vec<u8>> {
+        let readers = self.readers.clone();
+        let timeout_ms = self.timeout_ms;
+        tokio::task::spawn_blocking(move || readers.pop_any(timeout_ms, size))
+            .await
+            .context("spawn_blocking panicked")
     }
 
-    fn has_long_handle(&self) -> bool {
-        self.io.read_access().long.is_some()
+    async fn defer_event(&self, data: &[u8]) -> Result<()> {
+        self.readers.defer(data.to_vec());
+        Ok(())
+    }
+
+    fn has_companion(&self) -> bool {
+        self.io.read_access().companion.is_some()
+    }
+
+    fn event_receiver(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.readers.wake.subscribe())
+    }
+
+    async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+        Ok(self.readers.drain(limit))
     }
 
     fn rate_status(&self) -> WriteRateStatus {
@@ -407,32 +585,96 @@ impl Transport for HidTransport {
 mod tests {
     use super::*;
 
-    /// Logitech HID++ long-report report ID — the value a device would pass to
-    /// `with_routing`. Defined here only to exercise the routing hook.
-    const HIDPP_LONG_REPORT_ID: u8 = 0x11;
-    fn route_hidpp_long(report_id: u8) -> bool {
-        report_id == HIDPP_LONG_REPORT_ID
+    #[test]
+    fn input_queue_is_bounded_and_drops_the_oldest_report() {
+        let readers = HidReaders::new();
+        for value in 0..=INPUT_QUEUE_CAPACITY {
+            readers.push(QueuedReport {
+                endpoint: InputEndpoint::Primary,
+                data: vec![value as u8],
+            });
+        }
+        let drained = readers.drain(INPUT_QUEUE_CAPACITY + 1);
+        assert_eq!(drained.len(), INPUT_QUEUE_CAPACITY);
+        assert_eq!(drained[0].data, vec![1]);
+    }
+
+    #[test]
+    fn endpoint_reads_preserve_other_endpoint_reports_for_event_drain() {
+        let readers = HidReaders::new();
+        readers.push(QueuedReport {
+            endpoint: InputEndpoint::Companion,
+            data: vec![0x11],
+        });
+        readers.push(QueuedReport {
+            endpoint: InputEndpoint::Primary,
+            data: vec![0x10],
+        });
+        assert_eq!(readers.pop(InputEndpoint::Primary, 0, 64), vec![0x10]);
+        let remaining = readers.drain(8);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].endpoint, "companion");
+        assert_eq!(remaining[0].data, vec![0x11]);
+    }
+
+    // `pop_any` merges both endpoints so a reply is matched wherever the
+    // short/long collection split delivered it, in arrival (FIFO) order.
+    #[test]
+    fn pop_any_returns_next_report_from_either_endpoint_in_order() {
+        let readers = HidReaders::new();
+        readers.push(QueuedReport {
+            endpoint: InputEndpoint::Companion,
+            data: vec![0x11, 0xaa],
+        });
+        readers.push(QueuedReport {
+            endpoint: InputEndpoint::Primary,
+            data: vec![0x10, 0xbb],
+        });
+        assert_eq!(readers.pop_any(0, 64), vec![0x11, 0xaa]);
+        assert_eq!(readers.pop_any(0, 64), vec![0x10, 0xbb]);
+        assert!(readers.pop_any(0, 64).is_empty());
+    }
+
+    #[test]
+    fn pop_any_truncates_to_size() {
+        let readers = HidReaders::new();
+        readers.push(QueuedReport {
+            endpoint: InputEndpoint::Primary,
+            data: vec![1, 2, 3, 4],
+        });
+        assert_eq!(readers.pop_any(0, 2), vec![1, 2]);
+    }
+
+    // A deferred report is delivered ahead of newer live reports so arrival
+    // order is preserved, and it must never come back through `pop_any`.
+    #[test]
+    fn deferred_reports_drain_before_live_and_not_via_pop_any() {
+        let readers = HidReaders::new();
+        readers.defer(vec![0xde, 0xad]);
+        readers.push(QueuedReport {
+            endpoint: InputEndpoint::Primary,
+            data: vec![0x10, 0x01],
+        });
+        // A deferred packet is for the event path only, never a request read.
+        assert_eq!(readers.pop_any(0, 64), vec![0x10, 0x01]);
+        let drained = readers.drain(8);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].endpoint, DEFERRED_ENDPOINT);
+        assert_eq!(drained[0].data, vec![0xde, 0xad]);
+    }
+
+    #[test]
+    fn defer_bumps_the_event_wake_watch() {
+        let readers = HidReaders::new();
+        let mut rx = readers.wake.subscribe();
+        assert!(!rx.has_changed().unwrap());
+        readers.defer(vec![0x01]);
+        assert!(rx.has_changed().unwrap());
     }
 
     #[test]
     fn frame_raw_passthrough() {
         assert_eq!(build_frame(&[0x10, 0x02], None), vec![0x10, 0x02]);
-    }
-
-    #[test]
-    fn default_routing_is_short_only() {
-        // The identity default never routes to long, regardless of report ID.
-        assert!(!route_short_only(0x11));
-        assert!(!route_short_only(0x10));
-        assert!(!route_short_only(0x00));
-    }
-
-    #[test]
-    fn installed_routing_hook_selects_long_reports() {
-        // A protocol-supplied predicate routes its long report ID and nothing else.
-        assert!(route_hidpp_long(0x11));
-        assert!(!route_hidpp_long(0x10));
-        assert!(!route_hidpp_long(0x00));
     }
 
     #[cfg(target_os = "linux")]

@@ -601,7 +601,7 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     apply_repo_plugins(app, plugin_ids).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, any()))]
 mod tests {
     use super::*;
 

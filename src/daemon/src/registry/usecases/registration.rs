@@ -244,8 +244,20 @@ pub async fn register_device_and_children(app: &Arc<AppState>, device: Arc<dyn D
         return true;
     }
     if let Some(ctrl) = device.as_controller() {
+        let mut child_ids = std::collections::HashSet::new();
         for child in ctrl.discover_children().await {
-            register_device(app, child).await;
+            let child_id = child.id().to_owned();
+            if register_device(app, child).await {
+                child_ids.insert(child_id);
+            }
+        }
+        if !child_ids.is_empty() {
+            app.device_children
+                .lock()
+                .await
+                .entry(device.id().to_owned())
+                .or_default()
+                .extend(child_ids);
         }
     }
     true
@@ -270,11 +282,25 @@ fn is_registered_child(id: &str, root_id: &str) -> bool {
 /// scoped reload of one integration or plugin. Returns the removed ids so the
 /// caller can prune their (shared) HID-tracking entry.
 pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) -> Vec<String> {
+    let explicit_children = {
+        let mut owners = app.device_children.lock().await;
+        let owned = owners.remove(root_id).unwrap_or_default();
+        for children in owners.values_mut() {
+            children.remove(root_id);
+            for id in &owned {
+                children.remove(id);
+            }
+        }
+        owned
+    };
     let removed: Vec<Arc<dyn Device>> = {
         let mut devices = app.devices.write().await;
         let mut removed = Vec::new();
         devices.retain(|d| {
-            if d.id() == root_id || is_registered_child(d.id(), root_id) {
+            if d.id() == root_id
+                || explicit_children.contains(d.id())
+                || is_registered_child(d.id(), root_id)
+            {
                 removed.push(d.clone());
                 false
             } else {

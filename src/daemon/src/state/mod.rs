@@ -32,6 +32,11 @@ pub struct AppState {
     /// transport scanners run concurrently, so checking only `devices` leaves
     /// a window where the same physical device can be initialized twice.
     pub device_registrations: Mutex<std::collections::HashSet<String>>,
+    /// Dynamically discovered child ids owned by each controller. Stable child
+    /// ids need not share their root's prefix, so prefix matching alone cannot
+    /// remove them during a plugin reload.
+    pub device_children:
+        Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>,
 
     // --- Domains ---
     pub discovery: Mutex<DiscoveryStatus>,
@@ -83,6 +88,7 @@ impl AppState {
             config: RwLock::new(cfg),
             devices: RwLock::new(Vec::new()),
             device_registrations: Mutex::new(std::collections::HashSet::new()),
+            device_children: Mutex::new(std::collections::HashMap::new()),
             discovery: Mutex::new(DiscoveryStatus::default()),
             hid: HidTracking::new(),
             lighting: LightingState::default(),

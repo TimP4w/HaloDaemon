@@ -75,7 +75,7 @@ A protocol module sits on top of a transport and turns intent ("set zone 2 to
 red", "read fan RPM") into the exact byte sequences the chip expects, and parses
 replies back. Protocols hold a transport (often `Mutex<Option<T>>` so it can be
 opened/closed) and expose typed methods. See the
-[HID++ protocol implementation](../src/daemon/src/drivers/vendors/logitech/protocols/hidpp/mod.rs)
+[Logitech HID++ plugin](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/logitech)
 for an example. When you port a wire format from third-party code, add the
 SPDX attribution header (`CLAUDE.md` → *Licensing & attribution*) and document the
 format in [docs/protocols/](protocols/).
@@ -150,7 +150,8 @@ script) from the local plugins directory and every registered git-repo source, a
 `make_device()` consults `plugins::match_handle()` *before* the native descriptors —
 so a plugin **shadows** a native driver for the same hardware. A single generic
 `LuaDevice` implements the `Device` + capability traits and forwards each call into a
-per-device Lua worker thread (which owns the VM + transport). Plugins expose only
+per-physical-root Lua worker thread (which owns the VM + transport). Dynamic children
+use persistent routed `dev` tables on that same serialized worker. Plugins expose only
 existing capability *kinds*; the capability taxonomy and engines stay native and
 type-safe. See [docs/plugins.md](plugins.md) for the authoring guide.
 

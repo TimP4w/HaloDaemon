@@ -24,6 +24,7 @@ pub(crate) mod integration_monitor;
 pub(crate) mod integration_scan;
 mod lua_worker;
 mod manifest;
+mod migration_scan;
 #[cfg(feature = "plugin-test")]
 pub mod plugin_test;
 pub mod repo;
@@ -1350,6 +1351,12 @@ fn device_id(
     spec: &manifest::DeviceSpec,
     handle: &DiscoveryHandle<'_>,
 ) -> String {
+    // SMN describes the single physical CPU package, not one bus endpoint.
+    // Its native predecessor used a fixed stable identity; retain an explicit
+    // plugin identity verbatim instead of adding CPUID-derived churn.
+    if matches!(handle, DiscoveryHandle::AmdSmn { .. }) && manifest.identity.id.is_some() {
+        return manifest.id_prefix().to_owned();
+    }
     let suffix = transport::descriptor_for(&spec.transport)
         .and_then(|d| d.id_suffix)
         .map(|f| f(handle))
@@ -1440,6 +1447,26 @@ impl Registry {
                 _ => None,
             },
             index: None,
+            key: None,
+            name: None,
+            extra: match handle {
+                DiscoveryHandle::AmdSmn { family, model } => HashMap::from([
+                    ("family".to_owned(), u64::from(*family)),
+                    ("model".to_owned(), u64::from(*model)),
+                ]),
+                DiscoveryHandle::Lpcio {
+                    slot,
+                    chip_id,
+                    revision,
+                    hwm_base,
+                } => HashMap::from([
+                    ("slot".to_owned(), u64::from(*slot)),
+                    ("chip_id".to_owned(), u64::from(*chip_id)),
+                    ("revision".to_owned(), u64::from(*revision)),
+                    ("hwm_base".to_owned(), u64::from(*hwm_base)),
+                ]),
+                _ => HashMap::new(),
+            },
         };
 
         // `new_cyclic` so the device can hand its children a `FanHub` back-reference

@@ -48,6 +48,7 @@ pub fn apply(
     })?;
     globals.set("log", logger)?;
     bytebuf::register(lua)?;
+    inject_platform(lua)?;
     register_sleep(lua)?;
     super::image_api::register(lua)?;
     inject_config(lua, config)?;
@@ -178,7 +179,23 @@ fn register_sleep(lua: &Lua) -> mlua::Result<()> {
         }
         Ok(())
     })?;
-    halod.set("sleep_ms", sleep)
+    halod.set("sleep_ms", sleep)?;
+    // A duration-only clock is safe to expose to every package: unlike wall
+    // time it conveys no host date/time information and is useful for polling
+    // coalescing without requesting the `os` permission.
+    let origin = std::sync::OnceLock::<std::time::Instant>::new();
+    let monotonic_ms = lua.create_function(move |_, ()| {
+        Ok(origin
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64)
+    })?;
+    halod.set("monotonic_ms", monotonic_ms)
+}
+
+fn inject_platform(lua: &Lua) -> mlua::Result<()> {
+    let halod: Table = lua.globals().get("halod")?;
+    halod.set("platform", std::env::consts::OS)
 }
 
 /// Populate `halod.config` with this plugin's resolved values. Read-only in
@@ -298,6 +315,25 @@ mod tests {
         lua.load("assert(type(halod.config) == 'table')")
             .exec()
             .unwrap();
+    }
+
+    #[test]
+    fn monotonic_clock_is_available_without_os_permission() {
+        let lua = Lua::new();
+        apply(&lua, &[], &HashMap::new()).unwrap();
+        let first: u64 = lua.load("return halod.monotonic_ms()").eval().unwrap();
+        let second: u64 = lua.load("return halod.monotonic_ms()").eval().unwrap();
+        assert!(second >= first);
+        let os: mlua::Value = lua.load("return os").eval().unwrap();
+        assert!(os.is_nil());
+    }
+
+    #[test]
+    fn platform_is_available_without_os_permission() {
+        let lua = Lua::new();
+        apply(&lua, &[], &HashMap::new()).unwrap();
+        let platform: String = lua.load("return halod.platform").eval().unwrap();
+        assert_eq!(platform, std::env::consts::OS);
     }
 
     #[test]

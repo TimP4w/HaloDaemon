@@ -564,7 +564,10 @@ mod tests {
     fn plugins_needing_action_counts_new_permission_only_after_prior_approval() {
         let mut p = plugin("permission", true);
         p.enabled = false;
-        p.accepted_authority = Some(halod_shared::types::PluginAuthority { permissions: vec![halod_shared::types::Permission::Os], transport_scopes: vec![] });
+        p.accepted_authority = Some(halod_shared::types::PluginAuthority {
+            permissions: vec![halod_shared::types::Permission::Os],
+            transport_scopes: vec![],
+        });
         p.declared_permissions = vec![
             halod_shared::types::Permission::Os,
             halod_shared::types::Permission::Network,

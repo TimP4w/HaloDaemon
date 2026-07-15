@@ -36,6 +36,17 @@ pub struct HidConfig {
     pub timeout_ms: i32,
     #[serde(default)]
     pub feature_report: bool,
+    /// Optional second HID collection belonging to the same physical device.
+    /// Reports whose IDs are listed here are written through that collection;
+    /// reads from both collections are exposed as one logical HID stream.
+    #[serde(default)]
+    pub companion: Option<HidCompanionConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HidCompanionConfig {
+    pub usage_page: u16,
+    pub usage: u16,
 }
 
 impl Default for HidConfig {
@@ -44,6 +55,7 @@ impl Default for HidConfig {
             report_size: default_report_size(),
             timeout_ms: default_timeout_ms(),
             feature_report: false,
+            companion: None,
         }
     }
 }
@@ -122,6 +134,18 @@ pub struct CommandConfig {
     pub commands: Vec<String>,
 }
 
+/// AMD SMN is deliberately read-only.  Keeping an explicit transport section
+/// makes the authority visible in the manifest just like the other privileged
+/// transports, while leaving room for future, narrowly-scoped options.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AmdSmnConfig {}
+
+/// LPCIO exposes typed PawnIO operations only; plugins never receive a raw
+/// driver handle.  The empty configuration is still significant: it records
+/// that the package asks to use this privileged transport.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LpcioConfig {}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransportsConfig {
     #[serde(default)]
@@ -132,6 +156,10 @@ pub struct TransportsConfig {
     pub usb_control: Option<UsbControlConfig>,
     #[serde(default)]
     pub command: Option<CommandConfig>,
+    #[serde(default)]
+    pub amd_smn: Option<AmdSmnConfig>,
+    #[serde(default)]
+    pub lpcio: Option<LpcioConfig>,
 }
 
 impl TransportsConfig {
@@ -140,6 +168,8 @@ impl TransportsConfig {
             && self.tcp.is_none()
             && self.usb_control.is_none()
             && self.command.is_none()
+            && self.amd_smn.is_none()
+            && self.lpcio.is_none()
     }
 }
 
@@ -313,9 +343,9 @@ pub struct ConnectionManifest {}
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EqualizerManifest {}
 
-/// State comes from the `pairing_status` callback. Unpairing a slot does not
-/// (yet) remove a live child `Device` from the registry — wiring paired slots
-/// to owned children is a follow-up once a plugin needs it.
+/// State comes from the `pairing_status` callback. Dynamic-controller owners
+/// are reconciled after an unpair operation, so a departed paired slot is
+/// removed from the live device registry as well as from the receiver.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PairingManifest {}
 
@@ -591,7 +621,7 @@ pub enum CommandMatch {
 }
 
 impl CommandMatch {
-    fn command(&self) -> &str {
+    pub(crate) fn command(&self) -> &str {
         match self {
             Self::Name(command) | Self::Detail { command } => command,
         }
@@ -648,6 +678,11 @@ pub struct HidMatch {
     pub usage: Option<u16>,
     #[serde(default)]
     pub interface: Option<i32>,
+    /// Per-device HID write ceiling.  This belongs beside the HID identity so
+    /// packages can preserve protocol-specific pacing (for example G560's
+    /// 1500 B/s vendor-report limit) without granting a global transport rate.
+    #[serde(default)]
+    pub max_bytes_per_sec: Option<u32>,
 }
 
 impl DeviceMatch {
@@ -763,10 +798,17 @@ pub struct PluginManifest {
     pub effect_thumbnails: Vec<EffectAssetRef>,
     #[serde(rename = "type", default)]
     pub plugin_type: PluginKind,
+    /// Opt in to runtime child devices returned by `enumerate_controllers`.
+    #[serde(default)]
+    pub dynamic_children: bool,
     #[serde(default)]
     pub effects: Vec<EffectManifest>,
     #[serde(default)]
     pub transports: TransportsConfig,
+    // Internal descriptor slots used by inline fixtures and by
+    // `child_manifest_for` after Lua enumerates a runtime child. Directory
+    // `plugin.yaml` parsing rejects every corresponding top-level key in
+    // `reject_legacy_manifest_shape`; these are not accepted catalog fields.
     #[serde(default)]
     pub rgb: Option<RgbManifest>,
     #[serde(default)]
@@ -928,9 +970,9 @@ impl PluginManifest {
     /// True when the plugin declares any capability that needs a live transport
     /// + worker. Device-only plugins skip the worker.
     pub fn needs_worker(&self) -> bool {
-        // An integration plugin declares no capability section (it isn't a
-        // capability-bearing device itself), but its root always needs a live
-        // transport + Lua worker for `enumerate_controllers`/frame writes.
+        // An integration root is not itself capability-bearing, but its
+        // manifest still advertises the maximum union its children may expose.
+        // It always needs a worker for enumeration and routed callbacks.
         self.plugin_type == PluginKind::Integration || !self.capabilities.is_empty()
     }
 
@@ -1313,10 +1355,26 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
             if !manifest.devices.is_empty() {
                 bail!("integration plugin must not declare devices");
             }
-            if !manifest.capability_labels().is_empty() {
+            if manifest.rgb.is_some()
+                || manifest.fan.is_some()
+                || manifest.sensor.is_some()
+                || manifest.lcd.is_some()
+                || manifest.dpi.is_some()
+                || manifest.choice.is_some()
+                || manifest.range.is_some()
+                || manifest.boolean.is_some()
+                || manifest.action.is_some()
+                || manifest.battery.is_some()
+                || manifest.connection.is_some()
+                || manifest.equalizer.is_some()
+                || manifest.pairing.is_some()
+                || manifest.onboard_profiles.is_some()
+                || manifest.key_remap.is_some()
+                || manifest.chain.is_some()
+            {
                 bail!(
-                    "integration plugin must not declare capability sections; capabilities are \
-                     reported per controller by enumerate_controllers"
+                    "integration plugin must not declare legacy static capability sections; \
+                     advertise the capability union with 'capabilities' and report descriptors at runtime"
                 );
             }
         }
@@ -1327,6 +1385,13 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     // integration with an empty permission list and auto-activate silently.
     if manifest.transports.tcp.is_some() && !manifest.permissions.contains(&Permission::Network) {
         bail!("a tcp transport requires the 'network' permission to be declared");
+    }
+    if manifest.transports.amd_smn.is_some() && !manifest.permissions.contains(&Permission::AmdSmn)
+    {
+        bail!("an amd_smn transport requires the 'amd_smn' permission to be declared");
+    }
+    if manifest.transports.lpcio.is_some() && !manifest.permissions.contains(&Permission::Lpcio) {
+        bail!("an lpcio transport requires the 'lpcio' permission to be declared");
     }
     validate_component("plugin id", &manifest.plugin_id)?;
     Ok(())
@@ -1355,6 +1420,7 @@ fn normalize_device_matches(manifest: &mut PluginManifest) -> Result<()> {
             device.usage_page = hid.usage_page;
             device.usage = hid.usage;
             device.interface = hid.interface;
+            device.max_bytes_per_sec = hid.max_bytes_per_sec;
             device.generic_hid = hid.any;
         } else if let Some(usb_control) = &device.r#match.usb_control {
             if usb_control.vid == 0 || usb_control.pid == 0 {
@@ -1389,7 +1455,7 @@ fn normalize_device_matches(manifest: &mut PluginManifest) -> Result<()> {
             }
             device.transport = "amd_smn".to_owned();
         } else if let Some(lpcio) = &device.r#match.lpcio {
-            if lpcio.any == lpcio.chip_ids.is_empty() {
+            if lpcio.any == !lpcio.chip_ids.is_empty() {
                 bail!("lpcio match must declare chip_ids or explicit `any: true`");
             }
             device.transport = "lpcio".to_owned();
@@ -1432,6 +1498,7 @@ const SUPPORTED_CAPABILITIES: &[&str] = &[
     "dpi",
     "report_rate",
     "key_remap",
+    "keyboard_layout",
     "onboard_profiles",
     "lcd",
     "equalizer",
@@ -2598,9 +2665,21 @@ mod tests {
         let err = parse_manifest(src, Path::new("bad.lua")).unwrap_err();
         assert!(
             err.to_string()
-                .contains("integration plugin must not declare capability sections"),
+                .contains("integration plugin must not declare legacy static capability sections"),
             "expected capability-section rejection, got: {err}"
         );
+    }
+
+    #[test]
+    fn integration_plugin_may_advertise_child_capability_union() {
+        let src = r#"return {
+            type = "integration",
+            capabilities = { "rgb", "sensors" },
+            transports = { tcp = {} },
+            permissions = { "network" },
+        }"#;
+        let manifest = parse_manifest(src, Path::new("ok.lua")).unwrap();
+        assert_eq!(manifest.capabilities, vec!["rgb", "sensors"]);
     }
 
     #[test]

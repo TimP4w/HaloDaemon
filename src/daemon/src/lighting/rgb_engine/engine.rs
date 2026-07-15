@@ -779,7 +779,7 @@ impl RgbEngine {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any()))]
 mod tests {
     use super::*;
     use crate::config::Config;

@@ -89,19 +89,25 @@ pub enum DiscoveryHandle<'a> {
         addr: u8,
         bus_kind: crate::drivers::transports::smbus::SmbusBusKind,
     },
+    Command {
+        executable: &'a str,
+    },
+    AmdSmn {
+        family: u8,
+        model: u8,
+    },
+    Lpcio {
+        slot: u8,
+        chip_id: u16,
+        revision: u8,
+        hwm_base: u16,
+    },
     #[allow(dead_code)] // plugin discovery protocol variant; no built-in currently emits it
     ChainAccessory {
         channel_id: u8,
         accessory_id: u8,
         chain_hub: Arc<dyn crate::drivers::chain::ChainHub>,
         fan_hub: Arc<dyn crate::drivers::FanHub>,
-    },
-    // Logitech wireless device
-    LogitechSlot {
-        devnum: u8,
-        wpid: u16,
-        serial: Option<&'a str>,
-        messenger: Arc<dyn crate::drivers::vendors::logitech::protocols::hidpp::HidppChannel>,
     },
 }
 
@@ -269,7 +275,7 @@ pub async fn discover_handle_replacing(
             .await;
         }
     }
-    crate::registry::usecases::registration::register_device(app, device).await;
+    crate::registry::usecases::registration::register_device_and_children(app, device).await;
 }
 
 /// Convenience: find the matching descriptor, construct, and register.
@@ -290,7 +296,7 @@ pub async fn discover_handle(app: &Arc<crate::state::AppState>, handle: Discover
         return;
     }
     if let Some(device) = app.registry.make_device(app, handle) {
-        crate::registry::usecases::registration::register_device(app, device).await;
+        crate::registry::usecases::registration::register_device_and_children(app, device).await;
     }
 }
 

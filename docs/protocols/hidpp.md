@@ -24,7 +24,7 @@ Header byte layout (both generations):
 
 ```
 Byte 0: Report ID      0x10 short / 0x11 long
-Byte 1: Device number  0xFF = receiver itself; 1–6 = paired/relayed device; 1 = wired direct
+Byte 1: Device number  0xFF = receiver itself or wired direct; 1–6 = paired/relayed device
 Byte 2: Sub-ID         1.0: register-access sub-ID (0x80/0x81/0x82/0x83)
                        2.0: feature index (from ROOT lookup)
 Byte 3: Address byte   1.0: register address low byte
@@ -32,7 +32,7 @@ Byte 3: Address byte   1.0: register address low byte
 Byte 4..N: params, zero-padded to frame length (build_packet truncates to fit)
 ```
 
-**Device-number byte.** `RECEIVER_DEVNUM = 0xFF` addresses the receiver itself for HID++ 1.0 register access. Relayed/wireless devices use `1..=6`; a wired device is addressed at device number `1`.
+**Device-number byte.** `RECEIVER_DEVNUM = 0xFF` addresses the receiver itself for HID++ 1.0 register access. Relayed/wireless devices use `1..=6`; a directly wired device is also addressed at `0xFF` (it is its own transport root, not slot 1).
 
 The meaning of bytes 2–3 differs per generation — see [HID++ 1.0](hidpp1.md) (sub-ID encodes direction + register bit 9) and [HID++ 2.0](hidpp2.md) (feature index + function|software-id).
 
@@ -41,6 +41,8 @@ The meaning of bytes 2–3 differs per generation — see [HID++ 1.0](hidpp1.md)
 ## Transport: short/long collections
 
 On Windows the HID++ interface splits into a short-report node (usage 1) and a long-report node (usage 2) on usage page `0xFF00`; on Linux a single hidraw node carries both with usage 0. `collection::select_hidpp_paths` resolves both paths and `HidppMessenger::start_listener` spawns a second reader task for the long handle when present. Both reader tasks route through the same `dispatch_packet`.
+
+**Replies land on the collection matching the *reply's* report ID, not the request's.** A short (`0x10`) request whose reply is a long (`0x11`) report — the norm for HID++ 2.0 feature calls and for the `0x2B5` receiver register — arrives on the long node even though the request went out short. The host must therefore read *both* collections and match by `(devnum, sub_id)`; reading only the collection a request was written to loses the reply. The Lua plugin runtime gets the same guarantee from the merged `read_any` input queue (see [HID transport](../transports/hid.md)).
 
 `hidpp::open_wired(vid, pid, interface, path, serial, report)` encapsulates this: it resolves the collection paths, opens a dual-handle transport (or, for composite devices that declare no short report, a single long-only handle), and returns a ready `HidppMessenger`. Both wired devices and the receiver use it; the device layer never touches collection resolution or routing.
 

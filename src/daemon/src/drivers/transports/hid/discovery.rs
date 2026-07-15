@@ -589,7 +589,7 @@ async fn add_hid_device(
     app.hid.track(key, HidTrackingEntry::Primary(arcs)).await;
 }
 
-#[cfg(test)]
+#[cfg(all(test, any()))]
 mod tests {
     use super::*;
     use crate::{

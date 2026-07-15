@@ -96,6 +96,14 @@ pub enum PluginIo {
     /// reaches them by name.
     Control(ControlEndpoints),
     Command(CommandExecutor),
+    /// Read-only AMD System Management Network access.  This is available only
+    /// on Windows, where the typed PawnIO broker service exists.
+    #[cfg(target_os = "windows")]
+    AmdSmn(Arc<crate::drivers::transports::amd_smn::AmdSmnBus>),
+    /// Typed LPC/SuperIO access.  The mutex serializes every operation against
+    /// one PawnIO handle, including configuration-mode transitions.
+    #[cfg(target_os = "windows")]
+    Lpcio(Arc<crate::drivers::transports::lpcio::LpcIoTransport>),
 }
 
 impl PluginIo {
@@ -106,6 +114,21 @@ impl PluginIo {
             PluginIo::Register(r) => r.rate_status(),
             PluginIo::Control(c) => c.rate_status(),
             PluginIo::Command(_) => WriteRateStatus::default(),
+            #[cfg(target_os = "windows")]
+            PluginIo::AmdSmn(_) => WriteRateStatus::default(),
+            #[cfg(target_os = "windows")]
+            PluginIo::Lpcio(bus) => bus.rate_status(),
+        }
+    }
+
+    /// Restore host-managed safety-critical state. This is deliberately
+    /// independent of the Lua worker so cleanup still works after a timeout.
+    pub fn restore_safety_state(&self) {
+        #[cfg(target_os = "windows")]
+        if let PluginIo::Lpcio(transport) = self {
+            if let Err(error) = transport.restore() {
+                log::error!("restoring plugin LPCIO state: {error:#}");
+            }
         }
     }
 }

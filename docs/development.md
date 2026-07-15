@@ -184,7 +184,7 @@ Configuration lives in `~/.config/halod/config.yaml` (Linux) or `%APPDATA%\halod
 
 Implement the `Device` trait. Declare capabilities in `fn capabilities()` — the list of `Capability` variants the device supports (e.g. `Capability::Rgb`, `Capability::Fan`, `Capability::Battery`). Each capability variant has a matching accessor (`as_rgb()`, `as_fan()`, etc.) that returns a trait object.
 
-See any existing device (e.g. `logitech/devices/g560.rs`) for a complete example.
+See an official plugin package (for example [`logitech_g560`](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/logitech_g560)) for a complete device-protocol example.
 
 ### 2. Add a protocol module (if new)
 

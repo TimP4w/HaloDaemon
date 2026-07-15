@@ -20,7 +20,7 @@ byte 3    addr                register address low byte (R & 0xFF)
 byte 4-6  p0 p1 p2            params, zero-padded to 7 bytes
 ```
 
-The G560 vendor commands (§4) instead use a **long (20-byte) report** with a vendor sub-ID and function in bytes 2–3. (A short register request may have its *reply* delivered as a long report on the long collection — see [hidpp.md](hidpp.md).)
+The G560 vendor commands (§4) instead use a **long (20-byte) report** with a vendor sub-ID and function in bytes 2–3. (A short register request's *reply* mirrors the reply payload size, not the request: the device-count register `0x0002` answers on the short collection, while the pairing-record register `0x02B5` answers with a long report on the long collection. The host reads both and matches by `(devnum, sub-ID)` — see [hidpp.md](hidpp.md).)
 
 ---
 

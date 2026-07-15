@@ -50,7 +50,7 @@ All SMBus calls are blocking. They are batched via `SmBusDevice::run_batch` — 
 | `write_word_data(addr, cmd, val)` | Write a 16-bit word to register `cmd` |
 | `write_block_data(addr, cmd, data)` | Write up to 32 bytes to register `cmd` |
 
-Block writes are supported on Linux and Windows chipset buses (PawnIO), but **not** on Windows GPU buses (NvAPI). Callers fall back to byte-at-a-time automatically; an 8-LED DIMM costs ~49 transfers per frame instead of 2 in the fallback path.
+Block writes are supported on Linux and Windows chipset buses (PawnIO).
 
 ---
 
@@ -61,7 +61,6 @@ Block writes are supported on Linux and Windows chipset buses (PawnIO), but **no
 | `mod.rs` | all | Shared types, discovery, `run_batch` |
 | `linux.rs` | Linux | i2c-dev ioctl interface |
 | `windows/chipset.rs` | Windows | PawnIO chipset SMBus |
-| `windows/nvapi.rs` | Windows | NvAPI GPU i2c |
 | `fallback.rs` | other | Stub returning "not supported" |
 
 ---

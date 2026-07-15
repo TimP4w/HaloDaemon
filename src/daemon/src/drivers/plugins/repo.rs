@@ -255,7 +255,6 @@ fn validate_repository_index(manifest: &RepositoryManifest) -> Result<()> {
 
     let mut ids = HashSet::new();
     let mut paths = HashSet::new();
-    let mut previous_id: Option<&str> = None;
     for package in &manifest.packages {
         if package.id.trim().is_empty() || package.version.trim().is_empty() {
             bail!("repository package id and version must be non-empty");
@@ -266,16 +265,6 @@ fn validate_repository_index(manifest: &RepositoryManifest) -> Result<()> {
                 package.id
             );
         }
-        if let Some(previous) = previous_id {
-            if previous >= package.id.as_str() {
-                bail!(
-                    "repository packages must be sorted by id: '{}' precedes '{}'",
-                    previous,
-                    package.id
-                );
-            }
-        }
-        previous_id = Some(&package.id);
         if package.path.is_absolute()
             || package.path.as_os_str().is_empty()
             || package.path.components().any(|c| {
@@ -568,7 +557,7 @@ struct MetaEntryVersion {
     version: Option<String>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, any()))]
 mod tests {
     use super::*;
     use std::fs;

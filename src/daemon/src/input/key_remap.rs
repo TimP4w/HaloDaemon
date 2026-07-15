@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use halod_shared::types::{ButtonAction, ButtonMapping, DpiMode};
+use halod_shared::types::{ButtonAction, ButtonMapping};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::input::action_executor::ActionExecutor;
@@ -276,12 +276,7 @@ impl KeyRemapEngine {
                     if let Some(sw) = device.as_dpi() {
                         let status = sw.dpi_status().await;
                         // Restore point is captured now, not re-read on release.
-                        if status.mode != DpiMode::Host {
-                            // Onboard mode: the device's own profiles govern DPI.
-                            log::debug!(
-                                "KeyRemapEngine: momentary DPI press: not host mode, ignoring"
-                            );
-                        } else if status.current_dpi == 0 {
+                        if status.current_dpi == 0 {
                             // No known DPI — leave it alone rather than strand the device.
                             log::warn!(
                                 "KeyRemapEngine: momentary DPI press: no known current DPI; skipping"
