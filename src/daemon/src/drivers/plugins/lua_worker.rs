@@ -231,6 +231,51 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
             }
         }
     }
+
+    /// Enqueue a shutdown-critical command without dropping it when the bounded
+    /// queue is temporarily full. The same deadline still bounds both waiting
+    /// for queue capacity and waiting for the worker's reply.
+    pub(super) async fn request_terminal<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<T>) -> Cmd,
+    ) -> Result<T> {
+        let req_id = self.next_req_id.fetch_add(1, Ordering::Relaxed);
+        match &*self.state.lock().unwrap() {
+            WorkerState::Wedged(reason) => {
+                return Err(anyhow!(
+                    "{} worker is wedged ({})",
+                    self.label,
+                    reason.describe()
+                ));
+            }
+            WorkerState::Closing | WorkerState::Closed => {
+                return Err(anyhow!("{} worker is gone", self.label));
+            }
+            WorkerState::Starting | WorkerState::Healthy => {}
+        }
+        let (reply, rx) = oneshot::channel();
+        let command = make(reply);
+        let result = tokio::time::timeout(self.call_timeout, async {
+            self.tx.send(command).await.map_err(|_| {
+                *self.state.lock().unwrap() = WorkerState::Closed;
+                anyhow!("{} worker is gone", self.label)
+            })?;
+            rx.await
+                .map_err(|_| anyhow!("{} worker dropped the reply (req {req_id})", self.label))
+        })
+        .await;
+        match result {
+            Ok(result) => result,
+            Err(_) => {
+                *self.state.lock().unwrap() = WorkerState::Wedged(WedgeReason::Timeout);
+                Err(anyhow!(
+                    "{} worker exceeded its {:?} terminal deadline (req {req_id})",
+                    self.label,
+                    self.call_timeout
+                ))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -399,6 +444,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, 42);
+    }
+
+    #[tokio::test]
+    async fn terminal_request_waits_for_queue_capacity() {
+        let (tx, mut rx) = mpsc::channel::<Job>(1);
+        tx.try_send(Box::new(|_: &i32| ControlFlow::Continue(())))
+            .unwrap();
+        let worker = LuaWorker {
+            tx,
+            label: "test",
+            call_timeout: Duration::from_secs(1),
+            state: Arc::new(Mutex::new(WorkerState::Healthy)),
+            next_req_id: Arc::new(AtomicU64::new(0)),
+        };
+        let terminal = tokio::spawn(async move {
+            worker
+                .request_terminal(|reply| {
+                    Box::new(move |_: &i32| {
+                        let _ = reply.send(42);
+                        ControlFlow::Break(())
+                    }) as Job
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !terminal.is_finished(),
+            "terminal command must wait, not fail busy"
+        );
+
+        let _ = rx.recv().await.unwrap()(&0);
+        let _ = rx.recv().await.unwrap()(&0);
+        assert_eq!(terminal.await.unwrap().unwrap(), 42);
     }
 
     #[tokio::test]

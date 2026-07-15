@@ -738,11 +738,10 @@ impl PluginHandle {
         .await
     }
 
-    pub async fn close(&self) {
+    pub async fn close(&self) -> Result<()> {
         if let Some(route) = self.route.clone() {
-            let _ = self
-                .worker
-                .request(|reply: oneshot::Sender<()>| {
+            self.worker
+                .request_terminal(|reply: oneshot::Sender<()>| {
                     Box::new(move |ctx: &WorkerCtx| {
                         if let Ok(dev) = ctx.routed_dev(Some(&route)) {
                             if let Some(f) = func(&ctx.manifest, "close_child") {
@@ -758,14 +757,13 @@ impl PluginHandle {
                         ControlFlow::Continue(())
                     })
                 })
-                .await;
-            return;
+                .await?;
+            return Ok(());
         }
         // The job returns `Break` to end the worker loop after running the
         // plugin's `close` callback; the reply confirms it finished.
-        let _ = self
-            .worker
-            .request(|reply: oneshot::Sender<()>| {
+        self.worker
+            .request_terminal(|reply: oneshot::Sender<()>| {
                 Box::new(move |ctx: &WorkerCtx| {
                     if let Some(f) = func(&ctx.manifest, "close") {
                         if let Err(e) = f.call::<()>(ctx.dev.clone()) {
@@ -776,7 +774,7 @@ impl PluginHandle {
                     ControlFlow::Break(())
                 })
             })
-            .await;
+            .await
     }
 
     pub async fn rgb_apply(&self, state: RgbState) -> Result<()> {
@@ -887,22 +885,15 @@ impl PluginHandle {
         self.call("set_duty", duty).await
     }
 
-    pub async fn fan_get_rpm(&self) -> Option<u32> {
+    pub async fn fan_get_rpm(&self) -> Result<Option<u32>> {
         self.run(|ctx, dev, _| {
             let Some(f) = func(&ctx.manifest, "get_rpm") else {
                 return Ok(None);
             };
-            Ok(match f.call::<Option<u32>>(dev) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::debug!("plugin get_rpm: {e}");
-                    None
-                }
-            })
+            f.call::<Option<u32>>(dev)
+                .map_err(|e| lua_err("get_rpm", e))
         })
         .await
-        .ok()
-        .flatten()
     }
 
     pub async fn get_sensors(&self) -> Result<Vec<Sensor>> {
@@ -930,7 +921,7 @@ impl PluginHandle {
                         }
                         return Ok(outcome);
                     }
-                    Err(e) => log::debug!("plugin read_status: {e}"),
+                    Err(e) => return Err(lua_err("read_status", e)),
                 }
             }
             Ok(PollOutcome::default())
@@ -998,12 +989,15 @@ impl PluginHandle {
                 }
                 let targets = match route {
                     Value::Integer(0) => vec![(None, dev.clone())],
-                    Value::Integer(index) if index > 0 => ctx
-                        .child_devs
-                        .borrow()
-                        .get(&(index as u32))
-                        .cloned()
-                        .map(|child| vec![(Some(index as u32), child)])
+                    Value::Integer(index) if index > 0 => u32::try_from(index)
+                        .ok()
+                        .and_then(|index| {
+                            ctx.child_devs
+                                .borrow()
+                                .get(&index)
+                                .cloned()
+                                .map(|child| vec![(Some(index), child)])
+                        })
                         .unwrap_or_default(),
                     _ => vec![(None, dev.clone())],
                 };
@@ -1472,6 +1466,12 @@ fn run_pre_scan_inner(
 
 fn build_match_table(lua: &Lua, m: &DevMatch) -> Result<Table> {
     let t = lua.create_table().map_err(|e| lua_err("match table", e))?;
+    // Extension metadata is least authoritative: write it first so canonical
+    // routing fields below cannot be overwritten by a colliding `extra` key.
+    for (key, value) in &m.extra {
+        t.set(key.as_str(), *value)
+            .map_err(|e| lua_err("match extra", e))?;
+    }
     t.set("transport", m.transport.clone())
         .map_err(|e| lua_err("match.transport", e))?;
     if let Some(bus) = &m.bus {
@@ -1498,10 +1498,6 @@ fn build_match_table(lua: &Lua, m: &DevMatch) -> Result<Table> {
     if let Some(name) = &m.name {
         t.set("name", name.clone())
             .map_err(|e| lua_err("match.name", e))?;
-    }
-    for (key, value) in &m.extra {
-        t.set(key.as_str(), *value)
-            .map_err(|e| lua_err("match extra", e))?;
     }
     Ok(t)
 }
@@ -1685,9 +1681,9 @@ mod tests {
         );
         assert_eq!(child_one.fan_get_duty().await.unwrap(), 2);
         assert_eq!(child_two.fan_get_duty().await.unwrap(), 3);
-        child_one.close().await;
+        child_one.close().await.unwrap();
         assert_eq!(child_two.fan_get_duty().await.unwrap(), 3);
-        root.close().await;
+        root.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -1737,7 +1733,74 @@ mod tests {
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].child_index, Some(2));
         assert_eq!(outcomes[0].button_events.pressed, vec![7]);
-        root.close().await;
+        root.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn event_source_outside_u32_is_dropped() {
+        let transport = Arc::new(TestEventTransport {
+            events: std::sync::Mutex::new(vec![TransportEvent {
+                endpoint: "primary",
+                data: vec![0x10],
+            }]),
+        });
+        let root = PluginHandle::spawn(
+            r#"return {
+                event_source = function(_) return 4294967296 end,
+                event = function(_) return { state_changed = true } end,
+            }"#
+            .to_owned(),
+            Default::default(),
+            PluginIo::Stream {
+                transport,
+                usb: None,
+            },
+            DevMatch {
+                transport: "hid".into(),
+                ..Default::default()
+            },
+            vec![],
+            HashMap::new(),
+            Handle::current(),
+            Vec::new(),
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        assert!(root.on_transport_events().await.unwrap().is_empty());
+        root.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn canonical_match_fields_override_colliding_extra_keys() {
+        let h = PluginHandle::spawn(
+            "return { initialize = function(dev) return { model = tostring(dev.match.index) } end }"
+                .to_owned(),
+            Default::default(),
+            stream_io(),
+            DevMatch {
+                transport: "hid".into(),
+                index: Some(7),
+                extra: HashMap::from([("index".into(), 99)]),
+                ..Default::default()
+            },
+            vec![],
+            HashMap::new(),
+            Handle::current(),
+            Vec::new(),
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        assert_eq!(h.initialize().await.unwrap().model.as_deref(), Some("7"));
+        h.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn poll_surfaces_read_status_errors() {
+        let h = spawn(
+            "return { read_status = function() error('broken') end }",
+            vec![],
+        );
+        let error = h.poll().await.unwrap_err();
+        assert!(error.to_string().contains("read_status"), "{error:#}");
+        h.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -1761,7 +1824,7 @@ mod tests {
 
         h.rgb_apply(static_state()).await.unwrap();
         h.poll().await.unwrap();
-        h.close().await;
+        h.close().await.unwrap();
 
         // After close the worker loop has ended, so a further call fails rather
         // than hanging.
@@ -1781,7 +1844,7 @@ mod tests {
         let events = h.poll().await.unwrap().button_events;
         assert_eq!(events.pressed, vec![3, 7]);
         assert_eq!(events.released, vec![2]);
-        h.close().await;
+        h.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -1950,6 +2013,6 @@ mod tests {
         assert_eq!(children[0].extra.get("revision"), Some(&0x51));
         assert_eq!(children[0].extra.get("hwm_base"), Some(&0x290));
         assert_eq!(children[0].extra.get("slot"), Some(&1));
-        h.close().await;
+        h.close().await.unwrap();
     }
 }

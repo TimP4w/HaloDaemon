@@ -66,7 +66,12 @@ impl ByteBuf {
 pub fn register(lua: &Lua) -> mlua::Result<()> {
     let halod = lua.create_table()?;
     let buffer = lua.create_function(|_, arg: mlua::Value| match arg {
-        mlua::Value::Integer(n) if n >= 0 => Ok(ByteBuf::from_bytes(alloc_zeroed(n as usize)?)),
+        mlua::Value::Integer(n) if n >= 0 => {
+            let n = usize::try_from(n).map_err(|_| {
+                mlua::Error::RuntimeError("halod.buffer length does not fit this platform".into())
+            })?;
+            Ok(ByteBuf::from_bytes(alloc_zeroed(n)?))
+        }
         mlua::Value::String(s) => Ok(ByteBuf::from_bytes(s.as_bytes().to_vec())),
         _ => Err(mlua::Error::RuntimeError(
             "halod.buffer expects a non-negative length or a string".into(),

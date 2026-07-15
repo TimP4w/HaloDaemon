@@ -5,7 +5,7 @@
 //! may narrow it to the subset supported by one physical device.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -41,6 +41,18 @@ use super::worker::{
     InitLcd, InitZone, PluginHandle,
 };
 use std::collections::{HashMap, HashSet};
+
+const POLL_FAILURE_DEGRADE_THRESHOLD: u8 = 3;
+
+trait MutexRecover<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> MutexRecover<T> for Mutex<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
 /// Host-side DPI step-cycle state (the plugin only writes the chosen value).
 struct DpiState {
@@ -226,33 +238,35 @@ async fn sample_status(
 ) {
     if caps.sensor {
         if let Ok(sensors) = worker.get_sensors().await {
-            *sensor_cache.lock().unwrap() = sensors;
+            *sensor_cache.lock_recover() = sensors;
         }
     }
     if caps.fan {
         if let Ok(duty) = worker.fan_get_duty().await {
-            fan_cache.lock().unwrap().duty = Some(duty);
+            fan_cache.lock_recover().duty = Some(duty);
         }
-        fan_cache.lock().unwrap().rpm = worker.fan_get_rpm().await;
+        if let Ok(rpm) = worker.fan_get_rpm().await {
+            fan_cache.lock_recover().rpm = rpm;
+        }
     }
     if caps.boolean {
         if let Ok(booleans) = worker.boolean_get().await {
-            *boolean_cache.lock().unwrap() = booleans;
+            *boolean_cache.lock_recover() = booleans;
         }
     }
     if caps.battery {
         if let Ok(batteries) = worker.battery_get().await {
-            *battery_cache.lock().unwrap() = batteries;
+            *battery_cache.lock_recover() = batteries;
         }
     }
     if caps.connection {
         if let Ok(connection) = worker.connection_get().await {
-            *connection_cache.lock().unwrap() = connection;
+            *connection_cache.lock_recover() = connection;
         }
     }
     if caps.equalizer {
         if let Ok(equalizer) = worker.equalizer_get().await {
-            *eq_cache.lock().unwrap() = Some(equalizer);
+            *eq_cache.lock_recover() = Some(equalizer);
         }
     }
 }
@@ -447,7 +461,7 @@ pub struct LuaDevice {
     transport: Option<PluginIo>,
     /// Local registry lifetime. Dynamic children share their root's runtime,
     /// so closing a child must be tracked separately from closing the root.
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
     /// For integration roots only: the manifest each controller child is
     /// reported by the child's own `initialize` callback.
     root_manifest: Option<Arc<PluginManifest>>,
@@ -511,6 +525,7 @@ pub struct LuaDevice {
     /// receives input. The task only enqueues work on the root Lua worker.
     event_task: Option<tokio::task::JoinHandle<()>>,
     event_paused: Arc<AtomicBool>,
+    event_resume: Arc<tokio::sync::Notify>,
     dynamic_child_ids: Arc<RwLock<HashMap<u32, String>>>,
 
     /// Host-owned virtual-audio sink registry, drained on close; the guard tears
@@ -572,7 +587,7 @@ impl LuaDevice {
         notify: Weak<crate::state::AppState>,
         runtime: Arc<Mutex<RuntimeState>>,
     ) -> Self {
-        *runtime.lock().unwrap() = RuntimeState::Initializing;
+        *runtime.lock_recover() = RuntimeState::Initializing;
         let receiver_root = manifest.plugin_id == "logitech" && dev_match.pid == Some(0xc547);
         let nuvoton_sensor_root = manifest.plugin_id == "nuvoton_lpcio" && dev_match.key.is_none();
         let mut dev = Self::with_worker(
@@ -638,7 +653,7 @@ impl LuaDevice {
             Some(runtime.clone()),
         );
         dev.root_manifest = Some(Arc::new(manifest.clone()));
-        *runtime.lock().unwrap() = RuntimeState::Initializing;
+        *runtime.lock_recover() = RuntimeState::Initializing;
         dev
     }
 
@@ -750,14 +765,35 @@ impl LuaDevice {
         if let Some(mut events) = event_receiver {
             dev.event_paused.store(true, Ordering::Relaxed);
             let paused = dev.event_paused.clone();
+            let resume = dev.event_resume.clone();
+            let closed = dev.closed.clone();
             let event_worker = worker.clone();
             let event_notify = poll_notify.clone();
             let root_id = poll_device_id.clone();
             let child_ids = dev.dynamic_child_ids.clone();
             dev.event_task = Some(handle.spawn(async move {
-                while events.changed().await.is_ok() {
-                    while paused.load(Ordering::Relaxed) {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                loop {
+                    tokio::select! {
+                        changed = events.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                        }
+                        _ = resume.notified() => {
+                            if closed.load(Ordering::Acquire) {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                    if closed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    while paused.load(Ordering::Acquire) {
+                        resume.notified().await;
+                        if closed.load(Ordering::Acquire) {
+                            return;
+                        }
                     }
                     let outcomes = match event_worker.on_transport_events().await {
                         Ok(outcomes) => outcomes,
@@ -829,16 +865,36 @@ impl LuaDevice {
             let battery_cache = dev.battery_cache.clone();
             let connection_cache = dev.connection_cache.clone();
             let eq_cache = dev.eq_cache.clone();
+            let closed = dev.closed.clone();
+            let runtime = dev.runtime.clone();
             dev.poll_task = Some(handle.spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut consecutive_failures = 0u8;
                 loop {
                     ticker.tick().await;
+                    if closed.load(Ordering::Acquire) {
+                        break;
+                    }
                     if paused.load(Ordering::Relaxed) {
                         continue;
                     }
                     match worker.poll().await {
                         Ok(events) => {
+                            let recovered = consecutive_failures >= POLL_FAILURE_DEGRADE_THRESHOLD;
+                            consecutive_failures = 0;
+                            if recovered {
+                                if let Some(runtime) = &runtime {
+                                    let mut state = runtime.lock_recover();
+                                    if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed)
+                                    {
+                                        *state = RuntimeState::Online;
+                                    }
+                                }
+                                if let Some(app) = poll_notify.upgrade() {
+                                    app.broadcast_state().await;
+                                }
+                            }
                             if events.state_changed {
                                 if let Some(app) = poll_notify.upgrade() {
                                     app.broadcast_state().await;
@@ -857,7 +913,25 @@ impl LuaDevice {
                                 }
                             }
                         }
-                        Err(_) => break, // worker gone
+                        Err(error) => {
+                            consecutive_failures = consecutive_failures.saturating_add(1);
+                            if consecutive_failures == POLL_FAILURE_DEGRADE_THRESHOLD {
+                                log::warn!(
+                                    "plugin read_status failed {POLL_FAILURE_DEGRADE_THRESHOLD} consecutive times for '{poll_device_id}': {error:#}"
+                                );
+                                if let Some(runtime) = &runtime {
+                                    let mut state = runtime.lock_recover();
+                                    if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed)
+                                    {
+                                        *state = RuntimeState::Degraded(DegradeReason::CallFailed);
+                                    }
+                                }
+                                if let Some(app) = poll_notify.upgrade() {
+                                    app.broadcast_state().await;
+                                }
+                            }
+                            continue;
+                        }
                     }
                     sample_status(
                         &worker,
@@ -903,7 +977,7 @@ impl LuaDevice {
             dynamic_model: OnceLock::new(),
             worker,
             transport,
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             root_manifest: None,
             runtime: None,
             allowed_caps: declared_caps(manifest),
@@ -950,6 +1024,7 @@ impl LuaDevice {
             poll_paused: Arc::new(AtomicBool::new(false)),
             event_task: None,
             event_paused: Arc::new(AtomicBool::new(false)),
+            event_resume: Arc::new(tokio::sync::Notify::new()),
             dynamic_child_ids: Arc::new(RwLock::new(HashMap::new())),
             audio_registry: None,
             audio_guard: None,
@@ -993,7 +1068,7 @@ impl LuaDevice {
         // A failing call greys the integration; a success self-heals it —
         // unless the device already closed, which is terminal.
         if let Some(r) = &self.runtime {
-            let mut state = r.lock().unwrap();
+            let mut state = r.lock_recover();
             if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed) {
                 *state = if result.is_ok() {
                     RuntimeState::Online
@@ -1342,11 +1417,11 @@ impl Device for LuaDevice {
         }
         self.runtime
             .as_ref()
-            .is_none_or(|r| match *r.lock().unwrap() {
+            .is_none_or(|r| match *r.lock_recover() {
                 RuntimeState::OpeningTransport
                 | RuntimeState::Initializing
                 | RuntimeState::Online => true,
-                RuntimeState::Degraded(_) => self.plugin_type != PluginKind::Integration,
+                RuntimeState::Degraded(_) => false,
                 RuntimeState::Closing | RuntimeState::Closed => false,
             })
     }
@@ -1363,7 +1438,7 @@ impl Device for LuaDevice {
             Ok(outcome) => outcome,
             Err(error) => {
                 if let Some(runtime) = &self.runtime {
-                    *runtime.lock().unwrap() = RuntimeState::Degraded(DegradeReason::CallFailed);
+                    *runtime.lock_recover() = RuntimeState::Degraded(DegradeReason::CallFailed);
                 }
                 return Err(error);
             }
@@ -1409,9 +1484,6 @@ impl Device for LuaDevice {
                     .set(build_dynamic_descriptor(zones, effects, Some(&iso_keys)));
             }
         }
-        if let Some(runtime) = &self.runtime {
-            *runtime.lock().unwrap() = RuntimeState::Online;
-        }
         if let Some(lcd) = outcome.lcd {
             self.lcd_slot.set_brightness(lcd.brightness);
             self.lcd_slot
@@ -1440,7 +1512,7 @@ impl Device for LuaDevice {
             let _ = self.dynamic_controls.set(Controls::from_runtime(controls));
         }
         if let Some(dpi) = outcome.dpi {
-            *self.dpi_config.lock().unwrap() = DpiConfig {
+            *self.dpi_config.lock_recover() = DpiConfig {
                 min: dpi.min,
                 max: dpi.max,
                 mode: if dpi.onboard {
@@ -1450,7 +1522,7 @@ impl Device for LuaDevice {
                 },
                 mode_control: dpi.mode_control.clone(),
             };
-            *self.dpi_state.lock().unwrap() = dpi_state_from_runtime(&dpi);
+            *self.dpi_state.lock_recover() = dpi_state_from_runtime(&dpi);
         }
         if let Some(fan) = outcome.fan {
             self.fan_channel.store(fan.channel, Ordering::Relaxed);
@@ -1462,7 +1534,7 @@ impl Device for LuaDevice {
                 requires_host_mode: key_remap.requires_host_mode,
                 default_mappings: key_remap.default_mappings,
             };
-            let mut mappings = self.key_remap_mappings.lock().unwrap();
+            let mut mappings = self.key_remap_mappings.lock_recover();
             if mappings.is_empty() {
                 mappings.extend(defaults.into_iter().map(|mapping| (mapping.cid, mapping)));
             }
@@ -1480,6 +1552,9 @@ impl Device for LuaDevice {
             }
         }
         if outcome.ok {
+            if let Some(runtime) = &self.runtime {
+                *runtime.lock_recover() = RuntimeState::Online;
+            }
             // Seed every wire-status cache before registration publishes the
             // first snapshot (and before transport-conflict checks consult the
             // cached connection type). Later refreshes run on the poll task.
@@ -1494,6 +1569,9 @@ impl Device for LuaDevice {
             }
             self.poll_paused.store(false, Ordering::Relaxed);
             self.event_paused.store(false, Ordering::Relaxed);
+            self.event_resume.notify_one();
+        } else if let Some(runtime) = &self.runtime {
+            *runtime.lock_recover() = RuntimeState::Degraded(DegradeReason::CallFailed);
         }
         Ok(outcome.ok)
     }
@@ -1502,14 +1580,20 @@ impl Device for LuaDevice {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.event_resume.notify_one();
         let owns_root_resources = self.worker.as_ref().is_none_or(|worker| !worker.is_child());
         if owns_root_resources {
             if let Some(r) = &self.runtime {
-                *r.lock().unwrap() = RuntimeState::Closing;
+                *r.lock_recover() = RuntimeState::Closing;
             }
         }
         if let Some(w) = &self.worker {
-            w.close().await;
+            if let Err(error) = w.close().await {
+                log::warn!(
+                    "plugin close hook did not complete for '{}': {error:#}",
+                    self.id
+                );
+            }
         }
         if owns_root_resources {
             if let Some(transport) = &self.transport {
@@ -1525,7 +1609,7 @@ impl Device for LuaDevice {
         }
         if owns_root_resources {
             if let Some(r) = &self.runtime {
-                *r.lock().unwrap() = RuntimeState::Closed;
+                *r.lock_recover() = RuntimeState::Closed;
             }
         }
     }
@@ -1658,10 +1742,14 @@ fn apply_per_led_transforms(
         let permutation = build_permutation(zone, &transform);
         let new_map = (0..zone.leds.len())
             .filter_map(|i| {
-                let source_id = zone.leds[permutation[i]].id.to_string();
+                let source = permutation
+                    .get(i)
+                    .and_then(|&source| zone.leds.get(source))?;
+                let target = zone.leds.get(i)?;
+                let source_id = source.id.to_string();
                 led_map
                     .get(&source_id)
-                    .map(|color| (zone.leds[i].id.to_string(), *color))
+                    .map(|color| (target.id.to_string(), *color))
             })
             .collect();
         transformed.insert(zone_id.clone(), new_map);
@@ -1682,12 +1770,12 @@ impl FanCapability for LuaDevice {
     async fn set_duty(&self, duty: u8) -> Result<()> {
         let r = self.worker()?.fan_set_duty(duty).await;
         self.track(r).await?;
-        self.fan_cache.lock().unwrap().duty = Some(duty);
+        self.fan_cache.lock_recover().duty = Some(duty);
         Ok(())
     }
 
     async fn get_rpm(&self) -> Option<u32> {
-        self.fan_cache.lock().unwrap().rpm
+        self.fan_cache.lock_recover().rpm
     }
 
     fn fan_state(&self) -> &FanStateSlot {
@@ -1702,7 +1790,7 @@ impl FanCapability for LuaDevice {
 #[async_trait]
 impl SensorCapability for LuaDevice {
     async fn get_sensors(&self) -> Result<Vec<Sensor>> {
-        Ok(self.sensor_cache.lock().unwrap().clone())
+        Ok(self.sensor_cache.lock_recover().clone())
     }
 }
 
@@ -1736,7 +1824,7 @@ impl Controller for LuaDevice {
             Ok(d) => d,
             Err(e) => {
                 if let Some(r) = &self.runtime {
-                    let mut state = r.lock().unwrap();
+                    let mut state = r.lock_recover();
                     if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed) {
                         *state = RuntimeState::Degraded(DegradeReason::EnumerateFailed);
                     }
@@ -2117,7 +2205,7 @@ fn dpi_state_from_runtime(dpi: &InitDpi) -> DpiState {
 
 impl LuaDevice {
     fn clamp_dpi(&self, dpi: u16) -> u16 {
-        let config = self.dpi_config.lock().unwrap();
+        let config = self.dpi_config.lock_recover();
         dpi.clamp(config.min, config.max)
     }
 }
@@ -2125,8 +2213,8 @@ impl LuaDevice {
 #[async_trait]
 impl DpiCapability for LuaDevice {
     async fn dpi_status(&self) -> DpiStatus {
-        let dpi = self.dpi_state.lock().unwrap();
-        let config = self.dpi_config.lock().unwrap().clone();
+        let dpi = self.dpi_state.lock_recover();
+        let config = self.dpi_config.lock_recover().clone();
         DpiStatus {
             steps: dpi.steps.clone(),
             current_index: dpi.index,
@@ -2145,10 +2233,10 @@ impl DpiCapability for LuaDevice {
             anyhow::bail!("DPI steps list cannot be empty");
         }
         let (min, max) = {
-            let config = self.dpi_config.lock().unwrap();
+            let config = self.dpi_config.lock_recover();
             (config.min, config.max)
         };
-        let available = self.dpi_state.lock().unwrap().available_dpis.clone();
+        let available = self.dpi_state.lock_recover().available_dpis.clone();
         for &step in &steps {
             anyhow::ensure!(
                 step >= min && step <= max,
@@ -2162,7 +2250,7 @@ impl DpiCapability for LuaDevice {
             }
         }
         self.worker()?.dpi_set_steps(&steps).await?;
-        let mut dpi = self.dpi_state.lock().unwrap();
+        let mut dpi = self.dpi_state.lock_recover();
         dpi.steps = steps;
         if dpi.index >= dpi.steps.len() {
             dpi.index = dpi.steps.len() - 1;
@@ -2173,7 +2261,7 @@ impl DpiCapability for LuaDevice {
 
     async fn set_dpi_index(&self, index: usize) -> Result<()> {
         let value = {
-            let dpi = self.dpi_state.lock().unwrap();
+            let dpi = self.dpi_state.lock_recover();
             let &v = dpi
                 .steps
                 .get(index)
@@ -2181,7 +2269,7 @@ impl DpiCapability for LuaDevice {
             v
         };
         self.worker()?.dpi_set(value).await?;
-        let mut dpi = self.dpi_state.lock().unwrap();
+        let mut dpi = self.dpi_state.lock_recover();
         dpi.index = index;
         dpi.current = value;
         Ok(())
@@ -2190,7 +2278,7 @@ impl DpiCapability for LuaDevice {
     async fn set_dpi_direct(&self, dpi: u16) -> Result<()> {
         let value = self.clamp_dpi(dpi);
         self.worker()?.dpi_set(value).await?;
-        self.dpi_state.lock().unwrap().current = value;
+        self.dpi_state.lock_recover().current = value;
         Ok(())
     }
 }
@@ -2230,7 +2318,7 @@ impl RangeCapability for LuaDevice {
 #[async_trait]
 impl BooleanCapability for LuaDevice {
     async fn get_booleans(&self) -> Result<Vec<Boolean>> {
-        let mut live = self.boolean_cache.lock().unwrap().clone();
+        let mut live = self.boolean_cache.lock_recover().clone();
         self.active_controls().backfill_booleans(&mut live);
         Ok(live)
     }
@@ -2247,7 +2335,7 @@ impl BooleanCapability for LuaDevice {
         {
             current.value = value;
         }
-        let mut config = self.dpi_config.lock().unwrap();
+        let mut config = self.dpi_config.lock_recover();
         if config.mode_control.as_deref() == Some(key) {
             config.mode = if value {
                 DpiMode::Host
@@ -2280,14 +2368,14 @@ impl ActionCapability for LuaDevice {
 #[async_trait]
 impl BatteryCapability for LuaDevice {
     async fn get_batteries(&self) -> Result<Vec<Battery>> {
-        Ok(self.battery_cache.lock().unwrap().clone())
+        Ok(self.battery_cache.lock_recover().clone())
     }
 }
 
 #[async_trait]
 impl ConnectionCapability for LuaDevice {
     async fn connection_status(&self) -> Option<ConnectionStatus> {
-        self.connection_cache.lock().unwrap().clone()
+        self.connection_cache.lock_recover().clone()
     }
 }
 
@@ -2303,7 +2391,7 @@ impl EqualizerCapability for LuaDevice {
 
     async fn set_eq_preset(&self, preset_index: usize) -> Result<()> {
         self.worker()?.equalizer_set_preset(preset_index).await?;
-        if let Some(equalizer) = self.eq_cache.lock().unwrap().as_mut() {
+        if let Some(equalizer) = self.eq_cache.lock_recover().as_mut() {
             equalizer.selected_preset = preset_index;
         }
         Ok(())
@@ -2311,7 +2399,7 @@ impl EqualizerCapability for LuaDevice {
 
     async fn set_eq_bands(&self, values: &[f32]) -> Result<()> {
         self.worker()?.equalizer_set_bands(values).await?;
-        if let Some(equalizer) = self.eq_cache.lock().unwrap().as_mut() {
+        if let Some(equalizer) = self.eq_cache.lock_recover().as_mut() {
             for (band, value) in equalizer.bands.iter_mut().zip(values) {
                 band.value = *value;
             }
@@ -2320,7 +2408,7 @@ impl EqualizerCapability for LuaDevice {
     }
 
     fn current_state(&self) -> Option<Equalizer> {
-        self.eq_cache.lock().unwrap().clone()
+        self.eq_cache.lock_recover().clone()
     }
 }
 
@@ -2398,7 +2486,7 @@ impl KeyRemapCapability for LuaDevice {
         self.worker()?
             .key_remap_set_mapping(mapping.clone())
             .await?;
-        let mut cache = self.key_remap_mappings.lock().unwrap();
+        let mut cache = self.key_remap_mappings.lock_recover();
         if mapping.base == ButtonAction::Native && mapping.shifted == ButtonAction::Native {
             cache.remove(&mapping.cid);
         } else {
@@ -2417,7 +2505,7 @@ impl KeyRemapCapability for LuaDevice {
             .iter()
             .find(|mapping| mapping.cid == cid)
             .cloned();
-        let mut mappings = self.key_remap_mappings.lock().unwrap();
+        let mut mappings = self.key_remap_mappings.lock_recover();
         match default {
             Some(mapping)
                 if mapping.base != ButtonAction::Native
@@ -2435,7 +2523,7 @@ impl KeyRemapCapability for LuaDevice {
     async fn reset_all_button_mappings(&self) -> Result<()> {
         self.worker()?.key_remap_reset_all().await?;
         let defaults = self.key_remap.read().unwrap().default_mappings.clone();
-        let mut mappings = self.key_remap_mappings.lock().unwrap();
+        let mut mappings = self.key_remap_mappings.lock_recover();
         mappings.clear();
         mappings.extend(defaults.into_iter().filter_map(|mapping| {
             (mapping.base != ButtonAction::Native || mapping.shifted != ButtonAction::Native)
@@ -2759,12 +2847,56 @@ mod tests {
         dev.runtime = Some(runtime.clone());
         assert!(dev.initialize().await.is_err());
         assert_eq!(
-            *runtime.lock().unwrap(),
+            *runtime.lock_recover(),
             RuntimeState::Degraded(DegradeReason::CallFailed)
         );
         dev.close().await;
-        assert_eq!(*runtime.lock().unwrap(), RuntimeState::Closed);
+        assert_eq!(*runtime.lock_recover(), RuntimeState::Closed);
         assert!(!dev.is_live());
         assert!(dev.initialize().await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_false_stays_degraded_and_not_live() {
+        let (_tmp, manifest) = test_manifest(
+            "not_ready",
+            &["rgb"],
+            "return { initialize = function() return { ok = false } end }",
+        );
+        let runtime = Arc::new(Mutex::new(RuntimeState::OpeningTransport));
+        let mut dev = hid_device("not_ready-0", &manifest, Arc::new(MockTransport::empty()));
+        dev.runtime = Some(runtime.clone());
+
+        assert!(!dev.initialize().await.unwrap());
+        assert_eq!(
+            *runtime.lock_recover(),
+            RuntimeState::Degraded(DegradeReason::CallFailed)
+        );
+        assert!(!dev.is_live());
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transient_rpm_error_keeps_the_last_sample() {
+        let script = r#"
+            local rpm_reads = 0
+            return {
+              initialize = function() return true end,
+              get_duty = function() return 40 end,
+              get_rpm = function()
+                rpm_reads = rpm_reads + 1
+                if rpm_reads == 1 then return 1200 end
+                error("transient")
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("fan_sample", &["fan"], script);
+        let dev = hid_device("fan_sample-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+        assert_eq!(dev.fan_cache.lock_recover().rpm, Some(1200));
+
+        dev.refresh_status_cache().await;
+        assert_eq!(dev.fan_cache.lock_recover().rpm, Some(1200));
+        dev.close().await;
     }
 }
