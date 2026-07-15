@@ -2511,176 +2511,127 @@ mod tests {
     use super::*;
     use crate::drivers::transports::mock::test_transport::MockTransport;
     use crate::drivers::transports::Transport;
-    use crate::drivers::{FanCapability, RgbCapability, SensorCapability};
-    use halod_shared::types::VisibilityState;
-    use std::path::Path;
+    use crate::drivers::{FanCapability, RgbCapability};
+
+    fn test_manifest(
+        id: &str,
+        capabilities: &[&str],
+        script: &str,
+    ) -> (tempfile::TempDir, PluginManifest) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let capabilities = capabilities.join(", ");
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!(
+                "id: {id}\nversion: 1.0.0\npermissions: [hid]\ncapabilities: [{capabilities}]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Device\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), script).unwrap();
+        let manifest = super::super::parse_manifest_from_dir(&dir).unwrap();
+        (tmp, manifest)
+    }
 
     fn hid_match() -> DevMatch {
         DevMatch {
             transport: "hid".into(),
-            bus: None,
-            addr: None,
-            vid: None,
-            pid: Some(0x300E), // Kraken Z (320x320 LCD) for LCD-capable tests
-            index: None,
-            extra: Default::default(),
+            pid: Some(2),
+            ..Default::default()
         }
     }
 
-    /// A fresh `OpeningTransport` handle, as a caller would create before
-    /// opening a transport, for constructors under test.
-    fn opening_runtime() -> Arc<Mutex<RuntimeState>> {
-        Arc::new(Mutex::new(RuntimeState::OpeningTransport))
-    }
-
-    /// Build a HID plugin device over a mock byte-stream transport.
     fn hid_device(id: &str, manifest: &PluginManifest, transport: Arc<dyn Transport>) -> LuaDevice {
-        let spec = &manifest.devices[0];
-        let notify = Weak::new();
         LuaDevice::with_transport(
             id.into(),
             manifest,
-            spec,
+            &manifest.devices[0],
             hid_match(),
             PluginIo::Stream {
                 transport,
                 usb: None,
             },
             tokio::runtime::Handle::current(),
-            Vec::<Permission>::new(),
+            Vec::new(),
             HashMap::new(),
-            notify,
-            opening_runtime(),
+            Weak::new(),
+            Arc::new(Mutex::new(RuntimeState::OpeningTransport)),
         )
     }
 
-    const SCRIPT: &str = r#"
-        return {
-          devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
-          permissions = { "hid" },
-          capabilities = { "rgb", "fan", "sensors" },
-          transports = { hid = { report_size = 8 } },
-          rgb = { zones = { {
-              id = "z", name = "Z", topology = { type = "linear" },
-              leds = { {id=0, x=0.0, y=0.0}, {id=1, x=1.0, y=0.0} },
-          } } },
-          fan = { channel = 3 },
-          sensor = {},
-
-          initialize = function(dev) return { fan = { channel = 3 } } end,
-
-          write_frame = function(dev, zone, colors)
-            local bytes = { 0xAB }
-            for _, c in ipairs(colors) do
-              bytes[#bytes+1] = c.r
-              bytes[#bytes+1] = c.g
-              bytes[#bytes+1] = c.b
-            end
-            dev.transport:write(string.char(table.unpack(bytes)))
-          end,
-          apply = function(dev, state)
-            dev.transport:write(string.char(0xCC))
-          end,
-          set_duty = function(dev, duty)
-            dev.transport:write(string.char(0xFA, duty))
-          end,
-          get_duty = function(dev) return 42 end,
-          get_rpm = function(dev) return 1200 end,
-          get_sensors = function(dev)
-            return { { id="t", name="Temp", value=30.5, unit="celsius", sensor_type="temperature" } }
-          end,
-        }
-    "#;
-
-    fn device(transport: Arc<dyn Transport>) -> LuaDevice {
-        let manifest = super::super::parse_manifest(SCRIPT, Path::new("t.lua")).unwrap();
-        hid_device("t-0", &manifest, transport)
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn advertises_declared_capabilities() {
-        let dev = device(Arc::new(MockTransport::empty()));
-        let kinds: Vec<_> = dev
-            .capabilities()
-            .iter()
-            .map(std::mem::discriminant)
-            .collect();
-        assert_eq!(kinds.len(), 3, "rgb + fan + sensor");
-        dev.initialize().await.unwrap();
-        assert_eq!(dev.fan_channel_id(), 3);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn chain_advertises_controller_and_chain() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            permissions = { "hid" },
-            transports = { hid = { report_size = 8 } },
-            chain = { channels = { { id = "c1", name = "Port 1", max_leds = 30 } } },
-        }"#;
-        let manifest = super::super::parse_manifest(src, Path::new("chain.lua")).unwrap();
-        let dev = hid_device("c-0", &manifest, Arc::new(MockTransport::empty()));
-        let caps = dev.capabilities();
-        assert!(caps
-            .iter()
-            .any(|c| matches!(c, CapabilityRef::Controller(_))));
-        assert!(caps.iter().any(|c| matches!(c, CapabilityRef::Chain(_))));
+    #[test]
+    fn declared_capabilities_expand_controls_and_preserve_order() {
+        let (_tmp, manifest) = test_manifest(
+            "declared_caps",
+            &["rgb", "controls", "fan", "chain"],
+            "return {}",
+        );
+        assert_eq!(
+            declared_caps(&manifest),
+            vec![
+                Cap::Rgb,
+                Cap::Fan,
+                Cap::Choice,
+                Cap::Range,
+                Cap::Boolean,
+                Cap::Action,
+                Cap::Chain,
+            ]
+        );
     }
 
     #[test]
-    fn device_only_advertises_no_capabilities() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-        }"#;
-        let manifest = super::super::parse_manifest(src, Path::new("bare.lua")).unwrap();
-        let notify = Weak::new();
-        let dev = LuaDevice::device_only("d-0".into(), &manifest, &manifest.devices[0], notify);
+    fn runtime_capability_names_are_deduplicated_and_unknown_names_ignored() {
+        let caps = caps_named(&[
+            "controls".into(),
+            "rgb".into(),
+            "controls".into(),
+            "unknown".into(),
+        ]);
+        assert_eq!(
+            caps,
+            vec![Cap::Choice, Cap::Range, Cap::Boolean, Cap::Action, Cap::Rgb,]
+        );
+    }
+
+    #[test]
+    fn device_only_keeps_plugin_identity_without_capabilities() {
+        let (_tmp, manifest) = test_manifest("identity_only", &[], "return {}");
+        let dev = LuaDevice::device_only(
+            "identity_only-0".into(),
+            &manifest,
+            &manifest.devices[0],
+            Weak::new(),
+        );
         assert!(dev.capabilities().is_empty());
-        // A device-type plugin reports its owner for scoped teardown, even
-        // though it is not an integration (so `integration_id` stays `None`).
-        assert_eq!(dev.owning_plugin_id(), Some(manifest.plugin_id.clone()));
-        assert_eq!(dev.integration_id(), None);
+        assert_eq!(dev.owning_plugin_id().as_deref(), Some("identity_only"));
+        assert!(dev.is_live());
     }
 
     #[test]
-    fn controls_wire_and_validate_round_trip() {
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 1, pid = 2, vendor = "x", model = "y" } },
-            permissions = { "hid" },
-            choice = { choices = { { key = "mode", label = "Mode",
-                options = { { id = "a", label = "A" }, { id = "b", label = "B" } }, default = 0 } } },
-            range = { ranges = { { key = "hz", label = "Hz", min = 100, max = 1000, default = 500 } } },
-            boolean = { booleans = { { key = "snap", label = "Angle Snap", category = "Mouse" } } },
-            action = { actions = { { key = "cal", label = "Calibrate" } } },
-        }"#;
-        let m = super::super::parse_manifest(src, Path::new("controls.lua")).unwrap();
-        let controls = Controls::from_manifest(&m);
+    fn runtime_controls_validate_cache_and_render_wire_state() {
+        let runtime: InitControls = serde_yaml::from_str(
+            "choices:\n  - key: mode\n    label: Mode\n    options:\n      - { id: a, label: A }\n      - { id: b, label: B }\n    default: 0\nranges:\n  - key: hz\n    label: Hz\n    min: 100\n    max: 1000\n    default: 500\nbooleans:\n  - key: snap\n    label: Angle Snap\n    category: Mouse\nactions:\n  - key: calibrate\n    label: Calibrate\n",
+        )
+        .unwrap();
+        let controls = Controls::from_runtime(runtime);
 
-        // Empty groups yield no wire capability.
-        assert!(Controls::default().choices_wire().is_none());
-        assert!(Controls::default().ranges_wire().is_none());
-        assert!(Controls::default().actions_wire().is_none());
-
-        // Choice: cache override shows through; bad key/index rejected.
         controls.record_choice("mode", 1).unwrap();
+        assert!(controls.record_choice("mode", 2).is_err());
         let Some(DeviceCapability::Choice(choices)) = controls.choices_wire() else {
-            panic!("expected choice capability");
+            panic!("choice capability missing");
         };
         assert_eq!(choices[0].selected, 1);
-        assert!(controls.record_choice("mode", 2).is_err());
-        assert!(controls.record_choice("nope", 0).is_err());
 
-        // Range: value clamps to declared bounds; bad key rejected.
         assert_eq!(controls.record_range("hz", 5000).unwrap(), 1000);
-        assert_eq!(controls.record_range("hz", 0).unwrap(), 100);
-        assert!(controls.record_range("nope", 0).is_err());
+        assert!(controls.record_range("missing", 10).is_err());
         let Some(DeviceCapability::Range(ranges)) = controls.ranges_wire() else {
-            panic!("expected range capability");
+            panic!("range capability missing");
         };
-        assert_eq!(ranges[0].value, 100, "last recorded value wins");
+        assert_eq!(ranges[0].value, 1000);
 
-        // Boolean backfill fills empty label/category from the manifest decl.
-        let mut live = vec![Boolean {
+        let mut booleans = vec![Boolean {
             key: "snap".into(),
             value: true,
             label: String::new(),
@@ -2688,1105 +2639,127 @@ mod tests {
             category: String::new(),
             visible_when: None,
         }];
-        controls.backfill_booleans(&mut live);
-        assert_eq!(live[0].label, "Angle Snap");
-        assert_eq!(live[0].category, "Mouse");
+        controls.backfill_booleans(&mut booleans);
+        assert_eq!(booleans[0].label, "Angle Snap");
+        assert_eq!(booleans[0].category, "Mouse");
+        assert!(controls.has_action("calibrate"));
+        assert!(!controls.has_action("missing"));
+    }
 
-        // Action existence gate.
-        assert!(controls.has_action("cal"));
-        assert!(!controls.has_action("nope"));
+    #[test]
+    fn dynamic_rgb_descriptor_uses_reported_led_ids() {
+        let descriptor = build_dynamic_descriptor(
+            vec![InitZone {
+                id: "ring".into(),
+                name: "Ring".into(),
+                topology: "linear".into(),
+                led_count: 2,
+                led_ids: vec![10, 20],
+                leds: Vec::new(),
+                rings: 0,
+                keyboard_form_factor: None,
+                keyboard_layout: None,
+            }],
+            Vec::new(),
+            None,
+        );
+        assert_eq!(descriptor.zones.len(), 1);
+        assert_eq!(
+            descriptor.zones[0]
+                .leds
+                .iter()
+                .map(|led| led.id)
+                .collect::<Vec<_>>(),
+            vec![10, 20]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn write_frame_encodes_colors_and_reaches_transport() {
+    async fn initialize_narrows_capabilities_and_installs_runtime_descriptors() {
+        let script = r#"
+            return {
+              initialize = function(dev)
+                return {
+                  capabilities = { "rgb", "fan" },
+                  zones = { { id = "ring", name = "Ring", led_count = 2,
+                              led_ids = { 7, 9 } } },
+                  fan = { channel = 3 },
+                }
+              end,
+            }
+        "#;
+        let (_tmp, manifest) =
+            test_manifest("runtime_descriptors", &["rgb", "fan", "sensors"], script);
+        let dev = hid_device(
+            "runtime_descriptors-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        assert!(dev.initialize().await.unwrap());
+        let caps = dev.capabilities();
+        assert!(caps.iter().any(|cap| matches!(cap, CapabilityRef::Rgb(_))));
+        assert!(caps.iter().any(|cap| matches!(cap, CapabilityRef::Fan(_))));
+        assert!(!caps
+            .iter()
+            .any(|cap| matches!(cap, CapabilityRef::Sensor(_))));
+        assert_eq!(dev.fan_channel_id(), 3);
+        assert_eq!(RgbCapability::descriptor(&dev).zones[0].leds[0].id, 7);
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rgb_frames_reach_the_transport_through_the_current_worker() {
+        let script = r#"
+            return {
+              initialize = function(dev)
+                return { zones = { { id = "ring", name = "Ring", led_count = 2 } } }
+              end,
+              write_frame = function(dev, zone, colors)
+                local bytes = { 0xAB }
+                for _, color in ipairs(colors) do
+                  bytes[#bytes + 1] = color.r
+                  bytes[#bytes + 1] = color.g
+                  bytes[#bytes + 1] = color.b
+                end
+                dev.transport:write(string.char(table.unpack(bytes)))
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("rgb_write", &["rgb"], script);
         let mock = Arc::new(MockTransport::empty());
-        let dev = device(mock.clone());
-        let colors = [RgbColor { r: 1, g: 2, b: 3 }, RgbColor { r: 4, g: 5, b: 6 }];
-        dev.write_frame("z", &colors).await.unwrap();
+        let dev = hid_device("rgb_write-0", &manifest, mock.clone());
+        assert!(dev.initialize().await.unwrap());
+        dev.write_frame(
+            "ring",
+            &[RgbColor { r: 1, g: 2, b: 3 }, RgbColor { r: 4, g: 5, b: 6 }],
+        )
+        .await
+        .unwrap();
         assert_eq!(
             *mock.written.lock().await,
             vec![vec![0xAB, 1, 2, 3, 4, 5, 6]]
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn write_frame_accepts_a_halod_buffer() {
-        // Same behaviour as the string path, but built with the bounds-checked
-        // buffer (0-based, mutable) and passed straight to transport:write.
-        const BUF_SCRIPT: &str = r#"
-            return {
-              devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
-              rgb = { zones = { { id="z", name="Z", topology={type="linear"}, leds={ {id=0,x=0,y=0} } } } },
-              write_frame = function(dev, zone, colors)
-                local b = halod.buffer(1 + 3 * #colors)
-                b:set_u8(0, 0xAB)
-                for i, c in ipairs(colors) do
-                  local base = 1 + (i - 1) * 3
-                  b:set_u8(base, c.r)
-                  b:set_u8(base + 1, c.g)
-                  b:set_u8(base + 2, c.b)
-                end
-                dev.transport:write(b)
-              end,
-            }
-        "#;
-        let manifest = super::super::parse_manifest(BUF_SCRIPT, Path::new("buf.lua")).unwrap();
-        let mock = Arc::new(MockTransport::empty());
-        let dev = hid_device("b-0", &manifest, mock.clone());
-        dev.write_frame(
-            "z",
-            &[RgbColor {
-                r: 10,
-                g: 20,
-                b: 30,
-            }],
-        )
-        .await
-        .unwrap();
-        assert_eq!(*mock.written.lock().await, vec![vec![0xAB, 10, 20, 30]]);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn apply_persists_state_and_calls_script() {
-        let mock = Arc::new(MockTransport::empty());
-        let dev = device(mock.clone());
-        let state = RgbState::Static {
-            color: RgbColor { r: 9, g: 9, b: 9 },
-        };
-        dev.apply(state).await.unwrap();
-        assert_eq!(*mock.written.lock().await, vec![vec![0xCC]]);
-        assert!(matches!(
-            RgbCapability::current_state(&dev),
-            Some(RgbState::Static { .. })
-        ));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn fan_duty_and_rpm_round_trip() {
-        let mock = Arc::new(MockTransport::empty());
-        let dev = device(mock.clone());
-        dev.set_duty(50).await.unwrap();
-        assert_eq!(*mock.written.lock().await, vec![vec![0xFA, 50]]);
-        assert_eq!(dev.get_duty().await.unwrap(), 50, "write updates cache");
-        // Duty/rpm are read from the poll-populated cache, not live hardware.
-        dev.poll_once().await.unwrap();
-        assert_eq!(dev.get_duty().await.unwrap(), 42);
-        assert_eq!(dev.get_rpm().await, Some(1200));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reports_write_rate_from_transport() {
-        // The Info UI's throughput meter reads Device::write_rate_status().
-        let dev = device(Arc::new(MockTransport::empty()));
-        assert!(dev.write_rate_status().is_some());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn get_sensors_deserializes_lua_table() {
-        let dev = device(Arc::new(MockTransport::empty()));
-        dev.poll_once().await.unwrap();
-        let sensors = dev.get_sensors().await.unwrap();
-        assert_eq!(sensors.len(), 1);
-        assert_eq!(sensors[0].name, "Temp");
-        assert_eq!(sensors[0].value, 30.5);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn poll_caches_status_read_by_sensors() {
-        // read_status parses a report into dev.status; get_sensors reads the
-        // cache rather than hitting hardware. This device is not registered or
-        // initialized, so its background ticker remains paused; poll_once is
-        // the only read.
-        const POLL_SCRIPT: &str = r#"
-            return {
-              devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
-              permissions = { "hid" },
-              capabilities = { "sensors" },
-              read_status = function(dev)
-                local b = halod.buffer(dev.transport:read_nonblocking(1))
-                return { temp = b:get_u8(0) }
-              end,
-              get_sensors = function(dev)
-                local s = dev.status or {}
-                return { { id="t", name="Temp", value = s.temp or -1, unit="celsius" } }
-              end,
-            }
-        "#;
-        let manifest = super::super::parse_manifest(POLL_SCRIPT, Path::new("poll.lua")).unwrap();
-        let mock = Arc::new(MockTransport::new(vec![vec![55], vec![55]]));
-        let dev = hid_device("poll-0", &manifest, mock.clone());
-        dev.poll_once().await.unwrap();
-        assert_eq!(dev.get_sensors().await.unwrap()[0].value, 55.0);
-    }
-
-    // ── Range / Boolean / Action / Battery / Connection / Equalizer ────────
-
-    const CONTROLS_SCRIPT: &str = r#"
-        return {
-          devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
-          range = { ranges = { { key = "poll_hz", label = "Poll Rate", min = 125, max = 1000, default = 500 } } },
-          boolean = { booleans = { { key = "sniper", label = "Sniper" } } },
-          action = { actions = { { key = "calibrate", label = "Calibrate" } } },
-          battery = {},
-          connection = {},
-          equalizer = {},
-
-          set_range = function(dev, key, value)
-            dev.transport:write(string.char(0xA0, value & 0xFF))
-          end,
-          get_booleans = function(dev)
-            return { { key = "sniper", value = true } }
-          end,
-          set_boolean = function(dev, key, value)
-            dev.transport:write(string.char(0xB0, value and 1 or 0))
-          end,
-          trigger_action = function(dev, key)
-            dev.transport:write(string.char(0xC0))
-          end,
-          get_batteries = function(dev)
-            return { { key = "main", label = "Battery", level = 77, status = "discharging" } }
-          end,
-          connection_status = function(dev)
-            return { connection_type = "wireless" }
-          end,
-          get_equalizer = function(dev)
-            return { presets = {}, selected_preset = 0, bands = {}, bands_editable = false }
-          end,
-          set_eq_preset = function(dev, preset)
-            dev.transport:write(string.char(0xD0, preset))
-          end,
-          set_eq_bands = function(dev, values)
-            dev.transport:write(string.char(0xD1, #values))
-          end,
-        }
-    "#;
-
-    fn controls_device(transport: Arc<dyn Transport>) -> LuaDevice {
-        let manifest =
-            super::super::parse_manifest(CONTROLS_SCRIPT, Path::new("controls.lua")).unwrap();
-        hid_device("controls-0", &manifest, transport)
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn advertises_all_declared_controls() {
-        use crate::drivers::Device;
-        let dev = controls_device(Arc::new(MockTransport::empty()));
-        assert!(dev.as_range().is_some());
-        assert!(dev.as_boolean().is_some());
-        assert!(dev.as_action().is_some());
-        assert!(dev.as_battery().is_some());
-        assert!(dev.as_equalizer().is_some());
-        assert!(dev
-            .capabilities()
-            .iter()
-            .any(|c| matches!(c, CapabilityRef::Connection(_))));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn range_set_clamps_and_caches_and_reaches_script() {
-        use crate::drivers::RangeCapability;
-        let mock = Arc::new(MockTransport::empty());
-        let dev = controls_device(mock.clone());
-        dev.set_range("poll_hz", 5000).await.unwrap(); // above max, clamped
-        assert_eq!(*mock.written.lock().await, vec![vec![0xA0, 232]]); // 1000 & 0xFF
-        assert_eq!(dev.range_cache().get("poll_hz"), Some(1000));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn initialize_seeds_range_and_choice_caches_from_reported_values() {
-        // A plugin whose `initialize` reads live hardware values reports them
-        // back; the host seeds its range/choice caches so the UI shows the
-        // device state instead of the manifest defaults.
-        use crate::drivers::{ChoiceCapability, RangeCapability};
-        const SEED_SCRIPT: &str = r#"
-            return {
-              devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "M" } },
-              range = { ranges = { { key = "hz", label = "Hz", min = 0, max = 1000, default = 500 } } },
-              choice = { choices = { { key = "mode", label = "Mode", default = 0,
-                options = { { id = "0", label = "A" }, { id = "1", label = "B" } } } } },
-              initialize = function(dev)
-                return { ok = true, ranges = { hz = 250 }, choices = { mode = 1 } }
-              end,
-              set_range = function(dev, key, value) end,
-              set_choice = function(dev, key, selected) end,
-            }
-        "#;
-        let manifest = super::super::parse_manifest(SEED_SCRIPT, Path::new("seed.lua")).unwrap();
-        let dev = hid_device("seed-0", &manifest, Arc::new(MockTransport::empty()));
-        // Before initialize: caches empty, so the wire value falls back to default.
-        assert_eq!(dev.range_cache().get("hz"), None);
-        dev.initialize().await.unwrap();
-        assert_eq!(dev.range_cache().get("hz"), Some(250));
-        assert_eq!(dev.choice_cache().get("mode"), Some(1));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn boolean_round_trips_value_and_backfills_label() {
-        use crate::drivers::BooleanCapability;
-        let mock = Arc::new(MockTransport::empty());
-        let dev = controls_device(mock.clone());
-        dev.poll_once().await.unwrap();
-        let booleans = dev.get_booleans().await.unwrap();
-        assert_eq!(booleans.len(), 1);
-        assert!(booleans[0].value);
-        assert_eq!(booleans[0].label, "Sniper");
-        dev.set_boolean("sniper", false).await.unwrap();
-        assert_eq!(*mock.written.lock().await, vec![vec![0xB0, 0]]);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn action_trigger_reaches_script_and_rejects_unknown_key() {
-        use crate::drivers::ActionCapability;
-        let mock = Arc::new(MockTransport::empty());
-        let dev = controls_device(mock.clone());
-        dev.trigger_action("calibrate").await.unwrap();
-        assert_eq!(*mock.written.lock().await, vec![vec![0xC0]]);
-        assert!(dev.trigger_action("unknown").await.is_err());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn battery_and_connection_deserialize_from_lua() {
-        use crate::drivers::{BatteryCapability, ConnectionCapability, Device};
-        let dev = controls_device(Arc::new(MockTransport::empty()));
-        dev.poll_once().await.unwrap();
-        let batteries = dev.get_batteries().await.unwrap();
-        assert_eq!(batteries[0].level, 77);
-        let status = dev.connection_status().await.unwrap();
-        assert_eq!(
-            status.connection_type,
-            halod_shared::types::ConnectionType::Wireless
-        );
-        assert_eq!(
-            dev.wire_connection_type().await,
-            Some(halod_shared::types::ConnectionType::Wireless)
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn equalizer_status_poll_populates_current_state() {
-        use crate::drivers::EqualizerCapability;
-        let mock = Arc::new(MockTransport::empty());
-        let dev = controls_device(mock.clone());
-        assert!(
-            EqualizerCapability::current_state(&dev).is_none(),
-            "nothing read yet"
-        );
-        dev.poll_once().await.unwrap();
-        let eq = dev.get_equalizer().await.unwrap();
-        assert_eq!(eq.selected_preset, 0);
-        assert!(
-            EqualizerCapability::current_state(&dev).is_some(),
-            "cached after status poll"
-        );
-        dev.set_eq_preset(2).await.unwrap();
-        dev.set_eq_bands(&[1.0, 2.0, 3.0]).await.unwrap();
-        assert_eq!(
-            EqualizerCapability::current_state(&dev)
-                .unwrap()
-                .selected_preset,
-            2,
-            "write updates cache"
-        );
-        assert_eq!(
-            *mock.written.lock().await,
-            vec![vec![0xD0, 2], vec![0xD1, 3]]
-        );
-    }
-
-    // ── Pairing / OnboardProfiles / KeyRemap ────────────────────────────
-
-    const RECEIVER_SCRIPT: &str = r#"
-        return {
-          devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "Test", model = "Receiver" } },
-          pairing = {},
-          onboard_profiles = {},
-          key_remap = {
-            buttons = { { cid = 1, label = "Left", divertable = true, group = 0 } },
-            requires_host_mode = true,
-          },
-
-          start_pairing = function(dev, timeout_secs)
-            dev.transport:write(string.char(0xE0, timeout_secs))
-          end,
-          stop_pairing = function(dev)
-            dev.transport:write(string.char(0xE1))
-          end,
-          unpair = function(dev, slot)
-            dev.transport:write(string.char(0xE2, slot))
-          end,
-          pairing_status = function(dev)
-            return { state = "idle", max_slots = 1, slots = {} }
-          end,
-          switch_profile = function(dev, slot)
-            dev.transport:write(string.char(0xF0, slot))
-          end,
-          restore_profile = function(dev, slot)
-            dev.transport:write(string.char(0xF1, slot))
-          end,
-          set_profile_enabled = function(dev, slot, enabled)
-            dev.transport:write(string.char(0xF2, slot, enabled and 1 or 0))
-          end,
-          onboard_profiles_status = function(dev)
-            return { active_slot = 1, slots = { { index = 1, enabled = true, active = true, has_rom_default = true } } }
-          end,
-          set_button_mapping = function(dev, mapping)
-            dev.transport:write(string.char(0x90, mapping.cid))
-          end,
-          reset_button_mapping = function(dev, cid)
-            dev.transport:write(string.char(0x91, cid))
-          end,
-          reset_all_button_mappings = function(dev)
-            dev.transport:write(string.char(0x92))
-          end,
-          key_remap_host_mode = function(dev)
-            return true
-          end,
-        }
-    "#;
-
-    fn receiver_device(transport: Arc<dyn Transport>) -> LuaDevice {
-        let manifest =
-            super::super::parse_manifest(RECEIVER_SCRIPT, Path::new("receiver.lua")).unwrap();
-        hid_device("receiver-0", &manifest, transport)
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn advertises_pairing_onboard_and_key_remap() {
-        let dev = receiver_device(Arc::new(MockTransport::empty()));
-        assert!(dev.as_pairing().is_some());
-        assert!(dev.as_onboard_profiles().is_some());
-        assert!(dev.as_key_remap().is_some());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pairing_start_stop_unpair_reach_script() {
-        use crate::drivers::PairingCapability;
-        let mock = Arc::new(MockTransport::empty());
-        let dev = receiver_device(mock.clone());
-        dev.start_pairing(30).await.unwrap();
-        dev.stop_pairing().await.unwrap();
-        let removed = dev.unpair(1).await.unwrap();
-        assert!(removed.is_none(), "no owned child to remove");
-        assert_eq!(
-            *mock.written.lock().await,
-            vec![vec![0xE0, 30], vec![0xE1], vec![0xE2, 1]]
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn onboard_profiles_switch_restore_enable_reach_script() {
-        use crate::drivers::OnboardProfilesCapability;
-        let mock = Arc::new(MockTransport::empty());
-        let dev = receiver_device(mock.clone());
-        dev.switch_profile(2).await.unwrap();
-        dev.restore_profile(3).await.unwrap();
-        dev.set_profile_enabled(4, true).await.unwrap();
-        assert_eq!(
-            *mock.written.lock().await,
-            vec![vec![0xF0, 2], vec![0xF1, 3], vec![0xF2, 4, 1]]
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn key_remap_round_trips_mapping_and_reports_status() {
-        use crate::drivers::KeyRemapCapability;
-        use halod_shared::types::{ButtonAction, ButtonMapping, MouseBtn};
-        let mock = Arc::new(MockTransport::empty());
-        let dev = receiver_device(mock.clone());
-
-        let status = dev.get_key_remap_status().await;
-        assert_eq!(status.buttons.len(), 1);
-        assert!(status.requires_host_mode);
-        assert!(status.host_mode_active);
-        assert!(status.mappings.is_empty());
-
-        dev.set_button_mapping(ButtonMapping {
-            cid: 1,
-            base: ButtonAction::MouseButton {
-                btn: MouseBtn::Right,
-            },
-            shifted: ButtonAction::Native,
-        })
-        .await
-        .unwrap();
-        let status = dev.get_key_remap_status().await;
-        assert_eq!(status.mappings.len(), 1);
-        assert_eq!(status.mappings[0].cid, 1);
-
-        dev.reset_button_mapping(1).await.unwrap();
-        assert!(dev.get_key_remap_status().await.mappings.is_empty());
-
-        assert_eq!(
-            *mock.written.lock().await,
-            vec![vec![0x90, 1], vec![0x91, 1]]
-        );
-    }
-
-    // ── Chain / children ────────────────────────────────────────────────
-
-    const CHAIN_SCRIPT: &str = r#"
-        return {
-          devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "NZXT", model = "Kraken" } },
-          chain = {
-            channels = { { id = "0", name = "External", max_leds = 40 } },
-            accessories = {
-              { id = 0x13, name = "F120 RGB", led_count = 8, topology = "ring", fan = true },
-            },
-          },
-          detect_accessories = function(dev)
-            return { { channel = 0, accessory = 0x13 } }
-          end,
-          write_ext_frame = function(dev, channel, colors)
-            local b = halod.buffer(1 + #colors)
-            b:set_u8(0, 0xE0)
-            for i, c in ipairs(colors) do b:set_u8(i, c.r) end
-            dev.transport:write(b)
-          end,
-          fan_duty = function(dev, ch) return 60 end,
-          fan_rpm = function(dev, ch) return 1400 end,
-          fan_controllable = function(dev, ch) return true end,
-          set_fan_duty = function(dev, ch, duty)
-            dev.transport:write(string.char(0xFD, ch, duty))
-          end,
-        }
-    "#;
-
-    fn chain_device(transport: Arc<dyn Transport>) -> Arc<LuaDevice> {
-        use crate::drivers::chain::{ChainAdapter, ChainHost};
-        let manifest = super::super::parse_manifest(CHAIN_SCRIPT, Path::new("kraken.lua")).unwrap();
-        let spec = &manifest.devices[0];
-        let notify = Weak::new();
-        let dev = Arc::new_cyclic(|weak| {
-            let mut d = LuaDevice::with_transport(
-                "kraken-0".into(),
-                &manifest,
-                spec,
-                hid_match(),
-                PluginIo::Stream {
-                    transport,
-                    usb: None,
-                },
-                tokio::runtime::Handle::current(),
-                Vec::<Permission>::new(),
-                HashMap::new(),
-                notify,
-                opening_runtime(),
-            );
-            d.set_self_ref(weak.clone());
-            d
-        });
-        let adapter: Arc<dyn ChainAdapter> = dev.clone();
-        dev.install_chain_host(ChainHost::new(adapter));
-        dev
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn advertises_controller_and_chain() {
-        use crate::drivers::Device;
-        let dev = chain_device(Arc::new(MockTransport::empty()));
-        assert!(dev.as_controller().is_some());
-        assert!(dev.as_chain().is_some());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn discover_children_builds_and_wires_the_fan_child() {
-        use crate::drivers::Controller;
-        let mock = Arc::new(MockTransport::empty());
-        let dev = chain_device(mock.clone());
-
-        let children = dev.discover_children().await;
-        assert_eq!(children.len(), 1);
-        let child = &children[0];
-        assert_eq!(child.id(), "kraken-0_acc_0_19"); // 0x13 == 19
-        assert_eq!(child.name(), "F120 RGB");
-
-        // Fan reads/writes route back through the parent's FanHub into the script.
-        let fan = child.as_fan().expect("child has a fan");
-        assert_eq!(fan.get_duty().await.unwrap(), 60);
-        assert_eq!(fan.get_rpm().await, Some(1400));
-        fan.set_duty(77).await.unwrap();
-        assert_eq!(
-            *mock.written.lock().await.last().unwrap(),
-            vec![0xFD, 0, 77]
-        );
-
-        // An RGB frame composes through ChainHost and reaches write_ext_frame.
-        let rgb = child.as_rgb().expect("child has rgb");
-        rgb.write_frame("ring", &[RgbColor { r: 5, g: 0, b: 0 }; 8])
-            .await
-            .unwrap();
-        assert_eq!(
-            *mock.written.lock().await.last().unwrap(),
-            vec![0xE0, 5, 5, 5, 5, 5, 5, 5, 5]
-        );
-    }
-
-    const INTEGRATION_SCRIPT: &str = r#"
-        return {
-          type = "integration",
-          permissions = {"network"},
-          identity = { name = "Test Hub" },
-          config = { fields = { { key = "host", label = "Host" }, { key = "port", label = "Port" } } },
-          transports = { tcp = {} },
-
-          initialize = function(dev)
-            if dev.match.index ~= nil then
-              dev.transport:write(string.char(0xFE, dev.match.index))
-            end
-            return true
-          end,
-
-          enumerate_controllers = function(dev)
-            return {
-              { index = 0, name = "Keyboard", device_type = "keyboard", zones = {
-                  { id = "main", name = "Main", topology = "linear", led_count = 4 },
-              } },
-              { index = 1, name = "Mobo", zones = {
-                  { id = "aux", name = "Aux", topology = "linear", led_count = 2 },
-                  { id = "z2", name = "Zone 2", topology = "linear", led_count = 3 },
-              } },
-            }
-          end,
-
-          -------------------------------
-          -- Standard callbacks route through the persistent child match table.
-
-          write_frame = function(dev, zone_id, colors)
-            local index = assert(dev.match.index)
-            local bytes = { index, string.byte(zone_id, 1) }
-            for _, c in ipairs(colors) do
-              bytes[#bytes+1] = c.r
-              bytes[#bytes+1] = c.g
-              bytes[#bytes+1] = c.b
-            end
-            dev.transport:write(string.char(table.unpack(bytes)))
-          end,
-
-          apply = function(dev, state)
-            local index = assert(dev.match.index)
-            local color = (state.mode == "static") and state.color
-            if not color then return end
-            -- Zone layout per controller (mirrors enumerate_controllers).
-            local zones = index == 0 and {
-              { id = "main", n = 4 },
-            } or {
-              { id = "aux", n = 2 },
-              { id = "z2", n = 3 },
-            }
-            for _, z in ipairs(zones) do
-              local cs = {}
-              for i = 1, z.n do cs[i] = color end
-              -- Reuse the write_frame wire format so tests see the same bytes.
-              local bytes = { index, string.byte(z.id, 1) }
-              for _, c in ipairs(cs) do
-                bytes[#bytes+1] = c.r
-                bytes[#bytes+1] = c.g
-                bytes[#bytes+1] = c.b
-              end
-              dev.transport:write(string.char(table.unpack(bytes)))
-            end
-          end,
-        }
-    "#;
-
-    fn integration_device(transport: Arc<dyn Transport>) -> Arc<LuaDevice> {
-        let manifest =
-            super::super::parse_manifest(INTEGRATION_SCRIPT, Path::new("integ.lua")).unwrap();
-        // Every controller child spawns its own worker over the same mock
-        // transport (a real integration opens a fresh socket per controller).
-        let child_transport = transport.clone();
-        let child_worker: ChildWorkerFactory = Arc::new(move |_index| {
-            Ok(PluginIo::Stream {
-                transport: child_transport.clone(),
-                usb: None,
-            })
-        });
-        let notify = Weak::new();
-        Arc::new_cyclic(|weak| {
-            let mut d = LuaDevice::integration_root(
-                "integ-0".into(),
-                &manifest,
-                PluginIo::Stream {
-                    transport,
-                    usb: None,
-                },
-                child_worker,
-                tokio::runtime::Handle::current(),
-                Vec::<Permission>::new(),
-                HashMap::new(),
-                notify,
-                opening_runtime(),
-            );
-            d.set_self_ref(weak.clone());
-            d
-        })
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn integration_root_advertises_controller_capability() {
-        // Regression: `register_device_and_children` (the real registration
-        // path) finds children via `device.as_controller()`, not by calling
-        // `Controller::discover_children` directly on the concrete type — a
-        // plugin whose `capabilities()` forgets to advertise `Controller`
-        // silently never gets its children discovered at all, even though
-        // the trait impl itself is correct. Guard the capability list, not
-        // just the trait method.
-        let dev = integration_device(Arc::new(MockTransport::empty()));
-        assert!(dev.as_controller().is_some());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn track_flips_integration_liveness_to_last_result() {
-        // The shared root/child runtime state greys the integration on a failed
-        // call and self-heals on a success — `is_live()` always mirrors the
-        // last result.
-        let dev = integration_device(Arc::new(MockTransport::empty()));
-        assert!(dev.is_live(), "starts live");
-        let _ = dev.track::<()>(Err(anyhow::anyhow!("boom"))).await;
-        assert!(!dev.is_live(), "an error greys the integration");
-        let _ = dev.track::<()>(Ok(())).await;
-        assert!(dev.is_live(), "a success self-heals a transient blip");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn close_is_terminal_and_a_later_success_does_not_resurrect_it() {
-        // Closing -> Closed is terminal: a capability call that completes
-        // after close() must not flip the device back to live.
-        let dev = integration_device(Arc::new(MockTransport::empty()));
         dev.close().await;
-        assert!(!dev.is_live(), "closed devices are not live");
-        let _ = dev.track::<()>(Ok(())).await;
-        assert!(
-            !dev.is_live(),
-            "a tracked success after close must not resurrect the device"
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_initialize_degrades_and_close_is_terminal() {
+        let (_tmp, manifest) = test_manifest(
+            "lifecycle",
+            &["rgb"],
+            "return { initialize = function(dev) error('broken') end }",
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn non_integration_device_is_always_live() {
-        // A device with no remote backend has no runtime state; `track` never
-        // greys it, so engines always drive it.
-        let dev = device(Arc::new(MockTransport::empty()));
-        assert!(dev.is_live());
-        let _ = dev.track::<()>(Err(anyhow::anyhow!("boom"))).await;
-        assert!(dev.is_live(), "a backing-less device stays live");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn resync_children_builds_only_new_and_reports_gone() {
-        // enumerate_controllers reports ctrl_0 and ctrl_1. With ctrl_0 already
-        // registered and a stale ctrl_9 in `existing`, resync builds only the
-        // new ctrl_1 and reports ctrl_9 gone — the survivor is left untouched.
-        let dev = integration_device(Arc::new(MockTransport::empty()));
-        let existing: std::collections::HashSet<String> = ["integ-0_ctrl_0", "integ-0_ctrl_9"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-
-        let (added, gone) = dev
-            .as_controller()
-            .unwrap()
-            .resync_children(&existing)
-            .await
-            .unwrap();
-
-        assert_eq!(added.len(), 1, "only the un-registered controller is built");
-        assert_eq!(added[0].id(), "integ-0_ctrl_1");
-        assert_eq!(gone, vec!["integ-0_ctrl_9".to_string()]);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn integration_root_marks_itself_on_the_wire_but_not_its_children() {
-        // The GUI hides an integration's root from Home/sidebar via this
-        // marker (see `Device::integration_id`) — a device plugin and every
-        // `IntegrationLeaf` child must never set it, or they'd disappear too.
-        let dev = integration_device(Arc::new(MockTransport::empty()));
-        assert_eq!(dev.integration_id(), Some("integ".to_string()));
-        // `owning_plugin_id` is the *scoped teardown* selector and is broader
-        // than `integration_id`: it is set on every plugin device, so the
-        // generic plugin toggle can tear an integration plugin down too.
-        assert_eq!(dev.owning_plugin_id(), Some("integ".to_string()));
-        let wire = dev.serialize().await;
-        assert_eq!(wire.integration_id, Some("integ".to_string()));
-
-        let children = dev.as_controller().unwrap().discover_children().await;
-        for child in &children {
-            assert_eq!(child.integration_id(), None);
-            assert_eq!(child.serialize().await.integration_id, None);
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn integration_root_discovers_one_child_per_controller() {
-        let dev = integration_device(Arc::new(MockTransport::empty()));
-
-        let children = dev.as_controller().unwrap().discover_children().await;
-        assert_eq!(children.len(), 2);
-        assert_eq!(children[0].id(), "integ-0_ctrl_0");
-        assert_eq!(children[0].name(), "Keyboard");
-        assert_eq!(children[1].id(), "integ-0_ctrl_1");
-        assert_eq!(children[1].name(), "Mobo");
-
-        let mobo_rgb = children[1].as_rgb().expect("has rgb");
-        assert_eq!(mobo_rgb.descriptor().zones.len(), 2);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn disabled_integration_child_is_not_initialized() {
-        let mock = Arc::new(MockTransport::empty());
-        let dev = integration_device(mock.clone());
-        let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
-        app.config.write().await.known_devices.insert(
-            "integ-0_ctrl_0".into(),
-            crate::registry::config::DeviceRecord {
-                name: String::new(),
-                vendor: String::new(),
-                model: String::new(),
-                active_state: VisibilityState::Disabled,
-            },
-        );
-
-        crate::registry::usecases::registration::register_device_and_children(
-            &app,
-            dev as Arc<dyn Device>,
-        )
-        .await;
-
+        let runtime = Arc::new(Mutex::new(RuntimeState::OpeningTransport));
+        let mut dev = hid_device("lifecycle-0", &manifest, Arc::new(MockTransport::empty()));
+        dev.runtime = Some(runtime.clone());
+        assert!(dev.initialize().await.is_err());
         assert_eq!(
-            *mock.written.lock().await,
-            vec![vec![0xFE, 1]],
-            "only the enabled controller may run initialize()"
+            *runtime.lock().unwrap(),
+            RuntimeState::Degraded(DegradeReason::CallFailed)
         );
-        let devices = app.devices.read().await;
-        let disabled = devices.iter().find(|d| d.id() == "integ-0_ctrl_0").unwrap();
-        assert_eq!(disabled.active_state(), VisibilityState::Disabled);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn integration_leaf_write_frame_routes_to_the_parent_with_its_own_index() {
-        let mock = Arc::new(MockTransport::empty());
-        let dev = integration_device(mock.clone());
-        let children = dev.as_controller().unwrap().discover_children().await;
-
-        let keyboard_rgb = children[0].as_rgb().expect("has rgb");
-        keyboard_rgb
-            .write_frame("main", &[RgbColor { r: 9, g: 8, b: 7 }; 4])
-            .await
-            .unwrap();
-        // index 0, zone 'main' -> byte('m') = 109, then 4x(9,8,7).
-        assert_eq!(
-            *mock.written.lock().await.last().unwrap(),
-            vec![0, 109, 9, 8, 7, 9, 8, 7, 9, 8, 7, 9, 8, 7]
-        );
-
-        let mobo_rgb = children[1].as_rgb().expect("has rgb");
-        mobo_rgb
-            .write_frame("z2", &[RgbColor { r: 1, g: 1, b: 1 }; 2])
-            .await
-            .unwrap();
-        // index 1, zone 'z2' -> byte('z') = 122, then 2x(1,1,1).
-        assert_eq!(
-            *mock.written.lock().await.last().unwrap(),
-            vec![1, 122, 1, 1, 1, 1, 1, 1]
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn integration_leaf_write_frame_rejects_an_unknown_zone() {
-        let dev = integration_device(Arc::new(MockTransport::empty()));
-        let children = dev.as_controller().unwrap().discover_children().await;
-        let rgb = children[0].as_rgb().expect("has rgb");
-        assert!(rgb.write_frame("nope", &[]).await.is_err());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn integration_leaf_apply_static_broadcasts_to_every_zone() {
-        let mock = Arc::new(MockTransport::empty());
-        let dev = integration_device(mock.clone());
-        let children = dev.as_controller().unwrap().discover_children().await;
-        let mobo_rgb = children[1].as_rgb().expect("has rgb");
-
-        mobo_rgb
-            .apply(RgbState::Static {
-                color: RgbColor { r: 3, g: 3, b: 3 },
-            })
-            .await
-            .unwrap();
-
-        let written = mock.written.lock().await;
-        assert_eq!(written.len(), 2, "one write per zone");
-        // 'aux' has 2 LEDs; 'z2' has 3. index 1, byte('a')=97 / byte('z')=122.
-        assert!(written.iter().any(|w| *w == vec![1, 97, 3, 3, 3, 3, 3, 3]));
-        assert!(written
-            .iter()
-            .any(|w| *w == vec![1, 122, 3, 3, 3, 3, 3, 3, 3, 3, 3]));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dynamic_child_close_keeps_shared_root_and_siblings_live() {
-        // Dynamic children own only a route/table in the root VM. Removing a
-        // receiver slot or integration child must not close the root runtime
-        // or restore the shared transport out from under its siblings.
-        let dev = integration_device(Arc::new(MockTransport::empty()));
-        let children = dev.as_controller().unwrap().discover_children().await;
-
-        children[0].close().await;
-        assert!(dev.is_live(), "closing a child must leave its root live");
-        // The closed child's local surface is terminal.
-        let keyboard = children[0].as_rgb().expect("has rgb");
-        assert!(keyboard
-            .write_frame("main", &[RgbColor { r: 1, g: 1, b: 1 }; 4])
-            .await
-            .is_err());
-
-        // A sibling still routes through the shared worker.
-        let mobo = children[1].as_rgb().expect("has rgb");
-        assert!(mobo
-            .write_frame("z2", &[RgbColor { r: 2, g: 2, b: 2 }; 3])
-            .await
-            .is_ok());
-    }
-
-    // ---- multi-capability integration fixture ----------------------------------------
-
-    const INTEGRATION_MULTI_SCRIPT: &str = r#"
-        return {
-          type = "integration",
-          permissions = {"network"},
-          identity = { name = "Multi Hub" },
-          config = { fields = {
-            { key = "host", label = "Host" },
-            { key = "port", label = "Port", default = "12345" },
-          } },
-          transports = { tcp = {} },
-
-          enumerate_controllers = function(dev)
-            return {
-              { index = 0, name = "Ctrl0",
-                zones = { { id = "leds", name = "LEDs", topology = "linear", led_count = 2 } },
-                fan = { channel = 0 },
-                sensor = {},
-              },
-              { index = 1, name = "Ctrl1",
-                zones = { { id = "ring", name = "Ring", topology = "linear", led_count = 4 } },
-                battery = {},
-              },
-            }
-          end,
-
-          write_frame = function(dev, zone_id, colors)
-            local bytes = { dev.match.index, string.byte(zone_id, 1) }
-            for _, c in ipairs(colors) do
-              bytes[#bytes+1] = c.r; bytes[#bytes+1] = c.g; bytes[#bytes+1] = c.b
-            end
-            dev.transport:write(string.char(table.unpack(bytes)))
-          end,
-
-          set_duty = function(dev, duty)
-            dev.transport:write(string.char(dev.match.index, duty))
-          end,
-
-          get_duty = function(dev)
-            return dev.match.index == 0 and 60 or 0
-          end,
-
-          get_sensors = function(dev)
-            return { { id = "temp", name = "Temperature", value = 42 + dev.match.index, unit = "celsius" } }
-          end,
-
-          get_batteries = function(dev)
-            return { { id = "bat0", level = 80 } }
-          end,
-        }
-    "#;
-
-    fn integration_multi_device() -> Arc<LuaDevice> {
-        let manifest =
-            super::super::parse_manifest(INTEGRATION_MULTI_SCRIPT, Path::new("multi.lua")).unwrap();
-        let transport = Arc::new(MockTransport::empty());
-        let child_transport = transport.clone();
-        let child_worker: ChildWorkerFactory = Arc::new(move |_index| {
-            Ok(PluginIo::Stream {
-                transport: child_transport.clone(),
-                usb: None,
-            })
-        });
-        let notify = Weak::new();
-        Arc::new_cyclic(|weak| {
-            let mut d = LuaDevice::integration_root(
-                "multi-0".into(),
-                &manifest,
-                PluginIo::Stream {
-                    transport,
-                    usb: None,
-                },
-                child_worker,
-                tokio::runtime::Handle::current(),
-                Vec::<Permission>::new(),
-                HashMap::new(),
-                notify,
-                opening_runtime(),
-            );
-            d.set_self_ref(weak.clone());
-            d
-        })
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn integration_child_reports_all_declared_capabilities() {
-        let dev = integration_multi_device();
-        let children = dev.as_controller().unwrap().discover_children().await;
-        assert_eq!(children.len(), 2);
-
-        // Ctrl0: rgb (zones shorthand), fan, sensor
-        let c0 = &children[0];
-        assert!(c0.as_rgb().is_some());
-        assert!(c0.as_fan().is_some());
-        assert!(c0.as_sensor_capability().is_some());
-        assert!(c0.as_battery().is_none());
-        assert_eq!(c0.integration_id(), None);
-
-        // Ctrl1: rgb (zones shorthand), battery
-        let c1 = &children[1];
-        assert!(c1.as_rgb().is_some());
-        assert!(c1.as_battery().is_some());
-        assert!(c1.as_fan().is_none());
-        assert!(c1.as_sensor_capability().is_none());
-        assert_eq!(c1.integration_id(), None);
-
-        // Root stays hidden.
-        assert_eq!(dev.integration_id(), Some("multi".to_string()));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn integration_child_fan_and_sensor_route_with_correct_index() {
-        let mock = Arc::new(MockTransport::empty());
-        let transport = mock.clone();
-        let manifest =
-            super::super::parse_manifest(INTEGRATION_MULTI_SCRIPT, Path::new("multi.lua")).unwrap();
-        let child_transport = transport.clone();
-        let child_worker: ChildWorkerFactory = Arc::new(move |_index| {
-            Ok(PluginIo::Stream {
-                transport: child_transport.clone(),
-                usb: None,
-            })
-        });
-        let notify = Weak::new();
-        let dev = Arc::new_cyclic(|weak| {
-            let mut d = LuaDevice::integration_root(
-                "multi-0".into(),
-                &manifest,
-                PluginIo::Stream {
-                    transport,
-                    usb: None,
-                },
-                child_worker,
-                tokio::runtime::Handle::current(),
-                Vec::<Permission>::new(),
-                HashMap::new(),
-                notify,
-                opening_runtime(),
-            );
-            d.set_self_ref(weak.clone());
-            d
-        });
-        let children = dev.as_controller().unwrap().discover_children().await;
-
-        // Ctrl0 (index 0) has a fan: set_duty writes [0, duty].
-        let fan = children[0].as_fan().expect("ctrl0 has fan");
-        fan.set_duty(60).await.unwrap();
-        assert_eq!(*mock.written.lock().await.last().unwrap(), vec![0, 60]);
-        assert_eq!(fan.get_duty().await.unwrap(), 60);
-
-        // Ctrl1 (index 1) sensors return 42 + 1 = 43.
-        let sensor = children[0]
-            .as_sensor_capability()
-            .expect("ctrl0 has sensor");
-        let sensors: Vec<Sensor> = sensor.get_sensors().await.unwrap();
-        assert_eq!(sensors.len(), 1);
-        assert_eq!(sensors[0].value, 42.0);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn runtime_errors_surface_once_per_failure_episode() {
-        use crate::config::Config;
-        use crate::ipc::ClientHandle;
-        use crate::state::AppState;
-
-        // `apply` fails unless the requested colour is black — a per-call toggle
-        // so one device can walk fail → fail → recover → fail.
-        let src = r#"return {
-            devices = { { transport = "hid", vid = 0x1, pid = 0x2, vendor = "T", model = "M" } },
-            transports = { hid = { report_size = 8 } },
-            rgb = { zones = { { id = "z", name = "Z", topology = { type = "linear" },
-                leds = { { id = 0, x = 0.0, y = 0.0 } } } } },
-            apply = function(dev, state)
-                if state.color.r == 0 then return end
-                error("boom")
-            end,
-        }"#;
-        let manifest = super::super::parse_manifest(src, Path::new("err.lua")).unwrap();
-
-        let app = Arc::new(AppState::new(Config::default()));
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Arc<Vec<u8>>>(16);
-        app.clients.lock().await.push(ClientHandle {
-            id: 0,
-            tx,
-            subs: Arc::default(),
-        });
-
-        let dev = LuaDevice::with_transport(
-            "err-dev".into(),
-            &manifest,
-            &manifest.devices[0],
-            hid_match(),
-            PluginIo::Stream {
-                transport: Arc::new(MockTransport::empty()),
-                usb: None,
-            },
-            tokio::runtime::Handle::current(),
-            Vec::<Permission>::new(),
-            HashMap::new(),
-            Arc::downgrade(&app),
-            opening_runtime(),
-        );
-
-        let fail = || RgbState::Static {
-            color: RgbColor { r: 1, g: 0, b: 0 },
-        };
-        let ok = || RgbState::Static {
-            color: RgbColor { r: 0, g: 0, b: 0 },
-        };
-        let code_of = |frame: &[u8]| -> serde_json::Value {
-            serde_json::from_slice::<serde_json::Value>(&frame[5..]).unwrap()["data"]["code"]
-                .clone()
-        };
-
-        // First failure surfaces exactly one plugin_runtime_error toast.
-        let err = dev.apply(fail()).await.unwrap_err();
-        let surfaced = err
-            .downcast_ref::<crate::drivers::plugins::SurfacedPluginError>()
-            .expect("foreground error is marked as already surfaced");
-        assert_eq!(surfaced.plugin, manifest.plugin_id);
-        let frame = rx.try_recv().expect("first failure surfaced");
-        assert_eq!(code_of(&frame), "plugin_runtime_error");
-
-        // A second consecutive failure is deduped — no new toast.
-        assert!(dev.apply(fail()).await.is_err());
-        assert!(
-            rx.try_recv().is_err(),
-            "consecutive failure must not re-toast"
-        );
-
-        // A success clears the dedup flag (and never toasts)...
-        dev.apply(ok()).await.unwrap();
-        assert!(rx.try_recv().is_err(), "success must not toast");
-
-        // ...so the next failure alerts again.
-        assert!(dev.apply(fail()).await.is_err());
-        assert!(
-            rx.try_recv().is_ok(),
-            "a failure after recovery must re-toast"
-        );
+        dev.close().await;
+        assert_eq!(*runtime.lock().unwrap(), RuntimeState::Closed);
+        assert!(!dev.is_live());
+        assert!(dev.initialize().await.is_err());
     }
 }

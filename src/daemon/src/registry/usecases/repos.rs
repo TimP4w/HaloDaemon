@@ -689,6 +689,26 @@ mod tests {
 
     fn commit_all(repo: &git2::Repository, message: &str) -> String {
         refresh_repository_index(repo);
+        commit_tree(repo, message)
+    }
+
+    fn commit_with_repository_compatibility(
+        repo: &git2::Repository,
+        message: &str,
+        halod: &str,
+        plugin_api: u32,
+    ) -> String {
+        refresh_repository_index(repo);
+        let path = repo.workdir().unwrap().join("repository.yaml");
+        let current = std::fs::read_to_string(&path).unwrap();
+        let current = current
+            .replace("halod: '>=0.2.0, <0.3.0'", &format!("halod: '{halod}'"))
+            .replace("plugin_api: 1", &format!("plugin_api: {plugin_api}"));
+        std::fs::write(path, current).unwrap();
+        commit_tree(repo, message)
+    }
+
+    fn commit_tree(repo: &git2::Repository, message: &str) -> String {
         let mut index = repo.index().unwrap();
         index
             .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
@@ -752,20 +772,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_repo_checks_out_the_newest_compatible_plugin_revision() {
+    async fn add_repo_materializes_the_indexed_revision() {
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-            let source = git2::Repository::open(src.path()).unwrap();
-            std::fs::write(
-                src.path().join("plugin.yaml"),
-                format!(
-                    "id: {slug}\nversion: 0.3.0\ncompatibility:\n  halod: '>=0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
-                ),
-            )
-            .unwrap();
-            let tip_sha = commit_all(&source, "requires Halo 0.3");
+            let tip_sha = init_source_repo(src.path(), &slug);
 
             add_repo(file_url(src.path()), None, app.clone())
                 .await
@@ -773,19 +784,23 @@ mod tests {
 
             let cfg = app.config.read().await;
             assert_eq!(cfg.plugins.repos[0].locked_sha, tip_sha);
-            drop(cfg);
-            let checkout = crate::config::plugin_repos_dir().join(&slug);
-            assert!(
-                std::fs::read_to_string(checkout.join("plugin.yaml"))
-                    .unwrap()
-                    .contains("<0.3.0"),
-                "the working tree should use the latest compatible package"
+            assert_eq!(
+                cfg.plugins.repos[0].active_revision.as_deref(),
+                Some(tip_sha.as_str())
             );
+            let active = repo::active_revision_dir(&cfg.plugins.repos[0]);
+            drop(cfg);
+            assert!(active.join("repository.yaml").is_file());
+            assert!(active
+                .join("plugins")
+                .join(&slug)
+                .join("plugin.yaml")
+                .is_file());
             assert!(app
                 .registry
                 .list(&*app.secret_store)
                 .iter()
-                .any(|plugin| plugin.id == slug && plugin.health.issue.is_none()));
+                .any(|plugin| { plugin.id == slug && plugin.health.issue.is_none() }));
         })
         .await;
     }
@@ -902,28 +917,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repair_plugin_dir_restores_only_the_malformed_package() {
+    async fn mutable_git_worktree_is_never_loaded_as_plugin_input() {
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
-            let original_sha = init_source_repo(src.path(), &slug);
-
-            // Turn the source into a sibling-package repository.
-            let package = src.path().join(&slug);
-            std::fs::create_dir(&package).unwrap();
-            std::fs::rename(src.path().join("plugin.yaml"), package.join("plugin.yaml")).unwrap();
-            std::fs::rename(src.path().join("main.lua"), package.join("main.lua")).unwrap();
-            let source_repo = git2::Repository::open(src.path()).unwrap();
-            let package_sha = commit_all(&source_repo, "move plugin into package directory");
+            init_source_repo(src.path(), &slug);
 
             add_repo(file_url(src.path()), None, app.clone())
                 .await
                 .unwrap();
 
-            let checkout = crate::config::plugin_repos_dir().join(&slug);
-            std::fs::write(checkout.join("sibling-note.txt"), "keep this local edit").unwrap();
+            let worktree_package = crate::config::plugin_repos_dir()
+                .join(&slug)
+                .join("plugins")
+                .join(&slug);
             std::fs::write(
-                checkout.join(&slug).join("plugin.yaml"),
+                worktree_package.join("plugin.yaml"),
                 "id: broken\nid: duplicate\n",
             )
             .unwrap();
@@ -932,35 +941,25 @@ mod tests {
                 app.registry
                     .list(&*app.secret_store)
                     .iter()
-                    .all(|p| p.id != slug),
-                "the malformed manifest should make the repo plugin undiscoverable"
+                    .any(|p| p.id == slug && p.health.issue.is_none()),
+                "registry reload must continue reading the immutable active revision"
             );
-
-            update_repo(slug.clone(), app.clone()).await.unwrap();
-
             let cfg = app.config.read().await;
             let record = cfg.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
-            assert_ne!(package_sha, original_sha);
-            assert_eq!(record.locked_sha, package_sha);
-            drop(cfg);
-            assert_eq!(
-                std::fs::read_to_string(checkout.join("sibling-note.txt")).unwrap(),
-                "keep this local edit",
-                "repairing one package must not reset sibling paths"
-            );
             assert!(
-                app.registry
-                    .list(&*app.secret_store)
-                    .iter()
-                    .any(|p| p.id == slug),
-                "the restored manifest should make the plugin discoverable again"
+                repo::active_revision_dir(record)
+                    .join("plugins")
+                    .join(&slug)
+                    .join("plugin.yaml")
+                    .is_file(),
+                "the selected immutable package remains intact"
             );
         })
         .await;
     }
 
     #[tokio::test]
-    async fn update_plugin_broadcasts_a_cleared_update_flag() {
+    async fn update_all_plugins_broadcasts_a_cleared_update_flag() {
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -989,7 +988,7 @@ mod tests {
                 subs: Arc::default(),
             });
 
-            update_repo(slug.clone(), app.clone()).await.unwrap();
+            update_all_plugins(app.clone()).await.unwrap();
 
             // Drain frames until the plugin_updates one, and assert the flag cleared.
             let mut cleared = None;
@@ -1005,7 +1004,7 @@ mod tests {
             assert_eq!(
                 cleared,
                 Some(false),
-                "update_plugin must broadcast a plugin_updates frame clearing the flag"
+                "update_all_plugins must broadcast a plugin_updates frame clearing the flag"
             );
         })
         .await;
@@ -1026,14 +1025,17 @@ mod tests {
             let repo = git2::Repository::open(src.path()).unwrap();
             std::fs::write(
                 src.path().join("plugin.yaml"),
-                "id: not-the-slug\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+                "id: not-the-slug\nversion: 1.0.0\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             )
             .unwrap();
             let second_sha = commit_all(&repo, "broken");
             assert_ne!(first_sha, second_sha);
 
             let err = update_repo(slug.clone(), app.clone()).await.unwrap_err();
-            assert!(err.to_string().contains("failed validation"), "{err}");
+            assert!(
+                format!("{err:#}").contains("does not match its plugin.yaml id"),
+                "{err:#}"
+            );
 
             let cfg = app.config.read().await;
             let r = cfg.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
@@ -1041,13 +1043,15 @@ mod tests {
                 r.locked_sha, first_sha,
                 "a failed update must not advance locked_sha"
             );
+            let active = repo::active_revision_dir(r);
             drop(cfg);
 
             // Validation happened in staging, so the installed working tree was
             // never replaced with the invalid content.
-            let dir = crate::config::plugin_repos_dir().join(&slug);
-            let manifest = crate::drivers::plugins::parse_manifest_from_dir(&dir)
-                .expect("the reverted checkout must parse again");
+            let manifest = crate::drivers::plugins::parse_manifest_from_dir(
+                &active.join("plugins").join(&slug),
+            )
+            .expect("the reverted checkout must parse again");
             assert_eq!(manifest.plugin_id, slug);
         })
         .await;
@@ -1088,7 +1092,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incompatible_remote_plugin_resolves_to_latest_compatible_revision() {
+    async fn incompatible_remote_repository_does_not_replace_active_revision() {
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -1098,25 +1102,31 @@ mod tests {
                 .unwrap();
 
             let repo = git2::Repository::open(src.path()).unwrap();
-            std::fs::write(
-                src.path().join("plugin.yaml"),
-                format!(
-                    "id: {slug}\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 2\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
-                ),
-            )
-            .unwrap();
-            let tip_sha = commit_all(&repo, "requires future plugin API");
+            let tip_sha = commit_with_repository_compatibility(
+                &repo,
+                "requires future plugin API",
+                ">=0.2.0, <0.3.0",
+                2,
+            );
 
             let (statuses, _) = compute_plugin_updates(&app, Some(&slug)).await;
-            let status = statuses.iter().find(|s| s.plugin_id == slug).unwrap();
-            assert!(!status.update_available);
+            assert!(
+                statuses.is_empty(),
+                "an incompatible index is not advertised"
+            );
 
-            update_repo(slug.clone(), app.clone()).await.unwrap();
+            let error = update_repo(slug.clone(), app.clone()).await.unwrap_err();
+            assert!(format!("{error:#}").contains("plugin API 2"));
             let config = app.config.read().await;
-            let record = config.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
-            assert_eq!(record.locked_sha, tip_sha);
-            assert_ne!(record.locked_sha, first_sha);
-            assert_eq!(record.active_revision.as_deref(), Some(tip_sha.as_str()));
+            let record = config
+                .plugins
+                .repos
+                .iter()
+                .find(|r| r.slug == slug)
+                .unwrap();
+            assert_ne!(tip_sha, first_sha);
+            assert_eq!(record.locked_sha, first_sha);
+            assert_eq!(record.active_revision.as_deref(), Some(first_sha.as_str()));
         })
         .await;
     }
@@ -1133,12 +1143,22 @@ mod tests {
 
             // Simulate a previously valid plugin becoming invalid under newer
             // Halo validation while a compatible fix is available upstream.
-            let checkout = crate::config::plugin_repos_dir().join(&slug);
+            let record = app
+                .config
+                .read()
+                .await
+                .plugins
+                .repos
+                .iter()
+                .find(|record| record.slug == slug)
+                .cloned()
+                .unwrap();
+            let active_package = repo::active_revision_dir(&record)
+                .join("plugins")
+                .join(&slug);
             std::fs::write(
-                checkout.join("plugin.yaml"),
-                format!(
-                    "id: {slug}\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ntype: effect\n"
-                ),
+                active_package.join("plugin.yaml"),
+                format!("id: {slug}\nversion: 1.0.0\ntype: effect\n"),
             )
             .unwrap();
             reload_registry(&app).await;
@@ -1189,10 +1209,21 @@ mod tests {
                 .unwrap();
 
             // No upstream change, but the checked-out working-tree file is edited.
-            let clone_main = crate::config::plugin_repos_dir()
+            let record = app
+                .config
+                .read()
+                .await
+                .plugins
+                .repos
+                .iter()
+                .find(|record| record.slug == slug)
+                .cloned()
+                .unwrap();
+            let active_main = repo::active_revision_dir(&record)
+                .join("plugins")
                 .join(&slug)
                 .join("main.lua");
-            std::fs::write(&clone_main, "return { hacked = true }").unwrap();
+            std::fs::write(&active_main, "return { hacked = true }").unwrap();
             reload_registry(&app).await;
 
             let (statuses, _) = compute_plugin_updates(&app, Some(&slug)).await;
@@ -1227,10 +1258,21 @@ mod tests {
 
             // Edit the checked-out file, then drop the upstream so no network is
             // reachable — the local check must still flag the change.
-            let clone_main = crate::config::plugin_repos_dir()
+            let record = app
+                .config
+                .read()
+                .await
+                .plugins
+                .repos
+                .iter()
+                .find(|record| record.slug == slug)
+                .cloned()
+                .unwrap();
+            let active_main = repo::active_revision_dir(&record)
+                .join("plugins")
                 .join(&slug)
                 .join("main.lua");
-            std::fs::write(&clone_main, "return { hacked = true }").unwrap();
+            std::fs::write(&active_main, "return { hacked = true }").unwrap();
             reload_registry(&app).await;
             drop(src);
 
