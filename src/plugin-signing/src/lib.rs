@@ -334,12 +334,26 @@ pub fn package_hash(package_dir: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     for (relative, path) in files {
         let bytes = fs::read(&path).with_context(|| format!("reading package file {relative}"))?;
+        // Normalize so the digest is independent of checkout line endings (CRLF vs LF).
+        let bytes = normalize_for_hash(bytes);
         hasher.update(relative.as_bytes());
         hasher.update([0]);
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Strip carriage returns from text files so CRLF and LF hash identically.
+/// Binary files (any NUL byte, git's heuristic) are left untouched so asset
+/// bytes are never mangled.
+fn normalize_for_hash(bytes: Vec<u8>) -> Vec<u8> {
+    if bytes.contains(&0) {
+        return bytes;
+    }
+    let mut normalized = bytes;
+    normalized.retain(|&byte| byte != b'\r');
+    normalized
 }
 
 pub fn signature_bytes(key_id: &str, signature: &[u8; 64]) -> Vec<u8> {
@@ -529,6 +543,35 @@ mod tests {
         assert_ne!(original, renamed);
         fs::write(dir.join("renamed.lua"), "return {x=10}\n").unwrap();
         assert_ne!(renamed, package_hash(&dir).unwrap());
+    }
+
+    #[test]
+    fn package_hash_is_line_ending_independent() {
+        let root = tempfile::tempdir().unwrap();
+        let lf = root.path().join("lf");
+        fs::create_dir_all(&lf).unwrap();
+        fs::write(lf.join("plugin.yaml"), "id: demo\nversion: 1.0.0\n").unwrap();
+        fs::write(lf.join("main.lua"), "return {\n  a = 1,\n}\n").unwrap();
+
+        let crlf = root.path().join("crlf");
+        fs::create_dir_all(&crlf).unwrap();
+        fs::write(crlf.join("plugin.yaml"), "id: demo\r\nversion: 1.0.0\r\n").unwrap();
+        fs::write(crlf.join("main.lua"), "return {\r\n  a = 1,\r\n}\r\n").unwrap();
+
+        assert_eq!(package_hash(&lf).unwrap(), package_hash(&crlf).unwrap());
+    }
+
+    #[test]
+    fn normalize_for_hash_is_noop_on_lf() {
+        let lf = b"id: demo\nversion: 1.0.0\n".to_vec();
+        assert_eq!(normalize_for_hash(lf.clone()), lf);
+    }
+
+    #[test]
+    fn normalize_for_hash_leaves_binary_untouched() {
+        // A NUL byte marks the buffer binary, so a data CR must survive.
+        let binary = vec![0x00, 0x0d, 0x0a, 0xff];
+        assert_eq!(normalize_for_hash(binary.clone()), binary);
     }
 
     #[test]
