@@ -91,6 +91,7 @@ fn declared_write_rate_limit(max_bytes_per_sec: Option<u32>) -> Option<WriteRate
 pub struct PluginEffectEntry {
     pub plugin_id: String,
     pub script_source: String,
+    pub module_sources: std::collections::BTreeMap<String, String>,
     pub kind: EffectKind,
     pub catalog_id: String,
     pub descriptor: Animation,
@@ -263,6 +264,7 @@ fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
         .map(|e| PluginEffectEntry {
             plugin_id: manifest.plugin_id.clone(),
             script_source: manifest.script_source.clone(),
+            module_sources: manifest.module_sources.clone(),
             kind: e.kind,
             catalog_id: e.catalog_id(&manifest.plugin_id),
             descriptor: e.descriptor(&manifest.plugin_id),
@@ -359,6 +361,7 @@ impl Registry {
         let config = self.resolved_config_for(secrets, &entry.plugin_id, &granted);
         Some(PluginEffectHandle::spawn(
             entry.script_source,
+            entry.module_sources,
             effect_id,
             params.clone(),
             granted,

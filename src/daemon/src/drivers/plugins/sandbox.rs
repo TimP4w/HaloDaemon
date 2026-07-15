@@ -59,6 +59,56 @@ pub fn apply(
     Ok(())
 }
 
+/// Install the package-local module loader. Module functions are compiled from
+/// the sources indexed while parsing this package; the VM never receives a
+/// filesystem path and cannot traverse into a sibling plugin. Results follow
+/// Lua `require` semantics and are cached once per VM.
+pub(super) fn install_package_modules(
+    lua: &Lua,
+    sources: &std::collections::BTreeMap<String, String>,
+) -> mlua::Result<()> {
+    let loaders = lua.create_table()?;
+    for (name, source) in sources {
+        let function = lua
+            .load(source)
+            .set_name(format!("@{name}"))
+            .into_function()?;
+        loaders.set(name.as_str(), function)?;
+    }
+    let cache = lua.create_table()?;
+    let loading = lua.create_table()?;
+    let require = lua.create_function(move |_, name: String| {
+        let loader = match loaders.get::<mlua::Value>(name.as_str())? {
+            mlua::Value::Function(loader) => loader,
+            _ => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "package-local Lua module '{name}' is not available"
+                )))
+            }
+        };
+        let cached = cache.get::<mlua::Value>(name.as_str())?;
+        if !matches!(cached, mlua::Value::Nil) {
+            return Ok(cached);
+        }
+        if loading.get::<bool>(name.as_str()).unwrap_or(false) {
+            return Err(mlua::Error::RuntimeError(format!(
+                "circular package-local Lua module dependency at '{name}'"
+            )));
+        }
+        loading.set(name.as_str(), true)?;
+        let result = loader.call::<mlua::Value>(());
+        loading.set(name.as_str(), false)?;
+        let mut value = result?;
+        if matches!(value, mlua::Value::Nil) {
+            value = mlua::Value::Boolean(true);
+        }
+        cache.set(name.as_str(), value.clone())?;
+        Ok(value)
+    })?;
+    let halod: Table = lua.globals().get("halod")?;
+    halod.set("require", require)
+}
+
 /// Remove every filesystem/process/native escape hatch from `lua`'s globals.
 /// Shared by runtime VMs and legacy inline-Lua test fixtures. Real package
 /// manifests are pure YAML and never create a Lua VM.
@@ -315,6 +365,33 @@ mod tests {
         lua.load("assert(type(halod.config) == 'table')")
             .exec()
             .unwrap();
+    }
+
+    #[test]
+    fn package_modules_are_cached_and_cannot_escape_the_index() {
+        let lua = Lua::new();
+        apply(&lua, &[], &HashMap::new()).unwrap();
+        let sources = std::collections::BTreeMap::from([(
+            "lib.counter".to_owned(),
+            "local n = 0; return function() n = n + 1; return n end".to_owned(),
+        )]);
+        install_package_modules(&lua, &sources).unwrap();
+        let values: (u32, u32) = lua
+            .load(
+                "local a = halod.require('lib.counter'); \
+                 local b = halod.require('lib.counter'); return a(), b()",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(values, (1, 2), "the same module instance is cached");
+
+        for name in ["../other/main", "other.main", "C:\\other\\main"] {
+            let err = lua
+                .load(format!("return halod.require({name:?})"))
+                .eval::<mlua::Value>()
+                .unwrap_err();
+            assert!(err.to_string().contains("not available"), "{err}");
+        }
     }
 
     #[test]

@@ -242,6 +242,7 @@ enum PreScan {
     Plugin {
         plugin_id: String,
         source: String,
+        modules: std::collections::BTreeMap<String, String>,
         scope: Vec<u8>,
     },
 }
@@ -294,6 +295,7 @@ fn plugin_scan_jobs(registry: &crate::drivers::plugins::Registry) -> Vec<ScanJob
                 PreScan::Plugin {
                     plugin_id: e.plugin_id.clone(),
                     source: e.script_source.clone(),
+                    modules: e.module_sources.clone(),
                     scope: e.pre_scan_scope(),
                 }
             } else {
@@ -456,15 +458,18 @@ async fn run_pre_scan(
         PreScan::Plugin {
             plugin_id,
             source,
+            modules,
             scope,
         } => {
             let bus = Arc::clone(bus);
             let source = source.clone();
+            let modules = modules.clone();
             let scope = scope.clone();
             let granted = registry.granted_for(plugin_id);
             tokio::task::spawn_blocking(move || {
                 crate::drivers::plugins::run_pre_scan(
                     &source,
+                    &modules,
                     bus,
                     scope,
                     &granted,
@@ -588,6 +593,7 @@ mod tests {
 
         let err = crate::drivers::plugins::run_pre_scan(
             source,
+            &Default::default(),
             bus,
             vec![0x50],
             &[Permission::Os],

@@ -290,6 +290,7 @@ fn open_integration(
     let recording = Arc::new(RecordingStream::new(reads_from_spec(&spec_table)));
     let worker = PluginHandle::spawn(
         manifest.script_source.clone(),
+        manifest.module_sources.clone(),
         PluginIo::Stream {
             transport: recording.clone() as Arc<dyn Transport>,
             bulk: None,
@@ -944,7 +945,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: fixture\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: fixture\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
         )
         .unwrap();
         std::fs::write(
@@ -1019,7 +1020,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: fixture\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: fixture\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();

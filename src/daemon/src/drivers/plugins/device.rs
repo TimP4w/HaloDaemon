@@ -747,6 +747,7 @@ impl LuaDevice {
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let worker = PluginHandle::spawn(
             manifest.script_source.clone(),
+            manifest.module_sources.clone(),
             transport,
             dev_match,
             granted,

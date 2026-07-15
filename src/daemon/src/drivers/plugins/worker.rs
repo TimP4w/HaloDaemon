@@ -576,6 +576,7 @@ impl PluginHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         source: String,
+        module_sources: std::collections::BTreeMap<String, String>,
         transport: PluginIo,
         dev_match: DevMatch,
         granted: Vec<Permission>,
@@ -594,6 +595,7 @@ impl PluginHandle {
             move || {
                 build_ctx(
                     &source,
+                    &module_sources,
                     transport,
                     dev_match,
                     &granted,
@@ -1339,6 +1341,7 @@ fn validate_runtime_controls(controls: &InitControls) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn build_ctx(
     source: &str,
+    module_sources: &std::collections::BTreeMap<String, String>,
     transport: PluginIo,
     dev_match: DevMatch,
     granted: &[Permission],
@@ -1354,6 +1357,8 @@ fn build_ctx(
         PLUGIN_INSTRUCTION_BUDGET,
     )
     .map_err(|e| lua_err("sandbox setup", e))?;
+    sandbox::install_package_modules(&lua, module_sources)
+        .map_err(|e| lua_err("package modules", e))?;
 
     let manifest: Table = lua
         .load(source)
@@ -1443,12 +1448,14 @@ const PRE_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub fn run_pre_scan(
     source: &str,
+    module_sources: &std::collections::BTreeMap<String, String>,
     bus: Arc<SmBusDevice>,
     scope_addrs: Vec<u8>,
     granted: &[Permission],
     handle: Handle,
 ) -> Result<()> {
     let source = source.to_owned();
+    let module_sources = module_sources.clone();
     let granted = granted.to_vec();
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
@@ -1456,6 +1463,7 @@ pub fn run_pre_scan(
         .spawn(move || {
             let _ = tx.send(run_pre_scan_inner(
                 &source,
+                &module_sources,
                 bus,
                 scope_addrs,
                 &granted,
@@ -1474,6 +1482,7 @@ pub fn run_pre_scan(
 
 fn run_pre_scan_inner(
     source: &str,
+    module_sources: &std::collections::BTreeMap<String, String>,
     bus: Arc<SmBusDevice>,
     scope_addrs: Vec<u8>,
     granted: &[Permission],
@@ -1494,6 +1503,8 @@ fn run_pre_scan_inner(
         PLUGIN_INSTRUCTION_BUDGET,
     )
     .map_err(|e| lua_err("sandbox setup", e))?;
+    sandbox::install_package_modules(&lua, module_sources)
+        .map_err(|e| lua_err("package modules", e))?;
     let manifest: Table = lua
         .load(source)
         .eval()
@@ -1628,6 +1639,7 @@ mod tests {
     fn spawn(source: &str, granted: Vec<Permission>) -> PluginHandle {
         PluginHandle::spawn(
             source.to_owned(),
+            Default::default(),
             stream_io(),
             DevMatch {
                 transport: "hid".to_owned(),
@@ -1644,6 +1656,7 @@ mod tests {
     fn spawn_controller(source: &str, index: u32) -> PluginHandle {
         PluginHandle::spawn(
             source.to_owned(),
+            Default::default(),
             stream_io(),
             DevMatch {
                 transport: "tcp".to_owned(),
@@ -1732,6 +1745,7 @@ mod tests {
                 }
             "#
             .to_owned(),
+            Default::default(),
             PluginIo::Stream {
                 transport,
                 bulk: None,

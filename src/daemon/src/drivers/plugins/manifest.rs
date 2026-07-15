@@ -779,6 +779,11 @@ pub struct PluginManifest {
     /// Full entry-script text, re-executed by the worker to build its own VM.
     #[serde(skip)]
     pub script_source: String,
+    /// Package-local Lua modules indexed from `lib/**/*.lua`, keyed by dotted
+    /// module name (for example `lib.hidpp.v1`). Sources are read before the VM
+    /// starts, so module loading never performs runtime filesystem access.
+    #[serde(skip)]
+    pub module_sources: std::collections::BTreeMap<String, String>,
     /// Directory a plugin package was loaded from; empty only for an internal
     /// test fixture.
     #[serde(skip)]
@@ -911,7 +916,11 @@ impl PluginManifest {
 
     /// Hex SHA-256 of `manifest_bytes` + `script_source`; consent is pinned to this.
     pub fn content_hash(&self) -> String {
-        plugin_content_hash(&self.manifest_bytes, self.script_source.as_bytes())
+        plugin_content_hash(
+            &self.manifest_bytes,
+            self.script_source.as_bytes(),
+            &self.module_sources,
+        )
     }
 
     /// Device specs that request an SMBus scan.
@@ -1058,7 +1067,11 @@ impl PluginManifest {
 /// Hash the two text files that define a plugin package. Git may materialize
 /// LF blobs as CRLF in a Windows working tree, so normalize CRLF before hashing
 /// to keep consent and tamper baselines stable across checkout configurations.
-pub(super) fn plugin_content_hash(manifest: &[u8], script: &[u8]) -> String {
+pub(super) fn plugin_content_hash(
+    manifest: &[u8],
+    script: &[u8],
+    modules: &std::collections::BTreeMap<String, String>,
+) -> String {
     use sha2::{Digest, Sha256};
 
     fn update_text(hasher: &mut Sha256, bytes: &[u8]) {
@@ -1076,6 +1089,12 @@ pub(super) fn plugin_content_hash(manifest: &[u8], script: &[u8]) -> String {
     let mut hasher = Sha256::new();
     update_text(&mut hasher, manifest);
     update_text(&mut hasher, script);
+    for (name, source) in modules {
+        hasher.update([0]);
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        update_text(&mut hasher, source.as_bytes());
+    }
     hasher
         .finalize()
         .iter()
@@ -1188,6 +1207,8 @@ pub fn check_lcd_dims(width: u32, height: u32) -> Result<()> {
 /// symlinked/pathological `entry` (e.g.
 /// `/dev/zero`) would drive an unbounded `read_to_string`.
 const MAX_ENTRY_BYTES: u64 = 1024 * 1024;
+const MAX_MODULE_BYTES: u64 = 1024 * 1024;
+const MAX_MODULES: usize = 256;
 
 /// A plugin-package file (`plugin.yaml` / the entry Lua) must be a regular file no
 /// larger than `max`. Rejects a symlink (a manually-placed local plugin could point
@@ -1208,6 +1229,76 @@ fn check_package_file(path: &Path, max: u64) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn read_package_modules(dir: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        out: &mut std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+        let stat =
+            std::fs::symlink_metadata(dir).with_context(|| format!("reading {}", dir.display()))?;
+        if stat.file_type().is_symlink() || !stat.is_dir() {
+            bail!("{} must be a directory, not a symlink", dir.display());
+        }
+        for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+            let entry = entry?;
+            let path = entry.path();
+            let stat = std::fs::symlink_metadata(&path)?;
+            if stat.file_type().is_symlink() {
+                bail!("{} must not be a symlink", path.display());
+            }
+            if stat.is_dir() {
+                visit(root, &path, out)?;
+                continue;
+            }
+            if path.extension().and_then(|v| v.to_str()) != Some("lua") {
+                continue;
+            }
+            check_package_file(&path, MAX_MODULE_BYTES)?;
+            let relative = path
+                .strip_prefix(root)
+                .expect("visited module stays under root");
+            let module_path = relative.with_extension("");
+            let mut components = Vec::new();
+            for component in module_path.components() {
+                let value = component
+                    .as_os_str()
+                    .to_str()
+                    .ok_or_else(|| anyhow!("module path is not valid UTF-8: {}", path.display()))?;
+                if value.is_empty()
+                    || !value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+                {
+                    bail!(
+                        "invalid Lua module path component '{value}' in {}",
+                        path.display()
+                    );
+                }
+                components.push(value);
+            }
+            let name = components.join(".");
+            let source = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            if out.insert(name.clone(), source).is_some() {
+                bail!("duplicate Lua module '{name}'");
+            }
+            if out.len() > MAX_MODULES {
+                bail!("plugin contains more than {MAX_MODULES} Lua modules");
+            }
+        }
+        Ok(())
+    }
+
+    let root = dir.join("lib");
+    let mut modules = std::collections::BTreeMap::new();
+    visit(dir, &root, &mut modules)?;
+    Ok(modules)
 }
 
 /// The `entry` is joined onto the plugin dir and read, so it must be a relative
@@ -2073,6 +2164,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
     manifest.plugin_id = meta.id;
     manifest.source_path = entry_path;
     manifest.script_source = source;
+    manifest.module_sources = read_package_modules(dir)?;
     manifest.plugin_dir = dir.to_path_buf();
     manifest.manifest_bytes = manifest_bytes;
 
@@ -2860,6 +2952,28 @@ mod tests {
         assert_eq!(m.devices.len(), 1);
         assert_eq!(m.devices[0].vendor, "Acme");
         assert_eq!(m.capabilities, vec!["rgb"]);
+    }
+
+    #[test]
+    fn directory_plugin_indexes_only_its_package_local_lib_modules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(tmp.path(), "modules", "type: integration\n", "return {}");
+        std::fs::create_dir_all(dir.join("lib").join("hidpp")).unwrap();
+        std::fs::write(
+            dir.join("lib").join("hidpp").join("v1.lua"),
+            "return { version = 1 }",
+        )
+        .unwrap();
+        let sibling = write_plugin_dir(tmp.path(), "sibling", "type: integration\n", "return {}");
+        std::fs::create_dir_all(sibling.join("lib")).unwrap();
+        std::fs::write(sibling.join("lib").join("secret.lua"), "return 42").unwrap();
+
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest.module_sources.keys().collect::<Vec<_>>(),
+            vec!["lib.hidpp.v1"]
+        );
+        assert!(!manifest.module_sources.contains_key("lib.secret"));
     }
 
     #[test]
