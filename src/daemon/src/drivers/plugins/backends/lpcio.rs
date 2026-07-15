@@ -8,6 +8,7 @@ use anyhow::{bail, Result};
 use halod_shared::types::{Permission, WriteRateLimit};
 use std::collections::HashMap;
 
+#[cfg(target_os = "windows")]
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     let DiscoveryHandle::Lpcio { chip_id, .. } = handle else {
         return false;
@@ -17,8 +18,13 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
         .as_ref()
         .is_some_and(|m| m.any || m.chip_ids.contains(chip_id))
 }
+#[cfg(not(target_os = "windows"))]
+fn matches(_spec: &DeviceSpec, _handle: &DiscoveryHandle<'_>) -> bool {
+    false
+}
 fn suffix(handle: &DiscoveryHandle<'_>) -> String {
     match handle {
+        #[cfg(target_os = "windows")]
         DiscoveryHandle::Lpcio { slot, chip_id, .. } => format!("{chip_id:04x}-slot{slot}"),
         _ => "0".into(),
     }

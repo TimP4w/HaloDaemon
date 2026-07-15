@@ -89,7 +89,7 @@ fn amd_signature() -> Option<(u8, u8)> {
     matches!(family, 0x17 | 0x19 | 0x1a).then_some((family as u8, model as u8))
 }
 
-#[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+#[cfg(all(target_os = "windows", not(target_arch = "x86_64")))]
 fn amd_signature() -> Option<(u8, u8)> {
     None
 }

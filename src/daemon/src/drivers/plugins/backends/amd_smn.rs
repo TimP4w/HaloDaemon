@@ -9,12 +9,18 @@ use anyhow::{bail, Result};
 use halod_shared::types::{Permission, WriteRateLimit};
 use std::collections::HashMap;
 
+#[cfg(target_os = "windows")]
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     spec.r#match.amd_smn.as_ref().is_some_and(|m| m.any)
         && matches!(handle, DiscoveryHandle::AmdSmn { .. })
 }
+#[cfg(not(target_os = "windows"))]
+fn matches(_spec: &DeviceSpec, _handle: &DiscoveryHandle<'_>) -> bool {
+    false
+}
 fn suffix(handle: &DiscoveryHandle<'_>) -> String {
     match handle {
+        #[cfg(target_os = "windows")]
         DiscoveryHandle::AmdSmn { .. } => "cpu".into(),
         _ => "0".into(),
     }

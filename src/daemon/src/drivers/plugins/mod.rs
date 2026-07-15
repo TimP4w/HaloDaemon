@@ -1435,6 +1435,7 @@ fn device_id(
     // SMN describes the single physical CPU package, not one bus endpoint.
     // Its native predecessor used a fixed stable identity; retain an explicit
     // plugin identity verbatim instead of adding CPUID-derived churn.
+    #[cfg(target_os = "windows")]
     if matches!(handle, DiscoveryHandle::AmdSmn { .. }) && manifest.identity.id.is_some() {
         return manifest.id_prefix().to_owned();
     }
@@ -1534,10 +1535,12 @@ impl Registry {
             key: None,
             name: None,
             extra: match handle {
+                #[cfg(target_os = "windows")]
                 DiscoveryHandle::AmdSmn { family, model } => HashMap::from([
                     ("family".to_owned(), u64::from(*family)),
                     ("model".to_owned(), u64::from(*model)),
                 ]),
+                #[cfg(target_os = "windows")]
                 DiscoveryHandle::Lpcio {
                     slot,
                     chip_id,

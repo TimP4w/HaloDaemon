@@ -189,10 +189,9 @@ pub fn identity_from_handle(handle: &DiscoveryHandle<'_>) -> DeviceIdentity {
             });
             identity.usb_address = Some(*address);
         }
-        DiscoveryHandle::Smbus { .. }
-        | DiscoveryHandle::Command { .. }
-        | DiscoveryHandle::AmdSmn { .. }
-        | DiscoveryHandle::Lpcio { .. } => {}
+        DiscoveryHandle::Smbus { .. } | DiscoveryHandle::Command { .. } => {}
+        #[cfg(target_os = "windows")]
+        DiscoveryHandle::AmdSmn { .. } | DiscoveryHandle::Lpcio { .. } => {}
     }
     identity
 }

@@ -94,10 +94,12 @@ pub enum DiscoveryHandle<'a> {
     Command {
         executable: &'a str,
     },
+    #[cfg(target_os = "windows")]
     AmdSmn {
         family: u8,
         model: u8,
     },
+    #[cfg(target_os = "windows")]
     Lpcio {
         slot: u8,
         chip_id: u16,
