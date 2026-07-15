@@ -71,51 +71,6 @@ pub trait PairingCapability: Send + Sync {
     }
 }
 
-/// Direction of a transport switch — passed to the transport hook so the
-/// device's owner can react without the device touching `AppState`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportMode {
-    /// The device now owns its own transport path (e.g. direct USB).
-    Direct,
-    /// The device communicates through a hub/receiver.
-    HubMediated,
-}
-
-/// Devices that can hot-swap between wireless and wired transport without
-/// changing Arc identity in app.devices.
-#[async_trait]
-#[expect(dead_code, reason = "optional transport persistence protocol")]
-pub trait TransportSwitchable: Send + Sync {
-    /// Switch to a new direct HID transport at `path`.
-    /// Re-initializes the device through the new transport. `app` lets the device
-    /// restart its notification watcher app-aware, so button/DPI events on the
-    /// wired transport still reach the key-remap engine and the state broadcast.
-    async fn connect_direct(
-        &self,
-        path: &str,
-        pid: u16,
-        app: &Arc<crate::state::AppState>,
-    ) -> Result<()>;
-    /// Revert to the saved hub-mediated transport.
-    /// Returns true if a fallback existed (caller spawns reinit retry).
-    /// Returns false if there was no fallback (caller should close + remove the device).
-    async fn disconnect_direct(&self) -> bool;
-    /// True while the device is actively using its direct transport.
-    async fn is_direct(&self) -> bool;
-
-    async fn to_wire(&self) -> Option<DeviceCapability> {
-        None
-    }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
-}
-
 // Chain support — chainable ARGB channels with daisy-chained child devices.
 
 #[derive(Debug, Clone)]
@@ -969,12 +924,6 @@ pub trait KeyRemapCapability: Send + Sync {
     async fn set_button_mapping(&self, mapping: ButtonMapping) -> Result<()>;
     async fn reset_button_mapping(&self, cid: u16) -> Result<()>;
     async fn reset_all_button_mappings(&self) -> Result<()>;
-
-    /// The device's out-of-the-box button mappings. Seeded on first run and
-    /// restored by the reset methods. Empty by default (every button Native).
-    async fn default_mappings(&self) -> Vec<ButtonMapping> {
-        Vec::new()
-    }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
         let status = self.get_key_remap_status().await;

@@ -12,10 +12,10 @@ repository = "https://github.com/TimP4w/Halod"
 tokio      = { version = "1", features = ["full"] }
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+semver     = "1"
 anyhow     = "1"
 log        = "0.4"
 async-trait = "0.1"
-semver     = "1"
 
 [workspace.lints.clippy]
 # Opinionated style/formatting lints kept off so the gate stays focused on

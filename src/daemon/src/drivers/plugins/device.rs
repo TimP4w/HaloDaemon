@@ -33,7 +33,7 @@ use crate::drivers::{
 use super::chain_leaf::ChainLeaf;
 use super::manifest::{
     topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DeviceSpec, PluginManifest,
-    RangeDef, RgbManifest,
+    RangeDef,
 };
 use super::transport::PluginIo;
 use super::worker::{
@@ -299,35 +299,6 @@ fn wire_group<T, U>(
 }
 
 impl Controls {
-    /// Legacy fixture adapter. Production package loading never calls this:
-    /// canonical controls are supplied by `initialize`.
-    #[cfg(test)]
-    fn from_manifest(manifest: &PluginManifest) -> Self {
-        Self {
-            choices: manifest
-                .choice
-                .as_ref()
-                .map(|c| c.choices.clone())
-                .unwrap_or_default(),
-            ranges: manifest
-                .range
-                .as_ref()
-                .map(|r| r.ranges.clone())
-                .unwrap_or_default(),
-            booleans: manifest
-                .boolean
-                .as_ref()
-                .map(|b| b.booleans.clone())
-                .unwrap_or_default(),
-            actions: manifest
-                .action
-                .as_ref()
-                .map(|a| a.actions.clone())
-                .unwrap_or_default(),
-            ..Default::default()
-        }
-    }
-
     fn from_runtime(runtime: InitControls) -> Self {
         Self {
             choices: runtime.choices,
@@ -478,7 +449,7 @@ pub struct LuaDevice {
     /// so closing a child must be tracked separately from closing the root.
     closed: AtomicBool,
     /// For integration roots only: the manifest each controller child is
-    /// synthesized from (`child_manifest_for`).
+    /// reported by the child's own `initialize` callback.
     root_manifest: Option<Arc<PluginManifest>>,
     /// Integration runtime lifecycle, shared by a root and all its children
     /// (one socket pool → one state). `None` for non-integration devices
@@ -672,7 +643,7 @@ impl LuaDevice {
     }
 
     /// One integration controller as a full `LuaDevice`: its capability set
-    /// comes from the enumerated controller (`child_manifest_for`), and its
+    /// comes from the root catalog plus the child's `initialize` result, and its
     /// worker VM is seeded with the controller `index` in `dev.match.index`, so
     /// the shared script routes each capability call to the right remote
     /// controller.
@@ -1050,15 +1021,6 @@ impl LuaDevice {
         }
     }
 
-    /// Trigger one status poll synchronously (used by tests; production relies on
-    /// the ticker).
-    #[cfg(test)]
-    pub async fn poll_once(&self) -> Result<()> {
-        self.worker()?.poll().await?;
-        self.refresh_status_cache().await;
-        Ok(())
-    }
-
     /// Refresh the host-side sensor/fan caches from the worker. Driven by the
     /// status poll (and `poll_once`); serialization never calls this.
     async fn refresh_status_cache(&self) {
@@ -1080,6 +1042,7 @@ impl LuaDevice {
     /// Drain the transport's queued events once through `event()`, returning the
     /// per-target outcomes. Production drives this from the event watcher task;
     /// the plugin-test harness calls it directly.
+    #[cfg(feature = "plugin-test")]
     pub(super) async fn pump_events(&self) -> Result<Vec<super::worker::PollOutcome>> {
         self.worker()?.on_transport_events().await
     }
@@ -1425,8 +1388,6 @@ impl Device for LuaDevice {
             let _ = self.dynamic_model.set(model);
         }
         if let Some(keyboard) = outcome.keyboard {
-            self.keyboard_layout
-                .set_detected(keyboard.detected_language);
             let _ = self.keyboard_descriptor.set(keyboard);
         }
         if let Some(zones) = outcome.zones {
@@ -1966,7 +1927,6 @@ impl LuaDevice {
         controller: &DetectedController,
         ctx: &ChildBuildCtx,
     ) -> Option<Arc<dyn Device>> {
-        let child_manifest = child_manifest_for(&ctx.root_manifest, controller);
         self.dynamic_child_ids
             .write()
             .unwrap()
@@ -1979,7 +1939,7 @@ impl LuaDevice {
                 controller.name.clone(),
                 self.vendor.clone(),
                 controller.device_type,
-                &child_manifest,
+                &ctx.root_manifest,
                 controller.index,
                 controller.key.clone(),
                 controller.extra.clone(),
@@ -1994,11 +1954,6 @@ impl LuaDevice {
             d.set_self_ref(weak.clone());
             d
         });
-        if child_manifest.chain.is_some() {
-            let adapter: Arc<dyn ChainAdapter> = child.clone();
-            let host = ChainHost::new(adapter);
-            child.install_chain_host(host);
-        }
         let identity = crate::registry::identity::DeviceIdentity {
             scope: Some(ctx.identity_scope.clone()),
             serial: crate::registry::identity::normalize_serial(controller.serial.as_deref()),
@@ -2017,41 +1972,6 @@ impl LuaDevice {
             },
         )))
     }
-}
-
-/// Synthesize the per-controller manifest an integration builds one child
-/// `LuaDevice` from: a `Device`-kind clone of the (headless, capability-less)
-/// root whose capability sections come from the enumerated controller. The
-/// `zones` shorthand is promoted to an `rgb` section when no explicit one is
-/// given.
-fn child_manifest_for(root: &PluginManifest, ctrl: &DetectedController) -> PluginManifest {
-    let mut m = root.clone();
-    m.plugin_type = PluginKind::Device;
-    // Only the physical root enumerates children. A child inherits the root
-    // package's callbacks but must never recursively enumerate itself.
-    m.dynamic_children = false;
-    m.rgb = ctrl.rgb.clone().or_else(|| {
-        (!ctrl.zones.is_empty()).then(|| RgbManifest {
-            zones: ctrl.rgb_descriptor().zones,
-            native_effects: Vec::new(),
-        })
-    });
-    m.fan = ctrl.fan.clone();
-    m.sensor = ctrl.sensor.clone();
-    m.lcd = ctrl.lcd.clone();
-    m.dpi = ctrl.dpi.clone();
-    m.choice = ctrl.choice.clone();
-    m.range = ctrl.range.clone();
-    m.boolean = ctrl.boolean.clone();
-    m.action = ctrl.action.clone();
-    m.battery = ctrl.battery.clone();
-    m.connection = ctrl.connection.clone();
-    m.equalizer = ctrl.equalizer.clone();
-    m.pairing = ctrl.pairing.clone();
-    m.onboard_profiles = ctrl.onboard_profiles.clone();
-    m.key_remap = ctrl.key_remap.clone();
-    m.chain = ctrl.chain.clone();
-    m
 }
 
 impl ChainCapability for LuaDevice {
@@ -2482,18 +2402,39 @@ impl KeyRemapCapability for LuaDevice {
 
     async fn reset_button_mapping(&self, cid: u16) -> Result<()> {
         self.worker()?.key_remap_reset(cid).await?;
-        self.key_remap_mappings.lock().unwrap().remove(&cid);
+        let default = self
+            .key_remap
+            .read()
+            .unwrap()
+            .default_mappings
+            .iter()
+            .find(|mapping| mapping.cid == cid)
+            .cloned();
+        let mut mappings = self.key_remap_mappings.lock().unwrap();
+        match default {
+            Some(mapping)
+                if mapping.base != ButtonAction::Native
+                    || mapping.shifted != ButtonAction::Native =>
+            {
+                mappings.insert(cid, mapping);
+            }
+            _ => {
+                mappings.remove(&cid);
+            }
+        }
         Ok(())
     }
 
     async fn reset_all_button_mappings(&self) -> Result<()> {
         self.worker()?.key_remap_reset_all().await?;
-        self.key_remap_mappings.lock().unwrap().clear();
+        let defaults = self.key_remap.read().unwrap().default_mappings.clone();
+        let mut mappings = self.key_remap_mappings.lock().unwrap();
+        mappings.clear();
+        mappings.extend(defaults.into_iter().filter_map(|mapping| {
+            (mapping.base != ButtonAction::Native || mapping.shifted != ButtonAction::Native)
+                .then_some((mapping.cid, mapping))
+        }));
         Ok(())
-    }
-
-    async fn default_mappings(&self) -> Vec<ButtonMapping> {
-        self.key_remap.read().unwrap().default_mappings.clone()
     }
 }
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Minimal discovery roots for plugin-owned host transports.
+//! Discovery roots for plugin-owned host transports.
 
 use std::sync::Arc;
 
@@ -15,39 +15,54 @@ inventory::submit!(TransportScanner {
 });
 
 async fn scan(app: Arc<AppState>) {
-    // Command plugins perform their own enumeration in Lua. One root per
-    // executable preserves a single serialized worker and keeps argv authority
-    // entirely manifest-defined.
-    discovery::discover_handle(
-        &app,
-        DiscoveryHandle::Command {
-            executable: "nvidia-smi",
-        },
-    )
-    .await;
+    let specs = app.registry.active_device_specs();
 
-    #[cfg(target_os = "windows")]
-    if let Some((family, model)) = amd_signature() {
-        discovery::discover_handle(&app, DiscoveryHandle::AmdSmn { family, model }).await;
+    let commands: std::collections::BTreeSet<String> = specs
+        .iter()
+        .filter_map(|spec| spec.r#match.command.as_ref())
+        .map(|command| command.command().to_owned())
+        .collect();
+    for executable in commands {
+        discovery::discover_handle(
+            &app,
+            DiscoveryHandle::Command {
+                executable: &executable,
+            },
+        )
+        .await;
     }
 
     #[cfg(target_os = "windows")]
-    match tokio::task::spawn_blocking(lpcio_chips).await {
-        Ok(chips) => {
-            for (slot, chip_id, revision, hwm_base) in chips {
-                discovery::discover_handle(
-                    &app,
-                    DiscoveryHandle::Lpcio {
-                        slot,
-                        chip_id,
-                        revision,
-                        hwm_base,
-                    },
-                )
-                .await;
-            }
+    if specs.iter().any(|spec| spec.r#match.amd_smn.is_some()) {
+        if let Some((family, model)) = amd_signature() {
+            discovery::discover_handle(&app, DiscoveryHandle::AmdSmn { family, model }).await;
         }
-        Err(error) => log::debug!("LPCIO scan task failed: {error}"),
+    }
+
+    #[cfg(target_os = "windows")]
+    match specs
+        .iter()
+        .any(|spec| spec.r#match.lpcio.is_some())
+        .then(|| tokio::task::spawn_blocking(lpcio_chips))
+    {
+        None => {}
+        Some(task) => match task.await {
+            Ok(chips) => {
+                for (slot, chip_id, revision, hwm_base) in chips {
+                    discovery::discover_handle(
+                        &app,
+                        DiscoveryHandle::Lpcio {
+                            slot,
+                            chip_id,
+                            revision,
+                            hwm_base,
+                        },
+                    )
+                    .await;
+                }
+            }
+            Err(error) => log::debug!("LPCIO scan task failed: {error}"),
+        },
     }
 }
 
@@ -96,9 +111,9 @@ fn lpcio_chips() -> Vec<(u8, u16, u8, u16)> {
         }
         let id = bus.superio_inb(0x20).unwrap_or(0xff);
         let revision = bus.superio_inb(0x21).unwrap_or(0);
-        // IDs accepted by the official plugin catalog. Unknown chips never
-        // reach Lua, avoiding a broad SuperIO catch-all.
-        if !supported_nuvoton(id, revision) {
+        // Rust reports identity only; the enabled plugin declarations decide
+        // which chips are supported.
+        if id == 0 || id == 0xff {
             let _ = bus.write_port(port, 0xaa);
             continue;
         }
@@ -110,24 +125,4 @@ fn lpcio_chips() -> Vec<(u8, u16, u8, u16)> {
         let _ = bus.write_port(port, 0xaa);
     }
     found
-}
-
-#[cfg(target_os = "windows")]
-fn supported_nuvoton(id: u8, revision: u8) -> bool {
-    let hi = revision & 0xf0;
-    matches!(
-        (id, revision, hi),
-        (0xb4, _, 0x70)
-            | (0xc3, _, 0x30)
-            | (0xc4, _, 0x50)
-            | (0xc5, _, 0x60)
-            | (0xc7, 0x32, _)
-            | (0xc8, 0x03, _)
-            | (0xc9, 0x11 | 0x13, _)
-            | (0xd1, 0x21, _)
-            | (0xd3, 0x52, _)
-            | (0xd4, 0x23 | 0x2a | 0x51 | 0x2b | 0x40 | 0x41, _)
-            | (0xd5, 0x92, _)
-            | (0xd8, 0x02 | 0x06, _)
-    )
 }

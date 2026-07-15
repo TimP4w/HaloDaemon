@@ -484,9 +484,6 @@ pub enum NotificationCode {
     KeyRemapUnavailable {
         detail: String,
     },
-    WirelessReinitFailed {
-        device: String,
-    },
     DeviceReconnectFailed {
         device: String,
     },
@@ -557,7 +554,6 @@ impl NotificationCode {
             | DeviceWriteFailed { .. }
             | Generic { .. } => NotificationSeverity::Error,
             KeyRemapUnavailable { .. }
-            | WirelessReinitFailed { .. }
             | DeviceReconnectFailed { .. }
             | FanStalled { .. }
             | PluginNeedsPermission { .. }
@@ -895,6 +891,8 @@ pub enum PluginSource {
 pub enum PluginIssueKind {
     /// A config-instantiated integration could not open its connection.
     ConnectFailed,
+    /// A plugin-owned physical device failed its initialize callback.
+    InitFailed,
     /// A device callback failed at runtime on a background path.
     RuntimeError,
     /// The plugin loaded with a non-fatal warning (bad logo, id collision).
@@ -2234,6 +2232,16 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(info.health, HealthState::default());
+
+        let init_failed = PluginIssue {
+            kind: PluginIssueKind::InitFailed,
+            detail: "HID++ timeout".into(),
+            timestamp_ms: 43,
+        };
+        assert_eq!(
+            serde_json::to_value(&init_failed).unwrap()["kind"],
+            "init_failed"
+        );
     }
 
     #[test]
@@ -2396,7 +2404,6 @@ mod tests {
         let variants = [
             EngineStopped { detail: "e".into() },
             KeyRemapUnavailable { detail: "e".into() },
-            WirelessReinitFailed { device: "d".into() },
             DeviceReconnectFailed { device: "d".into() },
             ProfileSwitched {
                 profile: "p".into(),

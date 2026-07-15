@@ -454,7 +454,7 @@ impl KeyboardLayoutCapability for MockDevice {
             keys: vec![],
             variant: KeyVariant::Ansi,
             language: KeyboardLayout::US,
-            detected_language: slot.detected(),
+            detected_language: KeyboardLayout::US,
             selection: slot.selection(),
             iso_supported: true,
             languages: vec![KeyboardLayout::US, KeyboardLayout::CH],

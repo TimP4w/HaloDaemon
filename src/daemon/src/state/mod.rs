@@ -498,10 +498,15 @@ mod tests {
         // Clean — every handle passes.
         assert!(app.handle_in_scope(&handle).await);
 
-        let spec = serde_json::from_value(serde_json::json!({
-            "vendor": "x", "model": "y", "transport": "hid", "vid": 9, "pid": 9,
-        }))
-        .unwrap();
+        let mut spec: crate::drivers::plugins::DeviceSpec =
+            serde_json::from_value(serde_json::json!({
+            "vendor": "x", "model": "y",
+            "match": { "hid": { "vid": 9, "pid": 9 } }
+            }))
+            .unwrap();
+        spec.transport = "hid".to_owned();
+        spec.vid = Some(9);
+        spec.pid = Some(9);
         app.set_discovery_scope(DiscoveryScope::PluginSet {
             plugin_ids: ["p".to_string()].into_iter().collect(),
             filter: Arc::new(DiscoveryFilter { specs: vec![spec] }),

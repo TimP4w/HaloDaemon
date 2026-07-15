@@ -239,7 +239,7 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
                     removed
                 };
                 for child in removed {
-                    child.close().await;
+                    super::registration::close_device(&app, &child).await;
                 }
             }
 

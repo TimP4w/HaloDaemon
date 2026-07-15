@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Shared helpers for device drivers: stable-ID construction, serial normalisation, the `WireDevice` builder, per-LED frame assembly, and keyboard layout utilities.
+//! Shared helpers for the core device implementations.
 
 use std::collections::HashMap;
 
@@ -14,20 +14,6 @@ use halod_shared::zone_transform::transform_colors;
 use crate::drivers::RgbStateSlot;
 #[cfg(test)]
 use halod_shared::types::EffectParamValue;
-
-/// Build a stable device ID of the form `<prefix>_<serial>`, falling back to `<prefix>_<index>` when no usable serial is available.
-pub fn build_device_id(prefix: &str, serial: Option<&str>, index: usize) -> String {
-    match serial.filter(|s| !s.is_empty()) {
-        Some(s) => format!("{prefix}_{s}"),
-        None => format!("{prefix}_{index}"),
-    }
-}
-
-/// Normalise a hardware serial for the `WireDevice::serial_number` field:
-/// an empty string is treated as "no serial" and becomes `None`.
-pub fn stable_serial(serial: Option<&str>) -> Option<String> {
-    serial.filter(|s| !s.is_empty()).map(str::to_string)
-}
 
 /// Assemble a fixed-length per-LED colour frame from one zone's
 /// `index -> colour` map. LED indices are decimal strings; any index missing
@@ -228,31 +214,6 @@ impl WireDeviceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn build_device_id_uses_serial_when_present() {
-        assert_eq!(
-            build_device_id("nzxt_hub", Some("ABC123"), 0),
-            "nzxt_hub_ABC123"
-        );
-    }
-
-    #[test]
-    fn build_device_id_falls_back_to_index_when_serial_empty() {
-        assert_eq!(build_device_id("nzxt_hub", Some(""), 2), "nzxt_hub_2");
-    }
-
-    #[test]
-    fn build_device_id_falls_back_to_index_when_serial_none() {
-        assert_eq!(build_device_id("nzxt_hub", None, 1), "nzxt_hub_1");
-    }
-
-    #[test]
-    fn stable_serial_normalises_empty_and_missing() {
-        assert_eq!(stable_serial(Some("SN42")), Some("SN42".to_string()));
-        assert_eq!(stable_serial(Some("")), None);
-        assert_eq!(stable_serial(None), None);
-    }
 
     #[test]
     fn per_led_frame_fills_missing_indices_with_black() {

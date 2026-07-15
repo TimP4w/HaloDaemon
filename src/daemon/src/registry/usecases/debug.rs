@@ -301,23 +301,17 @@ fn smbus_to_wire(b: BusInfo, kind: DebugSmbusBusKind) -> SmbusBusDebugInfo {
     }
 }
 
-/// `(device_id, hid_key)` pairs for every device the HID transport is tracking,
-/// in either Primary or WiredOverride form. The HID key has the shape
+/// `(device_id, hid_key)` pairs for every device the HID transport is tracking.
+/// The HID key has the shape
 /// `vid:pid:serial` (all hex, serial may be empty).
 async fn snapshot_tracking_keys(app: &Arc<AppState>) -> Vec<(String, String)> {
     use crate::state::HidTrackingEntry;
     let tracking = app.hid.snapshot().await;
     let mut out = Vec::new();
     for (key, entry) in &tracking {
-        match entry {
-            HidTrackingEntry::Primary(arcs) => {
-                for d in arcs {
-                    out.push((d.id().to_owned(), key.clone()));
-                }
-            }
-            HidTrackingEntry::WiredOverride(d) => {
-                out.push((d.id().to_owned(), key.clone()));
-            }
+        let HidTrackingEntry::Primary(arcs) = entry;
+        for d in arcs {
+            out.push((d.id().to_owned(), key.clone()));
         }
     }
     out

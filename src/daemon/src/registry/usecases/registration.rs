@@ -6,6 +6,14 @@ use crate::drivers::Device;
 use crate::state::AppState;
 use halod_shared::types::{ConnectionType, VisibilityState, DEFAULT_PROFILE_NAME};
 
+/// Close a device after releasing any global input state it owns. Every
+/// registry removal path must use this instead of calling `Device::close`
+/// directly so a disconnected layer-shift key cannot remain latched.
+pub async fn close_device(app: &Arc<AppState>, device: &Arc<dyn Device>) {
+    app.input.layer_shift_clear_device(device.id());
+    device.close().await;
+}
+
 /// Load the device's effective saved state, then re-apply its per-zone RGB
 /// transforms (which `load_state` does not cover). Active devices only: state
 /// restoration may perform hardware I/O and must never run for a disabled one.
@@ -92,8 +100,20 @@ pub async fn seed_keyboard_layout(app: &Arc<AppState>, device: &Arc<dyn Device>)
 /// Returns the original result so callers keep existing Ok/Err branching.
 pub async fn init_device(app: &Arc<AppState>, device: &Arc<dyn Device>) -> Result<bool> {
     match device.initialize().await {
-        Ok(v) => Ok(v),
+        Ok(v) => {
+            if let Some(plugin_id) = device.owning_plugin_id() {
+                app.registry.clear_init_error(&plugin_id, device.id());
+            }
+            Ok(v)
+        }
         Err(e) => {
+            if let Some(plugin_id) = device.owning_plugin_id() {
+                app.registry.report_init_error(
+                    &plugin_id,
+                    device.id(),
+                    format!("{}: {e:#}", device.name()),
+                );
+            }
             crate::platform::notify::send(
                 app,
                 halod_shared::types::NotificationCode::DeviceInitFailed {
@@ -227,7 +247,7 @@ async fn prefer_wired_transport(app: &Arc<AppState>, device: &Arc<dyn Device>) -
                     candidate.id(),
                     device.id()
                 );
-                device.close().await;
+                close_device(app, device).await;
                 return false;
             }
             (ConnectionType::Wired, Some(ConnectionType::Wireless)) => wireless.push(candidate),
@@ -257,7 +277,7 @@ async fn prefer_wired_transport(app: &Arc<AppState>, device: &Arc<dyn Device>) -
             device.id(),
             displaced.id()
         );
-        displaced.close().await;
+        close_device(app, &displaced).await;
     }
     true
 }
@@ -396,7 +416,7 @@ pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) 
         removed
     };
     for device in &removed {
-        device.close().await;
+        close_device(app, device).await;
     }
     removed.iter().map(|d| d.id().to_owned()).collect()
 }

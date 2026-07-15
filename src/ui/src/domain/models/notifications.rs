@@ -18,10 +18,6 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
             t!("notify.key_remap_unavailable.title").to_string(),
             t!("notify.key_remap_unavailable.message", detail = detail).to_string(),
         ),
-        WirelessReinitFailed { device } => (
-            t!("notify.wireless_reinit_failed.title").to_string(),
-            t!("notify.wireless_reinit_failed.message", device = device).to_string(),
-        ),
         DeviceReconnectFailed { device } => (
             t!("notify.device_reconnect_failed.title").to_string(),
             t!("notify.device_reconnect_failed.message", device = device).to_string(),

@@ -2303,6 +2303,7 @@ fn regrant_warning_banner(ui: &mut egui::Ui, p: &PluginInfo) {
 fn issue_label_key(kind: &PluginIssueKind) -> &'static str {
     match kind {
         PluginIssueKind::ConnectFailed => "plugins.issue_connect_failed",
+        PluginIssueKind::InitFailed => "plugins.issue_init_failed",
         PluginIssueKind::RuntimeError => "plugins.issue_runtime_error",
         PluginIssueKind::LoadWarning => "plugins.issue_load_warning",
         PluginIssueKind::LoadFailed => "plugins.issue_load_failed",
@@ -2996,6 +2997,10 @@ mod tests {
         assert_eq!(
             issue_label_key(&PluginIssueKind::ConnectFailed),
             "plugins.issue_connect_failed"
+        );
+        assert_eq!(
+            issue_label_key(&PluginIssueKind::InitFailed),
+            "plugins.issue_init_failed"
         );
         assert_eq!(
             issue_label_key(&PluginIssueKind::RuntimeError),

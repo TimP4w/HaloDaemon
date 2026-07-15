@@ -35,9 +35,9 @@ fn open(
     }
     #[cfg(target_os = "windows")]
     {
-        return Ok(PluginIo::Lpcio(std::sync::Arc::new(
+        Ok(PluginIo::Lpcio(std::sync::Arc::new(
             crate::drivers::transports::lpcio::LpcIoTransport::open(limit)?,
-        )));
+        )))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -49,7 +49,7 @@ fn validate(spec: &DeviceSpec) -> Result<()> {
     let Some(m) = &spec.r#match.lpcio else {
         bail!("lpcio transport requires an lpcio match");
     };
-    if m.any == !m.chip_ids.is_empty() {
+    if m.any != m.chip_ids.is_empty() {
         bail!("lpcio match requires chip_ids or explicit any: true");
     }
     Ok(())

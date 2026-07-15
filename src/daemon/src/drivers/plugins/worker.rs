@@ -23,23 +23,19 @@ use halod_shared::keyboard::{KeyId, StandardLayout};
 use halod_shared::types::{
     Battery, Boolean, ButtonDescriptor, ButtonMapping, ConnectionStatus, DeviceType, Equalizer,
     KeyboardFormFactor, KeyboardLayout, LedPosition, NativeEffect, OnboardProfiles, PairingStatus,
-    Permission, RgbColor, RgbDescriptor, RgbState, RgbZone, Sensor, ZoneTopology,
+    Permission, RgbColor, RgbState, RgbZone, Sensor,
 };
 
 use super::bytebuf::ByteBuf;
 use super::ffi::to_lua_err;
 use super::manifest::{
-    check_lcd_dims, check_led_count, check_zone_count, topology_from, AccessoryManifest, ActionDef,
-    ActionManifest, BatteryManifest, BooleanDef, BooleanManifest, ChainManifest, ChoiceDef,
-    ChoiceManifest, ConnectionManifest, DpiManifest, EqualizerManifest, FanManifest,
-    KeyRemapManifest, LcdManifest, OnboardProfilesManifest, PairingManifest, RangeDef,
-    RangeManifest, RgbManifest, SensorManifest,
+    check_lcd_dims, check_led_count, check_zone_count, validate_accessories, validate_component,
+    validate_short_text, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, RangeDef,
 };
 use super::sandbox;
 use super::transport::{AddrScope, CommandExecutor, PluginIo, RegisterBus};
 use super::transport_api::TransportApi;
 use crate::drivers::transports::smbus::SmBusDevice;
-use crate::drivers::vendors::generic::devices::common::{linear_rgb_zone, ring_led_positions};
 
 /// Maximum HID reports handled by one serialized Lua-worker job. Event input,
 /// RGB frames, status polling, and capability commands share that worker; a
@@ -81,26 +77,19 @@ pub struct DetectedAccessory {
 }
 
 /// One RGB zone of a controller an integration plugin's `enumerate_controllers`
-/// reports. Mirrors `manifest::AccessoryManifest`'s topology fields, but comes
-/// from a live callback return rather than the static manifest table.
+/// reports for plugin-test inspection.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DetectedControllerZone {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub name: String,
-    #[serde(default)]
-    pub topology: String,
-    /// Ring count for `topology = "rings"`.
-    #[serde(default)]
-    pub rings: u8,
     pub led_count: u32,
 }
 
-/// One controller the plugin's `enumerate_controllers` reports — becomes one
-/// top-level `LuaDevice` child. Each optional capability section mirrors the
-/// static manifest's (`RgbManifest`, `FanManifest`, …) but is reported live per
-/// controller, so a single integration can bridge RGB *and* fans/sensors/etc.
+/// One controller the plugin's `enumerate_controllers` reports. It supplies
+/// identity and routing only; capability descriptors come from that child's
+/// own `initialize` result.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DetectedController {
     pub index: u32,
@@ -124,71 +113,10 @@ pub struct DetectedController {
     /// example an LPCIO chip id/revision and HWM base).
     #[serde(default)]
     pub extra: HashMap<String, u64>,
-    /// RGB-topology shorthand: computed into an `RgbManifest` when no explicit
-    /// `rgb` section is given (see `child_manifest_for`).
+    /// RGB topology used by the plugin-test harness to validate enumerated
+    /// controller output. Runtime descriptors come from `initialize`.
     #[serde(default)]
     pub zones: Vec<DetectedControllerZone>,
-    #[serde(default)]
-    pub rgb: Option<RgbManifest>,
-    #[serde(default)]
-    pub fan: Option<FanManifest>,
-    #[serde(default)]
-    pub sensor: Option<SensorManifest>,
-    #[serde(default)]
-    pub lcd: Option<LcdManifest>,
-    #[serde(default)]
-    pub dpi: Option<DpiManifest>,
-    #[serde(default)]
-    pub choice: Option<ChoiceManifest>,
-    #[serde(default)]
-    pub range: Option<RangeManifest>,
-    #[serde(default)]
-    pub boolean: Option<BooleanManifest>,
-    #[serde(default)]
-    pub action: Option<ActionManifest>,
-    #[serde(default)]
-    pub battery: Option<BatteryManifest>,
-    #[serde(default)]
-    pub connection: Option<ConnectionManifest>,
-    #[serde(default)]
-    pub equalizer: Option<EqualizerManifest>,
-    #[serde(default)]
-    pub pairing: Option<PairingManifest>,
-    #[serde(default)]
-    pub onboard_profiles: Option<OnboardProfilesManifest>,
-    #[serde(default)]
-    pub key_remap: Option<KeyRemapManifest>,
-    #[serde(default)]
-    pub chain: Option<ChainManifest>,
-}
-
-impl DetectedController {
-    /// Build the `RgbDescriptor` for the `zones` shorthand, computing LED
-    /// positions from each zone's declared topology + count — the same
-    /// approach `initialize`-reported dynamic zones use (`build_dynamic_descriptor`).
-    pub fn rgb_descriptor(&self) -> RgbDescriptor {
-        let zones = self
-            .zones
-            .iter()
-            .map(|z| {
-                let topology = topology_from(&z.topology, z.rings);
-                if matches!(topology, ZoneTopology::Linear) {
-                    linear_rgb_zone(&z.id, &z.name, z.led_count as usize)
-                } else {
-                    RgbZone {
-                        leds: ring_led_positions(&topology, z.led_count),
-                        id: z.id.clone(),
-                        name: z.name.clone(),
-                        topology,
-                    }
-                }
-            })
-            .collect();
-        RgbDescriptor {
-            zones,
-            native_effects: Vec::new(),
-        }
-    }
 }
 
 /// Identifying context injected into the plugin's `dev.match` table, so a
@@ -760,6 +688,9 @@ impl PluginHandle {
                             check_led_count(&c.id, c.max_leds)?;
                         }
                     }
+                    if let Some(accessories) = &t.accessories {
+                        validate_accessories(accessories)?;
+                    }
                     if let Some(controls) = &t.controls {
                         validate_runtime_controls(controls)?;
                     }
@@ -777,6 +708,12 @@ impl PluginHandle {
                                 "current DPI must stay within the declared bounds"
                             );
                         }
+                    }
+                    if let Some(key_remap) = &t.key_remap {
+                        crate::input::validate::validate_button_mappings(
+                            &key_remap.buttons,
+                            &key_remap.default_mappings,
+                        )?;
                     }
                     Ok(InitOutcome {
                         ok: t.ok,
@@ -1124,6 +1061,8 @@ impl PluginHandle {
         for c in &controllers {
             check_zone_count(c.zones.len())?;
             for z in &c.zones {
+                validate_component("controller zone id", &z.id)?;
+                validate_short_text("controller zone name", &z.name)?;
                 check_led_count(&z.id, z.led_count)?;
             }
         }
@@ -1199,25 +1138,6 @@ impl PluginHandle {
 
     pub async fn dpi_set_steps(&self, steps: &[u16]) -> Result<()> {
         self.call("set_dpi_steps", steps.to_vec()).await
-    }
-
-    /// Optional live DPI snapshot. Plugins with mutable onboard profiles use
-    /// this to reflect mode/profile changes without rebuilding the device.
-    pub async fn dpi_get(&self) -> Result<Option<InitDpi>> {
-        self.run(|ctx, dev, _| {
-            let Some(f) = func(&ctx.manifest, "dpi_status") else {
-                return Ok(None);
-            };
-            let value = f.call::<Value>(dev).map_err(|e| lua_err("dpi_status", e))?;
-            if matches!(value, Value::Nil) {
-                return Ok(None);
-            }
-            ctx.lua
-                .from_value(value)
-                .map(Some)
-                .map_err(|e| lua_err("dpi_status result", e))
-        })
-        .await
     }
 
     pub async fn choice_set(&self, key: &str, selected: usize) -> Result<()> {
@@ -1377,7 +1297,8 @@ fn build_ctx(
 ) -> Result<WorkerCtx> {
     let controller_index = dev_match.index;
     let (lua, budget) = sandbox::bootstrap_vm(
-        sandbox::InjectSurface::FullRuntime { granted, config },
+        granted,
+        config,
         PLUGIN_VM_MEMORY_BYTES,
         PLUGIN_INSTRUCTION_BUDGET,
     )
@@ -1520,10 +1441,8 @@ fn run_pre_scan_inner(
     // `pre_scan` is one-time bus preparation before a device is even matched,
     // not general plugin logic — it gets no `halod.config` (an empty map).
     let (lua, _budget) = sandbox::bootstrap_vm(
-        sandbox::InjectSurface::FullRuntime {
-            granted,
-            config: &HashMap::new(),
-        },
+        granted,
+        &HashMap::new(),
         PLUGIN_VM_MEMORY_BYTES,
         PLUGIN_INSTRUCTION_BUDGET,
     )

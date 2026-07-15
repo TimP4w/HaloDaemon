@@ -10,16 +10,12 @@ use crate::drivers::Device;
 pub enum HidTrackingEntry {
     /// Device(s) created for this HID key; closed and removed when it disappears.
     Primary(Vec<Arc<dyn Device>>),
-    /// An existing device adopted this HID key's transport; reverts (not removed)
-    /// when the key disappears.
-    WiredOverride(Arc<dyn Device>),
 }
 
 impl Clone for HidTrackingEntry {
     fn clone(&self) -> Self {
         match self {
             Self::Primary(arcs) => Self::Primary(arcs.clone()),
-            Self::WiredOverride(d) => Self::WiredOverride(Arc::clone(d)),
         }
     }
 }
@@ -32,7 +28,6 @@ fn entry_owned_by(entry: &HidTrackingEntry, ids: &HashSet<String>) -> bool {
         HidTrackingEntry::Primary(arcs) => {
             !arcs.is_empty() && arcs.iter().all(|d| ids.contains(d.id()))
         }
-        HidTrackingEntry::WiredOverride(d) => ids.contains(d.id()),
     }
 }
 
@@ -40,12 +35,8 @@ fn entry_owned_by(entry: &HidTrackingEntry, ids: &HashSet<String>) -> bool {
 fn compute_hid_ids(tracking: &HashMap<String, HidTrackingEntry>) -> HashSet<String> {
     let mut ids = HashSet::new();
     for entry in tracking.values() {
-        match entry {
-            HidTrackingEntry::Primary(arcs) => ids.extend(arcs.iter().map(|d| d.id().to_owned())),
-            HidTrackingEntry::WiredOverride(d) => {
-                ids.insert(d.id().to_owned());
-            }
-        }
+        let HidTrackingEntry::Primary(arcs) = entry;
+        ids.extend(arcs.iter().map(|d| d.id().to_owned()));
     }
     ids
 }
@@ -112,11 +103,6 @@ impl HidTracking {
         keys.len()
     }
 
-    #[cfg(test)]
-    pub async fn get(&self, key: &str) -> Option<HidTrackingEntry> {
-        self.tracking.lock().await.get(key).cloned()
-    }
-
     /// All currently-tracked HID keys.
     pub async fn keys(&self) -> HashSet<String> {
         self.tracking.lock().await.keys().cloned().collect()
@@ -141,18 +127,6 @@ impl HidTracking {
 }
 
 impl AppState {
-    /// Re-add a device to the registry if it is not already present (by pointer equality).
-    /// Returns `true` when the device was inserted. Used by reconnect paths that need to
-    /// restore a device to `app.devices` without going through the full registration lifecycle.
-    pub async fn add_device_if_absent(&self, device: Arc<dyn Device>) -> bool {
-        let mut devs = self.devices.write().await;
-        if devs.iter().any(|d| Arc::ptr_eq(d, &device)) {
-            return false;
-        }
-        devs.push(device);
-        true
-    }
-
     pub async fn find_device_by_id(&self, id: &str) -> Option<Arc<dyn Device>> {
         self.devices
             .read()

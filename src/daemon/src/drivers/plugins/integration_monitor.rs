@@ -304,7 +304,7 @@ async fn remove_children(app: &Arc<AppState>, gone: &[String]) {
         removed
     };
     for d in &removed {
-        d.close().await;
+        crate::registry::usecases::registration::close_device(app, d).await;
     }
 }
 

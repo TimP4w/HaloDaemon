@@ -183,9 +183,7 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
     }
 
     /// Snapshot of the current lifecycle state.
-    // Only exercised by tests today; will feed the plugin runtime state
-    // machine (AD-04 phase 1c).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(super) fn state(&self) -> WorkerState {
         self.state.lock().unwrap().clone()
     }

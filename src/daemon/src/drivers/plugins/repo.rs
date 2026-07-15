@@ -23,6 +23,7 @@ const REPOSITORY_SCHEMA: u32 = 1;
 const PLUGIN_API: u32 = 1;
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryManifest {
     pub schema: u32,
     pub id: String,
@@ -33,12 +34,14 @@ pub struct RepositoryManifest {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryCompatibility {
     pub halod: String,
     pub plugin_api: u32,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryPackage {
     pub id: String,
     pub path: PathBuf,
@@ -47,6 +50,7 @@ pub struct RepositoryPackage {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RepositorySignature {
     schema: u32,
     algorithm: String,
@@ -252,7 +256,6 @@ fn validate_repository_index(manifest: &RepositoryManifest) -> Result<()> {
             current
         );
     }
-
     let mut ids = HashSet::new();
     let mut paths = HashSet::new();
     for package in &manifest.packages {
@@ -502,14 +505,53 @@ fn materialize_tree(repo: &git2::Repository, tree: &git2::Tree<'_>, dest: &Path)
     Ok(())
 }
 
-/// The immutable directory selected for a repository record. Legacy records
-/// without an active revision retain the old checkout location until the next
-/// explicit installation migrates them.
+/// The immutable directory selected for a repository record. A source without
+/// an installed revision resolves to a deliberately nonexistent directory;
+/// the mutable Git worktree is never executable plugin input.
 pub fn active_revision_dir(record: &crate::config::PluginRepoRecord) -> PathBuf {
     let root = crate::config::plugin_repos_dir().join(&record.slug);
-    match &record.active_revision {
-        Some(sha) => root.join("revisions").join(sha),
-        None => root,
+    root.join("revisions").join(
+        record
+            .active_revision
+            .as_deref()
+            .filter(|sha| !sha.is_empty())
+            .unwrap_or("__inactive__"),
+    )
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    fn manifest(halod: &str, plugin_api: u32) -> RepositoryManifest {
+        RepositoryManifest {
+            schema: REPOSITORY_SCHEMA,
+            id: "test".to_owned(),
+            name: "Test".to_owned(),
+            version: "1.0.0".to_owned(),
+            compatibility: RepositoryCompatibility {
+                halod: halod.to_owned(),
+                plugin_api,
+            },
+            packages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn accepts_matching_production_compatibility_gate() {
+        validate_repository_index(&manifest(">=0.2.0, <0.3.0", PLUGIN_API)).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_different_plugin_api() {
+        let error = validate_repository_index(&manifest(">=0.2.0", PLUGIN_API + 1)).unwrap_err();
+        assert!(error.to_string().contains("plugin API"));
+    }
+
+    #[test]
+    fn rejects_an_incompatible_daemon_version() {
+        let error = validate_repository_index(&manifest(">=99.0.0", PLUGIN_API)).unwrap_err();
+        assert!(error.to_string().contains("requires Halo"));
     }
 }
 
@@ -568,7 +610,7 @@ mod tests {
         let repo = git2::Repository::init(dir).unwrap();
         fs::write(
             dir.join("plugin.yaml"),
-            "id: demo\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
+            "id: demo\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n",
         )
         .unwrap();
         fs::write(dir.join("main.lua"), "return {}").unwrap();

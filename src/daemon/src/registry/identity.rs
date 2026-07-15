@@ -165,7 +165,6 @@ pub fn identity_from_handle(handle: &DiscoveryHandle<'_>) -> DeviceIdentity {
         }
         DiscoveryHandle::UsbNonHid { vid, pid } => identity.usb = Some((*vid, *pid)),
         DiscoveryHandle::Smbus { .. }
-        | DiscoveryHandle::ChainAccessory { .. }
         | DiscoveryHandle::Command { .. }
         | DiscoveryHandle::AmdSmn { .. }
         | DiscoveryHandle::Lpcio { .. } => {}

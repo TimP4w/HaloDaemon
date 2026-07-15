@@ -48,6 +48,7 @@ plugins:
   modified_on_disk_sub: This plugin's files changed since they were installed, so it was disabled for safety. Re-enable it to accept the change.
   # Plugin issues (connect/runtime failures, load warnings)
   issue_connect_failed: Can't connect
+  issue_init_failed: Device initialization failed
   issue_runtime_error: Runtime error
   issue_load_warning: Loaded with a warning
   issue_load_failed: Failed to load

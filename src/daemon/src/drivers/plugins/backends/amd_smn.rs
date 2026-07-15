@@ -31,9 +31,9 @@ fn open(
     }
     #[cfg(target_os = "windows")]
     {
-        return Ok(PluginIo::AmdSmn(std::sync::Arc::new(
+        Ok(PluginIo::AmdSmn(std::sync::Arc::new(
             crate::drivers::transports::amd_smn::AmdSmnBus::open()?,
-        )));
+        )))
     }
     #[cfg(not(target_os = "windows"))]
     {

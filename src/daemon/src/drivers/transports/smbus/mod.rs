@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     drivers::Metered,
-    registry::discovery::{DiscoveryHandle, SmBusScanEntry, TransportScanner},
+    registry::discovery::{DiscoveryHandle, TransportScanner},
     state::AppState,
 };
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
@@ -42,9 +42,7 @@ pub enum SmbusBusKind {
 /// there can hang the display. `None` fields are wildcards; every set field must
 /// equal the bus's corresponding PCI id.
 ///
-/// `Copy`/const-constructible so a native [`SmBusScanEntry`] can declare a
-/// `static [PciMatch]`, and `Deserialize` so a Lua plugin manifest can declare
-/// the same list — both feed the identical scanner gate ([`gate_bus`]).
+/// Deserializable so a Lua plugin manifest can declare the scanner gate.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PciMatch {
     #[serde(default)]
@@ -73,7 +71,7 @@ impl PciMatch {
 }
 
 pub struct SmBusDevice {
-    /// Rate-limits the whole bus; devices sharing a `SmBusScanEntry` already
+    /// Rate-limits the whole bus; devices sharing a plugin scan entry already
     /// share this gate and its bus mutex. Boxed so tests can inject a recording
     /// backend without opening real hardware.
     io: Metered<Mutex<Box<dyn SmBusSyncOps + Send>>>,
@@ -219,14 +217,11 @@ fn bus_scan_label(bus: &BusInfo) -> String {
     }
 }
 
-/// One scan pass over a bus family: what addresses to probe, how, plus optional
-/// pre-scan and rate ceiling. Unifies native `SmBusScanEntry`s and the runtime
-/// entries plugins contribute, so both drive the identical open/probe flow.
+/// One plugin-defined scan pass over a bus family.
 struct ScanJob {
     bus_kind: SmbusBusKind,
     addresses: Vec<u8>,
     write_rate_limit: Option<WriteRateLimit>,
-    /// A native pre-scan (fn pointer) or a plugin pre-scan (Lua source + scope).
     pre_scan: PreScan,
     probe: Probe,
     /// PCI-identity gate. Empty ⇒ ungated (chipset default; forbidden on a GPU
@@ -234,11 +229,8 @@ struct ScanJob {
     pci_match: Vec<PciMatch>,
 }
 
-type NativePreScan = fn(Arc<SmBusDevice>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
-
 enum PreScan {
     None,
-    Native(NativePreScan),
     Plugin {
         plugin_id: String,
         source: String,
@@ -250,32 +242,12 @@ enum PreScan {
 /// How to gate a declared address into a discovery handle.
 #[derive(Clone, Copy)]
 enum Probe {
-    /// Always emit (native entries; plugins with `probe = "none"`).
+    /// Always emit for plugins with `probe = "none"`.
     Always,
     /// Emit only if `write_quick` ACKs.
     Quick,
     /// Emit only if `read_byte` succeeds.
     ReadByte,
-}
-
-use std::future::Future;
-use std::pin::Pin;
-
-fn native_scan_jobs() -> Vec<ScanJob> {
-    inventory::iter::<SmBusScanEntry>()
-        .map(|entry| ScanJob {
-            bus_kind: entry.bus_kind,
-            addresses: entry.addresses.to_vec(),
-            write_rate_limit: entry.write_rate_limit,
-            pre_scan: match entry.pre_scan {
-                Some(f) => PreScan::Native(f),
-                None => PreScan::None,
-            },
-            // Native entries pre-select their addresses, so every one is emitted.
-            probe: Probe::Always,
-            pci_match: entry.pci_match.to_vec(),
-        })
-        .collect()
 }
 
 fn plugin_scan_jobs(registry: &crate::drivers::plugins::Registry) -> Vec<ScanJob> {
@@ -349,14 +321,13 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
     // Failing to open a bus is non-fatal; warn once so the cause isn't silent.
     let mut open_warned = false;
 
-    let mut jobs = native_scan_jobs();
-    jobs.extend(plugin_scan_jobs(&app.registry));
+    let jobs = plugin_scan_jobs(&app.registry);
 
     for job in jobs {
         // A GPU job MUST carry a PCI gate: the GPU I²C segment is shared with the
         // display's DDC/EDID lines, so an ungated probe could hang a monitor on a
         // card we don't even support. Plugins are already rejected at parse; this
-        // is the backstop for native entries (which can't fail at submit time).
+        // is a defense-in-depth backstop for malformed runtime state.
         if job.bus_kind == SmbusBusKind::Gpu && job.pci_match.is_empty() {
             log::warn!(
                 "[SmBusTransport] GPU scan entry declares no pci_match; refusing to \
@@ -445,7 +416,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-/// Run a job's pre-scan (native fn or plugin Lua) against a freshly opened bus.
+/// Run a job's Lua pre-scan against a freshly opened bus.
 async fn run_pre_scan(
     registry: &crate::drivers::plugins::Registry,
     pre_scan: &PreScan,
@@ -454,7 +425,6 @@ async fn run_pre_scan(
 ) {
     let result = match pre_scan {
         PreScan::None => return,
-        PreScan::Native(f) => f(Arc::clone(bus)).await,
         PreScan::Plugin {
             plugin_id,
             source,

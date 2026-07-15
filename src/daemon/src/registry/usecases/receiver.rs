@@ -53,7 +53,7 @@ pub(crate) async fn reconcile_owned_children(
                 "[receiver] Removed {} after receiver slot changed",
                 child.id()
             );
-            child.close().await;
+            super::registration::close_device(app, &child).await;
         }
     }
     let changed = !gone.is_empty() || !registered.is_empty();
@@ -96,7 +96,7 @@ pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
     if let Some(removed) = cap.unpair(slot).await? {
         let removed_id = removed.id();
         app.devices.write().await.retain(|d| d.id() != removed_id);
-        removed.close().await;
+        super::registration::close_device(&app, &removed).await;
         log::info!("[receiver] Removed {removed_id} after unpair");
     } else {
         // Lua/plugin controllers cannot return a concrete child `Arc` through

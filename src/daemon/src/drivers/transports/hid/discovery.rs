@@ -6,8 +6,7 @@ use std::sync::Arc;
 use crate::{
     drivers::Device,
     ipc::broadcast_state,
-    platform::notify,
-    registry::discovery::{DeviceDescriptor, DiscoveryHandle, TransportScanner},
+    registry::discovery::{DiscoveryHandle, TransportScanner},
     state::{AppState, HidTrackingEntry},
 };
 
@@ -181,10 +180,7 @@ impl From<&hidapi::DeviceInfo> for HidDeviceInfo {
 /// Resolve enumerated HID entries to one entry per physical device,
 /// keyed by `(vid, pid, serial)`.
 ///
-/// Filters entries against both the native `DeviceDescriptor` inventory and
-/// the loaded plugin registry (`plugins::has_match`) — a device driven only
-/// by a plugin, with no native fallback, must still pass this pre-filter or
-/// it never reaches `make_device`. When multiple entries exist for one
+/// Filters entries against the loaded plugin registry. When multiple entries exist for one
 /// physical device (Windows HID collections), the one whose usage_page/usage
 /// satisfies a match is preferred; otherwise the first entry in the group
 /// wins. Result order follows enumeration first-occurrence so device `idx`
@@ -207,10 +203,7 @@ fn pick_hid_devices<'a>(
     let mut order: Vec<(u16, u16, String)> = Vec::new();
     let mut groups: HashMap<(u16, u16, String), Vec<&HidDeviceInfo>> = HashMap::new();
 
-    let is_recognized = |probe: &DiscoveryHandle<'_>| {
-        inventory::iter::<DeviceDescriptor>().any(|d| (d.matches)(probe))
-            || registry.has_match(probe)
-    };
+    let is_recognized = |probe: &DiscoveryHandle<'_>| registry.has_match(probe);
 
     for e in entries {
         let probe = make_probe(e);
@@ -277,241 +270,76 @@ fn devices_to_register<'a>(
 
 /// Handles a HID key that has disappeared from the enumeration.
 ///
-/// Matches on `HidTrackingEntry`:
-/// - `Primary`: removes and closes all registered device Arcs.
-/// - `WiredOverride`: reverts the device to wireless transport (Arc stays in `app.devices`);
-///   if there is no wireless fallback the device is removed and closed.
 pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
     let entry = app.hid.untrack(&key).await;
-    match entry {
-        Some(HidTrackingEntry::Primary(arcs)) => {
-            let to_close: Vec<Arc<dyn Device>> = {
-                let mut devs = app.devices.write().await;
-                let closing: Vec<_> = devs
-                    .iter()
-                    .filter(|d| arcs.iter().any(|a| Arc::ptr_eq(a, d)))
-                    .cloned()
-                    .collect();
-                devs.retain(|d| !arcs.iter().any(|a| Arc::ptr_eq(a, d)));
-                closing
-            };
-            // Native switchable devices need their receiver rescanned after a
-            // direct path vanishes. Plugin devices replace the wireless child
-            // while wired, so they need the same rescan to recreate that child.
-            let should_rescan_controllers = if to_close
+    if let Some(HidTrackingEntry::Primary(arcs)) = entry {
+        let to_close: Vec<Arc<dyn Device>> = {
+            let mut devs = app.devices.write().await;
+            let closing: Vec<_> = devs
                 .iter()
-                .any(|d| d.as_transport_switchable().is_some())
+                .filter(|d| arcs.iter().any(|a| Arc::ptr_eq(a, d)))
+                .cloned()
+                .collect();
+            devs.retain(|d| !arcs.iter().any(|a| Arc::ptr_eq(a, d)));
+            closing
+        };
+        let mut should_rescan_controllers = false;
+        for device in &to_close {
+            if device.wire_connection_type().await
+                == Some(halod_shared::types::ConnectionType::Wired)
             {
-                true
-            } else {
-                let mut wired = false;
-                for device in &to_close {
-                    if device.wire_connection_type().await
-                        == Some(halod_shared::types::ConnectionType::Wired)
-                    {
-                        wired = true;
-                        break;
-                    }
-                }
-                wired
-            };
-            for d in &to_close {
-                d.close().await;
-            }
-            log::info!("Hotplug: removed device(s) for key {key}");
-            broadcast_state(&app).await;
-
-            // The device may now be available through its paired receiver, whose
-            // pairing table only shows the slot once the cable is gone — rescan
-            // every controller after a short delay.
-            if should_rescan_controllers {
-                let app2 = Arc::clone(&app);
-                tokio::spawn(async move {
-                    if let Err(e) = async {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                        let controllers: Vec<Arc<dyn Device>> = app2
-                            .devices
-                            .read()
-                            .await
-                            .iter()
-                            .filter(|d| d.as_controller().is_some())
-                            .cloned()
-                            .collect();
-                        for ctrl_dev in controllers {
-                            if let Some(ctrl) = ctrl_dev.as_controller() {
-                                let children = ctrl.rescan_children().await;
-                                for child in children {
-                                    crate::registry::usecases::registration::register_device(
-                                        &app2, child,
-                                    )
-                                    .await;
-                                }
-                            }
-                        }
-                        Ok::<_, anyhow::Error>(())
-                    }
-                    .await
-                    {
-                        log::error!("[hotplug] controller rescan task failed: {e}");
-                    }
-                });
+                should_rescan_controllers = true;
+                break;
             }
         }
-        Some(HidTrackingEntry::WiredOverride(dev)) => {
-            // Wired path gone — try reverting to wireless; the Arc stays in app.devices.
-            if let Some(switchable) = dev.as_transport_switchable() {
-                if switchable.disconnect_direct().await {
-                    log::info!(
-                        "Hotplug: wired key {key} gone, {} reverted to wireless",
-                        dev.id()
-                    );
-                    let dev_arc = Arc::clone(&dev);
-                    let app2 = Arc::clone(&app);
-                    tokio::spawn(async move {
-                        if let Err(e) = async {
-                            for attempt in 0..6u8 {
-                                tokio::time::sleep(tokio::time::Duration::from_millis(1000))
-                                    .await;
-                                // Abort if the Primary handler already removed this device.
-                                if !app2
-                                    .devices
-                                    .read()
-                                    .await
-                                    .iter()
-                                    .any(|d| Arc::ptr_eq(d, &dev_arc))
-                                {
-                                    log::info!(
-                                        "[hotplug] {} no longer registered; wireless re-init aborted",
-                                        dev_arc.id()
-                                    );
-                                    return Ok(());
-                                }
-                                match dev_arc.initialize().await {
-                                    Ok(true) => {
-                                        let saved_state = {
-                                            let cfg = app2.config.read().await;
-                                            Some(cfg.effective_device_state(dev_arc.id()))
-                                                .filter(|v| !v.is_null())
-                                        };
-                                        if let Some(state) = saved_state {
-                                            dev_arc.load_state(&state).await;
-                                        }
-                                        log::info!(
-                                            "[hotplug] {} re-initialized on wireless (attempt {})",
-                                            dev_arc.id(),
-                                            attempt + 1
-                                        );
-                                        broadcast_state(&app2).await;
-                                        return Ok(());
-                                    }
-                                    Ok(false) => log::debug!(
-                                        "[hotplug] {} still offline on wireless (attempt {})",
-                                        dev_arc.id(),
-                                        attempt + 1
-                                    ),
-                                    Err(e) => log::warn!(
-                                        "[hotplug] {} wireless re-init error: {e}",
-                                        dev_arc.id()
-                                    ),
-                                }
-                            }
-                            // All attempts failed — remove and close so engines stop writing
-                            // to a dead transport. The receiver still holds the Arc, so the
-                            // device can be re-added when the next 0x41 "came online" fires.
-                            {
-                                let mut devs = app2.devices.write().await;
-                                devs.retain(|d| !Arc::ptr_eq(d, &dev_arc));
-                            }
-                            dev_arc.close().await;
-                            broadcast_state(&app2).await;
-                            notify::send(
-                                &app2,
-                                halod_shared::types::NotificationCode::WirelessReinitFailed {
-                                    device: dev_arc.id().to_string(),
-                                },
-                            )
-                            .await;
-                            Ok::<_, anyhow::Error>(())
-                        }
+        for d in &to_close {
+            crate::registry::usecases::registration::close_device(&app, d).await;
+        }
+        log::info!("Hotplug: removed device(s) for key {key}");
+        broadcast_state(&app).await;
+
+        // The device may now be available through its paired receiver, whose
+        // pairing table only shows the slot once the cable is gone — rescan
+        // every controller after a short delay.
+        if should_rescan_controllers {
+            let app2 = Arc::clone(&app);
+            tokio::spawn(async move {
+                if let Err(e) = async {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    let controllers: Vec<Arc<dyn Device>> = app2
+                        .devices
+                        .read()
                         .await
-                        {
-                            log::error!("[hotplug] wireless re-init task failed: {e}");
+                        .iter()
+                        .filter(|d| d.as_controller().is_some())
+                        .cloned()
+                        .collect();
+                    for ctrl_dev in controllers {
+                        if let Some(ctrl) = ctrl_dev.as_controller() {
+                            let children = ctrl.rescan_children().await;
+                            for child in children {
+                                crate::registry::usecases::registration::register_device(
+                                    &app2, child,
+                                )
+                                .await;
+                            }
                         }
-                    });
-                    broadcast_state(&app).await;
-                } else {
-                    // No wireless fallback — close and remove.
-                    app.devices.write().await.retain(|d| !Arc::ptr_eq(d, &dev));
-                    dev.close().await;
-                    log::info!(
-                        "Hotplug: wired key {key} gone, {} had no wireless fallback, removed",
-                        dev.id()
-                    );
-                    broadcast_state(&app).await;
+                    }
+                    Ok::<_, anyhow::Error>(())
                 }
-            }
-        }
-        None => {}
-    }
-}
-
-/// Checks whether `new_device` should be adopted by an existing wireless device as
-/// its direct transport.  Returns `true` and inserts a `WiredOverride` tracking entry
-/// when adoption succeeds; the caller should skip primary registration in that case.
-pub(crate) async fn try_connect_direct(
-    app: &Arc<AppState>,
-    new_device: &Arc<dyn Device>,
-    path: &str,
-    pid: u16,
-    key: String,
-) -> bool {
-    let Some(hw_serial) = new_device.hardware_serial() else {
-        return false;
-    };
-    if new_device.as_transport_switchable().is_none() {
-        return false;
-    }
-
-    let sibling = app
-        .devices
-        .read()
-        .await
-        .iter()
-        .find(|d| {
-            d.hardware_serial().as_deref() == Some(hw_serial.as_str())
-                && d.as_transport_switchable().is_some()
-                && !Arc::ptr_eq(d, new_device)
-        })
-        .cloned();
-
-    if let Some(existing) = sibling {
-        if let Some(switchable) = existing.as_transport_switchable() {
-            match switchable.connect_direct(path, pid, app).await {
-                Ok(()) => {
-                    app.hid
-                        .track(
-                            key.clone(),
-                            HidTrackingEntry::WiredOverride(Arc::clone(&existing)),
-                        )
-                        .await;
-                    log::info!(
-                        "Hotplug: {} adopted direct transport (key {key})",
-                        existing.id()
-                    );
-                    return true;
+                .await
+                {
+                    log::error!("[hotplug] controller rescan task failed: {e}");
                 }
-                Err(e) => log::error!("Hotplug: connect_direct failed for {}: {e}", existing.id()),
-            }
+            });
         }
     }
-    false
 }
 
 /// Creates, initializes, and registers one HID device (plus any hub children).
 ///
-/// If an existing device with the same `hardware_serial()` implements `TransportSwitchable`
-/// it adopts this HID path as its wired transport (Arc identity is preserved for engines).
-/// Otherwise the new device is registered as a brand-new `Primary` entry.
+/// The new device is registered as a `Primary` entry. Wired/wireless duplicate
+/// arbitration is handled by the central plugin registration lifecycle.
 #[allow(clippy::too_many_arguments)] // HID identity and usage tuple comes directly from hidapi
 async fn add_hid_device(
     app: &Arc<AppState>,
@@ -539,7 +367,7 @@ async fn add_hid_device(
     // through the same register → children → track flow as a normal one, so a
     // re-enabled plugin gets its children and HID tracking too — only the
     // native-eviction below and skipping the TransportSwitchable adoption are
-    // scoped-specific (a plugin HID device always registers as a new primary).
+    // scoped-specific.
     let scoped = {
         use crate::registry::discovery::DiscoveryScope;
         match &*app.discovery_scope.read().await {
@@ -559,24 +387,7 @@ async fn add_hid_device(
     let serial_key = serial.filter(|s| !s.is_empty()).unwrap_or("").to_string();
     let key = hid_key(vid, pid, &serial_key);
 
-    if scoped {
-        // Evict a stale native device the plugin now shadows: its id differs, so
-        // dedup won't, and both would otherwise bind the same hardware.
-        if impl_.owning_plugin_id().is_some()
-            && crate::registry::discovery::has_native_match(&handle)
-        {
-            if let Some(native) = crate::registry::discovery::make_device_native_only(handle) {
-                let native_id = native.id().to_owned();
-                native.close().await;
-                crate::registry::usecases::registration::unregister_device_and_children(
-                    app, &native_id,
-                )
-                .await;
-            }
-        }
-    } else if try_connect_direct(app, &impl_, path, pid, key.clone()).await {
-        return;
-    }
+    let _ = scoped;
 
     // Register as a new primary device via the centralised registration lifecycle.
     let registered =

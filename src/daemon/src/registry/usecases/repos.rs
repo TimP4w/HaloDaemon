@@ -13,8 +13,6 @@ use crate::state::AppState;
 
 use halod_shared::types::RepoUpdateStatus;
 
-#[cfg(test)]
-use super::plugins::reload_registry;
 use super::plugins::{apply_repo_plugins, purge_plugin_state, sanitize_slug};
 
 /// RFC 3339 timestamp for `PluginRepoRecord::last_sync`.

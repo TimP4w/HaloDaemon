@@ -109,26 +109,13 @@ pub(super) fn install_package_modules(
     halod.set("require", require)
 }
 
-/// Remove every filesystem/process/native escape hatch from `lua`'s globals.
-/// Shared by runtime VMs and legacy inline-Lua test fixtures. Real package
-/// manifests are pure YAML and never create a Lua VM.
+/// Remove every filesystem/process/native escape hatch from a runtime VM.
 pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
     let globals = lua.globals();
     for name in REMOVED {
         globals.set(*name, mlua::Value::Nil)?;
     }
     Ok(())
-}
-
-/// What surface a bootstrapped VM exposes. The device/effect workers get the
-/// full `halod` runtime API; `StripOnly` exists only for legacy test fixtures.
-pub(super) enum InjectSurface<'a> {
-    FullRuntime {
-        granted: &'a [Permission],
-        config: &'a HashMap<String, String>,
-    },
-    #[cfg(test)]
-    StripOnly,
 }
 
 /// Build a fresh sandboxed plugin VM: strip escape hatches (and, for a full
@@ -140,18 +127,15 @@ pub(super) enum InjectSurface<'a> {
 /// earlier drift left the effect VM with no memory cap; another the manifest
 /// parser hand-rolling the trio outside this chokepoint).
 pub(super) fn bootstrap_vm(
-    surface: InjectSurface<'_>,
+    granted: &[Permission],
+    config: &HashMap<String, String>,
     memory_limit: usize,
     instruction_budget: u64,
 ) -> mlua::Result<(Lua, Rc<Cell<u64>>)> {
     let lua = Lua::new();
     lua.set_app_data(CallDeadline(Rc::new(Cell::new(None))));
-    match surface {
-        InjectSurface::FullRuntime { granted, config } => apply(&lua, granted, config)?,
-        #[cfg(test)]
-        InjectSurface::StripOnly => strip_escape_hatches(&lua)?,
-    }
-    let _ = lua.set_memory_limit(memory_limit);
+    apply(&lua, granted, config)?;
+    lua.set_memory_limit(memory_limit)?;
     let budget = install_instruction_budget_hook(&lua, instruction_budget);
     Ok((lua, budget))
 }

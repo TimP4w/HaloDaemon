@@ -41,7 +41,6 @@ pub enum CapabilityRef<'a> {
     Chain(&'a dyn ChainCapability),
     Controller(&'a dyn Controller),
     Pairing(&'a dyn PairingCapability),
-    TransportSwitchable(&'a dyn TransportSwitchable),
 }
 
 macro_rules! capability_dispatch {
@@ -84,7 +83,7 @@ macro_rules! capability_dispatch {
 
 capability_dispatch!(
     persisting: [Fan, Rgb, Range, Choice, Boolean, Equalizer, Dpi, Lcd, KeyRemap, OnboardProfiles],
-    wire_only:  [Sensor, Action, Battery, Connection, KeyboardLayout, Chain, Controller, Pairing, TransportSwitchable],
+    wire_only:  [Sensor, Action, Battery, Connection, KeyboardLayout, Chain, Controller, Pairing],
 );
 
 macro_rules! as_capability {
@@ -214,8 +213,6 @@ pub trait Device: Send + Sync {
     as_capability!(as_choice, Choice, ChoiceCapability);
     as_capability!(as_boolean, Boolean, BooleanCapability);
     as_capability!(as_action, Action, ActionCapability);
-    #[cfg(test)]
-    as_capability!(as_battery, Battery, BatteryCapability);
     as_capability!(as_equalizer, Equalizer, EqualizerCapability);
     as_capability!(as_dpi, Dpi, DpiCapability);
     as_capability!(
@@ -229,12 +226,6 @@ pub trait Device: Send + Sync {
     as_capability!(as_chain, Chain, ChainCapability);
     as_capability!(as_controller, Controller, Controller);
     as_capability!(as_pairing, Pairing, PairingCapability);
-    as_capability!(
-        as_transport_switchable,
-        TransportSwitchable,
-        TransportSwitchable
-    );
-
     fn visibility_slot(&self) -> Option<&VisibilitySlot> {
         None
     }

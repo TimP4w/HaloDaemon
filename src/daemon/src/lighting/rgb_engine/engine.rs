@@ -17,8 +17,6 @@ use tokio::sync::{watch, Mutex};
 
 use super::canvas::{self, FrameSource, Sampler};
 use super::color::linear_to_led;
-#[cfg(test)]
-use super::color::LinearColor;
 use super::direct::{self, DirectLedEffect};
 use crate::{
     config::{CanvasState, PlacedZone},
@@ -749,17 +747,6 @@ impl RgbEngine {
                 }
             });
             slots.insert(id, handle);
-        }
-    }
-
-    #[cfg(test)]
-    async fn drain_writes(&self) {
-        let handles: Vec<_> = {
-            let mut slots = self.write_slots.lock().expect("write slots poisoned");
-            slots.drain().map(|(_, h)| h).collect()
-        };
-        for h in handles {
-            let _ = h.await;
         }
     }
 

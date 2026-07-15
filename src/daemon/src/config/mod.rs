@@ -374,9 +374,8 @@ pub struct PluginRepoRecord {
     pub branch: Option<String>,
     /// Commit SHA the checked-out working tree is pinned to.
     pub locked_sha: String,
-    /// Immutable revision directory currently selected for execution. Older
-    /// configs fall back to the Git checkout and are upgraded on their next
-    /// explicit install/update.
+    /// Immutable revision directory currently selected for execution. `None`
+    /// means the source is registered but has not installed a revision yet.
     #[serde(default)]
     pub active_revision: Option<String>,
     /// Last verified official revision retained for rollback diagnostics.

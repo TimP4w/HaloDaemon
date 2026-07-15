@@ -11,9 +11,6 @@ notify:
   key_remap_unavailable:
     title: Key remapping unavailable
     message: "Could not initialize the action system: %{detail}"
-  wireless_reinit_failed:
-    title: Device did not return to wireless
-    message: "%{device} did not come online after 6 attempts to reinitialize its wireless connection."
   device_reconnect_failed:
     title: Device did not reconnect
     message: "%{device} was not ready after 6 reconnection attempts."

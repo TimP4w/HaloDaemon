@@ -338,6 +338,7 @@ fn integration_issue_bar(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
     let mut clicked = false;
     let label = match issue.kind {
         PluginIssueKind::ConnectFailed => t!("integrations.issue_connect_failed"),
+        PluginIssueKind::InitFailed => t!("plugins.issue_init_failed"),
         PluginIssueKind::RuntimeError => t!("integrations.issue_runtime_error"),
         PluginIssueKind::LoadWarning => t!("plugins.issue_load_warning"),
         PluginIssueKind::LoadFailed => t!("plugins.issue_load_failed"),

@@ -19,12 +19,12 @@ mod chain_leaf;
 mod device;
 mod effect_worker;
 mod ffi;
+mod host_scan;
 mod image_api;
 pub(crate) mod integration_monitor;
 pub(crate) mod integration_scan;
 mod lua_worker;
 mod manifest;
-mod migration_scan;
 #[cfg(feature = "plugin-test")]
 pub mod plugin_test;
 pub mod repo;
@@ -35,8 +35,6 @@ mod worker;
 
 pub use device::LuaDevice;
 pub use effect_worker::{LedCoord, PluginEffectHandle};
-#[cfg(test)]
-pub(crate) use manifest::parse_manifest;
 pub use manifest::{parse_manifest_from_dir, DeviceSpec, EffectKind, PluginManifest, ProbeMode};
 pub use worker::run_pre_scan;
 
@@ -153,10 +151,7 @@ struct PluginState {
 /// The device-plugin registry: every piece of runtime-mutable plugin state the
 /// daemon owns. Held as [`crate::state::AppState::registry`] (one per process in
 /// production, one per `AppState` in tests — so tests are isolated without a
-/// shared-globals lock). The native driver registry it composes with is the
-/// compile-time `inventory` set consulted by [`crate::registry::discovery`];
-/// [`Registry::make_device`] tries plugins first (so a plugin shadows a native
-/// driver) then falls back to those native descriptors.
+/// shared-globals lock).
 #[derive(Default)]
 pub struct Registry {
     /// The read-mostly plugin snapshot (manifests/effects/consent/config).
@@ -438,21 +433,6 @@ impl Registry {
             .collect()
     }
 
-    /// The installed package hash for `plugin_id`, if any.
-    fn installed_hash_for(&self, plugin_id: &str) -> Option<String> {
-        self.snapshot().installed_hashes.get(plugin_id).cloned()
-    }
-
-    /// Current package content hash, used by repository update-detection tests.
-    #[cfg(test)]
-    pub fn content_hash_for(&self, plugin_id: &str) -> Option<String> {
-        self.snapshot()
-            .manifests
-            .iter()
-            .find(|m| m.plugin_id == plugin_id)
-            .map(PluginManifest::content_hash)
-    }
-
     /// A plugin's resolved non-secure config: every declared field defaults to its
     /// manifest `default`, overridden by any value the user has set. Unknown keys
     /// the user may have stored (e.g. after a manifest edit removed a field) are
@@ -530,7 +510,9 @@ impl Registry {
     /// the returned `true` transition.
     fn set_health(&self, scope: &str, kind: PluginIssueKind, detail: String) -> bool {
         let status = match kind {
-            PluginIssueKind::ConnectFailed | PluginIssueKind::RuntimeError => HealthStatus::Failed,
+            PluginIssueKind::ConnectFailed
+            | PluginIssueKind::InitFailed
+            | PluginIssueKind::RuntimeError => HealthStatus::Failed,
             PluginIssueKind::LoadFailed | PluginIssueKind::LoadWarning => HealthStatus::Degraded,
         };
         let mut health = write_recover(&self.health);
@@ -632,6 +614,26 @@ impl Registry {
     /// failing→ok transition the plugin's persisted runtime issue is cleared too.
     pub(super) fn clear_runtime_error(&self, plugin_id: &str, device_id: &str) {
         self.clear_health(&Self::device_health_scope(plugin_id, device_id));
+    }
+
+    /// Persist a physical plugin device's initialize failure on the owning
+    /// plugin card. The generic registration path sends the DeviceInitFailed
+    /// toast; this record keeps the failure visible after that toast expires.
+    pub(crate) fn report_init_error(&self, plugin_id: &str, device_id: &str, detail: String) {
+        let scope = Self::device_health_scope(plugin_id, device_id);
+        self.set_health(&scope, PluginIssueKind::InitFailed, detail);
+    }
+
+    /// A later successful initialization ends the per-device failure episode.
+    pub(crate) fn clear_init_error(&self, plugin_id: &str, device_id: &str) {
+        let scope = Self::device_health_scope(plugin_id, device_id);
+        let should_clear = read_recover(&self.health)
+            .get(&scope)
+            .and_then(|state| state.issue.as_ref())
+            .is_some_and(|issue| issue.kind == PluginIssueKind::InitFailed);
+        if should_clear {
+            self.clear_health(&scope);
+        }
     }
 
     /// Surface a config-instantiated integration plugin's connect failure as a
@@ -1368,18 +1370,14 @@ fn device_id(
 }
 
 impl Registry {
-    /// Build the winning device for `handle` (a plugin shadows a native driver),
-    /// else the native descriptor's device. The unified entry point over both the
-    /// runtime plugin registry and the compile-time native registry.
+    /// Build the plugin device matching `handle`.
     pub fn make_device(
         &self,
         app: &Arc<crate::state::AppState>,
         handle: DiscoveryHandle<'_>,
     ) -> Option<Arc<dyn Device>> {
         let identity = crate::registry::identity::identity_from_handle(&handle);
-        let device = self
-            .match_handle(app, &handle)
-            .or_else(|| crate::registry::discovery::make_device_native_only(handle))?;
+        let device = self.match_handle(app, &handle)?;
         let origin = device.conflict_origin();
         Some(Arc::new(crate::registry::identity::IdentifiedDevice::new(
             device, identity, origin,
@@ -1389,7 +1387,7 @@ impl Registry {
     /// Build a device from a matched manifest, the spec that matched, and the
     /// handle. Device-only plugins need no runtime/transport; capability plugins
     /// open their transport and spawn a worker. Returns `None` if the transport
-    /// can't be opened (so a native driver can still claim the hardware).
+    /// can't be opened.
     fn build_device(
         &self,
         app: &Arc<crate::state::AppState>,
@@ -1548,6 +1546,23 @@ impl Registry {
             .manifests
             .iter()
             .filter(|m| m.supports_current_platform() && plugin_ids.contains(&m.plugin_id))
+            .flat_map(|m| m.devices.clone())
+            .collect()
+    }
+
+    /// Device declarations belonging to plugins that may execute now. Host
+    /// scanners use this to enumerate generic identities without embedding
+    /// plugin-specific executable names or chip allowlists in Rust.
+    pub(super) fn active_device_specs(&self) -> Vec<DeviceSpec> {
+        let state = self.snapshot();
+        state
+            .manifests
+            .iter()
+            .filter(|m| {
+                m.supports_current_platform()
+                    && !state.disabled.contains(&m.plugin_id)
+                    && consent_satisfied_in(&state, m)
+            })
             .flat_map(|m| m.devices.clone())
             .collect()
     }

@@ -257,7 +257,8 @@ fn build_ctx(
     config: &HashMap<String, String>,
 ) -> Result<EffectCtx> {
     let (lua, budget) = sandbox::bootstrap_vm(
-        sandbox::InjectSurface::FullRuntime { granted, config },
+        granted,
+        config,
         PLUGIN_VM_MEMORY_BYTES,
         PLUGIN_INSTRUCTION_BUDGET,
     )
