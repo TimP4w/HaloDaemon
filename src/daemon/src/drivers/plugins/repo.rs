@@ -113,8 +113,16 @@ fn validate_repository_manifest(repo_dir: &Path, manifest: &RepositoryManifest) 
 
 /// Checks fields that are meaningful before the commit is checked out.
 fn validate_repository_index(manifest: &RepositoryManifest) -> Result<()> {
+    validate_repository_index_for(manifest, env!("CARGO_PKG_VERSION"), PLUGIN_API)
+}
+
+fn validate_repository_index_for(
+    manifest: &RepositoryManifest,
+    halod_version: &str,
+    plugin_api: u32,
+) -> Result<()> {
     halod_plugin_signing::validate_repository_index(manifest)?;
-    halod_plugin_signing::validate_compatibility(manifest, env!("CARGO_PKG_VERSION"), PLUGIN_API)
+    halod_plugin_signing::validate_compatibility(manifest, halod_version, plugin_api)
 }
 
 /// URL schemes a plugin repo may use. `file://` is a local clone (dev/test and
@@ -305,19 +313,31 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn accepts_matching_production_compatibility_gate() {
-        validate_repository_index(&manifest(">=0.3.0, <0.4.0", PLUGIN_API)).unwrap();
+    fn accepts_matching_compatibility_gate() {
+        validate_repository_index_for(
+            &manifest(">=0.2.0, <0.3.0", PLUGIN_API),
+            "0.2.5",
+            PLUGIN_API,
+        )
+        .unwrap();
     }
 
     #[test]
     fn rejects_a_different_plugin_api() {
-        let error = validate_repository_index(&manifest(">=0.2.0", PLUGIN_API + 1)).unwrap_err();
+        let error = validate_repository_index_for(
+            &manifest(">=0.2.0", PLUGIN_API + 1),
+            "0.2.5",
+            PLUGIN_API,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("plugin API"));
     }
 
     #[test]
     fn rejects_an_incompatible_daemon_version() {
-        let error = validate_repository_index(&manifest(">=99.0.0", PLUGIN_API)).unwrap_err();
+        let error =
+            validate_repository_index_for(&manifest(">=0.3.0", PLUGIN_API), "0.2.5", PLUGIN_API)
+                .unwrap_err();
         assert!(error.to_string().contains("requires Halo"));
     }
 }
@@ -386,7 +406,7 @@ mod tests {
         fs::write(
             root.join("repository.yaml"),
             format!(
-                "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.3.0, <0.4.0'\n  plugin_api: 1\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {digest}\n"
+                "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.0.0'\n  plugin_api: 1\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {digest}\n"
             ),
         )
         .unwrap();

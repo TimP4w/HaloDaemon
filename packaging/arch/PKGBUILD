@@ -1,6 +1,6 @@
 # Maintainer: Timucin Besken <beskent@gmail.com>
 pkgname=halod
-pkgver=0.4.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Peripheral control daemon (fan curves, RGB, LCD, audio EQ, DPI)"
 arch=('x86_64')
