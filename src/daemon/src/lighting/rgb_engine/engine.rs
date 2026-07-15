@@ -1343,7 +1343,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_sensor_fx\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: effect\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
+            "id: engine_sensor_fx\ntype: effect\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
         )
         .unwrap();
         std::fs::write(
@@ -1708,7 +1708,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_test_fx\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: effect\neffects:\n  - kind: pixmap\n    id: solid\n    name: Solid\n  - kind: direct\n    id: ramp\n    name: Ramp\n",
+            "id: engine_test_fx\ntype: effect\neffects:\n  - kind: pixmap\n    id: solid\n    name: Solid\n  - kind: direct\n    id: ramp\n    name: Ramp\n",
         )
         .unwrap();
         std::fs::write(

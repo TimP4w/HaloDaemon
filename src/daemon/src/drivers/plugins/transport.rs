@@ -103,6 +103,11 @@ impl CommandExecutor {
         if !self.allowed.iter().any(|name| name == executable) {
             anyhow::bail!("command '{executable}' is outside the declared transport scope");
         }
+        if super::manifest::is_disallowed_command(executable) {
+            anyhow::bail!(
+                "command '{executable}' is a shell, interpreter, or command launcher and cannot be run by a plugin"
+            );
+        }
         if args.len() > MAX_COMMAND_ARGS
             || args
                 .iter()
@@ -288,5 +293,16 @@ mod tests {
         assert!(error
             .to_string()
             .contains("outside the declared transport scope"));
+    }
+
+    #[test]
+    fn command_executor_rejects_allowlisted_interpreter() {
+        let commands = CommandExecutor::new(["python3".to_owned()]);
+        let error = commands
+            .run("python3", &["-c".to_owned(), "print('unsafe')".to_owned()])
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("shell, interpreter, or command launcher"));
     }
 }

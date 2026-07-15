@@ -1602,7 +1602,7 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
     Ok(())
 }
 
-fn is_disallowed_command(name: &str) -> bool {
+pub(super) fn is_disallowed_command(name: &str) -> bool {
     let normalized = name.to_ascii_lowercase();
     let normalized = normalized.strip_suffix(".exe").unwrap_or(&normalized);
     matches!(
@@ -1814,6 +1814,24 @@ mod tests {
         std::fs::write(dir.join("plugin.yaml"), format!("id: {id}\n{yaml_extra}")).unwrap();
         std::fs::write(dir.join("main.lua"), lua).unwrap();
         dir
+    }
+
+    #[test]
+    fn command_transport_rejects_interpreters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "unsafe_command",
+            "type: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [python3]\n",
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("shell, interpreter, or command launcher"),
+            "{error:#}"
+        );
     }
 
     #[test]

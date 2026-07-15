@@ -638,22 +638,57 @@ mod tests {
             .into()
     }
 
-    /// Init a local source repo at `dir`; the plugin id must equal `dir`'s file name (see `parse_manifest_from_dir`).
-    fn init_source_repo(dir: &std::path::Path, id: &str) -> String {
-        std::fs::create_dir_all(dir).unwrap();
-        let repo = git2::Repository::init(dir).unwrap();
+    fn source_package(dir: &std::path::Path, id: &str) -> std::path::PathBuf {
+        dir.join("plugins").join(id)
+    }
+
+    fn refresh_repository_index(repo: &git2::Repository) {
+        let root = repo.workdir().unwrap();
+        let package = std::fs::read_dir(root.join("plugins"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let id = package.file_name().unwrap().to_string_lossy();
+        let version = std::fs::read(package.join("plugin.yaml"))
+            .ok()
+            .and_then(|bytes| serde_yaml::from_slice::<serde_yaml::Value>(&bytes).ok())
+            .and_then(|value| value.get("version")?.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "1.0.0".to_owned());
+        let digest = crate::drivers::plugins::repo::package_hash(&package).unwrap();
         std::fs::write(
-            dir.join("plugin.yaml"),
+            root.join("repository.yaml"),
             format!(
-                "id: {id}\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\ndevices:\n  - vendor: x\n    model: y\n    transport: hid\n    vid: 1\n    pid: 2\n"
+                "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.2.0, <0.3.0'\n  plugin_api: 1\npackages:\n  - id: {id}\n    path: plugins/{id}\n    version: {version}\n    sha256: {digest}\n"
             ),
         )
         .unwrap();
-        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+    }
+
+    /// Init a current indexed repository with one package. Root-level hard
+    /// links keep older mutation-oriented cases concise while the daemon loads
+    /// only the indexed package under `plugins/<id>`.
+    fn init_source_repo(dir: &std::path::Path, id: &str) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let repo = git2::Repository::init(dir).unwrap();
+        let package = source_package(dir, id);
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("plugin.yaml"),
+            format!(
+                "id: {id}\nversion: 1.0.0\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(package.join("main.lua"), "return {}").unwrap();
+        std::fs::hard_link(package.join("plugin.yaml"), dir.join("plugin.yaml")).unwrap();
+        std::fs::hard_link(package.join("main.lua"), dir.join("main.lua")).unwrap();
         commit_all(&repo, "initial")
     }
 
     fn commit_all(repo: &git2::Repository, message: &str) -> String {
+        refresh_repository_index(repo);
         let mut index = repo.index().unwrap();
         index
             .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
