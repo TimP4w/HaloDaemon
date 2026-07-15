@@ -90,7 +90,7 @@ impl RecordingStream {
     }
 
     /// Push a report onto the event queue as if a reader thread had received it
-    /// unsolicited — lets a test drive `on_event` without a real device.
+    /// unsolicited — lets a test drive `event()` without a real device.
     fn queue_event(&self, data: Vec<u8>) {
         self.deferred
             .lock()
@@ -787,7 +787,7 @@ fn open_device(
     }
 
     // Push an unsolicited report onto the event queue (as a reader thread
-    // would), then drain it through `on_event` — exercising the push-based
+    // would), then drain it through `event()` — exercising the push-based
     // notification path without real hardware.
     {
         let recording = recording.clone();

@@ -22,8 +22,8 @@ use super::lua_worker::LuaWorker;
 use halod_shared::keyboard::{KeyId, StandardLayout};
 use halod_shared::types::{
     Battery, Boolean, ButtonDescriptor, ButtonMapping, ConnectionStatus, DeviceType, Equalizer,
-    KeyboardFormFactor, KeyboardLayout, NativeEffect, OnboardProfiles, PairingStatus, Permission,
-    RgbColor, RgbDescriptor, RgbState, RgbZone, Sensor, ZoneTopology,
+    KeyboardFormFactor, KeyboardLayout, LedPosition, NativeEffect, OnboardProfiles, PairingStatus,
+    Permission, RgbColor, RgbDescriptor, RgbState, RgbZone, Sensor, ZoneTopology,
 };
 
 use super::bytebuf::ByteBuf;
@@ -40,6 +40,13 @@ use super::transport::{AddrScope, CommandExecutor, PluginIo, RegisterBus};
 use super::transport_api::TransportApi;
 use crate::drivers::transports::smbus::SmBusDevice;
 use crate::drivers::vendors::generic::devices::common::{linear_rgb_zone, ring_led_positions};
+
+/// Maximum HID reports handled by one serialized Lua-worker job. Event input,
+/// RGB frames, status polling, and capability commands share that worker; a
+/// complete 256-report queue would otherwise monopolize it long enough to
+/// reject or visibly stall animation frames. The transport re-wakes the event
+/// task when a bounded drain leaves reports behind.
+const EVENT_DISPATCH_BATCH: usize = 32;
 
 use super::{PLUGIN_INSTRUCTION_BUDGET, PLUGIN_VM_MEMORY_BYTES};
 
@@ -222,6 +229,10 @@ pub struct InitZone {
     /// synthesized from 0..led_count as before.
     #[serde(default)]
     pub led_ids: Vec<u32>,
+    /// Optional explicit normalized LED geometry. This takes precedence over
+    /// `led_ids` and topology-derived layouts when supplied.
+    #[serde(default)]
+    pub leds: Vec<LedPosition>,
     #[serde(default)]
     pub rings: u8,
     #[serde(default)]
@@ -728,7 +739,14 @@ impl PluginHandle {
                     if let Some(zones) = &t.zones {
                         check_zone_count(zones.len())?;
                         for z in zones {
-                            check_led_count(&z.id, z.led_count)?;
+                            let count = if !z.leds.is_empty() {
+                                u32::try_from(z.leds.len()).unwrap_or(u32::MAX)
+                            } else if !z.led_ids.is_empty() {
+                                u32::try_from(z.led_ids.len()).unwrap_or(u32::MAX)
+                            } else {
+                                z.led_count
+                            };
+                            check_led_count(&z.id, count)?;
                         }
                     }
                     if let Some(lcd) = &t.lcd {
@@ -956,55 +974,56 @@ impl PluginHandle {
         .await
     }
 
-    /// Drain host-reader reports and deliver them to `on_event(dev, event)` on
+    pub async fn supports_events(&self) -> Result<bool> {
+        self.run(|ctx, _, _| Ok(func(&ctx.manifest, "event").is_some()))
+            .await
+    }
+
+    /// Drain dispatcher reports and deliver them to `event(dev, event)` on
     /// this same serialized worker. Each callback may return button transitions
     /// and an optional child index for receiver routing.
     pub async fn on_transport_events(&self) -> Result<Vec<PollOutcome>> {
         self.run(|ctx, dev, _| {
-            let Some(callback) = func(&ctx.manifest, "on_event") else {
-                // A plugin without event support may continue using explicit
-                // request reads; do not consume its queue behind its back.
-                return Ok(Vec::new());
-            };
             let transport = match &ctx.transport {
                 PluginIo::Stream { transport, .. } => transport,
                 _ => return Ok(Vec::new()),
             };
             let events = ctx
                 .handle
-                // Both the live and protocol-deferred HID queues are bounded
-                // at 256. Drain a complete burst per wake so watch-channel
-                // coalescing cannot strand the tail indefinitely.
-                .block_on(transport.drain_events(512))
+                .block_on(transport.drain_events(EVENT_DISPATCH_BATCH))
                 .map_err(|e| anyhow!("draining transport events: {e:#}"))?;
+            let Some(callback) = func(&ctx.manifest, "event") else {
+                return Ok(Vec::new());
+            };
             let mut outcomes = Vec::new();
             for event in events {
                 let event_table = ctx
                     .lua
                     .create_table()
-                    .map_err(|e| lua_err("on_event arg", e))?;
+                    .map_err(|e| lua_err("event arg", e))?;
                 event_table
                     .set("transport", "hid")
-                    .map_err(|e| lua_err("on_event arg", e))?;
+                    .map_err(|e| lua_err("event arg", e))?;
                 event_table
                     .set("endpoint", event.endpoint)
-                    .map_err(|e| lua_err("on_event arg", e))?;
+                    .map_err(|e| lua_err("event arg", e))?;
                 event_table
                     .set(
                         "report",
                         ctx.lua
                             .create_string(&event.data)
-                            .map_err(|e| lua_err("on_event arg", e))?,
+                            .map_err(|e| lua_err("event arg", e))?,
                     )
-                    .map_err(|e| lua_err("on_event arg", e))?;
+                    .map_err(|e| lua_err("event arg", e))?;
 
                 // A protocol may cheaply discard acknowledgements or select
                 // one dynamic child before the heavier callback runs. `nil`
-                // preserves the compatibility behavior of trying every target.
-                let route = match func(&ctx.manifest, "route_event") {
+                // means the root/originating device when no finer source is
+                // available.
+                let route = match func(&ctx.manifest, "event_source") {
                     Some(router) => router
                         .call::<Value>(event_table.clone())
-                        .map_err(|e| lua_err("route_event", e))?,
+                        .map_err(|e| lua_err("event_source", e))?,
                     None => Value::Nil,
                 };
                 if matches!(route, Value::Boolean(false)) {
@@ -1019,24 +1038,13 @@ impl PluginHandle {
                         .cloned()
                         .map(|child| vec![(Some(index as u32), child)])
                         .unwrap_or_default(),
-                    _ => {
-                        let mut targets = vec![(None, dev.clone())];
-                        let mut children: Vec<_> = ctx
-                            .child_devs
-                            .borrow()
-                            .iter()
-                            .map(|(index, dev)| (Some(*index), dev.clone()))
-                            .collect();
-                        children.sort_by_key(|(index, _)| *index);
-                        targets.extend(children);
-                        targets
-                    }
+                    _ => vec![(None, dev.clone())],
                 };
                 for (child_index, target) in targets {
                     let value: Value = match callback.call((target, event_table.clone())) {
                         Ok(value) => value,
                         Err(error) => {
-                            log::warn!("plugin on_event callback failed: {error}");
+                            log::warn!("plugin event callback failed: {error}");
                             continue;
                         }
                     };
@@ -1044,7 +1052,7 @@ impl PluginHandle {
                         let mut outcome: PollOutcome = match ctx.lua.from_value(value) {
                             Ok(outcome) => outcome,
                             Err(error) => {
-                                log::warn!("plugin on_event returned a malformed result: {error}");
+                                log::warn!("plugin event returned a malformed result: {error}");
                                 continue;
                             }
                         };
@@ -1715,7 +1723,8 @@ mod tests {
             r#"
                 return {
                     initialize = function(_) return true end,
-                    on_event = function(dev, event)
+                    event_source = function(event) return event.report:byte(2) end,
+                    event = function(dev, event)
                         if dev.match.index == event.report:byte(2) then
                             return { button_events = { pressed = { 7 }, released = {} } }
                         end

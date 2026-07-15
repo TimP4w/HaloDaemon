@@ -295,19 +295,36 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
                 devs.retain(|d| !arcs.iter().any(|a| Arc::ptr_eq(a, d)));
                 closing
             };
+            // Native switchable devices need their receiver rescanned after a
+            // direct path vanishes. Plugin devices replace the wireless child
+            // while wired, so they need the same rescan to recreate that child.
+            let should_rescan_controllers = if to_close
+                .iter()
+                .any(|d| d.as_transport_switchable().is_some())
+            {
+                true
+            } else {
+                let mut wired = false;
+                for device in &to_close {
+                    if device.wire_connection_type().await
+                        == Some(halod_shared::types::ConnectionType::Wired)
+                    {
+                        wired = true;
+                        break;
+                    }
+                }
+                wired
+            };
             for d in &to_close {
                 d.close().await;
             }
             log::info!("Hotplug: removed device(s) for key {key}");
             broadcast_state(&app).await;
 
-            // A wired TransportSwitchable device may now be available through its
-            // paired receiver, whose pairing table only shows the slot once the cable
-            // is gone — rescan every controller after a short delay.
-            let any_switchable = to_close
-                .iter()
-                .any(|d| d.as_transport_switchable().is_some());
-            if any_switchable {
+            // The device may now be available through its paired receiver, whose
+            // pairing table only shows the slot once the cable is gone — rescan
+            // every controller after a short delay.
+            if should_rescan_controllers {
                 let app2 = Arc::clone(&app);
                 tokio::spawn(async move {
                     if let Err(e) = async {

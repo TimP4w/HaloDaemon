@@ -437,7 +437,9 @@ impl Device for IdentifiedDevice {
         self.inner.wire_connection_type().await
     }
     fn wire_serial_number(&self) -> Option<String> {
-        self.inner.wire_serial_number()
+        self.inner
+            .wire_serial_number()
+            .or_else(|| self.identity.serial.clone())
     }
     async fn wire_device_connected(&self) -> bool {
         self.inner.wire_device_connected().await
@@ -449,7 +451,9 @@ impl Device for IdentifiedDevice {
         self.inner.wire_device_name().await
     }
     fn hardware_serial(&self) -> Option<String> {
-        self.inner.hardware_serial()
+        self.inner
+            .hardware_serial()
+            .or_else(|| self.identity.serial.clone())
     }
     fn identity(&self) -> DeviceIdentity {
         self.identity.clone()

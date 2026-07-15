@@ -221,17 +221,22 @@ pub trait Transport: Send + Sync {
         false
     }
 
-    /// Subscribe to host-reader wakeups for event-driven transports. The
-    /// counter changes whenever at least one report is queued; consumers drain
-    /// reports from the serialized plugin worker via `drain_events`.
+    /// Subscribe to dispatcher wakeups for event-driven transports. Request
+    /// reads use a separate input handle and never consume this event stream.
     fn event_receiver(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
         None
     }
 
-    /// Drain queued unsolicited input in arrival order. Request/response reads
-    /// and this drain are serialized by the owning root worker.
+    /// Drain unsolicited input in arrival order for delivery to Lua `event()`.
     async fn drain_events(&self, _limit: usize) -> Result<Vec<TransportEvent>> {
         Ok(Vec::new())
+    }
+
+    /// Start dispatching unsolicited input reports. HID opens a dedicated
+    /// event handle lazily; request/reply reads retain their own input handle.
+    /// Called only when the owning plugin declares an `event()` callback.
+    fn enable_event_listener(&self) -> Result<()> {
+        Ok(())
     }
 
     /// Live write-rate limit and throughput. No default: every implementor

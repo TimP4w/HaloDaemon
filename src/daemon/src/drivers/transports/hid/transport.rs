@@ -2,7 +2,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex as StdMutex, Weak};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -66,6 +66,16 @@ impl HidIo {
             write_dev: Arc::new(Mutex::new(write_dev)),
         })
     }
+
+    fn open_input(api: &hidapi::HidApi, path: &str, purpose: &str) -> Result<hidapi::HidDevice> {
+        let cpath = std::ffi::CString::new(path)?;
+        let dev = api
+            .open_path(cpath.as_c_str())
+            .with_context(|| format!("failed to open HID device ({purpose}) at {path}"))?;
+        dev.set_blocking_mode(false)
+            .context("failed to set non-blocking mode")?;
+        Ok(dev)
+    }
 }
 
 /// Write one already-framed packet, via a feature report or an output report.
@@ -111,7 +121,7 @@ async fn write_batch(
     .context("spawn_blocking panicked")?
 }
 
-const INPUT_QUEUE_CAPACITY: usize = 256;
+const EVENT_QUEUE_CAPACITY: usize = 256;
 const INPUT_REPORT_MAX: usize = 4096;
 
 /// Endpoint label carried by an event report the protocol layer deferred: the
@@ -134,30 +144,19 @@ impl InputEndpoint {
     }
 }
 
-struct QueuedReport {
-    endpoint: InputEndpoint,
-    data: Vec<u8>,
-}
-
-/// Host-owned bounded report queue. Reader threads are the only code touching
-/// hidapi input handles; Lua request reads and event drains consume this queue.
-struct HidReaders {
-    reports: StdMutex<VecDeque<QueuedReport>>,
-    /// Reports popped by an endpoint-agnostic `read_any` that the protocol
-    /// layer handed back as not-its-own; delivered ahead of the live queue on
-    /// the next event drain so arrival order is preserved.
-    deferred: StdMutex<VecDeque<Vec<u8>>>,
-    available: Condvar,
+/// Event-only dispatcher queue. Request/reply reads use their original input
+/// handles directly and never consume this queue. Event listeners are opened
+/// lazily only after the plugin advertises an `event()` callback.
+struct HidEvents {
+    reports: StdMutex<VecDeque<TransportEvent>>,
     wake: tokio::sync::watch::Sender<u64>,
 }
 
-impl HidReaders {
+impl HidEvents {
     fn new() -> Self {
         let (wake, _) = tokio::sync::watch::channel(0);
         Self {
-            reports: StdMutex::new(VecDeque::with_capacity(INPUT_QUEUE_CAPACITY)),
-            deferred: StdMutex::new(VecDeque::with_capacity(INPUT_QUEUE_CAPACITY)),
-            available: Condvar::new(),
+            reports: StdMutex::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
             wake,
         }
     }
@@ -167,127 +166,106 @@ impl HidReaders {
         self.wake.send_replace(next);
     }
 
-    fn push(&self, report: QueuedReport) {
+    fn push(&self, endpoint: &'static str, data: Vec<u8>) {
         let mut reports = self.reports.lock().unwrap();
-        if reports.len() == INPUT_QUEUE_CAPACITY {
+        if reports.len() == EVENT_QUEUE_CAPACITY {
             reports.pop_front();
-            log::debug!("[HidTransport] input queue full; dropping oldest report");
+            log::debug!("[HidTransport] event queue full; dropping oldest event");
         }
-        reports.push_back(report);
-        self.available.notify_all();
+        reports.push_back(TransportEvent { endpoint, data });
+        drop(reports);
         self.bump_wake();
     }
 
-    /// Set a report aside for the event path (`drain`). Wakes the event watcher.
     fn defer(&self, data: Vec<u8>) {
-        let mut deferred = self.deferred.lock().unwrap();
-        if deferred.len() == INPUT_QUEUE_CAPACITY {
-            deferred.pop_front();
-            log::debug!("[HidTransport] deferred input queue full; dropping oldest report");
-        }
-        deferred.push_back(data);
-        drop(deferred);
-        self.bump_wake();
-    }
-
-    fn pop(&self, endpoint: InputEndpoint, timeout_ms: i32, size: usize) -> Vec<u8> {
-        self.pop_matching(timeout_ms, size, |r| r.endpoint == endpoint)
-    }
-
-    /// Pop the next report from any endpoint (merged short/long queue), so a
-    /// reply is matched wherever the collection split delivered it.
-    fn pop_any(&self, timeout_ms: i32, size: usize) -> Vec<u8> {
-        self.pop_matching(timeout_ms, size, |_| true)
-    }
-
-    fn pop_matching(
-        &self,
-        timeout_ms: i32,
-        size: usize,
-        accept: impl Fn(&QueuedReport) -> bool,
-    ) -> Vec<u8> {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(0) as u64);
-        let mut reports = self.reports.lock().unwrap();
-        loop {
-            if let Some(index) = reports.iter().position(&accept) {
-                let mut data = reports
-                    .remove(index)
-                    .expect("position came from queue")
-                    .data;
-                data.truncate(size);
-                return data;
-            }
-            if timeout_ms <= 0 {
-                return Vec::new();
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Vec::new();
-            }
-            let (next, wait) = self
-                .available
-                .wait_timeout(reports, deadline - now)
-                .unwrap();
-            reports = next;
-            if wait.timed_out() {
-                return Vec::new();
-            }
-        }
+        self.push(DEFERRED_ENDPOINT, data);
     }
 
     fn drain(&self, limit: usize) -> Vec<TransportEvent> {
-        let mut events: Vec<TransportEvent> = {
-            let mut deferred = self.deferred.lock().unwrap();
-            let count = deferred.len().min(limit);
-            deferred
-                .drain(..count)
-                .map(|data| TransportEvent {
-                    endpoint: DEFERRED_ENDPOINT,
-                    data,
-                })
-                .collect()
-        };
-        if events.len() >= limit {
-            return events;
-        }
         let mut reports = self.reports.lock().unwrap();
-        let count = reports.len().min(limit - events.len());
-        events.extend(reports.drain(..count).map(|report| TransportEvent {
-            endpoint: report.endpoint.name(),
-            data: report.data,
-        }));
+        let count = reports.len().min(limit);
+        let events = reports.drain(..count).collect();
+        let reports_remaining = !reports.is_empty();
+        drop(reports);
+        if reports_remaining {
+            self.bump_wake();
+        }
         events
     }
 }
 
-fn spawn_reader(
-    dev: Arc<Mutex<hidapi::HidDevice>>,
-    endpoint: InputEndpoint,
-    readers: Weak<HidReaders>,
-) {
+fn spawn_event_reader(dev: hidapi::HidDevice, endpoint: InputEndpoint, events: Weak<HidEvents>) {
     let _ = std::thread::Builder::new()
-        .name(format!("halod-hid-{}", endpoint.name()))
+        .name(format!("halod-hid-event-{}", endpoint.name()))
         .spawn(move || loop {
-            let Some(readers) = readers.upgrade() else {
+            let Some(events) = events.upgrade() else {
                 break;
             };
             let mut buf = vec![0; INPUT_REPORT_MAX];
-            let result = dev.blocking_lock().read_timeout(&mut buf, 100);
+            let result = dev.read_timeout(&mut buf, 100);
             match result {
                 Ok(0) => {}
                 Ok(n) => {
                     buf.truncate(n);
-                    readers.push(QueuedReport {
-                        endpoint,
-                        data: buf,
-                    });
+                    events.push(endpoint.name(), buf);
                 }
                 Err(error) => {
-                    log::debug!("[HidTransport] {} reader stopped: {error}", endpoint.name());
+                    log::debug!(
+                        "[HidTransport] {} event reader stopped: {error}",
+                        endpoint.name()
+                    );
                     break;
                 }
             }
         });
+}
+
+async fn read_io(
+    dev: Arc<Mutex<hidapi::HidDevice>>,
+    size: usize,
+    timeout_ms: i32,
+) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || {
+        let guard = dev.blocking_lock();
+        let mut buf = vec![0u8; size];
+        let n = guard
+            .read_timeout(&mut buf, timeout_ms)
+            .map_err(|e| anyhow::anyhow!("HID read error: {e}"))?;
+        buf.truncate(n);
+        Ok(buf)
+    })
+    .await
+    .context("spawn_blocking panicked")?
+}
+
+async fn read_any_io(
+    primary: Arc<Mutex<hidapi::HidDevice>>,
+    companion: Option<Arc<Mutex<hidapi::HidDevice>>>,
+    size: usize,
+    timeout_ms: i32,
+) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(0) as u64);
+        loop {
+            for dev in std::iter::once(&primary).chain(companion.iter()) {
+                let guard = dev.blocking_lock();
+                let mut buf = vec![0u8; size];
+                let n = guard
+                    .read_timeout(&mut buf, 0)
+                    .map_err(|e| anyhow::anyhow!("HID read error: {e}"))?;
+                if n != 0 {
+                    buf.truncate(n);
+                    return Ok(buf);
+                }
+            }
+            if timeout_ms <= 0 || Instant::now() >= deadline {
+                return Ok(Vec::new());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    })
+    .await
+    .context("spawn_blocking panicked")?
 }
 
 /// The raw HID handles gated behind [`Metered`]: a `short` handle and, for
@@ -305,7 +283,10 @@ struct HidState {
 #[derive(Clone)]
 pub struct HidTransport {
     io: Metered<HidState>,
-    readers: Arc<HidReaders>,
+    events: Arc<HidEvents>,
+    primary_path: Arc<str>,
+    companion_path: Option<Arc<str>>,
+    event_listener_started: Arc<StdMutex<bool>>,
     report_size: Option<usize>,
     timeout_ms: i32,
     /// When true, writes use `send_feature_report()` (HIDIOCSFEATURE) instead of
@@ -332,12 +313,6 @@ impl HidTransport {
     ) -> Result<Self> {
         let api = hidapi::HidApi::new().context("failed to create HidApi")?;
         let primary = HidIo::open(&api, path)?;
-        let readers = Arc::new(HidReaders::new());
-        spawn_reader(
-            Arc::clone(&primary.read_dev),
-            InputEndpoint::Primary,
-            Arc::downgrade(&readers),
-        );
         Ok(Self {
             io: Metered::new(
                 HidState {
@@ -346,7 +321,10 @@ impl HidTransport {
                 },
                 limit,
             ),
-            readers,
+            events: Arc::new(HidEvents::new()),
+            primary_path: Arc::from(path),
+            companion_path: None,
+            event_listener_started: Arc::new(StdMutex::new(false)),
             report_size,
             timeout_ms,
             use_feature_report,
@@ -374,22 +352,13 @@ impl HidTransport {
         } else {
             Some(HidIo::open(&api, companion_path)?)
         };
-        let readers = Arc::new(HidReaders::new());
-        spawn_reader(
-            Arc::clone(&primary.read_dev),
-            InputEndpoint::Primary,
-            Arc::downgrade(&readers),
-        );
-        if let Some(companion) = &companion {
-            spawn_reader(
-                Arc::clone(&companion.read_dev),
-                InputEndpoint::Companion,
-                Arc::downgrade(&readers),
-            );
-        }
         Ok(Self {
             io: Metered::new(HidState { primary, companion }, limit),
-            readers,
+            events: Arc::new(HidEvents::new()),
+            primary_path: Arc::from(primary_path),
+            companion_path: (!companion_path.is_empty() && companion_path != primary_path)
+                .then(|| Arc::from(companion_path)),
+            event_listener_started: Arc::new(StdMutex::new(false)),
             report_size,
             timeout_ms,
             use_feature_report,
@@ -398,6 +367,30 @@ impl HidTransport {
 
     fn frame(&self, data: &[u8]) -> Vec<u8> {
         build_frame(data, self.report_size)
+    }
+
+    fn start_event_listener(&self) -> Result<()> {
+        let mut started = self.event_listener_started.lock().unwrap();
+        if *started {
+            return Ok(());
+        }
+        let api = hidapi::HidApi::new().context("failed to create HidApi for event listener")?;
+        let primary = HidIo::open_input(&api, &self.primary_path, "event")?;
+        spawn_event_reader(
+            primary,
+            InputEndpoint::Primary,
+            Arc::downgrade(&self.events),
+        );
+        if let Some(path) = &self.companion_path {
+            let companion = HidIo::open_input(&api, path, "companion event")?;
+            spawn_event_reader(
+                companion,
+                InputEndpoint::Companion,
+                Arc::downgrade(&self.events),
+            );
+        }
+        *started = true;
+        Ok(())
     }
 }
 
@@ -416,11 +409,12 @@ impl Transport for HidTransport {
     }
 
     async fn read(&self, size: usize) -> Result<Vec<u8>> {
-        let readers = self.readers.clone();
-        let timeout_ms = self.timeout_ms;
-        tokio::task::spawn_blocking(move || readers.pop(InputEndpoint::Primary, timeout_ms, size))
-            .await
-            .context("spawn_blocking panicked")
+        read_io(
+            Arc::clone(&self.io.read_access().primary.read_dev),
+            size,
+            self.timeout_ms,
+        )
+        .await
     }
 
     async fn write_then_read(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
@@ -454,14 +448,14 @@ impl Transport for HidTransport {
     }
 
     async fn read_companion(&self, size: usize) -> Result<Vec<u8>> {
-        if self.io.read_access().companion.is_none() {
-            anyhow::bail!("companion HID collection is not available");
-        }
-        let readers = self.readers.clone();
-        let timeout_ms = self.timeout_ms;
-        tokio::task::spawn_blocking(move || readers.pop(InputEndpoint::Companion, timeout_ms, size))
-            .await
-            .context("spawn_blocking panicked")
+        let dev = self
+            .io
+            .read_access()
+            .companion
+            .as_ref()
+            .map(|io| Arc::clone(&io.read_dev))
+            .context("companion HID collection is not available")?;
+        read_io(dev, size, self.timeout_ms).await
     }
 
     async fn write_then_read_companion(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
@@ -544,19 +538,28 @@ impl Transport for HidTransport {
     }
 
     async fn read_nonblocking(&self, size: usize) -> Result<Vec<u8>> {
-        Ok(self.readers.pop(InputEndpoint::Primary, 0, size))
+        read_io(Arc::clone(&self.io.read_access().primary.read_dev), size, 0).await
     }
 
     async fn read_any(&self, size: usize) -> Result<Vec<u8>> {
-        let readers = self.readers.clone();
-        let timeout_ms = self.timeout_ms;
-        tokio::task::spawn_blocking(move || readers.pop_any(timeout_ms, size))
-            .await
-            .context("spawn_blocking panicked")
+        let state = self.io.read_access();
+        read_any_io(
+            Arc::clone(&state.primary.read_dev),
+            state.companion.as_ref().map(|io| Arc::clone(&io.read_dev)),
+            size,
+            self.timeout_ms,
+        )
+        .await
     }
 
     async fn defer_event(&self, data: &[u8]) -> Result<()> {
-        self.readers.defer(data.to_vec());
+        // Before the independent listener starts (notably during initialize),
+        // preserve an unsolicited report encountered by a request read. Once
+        // active, the listener receives its own copy; deferring the request
+        // handle's copy would dispatch the same event twice.
+        if !*self.event_listener_started.lock().unwrap() {
+            self.events.defer(data.to_vec());
+        }
         Ok(())
     }
 
@@ -565,11 +568,15 @@ impl Transport for HidTransport {
     }
 
     fn event_receiver(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
-        Some(self.readers.wake.subscribe())
+        Some(self.events.wake.subscribe())
     }
 
     async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
-        Ok(self.readers.drain(limit))
+        Ok(self.events.drain(limit))
+    }
+
+    fn enable_event_listener(&self) -> Result<()> {
+        self.start_event_listener()
     }
 
     fn rate_status(&self) -> WriteRateStatus {
@@ -586,78 +593,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn input_queue_is_bounded_and_drops_the_oldest_report() {
-        let readers = HidReaders::new();
-        for value in 0..=INPUT_QUEUE_CAPACITY {
-            readers.push(QueuedReport {
-                endpoint: InputEndpoint::Primary,
-                data: vec![value as u8],
-            });
+    fn event_queue_is_bounded_and_drops_the_oldest_event() {
+        let events = HidEvents::new();
+        for value in 0..=EVENT_QUEUE_CAPACITY {
+            events.push(InputEndpoint::Primary.name(), vec![value as u8]);
         }
-        let drained = readers.drain(INPUT_QUEUE_CAPACITY + 1);
-        assert_eq!(drained.len(), INPUT_QUEUE_CAPACITY);
+        let drained = events.drain(EVENT_QUEUE_CAPACITY + 1);
+        assert_eq!(drained.len(), EVENT_QUEUE_CAPACITY);
         assert_eq!(drained[0].data, vec![1]);
     }
 
     #[test]
-    fn endpoint_reads_preserve_other_endpoint_reports_for_event_drain() {
-        let readers = HidReaders::new();
-        readers.push(QueuedReport {
-            endpoint: InputEndpoint::Companion,
-            data: vec![0x11],
-        });
-        readers.push(QueuedReport {
-            endpoint: InputEndpoint::Primary,
-            data: vec![0x10],
-        });
-        assert_eq!(readers.pop(InputEndpoint::Primary, 0, 64), vec![0x10]);
-        let remaining = readers.drain(8);
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].endpoint, "companion");
-        assert_eq!(remaining[0].data, vec![0x11]);
-    }
-
-    // `pop_any` merges both endpoints so a reply is matched wherever the
-    // short/long collection split delivered it, in arrival (FIFO) order.
-    #[test]
-    fn pop_any_returns_next_report_from_either_endpoint_in_order() {
-        let readers = HidReaders::new();
-        readers.push(QueuedReport {
-            endpoint: InputEndpoint::Companion,
-            data: vec![0x11, 0xaa],
-        });
-        readers.push(QueuedReport {
-            endpoint: InputEndpoint::Primary,
-            data: vec![0x10, 0xbb],
-        });
-        assert_eq!(readers.pop_any(0, 64), vec![0x11, 0xaa]);
-        assert_eq!(readers.pop_any(0, 64), vec![0x10, 0xbb]);
-        assert!(readers.pop_any(0, 64).is_empty());
-    }
-
-    #[test]
-    fn pop_any_truncates_to_size() {
-        let readers = HidReaders::new();
-        readers.push(QueuedReport {
-            endpoint: InputEndpoint::Primary,
-            data: vec![1, 2, 3, 4],
-        });
-        assert_eq!(readers.pop_any(0, 2), vec![1, 2]);
-    }
-
-    // A deferred report is delivered ahead of newer live reports so arrival
-    // order is preserved, and it must never come back through `pop_any`.
-    #[test]
-    fn deferred_reports_drain_before_live_and_not_via_pop_any() {
-        let readers = HidReaders::new();
-        readers.defer(vec![0xde, 0xad]);
-        readers.push(QueuedReport {
-            endpoint: InputEndpoint::Primary,
-            data: vec![0x10, 0x01],
-        });
-        // A deferred packet is for the event path only, never a request read.
-        assert_eq!(readers.pop_any(0, 64), vec![0x10, 0x01]);
-        let drained = readers.drain(8);
+    fn deferred_report_enters_only_the_event_queue() {
+        let events = HidEvents::new();
+        events.defer(vec![0xde, 0xad]);
+        let drained = events.drain(8);
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].endpoint, DEFERRED_ENDPOINT);
         assert_eq!(drained[0].data, vec![0xde, 0xad]);
@@ -665,11 +615,28 @@ mod tests {
 
     #[test]
     fn defer_bumps_the_event_wake_watch() {
-        let readers = HidReaders::new();
-        let mut rx = readers.wake.subscribe();
+        let events = HidEvents::new();
+        let rx = events.wake.subscribe();
         assert!(!rx.has_changed().unwrap());
-        readers.defer(vec![0x01]);
+        events.defer(vec![0x01]);
         assert!(rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn bounded_drain_rewakes_for_the_remaining_tail() {
+        let events = HidEvents::new();
+        let mut rx = events.wake.subscribe();
+        for value in 0..3 {
+            events.push(InputEndpoint::Primary.name(), vec![value]);
+        }
+
+        // Model the event task acknowledging the producer wake before it asks
+        // the serialized plugin worker to drain one fair-sized batch.
+        rx.borrow_and_update();
+        let first = events.drain(1);
+        assert_eq!(first.len(), 1);
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(events.drain(8).len(), 2);
     }
 
     #[test]

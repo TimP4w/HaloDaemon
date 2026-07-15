@@ -621,7 +621,7 @@ pub trait FanCapability: Send + Sync {
             channel: self.fan_channel_id(),
             rpm: self.get_rpm().await.unwrap_or(0),
             duty: self.get_duty().await.unwrap_or_else(|e| {
-                log::debug!("[FanCapability::to_wire] get_duty: {e}");
+                log::trace!("[FanCapability::to_wire] get_duty: {e}");
                 0
             }),
             controllable: self.fan_controllable().await,
@@ -690,7 +690,7 @@ pub async fn fan_sensors(device: &dyn Device) -> Vec<Sensor> {
         id: fan_duty_sensor_id(device.id()),
         name: format!("{} Duty", device.name()),
         value: fan.get_duty().await.unwrap_or_else(|e| {
-            log::debug!("[fan_sensors] get_duty: {e}");
+            log::trace!("[fan_sensors] get_duty: {e}");
             0
         }) as f64,
         unit: SensorUnit::Percent,

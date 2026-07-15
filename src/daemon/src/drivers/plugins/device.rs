@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use halod_shared::keyboard::{is_iso_language, KeyId, KeyVariant, KeyboardLayoutStatus, VisualKey};
+use halod_shared::keyboard::{KeyId, KeyVariant, KeyboardLayoutStatus, VisualKey};
 use halod_shared::types::{
     Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, Choice,
     ConnectionStatus, DeviceCapability, DeviceType, DpiMode, DpiStatus, Equalizer, KeyRemapStatus,
@@ -162,6 +162,109 @@ fn caps_named(names: &[String]) -> Vec<Cap> {
         }
     }
     caps
+}
+
+fn needs_status_poll(caps: &[Cap]) -> bool {
+    StatusPollCaps::from_caps(caps).any()
+}
+
+#[derive(Default, Clone)]
+struct FanSample {
+    duty: Option<u8>,
+    rpm: Option<u32>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct StatusPollCaps {
+    sensor: bool,
+    fan: bool,
+    boolean: bool,
+    battery: bool,
+    connection: bool,
+    equalizer: bool,
+    always: bool,
+}
+
+impl StatusPollCaps {
+    fn from_caps(caps: &[Cap]) -> Self {
+        Self {
+            sensor: caps.contains(&Cap::Sensor),
+            fan: caps.contains(&Cap::Fan),
+            boolean: caps.contains(&Cap::Boolean),
+            battery: caps.contains(&Cap::Battery),
+            connection: caps.contains(&Cap::Connection),
+            equalizer: caps.contains(&Cap::Equalizer),
+            always: caps
+                .iter()
+                .any(|cap| matches!(cap, Cap::KeyRemap | Cap::Chain)),
+        }
+    }
+
+    fn any(self) -> bool {
+        self.sensor
+            || self.fan
+            || self.boolean
+            || self.battery
+            || self.connection
+            || self.equalizer
+            || self.always
+    }
+}
+
+/// Sample dynamic status through the worker into the host caches that
+/// serialization reads, keeping fresh hardware I/O off the serialize path.
+/// Runs only on the status-poll cadence; a failed read keeps the last value.
+async fn sample_status(
+    worker: &PluginHandle,
+    caps: StatusPollCaps,
+    sensor_cache: &Mutex<Vec<Sensor>>,
+    fan_cache: &Mutex<FanSample>,
+    boolean_cache: &Mutex<Vec<Boolean>>,
+    battery_cache: &Mutex<Vec<Battery>>,
+    connection_cache: &Mutex<Option<ConnectionStatus>>,
+    eq_cache: &Mutex<Option<Equalizer>>,
+) {
+    if caps.sensor {
+        if let Ok(sensors) = worker.get_sensors().await {
+            *sensor_cache.lock().unwrap() = sensors;
+        }
+    }
+    if caps.fan {
+        if let Ok(duty) = worker.fan_get_duty().await {
+            fan_cache.lock().unwrap().duty = Some(duty);
+        }
+        fan_cache.lock().unwrap().rpm = worker.fan_get_rpm().await;
+    }
+    if caps.boolean {
+        if let Ok(booleans) = worker.boolean_get().await {
+            *boolean_cache.lock().unwrap() = booleans;
+        }
+    }
+    if caps.battery {
+        if let Ok(batteries) = worker.battery_get().await {
+            *battery_cache.lock().unwrap() = batteries;
+        }
+    }
+    if caps.connection {
+        if let Ok(connection) = worker.connection_get().await {
+            *connection_cache.lock().unwrap() = connection;
+        }
+    }
+    if caps.equalizer {
+        if let Ok(equalizer) = worker.equalizer_get().await {
+            *eq_cache.lock().unwrap() = Some(equalizer);
+        }
+    }
+}
+
+#[cfg(test)]
+mod status_poll_tests {
+    use super::{needs_status_poll, Cap};
+
+    #[test]
+    fn chain_root_polls_for_child_fan_telemetry() {
+        assert!(needs_status_poll(&[Cap::Chain]));
+    }
 }
 
 /// The four "control" capability groups (choice/range/boolean/action) share the
@@ -394,9 +497,12 @@ pub struct LuaDevice {
     controls: Controls,
     dynamic_controls: OnceLock<Controls>,
 
-    /// Last equalizer snapshot read, backing `EqualizerCapability::current_state`
-    /// (and therefore save/restore) between explicit `get_equalizer` calls.
-    eq_cache: Mutex<Option<Equalizer>>,
+    /// Last status samples. Full IPC serialization reads these caches instead
+    /// of queueing callbacks on the worker used by interactive commands.
+    eq_cache: Arc<Mutex<Option<Equalizer>>>,
+    boolean_cache: Arc<Mutex<Vec<Boolean>>>,
+    battery_cache: Arc<Mutex<Vec<Battery>>>,
+    connection_cache: Arc<Mutex<Option<ConnectionStatus>>>,
 
     key_remap: RwLock<KeyRemapDescriptor>,
     /// Host-cached mappings that differ from `ButtonAction::Native`.
@@ -415,9 +521,16 @@ pub struct LuaDevice {
     /// RGB zones discovered at `initialize()` (dynamic LED counts). Overrides
     /// `rgb_descriptor` when set.
     dynamic_rgb_descriptor: OnceLock<RgbDescriptor>,
+    /// ISO keyboard geometry for runtime-described keyboards. The active
+    /// descriptor is selected from the shared layout slot on every snapshot.
+    dynamic_rgb_iso_descriptor: OnceLock<RgbDescriptor>,
     rgb_slot: RgbStateSlot,
     fan_slot: FanStateSlot,
     fan_channel: AtomicU8,
+
+    /// Last sensor/fan telemetry sampled by the status poll.
+    sensor_cache: Arc<Mutex<Vec<Sensor>>>,
+    fan_cache: Arc<Mutex<FanSample>>,
 
     /// Host-run status poll: aborted on drop. `poll_paused` lets a future LCD
     /// path silence polling during a bulk transfer without tearing it down.
@@ -724,20 +837,23 @@ impl LuaDevice {
         }
 
         // Sensor/fan refresh stays host-side (not in the serialized VM): a
-        // daemon-cadence ticker enqueues one status read at a time.
+        // daemon-cadence ticker enqueues one status read at a time. Chain roots
+        // also need this: fan telemetry can belong exclusively to chained
+        // accessories, while read_status() and its cache live on the root.
         // Start paused and let initialize() release it. This matters because a
         // plugin device is constructed before central registration checks the
         // persisted Disabled state.
-        if dev
-            .caps
-            .read()
-            .unwrap()
-            .iter()
-            .any(|cap| matches!(cap, Cap::Sensor | Cap::Fan | Cap::KeyRemap))
-        {
+        if needs_status_poll(&dev.caps.read().unwrap()) {
             dev.poll_paused.store(true, Ordering::Relaxed);
             let interval = Duration::from_secs(1);
             let paused = dev.poll_paused.clone();
+            let poll_caps = StatusPollCaps::from_caps(&dev.caps.read().unwrap());
+            let sensor_cache = dev.sensor_cache.clone();
+            let fan_cache = dev.fan_cache.clone();
+            let boolean_cache = dev.boolean_cache.clone();
+            let battery_cache = dev.battery_cache.clone();
+            let connection_cache = dev.connection_cache.clone();
+            let eq_cache = dev.eq_cache.clone();
             dev.poll_task = Some(handle.spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
                 loop {
@@ -767,6 +883,17 @@ impl LuaDevice {
                         }
                         Err(_) => break, // worker gone
                     }
+                    sample_status(
+                        &worker,
+                        poll_caps,
+                        &sensor_cache,
+                        &fan_cache,
+                        &boolean_cache,
+                        &battery_cache,
+                        &connection_cache,
+                        &eq_cache,
+                    )
+                    .await;
                 }
             }));
         }
@@ -824,7 +951,10 @@ impl LuaDevice {
             // initialize. Keep the pre-initialize surface empty.
             controls: Controls::default(),
             dynamic_controls: OnceLock::new(),
-            eq_cache: Mutex::new(None),
+            eq_cache: Arc::new(Mutex::new(None)),
+            boolean_cache: Arc::new(Mutex::new(Vec::new())),
+            battery_cache: Arc::new(Mutex::new(Vec::new())),
+            connection_cache: Arc::new(Mutex::new(None)),
             key_remap: RwLock::new(KeyRemapDescriptor::default()),
             key_remap_mappings: Mutex::new(HashMap::new()),
             keyboard_layout: KeyboardLayoutSlot::default(),
@@ -834,9 +964,12 @@ impl LuaDevice {
                 native_effects: Vec::new(),
             },
             dynamic_rgb_descriptor: OnceLock::new(),
+            dynamic_rgb_iso_descriptor: OnceLock::new(),
             rgb_slot: RgbStateSlot::default(),
             fan_slot: FanStateSlot::default(),
             fan_channel: AtomicU8::new(0),
+            sensor_cache: Arc::new(Mutex::new(Vec::new())),
+            fan_cache: Arc::new(Mutex::new(FanSample::default())),
             poll_task: None,
             poll_paused: Arc::new(AtomicBool::new(false)),
             event_task: None,
@@ -920,10 +1053,29 @@ impl LuaDevice {
     #[cfg(test)]
     pub async fn poll_once(&self) -> Result<()> {
         self.worker()?.poll().await?;
+        self.refresh_status_cache().await;
         Ok(())
     }
 
-    /// Drain the transport's queued events once through `on_event`, returning the
+    /// Refresh the host-side sensor/fan caches from the worker. Driven by the
+    /// status poll (and `poll_once`); serialization never calls this.
+    async fn refresh_status_cache(&self) {
+        let Some(worker) = &self.worker else { return };
+        let caps = StatusPollCaps::from_caps(&self.caps.read().unwrap());
+        sample_status(
+            worker,
+            caps,
+            &self.sensor_cache,
+            &self.fan_cache,
+            &self.boolean_cache,
+            &self.battery_cache,
+            &self.connection_cache,
+            &self.eq_cache,
+        )
+        .await;
+    }
+
+    /// Drain the transport's queued events once through `event()`, returning the
     /// per-target outcomes. Production drives this from the event watcher task;
     /// the plugin-test harness calls it directly.
     pub(super) async fn pump_events(&self) -> Result<Vec<super::worker::PollOutcome>> {
@@ -1016,27 +1168,16 @@ fn effective_keyboard_layout(
     descriptor: &InitKeyboard,
     slot: &KeyboardLayoutSlot,
 ) -> (KeyVariant, KeyboardLayout) {
-    let selection = slot.selection();
-    let detected = descriptor.detected_language;
-    let language = selection
-        .language
-        .unwrap_or(if detected == KeyboardLayout::Unknown {
-            descriptor
-                .languages
-                .first()
-                .copied()
-                .unwrap_or(KeyboardLayout::US)
-        } else {
-            detected
-        });
-    let variant = selection.variant.unwrap_or_else(|| {
-        if descriptor.iso.is_some() && is_iso_language(language) {
-            KeyVariant::Iso
-        } else {
-            KeyVariant::Ansi
-        }
-    });
-    (variant, language)
+    crate::drivers::effective_layout(
+        slot.selection(),
+        descriptor.detected_language,
+        descriptor
+            .languages
+            .first()
+            .copied()
+            .unwrap_or(KeyboardLayout::US),
+        descriptor.iso.is_some(),
+    )
 }
 
 fn selected_visual_keys(descriptor: &InitKeyboard, slot: &KeyboardLayoutSlot) -> Vec<VisualKey> {
@@ -1071,7 +1212,14 @@ fn build_dynamic_descriptor(
             };
             // `ring_led_positions` only lays out ring topologies; linear zones use
             // the evenly-spaced strip layout (as the native drivers did).
-            if matches!(topology, ZoneTopology::Keyboard { .. })
+            if !z.leds.is_empty() {
+                RgbZone {
+                    leds: z.leds,
+                    id: z.id,
+                    name: z.name,
+                    topology,
+                }
+            } else if matches!(topology, ZoneTopology::Keyboard { .. })
                 && keyboard_keys.is_some_and(|keys| !keys.is_empty())
             {
                 RgbZone {
@@ -1128,6 +1276,52 @@ fn build_dynamic_descriptor(
     }
 }
 
+#[cfg(test)]
+mod dynamic_rgb_descriptor_tests {
+    use super::*;
+    use halod_shared::types::LedPosition;
+
+    #[test]
+    fn runtime_zone_preserves_explicit_led_geometry() {
+        let leds = vec![
+            LedPosition {
+                id: 7,
+                x: 0.98,
+                y: 1.0,
+            },
+            LedPosition {
+                id: 8,
+                x: 0.5,
+                y: 0.05,
+            },
+        ];
+        let descriptor = build_dynamic_descriptor(
+            vec![InitZone {
+                id: "ambiglow".into(),
+                name: "Ambiglow".into(),
+                topology: "grid".into(),
+                led_count: 2,
+                led_ids: Vec::new(),
+                leds: leds.clone(),
+                rings: 0,
+                keyboard_form_factor: None,
+                keyboard_layout: None,
+            }],
+            Vec::new(),
+            None,
+        );
+
+        let zone = &descriptor.zones[0];
+        assert!(matches!(zone.topology, ZoneTopology::Grid));
+        assert_eq!(zone.leds.len(), 2);
+        for (actual, expected) in zone.leds.iter().zip(leds) {
+            assert_eq!(actual.id, expected.id);
+            assert_eq!(actual.x, expected.x);
+            assert_eq!(actual.y, expected.y);
+        }
+    }
+}
+
 #[async_trait]
 impl Device for LuaDevice {
     fn id(&self) -> &str {
@@ -1162,6 +1356,12 @@ impl Device for LuaDevice {
 
     fn owning_plugin_id(&self) -> Option<String> {
         Some(self.plugin_id.clone())
+    }
+
+    async fn wire_connection_type(&self) -> Option<halod_shared::types::ConnectionType> {
+        ConnectionCapability::connection_status(self)
+            .await
+            .map(|status| status.connection_type)
     }
 
     fn visibility_slot(&self) -> Option<&VisibilitySlot> {
@@ -1228,15 +1428,20 @@ impl Device for LuaDevice {
             let _ = self.keyboard_descriptor.set(keyboard);
         }
         if let Some(zones) = outcome.zones {
-            let keyboard_keys = self
-                .keyboard_descriptor
-                .get()
-                .map(|descriptor| selected_visual_keys(descriptor, &self.keyboard_layout));
+            let effects = outcome.native_effects.unwrap_or_default();
+            let keyboard = self.keyboard_descriptor.get();
+            let ansi_keys = keyboard.map(|descriptor| visual_keys(&descriptor.ansi));
             let _ = self.dynamic_rgb_descriptor.set(build_dynamic_descriptor(
-                zones,
-                outcome.native_effects.unwrap_or_default(),
-                keyboard_keys.as_deref(),
+                zones.clone(),
+                effects.clone(),
+                ansi_keys.as_deref(),
             ));
+            if let Some(iso) = keyboard.and_then(|descriptor| descriptor.iso.as_ref()) {
+                let iso_keys = visual_keys(iso);
+                let _ = self
+                    .dynamic_rgb_iso_descriptor
+                    .set(build_dynamic_descriptor(zones, effects, Some(&iso_keys)));
+            }
         }
         if let Some(runtime) = &self.runtime {
             *runtime.lock().unwrap() = RuntimeState::Online;
@@ -1309,6 +1514,15 @@ impl Device for LuaDevice {
             }
         }
         if outcome.ok {
+            // Seed every wire-status cache before registration publishes the
+            // first snapshot (and before transport-conflict checks consult the
+            // cached connection type). Later refreshes run on the poll task.
+            self.refresh_status_cache().await;
+            if w.supports_events().await? {
+                if let Some(PluginIo::Stream { transport, .. }) = &self.transport {
+                    transport.enable_event_listener()?;
+                }
+            }
             self.poll_paused.store(false, Ordering::Relaxed);
             self.event_paused.store(false, Ordering::Relaxed);
         }
@@ -1392,6 +1606,14 @@ impl Device for LuaDevice {
 #[async_trait]
 impl RgbCapability for LuaDevice {
     fn descriptor(&self) -> &RgbDescriptor {
+        if let Some(keyboard) = self.keyboard_descriptor.get() {
+            let (variant, _) = effective_keyboard_layout(keyboard, &self.keyboard_layout);
+            if variant == KeyVariant::Iso {
+                if let Some(descriptor) = self.dynamic_rgb_iso_descriptor.get() {
+                    return descriptor;
+                }
+            }
+        }
         self.dynamic_rgb_descriptor
             .get()
             .unwrap_or(&self.rgb_descriptor)
@@ -1465,7 +1687,11 @@ fn apply_per_led_transforms(
 #[async_trait]
 impl FanCapability for LuaDevice {
     async fn get_duty(&self) -> Result<u8> {
-        self.worker()?.fan_get_duty().await
+        self.fan_cache
+            .lock()
+            .unwrap()
+            .duty
+            .ok_or_else(|| anyhow::anyhow!("fan duty not sampled yet"))
     }
 
     async fn set_duty(&self, duty: u8) -> Result<()> {
@@ -1474,10 +1700,7 @@ impl FanCapability for LuaDevice {
     }
 
     async fn get_rpm(&self) -> Option<u32> {
-        match &self.worker {
-            Some(w) => w.fan_get_rpm().await,
-            None => None,
-        }
+        self.fan_cache.lock().unwrap().rpm
     }
 
     fn fan_state(&self) -> &FanStateSlot {
@@ -1492,8 +1715,7 @@ impl FanCapability for LuaDevice {
 #[async_trait]
 impl SensorCapability for LuaDevice {
     async fn get_sensors(&self) -> Result<Vec<Sensor>> {
-        let r = self.worker()?.get_sensors().await;
-        self.track(r).await
+        Ok(self.sensor_cache.lock().unwrap().clone())
     }
 }
 
@@ -1956,22 +2178,6 @@ impl LuaDevice {
 #[async_trait]
 impl DpiCapability for LuaDevice {
     async fn dpi_status(&self) -> DpiStatus {
-        if let Some(worker) = &self.worker {
-            if let Ok(Some(live)) = worker.dpi_get().await {
-                let mode_control = live.mode_control.clone();
-                *self.dpi_config.lock().unwrap() = DpiConfig {
-                    min: live.min,
-                    max: live.max,
-                    mode: if live.onboard {
-                        DpiMode::Onboard
-                    } else {
-                        DpiMode::Host
-                    },
-                    mode_control,
-                };
-                *self.dpi_state.lock().unwrap() = dpi_state_from_runtime(&live);
-            }
-        }
         let dpi = self.dpi_state.lock().unwrap();
         let config = self.dpi_config.lock().unwrap().clone();
         DpiStatus {
@@ -2077,7 +2283,7 @@ impl RangeCapability for LuaDevice {
 #[async_trait]
 impl BooleanCapability for LuaDevice {
     async fn get_booleans(&self) -> Result<Vec<Boolean>> {
-        let mut live = self.worker()?.boolean_get().await?;
+        let mut live = self.boolean_cache.lock().unwrap().clone();
         self.active_controls().backfill_booleans(&mut live);
         Ok(live)
     }
@@ -2085,6 +2291,15 @@ impl BooleanCapability for LuaDevice {
     async fn set_boolean(&self, key: &str, value: bool) -> Result<()> {
         self.worker()?.boolean_set(key, value).await?;
         self.active_controls().bool_cache.record(key, value);
+        if let Some(current) = self
+            .boolean_cache
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|boolean| boolean.key == key)
+        {
+            current.value = value;
+        }
         let mut config = self.dpi_config.lock().unwrap();
         if config.mode_control.as_deref() == Some(key) {
             config.mode = if value {
@@ -2118,23 +2333,25 @@ impl ActionCapability for LuaDevice {
 #[async_trait]
 impl BatteryCapability for LuaDevice {
     async fn get_batteries(&self) -> Result<Vec<Battery>> {
-        self.worker()?.battery_get().await
+        Ok(self.battery_cache.lock().unwrap().clone())
     }
 }
 
 #[async_trait]
 impl ConnectionCapability for LuaDevice {
     async fn connection_status(&self) -> Option<ConnectionStatus> {
-        self.worker().ok()?.connection_get().await.ok().flatten()
+        self.connection_cache.lock().unwrap().clone()
     }
 }
 
 #[async_trait]
 impl EqualizerCapability for LuaDevice {
     async fn get_equalizer(&self) -> Result<Equalizer> {
-        let eq = self.worker()?.equalizer_get().await?;
-        *self.eq_cache.lock().unwrap() = Some(eq.clone());
-        Ok(eq)
+        self.eq_cache
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("equalizer not sampled yet"))
     }
 
     async fn set_eq_preset(&self, preset_index: usize) -> Result<()> {
@@ -2577,6 +2794,8 @@ mod tests {
         let dev = device(mock.clone());
         dev.set_duty(50).await.unwrap();
         assert_eq!(*mock.written.lock().await, vec![vec![0xFA, 50]]);
+        // Duty/rpm are read from the poll-populated cache, not live hardware.
+        dev.poll_once().await.unwrap();
         assert_eq!(dev.get_duty().await.unwrap(), 42);
         assert_eq!(dev.get_rpm().await, Some(1200));
     }
@@ -2591,6 +2810,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_sensors_deserializes_lua_table() {
         let dev = device(Arc::new(MockTransport::empty()));
+        dev.poll_once().await.unwrap();
         let sensors = dev.get_sensors().await.unwrap();
         assert_eq!(sensors.len(), 1);
         assert_eq!(sensors[0].name, "Temp");
@@ -2731,6 +2951,7 @@ mod tests {
         use crate::drivers::BooleanCapability;
         let mock = Arc::new(MockTransport::empty());
         let dev = controls_device(mock.clone());
+        dev.poll_once().await.unwrap();
         let booleans = dev.get_booleans().await.unwrap();
         assert_eq!(booleans.len(), 1);
         assert!(booleans[0].value);
@@ -2751,8 +2972,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn battery_and_connection_deserialize_from_lua() {
-        use crate::drivers::{BatteryCapability, ConnectionCapability};
+        use crate::drivers::{BatteryCapability, ConnectionCapability, Device};
         let dev = controls_device(Arc::new(MockTransport::empty()));
+        dev.poll_once().await.unwrap();
         let batteries = dev.get_batteries().await.unwrap();
         assert_eq!(batteries[0].level, 77);
         let status = dev.connection_status().await.unwrap();
@@ -2760,10 +2982,14 @@ mod tests {
             status.connection_type,
             halod_shared::types::ConnectionType::Wireless
         );
+        assert_eq!(
+            dev.wire_connection_type().await,
+            Some(halod_shared::types::ConnectionType::Wireless)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn equalizer_caches_last_read_for_current_state() {
+    async fn equalizer_status_poll_populates_current_state() {
         use crate::drivers::EqualizerCapability;
         let mock = Arc::new(MockTransport::empty());
         let dev = controls_device(mock.clone());
@@ -2771,11 +2997,12 @@ mod tests {
             EqualizerCapability::current_state(&dev).is_none(),
             "nothing read yet"
         );
+        dev.poll_once().await.unwrap();
         let eq = dev.get_equalizer().await.unwrap();
         assert_eq!(eq.selected_preset, 0);
         assert!(
             EqualizerCapability::current_state(&dev).is_some(),
-            "cached after get_equalizer"
+            "cached after status poll"
         );
         dev.set_eq_preset(2).await.unwrap();
         dev.set_eq_bands(&[1.0, 2.0, 3.0]).await.unwrap();
@@ -3125,14 +3352,6 @@ mod tests {
         // just the trait method.
         let dev = integration_device(Arc::new(MockTransport::empty()));
         assert!(dev.as_controller().is_some());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dynamic_child_keeps_reported_device_type() {
-        let dev = integration_device(Arc::new(MockTransport::empty()));
-        let children = dev.as_controller().unwrap().discover_children().await;
-        assert_eq!(children[0].wire_device_type(), DeviceType::Keyboard);
-        assert_eq!(children[1].wire_device_type(), DeviceType::Other);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

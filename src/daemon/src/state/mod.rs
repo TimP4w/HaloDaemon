@@ -54,6 +54,10 @@ pub struct AppState {
     /// different devices run concurrently, so one slow/timing-out device can't
     /// stall the whole IPC command stream.
     pub device_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+    /// Coalesces full IPC snapshots. Periodic ticks and command-triggered
+    /// broadcasts can otherwise serialize the same plugin devices concurrently,
+    /// filling their single-threaded worker queues ahead of interactive writes.
+    pub ipc_broadcast_lock: Mutex<()>,
     pub clients: Mutex<Vec<ClientHandle>>,
     /// Ring-buffer of recent log entries written by the custom logger.
     pub log_buffer: Arc<std::sync::Mutex<VecDeque<LogEntry>>>,
@@ -98,6 +102,7 @@ impl AppState {
             input: InputState::new(),
             persistence: Persistence::new(),
             device_locks: Mutex::new(std::collections::HashMap::new()),
+            ipc_broadcast_lock: Mutex::new(()),
             clients: Mutex::new(Vec::new()),
             log_buffer: Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(
                 crate::logger::BUFFER_CAP,
