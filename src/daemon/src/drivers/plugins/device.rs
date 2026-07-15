@@ -657,14 +657,14 @@ impl LuaDevice {
         controller_index: u32,
         controller_key: Option<String>,
         controller_extra: HashMap<String, u64>,
-        transport_kind: String,
+        transport_kind: &'static str,
         worker: PluginHandle,
         transport: PluginIo,
         notify: Weak<crate::state::AppState>,
         runtime: Arc<Mutex<RuntimeState>>,
     ) -> Self {
         let dev_match = DevMatch {
-            transport: transport_kind,
+            transport: transport_kind.to_owned(),
             index: Some(controller_index),
             key: controller_key,
             name: Some(name.clone()),
@@ -683,6 +683,7 @@ impl LuaDevice {
         dev.name = name;
         dev.vendor = vendor;
         dev.device_type = device_type;
+        dev.transport_kind = transport_kind;
         dev
     }
 
@@ -1943,7 +1944,7 @@ impl LuaDevice {
                 controller.index,
                 controller.key.clone(),
                 controller.extra.clone(),
-                self.transport_kind.to_owned(),
+                self.transport_kind,
                 ctx.worker.clone(),
                 ctx.transport.clone(),
                 self.notify.clone(),
