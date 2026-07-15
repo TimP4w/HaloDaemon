@@ -109,4 +109,7 @@ fn indexed_repository_with_a_bad_digest_does_not_fall_back_to_loose_scanning() {
     super::scan_repo(root.path(), &mut scan);
 
     assert!(scan.manifests.is_empty());
+    assert_eq!(scan.invalid.len(), 1);
+    assert_eq!(scan.invalid[0].0.plugin_id, "demo");
+    assert!(scan.invalid[0].1.contains("integrity validation"));
 }

@@ -148,10 +148,6 @@ fn main() -> Result<()> {
             eprintln!("invalid --dev-plugin-repo '{}': {e}", path.display());
             std::process::exit(2);
         });
-        crate::drivers::plugins::repo::read_repository_manifest(&canonical).unwrap_or_else(|e| {
-            eprintln!("invalid --dev-plugin-repo '{}': {e:#}", canonical.display());
-            std::process::exit(2);
-        });
         canonical
     });
 

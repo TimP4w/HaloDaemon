@@ -97,6 +97,11 @@ third-party repositories available, and never fetches, checks, updates, or
 repairs the managed official repository for that daemon process. Restart
 without the flag to return to the installed official revision.
 
+An invalid development repository does not prevent the daemon from starting.
+Packages with malformed manifests or mismatched index digests are listed as
+disabled with a load error and are never executed; fixing the repository and
+reloading plugins makes them eligible again.
+
 ## Runtime and containment
 
 ### Lua callback contract (plugin API 1)
@@ -169,3 +174,11 @@ cargo run -p halod --features plugin-test -- plugin-test ..\path\to\package
 Before submitting package changes, validate all catalogs without Lua execution,
 refresh the deterministic package digest in `repository.yaml`, and run the
 daemon workspace formatter, clippy, and relevant tests.
+
+`halod-plugin-signing` is the canonical implementation used by both the daemon
+and release automation. `validate <repo>` verifies all indexed SHA-256 values,
+`index <repo> --check` rejects a stale generated index, and
+`index <repo> --version <version>` discovers top-level packages and atomically
+rewrites their sorted hashes. `sign` signs the exact index bytes using the
+base64 Ed25519 seed named by `--key-env`; `verify` checks the signature,
+compatibility, manifests, and package contents.

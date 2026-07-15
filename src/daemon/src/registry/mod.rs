@@ -46,14 +46,7 @@ pub async fn initialize_app_state(
     #[cfg(feature = "dev-plugin-repo")] dev_plugin_repo: Option<std::path::PathBuf>,
 ) {
     #[cfg(feature = "dev-plugin-repo")]
-    let dev_plugin_repo = dev_plugin_repo.map(|dir| {
-        std::fs::canonicalize(&dir)
-            .unwrap_or_else(|e| panic!("invalid --dev-plugin-repo '{}': {e}", dir.display()))
-    });
-    #[cfg(feature = "dev-plugin-repo")]
     if let Some(dir) = &dev_plugin_repo {
-        crate::drivers::plugins::repo::read_repository_manifest(dir)
-            .unwrap_or_else(|e| panic!("invalid --dev-plugin-repo '{}': {e:#}", dir.display()));
         log::warn!("Using development plugin repository at {}", dir.display());
     } else {
         ensure_official_repo(&app).await;

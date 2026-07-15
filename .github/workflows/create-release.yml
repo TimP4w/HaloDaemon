@@ -90,7 +90,24 @@ jobs:
         working-directory: src
         env:
           HALOD_REQUIRE_LICENSES: "1"
-        run: cargo build --release --workspace
+        run: |
+          cargo build --release --workspace
+          CARGO_TARGET_DIR=target/plugin-test \
+            cargo build --release -p halod --features plugin-test
+
+      - name: Stage plugin tooling
+        run: |
+          mkdir plugin-tools-linux
+          cp src/target/release/halod-plugin-signing \
+            plugin-tools-linux/halod-plugin-signing-linux-x64
+          cp src/target/plugin-test/release/halod \
+            plugin-tools-linux/halod-plugin-test-linux-x64
+
+      - name: Upload plugin tools
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: plugin-tools-linux
+          path: plugin-tools-linux/*
 
       - name: Upload release binaries
         uses: actions/upload-artifact@v7.0.1
@@ -139,6 +156,19 @@ jobs:
         run: |
           cd src
           cargo build --release --workspace
+
+      - name: Stage plugin tooling
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory plugin-tools-windows
+          Copy-Item src\target\release\halod-plugin-signing.exe `
+            plugin-tools-windows\halod-plugin-signing-windows-x64.exe
+
+      - name: Upload plugin tools
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: plugin-tools-windows
+          path: plugin-tools-windows/*
 
       - name: Upload release binaries
         uses: actions/upload-artifact@v7.0.1
@@ -492,6 +522,8 @@ jobs:
           cp artifacts/halod-linux-x64/halod-linux-x64.tar.gz release/
           cp artifacts/halod-deb/*.deb release/
           cp artifacts/halod-rpm/*.rpm release/
+          cp artifacts/plugin-tools-linux/* release/
+          cp artifacts/plugin-tools-windows/* release/
           ( cd release && sha256sum -- * > SHA256SUMS )
           echo "release/SHA256SUMS:"; cat release/SHA256SUMS
           if [ -n "${GPG_PRIVATE_KEY}" ]; then
@@ -520,5 +552,8 @@ jobs:
             artifacts/halod-linux-x64/halod-linux-x64.tar.gz
             artifacts/halod-deb/*.deb
             artifacts/halod-rpm/*.rpm
+            artifacts/plugin-tools-linux/halod-plugin-signing-linux-x64
+            artifacts/plugin-tools-linux/halod-plugin-test-linux-x64
+            artifacts/plugin-tools-windows/halod-plugin-signing-windows-x64.exe
             release/SHA256SUMS
             release/SHA256SUMS.asc
