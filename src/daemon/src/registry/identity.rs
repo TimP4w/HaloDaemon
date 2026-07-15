@@ -11,7 +11,7 @@ use halod_shared::types::{
 };
 
 use crate::{
-    drivers::{CapabilityRef, Device, PostRegisterHook, VisibilitySlot},
+    drivers::{CapabilityRef, Device, VisibilitySlot},
     registry::discovery::DiscoveryHandle,
 };
 
@@ -464,8 +464,8 @@ impl Device for IdentifiedDevice {
             .wire_serial_number()
             .or_else(|| self.identity.serial.clone())
     }
-    async fn wire_device_connected(&self) -> bool {
-        self.inner.wire_device_connected().await
+    fn wire_device_connected(&self) -> bool {
+        self.inner.wire_device_connected()
     }
     fn is_live(&self) -> bool {
         self.inner.is_live()
@@ -562,9 +562,6 @@ impl Device for IdentifiedDevice {
     }
     fn write_rate_status(&self) -> Option<halod_shared::types::WriteRateStatus> {
         self.inner.write_rate_status()
-    }
-    fn as_post_register_hook(&self) -> Option<&dyn PostRegisterHook> {
-        self.inner.as_post_register_hook()
     }
 }
 

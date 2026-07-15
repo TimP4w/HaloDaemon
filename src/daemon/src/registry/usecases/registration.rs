@@ -163,7 +163,6 @@ async fn ensure_default_baseline(app: &Arc<AppState>, device: &dyn Device) {
 ///   3. Init     — initialize; skip if Err or Ok(false)
 ///   4. State    — load saved state (sensor visibility, fan curves, …)
 ///   5. Push     — add to app.devices
-///   6. Hook     — call device.after_register
 ///
 /// Returns `true` when the device is now active in app.devices.
 pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bool {
@@ -194,9 +193,6 @@ pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bo
     log_registration_conflicts(app, &device).await;
     finish_registration(app, &device_id).await;
     log::info!("[{}] registered", device.name());
-    if let Some(hook) = device.as_post_register_hook() {
-        hook.on_registered(Arc::clone(app)).await;
-    }
     true
 }
 

@@ -1119,6 +1119,24 @@ fn open_device(
     }
 
     {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "poll_sensors",
+                lua.create_function(move |lua, _self: Table| {
+                    handle.block_on(device.poll_once()).map_err(mlua_err)?;
+                    let sensors = handle
+                        .block_on(crate::drivers::SensorCapability::get_sensors(&*device))
+                        .map_err(mlua_err)?;
+                    lua.to_value(&sensors)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
         let recording = recording.clone();
         dev_table
             .set(

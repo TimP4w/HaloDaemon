@@ -1186,6 +1186,13 @@ impl LuaDevice {
         .await;
     }
 
+    #[cfg(feature = "plugin-test")]
+    pub(super) async fn poll_once(&self) -> Result<()> {
+        self.worker()?.poll().await?;
+        self.refresh_status_cache().await;
+        Ok(())
+    }
+
     /// Drain the transport's queued events once through `event()`, returning the
     /// per-target outcomes. Production drives this from the event watcher task;
     /// the plugin-test harness calls it directly.
@@ -1503,7 +1510,7 @@ impl Device for LuaDevice {
             })
     }
 
-    async fn wire_device_connected(&self) -> bool {
+    fn wire_device_connected(&self) -> bool {
         self.is_live()
     }
 
@@ -1857,8 +1864,7 @@ fn apply_per_led_transforms(
 impl FanCapability for LuaDevice {
     async fn get_duty(&self) -> Result<u8> {
         self.fan_cache
-            .lock()
-            .unwrap()
+            .lock_recover()
             .duty
             .ok_or_else(|| anyhow::anyhow!("fan duty not sampled yet"))
     }

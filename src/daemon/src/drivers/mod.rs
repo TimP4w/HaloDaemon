@@ -142,7 +142,7 @@ pub trait Device: Send + Sync {
         .device_type(self.wire_device_type())
         .connection_type(self.wire_connection_type().await)
         .serial_number(self.wire_serial_number())
-        .connected(self.wire_device_connected().await)
+        .connected(self.wire_device_connected())
         .capabilities(caps)
         .integration_id(self.integration_id())
         .build()
@@ -172,7 +172,7 @@ pub trait Device: Send + Sync {
         None
     }
 
-    async fn wire_device_connected(&self) -> bool {
+    fn wire_device_connected(&self) -> bool {
         true
     }
 
@@ -309,15 +309,6 @@ pub trait Device: Send + Sync {
     /// Live write-rate limit and throughput for the debug/Info UI. `None`
     /// when the device hasn't wired up live stats from its transport.
     fn write_rate_status(&self) -> Option<WriteRateStatus> {
-        None
-    }
-
-    /// Devices that need application-level setup after registration (e.g. starting
-    /// notification watchers, registering dynamic children) implement
-    /// [`PostRegisterHook`] and return `Some(self)` here. The registration usecase
-    /// calls the hook after the device is pushed to `AppState::devices`, so the
-    /// device itself never holds a direct reference to `AppState`.
-    fn as_post_register_hook(&self) -> Option<&dyn PostRegisterHook> {
         None
     }
 }

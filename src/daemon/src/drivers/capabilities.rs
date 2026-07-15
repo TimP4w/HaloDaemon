@@ -71,14 +71,6 @@ pub struct ChainLinkSpec {
     pub led_count: u32,
 }
 
-/// Opt-in hook for devices needing application-level setup after registration
-/// in `AppState` (e.g. notification watchers, dynamic children).
-/// Accessed via [`Device::as_post_register_hook`] to avoid coupling every device to `AppState`.
-#[async_trait]
-pub trait PostRegisterHook: Send + Sync {
-    async fn on_registered(&self, app: std::sync::Arc<crate::state::AppState>);
-}
-
 /// Fan status/speed surface for chain accessory drivers with fan hardware
 /// alongside their ARGB channels; chain writes go through [`chain::ChainHub`] instead.
 #[async_trait]
