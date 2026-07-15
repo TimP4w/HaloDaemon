@@ -45,7 +45,7 @@ transports:
   hid: { report_size: 64, timeout_ms: 1000 }
 ```
 
-Supported nested matches are `hid`, `usb`, `smbus`, `hwmon`, `command`,
+Supported nested matches are `hid`, `usb`, `smbus`, `command`,
 `amd_smn`, and `lpcio`. Concrete identifiers must be unique; generic support is always an
 explicit `any: true` declaration. Unsupported-platform packages remain visible
 but inert and never suppress a built-in host device.
@@ -161,7 +161,9 @@ the episode.
 Device-vendor implementations are plugin-owned. AMD SMN, Nuvoton LPCIO,
 NVIDIA SMI, and Logitech HID++ are supplied by the official plugin repository;
 the daemon retains only transport brokers and discovery roots for them. The only
-built-in host devices are the Linux hwmon path and the computer special case.
+built-in host device is the computer special case. Linux hwmon behavior is
+supplied by the official integration package; the daemon retains only its
+scoped sysfs transport and discovery boundary.
 
 ## Validation
 

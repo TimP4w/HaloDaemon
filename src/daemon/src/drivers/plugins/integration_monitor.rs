@@ -186,8 +186,20 @@ async fn reconcile_live_root(
         }
         Ok((added, gone)) => {
             let changed = !added.is_empty() || !gone.is_empty();
+            let mut registered = Vec::new();
             for child in added {
-                register_device(app, child).await;
+                let id = child.id().to_owned();
+                if register_device(app, child).await {
+                    registered.push(id);
+                }
+            }
+            if !registered.is_empty() {
+                app.device_children
+                    .lock()
+                    .await
+                    .entry(root.id().to_owned())
+                    .or_default()
+                    .extend(registered);
             }
             remove_children(app, &gone).await;
             if changed {
@@ -271,17 +283,15 @@ async fn find_root(app: &Arc<AppState>, plugin_id: &str) -> Option<Arc<dyn Devic
         .cloned()
 }
 
-/// Ids of the currently-registered children of integration root `root_id`
-/// (`{root_id}_ctrl_*`, the scheme `build_child` uses).
+/// Ids explicitly registered as children of integration root `root_id`.
+/// Controller-provided stable IDs need not share the root's prefix.
 async fn child_ids_of(app: &Arc<AppState>, root_id: &str) -> HashSet<String> {
-    let prefix = format!("{root_id}_ctrl_");
-    app.devices
-        .read()
+    app.device_children
+        .lock()
         .await
-        .iter()
-        .filter(|d| d.id().starts_with(&prefix))
-        .map(|d| d.id().to_owned())
-        .collect()
+        .get(root_id)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Remove exactly the `gone` ids from `app.devices` and close them, leaving
@@ -305,6 +315,10 @@ async fn remove_children(app: &Arc<AppState>, gone: &[String]) {
     };
     for d in &removed {
         crate::registry::usecases::registration::close_device(app, d).await;
+    }
+    let gone: HashSet<&str> = gone.iter().map(String::as_str).collect();
+    for children in app.device_children.lock().await.values_mut() {
+        children.retain(|id| !gone.contains(id.as_str()));
     }
 }
 
@@ -455,6 +469,44 @@ mod tests {
             assert!(drop.closed.load(Ordering::SeqCst), "departed child closed");
             assert!(ids.iter().any(|id| id == &keep.id), "sibling survives");
             assert!(!keep.closed.load(Ordering::SeqCst), "sibling not closed");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn explicit_child_ids_are_tracked_without_ctrl_prefixes() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let root = MockRoot::new("hwmon");
+            let existing = Arc::new(MockDevice::new("hwmon_pci_temp"));
+            let added = Arc::new(MockDevice::new("hwmon_pci_fan1"));
+            root.scripted(Ok((vec![added.clone() as Arc<dyn Device>], vec![])));
+            app.devices.write().await.extend([
+                root.clone() as Arc<dyn Device>,
+                existing.clone() as Arc<dyn Device>,
+            ]);
+            app.device_children
+                .lock()
+                .await
+                .insert(root.id.clone(), [existing.id.clone()].into_iter().collect());
+
+            assert_eq!(
+                child_ids_of(&app, &root.id).await,
+                [existing.id.clone()].into_iter().collect()
+            );
+            reconcile_live_root(
+                &app,
+                &(root.clone() as Arc<dyn Device>),
+                &mut HashMap::new(),
+            )
+            .await;
+            let owned = child_ids_of(&app, &root.id).await;
+            assert!(owned.contains(&existing.id));
+            assert!(owned.contains(&added.id));
+
+            unregister_device_and_children(&app, &root.id).await;
+            assert!(app.devices.read().await.is_empty());
+            assert!(existing.closed.load(Ordering::SeqCst));
+            assert!(added.closed.load(Ordering::SeqCst));
         })
         .await;
     }

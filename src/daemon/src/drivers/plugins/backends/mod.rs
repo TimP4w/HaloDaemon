@@ -6,6 +6,7 @@
 mod amd_smn;
 mod command;
 mod hid;
+mod hwmon;
 mod lpcio;
 mod smbus;
 pub(crate) mod tcp;

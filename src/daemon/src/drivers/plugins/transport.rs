@@ -39,6 +39,9 @@ pub enum PluginIo {
     Register(RegisterBus),
     Usb(Arc<dyn UsbCollection>),
     Command(CommandExecutor),
+    /// Scoped Linux hwmon collection used by the local hwmon integration.
+    #[cfg(target_os = "linux")]
+    Hwmon(Arc<crate::drivers::transports::hwmon::HwmonTransport>),
     /// Read-only AMD System Management Network access.  This is available only
     /// on Windows, where the typed PawnIO broker service exists.
     #[cfg(target_os = "windows")]
@@ -57,6 +60,8 @@ impl PluginIo {
             PluginIo::Register(r) => r.rate_status(),
             PluginIo::Usb(c) => c.rate_status(),
             PluginIo::Command(_) => WriteRateStatus::default(),
+            #[cfg(target_os = "linux")]
+            PluginIo::Hwmon(bus) => bus.rate_status(),
             #[cfg(target_os = "windows")]
             PluginIo::AmdSmn(_) => WriteRateStatus::default(),
             #[cfg(target_os = "windows")]
@@ -67,6 +72,12 @@ impl PluginIo {
     /// Restore host-managed safety-critical state. This is deliberately
     /// independent of the Lua worker so cleanup still works after a timeout.
     pub fn restore_safety_state(&self) {
+        #[cfg(target_os = "linux")]
+        if let PluginIo::Hwmon(transport) = self {
+            if let Err(error) = transport.restore() {
+                log::error!("restoring plugin hwmon state: {error:#}");
+            }
+        }
         #[cfg(target_os = "windows")]
         if let PluginIo::Lpcio(transport) = self {
             if let Err(error) = transport.restore() {

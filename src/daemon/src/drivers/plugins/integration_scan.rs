@@ -29,13 +29,15 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
-/// Stable device id for an integration root, derived from its own config
-/// rather than a discovery handle (it has none) — so two servers configured
-/// for the same plugin (a future multi-instance setup) can't collide.
+/// Stable device id for an integration root. TCP roots include their endpoint;
+/// local host integrations use a fixed headless root id.
 fn root_device_id(
     manifest: &PluginManifest,
     config: &std::collections::HashMap<String, String>,
 ) -> String {
+    if manifest.transports.tcp.is_none() {
+        return format!("{}-integration", manifest.id_prefix());
+    }
     let tcp = manifest.transports.tcp.clone().unwrap_or_default();
     let host = config.get(&tcp.host_key).cloned().unwrap_or_default();
     let port = config.get(&tcp.port_key).cloned().unwrap_or_default();
@@ -63,17 +65,20 @@ fn placeholder_handle<'a>() -> DiscoveryHandle<'a> {
     }
 }
 
-/// Open one fresh `tcp` connection to the configured server. Blocks for the
-/// transport timeout, so callers run it off-runtime. Shared by discovery and the
-/// reconnect watcher's probe.
+/// Open one fresh integration transport. TCP can block for its timeout, so all
+/// callers run this off-runtime; local transports use the same path.
 pub(super) fn open_probe(
     manifest: &PluginManifest,
     config: &std::collections::HashMap<String, String>,
     granted: &[Permission],
 ) -> Result<PluginIo> {
-    match super::transport::descriptor_for("tcp") {
+    let kind = manifest
+        .transports
+        .integration_transport_kind()
+        .ok_or_else(|| anyhow::anyhow!("integration plugin has no root transport"))?;
+    match super::transport::descriptor_for(kind) {
         Some(d) => (d.open)(manifest, &placeholder_handle(), config, granted, None),
-        None => anyhow::bail!("integration plugin: no 'tcp' transport backend registered"),
+        None => anyhow::bail!("integration plugin: no '{kind}' transport backend registered"),
     }
 }
 
@@ -147,17 +152,10 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
     if app.registry.integration_manifest(&plugin_id).is_none() {
         return;
     }
-    match &transport {
-        PluginIo::Stream { .. } => {}
-        _ => {
-            log::error!(
-                "integration plugin '{}': root transport is not a stream",
-                manifest.plugin_id
-            );
-            report_connect_failure(app, &manifest, "root transport is not a stream".into()).await;
-            return;
-        }
-    }
+    let transport_kind = manifest
+        .transports
+        .integration_transport_kind()
+        .expect("validated integration transport");
 
     let notify = Arc::downgrade(app);
     let device = Arc::new_cyclic(move |weak| {
@@ -169,7 +167,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) {
             runtime: Some(runtime_state),
             worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
                 dev_match: super::worker::DevMatch {
-                    transport: "tcp".to_owned(),
+                    transport: transport_kind.to_owned(),
                     ..Default::default()
                 },
                 transport,

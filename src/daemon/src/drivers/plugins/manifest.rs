@@ -196,6 +196,11 @@ pub struct AmdSmnConfig {}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LpcioConfig {}
 
+/// Linux hwmon is a host-enumerated integration transport. Its empty config is
+/// still part of the package's declared authority.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HwmonConfig {}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransportsConfig {
     #[serde(default)]
@@ -206,6 +211,8 @@ pub struct TransportsConfig {
     pub usb: Option<UsbConfig>,
     #[serde(default)]
     pub command: Option<CommandConfig>,
+    #[serde(default)]
+    pub hwmon: Option<HwmonConfig>,
     #[serde(default)]
     pub amd_smn: Option<AmdSmnConfig>,
     #[serde(default)]
@@ -218,8 +225,22 @@ impl TransportsConfig {
             && self.tcp.is_none()
             && self.usb.is_none()
             && self.command.is_none()
+            && self.hwmon.is_none()
             && self.amd_smn.is_none()
             && self.lpcio.is_none()
+    }
+
+    pub fn integration_transport_kind(&self) -> Option<&'static str> {
+        match (
+            self.tcp.is_some(),
+            self.hwmon.is_some(),
+            self.command.is_some(),
+        ) {
+            (true, false, false) => Some("tcp"),
+            (false, true, false) => Some("hwmon"),
+            (false, false, true) => Some("command"),
+            _ => None,
+        }
     }
 }
 
@@ -520,22 +541,11 @@ pub struct DeviceMatch {
     #[serde(default)]
     pub smbus: Option<SmbusMatch>,
     #[serde(default)]
-    pub hwmon: Option<HwmonMatch>,
-    #[serde(default)]
     pub command: Option<CommandMatch>,
     #[serde(default)]
     pub amd_smn: Option<AmdSmnMatch>,
     #[serde(default)]
     pub lpcio: Option<LpcioMatch>,
-}
-
-/// The deliberately broad hwmon discovery declaration. Generic matching is an
-/// explicit opt-in so a missing identifier cannot turn into a catch-all.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HwmonMatch {
-    #[serde(default)]
-    pub any: bool,
 }
 
 /// A command-backed device is identified by the exact executable that reports
@@ -621,7 +631,6 @@ impl DeviceMatch {
         usize::from(self.hid.is_some())
             + usize::from(self.usb.is_some())
             + usize::from(self.smbus.is_some())
-            + usize::from(self.hwmon.is_some())
             + usize::from(self.command.is_some())
             + usize::from(self.amd_smn.is_some())
             + usize::from(self.lpcio.is_some())
@@ -1087,7 +1096,6 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                     bail!("a device using the usb transport must declare the `usb` permission");
                 }
                 let required_permission = match spec.transport.as_str() {
-                    "hwmon" => Some(Permission::Hwmon),
                     "command" => Some(Permission::Command),
                     "amd_smn" => Some(Permission::AmdSmn),
                     "lpcio" => Some(Permission::Lpcio),
@@ -1118,6 +1126,18 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
             if !manifest.devices.is_empty() {
                 bail!("integration plugin must not declare devices");
             }
+            if manifest.transports.integration_transport_kind().is_none() {
+                bail!(
+                    "integration plugin must declare exactly one tcp, hwmon, or command transport"
+                );
+            }
+            if manifest.transports.hid.is_some()
+                || manifest.transports.usb.is_some()
+                || manifest.transports.amd_smn.is_some()
+                || manifest.transports.lpcio.is_some()
+            {
+                bail!("integration plugin declares a non-integration transport");
+            }
         }
     }
     // A tcp transport reaches the network, so the manifest must declare the
@@ -1126,6 +1146,19 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     // integration with an empty permission list and auto-activate silently.
     if manifest.transports.tcp.is_some() && !manifest.permissions.contains(&Permission::Network) {
         bail!("a tcp transport requires the 'network' permission to be declared");
+    }
+    if manifest.transports.hwmon.is_some() {
+        if !manifest.permissions.contains(&Permission::Hwmon) {
+            bail!("an hwmon transport requires the 'hwmon' permission to be declared");
+        }
+        if manifest.platforms.is_empty()
+            || manifest
+                .platforms
+                .iter()
+                .any(|platform| platform != "linux")
+        {
+            bail!("an hwmon integration must declare platforms: [linux]");
+        }
     }
     if manifest.transports.amd_smn.is_some() && !manifest.permissions.contains(&Permission::AmdSmn)
     {
@@ -1217,11 +1250,6 @@ fn normalize_device_matches(manifest: &mut PluginManifest) -> Result<()> {
             device.pre_scan = smbus.pre_scan;
             device.probe = smbus.probe;
             device.pci_match = smbus.pci_match.clone();
-        } else if let Some(hwmon) = &device.r#match.hwmon {
-            if !hwmon.any {
-                bail!("hwmon match must explicitly declare `any: true`");
-            }
-            device.transport = "hwmon".to_owned();
         } else if let Some(command) = &device.r#match.command {
             if command.command().is_empty() {
                 bail!("command match must name an executable");
@@ -1853,14 +1881,15 @@ mod tests {
     #[test]
     fn directory_plugin_indexes_only_its_package_local_lib_modules() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = write_plugin_dir(tmp.path(), "modules", "type: integration\n", "return {}");
+        let integration = "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n";
+        let dir = write_plugin_dir(tmp.path(), "modules", integration, "return {}");
         std::fs::create_dir_all(dir.join("lib").join("hidpp")).unwrap();
         std::fs::write(
             dir.join("lib").join("hidpp").join("v1.lua"),
             "return { version = 1 }",
         )
         .unwrap();
-        let sibling = write_plugin_dir(tmp.path(), "sibling", "type: integration\n", "return {}");
+        let sibling = write_plugin_dir(tmp.path(), "sibling", integration, "return {}");
         std::fs::create_dir_all(sibling.join("lib")).unwrap();
         std::fs::write(sibling.join("lib").join("secret.lua"), "return 42").unwrap();
 
@@ -1938,12 +1967,69 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "inert_entry",
-            "type: integration\n",
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n",
             "this is deliberately not valid Lua",
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
         assert_eq!(manifest.plugin_type, PluginKind::Integration);
         assert_eq!(manifest.script_source, "this is deliberately not valid Lua");
+    }
+
+    #[test]
+    fn linux_hwmon_integration_is_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "hwmon",
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ncapabilities: [sensors, fan]\ntransports:\n  hwmon: {}\n",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest.transports.integration_transport_kind(),
+            Some("hwmon")
+        );
+    }
+
+    #[test]
+    fn hwmon_integration_requires_permission_and_linux_platform() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing_permission = write_plugin_dir(
+            tmp.path(),
+            "missing_permission",
+            "type: integration\nplatforms: [linux]\ntransports:\n  hwmon: {}\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&missing_permission)
+            .unwrap_err()
+            .to_string()
+            .contains("hwmon"));
+
+        let wrong_platform = write_plugin_dir(
+            tmp.path(),
+            "wrong_platform",
+            "type: integration\nplatforms: [windows]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&wrong_platform)
+            .unwrap_err()
+            .to_string()
+            .contains("platforms: [linux]"));
+    }
+
+    #[test]
+    fn integration_rejects_multiple_root_transports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "multiple_roots",
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon, network]\ntransports:\n  hwmon: {}\n  tcp:\n    host_key: host\n    port_key: port\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&dir)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one"));
     }
 
     #[test]

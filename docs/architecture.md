@@ -47,8 +47,9 @@ hardware-backed versions. HID feature reports, companion collections, nonblockin
 reads, and event delivery live on the `HidTransport` sub-trait and are reached
 through an explicit capability downcast. Available transports: `hid`, `smbus`,
 endpoint-oriented `usb`, `hwmon` (Linux), `lpcio`/`pawnio` (Windows SuperIO),
-and `mock` (for tests). A transport knows nothing about colors, fans, or vendors
-— only bytes.
+and `mock` (for tests). Hwmon and LPCIO expose narrow typed operations rather
+than raw paths or broker handles; transports still know nothing about colors,
+fans, or vendors.
 
 For that same reason, a per-device write-rate ceiling is enforced at this
 boundary rather than in a usecase or engine: `HidTransport` (and `SmBusDevice`
@@ -157,6 +158,11 @@ per-physical-root Lua worker thread (which owns the VM + transport). Dynamic chi
 use persistent routed `dev` tables on that same serialized worker. Plugins expose only
 existing capability *kinds*; the capability taxonomy and engines stay native and
 type-safe. See [docs/plugins.md](plugins.md) for the authoring guide.
+
+Integration plugins have host-instantiated roots rather than hardware matches.
+TCP roots connect from plugin config; the Linux hwmon root receives a scoped
+local collection and enumerates stable sensor/fan children. In both cases the
+host owns child relationships, reconciliation, and transport safety cleanup.
 
 **Trust boundary.** Untrusted plugin Lua runs **in-process** in the daemon today.
 Runtime VMs strip filesystem/process/native-loading globals and enforce heap,

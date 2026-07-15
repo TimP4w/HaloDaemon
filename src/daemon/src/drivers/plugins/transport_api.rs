@@ -14,7 +14,7 @@
 //! Calling a stream method on a register transport (or vice-versa) raises a
 //! clear Lua error.
 
-use mlua::{Function, UserData, UserDataMethods, Value};
+use mlua::{Function, LuaSerdeExt, UserData, UserDataMethods, Value};
 use tokio::runtime::Handle;
 
 use crate::drivers::transports::smbus::SmBusSyncOps;
@@ -80,6 +80,18 @@ impl TransportApi {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn hwmon(
+        &self,
+    ) -> mlua::Result<&std::sync::Arc<crate::drivers::transports::hwmon::HwmonTransport>> {
+        match &self.io {
+            PluginIo::Hwmon(bus) => Ok(bus),
+            _ => Err(mlua::Error::RuntimeError(
+                "this transport is not Linux hwmon".into(),
+            )),
+        }
+    }
+
     #[cfg(target_os = "windows")]
     fn amd_smn(
         &self,
@@ -109,6 +121,27 @@ impl TransportApi {
 
 impl UserData for TransportApi {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        #[cfg(target_os = "linux")]
+        methods.add_method("hwmon_list", |lua, this, ()| {
+            lua.to_value(&this.hwmon()?.list())
+        });
+        #[cfg(target_os = "linux")]
+        methods.add_method(
+            "hwmon_read",
+            |_, this, (key, attribute): (String, String)| {
+                this.hwmon()?.read(&key, &attribute).map_err(to_lua_err)
+            },
+        );
+        #[cfg(target_os = "linux")]
+        methods.add_method(
+            "hwmon_write",
+            |_, this, (key, attribute, value): (String, String, String)| {
+                this.hwmon()?
+                    .write(&key, &attribute, &value)
+                    .map_err(to_lua_err)
+            },
+        );
+
         // ── Stream (HID) ─────────────────────────────────────────────────
         // The common shapes: `write` (bytes → unit), `read`/`read_nonblocking`
         // (size → string), and `write_then_read`/`feature_exchange`

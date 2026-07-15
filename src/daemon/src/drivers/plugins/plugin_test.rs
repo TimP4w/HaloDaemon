@@ -446,15 +446,39 @@ fn open_integration(
         anyhow::bail!("open_integration requires an integration plugin");
     }
     let recording = Arc::new(RecordingStream::new(reads_from_spec(&spec_table)));
+    #[cfg(target_os = "linux")]
+    let hwmon = if manifest.transports.hwmon.is_some() {
+        Some(Arc::new(
+            crate::drivers::transports::hwmon::HwmonTransport::from_fixture(
+                hwmon_fixtures_from_spec(&spec_table)?,
+            ),
+        ))
+    } else {
+        None
+    };
+    #[cfg(target_os = "linux")]
+    let io = hwmon
+        .clone()
+        .map(PluginIo::Hwmon)
+        .unwrap_or_else(|| PluginIo::Stream {
+            transport: recording.clone() as Arc<dyn Transport>,
+            usb: None,
+        });
+    #[cfg(not(target_os = "linux"))]
+    let io = PluginIo::Stream {
+        transport: recording.clone() as Arc<dyn Transport>,
+        usb: None,
+    };
+    let transport_kind = manifest
+        .transports
+        .integration_transport_kind()
+        .unwrap_or("tcp");
     let worker = PluginHandle::spawn(
         manifest.script_source.clone(),
         manifest.module_sources.clone(),
-        PluginIo::Stream {
-            transport: recording.clone() as Arc<dyn Transport>,
-            usb: None,
-        },
+        io,
         DevMatch {
-            transport: "tcp".into(),
+            transport: transport_kind.into(),
             ..Default::default()
         },
         manifest.permissions.clone(),
@@ -489,9 +513,12 @@ fn open_integration(
                 for (i, controller) in controllers.iter().enumerate() {
                     let item = lua.create_table()?;
                     item.set("index", controller.index)?;
+                    item.set("id", controller.id.clone())?;
+                    item.set("key", controller.key.clone())?;
                     item.set("name", controller.name.clone())?;
                     item.set("serial", controller.serial.clone())?;
                     item.set("location", controller.location.clone())?;
+                    item.set("extra", lua.to_value(&controller.extra)?)?;
                     let zones = lua.create_table()?;
                     for (z, zone) in controller.zones.iter().enumerate() {
                         let zone_t = lua.create_table()?;
@@ -504,6 +531,44 @@ fn open_integration(
                     out.set(i + 1, item)?;
                 }
                 Ok(out)
+            })
+            .anyhow()?,
+        )
+        .anyhow()?;
+    }
+    {
+        let worker = worker.clone();
+        let handle = handle.clone();
+        dev.set(
+            "open_controller",
+            lua.create_function(move |lua, (_self, wanted): (Table, u32)| {
+                let controllers = handle
+                    .block_on(worker.enumerate_controllers())
+                    .map_err(mlua_err)?;
+                let controller = controllers
+                    .into_iter()
+                    .find(|controller| controller.index == wanted)
+                    .ok_or_else(|| mlua::Error::RuntimeError("unknown controller index".into()))?;
+                let child = worker.child(DevMatch {
+                    transport: transport_kind.into(),
+                    index: Some(controller.index),
+                    key: controller.key,
+                    name: Some(controller.name),
+                    extra: controller.extra,
+                    ..Default::default()
+                });
+                integration_child_table(lua, child, handle.clone())
+            })
+            .anyhow()?,
+        )
+        .anyhow()?;
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(hwmon) = hwmon {
+        dev.set(
+            "hwmon_read",
+            lua.create_function(move |_, (_self, key, attribute): (Table, String, String)| {
+                hwmon.read(&key, &attribute).map_err(mlua_err)
             })
             .anyhow()?,
         )
@@ -526,6 +591,92 @@ fn open_integration(
         .anyhow()?;
     }
     Ok(dev)
+}
+
+fn integration_child_table(
+    lua: &Lua,
+    child: PluginHandle,
+    handle: tokio::runtime::Handle,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    {
+        let child = child.clone();
+        let handle = handle.clone();
+        table.set(
+            "initialize",
+            lua.create_function(move |_, _self: Table| {
+                Ok(handle.block_on(child.initialize()).map_err(mlua_err)?.ok)
+            })?,
+        )?;
+    }
+    {
+        let child = child.clone();
+        let handle = handle.clone();
+        table.set(
+            "get_sensors",
+            lua.create_function(move |lua, _self: Table| {
+                let sensors = handle.block_on(child.get_sensors()).map_err(mlua_err)?;
+                lua.to_value(&sensors)
+            })?,
+        )?;
+    }
+    {
+        let child = child.clone();
+        let handle = handle.clone();
+        table.set(
+            "get_duty",
+            lua.create_function(move |_, _self: Table| {
+                handle.block_on(child.fan_get_duty()).map_err(mlua_err)
+            })?,
+        )?;
+    }
+    {
+        let child = child.clone();
+        let handle = handle.clone();
+        table.set(
+            "get_rpm",
+            lua.create_function(move |_, _self: Table| {
+                handle.block_on(child.fan_get_rpm()).map_err(mlua_err)
+            })?,
+        )?;
+    }
+    {
+        let handle = handle.clone();
+        table.set(
+            "set_duty",
+            lua.create_function(move |_, (_self, duty): (Table, u8)| {
+                handle.block_on(child.fan_set_duty(duty)).map_err(mlua_err)
+            })?,
+        )?;
+    }
+    Ok(table)
+}
+
+#[cfg(target_os = "linux")]
+fn hwmon_fixtures_from_spec(
+    spec: &Option<Table>,
+) -> Result<Vec<(String, String, std::collections::HashMap<String, String>)>> {
+    let Some(spec) = spec else {
+        return Ok(Vec::new());
+    };
+    let Ok(fixtures) = spec.get::<Table>("hwmon") else {
+        return Ok(Vec::new());
+    };
+    fixtures
+        .sequence_values::<Table>()
+        .map(|fixture| {
+            let fixture = fixture.anyhow()?;
+            let stable_id = fixture.get::<String>("stable_id").anyhow()?;
+            let name = fixture.get::<String>("name").anyhow()?;
+            let attributes = fixture.get::<Table>("attributes").anyhow()?;
+            let mut values = std::collections::HashMap::new();
+            for pair in attributes.pairs::<String, String>() {
+                let (attribute, value) = pair.anyhow()?;
+                values.insert(attribute, value);
+            }
+            Ok((stable_id, name, values))
+        })
+        .collect()
 }
 
 /// `serde`-compare two Lua values (mlua's `serialize` feature makes `Value` `Serialize`).

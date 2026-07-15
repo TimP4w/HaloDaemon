@@ -28,7 +28,7 @@ cooling:
   curve_hint: "Trascina un punto per modificare la curva · clicca su uno spazio vuoto per aggiungere · tasto destro su un punto per eliminare"
   status_no_sensor: "Nessun sensore di temperatura assegnato. La ventola resta al 75%."
   status_sensor_malfunction: "È stato rilevato un guasto al sensore. La ventola resta al 75%."
-  status_permission_denied: "Non hai i permessi per scrivere i valori PWM. Esegui: sudo udevadm trigger --subsystem-match=hwmon"
+  status_permission_denied: "Non hai i permessi per scrivere i valori PWM. Unisciti al gruppo halod, accedi di nuovo, poi esegui: sudo udevadm trigger --action=change --subsystem-match=hwmon"
   status_write_error: Impossibile impostare la velocità della ventola. Controlla i log del daemon.
   status_fan_stalled: "La ventola non gira (0 RPM). Controlla i collegamenti o sostituiscila."
   status_no_device: La ventola non è connessa. La curva verrà riapplicata quando sarà di nuovo disponibile.

@@ -8,7 +8,7 @@ HaloDaemon ships with support to the following devices by default. More devices 
 
 | Vendor | Model | VID:PID | Protocol | Transport | Platform |
 |--------|-------|---------|----------|-----------|----------|
-| (All) | Motherboard fan headers | — | sysfs | [hwmon](transports/hwmon.md) | 🐧 |
+| (All) | Motherboard fan headers | — | [hwmon plugin](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/hwmon) | [hwmon](transports/hwmon.md) | 🐧 |
 | (All) | Motherboard fan headers (NCT677x) | — | [Nuvoton plugin](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/nuvoton_lpcio) | LPCIO plugin transport | 🪟 |
 
 ## Mice
@@ -47,7 +47,7 @@ HaloDaemon ships with support to the following devices by default. More devices 
 
 | Source | VID:PID | Transport | Platform |
 |--------|---------|-----------|----------|
-| CPU / motherboard temperatures | — | [hwmon](transports/hwmon.md) | 🐧 |
+| CPU / motherboard temperatures | — | [hwmon plugin](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/hwmon) via [hwmon](transports/hwmon.md) | 🐧 |
 | Motherboard temperatures (NCT677x) | — | [Nuvoton plugin](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/nuvoton_lpcio) | 🪟 |
 | AMD Ryzen CPU temperatures (Zen 17h/19h/1Ah) | — | [AMD SMN plugin](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/amd_smn) | 🪟 |
 | GPU temperatures (NVIDIA) | — | NvAPI (🪟) / `nvidia-smi` (🐧) | 🐧🪟 |

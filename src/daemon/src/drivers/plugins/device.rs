@@ -647,6 +647,9 @@ impl LuaDevice {
             granted,
             config,
         } = *spawn;
+        let transport_kind = super::transport::descriptor_for(&dev_match.transport)
+            .map(|descriptor| descriptor.kind)
+            .unwrap_or("tcp");
         if let Some(runtime) = &runtime {
             *runtime.lock_recover() = RuntimeState::Initializing;
         }
@@ -688,6 +691,7 @@ impl LuaDevice {
             notify,
         );
         dev.runtime = runtime;
+        dev.transport_kind = transport_kind;
         dev.audio_registry = Some(audio_registry.clone());
         dev.audio_guard = Some(super::audio_api::AudioGuard::new(
             audio_registry,
@@ -786,7 +790,9 @@ impl LuaDevice {
         // Start paused and let initialize() release it. This matters because a
         // plugin device is constructed before central registration checks the
         // persisted Disabled state.
-        if needs_status_poll(&dev.caps.read().unwrap()) {
+        if needs_status_poll(&dev.caps.read().unwrap())
+            && !(manifest.plugin_type == PluginKind::Integration && spec.is_none())
+        {
             dev.poll_paused.store(true, Ordering::Relaxed);
             let interval = Duration::from_secs(1);
             let paused = dev.poll_paused.clone();
@@ -1947,7 +1953,9 @@ impl LuaDevice {
             }
             None => HashMap::new(),
         };
-        let identity_scope = if self.plugin_type == PluginKind::Integration {
+        let identity_scope = if self.plugin_type == PluginKind::Integration
+            && root_manifest.transports.tcp.is_some()
+        {
             let tcp = root_manifest.transports.tcp.clone().unwrap_or_default();
             crate::registry::identity::integration_scope(
                 config.get(&tcp.host_key).map(String::as_str),
