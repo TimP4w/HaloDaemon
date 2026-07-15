@@ -9,16 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// The first official plugin repository signing key. The signing private key
-/// is intentionally never present in this repository.
-/// Embedded public keys are intentionally keyed by stable release key id so a
-/// later Halo build can accept a rotated official key without treating the
-/// repository URL as a trust signal.
-/// TODO: move to constants
-const OFFICIAL_PUBLIC_KEYS: &[(&str, &str)] = &[(
-    "halodaemon-official-2026",
-    "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=",
-)];
+use crate::constants::OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS;
 const REPOSITORY_SCHEMA: u32 = 1;
 const PLUGIN_API: u32 = 1;
 
@@ -167,7 +158,7 @@ fn verify_official_signature(yaml: &[u8], sig_bytes: &[u8]) -> Result<()> {
             signature.algorithm
         );
     }
-    let key_b64 = OFFICIAL_PUBLIC_KEYS
+    let key_b64 = OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS
         .iter()
         .find_map(|(key_id, key)| (*key_id == signature.key_id).then_some(*key))
         .ok_or_else(|| {

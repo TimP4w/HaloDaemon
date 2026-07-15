@@ -36,3 +36,10 @@ pub const OFFICIAL_PLUGIN_REPO_URL: &str = "https://github.com/TimP4w/HaloDaemon
 /// URL, so a future URL change can't orphan the non-removable guard in
 /// `registry::usecases::repos::remove_repo`.
 pub const OFFICIAL_PLUGIN_REPO_SLUG: &str = "official";
+
+/// Trusted release keys for the official plugin repository. Keys are indexed
+/// by stable id so a daemon release can overlap old and rotated signing keys.
+pub const OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS: &[(&str, &str)] = &[(
+    "halodaemon-official-2026",
+    "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=",
+)];
