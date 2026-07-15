@@ -27,8 +27,7 @@ route or interpret vendor report IDs.
 
 Both collections' reader threads feed one host-owned queue, so a reply can be
 matched wherever its report ID lands it (a short request whose reply is a long
-report arrives on the companion collection — see
-[HID++](../protocols/hidpp.md)). Two endpoint-agnostic primitives let a Lua
+report arrives on the companion collection). Two endpoint-agnostic primitives let a Lua
 protocol implement request/response multiplexing without guessing a collection:
 
 - `read_any(size)` — pop the next inbound report from the merged queue,

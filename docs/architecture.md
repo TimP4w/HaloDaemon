@@ -78,7 +78,7 @@ opened/closed) and expose typed methods. See the
 [Logitech HID++ plugin](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/logitech)
 for an example. When you port a wire format from third-party code, add the
 SPDX attribution header (`CLAUDE.md` → *Licensing & attribution*) and document the
-format in [docs/protocols/](protocols/).
+format beside its package in the [official plugin repository](https://github.com/TimP4w/HaloDaemon-plugins).
 
 ### Device — the unit the daemon understands
 

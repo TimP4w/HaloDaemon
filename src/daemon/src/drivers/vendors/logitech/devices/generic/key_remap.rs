@@ -247,7 +247,7 @@ impl LogitechDevice {
         // right-click — cid 10 — as id 5), so addressing it by bit index
         // diverted the wrong buttons, and un-mapping never restored them.
         // Until that id encoding is reverse-engineered, a remapped button also
-        // fires its native action (double-fire). See docs/protocols/hidpp2.md.
+        // fires its native action (double-fire). 
         if spy_idx.is_some() {
             match self.hidpp2().await.set_mouse_button_spy(any_mapped).await {
                 Ok(_) => log::debug!(

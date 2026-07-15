@@ -856,6 +856,7 @@ impl LuaDevice {
             let eq_cache = dev.eq_cache.clone();
             dev.poll_task = Some(handle.spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     ticker.tick().await;
                     if paused.load(Ordering::Relaxed) {
@@ -1696,7 +1697,9 @@ impl FanCapability for LuaDevice {
 
     async fn set_duty(&self, duty: u8) -> Result<()> {
         let r = self.worker()?.fan_set_duty(duty).await;
-        self.track(r).await
+        self.track(r).await?;
+        self.fan_cache.lock().unwrap().duty = Some(duty);
+        Ok(())
     }
 
     async fn get_rpm(&self) -> Option<u32> {
@@ -2355,11 +2358,21 @@ impl EqualizerCapability for LuaDevice {
     }
 
     async fn set_eq_preset(&self, preset_index: usize) -> Result<()> {
-        self.worker()?.equalizer_set_preset(preset_index).await
+        self.worker()?.equalizer_set_preset(preset_index).await?;
+        if let Some(equalizer) = self.eq_cache.lock().unwrap().as_mut() {
+            equalizer.selected_preset = preset_index;
+        }
+        Ok(())
     }
 
     async fn set_eq_bands(&self, values: &[f32]) -> Result<()> {
-        self.worker()?.equalizer_set_bands(values).await
+        self.worker()?.equalizer_set_bands(values).await?;
+        if let Some(equalizer) = self.eq_cache.lock().unwrap().as_mut() {
+            for (band, value) in equalizer.bands.iter_mut().zip(values) {
+                band.value = *value;
+            }
+        }
+        Ok(())
     }
 
     fn current_state(&self) -> Option<Equalizer> {
@@ -2794,6 +2807,7 @@ mod tests {
         let dev = device(mock.clone());
         dev.set_duty(50).await.unwrap();
         assert_eq!(*mock.written.lock().await, vec![vec![0xFA, 50]]);
+        assert_eq!(dev.get_duty().await.unwrap(), 50, "write updates cache");
         // Duty/rpm are read from the poll-populated cache, not live hardware.
         dev.poll_once().await.unwrap();
         assert_eq!(dev.get_duty().await.unwrap(), 42);
@@ -3006,6 +3020,13 @@ mod tests {
         );
         dev.set_eq_preset(2).await.unwrap();
         dev.set_eq_bands(&[1.0, 2.0, 3.0]).await.unwrap();
+        assert_eq!(
+            EqualizerCapability::current_state(&dev)
+                .unwrap()
+                .selected_preset,
+            2,
+            "write updates cache"
+        );
         assert_eq!(
             *mock.written.lock().await,
             vec![vec![0xD0, 2], vec![0xD1, 3]]

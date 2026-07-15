@@ -6,8 +6,7 @@
 //! Codecs (pure `&[u8]` in / values out) plus the typed [`Hidpp20`] operations
 //! that drive them, device-agnostic.
 //!
-//! Reference: Solaar (GPL-2.0-or-later) — `settings_templates.py`. See
-//! `docs/protocols/hidpp2.md` for the byte-level spec.
+//! Reference: Solaar (GPL-2.0-or-later) — `settings_templates.py`.
 use super::{feature, Hidpp20};
 
 // ── EQUALIZER (0x8310) function codes ────────────────────────────────────────

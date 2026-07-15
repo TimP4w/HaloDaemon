@@ -498,6 +498,21 @@ fn open_device(
 
     {
         let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "serialize",
+                lua.create_function(move |lua, _self: Table| {
+                    let wire = handle.block_on(crate::drivers::Device::serialize(&*device));
+                    lua.to_value(&wire)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
         dev_table
             .set(
                 "rgb_descriptor",
