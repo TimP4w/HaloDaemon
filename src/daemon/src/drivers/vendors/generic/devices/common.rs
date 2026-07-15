@@ -6,14 +6,12 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 
 use halod_shared::types::{
-    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, LedPosition, RgbColor, RgbZone,
-    WireDevice, ZoneTopology,
+    ConnectionType, DeviceCapability, DeviceType, LedPosition, RgbColor, RgbZone, WireDevice,
+    ZoneTopology,
 };
 use halod_shared::zone_transform::transform_colors;
 
 use crate::drivers::RgbStateSlot;
-#[cfg(test)]
-use halod_shared::types::EffectParamValue;
 
 /// Assemble a fixed-length per-LED colour frame from one zone's
 /// `index -> colour` map. LED indices are decimal strings; any index missing
@@ -42,26 +40,6 @@ pub fn transformed_zone_frame(
     let colors = per_led_frame(led_map, zone.leds.len());
     let transform = slot.transform_for(&zone.id);
     transform_colors(&colors, zone, &transform)
-}
-
-/// Extract a color value from a native-effect param map.
-#[cfg(test)]
-fn effect_color(params: &HashMap<String, EffectParamValue>, key: &str) -> Option<RgbColor> {
-    if let Some(EffectParamValue::Color(c)) = params.get(key) {
-        Some(*c)
-    } else {
-        None
-    }
-}
-
-/// Extract a string value from a native-effect param map.
-#[cfg(test)]
-fn effect_str<'a>(params: &'a HashMap<String, EffectParamValue>, key: &str) -> Option<&'a str> {
-    if let Some(EffectParamValue::Str(s)) = params.get(key) {
-        Some(s.as_str())
-    } else {
-        None
-    }
 }
 
 /// Compute LED positions for a ring or multi-ring topology; other topologies return an empty vec.
@@ -131,7 +109,6 @@ pub struct WireDeviceBuilder {
     capabilities: Vec<DeviceCapability>,
     connection_type: Option<ConnectionType>,
     serial_number: Option<String>,
-    control_layout: Vec<CategoryLayout>,
     integration_id: Option<String>,
 }
 
@@ -149,7 +126,6 @@ impl WireDeviceBuilder {
             capabilities: Vec::new(),
             connection_type: None,
             serial_number: None,
-            control_layout: Vec::new(),
             integration_id: None,
         }
     }
@@ -204,7 +180,7 @@ impl WireDeviceBuilder {
             // The serializer overlays live write-rate stats when the device
             // reports them.
             write_rate: Default::default(),
-            control_layout: self.control_layout,
+            control_layout: Vec::new(),
             integration_id: self.integration_id,
             conflict: None,
         }
@@ -242,51 +218,6 @@ mod tests {
         );
         assert_eq!(frame[1], RgbColor { r: 0, g: 0, b: 0 });
         assert_eq!(frame[2], RgbColor { r: 1, g: 2, b: 3 });
-    }
-
-    #[test]
-    fn effect_color_extracts_color_variant() {
-        let mut params = HashMap::new();
-        params.insert(
-            "color".to_string(),
-            EffectParamValue::Color(RgbColor { r: 1, g: 2, b: 3 }),
-        );
-        assert_eq!(
-            effect_color(&params, "color"),
-            Some(RgbColor { r: 1, g: 2, b: 3 })
-        );
-        assert_eq!(effect_color(&params, "missing"), None);
-    }
-
-    #[test]
-    fn effect_color_returns_none_for_wrong_variant() {
-        let mut params = HashMap::new();
-        params.insert(
-            "color".to_string(),
-            EffectParamValue::Str("red".to_string()),
-        );
-        assert_eq!(effect_color(&params, "color"), None);
-    }
-
-    #[test]
-    fn effect_str_extracts_str_variant() {
-        let mut params = HashMap::new();
-        params.insert(
-            "speed".to_string(),
-            EffectParamValue::Str("fast".to_string()),
-        );
-        assert_eq!(effect_str(&params, "speed"), Some("fast"));
-        assert_eq!(effect_str(&params, "missing"), None);
-    }
-
-    #[test]
-    fn effect_str_returns_none_for_wrong_variant() {
-        let mut params = HashMap::new();
-        params.insert(
-            "speed".to_string(),
-            EffectParamValue::Color(RgbColor { r: 0, g: 0, b: 0 }),
-        );
-        assert_eq!(effect_str(&params, "speed"), None);
     }
 
     #[test]

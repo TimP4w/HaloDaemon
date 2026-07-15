@@ -741,40 +741,37 @@ impl PluginHandle {
     pub async fn close(&self) -> Result<()> {
         if let Some(route) = self.route.clone() {
             self.worker
-                .request_terminal(|reply: oneshot::Sender<()>| {
+                .request_terminal(|reply: oneshot::Sender<Result<()>>| {
                     Box::new(move |ctx: &WorkerCtx| {
-                        if let Ok(dev) = ctx.routed_dev(Some(&route)) {
-                            if let Some(f) = func(&ctx.manifest, "close_child") {
-                                if let Err(e) = f.call::<()>(dev) {
-                                    log::debug!("plugin close_child: {e}");
-                                }
-                            }
-                        }
+                        let hook_result = ctx.routed_dev(Some(&route)).and_then(|dev| {
+                            func(&ctx.manifest, "close_child").map_or(Ok(()), |f| {
+                                f.call::<()>(dev).map_err(|e| lua_err("close_child", e))
+                            })
+                        });
                         if let Some(index) = route.index {
                             ctx.child_devs.borrow_mut().remove(&index);
                         }
-                        let _ = reply.send(());
+                        let _ = reply.send(hook_result);
                         ControlFlow::Continue(())
                     })
                 })
-                .await?;
-            return Ok(());
-        }
-        // The job returns `Break` to end the worker loop after running the
-        // plugin's `close` callback; the reply confirms it finished.
-        self.worker
-            .request_terminal(|reply: oneshot::Sender<()>| {
-                Box::new(move |ctx: &WorkerCtx| {
-                    if let Some(f) = func(&ctx.manifest, "close") {
-                        if let Err(e) = f.call::<()>(ctx.dev.clone()) {
-                            log::debug!("plugin close: {e}");
-                        }
-                    }
-                    let _ = reply.send(());
-                    ControlFlow::Break(())
+                .await?
+        } else {
+            // The job returns `Break` to end the worker loop after running the
+            // plugin's `close` callback; the reply confirms it finished.
+            self.worker
+                .request_terminal(|reply: oneshot::Sender<Result<()>>| {
+                    Box::new(move |ctx: &WorkerCtx| {
+                        let hook_result = func(&ctx.manifest, "close").map_or(Ok(()), |f| {
+                            f.call::<()>(ctx.dev.clone())
+                                .map_err(|e| lua_err("close", e))
+                        });
+                        let _ = reply.send(hook_result);
+                        ControlFlow::Break(())
+                    })
                 })
-            })
-            .await
+                .await?
+        }
     }
 
     pub async fn rgb_apply(&self, state: RgbState) -> Result<()> {

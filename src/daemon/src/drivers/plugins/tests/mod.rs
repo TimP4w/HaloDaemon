@@ -31,3 +31,56 @@ fn init_failure_is_aggregated_and_clears_after_recovery() {
         halod_shared::types::HealthState::default()
     );
 }
+
+fn command_manifest(commands: &[&str]) -> super::PluginManifest {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("command_scope_test");
+    std::fs::create_dir(&dir).unwrap();
+    let commands = commands.join(", ");
+    std::fs::write(
+        dir.join("plugin.yaml"),
+        format!(
+            "id: command_scope_test\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [{commands}]\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.lua"), "return {}\n").unwrap();
+    super::parse_manifest_from_dir(&dir).unwrap()
+}
+
+#[test]
+fn consent_rejects_transport_scope_widening_under_old_acceptance() {
+    let manifest = command_manifest(&["nvidia-smi", "rocm-smi"]);
+    let mut state = super::PluginState::default();
+    state.granted.insert(
+        manifest.plugin_id.clone(),
+        vec![halod_shared::types::Permission::Command],
+    );
+    state.accepted_authorities.insert(
+        manifest.plugin_id.clone(),
+        halod_shared::types::PluginAuthority {
+            permissions: vec![halod_shared::types::Permission::Command],
+            transport_scopes: vec!["command:nvidia-smi".to_owned()],
+        },
+    );
+
+    assert!(!super::consent_satisfied_in(&state, &manifest));
+}
+
+#[test]
+fn consent_accepts_authority_within_the_accepted_snapshot() {
+    let manifest = command_manifest(&["nvidia-smi"]);
+    let mut state = super::PluginState::default();
+    state.accepted_authorities.insert(
+        manifest.plugin_id.clone(),
+        halod_shared::types::PluginAuthority {
+            permissions: vec![halod_shared::types::Permission::Command],
+            transport_scopes: vec![
+                "command:nvidia-smi".to_owned(),
+                "command:rocm-smi".to_owned(),
+            ],
+        },
+    );
+
+    assert!(super::consent_satisfied_in(&state, &manifest));
+}

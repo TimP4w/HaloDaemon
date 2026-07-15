@@ -52,9 +52,9 @@ directory in exact sync with what's actually declared.
 
 **Verify:** `reuse lint` (the `reuse` tool ships in the Nix dev shell).
 
-Currently declared license set: `GPL-3.0-or-later`, `GPL-2.0-or-later`, `MPL-2.0`,
-`MIT`, `Apache-2.0`, `OFL-1.1`, `LGPL-2.1-or-later` — and exactly those seven
-texts live in `LICENSES/`.
+Currently declared license set: `GPL-3.0-or-later`, `GPL-2.0-or-later`,
+`Apache-2.0`, `OFL-1.1`, and `LGPL-2.1-or-later` — and exactly those five texts
+live in `LICENSES/`.
 
 ## 2. Ported / adapted driver code — per-file SPDX headers
 

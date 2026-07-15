@@ -202,18 +202,14 @@ impl Registry {
 }
 
 fn consent_satisfied_in(state: &PluginState, manifest: &PluginManifest) -> bool {
-    if manifest.permissions.is_empty() {
+    let requested = authority_for_manifest(manifest);
+    if requested.permissions.is_empty() && requested.transport_scopes.is_empty() {
         return true;
     }
-    let granted = state
-        .granted
+    state
+        .accepted_authorities
         .get(&manifest.plugin_id)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    manifest
-        .permissions
-        .iter()
-        .all(|permission| granted.contains(permission))
+        .is_some_and(|accepted| requested.is_subset_of(accepted))
 }
 
 /// Convert the statically declared transport surface into stable scope labels
@@ -267,8 +263,8 @@ fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
 }
 
 impl Registry {
-    /// Whether the plugin owning an effect has granted all of its declared
-    /// permissions. Installed content hashes intentionally do not gate code.
+    /// Whether the plugin owning an effect remains within its accepted authority.
+    /// Installed content hashes intentionally do not gate code.
     fn effect_consent_ok(state: &PluginState, plugin_id: &str) -> bool {
         state
             .manifests
@@ -786,15 +782,15 @@ impl Registry {
         Ok(())
     }
 
-    /// True when the plugin's declared permissions have all been granted. Being
-    /// permission-satisfied is
+    /// True when the plugin's complete requested authority remains within the
+    /// accepted snapshot. Being consent-satisfied is
     /// necessary but not sufficient to activate — see [`Registry::activation_status`],
     /// which also accounts for the disabled set.
     fn consent_satisfied(&self, manifest: &PluginManifest) -> bool {
         consent_satisfied_in(&self.snapshot(), manifest)
     }
 
-    /// Why `manifest` is not permission-satisfied.
+    /// Why `manifest` is not consent-satisfied.
     fn ungranted_reason(&self, manifest: &PluginManifest) -> UngrantedReason {
         let _ = manifest;
         UngrantedReason::NeedsPermission

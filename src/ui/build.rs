@@ -277,13 +277,7 @@ fn append_bundled_asset_licenses(workspace: &std::path::Path, buf: &mut Vec<u8>)
     append_license_text(buf, &licenses, "Apache-2.0", "Apache-2.0.txt");
 
     buf.extend_from_slice(format!("\n{sep}\nINCORPORATED SOURCE LICENSES\n{sep}\n\n").as_bytes());
-    for (id, file) in [
-        ("GPL-2.0-or-later", "GPL-2.0-or-later.txt"),
-        ("MPL-2.0", "MPL-2.0.txt"),
-        ("MIT", "MIT.txt"),
-    ] {
-        append_license_text(buf, &licenses, id, file);
-    }
+    append_license_text(buf, &licenses, "GPL-2.0-or-later", "GPL-2.0-or-later.txt");
 }
 
 fn append_license_text(buf: &mut Vec<u8>, licenses_dir: &std::path::Path, id: &str, file: &str) {

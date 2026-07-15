@@ -812,7 +812,7 @@ impl LuaDevice {
                             if let Some(root) = app.find_device_by_id(&root_id).await {
                                 // Receiver firmware may announce lock closure
                                 // before its pairing table exposes the new slot.
-                                // Retry briefly, as the native receiver does.
+                                // Retry briefly, as the built-in receiver does.
                                 for _ in 0..8 {
                                     if crate::registry::usecases::receiver::reconcile_owned_children(
                                         &root, &app,
@@ -2582,9 +2582,6 @@ impl ChainAdapter for LuaDevice {
 
 #[async_trait]
 impl FanHub for LuaDevice {
-    fn id(&self) -> &str {
-        &self.id
-    }
     async fn get_fan_rpm(&self, channel: u8) -> Result<u32> {
         self.worker()?.hub_fan_rpm(channel).await
     }

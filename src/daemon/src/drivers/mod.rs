@@ -37,7 +37,6 @@ pub enum CapabilityRef<'a> {
     Lcd(&'a dyn LcdCapability),
     KeyRemap(&'a dyn KeyRemapCapability),
     KeyboardLayout(&'a dyn KeyboardLayoutCapability),
-    #[allow(dead_code)]
     Chain(&'a dyn ChainCapability),
     Controller(&'a dyn Controller),
     Pairing(&'a dyn PairingCapability),

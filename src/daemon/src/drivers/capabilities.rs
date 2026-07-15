@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[async_trait]
-#[expect(dead_code, reason = "optional controller persistence protocol")]
 pub trait Controller: Send + Sync {
     async fn discover_children(&self) -> Vec<Arc<dyn Device>> {
         vec![]
@@ -43,14 +42,6 @@ pub trait Controller: Send + Sync {
     async fn to_wire(&self) -> Option<DeviceCapability> {
         None
     }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
 }
 
 /// Pair/unpair wireless devices on a receiver and surface pairing state to the UI.
@@ -83,7 +74,6 @@ pub struct ChainLinkSpec {
 /// Parent-side capability for managing chainable channels; the CRUD surface
 /// delegates to a shared [`chain::ChainHost`] exposed via [`ChainCapability::chain_host`].
 #[async_trait]
-#[expect(dead_code, reason = "optional chain persistence protocol")]
 pub trait ChainCapability: Send + Sync {
     /// The driver's chain host. Returning `None` is treated as "no chainable
     /// channels yet" by every default impl below.
@@ -200,14 +190,6 @@ pub trait ChainCapability: Send + Sync {
             );
         }
     }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
 }
 
 /// Opt-in hook for devices needing application-level setup after registration
@@ -221,12 +203,7 @@ pub trait PostRegisterHook: Send + Sync {
 /// Fan status/speed surface for chain accessory drivers with fan hardware
 /// alongside their ARGB channels; chain writes go through [`chain::ChainHub`] instead.
 #[async_trait]
-#[expect(
-    dead_code,
-    reason = "capability identity reserved for fan-hub discovery"
-)]
 pub trait FanHub: Send + Sync + 'static {
-    fn id(&self) -> &str;
     async fn get_fan_rpm(&self, channel: u8) -> Result<u32>;
     async fn get_fan_duty(&self, channel: u8) -> Result<u8>;
     async fn get_fan_controllable(&self, channel: u8) -> Result<bool>;
@@ -435,25 +412,15 @@ pub trait BooleanCapability: Send + Sync {
 }
 
 #[async_trait]
-#[expect(dead_code, reason = "optional action persistence protocol")]
 pub trait ActionCapability: Send + Sync {
     async fn trigger_action(&self, key: &str) -> Result<()>;
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
         None
     }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
 }
 
 #[async_trait]
-#[expect(dead_code, reason = "optional battery persistence protocol")]
 pub trait BatteryCapability: Send + Sync {
     async fn get_batteries(&self) -> Result<Vec<Battery>>;
 
@@ -468,14 +435,6 @@ pub trait BatteryCapability: Send + Sync {
             Some(DeviceCapability::Battery(batteries))
         }
     }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
 }
 
 #[async_trait]
@@ -602,7 +561,6 @@ pub trait FanCapability: Send + Sync {
 }
 
 #[async_trait]
-#[expect(dead_code, reason = "optional sensor persistence protocol")]
 pub trait SensorCapability: Send + Sync {
     async fn get_sensors(&self) -> Result<Vec<Sensor>>;
 
@@ -614,14 +572,6 @@ pub trait SensorCapability: Send + Sync {
             }),
         ))
     }
-
-    fn state_key(&self) -> &'static str {
-        ""
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    async fn restore_state(&self, _: &serde_json::Value) {}
 }
 
 /// Deterministic id for a fan's synthesized duty-percent sensor reading.
