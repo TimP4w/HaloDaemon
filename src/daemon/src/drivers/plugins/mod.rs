@@ -429,6 +429,16 @@ impl Registry {
             .map(authority_for_manifest)
     }
 
+    /// Whether `plugin_id`'s manifest may execute on the current host. Unknown
+    /// plugins report `false`.
+    pub(crate) fn supports_current_platform(&self, plugin_id: &str) -> bool {
+        self.snapshot()
+            .manifests
+            .iter()
+            .find(|m| m.plugin_id == plugin_id)
+            .is_some_and(|m| m.supports_current_platform())
+    }
+
     /// Effective permissions granted to `plugin_id`'s Lua sandbox: persisted user
     /// grants intersected with the current manifest declaration. This is the
     /// authoritative capability boundary even if persisted config was edited or an

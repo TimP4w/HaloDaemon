@@ -279,7 +279,15 @@ impl PluginsUi {
         plugin_updates: &[PluginUpdateStatus],
     ) {
         widgets::card(ui, |ui| {
-            let active = state.plugins.plugins.iter().filter(|p| p.active).count();
+            // Platform-unsupported plugins are hidden from this screen, so the
+            // header counts only what the list actually shows.
+            let shown = state
+                .plugins
+                .plugins
+                .iter()
+                .filter(|p| p.platform_supported);
+            let total = shown.clone().count();
+            let active = shown.filter(|p| p.active).count();
             egui::Sides::new().show(
                 ui,
                 |ui| {
@@ -292,7 +300,7 @@ impl PluginsUi {
                         ui.label(
                             egui::RichText::new(t!(
                                 "plugins.counts",
-                                count = state.plugins.plugins.len(),
+                                count = total,
                                 active = active
                             ))
                             .font(theme::mono(10.0))
@@ -319,7 +327,15 @@ impl PluginsUi {
             );
             ui.add_space(12.0);
 
-            if state.plugins.plugins.is_empty() {
+            // Platform-unsupported plugins can never activate on this host, so
+            // they're hidden from the list entirely.
+            let visible: Vec<&PluginInfo> = state
+                .plugins
+                .plugins
+                .iter()
+                .filter(|p| p.platform_supported)
+                .collect();
+            if visible.is_empty() {
                 ui.label(
                     egui::RichText::new(t!("plugins.empty_title"))
                         .font(theme::body(12.0))
@@ -331,7 +347,7 @@ impl PluginsUi {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 3.0;
-                        for p in &state.plugins.plugins {
+                        for p in visible {
                             let selected = self.selection == Selection::Plugin(p.id.clone());
                             // An on-disk change only flags the row while the
                             // plugin is held disabled; re-enabling accepts it.

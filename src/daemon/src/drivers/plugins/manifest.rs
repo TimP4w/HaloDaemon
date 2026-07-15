@@ -1074,6 +1074,12 @@ fn validate_entry_path(entry: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether `platforms` names `os` and nothing else — the manifest is pinned to
+/// a single host OS. An empty list (meaning "all platforms") does not qualify.
+fn declares_only_platform(platforms: &[String], os: &str) -> bool {
+    !platforms.is_empty() && platforms.iter().all(|platform| platform == os)
+}
+
 /// Cross-field validation, gated by `plugin_type`.
 pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     check_count("devices", manifest.devices.len(), MAX_PLUGIN_DEVICES)?;
@@ -1177,21 +1183,25 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         if !manifest.permissions.contains(&Permission::Hwmon) {
             bail!("an hwmon transport requires the 'hwmon' permission to be declared");
         }
-        if manifest.platforms.is_empty()
-            || manifest
-                .platforms
-                .iter()
-                .any(|platform| platform != "linux")
-        {
+        if !declares_only_platform(&manifest.platforms, "linux") {
             bail!("an hwmon integration must declare platforms: [linux]");
         }
     }
-    if manifest.transports.amd_smn.is_some() && !manifest.permissions.contains(&Permission::AmdSmn)
-    {
-        bail!("an amd_smn transport requires the 'amd_smn' permission to be declared");
+    if manifest.transports.amd_smn.is_some() {
+        if !manifest.permissions.contains(&Permission::AmdSmn) {
+            bail!("an amd_smn transport requires the 'amd_smn' permission to be declared");
+        }
+        if !declares_only_platform(&manifest.platforms, "windows") {
+            bail!("an amd_smn transport must declare platforms: [windows]");
+        }
     }
-    if manifest.transports.lpcio.is_some() && !manifest.permissions.contains(&Permission::Lpcio) {
-        bail!("an lpcio transport requires the 'lpcio' permission to be declared");
+    if manifest.transports.lpcio.is_some() {
+        if !manifest.permissions.contains(&Permission::Lpcio) {
+            bail!("an lpcio transport requires the 'lpcio' permission to be declared");
+        }
+        if !declares_only_platform(&manifest.platforms, "windows") {
+            bail!("an lpcio transport must declare platforms: [windows]");
+        }
     }
     if manifest.transports.usb.is_some() && !manifest.permissions.contains(&Permission::Usb) {
         bail!("a usb transport requires the 'usb' permission to be declared");
@@ -2181,6 +2191,32 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("platforms: [linux]"));
+    }
+
+    #[test]
+    fn amd_smn_transport_must_declare_windows_platform() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = |platforms: &str| {
+            format!(
+                "{platforms}permissions: [amd_smn]\ncapabilities: [sensors]\ndevices:\n  - vendor: AMD\n    model: AMD Zen CPU\n    type: sensor\n    match:\n      amd_smn: {{ any: true }}\ntransports:\n  amd_smn: {{}}\n"
+            )
+        };
+
+        let windows = write_plugin_dir(
+            tmp.path(),
+            "smn_win",
+            &body("platforms: [windows]\n"),
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&windows).is_ok());
+
+        for (name, platforms) in [("smn_none", ""), ("smn_linux", "platforms: [linux]\n")] {
+            let dir = write_plugin_dir(tmp.path(), name, &body(platforms), ENTRY_LUA);
+            assert!(parse_manifest_from_dir(&dir)
+                .unwrap_err()
+                .to_string()
+                .contains("platforms: [windows]"));
+        }
     }
 
     #[test]

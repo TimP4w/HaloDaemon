@@ -442,6 +442,10 @@ pub async fn confirm_enable_batch(
             ));
             continue;
         }
+        if !app.registry.supports_current_platform(&id) {
+            failures.push(format!("plugin '{id}' is not supported on this platform"));
+            continue;
+        }
         let missing = app.registry.missing_blocking_requirements(&id);
         if !missing.is_empty() {
             failures.push(format!(
@@ -982,6 +986,45 @@ mod tests {
                 );
             })
             .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn enable_rejects_platform_unsupported_plugin() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let dir = crate::config::plugins_dir();
+            std::fs::create_dir_all(dir.join("winonly")).unwrap();
+            // Declares a platform we are not running on, so it can never activate.
+            let foreign = if std::env::consts::OS == "windows" {
+                "linux"
+            } else {
+                "windows"
+            };
+            std::fs::write(
+                dir.join("winonly").join("plugin.yaml"),
+                format!("id: winonly\nplatforms: [{foreign}]\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"),
+            )
+            .unwrap();
+            std::fs::write(dir.join("winonly").join("main.lua"), CONFIG_TEST_PLUGIN).unwrap();
+            app.registry.load_all(&dir);
+
+            let authority = app.registry.authority_for("winonly").unwrap();
+            let result = confirm_enable("winonly".into(), authority, app.clone()).await;
+
+            let error = result.expect_err("enable must be rejected on an unsupported platform");
+            assert!(error.to_string().contains("not supported on this platform"));
+            assert!(
+                !app.config
+                    .read()
+                    .await
+                    .plugins
+                    .enabled
+                    .contains(&"winonly".to_owned()),
+                "an unsupported plugin must never be persisted as enabled"
+            );
+
+            app.registry.load_all(std::path::Path::new("/nonexistent"));
         })
         .await;
     }
