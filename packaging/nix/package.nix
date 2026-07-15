@@ -46,6 +46,7 @@ pkgs.rustPlatform.buildRustPackage {
     makeWrapper
     rustPlatform.bindgenHook
     cargo-about
+    perl # git2 needs perl for vendored-openssl
   ];
 
   buildInputs = with pkgs; [
