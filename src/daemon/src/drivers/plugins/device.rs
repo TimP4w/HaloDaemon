@@ -849,7 +849,13 @@ impl LuaDevice {
             let poll_transport = dev.transport.clone();
             let poll_plugin_id = dev.plugin_id.clone();
             dev.poll_task = Some(handle.spawn(async move {
-                let mut ticker = tokio::time::interval(interval);
+                // `initialize()` seeds the status caches before it releases
+                // this task.  Wait a full interval before the next read rather
+                // than immediately polling the transport a second time.
+                let mut ticker = tokio::time::interval_at(
+                    tokio::time::Instant::now() + interval,
+                    interval,
+                );
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 let mut consecutive_failures = 0u8;
                 loop {

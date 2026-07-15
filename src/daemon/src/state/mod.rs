@@ -73,6 +73,14 @@ pub struct AppState {
     pub rediscovery_runner: Mutex<()>,
     /// Latest plugin update/on-disk status, replayed to each client on connect.
     pub plugin_update_status: Mutex<Vec<halod_shared::types::PluginUpdateStatus>>,
+    /// Latest signature result observed for a fetched repository commit, keyed
+    /// by slug. The SHA distinguishes a rejected remote tip from the active revision.
+    pub repo_signature_status: Mutex<
+        std::collections::HashMap<String, (String, halod_shared::types::RepoSignatureStatus)>,
+    >,
+    /// Compatibility result for the latest fetched tip of each repository.
+    pub repo_compatibility_status:
+        Mutex<std::collections::HashMap<String, halod_shared::types::RepoCompatibilityStatus>>,
     /// The device-plugin registry (loaded manifests, consent/config, notice
     /// dedup, load warnings).
     pub registry: crate::drivers::plugins::Registry,
@@ -109,6 +117,8 @@ impl AppState {
             pending_rediscovery: Mutex::new(PendingRediscovery::Clean),
             rediscovery_runner: Mutex::new(()),
             plugin_update_status: Mutex::new(Vec::new()),
+            repo_signature_status: Mutex::new(std::collections::HashMap::new()),
+            repo_compatibility_status: Mutex::new(std::collections::HashMap::new()),
             registry: crate::drivers::plugins::Registry::default(),
             #[cfg(feature = "dev-plugin-repo")]
             development_plugin_repo: RwLock::new(None),

@@ -185,9 +185,10 @@ and surfaced via `take_plugin_load_warnings` rather than silently dropped.
 
 Repo updates are atomic and repository-scoped. Git object storage is separate
 from immutable executable revisions: Halo fetches, verifies the root index and
-official signature, materializes and validates a proposed revision, then atomically
-selects it. Update checks never modify executable files, and a failed update
-leaves the previously selected revision running.
+official signature, walks first-parent history to the newest compatible commit,
+materializes and validates that proposed revision, then atomically selects it.
+Update checks never modify executable files, and a failed update leaves the
+previously selected revision running.
 
 ## IPC and usecases — the daemon's public API
 

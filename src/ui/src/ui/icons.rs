@@ -16,6 +16,7 @@ pub enum Icon {
     Settings,
     Plugins,
     Integrations,
+    Lock,
 }
 
 impl Icon {
@@ -27,6 +28,7 @@ impl Icon {
             Icon::Settings => include_bytes!("../../assets/icons/settings.svg"),
             Icon::Plugins => include_bytes!("../../assets/icons/plugins.svg"),
             Icon::Integrations => include_bytes!("../../assets/icons/integrations.svg"),
+            Icon::Lock => include_bytes!("../../assets/icons/lock.svg"),
         }
     }
 
@@ -38,6 +40,7 @@ impl Icon {
             Icon::Settings => "nav_settings",
             Icon::Plugins => "nav_plugins",
             Icon::Integrations => "nav_integrations",
+            Icon::Lock => "lock",
         }
     }
 }
@@ -242,6 +245,7 @@ mod tests {
             Icon::Cooling,
             Icon::Settings,
             Icon::Integrations,
+            Icon::Lock,
         ] {
             let img = rasterize(icon.svg(), ICON_PX)
                 .unwrap_or_else(|| panic!("{} failed to rasterize", icon.key()));

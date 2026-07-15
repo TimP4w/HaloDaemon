@@ -802,9 +802,14 @@ fn open_device(
             .set(
                 "initialize",
                 lua.create_function(move |_, _self: Table| {
-                    handle
+                    let initialized = handle
                         .block_on(crate::drivers::Device::initialize(&*device))
-                        .map_err(mlua_err)
+                        .map_err(mlua_err)?;
+                    // Package tests drive status reads explicitly through
+                    // `poll_sensors`; a live background ticker would race for
+                    // the same scripted reports and make tests nondeterministic.
+                    device.set_polling_paused(true);
+                    Ok(initialized)
                 })
                 .anyhow()?,
             )

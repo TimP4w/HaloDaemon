@@ -30,13 +30,10 @@ pub fn read_repository_index(repo_dir: &Path) -> Result<RepositoryManifest> {
     Ok(manifest)
 }
 
-/// Read the repository index directly from a fetched commit without changing
-/// the working tree.  This is used to advertise an explicit update before the
-/// user accepts it; the complete on-disk validation still runs after checkout.
-pub fn read_repository_manifest_at_commit(
-    repo_dir: &Path,
-    sha: &str,
-) -> Result<RepositoryManifest> {
+/// Verify only the detached official signature at a fetched commit. This does
+/// not parse or validate repository compatibility; callers use it exclusively
+/// for the GUI's signature indicator.
+pub fn verify_official_repository_signature_at_commit(repo_dir: &Path, sha: &str) -> Result<()> {
     let repo = git2::Repository::open(repo_dir)
         .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
     let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
@@ -45,21 +42,14 @@ pub fn read_repository_manifest_at_commit(
         .with_context(|| format!("commit '{sha}' not found"))?
         .tree()
         .context("reading commit tree")?;
-    let bytes = read_blob_at(&repo, &tree, Path::new("repository.yaml"))?;
-    let manifest: RepositoryManifest =
-        serde_yaml::from_slice(&bytes).context("parsing repository.yaml from commit")?;
-    validate_repository_index(&manifest)?;
-    Ok(manifest)
+    let yaml = read_blob_at(&repo, &tree, Path::new("repository.yaml"))?;
+    let signature = read_blob_at(&repo, &tree, Path::new("repository.sig"))?;
+    verify_official_signature(&yaml, &signature)
 }
 
-/// Verify the official detached signature directly from fetched Git objects.
-/// This is intentionally lighter than [`verify_official_repository`]: update
-/// discovery must not touch the active checkout, while installation performs
-/// the complete package-digest validation after materializing the revision.
-pub fn verify_official_repository_at_commit(
-    repo_dir: &Path,
-    sha: &str,
-) -> Result<RepositoryManifest> {
+/// Validate only the repository-index structure and Halo/plugin-API
+/// compatibility at a fetched commit. Signature status is evaluated separately.
+pub fn validate_repository_compatibility_at_commit(repo_dir: &Path, sha: &str) -> Result<()> {
     let repo = git2::Repository::open(repo_dir)
         .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
     let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
@@ -71,10 +61,7 @@ pub fn verify_official_repository_at_commit(
     let yaml = read_blob_at(&repo, &tree, Path::new("repository.yaml"))?;
     let manifest: RepositoryManifest =
         serde_yaml::from_slice(&yaml).context("parsing repository.yaml from commit")?;
-    validate_repository_index(&manifest)?;
-    let signature = read_blob_at(&repo, &tree, Path::new("repository.sig"))?;
-    verify_official_signature(&yaml, &signature)?;
-    Ok(manifest)
+    validate_repository_index(&manifest)
 }
 
 /// Verify the official detached signature in a checked-out repository. Package
@@ -96,6 +83,19 @@ pub fn verify_official_repository(repo_dir: &Path) -> Result<RepositoryManifest>
         .with_context(|| format!("verifying {}", sig_path.display()))?;
 
     Ok(manifest)
+}
+
+/// Verify only the detached official signature in a materialized revision.
+/// Compatibility and package validation deliberately remain separate.
+pub fn verify_official_repository_signature(repo_dir: &Path) -> Result<()> {
+    let yaml_path = repo_dir.join("repository.yaml");
+    let yaml =
+        std::fs::read(&yaml_path).with_context(|| format!("reading {}", yaml_path.display()))?;
+    let sig_path = repo_dir.join("repository.sig");
+    let signature =
+        std::fs::read(&sig_path).with_context(|| format!("reading {}", sig_path.display()))?;
+    verify_official_signature(&yaml, &signature)
+        .with_context(|| format!("verifying {}", sig_path.display()))
 }
 
 /// Verify a detached official signature over the exact repository YAML bytes.
@@ -123,6 +123,59 @@ fn validate_repository_index_for(
 ) -> Result<()> {
     halod_plugin_signing::validate_repository_index(manifest)?;
     halod_plugin_signing::validate_compatibility(manifest, halod_version, plugin_api)
+}
+
+#[derive(Debug, Clone)]
+pub struct CompatibleRevision {
+    pub sha: String,
+    pub manifest: RepositoryManifest,
+}
+
+/// Walk the fetched branch's first-parent history from `tip_sha` and return
+/// the newest repository revision supported by this Halo build. Official
+/// candidates must also carry a valid signature. There is deliberately no
+/// history-depth limit: release-boundary commits are the compatibility archive.
+pub fn latest_compatible_revision(
+    repo_dir: &Path,
+    tip_sha: &str,
+    official: bool,
+) -> Result<Option<CompatibleRevision>> {
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let oid = git2::Oid::from_str(tip_sha).with_context(|| format!("parsing sha '{tip_sha}'"))?;
+    let mut commit = repo
+        .find_commit(oid)
+        .with_context(|| format!("commit '{tip_sha}' not found"))?;
+
+    loop {
+        let candidate = (|| -> Result<RepositoryManifest> {
+            let tree = commit.tree().context("reading commit tree")?;
+            let yaml = read_blob_at(&repo, &tree, Path::new("repository.yaml"))?;
+            let manifest: RepositoryManifest =
+                serde_yaml::from_slice(&yaml).context("parsing repository.yaml from commit")?;
+            halod_plugin_signing::validate_repository_index(&manifest)?;
+            if official {
+                let signature = read_blob_at(&repo, &tree, Path::new("repository.sig"))?;
+                verify_official_signature(&yaml, &signature)?;
+            }
+            halod_plugin_signing::validate_compatibility(
+                &manifest,
+                env!("CARGO_PKG_VERSION"),
+                PLUGIN_API,
+            )?;
+            Ok(manifest)
+        })();
+        if let Ok(manifest) = candidate {
+            return Ok(Some(CompatibleRevision {
+                sha: commit.id().to_string(),
+                manifest,
+            }));
+        }
+        if commit.parent_count() == 0 {
+            return Ok(None);
+        }
+        commit = commit.parent(0).context("walking first-parent history")?;
+    }
 }
 
 /// URL schemes a plugin repo may use. `file://` is a local clone (dev/test and

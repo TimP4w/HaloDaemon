@@ -39,6 +39,67 @@ async fn official_repo_is_overridden(app: &AppState) -> bool {
     }
 }
 
+async fn record_official_signature(
+    app: &AppState,
+    slug: &str,
+    repo_dir: &std::path::Path,
+    sha: &str,
+) {
+    if slug != crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
+        return;
+    }
+    let verification = {
+        let dir = repo_dir.to_owned();
+        let sha = sha.to_owned();
+        tokio::task::spawn_blocking(move || {
+            repo::verify_official_repository_signature_at_commit(&dir, &sha)
+        })
+        .await
+    };
+    let status = match verification {
+        Ok(Ok(())) => halod_shared::types::RepoSignatureStatus::Verified,
+        Ok(Err(error)) => halod_shared::types::RepoSignatureStatus::Invalid {
+            reason: format!("{error:#}"),
+        },
+        Err(error) => halod_shared::types::RepoSignatureStatus::Invalid {
+            reason: format!("signature verification task failed: {error}"),
+        },
+    };
+    app.repo_signature_status
+        .lock()
+        .await
+        .insert(slug.to_owned(), (sha.to_owned(), status));
+}
+
+async fn record_tip_compatibility(
+    app: &AppState,
+    slug: &str,
+    repo_dir: &std::path::Path,
+    sha: &str,
+) {
+    let result = {
+        let dir = repo_dir.to_owned();
+        let sha = sha.to_owned();
+        tokio::task::spawn_blocking(move || {
+            repo::validate_repository_compatibility_at_commit(&dir, &sha)
+        })
+        .await
+    };
+    let status = match result {
+        Ok(Ok(())) => halod_shared::types::RepoCompatibilityStatus::Compatible,
+        Ok(Err(error)) => halod_shared::types::RepoCompatibilityStatus::Incompatible {
+            reason: format!("{error:#}"),
+        },
+        Err(error) => halod_shared::types::RepoCompatibilityStatus::Incompatible {
+            reason: format!("compatibility check task failed: {error}"),
+        },
+    };
+    app.repo_compatibility_status
+        .lock()
+        .await
+        .insert(slug.to_owned(), status);
+}
+
 async fn package_disk_hash(
     repo_dir: &std::path::Path,
     subpath: &std::path::Path,
@@ -111,7 +172,7 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
         .collect();
 
     let dest = crate::config::plugin_repos_dir().join(&slug);
-    let locked_sha = {
+    let tip_sha = {
         let url = url.clone();
         let dest = dest.clone();
         let branch = branch.clone();
@@ -119,6 +180,19 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
             .await
             .context("clone task panicked")??
     };
+    record_tip_compatibility(&app, &slug, &dest, &tip_sha).await;
+
+    let compatible = {
+        let dest = dest.clone();
+        let tip_sha = tip_sha.clone();
+        tokio::task::spawn_blocking(move || {
+            repo::latest_compatible_revision(&dest, &tip_sha, false)
+        })
+        .await
+        .context("repository history scan task panicked")??
+        .ok_or_else(|| anyhow::anyhow!("repository has no revision compatible with this Halo"))?
+    };
+    let locked_sha = compatible.sha;
 
     let manifest = {
         let dest = dest.clone();
@@ -227,16 +301,44 @@ async fn compute_repo_updates(app: &Arc<AppState>) -> Vec<RepoUpdateStatus> {
             continue;
         }
         let branch = r.branch.clone();
-        let result =
-            tokio::task::spawn_blocking(move || repo::fetch_remote_sha(&dir, branch.as_deref()))
-                .await;
+        let fetch_dir = dir.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            repo::fetch_remote_sha(&fetch_dir, branch.as_deref())
+        })
+        .await;
         match result {
             Ok(Ok(remote_sha)) => {
-                let behind = remote_sha != r.locked_sha;
+                record_official_signature(app, &r.slug, &dir, &remote_sha).await;
+                record_tip_compatibility(app, &r.slug, &dir, &remote_sha).await;
+                let compatible = {
+                    let dir = dir.clone();
+                    let tip_sha = remote_sha;
+                    let official = r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
+                    tokio::task::spawn_blocking(move || {
+                        repo::latest_compatible_revision(&dir, &tip_sha, official)
+                    })
+                    .await
+                };
+                let candidate_sha = match compatible {
+                    Ok(Ok(Some(revision))) => revision.sha,
+                    Ok(Ok(None)) => r.locked_sha.clone(),
+                    Ok(Err(error)) => {
+                        log::warn!("scanning repository history for '{}': {error:#}", r.slug);
+                        continue;
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "repository-history task for '{}' panicked: {error:#}",
+                            r.slug
+                        );
+                        continue;
+                    }
+                };
+                let behind = candidate_sha != r.locked_sha;
                 out.push(RepoUpdateStatus {
                     slug: r.slug,
                     locked_sha: r.locked_sha,
-                    remote_sha,
+                    remote_sha: candidate_sha,
                     behind,
                 });
             }
@@ -298,20 +400,19 @@ async fn compute_plugin_updates(
         reached.push(r.slug.clone());
 
         let official = r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
+        record_official_signature(app, &r.slug, &dir, &remote_sha).await;
+        record_tip_compatibility(app, &r.slug, &dir, &remote_sha).await;
         let result = {
             let dir = dir.clone();
-            let remote_sha = remote_sha.clone();
+            let tip_sha = remote_sha.clone();
             tokio::task::spawn_blocking(move || {
-                if official {
-                    repo::verify_official_repository_at_commit(&dir, &remote_sha)
-                } else {
-                    repo::read_repository_manifest_at_commit(&dir, &remote_sha)
-                }
+                repo::latest_compatible_revision(&dir, &tip_sha, official)
             })
             .await
         };
         match result {
-            Ok(Ok(manifest)) => {
+            Ok(Ok(Some(revision))) => {
+                let manifest = revision.manifest;
                 for package in manifest.packages {
                     let installed_hash = policy.installed_hashes.get(&package.id);
                     let active_dir = repo::active_revision_dir(&r);
@@ -337,7 +438,11 @@ async fn compute_plugin_updates(
                     });
                 }
             }
-            Ok(Err(e)) => log::warn!("reading remote repository index for '{}': {e:#}", r.slug),
+            Ok(Ok(None)) => log::info!(
+                "repository '{}' has no revision compatible with this Halo",
+                r.slug
+            ),
+            Ok(Err(e)) => log::warn!("scanning repository history for '{}': {e:#}", r.slug),
             Err(e) => log::warn!("repository-index task for '{}' panicked: {e:#}", r.slug),
         }
     }
@@ -557,7 +662,20 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
             .await
             .context("fetch task panicked")??
     };
+    record_official_signature(&app, &slug, &dir, &remote_sha).await;
+    record_tip_compatibility(&app, &slug, &dir, &remote_sha).await;
     let official = slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
+    let compatible = {
+        let dir = dir.clone();
+        let tip_sha = remote_sha;
+        tokio::task::spawn_blocking(move || {
+            repo::latest_compatible_revision(&dir, &tip_sha, official)
+        })
+        .await
+        .context("repository history scan task panicked")??
+        .ok_or_else(|| anyhow::anyhow!("repository has no revision compatible with this Halo"))?
+    };
+    let remote_sha = compatible.sha;
     let manifest = {
         let dir = dir.clone();
         let sha = remote_sha.clone();
@@ -840,6 +958,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signature_status_is_independent_of_repository_compatibility() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            init_source_repo(src.path(), "unsigned");
+            let source = git2::Repository::open(src.path()).unwrap();
+            commit_with_repository_compatibility(
+                &source,
+                "requires future plugin API",
+                ">=999.0.0",
+                999,
+            );
+            let slug = crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned();
+            let dest = crate::config::plugin_repos_dir().join(&slug);
+            let locked_sha = repo::clone(&file_url(src.path()), &dest, None).unwrap();
+            app.config
+                .write()
+                .await
+                .plugins
+                .repos
+                .push(PluginRepoRecord {
+                    url: file_url(src.path()),
+                    slug: slug.clone(),
+                    repository_id: None,
+                    branch: None,
+                    locked_sha,
+                    active_revision: None,
+                    previous_verified_sha: None,
+                    last_sync: None,
+                });
+
+            compute_repo_updates(&app).await;
+
+            let statuses = app.repo_signature_status.lock().await;
+            let (_, status) = statuses.get(&slug).expect("official status was recorded");
+            match status {
+                halod_shared::types::RepoSignatureStatus::Invalid { reason } => {
+                    assert!(reason.contains("repository.sig"), "{reason}");
+                    assert!(!reason.contains("plugin API"), "{reason}");
+                }
+                other => panic!("expected invalid signature, got {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn touch_last_sync_advances_only_the_reached_repos() {
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
@@ -1092,7 +1256,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incompatible_remote_repository_does_not_replace_active_revision() {
+    async fn incompatible_remote_repository_keeps_latest_compatible_revision() {
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -1109,14 +1273,17 @@ mod tests {
                 2,
             );
 
+            let repo_statuses = compute_repo_updates(&app).await;
+            assert_eq!(repo_statuses[0].remote_sha, first_sha);
+            assert!(!repo_statuses[0].behind);
+
             let (statuses, _) = compute_plugin_updates(&app, Some(&slug)).await;
             assert!(
-                statuses.is_empty(),
-                "an incompatible index is not advertised"
+                statuses.iter().all(|status| !status.update_available),
+                "an incompatible tip is not advertised as an update"
             );
 
-            let error = update_repo(slug.clone(), app.clone()).await.unwrap_err();
-            assert!(format!("{error:#}").contains("plugin API 2"));
+            update_repo(slug.clone(), app.clone()).await.unwrap();
             let config = app.config.read().await;
             let record = config
                 .plugins
@@ -1127,6 +1294,36 @@ mod tests {
             assert_ne!(tip_sha, first_sha);
             assert_eq!(record.locked_sha, first_sha);
             assert_eq!(record.active_revision.as_deref(), Some(first_sha.as_str()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn add_repo_selects_latest_compatible_commit_behind_tip() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&file_url(src.path()));
+            let compatible_sha = init_source_repo(src.path(), &slug);
+            let source = git2::Repository::open(src.path()).unwrap();
+            let tip_sha = commit_with_repository_compatibility(
+                &source,
+                "requires future plugin API",
+                ">=0.0.0",
+                2,
+            );
+
+            add_repo(file_url(src.path()), None, app.clone())
+                .await
+                .unwrap();
+
+            let config = app.config.read().await;
+            let record = &config.plugins.repos[0];
+            assert_ne!(tip_sha, compatible_sha);
+            assert_eq!(record.locked_sha, compatible_sha);
+            assert_eq!(
+                record.active_revision.as_deref(),
+                Some(compatible_sha.as_str())
+            );
         })
         .await;
     }

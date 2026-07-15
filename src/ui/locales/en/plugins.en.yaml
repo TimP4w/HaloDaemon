@@ -38,6 +38,11 @@ plugins:
   repo_drivers_count: "%{count} installed"
   repo_drivers_from: DRIVERS FROM THIS REPOSITORY
   repo_no_drivers: No drivers installed from this repository yet.
+  repo_signature_verified: Signature verified. This repository index is authenticated by HaloDaemon.
+  repo_signature_unsigned: Unsigned repository. Package hashes are checked, but the publisher is not authenticated.
+  repo_signature_invalid: "Signature verification failed. HaloDaemon will not load the untrusted revision: %{reason}"
+  repo_compatible_fallback: Compatible revision
+  repo_compatibility_incompatible: "The latest repository revision is incompatible, so HaloDaemon is using the newest supported commit: %{reason}"
   # Per-plugin updates
   updates_available: "%{count} plugin update available"
   updates_available_plural: "%{count} plugin updates available"

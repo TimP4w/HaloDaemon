@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
     AppState, PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
-    PluginRepoInfo, PluginSource, PluginUpdateStatus, RepoUpdateStatus,
+    PluginRepoInfo, PluginSource, PluginUpdateStatus, RepoCompatibilityStatus, RepoSignatureStatus,
+    RepoUpdateStatus,
 };
 
 use crate::domain::models::plugin_issues::plugin_issue_detail;
@@ -1051,6 +1052,7 @@ struct RepoRow<'a> {
     locked_short: String,
     remote_short: Option<String>,
     behind: bool,
+    signature: &'a RepoSignatureStatus,
 }
 
 /// A commit SHA truncated to a short, still-unambiguous display form.
@@ -1075,6 +1077,7 @@ fn repo_rows<'a>(repos: &'a [PluginRepoInfo], updates: &[RepoUpdateStatus]) -> V
                     .filter(|_| behind)
                     .map(|s| truncate_sha(&s.remote_sha).to_owned()),
                 behind,
+                signature: &r.signature,
             }
         })
         .collect();
@@ -1097,6 +1100,33 @@ fn repo_icon_tile(ui: &mut egui::Ui, size: f32) {
         Rect::from_center_size(rect.center(), Vec2::splat(size * 0.44)),
         theme::TEXT_MUT,
     );
+}
+
+fn repo_signature_tooltip(status: &RepoSignatureStatus) -> String {
+    match status {
+        RepoSignatureStatus::Verified => t!("plugins.repo_signature_verified").to_string(),
+        RepoSignatureStatus::Unsigned => t!("plugins.repo_signature_unsigned").to_string(),
+        RepoSignatureStatus::Invalid { reason } => {
+            t!("plugins.repo_signature_invalid", reason = reason.clone()).to_string()
+        }
+    }
+}
+
+fn draw_repo_lock(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    status: &RepoSignatureStatus,
+    id: impl std::hash::Hash + std::fmt::Debug,
+) {
+    let color = match status {
+        RepoSignatureStatus::Verified => theme::ONLINE,
+        RepoSignatureStatus::Unsigned => theme::STAT_AMBER,
+        RepoSignatureStatus::Invalid { .. } => theme::OFFLINE,
+    };
+    icons::draw(ui, rect, icons::Icon::Lock, color);
+
+    ui.interact(rect, ui.id().with(id), Sense::hover())
+        .on_hover_text(repo_signature_tooltip(status));
 }
 
 /// One selectable repo row in the list column. Returns whether it was clicked.
@@ -1172,8 +1202,14 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
         );
     }
 
+    let lock_rect = Rect::from_center_size(
+        Pos2::new(rect.right() - 13.0, rect.center().y),
+        Vec2::splat(16.0),
+    );
+    draw_repo_lock(ui, lock_rect, row.signature, ("repo_signature", row.slug));
+
     if let Some(branch) = row.branch {
-        let branch_pos = Pos2::new(rect.right() - 10.0, rect.center().y);
+        let branch_pos = Pos2::new(rect.right() - 27.0, rect.center().y);
         ui.painter().text(
             branch_pos,
             Align2::RIGHT_CENTER,
@@ -2582,6 +2618,32 @@ fn repo_detail_body(
                         if let Some(branch) = &r.branch {
                             widgets::chip(ui, branch);
                         }
+                        if matches!(
+                            r.compatibility,
+                            RepoCompatibilityStatus::Incompatible { .. }
+                        ) {
+                            let response = widgets::chip_colored(
+                                ui,
+                                &t!("plugins.repo_compatible_fallback"),
+                                theme::STAT_AMBER,
+                            );
+                            if let RepoCompatibilityStatus::Incompatible { reason } =
+                                &r.compatibility
+                            {
+                                response.on_hover_text(t!(
+                                    "plugins.repo_compatibility_incompatible",
+                                    reason = reason.clone()
+                                ));
+                            }
+                        }
+                        let (lock_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                        draw_repo_lock(
+                            ui,
+                            lock_rect,
+                            &r.signature,
+                            ("repo_detail_signature", &r.slug),
+                        );
                     });
                     let url = ui.add(
                         egui::Label::new(
@@ -3196,6 +3258,8 @@ mod tests {
             previous_verified_sha: None,
             last_sync: None,
             official: false,
+            signature: RepoSignatureStatus::Unsigned,
+            compatibility: RepoCompatibilityStatus::Compatible,
         }
     }
 
@@ -3215,6 +3279,7 @@ mod tests {
         assert!(!rows[0].behind);
         assert!(rows[0].remote_short.is_none());
         assert_eq!(rows[0].locked_short, "bbbbbbbb");
+        assert_eq!(*rows[0].signature, RepoSignatureStatus::Unsigned);
     }
 
     #[test]

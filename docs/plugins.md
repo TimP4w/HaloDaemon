@@ -71,6 +71,16 @@ active revision, so a running package is never changed in place. Repository
 pages show provenance, validation status, and package diffs; update and repair
 are repository-wide actions.
 
+Halo resolves the newest compatible revision by walking the configured
+branch's first-parent history from its fetched tip. A newer incompatible tip
+therefore does not strand older Halo releases or appear as an installable
+update; they remain on the latest compatible commit (which must also be signed
+for the official repository). For a breaking
+release, publish a final legacy commit with an upper compatibility bound, then
+publish the new lower-bounded commit before releasing the matching Halo
+version. Existing releases fall back through history while the new release can
+use the tip immediately.
+
 Official packages have a verified detached repository-index signature. Every
 indexed repository, including a third-party or development repository, must
 match each package SHA-256 declared by `repository.yaml`; a mismatch makes the

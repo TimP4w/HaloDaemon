@@ -688,6 +688,36 @@ pub struct PluginRepoInfo {
     /// True for the seeded official repo — the GUI hides its remove control.
     #[serde(default)]
     pub official: bool,
+    /// Whether this repository's index is authenticated by Halo's official
+    /// signing key. Third-party repositories intentionally remain unsigned.
+    #[serde(default)]
+    pub signature: RepoSignatureStatus,
+    /// Compatibility of the latest fetched branch tip. This is independent
+    /// from signature authentication and may cause history fallback.
+    #[serde(default)]
+    pub compatibility: RepoCompatibilityStatus,
+}
+
+/// Authentication state for a plugin repository index.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RepoSignatureStatus {
+    Verified,
+    #[default]
+    Unsigned,
+    Invalid {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RepoCompatibilityStatus {
+    #[default]
+    Compatible,
+    Incompatible {
+        reason: String,
+    },
 }
 
 /// One repo's update check result, reported in reply to `DaemonCommand::CheckPluginRepoUpdates`.

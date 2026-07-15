@@ -84,9 +84,7 @@ pub async fn initialize_app_state(
                             .map(|package| (package.id, package.sha256)),
                     ),
                     Err(e) => {
-                        log::warn!(
-                            "official plugin repository is not signed or failed verification: {e:#}"
-                        );
+                        log::warn!("official plugin repository failed validation: {e:#}");
                         repo_dirs.retain(|dir| dir != &official_dir);
                     }
                 }
@@ -178,6 +176,30 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     let dest2 = dest.clone();
     match tokio::task::spawn_blocking(move || repo::clone(&url, &dest2, None)).await {
         Ok(Ok(sha)) => {
+            let sha = {
+                let dest = dest.clone();
+                match tokio::task::spawn_blocking(move || {
+                    repo::latest_compatible_revision(&dest, &sha, true)
+                })
+                .await
+                {
+                    Ok(Ok(Some(revision))) => revision.sha,
+                    Ok(Ok(None)) => {
+                        log::warn!(
+                            "official plugin repository has no revision compatible with this Halo"
+                        );
+                        return;
+                    }
+                    Ok(Err(error)) => {
+                        log::warn!("scanning official plugin repository history: {error:#}");
+                        return;
+                    }
+                    Err(error) => {
+                        log::warn!("official plugin repository history task panicked: {error:#}");
+                        return;
+                    }
+                }
+            };
             let revision = dest.join("revisions").join(&sha);
             let materialized = {
                 let dest = dest.clone();
@@ -205,7 +227,7 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
             match materialized {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    log::warn!("official plugin signature verification failed: {e:#}");
+                    log::warn!("official plugin repository validation failed: {e:#}");
                     return;
                 }
                 Err(e) => {
