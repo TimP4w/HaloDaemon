@@ -84,8 +84,11 @@ pub async fn set_log_level(level: String, app: Arc<AppState>) -> Result<()> {
     let level_filter = level
         .parse::<log::LevelFilter>()
         .map_err(|_| anyhow::anyhow!("invalid log level: {level}"))?;
+    if level_filter == log::LevelFilter::Trace {
+        anyhow::bail!("trace logging is not supported");
+    }
 
-    log::set_max_level(level_filter);
+    log::set_max_level(crate::logger::without_trace(level_filter));
 
     {
         let mut cfg = app.config.write().await;
@@ -314,6 +317,7 @@ mod tests {
     async fn set_log_level_invalid_level_returns_error() {
         with_tmp_config(|app| async move {
             assert!(set_log_level("nonsense".into(), app).await.is_err());
+            assert!(set_log_level("trace".into(), app).await.is_err());
         })
         .await;
     }

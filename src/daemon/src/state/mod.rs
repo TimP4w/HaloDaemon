@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::collections::VecDeque;
 #[cfg(feature = "dev-plugin-repo")]
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,7 +7,7 @@ use tokio::sync::{watch, Mutex, RwLock};
 use crate::config::Config;
 use crate::ipc::ClientHandle;
 use crate::registry::discovery::{DiscoveryScope, PendingRediscovery};
-use halod_shared::types::{DiscoveryStatus, LogEntry};
+use halod_shared::types::DiscoveryStatus;
 
 mod persistence;
 mod workers;
@@ -60,8 +59,6 @@ pub struct AppState {
     /// filling their single-threaded worker queues ahead of interactive writes.
     pub ipc_broadcast_lock: Mutex<()>,
     pub clients: Mutex<Vec<ClientHandle>>,
-    /// Ring-buffer of recent log entries written by the custom logger.
-    pub log_buffer: Arc<std::sync::Mutex<VecDeque<LogEntry>>>,
     /// Flipped to `true` once every domain's engine has been set
     pub engines_ready: watch::Sender<bool>,
     /// Notified to request a graceful daemon shutdown (e.g. an IPC `shutdown`
@@ -106,9 +103,6 @@ impl AppState {
             device_locks: Mutex::new(std::collections::HashMap::new()),
             ipc_broadcast_lock: Mutex::new(()),
             clients: Mutex::new(Vec::new()),
-            log_buffer: Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(
-                crate::logger::BUFFER_CAP,
-            ))),
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
             discovery_scope: RwLock::new(DiscoveryScope::Clean),
@@ -157,17 +151,6 @@ impl AppState {
     /// IPC layer out of the driver layer.
     pub async fn broadcast_state(self: &Arc<Self>) {
         crate::ipc::broadcast_state(self).await;
-    }
-
-    /// Last `n` log entries from the ring buffer (empty if the lock is poisoned).
-    pub fn recent_logs(&self, n: usize) -> Vec<LogEntry> {
-        self.log_buffer
-            .lock()
-            .map(|buf| {
-                let skip = buf.len().saturating_sub(n);
-                buf.iter().skip(skip).cloned().collect()
-            })
-            .unwrap_or_default()
     }
 
     pub async fn set_discovery_scope(&self, scope: DiscoveryScope) {
@@ -363,27 +346,6 @@ mod tests {
             !ids.contains(&"hidden_dev".to_string()),
             "hidden device must not be active"
         );
-    }
-
-    #[test]
-    fn recent_logs_truncates_to_n_most_recent() {
-        let app = make_test_app();
-        {
-            let mut buf = app.log_buffer.lock().unwrap();
-            for i in 0..5 {
-                buf.push_back(LogEntry {
-                    level: "INFO".to_string(),
-                    target: String::new(),
-                    message: format!("entry {i}"),
-                    timestamp_ms: 0,
-                });
-            }
-        }
-
-        let logs = app.recent_logs(2);
-        assert_eq!(logs.len(), 2);
-        assert_eq!(logs[0].message, "entry 3");
-        assert_eq!(logs[1].message, "entry 4");
     }
 
     #[test]

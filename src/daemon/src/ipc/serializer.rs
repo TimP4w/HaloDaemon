@@ -44,7 +44,6 @@ pub async fn serialize_state(
         lighting,
         lcd,
         gui: cfg.gui.clone(),
-        log_entries: app.recent_logs(100),
         config_dir: crate::config::config_dir().display().to_string(),
         health: HealthCheckState {
             focus_watcher_supported: app.focus.supported(),

@@ -1,137 +1,197 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+//! Rotating daemon file logger. Mirrors the broker's bounded policy while
+//! writing to the daemon's user-writable config directory.
 
-use halod_shared::types::LogEntry;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use crate::util::time::now_ms;
+use log::{Level, LevelFilter, Metadata, Record};
 
-pub(crate) const BUFFER_CAP: usize = 500;
+const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_ROTATED: u32 = 3;
+const NOISY_TARGETS: &[&str] = &["wmi::context", "wmi::connection"];
 
-/// Wraps env_logger's Logger and also appends entries to a shared ring-buffer
-/// so the IPC layer can broadcast recent log lines to connected UI clients.
-pub struct BufferingLogger {
-    inner: env_logger::Logger,
-    buffer: Arc<Mutex<VecDeque<LogEntry>>>,
+struct LogState {
+    file: File,
+    written: u64,
 }
 
-impl BufferingLogger {
-    /// Build from an already-configured env_logger Logger.
-    pub fn new(inner: env_logger::Logger, buffer: Arc<Mutex<VecDeque<LogEntry>>>) -> Self {
-        Self { inner, buffer }
+struct FileLogger {
+    path: PathBuf,
+    state: Mutex<Option<LogState>>,
+}
+
+fn rotated_path(base: &Path, index: u32) -> PathBuf {
+    let mut name = base.as_os_str().to_owned();
+    name.push(format!(".{index}"));
+    PathBuf::from(name)
+}
+
+fn should_rotate(written: u64, max: u64) -> bool {
+    written >= max
+}
+
+fn shift_rotations(base: &Path, keep: u32) {
+    let _ = std::fs::remove_file(rotated_path(base, keep));
+    for index in (1..keep).rev() {
+        let _ = std::fs::rename(rotated_path(base, index), rotated_path(base, index + 1));
+    }
+    let _ = std::fs::rename(base, rotated_path(base, 1));
+}
+
+fn open_log(path: &Path) -> Option<LogState> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
+    let written = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    Some(LogState { file, written })
+}
+
+fn allowed(metadata: &Metadata<'_>) -> bool {
+    metadata.level() <= Level::Debug
+        && !NOISY_TARGETS
+            .iter()
+            .any(|target| metadata.target().starts_with(target))
+}
+
+impl FileLogger {
+    fn rotate(&self) -> Option<LogState> {
+        shift_rotations(&self.path, MAX_ROTATED);
+        open_log(&self.path)
     }
 }
 
-impl log::Log for BufferingLogger {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
-        self.inner.enabled(metadata)
+impl log::Log for FileLogger {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        allowed(metadata)
     }
 
-    fn log(&self, record: &log::Record) {
-        if !self.inner.enabled(record.metadata()) {
+    fn log(&self, record: &Record<'_>) {
+        if !self.enabled(record.metadata()) {
             return;
         }
-        self.inner.log(record);
-
-        let entry = LogEntry {
-            level: record.level().to_string(),
-            target: record.target().to_string(),
-            message: record.args().to_string(),
-            timestamp_ms: now_ms(),
-        };
-
-        if let Ok(mut buf) = self.buffer.lock() {
-            push_entry(&mut buf, entry);
+        let line = format!(
+            "[{}] {}: {}\n",
+            record.level(),
+            record.target(),
+            record.args()
+        );
+        if let Ok(mut guard) = self.state.lock() {
+            if let Some(state) = guard.as_mut() {
+                let _ = state.file.write_all(line.as_bytes());
+                let _ = state.file.flush();
+                state.written += line.len() as u64;
+                if should_rotate(state.written, MAX_LOG_BYTES) {
+                    if let Some(fresh) = self.rotate() {
+                        *state = fresh;
+                    }
+                }
+            }
         }
+        let _ = write!(std::io::stderr(), "{line}");
     }
 
     fn flush(&self) {
-        self.inner.flush();
+        if let Ok(mut guard) = self.state.lock() {
+            if let Some(state) = guard.as_mut() {
+                let _ = state.file.flush();
+            }
+        }
     }
 }
 
-/// Insert `entry` into a ring buffer, evicting the oldest entry when full.
-fn push_entry(buf: &mut VecDeque<LogEntry>, entry: LogEntry) {
-    if buf.len() >= BUFFER_CAP {
-        buf.pop_front();
-    }
-    buf.push_back(entry);
+/// Install the daemon logger. File opening is best-effort; stderr remains
+/// available if the config directory cannot be written.
+pub fn init(path: PathBuf, level: LevelFilter) {
+    let state = open_log(&path);
+    let logger = Box::new(FileLogger {
+        path,
+        state: Mutex::new(state),
+    });
+    let _ = log::set_boxed_logger(logger);
+    log::set_max_level(without_trace(level));
+}
+
+pub fn without_trace(level: LevelFilter) -> LevelFilter {
+    level.min(LevelFilter::Debug)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use halod_shared::types::LogEntry;
+    use log::Log;
+    use std::io::Read;
 
-    fn make_entry(msg: &str) -> LogEntry {
-        LogEntry {
-            level: "INFO".into(),
-            target: "test".into(),
-            message: msg.into(),
-            timestamp_ms: 0,
-        }
+    fn temp_dir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
     }
 
-    fn push(buf: &Arc<Mutex<VecDeque<LogEntry>>>, entry: LogEntry) {
-        let mut b = buf.lock().unwrap();
-        push_entry(&mut b, entry);
-    }
-
-    #[test]
-    fn buffer_stores_entries_in_order() {
-        let buf = Arc::new(Mutex::new(VecDeque::new()));
-        push(&buf, make_entry("first"));
-        push(&buf, make_entry("second"));
-        let b = buf.lock().unwrap();
-        assert_eq!(b.len(), 2);
-        assert_eq!(b[0].message, "first");
-        assert_eq!(b[1].message, "second");
+    fn read(path: &Path) -> String {
+        let mut output = String::new();
+        File::open(path)
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        output
     }
 
     #[test]
-    fn buffer_evicts_oldest_at_capacity() {
-        let buf = Arc::new(Mutex::new(VecDeque::new()));
-        for i in 0..BUFFER_CAP {
-            push(&buf, make_entry(&i.to_string()));
-        }
-        // At capacity; pushing one more should evict "0".
-        push(&buf, make_entry("overflow"));
-        let b = buf.lock().unwrap();
-        assert_eq!(b.len(), BUFFER_CAP);
-        assert_eq!(b.front().unwrap().message, "1");
-        assert_eq!(b.back().unwrap().message, "overflow");
+    fn trace_and_noisy_wmi_targets_are_excluded() {
+        let metadata = |level, target| Metadata::builder().level(level).target(target).build();
+        assert!(allowed(&metadata(Level::Debug, "halod")));
+        assert!(!allowed(&metadata(Level::Trace, "halod")));
+        assert!(!allowed(&metadata(Level::Debug, "wmi::context")));
+        assert!(!allowed(&metadata(Level::Info, "wmi::connection::query")));
     }
 
     #[test]
-    fn log_trait_filters_enabled_and_appends() {
-        use log::{Level, Log};
+    fn trace_level_is_clamped_to_debug() {
+        assert_eq!(without_trace(LevelFilter::Trace), LevelFilter::Debug);
+        assert_eq!(without_trace(LevelFilter::Info), LevelFilter::Info);
+    }
 
-        let buf = Arc::new(Mutex::new(VecDeque::new()));
-        // Build an inner logger that accepts Info and above, rejects Debug.
-        let mut builder = env_logger::Builder::new();
-        builder.filter_level(log::LevelFilter::Info);
-        let inner = builder.build();
-        let logger = BufferingLogger::new(inner, buf.clone());
+    #[test]
+    fn shift_rotations_ages_files_out() {
+        let dir = temp_dir();
+        let base = dir.path().join("halod.log");
+        std::fs::write(&base, b"live").unwrap();
+        std::fs::write(rotated_path(&base, 1), b"one").unwrap();
+        std::fs::write(rotated_path(&base, 2), b"two").unwrap();
+        std::fs::write(rotated_path(&base, 3), b"three").unwrap();
 
-        // Info record — passes the enabled() gate, must appear in buffer.
-        let info = log::Record::builder()
+        shift_rotations(&base, 3);
+
+        assert_eq!(read(&rotated_path(&base, 1)), "live");
+        assert_eq!(read(&rotated_path(&base, 2)), "one");
+        assert_eq!(read(&rotated_path(&base, 3)), "two");
+        assert!(!rotated_path(&base, 4).exists());
+    }
+
+    #[test]
+    fn logger_rotates_when_the_cap_is_crossed() {
+        let dir = temp_dir();
+        let base = dir.path().join("halod.log");
+        std::fs::write(&base, vec![b'x'; (MAX_LOG_BYTES - 4) as usize]).unwrap();
+        let logger = FileLogger {
+            path: base.clone(),
+            state: Mutex::new(open_log(&base)),
+        };
+        let record = Record::builder()
             .level(Level::Info)
-            .target("halod_test")
+            .target("test")
             .args(format_args!("hello"))
             .build();
-        logger.log(&info);
 
-        // Debug record — rejected by enabled(), must NOT appear in buffer.
-        let debug = log::Record::builder()
-            .level(Level::Debug)
-            .target("halod_test")
-            .args(format_args!("ignored"))
-            .build();
-        logger.log(&debug);
+        logger.log(&record);
 
-        let b = buf.lock().unwrap();
-        assert_eq!(b.len(), 1, "only the passing record should be buffered");
-        assert_eq!(b[0].message, "hello");
-        assert_eq!(b[0].target, "halod_test");
+        assert!(rotated_path(&base, 1).exists());
+        assert!(base.metadata().unwrap().len() < MAX_LOG_BYTES);
     }
 }

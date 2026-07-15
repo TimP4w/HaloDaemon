@@ -455,14 +455,6 @@ impl Default for GuiConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogEntry {
-    pub level: String,
-    pub target: String,
-    pub message: String,
-    pub timestamp_ms: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationSeverity {
@@ -742,8 +734,6 @@ pub struct AppState {
     pub lcd: LcdState,
     #[serde(default)]
     pub gui: GuiConfig,
-    #[serde(default)]
-    pub log_entries: Vec<LogEntry>,
     /// Filesystem path to the daemon's config directory; the UI displays and
     /// opens it without recomputing client-side.
     #[serde(default)]

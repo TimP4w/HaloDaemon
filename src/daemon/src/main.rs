@@ -197,20 +197,11 @@ async fn run_daemon(
     let initial_level: log::LevelFilter =
         cfg.gui.log_level.parse().unwrap_or(log::LevelFilter::Info);
 
-    let env_logger = env_logger::Builder::new()
-        .filter_level(initial_level)
-        .parse_default_env()
-        .build();
-
     let app = Arc::new(state::AppState::new(cfg).with_secret_store(secrets::open_secret_store()));
     let save_worker = crate::state::start_config_save_worker(app.clone());
     let persist_worker = crate::state::start_persist_worker(app.clone());
 
-    let buffering_logger = logger::BufferingLogger::new(env_logger, Arc::clone(&app.log_buffer));
-    if let Err(e) = log::set_boxed_logger(Box::new(buffering_logger)) {
-        log::warn!("logger already installed: {e}");
-    }
-    log::set_max_level(initial_level);
+    logger::init(crate::config::config_dir().join("halod.log"), initial_level);
 
     log::info!(
         "Starting halod v{} (build {})",

@@ -44,8 +44,6 @@ settings:
   dep_required: Required
   dep_optional: Optional
   log_level_sub: Daemon log verbosity
-  live_log_title: Live Log
-  log_entries: "%{n} entries"
   config_folder_title: Config Folder
   unknown: Unknown
   open_external_button: "Open ↗"

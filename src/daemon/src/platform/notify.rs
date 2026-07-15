@@ -9,7 +9,7 @@
 //!
 //! Notifications are not buffered daemon-side. A client that connects after a
 //! notification fires will not see it — historical context lives in
-//! `log_entries` (already broadcast every 250 ms in the state frame).
+//! the daemon log file.
 
 use std::sync::Arc;
 
