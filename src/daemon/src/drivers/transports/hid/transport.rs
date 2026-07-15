@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::drivers::transports::{Transport, TransportEvent};
+use crate::drivers::transports::{HidTransport as HidTransportTrait, Transport, TransportEvent};
 use crate::drivers::Metered;
 use halod_shared::types::WriteRateLimit;
 use halod_shared::types::WriteRateStatus;
@@ -431,6 +431,34 @@ impl Transport for HidTransport {
         self.read(size).await
     }
 
+    async fn write_many(&self, packets: &[Vec<u8>]) -> Result<()> {
+        let total_len: usize = packets.iter().map(Vec::len).sum();
+        let state = self.io.write_access(total_len).await?;
+
+        let framed = packets.iter().map(|packet| self.frame(packet)).collect();
+        write_batch(
+            Arc::clone(&state.primary.write_dev),
+            framed,
+            self.use_feature_report,
+        )
+        .await
+    }
+
+    fn as_hid(&self) -> Option<&dyn HidTransportTrait> {
+        Some(self)
+    }
+
+    fn rate_status(&self) -> WriteRateStatus {
+        self.io.status()
+    }
+
+    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
+        self.io.set_limit(limit);
+    }
+}
+
+#[async_trait]
+impl HidTransportTrait for HidTransport {
     async fn write_companion(&self, data: &[u8]) -> Result<()> {
         let framed = self.frame(data);
         let state = self.io.write_access(framed.len()).await?;
@@ -474,19 +502,6 @@ impl Transport for HidTransport {
         .await
         .context("spawn_blocking panicked")??;
         self.read_companion(size).await
-    }
-
-    async fn write_many(&self, packets: &[Vec<u8>]) -> Result<()> {
-        let total_len: usize = packets.iter().map(Vec::len).sum();
-        let state = self.io.write_access(total_len).await?;
-
-        let framed = packets.iter().map(|packet| self.frame(packet)).collect();
-        write_batch(
-            Arc::clone(&state.primary.write_dev),
-            framed,
-            self.use_feature_report,
-        )
-        .await
     }
 
     async fn write_many_companion(&self, packets: &[Vec<u8>]) -> Result<()> {
@@ -577,14 +592,6 @@ impl Transport for HidTransport {
 
     fn enable_event_listener(&self) -> Result<()> {
         self.start_event_listener()
-    }
-
-    fn rate_status(&self) -> WriteRateStatus {
-        self.io.status()
-    }
-
-    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
-        self.io.set_limit(limit);
     }
 }
 

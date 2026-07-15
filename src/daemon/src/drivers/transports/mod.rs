@@ -97,9 +97,6 @@ pub trait Transport: Send + Sync {
     async fn write(&self, data: &[u8]) -> Result<()>;
     async fn read(&self, size: usize) -> Result<Vec<u8>>;
 
-    // Extended methods — default impls for non-HID transports / mocks.
-    // HidTransport overrides these with optimized hardware-backed versions.
-
     async fn write_then_read(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
         self.write(data).await?;
         self.read(size).await
@@ -112,11 +109,30 @@ pub trait Transport: Send + Sync {
         Ok(())
     }
 
+    /// Expose the HID-specific surface when this byte stream supports it.
+    /// Keeping the downcast here leaves the base trait object-safe without
+    /// giving non-HID transports stub operations that can only fail at runtime.
+    fn as_hid(&self) -> Option<&dyn HidTransport> {
+        None
+    }
+
+    /// Live write-rate limit and throughput. No default: every implementor
+    /// (including test mocks) must back this with a real `Metered` gate
+    /// rather than silently reporting nothing — a device generic over
+    /// `T: Transport` can then rely on the limiter actually working.
+    fn rate_status(&self) -> WriteRateStatus;
+
+    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>);
+}
+
+/// HID-only byte-stream operations, including companion collections and
+/// unsolicited report delivery. Callers holding only [`Transport`] must first
+/// opt into this capability through [`Transport::as_hid`].
+#[async_trait]
+pub trait HidTransport: Transport {
     /// Send a feature report and read the reply; unlike `write_then_read`,
     /// `response_size` excludes the leading report-ID byte.
-    async fn feature_exchange(&self, _data: &[u8], _response_size: usize) -> Result<Vec<u8>> {
-        anyhow::bail!("feature_exchange not supported by this transport")
-    }
+    async fn feature_exchange(&self, data: &[u8], response_size: usize) -> Result<Vec<u8>>;
 
     async fn read_nonblocking(&self, size: usize) -> Result<Vec<u8>> {
         self.read(size).await
@@ -133,15 +149,11 @@ pub trait Transport: Send + Sync {
     /// Hand back a report that was read but did not belong to the in-flight
     /// request, so it is delivered through the event path (`drain_events`)
     /// instead of being dropped. The transport never interprets the bytes.
-    async fn defer_event(&self, _data: &[u8]) -> Result<()> {
-        anyhow::bail!("defer_event not supported by this transport")
-    }
+    async fn defer_event(&self, data: &[u8]) -> Result<()>;
 
     /// Write to an explicitly opened companion HID collection. Protocol code
     /// chooses the collection; the transport never interprets report IDs.
-    async fn write_companion(&self, _data: &[u8]) -> Result<()> {
-        anyhow::bail!("companion collection not supported by this transport")
-    }
+    async fn write_companion(&self, data: &[u8]) -> Result<()>;
 
     /// Batch writes to an explicitly opened companion collection. HID
     /// protocols with split short/long collections use this for streaming.
@@ -152,9 +164,7 @@ pub trait Transport: Send + Sync {
         Ok(())
     }
 
-    async fn read_companion(&self, _size: usize) -> Result<Vec<u8>> {
-        anyhow::bail!("companion collection not supported by this transport")
-    }
+    async fn read_companion(&self, size: usize) -> Result<Vec<u8>>;
 
     async fn write_then_read_companion(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
         self.write_companion(data).await?;
@@ -182,14 +192,6 @@ pub trait Transport: Send + Sync {
     fn enable_event_listener(&self) -> Result<()> {
         Ok(())
     }
-
-    /// Live write-rate limit and throughput. No default: every implementor
-    /// (including test mocks) must back this with a real `Metered` gate
-    /// rather than silently reporting nothing — a device generic over
-    /// `T: Transport` can then rely on the limiter actually working.
-    fn rate_status(&self) -> WriteRateStatus;
-
-    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>);
 }
 
 #[derive(Debug, Clone)]

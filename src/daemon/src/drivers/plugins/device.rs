@@ -709,7 +709,9 @@ impl LuaDevice {
         // write-rate/throughput; the worker owns the one it does I/O through.
         let rate_transport = transport.clone();
         let event_receiver = match &rate_transport {
-            PluginIo::Stream { transport, .. } => transport.event_receiver(),
+            PluginIo::Stream { transport, .. } => {
+                transport.as_hid().and_then(|hid| hid.event_receiver())
+            }
             _ => None,
         };
         // Canonical packages report physical zones from initialize. Do not
@@ -1484,7 +1486,10 @@ impl Device for LuaDevice {
             self.refresh_status_cache().await;
             if w.supports_events().await? {
                 if let Some(PluginIo::Stream { transport, .. }) = &self.transport {
-                    transport.enable_event_listener()?;
+                    transport
+                        .as_hid()
+                        .ok_or_else(|| anyhow::anyhow!("event callbacks require a HID transport"))?
+                        .enable_event_listener()?;
                 }
             }
             self.poll_paused.store(false, Ordering::Relaxed);

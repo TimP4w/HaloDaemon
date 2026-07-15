@@ -17,7 +17,7 @@ use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 
 use crate::drivers::chain::ChainAdapter;
 use crate::drivers::transports::usb::{UsbCollection, UsbControlResult};
-use crate::drivers::transports::{Transport, TransportEvent};
+use crate::drivers::transports::{HidTransport, Transport, TransportEvent};
 use crate::drivers::{Metered, RgbCapability};
 use std::collections::HashMap;
 
@@ -114,6 +114,25 @@ impl Transport for RecordingStream {
             .ok_or_else(|| anyhow::anyhow!("no more scripted reads queued for this device"))
     }
 
+    fn as_hid(&self) -> Option<&dyn HidTransport> {
+        Some(self)
+    }
+
+    fn rate_status(&self) -> WriteRateStatus {
+        self.rate.status()
+    }
+
+    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
+        self.rate.set_limit(limit);
+    }
+}
+
+#[async_trait]
+impl HidTransport for RecordingStream {
+    async fn feature_exchange(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
+        self.write_then_read(data, size).await
+    }
+
     async fn write_companion(&self, data: &[u8]) -> Result<()> {
         if !self.companion {
             anyhow::bail!("companion collection not available on this recording stream");
@@ -144,12 +163,8 @@ impl Transport for RecordingStream {
         self.companion
     }
 
-    fn rate_status(&self) -> WriteRateStatus {
-        self.rate.status()
-    }
-
-    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
-        self.rate.set_limit(limit);
+    async fn read_companion(&self, size: usize) -> Result<Vec<u8>> {
+        self.read(size).await
     }
 }
 

@@ -42,10 +42,13 @@ vendor/   organizational namespace (nzxt, corsair, logitech, asus, …)
 A transport implements the `Transport` trait
 ([transports/mod.rs](../src/daemon/src/drivers/transports/mod.rs)): at its core
 just `write(&[u8])` and `read(size)`, with default-implemented conveniences
-(`write_then_read`, `write_many`, feature-report helpers) that HID overrides with
-hardware-backed versions. Available transports: `hid`, `smbus`, endpoint-oriented
-`usb`, `hwmon` (Linux), `lpcio`/`pawnio` (Windows SuperIO), and `mock` (for
-tests). A transport knows nothing about colors, fans, or vendors — only bytes.
+(`write_then_read`, `write_many`) that transports may override with
+hardware-backed versions. HID feature reports, companion collections, nonblocking
+reads, and event delivery live on the `HidTransport` sub-trait and are reached
+through an explicit capability downcast. Available transports: `hid`, `smbus`,
+endpoint-oriented `usb`, `hwmon` (Linux), `lpcio`/`pawnio` (Windows SuperIO),
+and `mock` (for tests). A transport knows nothing about colors, fans, or vendors
+— only bytes.
 
 For that same reason, a per-device write-rate ceiling is enforced at this
 boundary rather than in a usecase or engine: `HidTransport` (and `SmBusDevice`

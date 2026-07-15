@@ -949,7 +949,10 @@ impl PluginHandle {
     pub async fn on_transport_events(&self) -> Result<Vec<PollOutcome>> {
         self.run(|ctx, dev, _| {
             let transport = match &ctx.transport {
-                PluginIo::Stream { transport, .. } => transport,
+                PluginIo::Stream { transport, .. } => match transport.as_hid() {
+                    Some(hid) => hid,
+                    None => return Ok(Vec::new()),
+                },
                 _ => return Ok(Vec::new()),
             };
             let events = ctx
@@ -1507,18 +1510,41 @@ fn build_match_table(lua: &Lua, m: &DevMatch) -> Result<Table> {
 mod tests {
     use super::*;
     use crate::drivers::transports::mock::test_transport::MockTransport;
-    use crate::drivers::transports::{Transport, TransportEvent};
+    use crate::drivers::transports::{HidTransport, Transport, TransportEvent};
 
-    struct EventTransport {
+    struct TestEventTransport {
         events: std::sync::Mutex<Vec<TransportEvent>>,
     }
 
     #[async_trait::async_trait]
-    impl Transport for EventTransport {
+    impl Transport for TestEventTransport {
         async fn write(&self, _data: &[u8]) -> Result<()> {
             Ok(())
         }
         async fn read(&self, _size: usize) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        fn as_hid(&self) -> Option<&dyn HidTransport> {
+            Some(self)
+        }
+        fn rate_status(&self) -> halod_shared::types::WriteRateStatus {
+            Default::default()
+        }
+        fn set_write_rate_limit(&self, _limit: Option<halod_shared::types::WriteRateLimit>) {}
+    }
+
+    #[async_trait::async_trait]
+    impl HidTransport for TestEventTransport {
+        async fn feature_exchange(&self, _data: &[u8], _size: usize) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        async fn defer_event(&self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        async fn write_companion(&self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        async fn read_companion(&self, _size: usize) -> Result<Vec<u8>> {
             Ok(Vec::new())
         }
         async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
@@ -1526,10 +1552,6 @@ mod tests {
             let count = events.len().min(limit);
             Ok(events.drain(..count).collect())
         }
-        fn rate_status(&self) -> halod_shared::types::WriteRateStatus {
-            Default::default()
-        }
-        fn set_write_rate_limit(&self, _limit: Option<halod_shared::types::WriteRateLimit>) {}
     }
 
     fn stream_io() -> PluginIo {
@@ -1670,7 +1692,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_events_route_to_a_child_on_the_root_worker() {
-        let transport = Arc::new(EventTransport {
+        let transport = Arc::new(TestEventTransport {
             events: std::sync::Mutex::new(vec![TransportEvent {
                 endpoint: "primary",
                 data: vec![0x10, 2, 0xaa],

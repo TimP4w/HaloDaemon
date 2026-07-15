@@ -19,7 +19,7 @@ use tokio::runtime::Handle;
 
 use crate::drivers::transports::smbus::SmBusSyncOps;
 use crate::drivers::transports::usb::{UsbCollection, UsbControlResult};
-use crate::drivers::transports::Transport;
+use crate::drivers::transports::{HidTransport, Transport};
 
 use super::bytebuf::check_alloc;
 use super::ffi::{bytes_from, to_lua_err};
@@ -45,6 +45,12 @@ impl TransportApi {
                     .into(),
             )),
         }
+    }
+
+    fn hid(&self) -> mlua::Result<&dyn HidTransport> {
+        self.stream()?.as_hid().ok_or_else(|| {
+            mlua::Error::RuntimeError("this byte stream is not a HID transport".into())
+        })
     }
 
     fn usb(&self) -> mlua::Result<&dyn UsbCollection> {
@@ -108,49 +114,49 @@ impl UserData for TransportApi {
         // (size → string), and `write_then_read`/`feature_exchange`
         // (bytes+size → string). Each drives the async transport via `block_on`.
         macro_rules! stream_method {
-            (bytes_unit $name:literal, $m:ident) => {
+            (bytes_unit $accessor:ident, $name:literal, $m:ident) => {
                 methods.add_method($name, |_, this, data: Value| {
                     let bytes = bytes_from(&data)?;
                     this.handle
-                        .block_on(this.stream()?.$m(&bytes))
+                        .block_on(this.$accessor()?.$m(&bytes))
                         .map_err(to_lua_err)
                 });
             };
-            (size_str $name:literal, $m:ident) => {
+            (size_str $accessor:ident, $name:literal, $m:ident) => {
                 methods.add_method($name, |lua, this, size: usize| {
                     check_alloc(size)?;
                     let data = this
                         .handle
-                        .block_on(this.stream()?.$m(size))
+                        .block_on(this.$accessor()?.$m(size))
                         .map_err(to_lua_err)?;
                     lua.create_string(&data)
                 });
             };
-            (bytes_size_str $name:literal, $m:ident) => {
+            (bytes_size_str $accessor:ident, $name:literal, $m:ident) => {
                 methods.add_method($name, |lua, this, (data, size): (Value, usize)| {
                     check_alloc(size)?;
                     let bytes = bytes_from(&data)?;
                     let reply = this
                         .handle
-                        .block_on(this.stream()?.$m(&bytes, size))
+                        .block_on(this.$accessor()?.$m(&bytes, size))
                         .map_err(to_lua_err)?;
                     lua.create_string(&reply)
                 });
             };
         }
-        stream_method!(bytes_unit "write", write);
-        stream_method!(size_str "read", read);
-        stream_method!(size_str "read_nonblocking", read_nonblocking);
-        stream_method!(size_str "read_any", read_any);
-        stream_method!(bytes_unit "defer_event", defer_event);
-        stream_method!(bytes_size_str "write_then_read", write_then_read);
-        stream_method!(bytes_size_str "feature_exchange", feature_exchange);
-        stream_method!(bytes_unit "write_companion", write_companion);
-        stream_method!(size_str "read_companion", read_companion);
-        stream_method!(bytes_size_str "write_then_read_companion", write_then_read_companion);
+        stream_method!(bytes_unit stream, "write", write);
+        stream_method!(size_str stream, "read", read);
+        stream_method!(size_str hid, "read_nonblocking", read_nonblocking);
+        stream_method!(size_str hid, "read_any", read_any);
+        stream_method!(bytes_unit hid, "defer_event", defer_event);
+        stream_method!(bytes_size_str stream, "write_then_read", write_then_read);
+        stream_method!(bytes_size_str hid, "feature_exchange", feature_exchange);
+        stream_method!(bytes_unit hid, "write_companion", write_companion);
+        stream_method!(size_str hid, "read_companion", read_companion);
+        stream_method!(bytes_size_str hid, "write_then_read_companion", write_then_read_companion);
 
         methods.add_method("has_companion", |_, this, ()| {
-            Ok(this.stream()?.has_companion())
+            Ok(this.hid()?.has_companion())
         });
 
         methods.add_method("write_many", |_, this, packets: Vec<Value>| {
@@ -169,7 +175,7 @@ impl UserData for TransportApi {
                 .map(bytes_from)
                 .collect::<mlua::Result<_>>()?;
             this.handle
-                .block_on(this.stream()?.write_many_companion(&owned))
+                .block_on(this.hid()?.write_many_companion(&owned))
                 .map_err(to_lua_err)
         });
 
