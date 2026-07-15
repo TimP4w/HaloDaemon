@@ -272,17 +272,22 @@ impl HwmonTransport {
         let originals = std::mem::take(&mut *self.original_pwm_enable.lock().unwrap());
         let chips = self.chips.read_access();
         let mut first_error = None;
+        let mut pending = HashMap::new();
         for ((key, attribute), value) in originals {
             let result = chips
                 .get(&key)
                 .ok_or_else(|| anyhow::anyhow!("hwmon device disappeared during restore"))
                 .and_then(|chip| {
-                    chip.write(&attribute, value)
+                    chip.write(&attribute, value.clone())
                         .with_context(|| format!("restoring hwmon attribute {attribute}"))
                 });
             if let Err(error) = result {
                 first_error.get_or_insert(error);
+                pending.insert((key, attribute), value);
             }
+        }
+        if !pending.is_empty() {
+            self.original_pwm_enable.lock().unwrap().extend(pending);
         }
         first_error.map_or(Ok(()), Err)
     }

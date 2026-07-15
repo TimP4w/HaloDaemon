@@ -2959,7 +2959,7 @@ mod tests {
             &[],
             r#"return {
                 initialize = function(dev)
-                    dev.transport:run("sh", {})
+                    command.run("sh", {})
                     return true
                 end,
             }"#,
