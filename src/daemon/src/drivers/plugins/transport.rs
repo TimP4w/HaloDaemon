@@ -22,79 +22,22 @@ use anyhow::Result;
 use halod_shared::types::{Permission, WriteRateStatus};
 
 use crate::drivers::transports::smbus::{SmBusDevice, SmBusSyncOps};
-use crate::drivers::transports::usb_bulk::UsbBulkTransport;
-use crate::drivers::transports::{ControlTransport, Transport};
+use crate::drivers::transports::usb::UsbCollection;
+use crate::drivers::transports::Transport;
 use crate::registry::discovery::DiscoveryHandle;
 
 use super::manifest::{DeviceSpec, PluginManifest};
-
-/// A lazily-opened USB bulk-OUT endpoint paired with a HID stream transport, for
-/// plugins that must push payloads larger than a HID report (LCD image frames).
-/// The device is opened on first write, so plugins that never stream pay nothing.
-pub enum BulkEndpoint {
-    Usb {
-        vid: u16,
-        pid: u16,
-        limit: Option<halod_shared::types::WriteRateLimit>,
-        inner: std::sync::Mutex<Option<UsbBulkTransport>>,
-    },
-}
-
-impl BulkEndpoint {
-    pub fn new(
-        vid: u16,
-        pid: u16,
-        limit: Option<halod_shared::types::WriteRateLimit>,
-    ) -> Arc<Self> {
-        Arc::new(Self::Usb {
-            vid,
-            pid,
-            limit,
-            inner: std::sync::Mutex::new(None),
-        })
-    }
-
-    /// Write the whole payload to the bulk endpoint, opening the device on first
-    /// use. `UsbBulkTransport::write` loops internally until every byte is sent.
-    pub fn write(&self, data: &[u8]) -> Result<()> {
-        match self {
-            BulkEndpoint::Usb {
-                vid,
-                pid,
-                limit,
-                inner,
-            } => {
-                let mut guard = inner
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("plugin bulk endpoint mutex poisoned"))?;
-                let transport = match &mut *guard {
-                    Some(t) => t,
-                    none => none.insert(UsbBulkTransport::open(*vid, *pid, *limit)?),
-                };
-                transport.write(data)?;
-                Ok(())
-            }
-        }
-    }
-}
 
 /// The live transport handed to a plugin's worker (and to a `pre_scan`).
 #[derive(Clone)]
 pub enum PluginIo {
     Stream {
         transport: Arc<dyn Transport>,
-        /// Companion bulk endpoint for HID devices that also expose one (e.g. an
-        /// LCD panel). `None` when the device has no bulk endpoint.
-        bulk: Option<Arc<BulkEndpoint>>,
+        /// General USB endpoint collection attached to a composite HID worker.
+        usb: Option<Arc<dyn UsbCollection>>,
     },
     Register(RegisterBus),
-    /// One or more USB vendor-control endpoints (DDC/CI, ENE RGB controllers).
-    /// Unlike the byte-stream/register shapes, a control device can bundle
-    /// *several* physical USB devices behind one plugin — a plugin that presents
-    /// two chips as a single device (e.g. a monitor's DDC controller plus its
-    /// Ambiglow LED controller) declares the extra ones in its manifest and
-    /// reaches them by name.
-    Control(ControlEndpoints),
+    Usb(Arc<dyn UsbCollection>),
     Command(CommandExecutor),
     /// Read-only AMD System Management Network access.  This is available only
     /// on Windows, where the typed PawnIO broker service exists.
@@ -112,7 +55,7 @@ impl PluginIo {
         match self {
             PluginIo::Stream { transport, .. } => transport.rate_status(),
             PluginIo::Register(r) => r.rate_status(),
-            PluginIo::Control(c) => c.rate_status(),
+            PluginIo::Usb(c) => c.rate_status(),
             PluginIo::Command(_) => WriteRateStatus::default(),
             #[cfg(target_os = "windows")]
             PluginIo::AmdSmn(_) => WriteRateStatus::default(),
@@ -218,39 +161,6 @@ impl CommandExecutor {
             );
         }
         Ok(stdout)
-    }
-}
-
-/// A set of named USB vendor-control endpoints. The device the discovery handle
-/// matched lives under [`ControlEndpoints::PRIMARY`] (the empty string); any
-/// secondary endpoints a plugin declares (`transports.usb_control.endpoints`)
-/// are keyed by their declared id. A script reaches each through the `transport`
-/// object's `control_write`/`control_read`, naming the endpoint (`""` = primary).
-#[derive(Clone)]
-pub struct ControlEndpoints {
-    endpoints: Arc<HashMap<String, Arc<dyn ControlTransport>>>,
-}
-
-impl ControlEndpoints {
-    /// Key under which the matched (primary) device is stored.
-    pub const PRIMARY: &'static str = "";
-
-    pub fn new(endpoints: HashMap<String, Arc<dyn ControlTransport>>) -> Self {
-        Self {
-            endpoints: Arc::new(endpoints),
-        }
-    }
-
-    /// The endpoint registered under `name`, or `None` if the manifest never
-    /// declared it (`""` is always the matched device).
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn ControlTransport>> {
-        self.endpoints.get(name)
-    }
-
-    fn rate_status(&self) -> WriteRateStatus {
-        self.get(Self::PRIMARY)
-            .map(|t| t.rate_status())
-            .unwrap_or_default()
     }
 }
 

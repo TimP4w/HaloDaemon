@@ -34,7 +34,7 @@ concerns. A single physical device is the composition of all four.
 vendor/   organizational namespace (nzxt, corsair, logitech, asus, …)
   device      implements Device, declares capabilities()        ← what the rest of the daemon sees
     protocol    encodes/decodes the vendor wire format           ← "how do I phrase a 'set color' for this chip"
-      transport   moves raw bytes (HID, SMBus, USB control, …)   ← "how do those bytes reach the wire"
+      transport   moves raw bytes (HID, SMBus, USB, …)           ← "how do those bytes reach the wire"
 ```
 
 ### Transport — moving bytes
@@ -43,8 +43,8 @@ A transport implements the `Transport` trait
 ([transports/mod.rs](../src/daemon/src/drivers/transports/mod.rs)): at its core
 just `write(&[u8])` and `read(size)`, with default-implemented conveniences
 (`write_then_read`, `write_many`, feature-report helpers) that HID overrides with
-hardware-backed versions. Available transports: `hid`, `smbus`, `usb_control`,
-`usb_bulk`, `hwmon` (Linux), `lpcio`/`pawnio` (Windows SuperIO), and `mock` (for
+hardware-backed versions. Available transports: `hid`, `smbus`, endpoint-oriented
+`usb`, `hwmon` (Linux), `lpcio`/`pawnio` (Windows SuperIO), and `mock` (for
 tests). A transport knows nothing about colors, fans, or vendors — only bytes.
 
 For that same reason, a per-device write-rate ceiling is enforced at this

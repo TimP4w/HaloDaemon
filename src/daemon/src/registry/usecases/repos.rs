@@ -28,7 +28,15 @@ fn repo_cloned(dir: &std::path::Path) -> bool {
 /// of this process. Never fetch, update, or otherwise mutate the inactive
 /// official repository while that override is selected.
 async fn official_repo_is_overridden(app: &AppState) -> bool {
-    app.development_plugin_repo.read().await.is_some()
+    #[cfg(feature = "dev-plugin-repo")]
+    {
+        return app.development_plugin_repo.read().await.is_some();
+    }
+    #[cfg(not(feature = "dev-plugin-repo"))]
+    {
+        let _ = app;
+        false
+    }
 }
 
 async fn package_disk_hash(
@@ -603,6 +611,7 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "dev-plugin-repo")]
     #[tokio::test]
     async fn development_override_blocks_official_updates() {
         crate::test_support::with_tmp_config(|app| async move {

@@ -1535,7 +1535,7 @@ mod tests {
     fn stream_io() -> PluginIo {
         PluginIo::Stream {
             transport: Arc::new(MockTransport::empty()),
-            bulk: None,
+            usb: None,
         }
     }
 
@@ -1692,7 +1692,7 @@ mod tests {
             Default::default(),
             PluginIo::Stream {
                 transport,
-                bulk: None,
+                usb: None,
             },
             DevMatch {
                 transport: "hid".into(),

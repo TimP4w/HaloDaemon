@@ -8,8 +8,9 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 
 use crate::drivers::plugins::manifest::{DeviceSpec, PluginManifest};
-use crate::drivers::plugins::transport::{BulkEndpoint, PluginIo, PluginTransportDescriptor};
+use crate::drivers::plugins::transport::{PluginIo, PluginTransportDescriptor};
 use crate::drivers::transports::hid::HidTransport;
+use crate::drivers::transports::usb::UsbSelector;
 use crate::registry::discovery::DiscoveryHandle;
 
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
@@ -45,7 +46,7 @@ fn open(
     manifest: &PluginManifest,
     handle: &DiscoveryHandle<'_>,
     _config: &HashMap<String, String>,
-    _granted: &[halod_shared::types::Permission],
+    granted: &[halod_shared::types::Permission],
     limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
     let DiscoveryHandle::Hid {
@@ -89,11 +90,34 @@ fn open(
     } else {
         HidTransport::open(path, report_size, hid.timeout_ms, hid.feature_report, limit)?
     };
+    let usb = if manifest.transports.usb.is_some() {
+        Some(super::usb::open_usb(
+            manifest,
+            UsbSelector {
+                vid: *vid,
+                pid: *pid,
+                serial: serial.map(str::to_owned),
+                index: handle_idx(handle),
+                ..Default::default()
+            },
+            granted,
+            limit,
+        )?
+            as Arc<dyn crate::drivers::transports::usb::UsbCollection>)
+    } else {
+        None
+    };
     Ok(PluginIo::Stream {
         transport: Arc::new(transport),
-        // Lazy companion bulk endpoint (opened only if the plugin streams LCD).
-        bulk: Some(BulkEndpoint::new(*vid, *pid, limit)),
+        usb,
     })
+}
+
+fn handle_idx(handle: &DiscoveryHandle<'_>) -> usize {
+    match handle {
+        DiscoveryHandle::Hid { idx, .. } => *idx,
+        _ => 0,
+    }
 }
 
 fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {

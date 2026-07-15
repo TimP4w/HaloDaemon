@@ -143,6 +143,7 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
     };
     app.request_config_save();
     if newly_allowed {
+        #[cfg(feature = "dev-plugin-repo")]
         if app.development_plugin_repo.read().await.is_some() {
             log::info!("skipping official plugin download because --dev-plugin-repo is active");
             return Ok(());

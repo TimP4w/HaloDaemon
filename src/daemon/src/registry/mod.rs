@@ -41,14 +41,16 @@ pub async fn seed_known_devices(app: Arc<AppState>) {
 /// Initialize devices using an optional development checkout in place of the
 /// managed official repository. The override is process-local and never
 /// persists in config.
-pub async fn initialize_app_state_with_dev_repo(
+pub async fn initialize_app_state(
     app: Arc<AppState>,
-    dev_plugin_repo: Option<std::path::PathBuf>,
+    #[cfg(feature = "dev-plugin-repo")] dev_plugin_repo: Option<std::path::PathBuf>,
 ) {
+    #[cfg(feature = "dev-plugin-repo")]
     let dev_plugin_repo = dev_plugin_repo.map(|dir| {
         std::fs::canonicalize(&dir)
             .unwrap_or_else(|e| panic!("invalid --dev-plugin-repo '{}': {e}", dir.display()))
     });
+    #[cfg(feature = "dev-plugin-repo")]
     if let Some(dir) = &dev_plugin_repo {
         crate::drivers::plugins::repo::read_repository_manifest(dir)
             .unwrap_or_else(|e| panic!("invalid --dev-plugin-repo '{}': {e:#}", dir.display()));
@@ -56,7 +58,15 @@ pub async fn initialize_app_state_with_dev_repo(
     } else {
         ensure_official_repo(&app).await;
     }
-    *app.development_plugin_repo.write().await = dev_plugin_repo.clone();
+    #[cfg(not(feature = "dev-plugin-repo"))]
+    let dev_plugin_repo: Option<std::path::PathBuf> = {
+        ensure_official_repo(&app).await;
+        None
+    };
+    #[cfg(feature = "dev-plugin-repo")]
+    {
+        *app.development_plugin_repo.write().await = dev_plugin_repo.clone();
+    }
     let mut discovered_hashes = Vec::new();
     {
         let cfg = app.config.read().await;

@@ -24,6 +24,11 @@ pub enum IdentityScope {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LocationKey {
     HidPath(String),
+    UsbPort {
+        bus: u8,
+        port_path: Vec<u8>,
+        interface: u8,
+    },
     Opaque(String),
 }
 
@@ -33,6 +38,9 @@ pub struct DeviceIdentity {
     pub serial: Option<String>,
     pub location: Option<LocationKey>,
     pub usb: Option<(u16, u16)>,
+    /// Ephemeral libusb address, retained for diagnostics/routing but excluded
+    /// from the stable physical location key.
+    pub usb_address: Option<u8>,
 }
 
 impl DeviceIdentity {
@@ -163,7 +171,24 @@ pub fn identity_from_handle(handle: &DiscoveryHandle<'_>) -> DeviceIdentity {
             identity.usb = Some((*vid, *pid));
             identity.location = Some(LocationKey::HidPath(normalize_hid_path(path)));
         }
-        DiscoveryHandle::UsbNonHid { vid, pid } => identity.usb = Some((*vid, *pid)),
+        DiscoveryHandle::UsbNonHid {
+            vid,
+            pid,
+            bus,
+            address,
+            port_path,
+            serial,
+            interface_number,
+        } => {
+            identity.usb = Some((*vid, *pid));
+            identity.serial = normalize_serial(*serial);
+            identity.location = Some(LocationKey::UsbPort {
+                bus: *bus,
+                port_path: port_path.to_vec(),
+                interface: *interface_number,
+            });
+            identity.usb_address = Some(*address);
+        }
         DiscoveryHandle::Smbus { .. }
         | DiscoveryHandle::Command { .. }
         | DiscoveryHandle::AmdSmn { .. }
@@ -488,12 +513,27 @@ impl Device for IdentifiedDevice {
                 "identity_location".into(),
                 match location {
                     LocationKey::HidPath(path) => format!("hid:{path}"),
+                    LocationKey::UsbPort {
+                        bus,
+                        port_path,
+                        interface,
+                    } => format!(
+                        "usb:{bus}-{}:if{interface}",
+                        port_path
+                            .iter()
+                            .map(u8::to_string)
+                            .collect::<Vec<_>>()
+                            .join(".")
+                    ),
                     LocationKey::Opaque(value) => format!("opaque:{value}"),
                 },
             ));
         }
         if let Some((vid, pid)) = self.identity.usb {
             fields.push(("identity_usb".into(), format!("{vid:04x}:{pid:04x}")));
+        }
+        if let Some(address) = self.identity.usb_address {
+            fields.push(("identity_usb_address".into(), address.to_string()));
         }
         if let Some(scope) = &self.identity.scope {
             fields.push((
@@ -540,6 +580,7 @@ mod tests {
                 serial: normalize_serial(serial),
                 location: location_from_openrgb(location),
                 usb: None,
+                usb_address: None,
             },
             origin: DeviceOrigin::Native,
             connected: true,
@@ -568,5 +609,39 @@ mod tests {
         let found = detect_conflicts(&entries);
         assert!(found[0].is_none());
         assert!(found[2].is_none());
+    }
+
+    #[test]
+    fn usb_identity_is_stable_across_address_changes_and_distinct_by_port() {
+        let a = identity_from_handle(&DiscoveryHandle::UsbNonHid {
+            vid: 0x1234,
+            pid: 0x5678,
+            bus: 1,
+            address: 4,
+            port_path: &[2, 3],
+            serial: None,
+            interface_number: 1,
+        });
+        let moved = identity_from_handle(&DiscoveryHandle::UsbNonHid {
+            vid: 0x1234,
+            pid: 0x5678,
+            bus: 1,
+            address: 9,
+            port_path: &[2, 3],
+            serial: None,
+            interface_number: 1,
+        });
+        let other = identity_from_handle(&DiscoveryHandle::UsbNonHid {
+            vid: 0x1234,
+            pid: 0x5678,
+            bus: 1,
+            address: 5,
+            port_path: &[2, 4],
+            serial: None,
+            interface_number: 1,
+        });
+        assert_eq!(a.location, moved.location);
+        assert_ne!(a.usb_address, moved.usb_address);
+        assert_ne!(a.location, other.location);
     }
 }

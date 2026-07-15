@@ -80,6 +80,11 @@ pub enum DiscoveryHandle<'a> {
     UsbNonHid {
         vid: u16,
         pid: u16,
+        bus: u8,
+        address: u8,
+        port_path: &'a [u8],
+        serial: Option<&'a str>,
+        interface_number: u8,
     },
     Smbus {
         bus: Arc<dyn crate::drivers::transports::smbus::SmBusOps>,
@@ -155,14 +160,37 @@ inventory::submit!(TransportScanner {
                 return;
             }
         };
-        let present: std::collections::HashSet<(u16, u16)> = ctx
+        let present: Vec<(u16, u16, u8, u8, Vec<u8>, Option<String>, Vec<u8>)> = ctx
             .devices()
             .map(|devs| {
                 devs.iter()
                     .filter_map(|d| {
-                        d.device_descriptor()
+                        let dd = d.device_descriptor().ok()?;
+                        let serial = d
+                            .open()
                             .ok()
-                            .map(|dd| (dd.vendor_id(), dd.product_id()))
+                            .and_then(|h| h.read_serial_number_string_ascii(&dd).ok());
+                        let mut interfaces: Vec<u8> = d
+                            .active_config_descriptor()
+                            .ok()
+                            .map(|c| {
+                                c.interfaces()
+                                    .flat_map(|i| i.descriptors())
+                                    .map(|i| i.interface_number())
+                                    .collect()
+                            })
+                            .unwrap_or_else(|| vec![0]);
+                        interfaces.sort_unstable();
+                        interfaces.dedup();
+                        Some((
+                            dd.vendor_id(),
+                            dd.product_id(),
+                            d.bus_number(),
+                            d.address(),
+                            d.port_numbers().unwrap_or_default(),
+                            serial,
+                            interfaces,
+                        ))
                     })
                     .collect()
             })
@@ -171,12 +199,22 @@ inventory::submit!(TransportScanner {
                 Default::default()
             });
 
-        for (vid, pid) in present {
-            crate::registry::discovery::discover_handle(
-                &app,
-                crate::registry::discovery::DiscoveryHandle::UsbNonHid { vid, pid },
-            )
-            .await;
+        for (vid, pid, bus, address, port_path, serial, interfaces) in &present {
+            for interface_number in interfaces {
+                crate::registry::discovery::discover_handle(
+                    &app,
+                    crate::registry::discovery::DiscoveryHandle::UsbNonHid {
+                        vid: *vid,
+                        pid: *pid,
+                        bus: *bus,
+                        address: *address,
+                        port_path,
+                        serial: serial.as_deref(),
+                        interface_number: *interface_number,
+                    },
+                )
+                .await;
+            }
         }
     }),
 });
@@ -277,6 +315,11 @@ mod tests {
         let handle = DiscoveryHandle::UsbNonHid {
             vid: 0x0000,
             pid: 0x0000,
+            bus: 0,
+            address: 0,
+            port_path: &[],
+            serial: None,
+            interface_number: 0,
         };
         let app = Arc::new(crate::state::AppState::new(crate::config::Config::default()));
         assert!(app.registry.make_device(&app, handle).is_none());

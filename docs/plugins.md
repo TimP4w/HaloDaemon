@@ -45,7 +45,7 @@ transports:
   hid: { report_size: 64, timeout_ms: 1000 }
 ```
 
-Supported nested matches are `hid`, `usb_control`, `smbus`, `hwmon`, `command`,
+Supported nested matches are `hid`, `usb`, `smbus`, `hwmon`, `command`,
 `amd_smn`, and `lpcio`. Concrete identifiers must be unique; generic support is always an
 explicit `any: true` declaration. Unsupported-platform packages remain visible
 but inert and never suppress a native driver.
@@ -72,9 +72,14 @@ are repository-wide actions.
 
 Official packages have a verified detached repository-index signature.
 Third-party repositories are unsigned but usable. Development repositories are
-loaded directly via `--dev-plugin-repo`; imported standalone packages are local
-unsigned packages. Invalid official content stays visible for repair but never
-loads or shadows native discovery.
+loaded directly via `--dev-plugin-repo` in daemon builds compiled with the
+non-default `dev-plugin-repo` Cargo feature; production builds omit the flag and
+its runtime state. Imported standalone packages are local unsigned packages.
+Invalid official content stays visible for repair but never loads or shadows
+native discovery.
+
+Run a development build with
+`cargo run -p halod --features dev-plugin-repo -- --dev-plugin-repo <DIR>`.
 
 `--dev-plugin-repo` is a process-local official-source replacement, not an
 additional checkout. Halo canonicalizes and displays its package paths, keeps

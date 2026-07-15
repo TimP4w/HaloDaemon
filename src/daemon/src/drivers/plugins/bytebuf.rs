@@ -11,7 +11,7 @@
 use mlua::{Lua, UserData, UserDataMethods};
 
 /// Upper bound on any single plugin-driven native allocation (`halod.buffer`,
-/// `transport:control_read`, image-codec output). `set_memory_limit` only tracks
+/// `transport:usb_read`/`usb_control`, image-codec output). `set_memory_limit` only tracks
 /// Lua's own allocator, so an unbounded `vec![0u8; n]` from a Lua-supplied length
 /// would OOM/abort the (root) daemon; this caps every such allocation. Shares the
 /// plugin-VM heap ceiling so the two never drift — see [`super::PLUGIN_VM_MEMORY_BYTES`].

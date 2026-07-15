@@ -118,7 +118,7 @@ fn open(
     crate::drivers::transports::Transport::set_write_rate_limit(&transport, limit);
     Ok(PluginIo::Stream {
         transport: std::sync::Arc::new(transport),
-        bulk: None,
+        usb: None,
     })
 }
 

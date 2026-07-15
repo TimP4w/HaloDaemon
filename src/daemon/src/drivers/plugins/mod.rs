@@ -24,7 +24,7 @@ mod image_api;
 pub(crate) mod integration_monitor;
 pub(crate) mod integration_scan;
 mod lua_worker;
-mod manifest;
+pub(crate) mod manifest;
 #[cfg(feature = "plugin-test")]
 pub mod plugin_test;
 pub mod repo;
@@ -234,8 +234,8 @@ fn authority_for_manifest(manifest: &PluginManifest) -> halod_shared::types::Plu
     if manifest.transports.tcp.is_some() {
         scopes.push("tcp".to_owned());
     }
-    if manifest.transports.usb_control.is_some() {
-        scopes.push("usb_control".to_owned());
+    if manifest.transports.usb.is_some() {
+        scopes.push("usb".to_owned());
     }
     if let Some(command) = &manifest.transports.command {
         scopes.extend(

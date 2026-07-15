@@ -18,13 +18,12 @@ use mlua::{Function, UserData, UserDataMethods, Value};
 use tokio::runtime::Handle;
 
 use crate::drivers::transports::smbus::SmBusSyncOps;
+use crate::drivers::transports::usb::{UsbCollection, UsbControlResult};
 use crate::drivers::transports::Transport;
 
 use super::bytebuf::check_alloc;
 use super::ffi::{bytes_from, to_lua_err};
-use super::transport::{
-    AddrScope, BulkEndpoint, CommandExecutor, ControlEndpoints, PluginIo, RegisterBus,
-};
+use super::transport::{AddrScope, CommandExecutor, PluginIo, RegisterBus};
 
 /// Lua userdata wrapping one transport. Rate limiting is inherited: this holds
 /// the real (metered) transport, so a script cannot outrun the hardware.
@@ -48,13 +47,11 @@ impl TransportApi {
         }
     }
 
-    fn bulk(&self) -> mlua::Result<&BulkEndpoint> {
+    fn usb(&self) -> mlua::Result<&dyn UsbCollection> {
         match &self.io {
-            PluginIo::Stream {
-                bulk: Some(bulk), ..
-            } => Ok(bulk),
+            PluginIo::Stream { usb: Some(usb), .. } | PluginIo::Usb(usb) => Ok(usb.as_ref()),
             _ => Err(mlua::Error::RuntimeError(
-                "this transport has no bulk endpoint".into(),
+                "this transport has no declared USB endpoint collection".into(),
             )),
         }
     }
@@ -64,16 +61,6 @@ impl TransportApi {
             PluginIo::Register(r) => Ok(r),
             _ => Err(mlua::Error::RuntimeError(
                 "this transport is not a register bus (SMBus); use transport:batch(fn)".into(),
-            )),
-        }
-    }
-
-    fn control(&self) -> mlua::Result<&ControlEndpoints> {
-        match &self.io {
-            PluginIo::Control(c) => Ok(c),
-            _ => Err(mlua::Error::RuntimeError(
-                "this transport is not a USB control bus; use transport:control_write/control_read"
-                    .into(),
             )),
         }
     }
@@ -186,12 +173,58 @@ impl UserData for TransportApi {
                 .map_err(to_lua_err)
         });
 
-        // Push a payload over the device's USB bulk-OUT endpoint (LCD images).
-        // Blocking, on the worker thread; the endpoint opens on first use.
-        methods.add_method("write_bulk", |_, this, data: Value| {
-            let bytes = bytes_from(&data)?;
-            this.bulk()?.write(&bytes).map_err(to_lua_err)
-        });
+        methods.add_method(
+            "usb_write",
+            |_, this, (endpoint, data, timeout_ms, device_id): (u8, Value, u64, Option<String>)| {
+                let bytes = bytes_from(&data)?;
+                this.usb()?
+                    .write(device_id.as_deref(), endpoint, &bytes, timeout_ms)
+                    .map_err(to_lua_err)
+            },
+        );
+        methods.add_method(
+            "usb_read",
+            |lua, this, (endpoint, length, timeout_ms, device_id): (u8, usize, u64, Option<String>)| {
+                check_alloc(length)?;
+                let bytes = this.usb()?.read(device_id.as_deref(), endpoint, length, timeout_ms).map_err(to_lua_err)?;
+                lua.create_string(&bytes)
+            },
+        );
+        methods.add_method(
+            "usb_control",
+            |lua,
+             this,
+             (request_type, request, value, index, data, read_length, timeout_ms, device_id): (
+                u8,
+                u8,
+                u16,
+                u16,
+                Value,
+                usize,
+                u64,
+                Option<String>,
+            )| {
+                check_alloc(read_length)?;
+                let bytes = bytes_from(&data)?;
+                match this
+                    .usb()?
+                    .control(
+                        device_id.as_deref(),
+                        request_type,
+                        request,
+                        value,
+                        index,
+                        &bytes,
+                        read_length,
+                        timeout_ms,
+                    )
+                    .map_err(to_lua_err)?
+                {
+                    UsbControlResult::Written(n) => Ok(Value::Integer(n as mlua::Integer)),
+                    UsbControlResult::Read(bytes) => Ok(Value::String(lua.create_string(&bytes)?)),
+                }
+            },
+        );
 
         methods.add_method(
             "run",
@@ -267,55 +300,6 @@ impl UserData for TransportApi {
                 this.lpcio()?
                     .superio_outb(register, value)
                     .map_err(to_lua_err)
-            },
-        );
-
-        // ── USB vendor control (DDC/CI, ENE RGB) ─────────────────────────
-        // `endpoint` names which bundled device to talk to: "" is the matched
-        // (primary) device; other names come from `transports.usb_control.endpoints`.
-        // Both calls issue a single blocking control transfer on the worker thread.
-        methods.add_method(
-            "control_write",
-            |_,
-             this,
-             (endpoint, bm_request_type, b_request, w_value, w_index, data): (
-                String,
-                u8,
-                u8,
-                u16,
-                u16,
-                Value,
-            )| {
-                let bytes = bytes_from(&data)?;
-                let t = this.control()?.get(&endpoint).ok_or_else(|| {
-                    mlua::Error::RuntimeError(format!("unknown control endpoint '{endpoint}'"))
-                })?;
-                t.write_control(bm_request_type, b_request, w_value, w_index, &bytes)
-                    .map_err(to_lua_err)
-            },
-        );
-        methods.add_method(
-            "control_read",
-            |lua,
-             this,
-             (endpoint, bm_request_type, b_request, w_value, w_index, len): (
-                String,
-                u8,
-                u8,
-                u16,
-                u16,
-                usize,
-            )| {
-                let t = this.control()?.get(&endpoint).ok_or_else(|| {
-                    mlua::Error::RuntimeError(format!("unknown control endpoint '{endpoint}'"))
-                })?;
-                let mut buf = super::bytebuf::alloc_zeroed(len)?;
-                let n = t
-                    .read_control(bm_request_type, b_request, w_value, w_index, &mut buf)
-                    .map_err(to_lua_err)?;
-                // Clamp to the buffer: a misbehaving backend returning `n > len`
-                // would otherwise panic on the slice below.
-                lua.create_string(&buf[..n.min(buf.len())])
             },
         );
 

@@ -26,7 +26,6 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::drivers::transports::hid;
-use crate::registry::initialize_app_state_with_dev_repo;
 use crate::state::EngineRunConfig;
 
 /// How this process was invoked, decided purely from argv.
@@ -34,8 +33,8 @@ use crate::state::EngineRunConfig;
 /// The daemon is always a plain user process now — Windows service registration
 /// and the elevated register-bus broker live in `halod-broker.exe`, and the GUI
 /// launches this daemon directly. `--headless` opts out of idle-shutdown (see
-/// [`crate::lifecycle`]); `--dev-plugin-repo <DIR>` replaces the official
-/// plugin checkout with a directly loaded working tree for this process.
+/// [`crate::lifecycle`]); the development-only `--dev-plugin-repo <DIR>` flag
+/// replaces the official plugin checkout with a directly loaded working tree.
 ///
 /// `plugin-test <package-dir>` (behind the `plugin-test` cargo feature) is a
 /// separate mode entirely: it drives one plugin package's `test.lua` against
@@ -46,13 +45,17 @@ use crate::state::EngineRunConfig;
 enum ProcessRole {
     Server {
         headless: bool,
+        #[cfg(feature = "dev-plugin-repo")]
         dev_plugin_repo: Option<std::path::PathBuf>,
     },
     #[cfg(feature = "plugin-test")]
     PluginTest { package: std::path::PathBuf },
 }
 
+#[cfg(feature = "dev-plugin-repo")]
 const USAGE: &str = "usage: halod [--headless] [--dev-plugin-repo <DIR>]";
+#[cfg(not(feature = "dev-plugin-repo"))]
+const USAGE: &str = "usage: halod [--headless]";
 
 fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
     #[cfg(feature = "plugin-test")]
@@ -67,6 +70,7 @@ fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
         return Ok(ProcessRole::PluginTest { package });
     }
     let mut headless = false;
+    #[cfg(feature = "dev-plugin-repo")]
     let mut dev_plugin_repo = None;
     let mut i = 0;
     while i < args.len() {
@@ -77,6 +81,7 @@ fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
                 }
                 headless = true;
             }
+            #[cfg(feature = "dev-plugin-repo")]
             "--dev-plugin-repo" => {
                 let Some(path) = args.get(i + 1) else {
                     return Err("--dev-plugin-repo requires a directory".to_owned());
@@ -101,6 +106,7 @@ fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
     }
     Ok(ProcessRole::Server {
         headless,
+        #[cfg(feature = "dev-plugin-repo")]
         dev_plugin_repo,
     })
 }
@@ -123,14 +129,20 @@ fn main() -> Result<()> {
         std::process::exit(exit_code);
     }
 
-    let (headless, dev_plugin_repo) = match role {
-        ProcessRole::Server {
-            headless,
-            dev_plugin_repo,
-        } => (headless, dev_plugin_repo),
+    let headless = match &role {
+        ProcessRole::Server { headless, .. } => *headless,
         #[cfg(feature = "plugin-test")]
         ProcessRole::PluginTest { .. } => unreachable!("handled above"),
     };
+    #[cfg(feature = "dev-plugin-repo")]
+    let dev_plugin_repo = match role {
+        ProcessRole::Server {
+            dev_plugin_repo, ..
+        } => dev_plugin_repo,
+        #[cfg(feature = "plugin-test")]
+        ProcessRole::PluginTest { .. } => unreachable!("handled above"),
+    };
+    #[cfg(feature = "dev-plugin-repo")]
     let dev_plugin_repo = dev_plugin_repo.map(|path| {
         let canonical = std::fs::canonicalize(&path).unwrap_or_else(|e| {
             eprintln!("invalid --dev-plugin-repo '{}': {e}", path.display());
@@ -170,7 +182,12 @@ fn main() -> Result<()> {
         .worker_threads(4)
         .enable_all()
         .build()?;
-    runtime.block_on(run_daemon(headless, dev_plugin_repo, cfg))
+    runtime.block_on(run_daemon(
+        headless,
+        #[cfg(feature = "dev-plugin-repo")]
+        dev_plugin_repo,
+        cfg,
+    ))
 }
 
 /// The actual device server — always a plain, unprivileged user process.
@@ -178,7 +195,7 @@ fn main() -> Result<()> {
 /// on demand (see `drivers::transports::register_ops`); nothing here elevates.
 async fn run_daemon(
     headless: bool,
-    dev_plugin_repo: Option<std::path::PathBuf>,
+    #[cfg(feature = "dev-plugin-repo")] dev_plugin_repo: Option<std::path::PathBuf>,
     cfg: crate::config::Config,
 ) -> Result<()> {
     let initial_level: log::LevelFilter =
@@ -221,7 +238,12 @@ async fn run_daemon(
     services::audio::sink::cleanup_orphaned_sinks().await;
 
     log::info!("Discovering devices...");
-    initialize_app_state_with_dev_repo(app.clone(), dev_plugin_repo).await;
+    crate::registry::initialize_app_state(
+        app.clone(),
+        #[cfg(feature = "dev-plugin-repo")]
+        dev_plugin_repo,
+    )
+    .await;
     log::info!("Device discovery complete");
 
     // Started only once startup is done — the grace clock must not elapse
@@ -449,6 +471,7 @@ mod tests {
             process_role(&argv(&[])).unwrap(),
             ProcessRole::Server {
                 headless: false,
+                #[cfg(feature = "dev-plugin-repo")]
                 dev_plugin_repo: None
             }
         );
@@ -460,11 +483,13 @@ mod tests {
             process_role(&argv(&["--headless"])).unwrap(),
             ProcessRole::Server {
                 headless: true,
+                #[cfg(feature = "dev-plugin-repo")]
                 dev_plugin_repo: None
             }
         );
     }
 
+    #[cfg(feature = "dev-plugin-repo")]
     #[test]
     fn development_plugin_repository_is_parsed() {
         assert_eq!(
@@ -478,13 +503,16 @@ mod tests {
 
     #[test]
     fn invalid_server_arguments_return_usage_errors() {
-        for args in [
-            vec!["--unknown"],
-            vec!["--headless", "--headless"],
+        let mut cases = vec![vec!["--unknown"], vec!["--headless", "--headless"]];
+        #[cfg(feature = "dev-plugin-repo")]
+        cases.extend([
             vec!["--dev-plugin-repo"],
             vec!["--dev-plugin-repo", "--headless"],
             vec!["--dev-plugin-repo", "one", "--dev-plugin-repo", "two"],
-        ] {
+        ]);
+        #[cfg(not(feature = "dev-plugin-repo"))]
+        cases.push(vec!["--dev-plugin-repo", "C:/plugins"]);
+        for args in cases {
             assert!(process_role(&argv(&args)).is_err(), "{args:?}");
         }
     }

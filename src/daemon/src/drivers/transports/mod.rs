@@ -10,13 +10,11 @@ pub mod mock;
 pub mod register_ops;
 pub mod smbus;
 pub mod tcp;
-pub mod usb_bulk;
-pub mod usb_control;
+pub mod usb;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
-use rusb::UsbContext;
 
 /// Shared USB interface claim guard with automatic detach/reattach of kernel drivers on Linux.
 pub struct UsbClaim {
@@ -30,15 +28,6 @@ pub struct UsbClaim {
 }
 
 impl UsbClaim {
-    /// Open a USB device by VID/PID and claim the interface.
-    pub fn open(vid: u16, pid: u16, interface: u8) -> Result<Self> {
-        let ctx = rusb::Context::new()?;
-        let handle = ctx
-            .open_device_with_vid_pid(vid, pid)
-            .ok_or_else(|| anyhow::anyhow!("USB device {:04x}:{:04x} not found", vid, pid))?;
-        Self::claim(handle, interface)
-    }
-
     /// Claim an interface on an already-opened device handle.
     pub fn claim(handle: rusb::DeviceHandle<rusb::Context>, interface: u8) -> Result<Self> {
         #[cfg(target_os = "linux")]
@@ -56,7 +45,17 @@ impl UsbClaim {
             ),
         }
 
-        handle.claim_interface(interface)?;
+        if let Err(error) = handle.claim_interface(interface) {
+            #[cfg(target_os = "linux")]
+            if had_kernel_driver {
+                if let Err(attach_error) = handle.attach_kernel_driver(interface) {
+                    log::warn!(
+                        "UsbClaim: reattach after failed claim({interface}) failed: {attach_error}"
+                    );
+                }
+            }
+            return Err(error.into());
+        }
         Ok(Self {
             handle,
             interface,
@@ -91,61 +90,6 @@ impl Drop for UsbClaim {
             }
         }
     }
-}
-
-/// Lets device code accept `impl BulkTransport` and be tested with a mock instead of real hardware.
-#[async_trait]
-#[expect(dead_code, reason = "plugin-facing bulk transport protocol")]
-pub trait BulkTransport: Send + Sync {
-    /// Write all bytes to the bulk-OUT endpoint, looping until every byte is
-    /// delivered. Returns the total number of bytes sent.
-    fn write(&self, data: &[u8]) -> anyhow::Result<usize>;
-
-    /// Async wrapper that runs [`write`] on a `spawn_blocking` thread so the
-    /// tokio executor is not stalled by the blocking transfer.
-    async fn write_async(&self, data: Vec<u8>) -> anyhow::Result<usize>;
-
-    /// Live write-rate limit and throughput. No default: every implementor
-    /// must back this with a real `Metered` gate rather than silently
-    /// reporting nothing.
-    fn rate_status(&self) -> WriteRateStatus;
-
-    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>);
-}
-
-/// Abstraction over synchronous USB vendor-control transports.
-///
-/// `UsbControlTransport` implements this trait. Device code that accepts
-/// `impl ControlTransport` (or `dyn ControlTransport`) can be tested with a
-/// mock without opening real hardware.
-#[expect(dead_code, reason = "rate-limit hook is optional transport protocol")]
-pub trait ControlTransport: Send + Sync {
-    /// Issue a vendor control OUT transfer.
-    fn write_control(
-        &self,
-        bm_request_type: u8,
-        b_request: u8,
-        w_value: u16,
-        w_index: u16,
-        data: &[u8],
-    ) -> anyhow::Result<()>;
-
-    /// Issue a vendor control IN transfer. Returns the number of bytes read.
-    fn read_control(
-        &self,
-        bm_request_type: u8,
-        b_request: u8,
-        w_value: u16,
-        w_index: u16,
-        buf: &mut [u8],
-    ) -> anyhow::Result<usize>;
-
-    /// Live write-rate limit and throughput. No default: every implementor
-    /// must back this with a real `Metered` gate rather than silently
-    /// reporting nothing.
-    fn rate_status(&self) -> WriteRateStatus;
-
-    fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>);
 }
 
 #[async_trait]

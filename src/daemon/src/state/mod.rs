@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::collections::VecDeque;
+#[cfg(feature = "dev-plugin-repo")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
@@ -78,6 +79,7 @@ pub struct AppState {
     /// The device-plugin registry (loaded manifests, consent/config, notice
     /// dedup, load warnings).
     pub registry: crate::drivers::plugins::Registry,
+    #[cfg(feature = "dev-plugin-repo")]
     /// Process-local development repository selected with `--dev-plugin-repo`.
     /// Registry rebuilds must retain this priority source rather than falling
     /// back to the managed official checkout.
@@ -114,6 +116,7 @@ impl AppState {
             rediscovery_runner: Mutex::new(()),
             plugin_update_status: Mutex::new(Vec::new()),
             registry: crate::drivers::plugins::Registry::default(),
+            #[cfg(feature = "dev-plugin-repo")]
             development_plugin_repo: RwLock::new(None),
             secret_store: Arc::new(crate::secrets::FileKeyStore::new()),
         }

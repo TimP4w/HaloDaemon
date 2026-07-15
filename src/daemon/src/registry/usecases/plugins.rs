@@ -292,10 +292,16 @@ pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
 /// re-apply the enabled and accepted-authority policy. Shared with `repos.rs`.
 pub(crate) async fn reload_registry(app: &Arc<AppState>) {
     let cfg = app.config.read().await;
+    #[cfg(feature = "dev-plugin-repo")]
     let development_repo = app.development_plugin_repo.read().await.clone();
+    #[cfg(not(feature = "dev-plugin-repo"))]
+    let development_repo: Option<&std::path::Path> = None;
     app.registry.load_all_with_priority_repo(
         &crate::config::plugins_dir(),
+        #[cfg(feature = "dev-plugin-repo")]
         development_repo.as_deref(),
+        #[cfg(not(feature = "dev-plugin-repo"))]
+        development_repo,
         &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
     );
     app.registry.replace_policy(&cfg.plugins);
@@ -513,6 +519,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
+    #[cfg(feature = "dev-plugin-repo")]
     #[tokio::test]
     async fn reload_registry_keeps_the_development_repository_as_the_priority_source() {
         crate::test_support::with_tmp_config(|app| async move {

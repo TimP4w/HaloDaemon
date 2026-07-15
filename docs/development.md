@@ -228,7 +228,7 @@ Add `docs/protocol.md` inside the plugin package (with local split pages for a l
 
 1. Create `src/daemon/src/drivers/vendors/<vendor>/protocols/<name>.rs`.
 2. Implement frame builders (requests) and response parsers as plain functions or a small struct. Keep protocol logic separate from device state.
-3. Wire to the transport: take a `HidTransport`, `SmbusTransport`, or `UsbControlTransport` reference in the device struct and call it from the `Device` trait implementation.
+3. Wire to the transport: take a HID, SMBus, or scoped endpoint-oriented USB transport reference in the device struct and call it from the `Device` trait implementation.
 4. Add `docs/protocol.md` to the owning package in the [official plugin repository](https://github.com/TimP4w/HaloDaemon-plugins), covering the frame format, key commands, credits/references, and known limitations. Large packages may use that page as a local index to split pages in the same `docs/` directory. The doc is the source of truth — every concrete value must trace to the implementation.
 5. Keep protocol documentation package-local; do not add a centralized protocol page to the daemon repository.
 
@@ -237,7 +237,7 @@ Add `docs/protocol.md` inside the plugin package (with local split pages for a l
 Every transport gets write-rate throughput, a limiter, and enforcement for free by wrapping its raw I/O handle in `Metered<T>` ([daemon/src/drivers/rate_limit.rs](../src/daemon/src/drivers/rate_limit.rs)) instead of holding the handle directly:
 
 1. Give the transport struct an `io: Metered<YourRawIo>` field; its `open(...)` takes a trailing `limit: Option<WriteRateLimit>` and builds it with `Metered::new(raw_io, limit)`.
-2. Route every write through `io.write_access(len).await` (async transports) or `io.write_access_blocking(len)` (sync transports, e.g. USB bulk/control — only from a thread that's allowed to block) to get the gated `&YourRawIo` back; route every read through the unmetered `io.read_access()`. For batch transports whose byte count is only known after the operation runs (e.g. SMBus), use `io.write_tallied(...)` instead.
+2. Route every write through `io.write_access(len).await` (async transports) or `io.write_access_blocking(len)` (sync USB transfers—only from a thread allowed to block) to get the gated `&YourRawIo` back; route every read through the unmetered `io.read_access()`. For batch transports whose byte count is only known after the operation runs (e.g. SMBus), use `io.write_tallied(...)` instead.
 3. Implement the transport trait's `rate_status()`/`set_write_rate_limit()` by delegating to `io.status()`/`io.set_limit()` — these are required methods, not optional ones, so a transport that skips this step won't compile.
 
 Because the raw handle only exists behind the gate, there's no separate step to "remember" metering — a write path that bypasses it simply has no handle to write through.

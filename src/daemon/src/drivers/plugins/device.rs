@@ -1961,6 +1961,7 @@ impl LuaDevice {
                 controller.location.as_deref(),
             ),
             usb: None,
+            usb_address: None,
         };
         Some(Arc::new(crate::registry::identity::IdentifiedDevice::new(
             child as Arc<dyn Device>,
@@ -2542,7 +2543,7 @@ mod tests {
             hid_match(),
             PluginIo::Stream {
                 transport,
-                bulk: None,
+                usb: None,
             },
             tokio::runtime::Handle::current(),
             Vec::<Permission>::new(),
@@ -3162,7 +3163,7 @@ mod tests {
                 hid_match(),
                 PluginIo::Stream {
                     transport,
-                    bulk: None,
+                    usb: None,
                 },
                 tokio::runtime::Handle::current(),
                 Vec::<Permission>::new(),
@@ -3296,7 +3297,7 @@ mod tests {
         let child_worker: ChildWorkerFactory = Arc::new(move |_index| {
             Ok(PluginIo::Stream {
                 transport: child_transport.clone(),
-                bulk: None,
+                usb: None,
             })
         });
         let notify = Weak::new();
@@ -3306,7 +3307,7 @@ mod tests {
                 &manifest,
                 PluginIo::Stream {
                     transport,
-                    bulk: None,
+                    usb: None,
                 },
                 child_worker,
                 tokio::runtime::Handle::current(),
@@ -3606,7 +3607,7 @@ mod tests {
         let child_worker: ChildWorkerFactory = Arc::new(move |_index| {
             Ok(PluginIo::Stream {
                 transport: child_transport.clone(),
-                bulk: None,
+                usb: None,
             })
         });
         let notify = Weak::new();
@@ -3616,7 +3617,7 @@ mod tests {
                 &manifest,
                 PluginIo::Stream {
                     transport,
-                    bulk: None,
+                    usb: None,
                 },
                 child_worker,
                 tokio::runtime::Handle::current(),
@@ -3666,7 +3667,7 @@ mod tests {
         let child_worker: ChildWorkerFactory = Arc::new(move |_index| {
             Ok(PluginIo::Stream {
                 transport: child_transport.clone(),
-                bulk: None,
+                usb: None,
             })
         });
         let notify = Weak::new();
@@ -3676,7 +3677,7 @@ mod tests {
                 &manifest,
                 PluginIo::Stream {
                     transport,
-                    bulk: None,
+                    usb: None,
                 },
                 child_worker,
                 tokio::runtime::Handle::current(),
@@ -3740,7 +3741,7 @@ mod tests {
             hid_match(),
             PluginIo::Stream {
                 transport: Arc::new(MockTransport::empty()),
-                bulk: None,
+                usb: None,
             },
             tokio::runtime::Handle::current(),
             Vec::<Permission>::new(),

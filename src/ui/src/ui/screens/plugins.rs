@@ -1985,6 +1985,7 @@ fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'
     use halod_shared::types::Permission;
     match perm {
         Permission::Hid => "HID device access".into(),
+        Permission::Usb => "USB device access".into(),
         Permission::Hwmon => "Hardware monitoring".into(),
         Permission::Lpcio => "LPC/SuperIO access".into(),
         Permission::AmdSmn => "AMD SMN access".into(),
@@ -2003,6 +2004,7 @@ fn permission_description(perm: halod_shared::types::Permission) -> std::borrow:
     use halod_shared::types::Permission;
     match perm {
         Permission::Hid => "Lets the plugin communicate with the matching HID device and receive its input reports.".into(),
+        Permission::Usb => "Lets the plugin claim only its declared USB devices and use allowlisted endpoints and bounded control transfers.".into(),
         Permission::Hwmon => "Lets the plugin access the selected Linux hardware-monitoring device, including approved fan controls.".into(),
         Permission::Lpcio => "Lets the plugin use the typed broker interface for motherboard SuperIO hardware.".into(),
         Permission::AmdSmn => "Lets the plugin read supported AMD SMN registers through the broker.".into(),

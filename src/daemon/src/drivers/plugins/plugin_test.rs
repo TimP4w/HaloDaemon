@@ -5,10 +5,8 @@
 //! daemon owns the Lua worker + transport machinery here; the test *cases*
 //! live in the plugin repo, one `test.lua` per package.
 //!
-//! Scope today: `hid`/`tcp`-transport (`PluginIo::Stream`) device plugins,
-//! exercising `initialize()` and `apply()` (static color) against the first
-//! declared device. SMBus/usb_control support can be added the same way
-//! (a new recording backend + `PluginIo` arm) when a package needs it.
+//! Covers HID/TCP streams and scoped USB endpoint/control collections against
+//! the first declared device without opening host hardware.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -18,6 +16,7 @@ use async_trait::async_trait;
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 
 use crate::drivers::chain::ChainAdapter;
+use crate::drivers::transports::usb::{UsbCollection, UsbControlResult};
 use crate::drivers::transports::{Transport, TransportEvent};
 use crate::drivers::{Metered, RgbCapability};
 use std::collections::HashMap;
@@ -25,7 +24,7 @@ use std::collections::HashMap;
 use halod_shared::types::{EffectParamValue, RgbColor, RgbState, WriteRateLimit, WriteRateStatus};
 
 use super::device::LuaDevice;
-use super::manifest::{parse_manifest_from_dir, PluginManifest};
+use super::manifest::{parse_manifest_from_dir, PluginManifest, UsbConfig};
 use super::transport::PluginIo;
 use super::worker::{DevMatch, PluginHandle};
 
@@ -151,6 +150,150 @@ impl Transport for RecordingStream {
 
     fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
         self.rate.set_limit(limit);
+    }
+}
+
+struct UsbWriteRecord {
+    device: String,
+    endpoint: Option<u8>,
+    request_type: Option<u8>,
+    request: Option<u8>,
+    data: Vec<u8>,
+}
+
+struct RecordingUsb {
+    config: UsbConfig,
+    written: Mutex<Vec<UsbWriteRecord>>,
+    reads: Mutex<std::collections::VecDeque<Vec<u8>>>,
+    rate: Metered<()>,
+}
+
+impl RecordingUsb {
+    fn new(config: UsbConfig, reads: Vec<Vec<u8>>) -> Self {
+        Self {
+            config,
+            written: Mutex::new(Vec::new()),
+            reads: Mutex::new(reads.into()),
+            rate: Metered::new((), None),
+        }
+    }
+    fn device(&self, id: Option<&str>) -> Result<&super::manifest::UsbDeviceConfig> {
+        let id = id.unwrap_or("primary");
+        self.config
+            .devices
+            .iter()
+            .find(|d| d.id == id)
+            .ok_or_else(|| anyhow::anyhow!("unknown USB device '{id}'"))
+    }
+    fn scripted_read(&self, length: usize) -> Result<Vec<u8>> {
+        let mut data = self
+            .reads
+            .lock()
+            .expect("recording USB poisoned")
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("no more scripted USB reads"))?;
+        data.truncate(length);
+        Ok(data)
+    }
+}
+
+impl UsbCollection for RecordingUsb {
+    fn write(
+        &self,
+        device_id: Option<&str>,
+        endpoint: u8,
+        data: &[u8],
+        timeout_ms: u64,
+    ) -> Result<usize> {
+        let device = self.device(device_id)?;
+        let policy = device
+            .endpoints
+            .iter()
+            .find(|e| e.address == endpoint)
+            .ok_or_else(|| anyhow::anyhow!("USB endpoint outside recording allowlist"))?;
+        if endpoint & 0x80 != 0
+            || data.len() > policy.max_transfer_size
+            || timeout_ms == 0
+            || timeout_ms > policy.max_timeout_ms
+        {
+            anyhow::bail!("USB recording write exceeds endpoint policy");
+        }
+        self.rate.write_access_blocking(data.len())?;
+        self.written
+            .lock()
+            .expect("recording USB poisoned")
+            .push(UsbWriteRecord {
+                device: device.id.clone(),
+                endpoint: Some(endpoint),
+                request_type: None,
+                request: None,
+                data: data.to_vec(),
+            });
+        Ok(data.len())
+    }
+    fn read(
+        &self,
+        device_id: Option<&str>,
+        endpoint: u8,
+        length: usize,
+        timeout_ms: u64,
+    ) -> Result<Vec<u8>> {
+        let device = self.device(device_id)?;
+        let policy = device
+            .endpoints
+            .iter()
+            .find(|e| e.address == endpoint)
+            .ok_or_else(|| anyhow::anyhow!("USB endpoint outside recording allowlist"))?;
+        if endpoint & 0x80 == 0
+            || length > policy.max_transfer_size
+            || timeout_ms == 0
+            || timeout_ms > policy.max_timeout_ms
+        {
+            anyhow::bail!("USB recording read exceeds endpoint policy");
+        }
+        self.scripted_read(length)
+    }
+    fn control(
+        &self,
+        device_id: Option<&str>,
+        request_type: u8,
+        request: u8,
+        _value: u16,
+        _index: u16,
+        bytes: &[u8],
+        read_length: usize,
+        timeout_ms: u64,
+    ) -> Result<UsbControlResult> {
+        let device = self.device(device_id)?;
+        let policy = device
+            .control
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("USB control outside recording allowlist"))?;
+        let length = bytes.len().max(read_length);
+        if length > policy.max_transfer_size
+            || timeout_ms == 0
+            || timeout_ms > policy.max_timeout_ms
+        {
+            anyhow::bail!("USB recording control exceeds policy");
+        }
+        if request_type & 0x80 != 0 {
+            return Ok(UsbControlResult::Read(self.scripted_read(read_length)?));
+        }
+        self.rate.write_access_blocking(bytes.len())?;
+        self.written
+            .lock()
+            .expect("recording USB poisoned")
+            .push(UsbWriteRecord {
+                device: device.id.clone(),
+                endpoint: None,
+                request_type: Some(request_type),
+                request: Some(request),
+                data: bytes.to_vec(),
+            });
+        Ok(UsbControlResult::Written(bytes.len()))
+    }
+    fn rate_status(&self) -> WriteRateStatus {
+        self.rate.status()
     }
 }
 
@@ -293,7 +436,7 @@ fn open_integration(
         manifest.module_sources.clone(),
         PluginIo::Stream {
             transport: recording.clone() as Arc<dyn Transport>,
-            bulk: None,
+            usb: None,
         },
         DevMatch {
             transport: "tcp".into(),
@@ -409,9 +552,9 @@ fn open_device(
         .devices
         .first()
         .context("plugin declares no devices")?;
-    if !matches!(spec.transport.as_str(), "hid" | "tcp") {
+    if !matches!(spec.transport.as_str(), "hid" | "tcp" | "usb") {
         anyhow::bail!(
-            "plugin-test harness only supports hid/tcp transports today (got '{}')",
+            "plugin-test harness only supports hid/tcp/usb transports today (got '{}')",
             spec.transport
         );
     }
@@ -424,6 +567,11 @@ fn open_device(
         reads_from_spec(&spec_table),
         companion,
     ));
+    let usb_recording = manifest
+        .transports
+        .usb
+        .clone()
+        .map(|config| Arc::new(RecordingUsb::new(config, reads_from_spec(&spec_table))));
     let pid = spec_table
         .as_ref()
         .and_then(|table| table.get::<Option<u16>>("pid").ok().flatten())
@@ -447,9 +595,15 @@ fn open_device(
         manifest,
         spec,
         dev_match,
-        PluginIo::Stream {
-            transport: recording.clone() as Arc<dyn Transport>,
-            bulk: None,
+        if spec.transport == "usb" {
+            PluginIo::Usb(usb_recording.clone().expect("USB manifest config"))
+        } else {
+            PluginIo::Stream {
+                transport: recording.clone() as Arc<dyn Transport>,
+                usb: usb_recording
+                    .clone()
+                    .map(|usb| usb as Arc<dyn UsbCollection>),
+            }
         },
         handle.clone(),
         // The harness grants every declared permission (so gated transports
@@ -475,6 +629,38 @@ fn open_device(
                         .block_on(crate::drivers::Device::initialize(&*device))
                         .map_err(mlua_err)
                 })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "lcd_stream_frame",
+                lua.create_function(
+                    move |_,
+                          (_self, bytes, width, height, _rotation, _raw, _brightness): (
+                        Table,
+                        Table,
+                        u32,
+                        u32,
+                        u32,
+                        bool,
+                        u8,
+                    )| {
+                        let rgba = bytes
+                            .sequence_values::<u8>()
+                            .collect::<mlua::Result<Vec<_>>>()?;
+                        handle
+                            .block_on(crate::drivers::LcdCapability::stream_frame(
+                                &*device, &rgba, width, height,
+                            ))
+                            .map_err(mlua_err)
+                    },
+                )
                 .anyhow()?,
             )
             .anyhow()?;
@@ -765,6 +951,50 @@ fn open_device(
     }
 
     {
+        let recording = recording.clone();
+        dev_table
+            .set(
+                "queue_read",
+                lua.create_function(move |_, (_self, bytes): (Table, Table)| {
+                    let data = bytes
+                        .sequence_values::<u8>()
+                        .collect::<mlua::Result<Vec<_>>>()?;
+                    recording
+                        .reads
+                        .lock()
+                        .expect("recording poisoned")
+                        .push_back(data);
+                    Ok(())
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    if let Some(usb) = usb_recording.clone() {
+        dev_table
+            .set(
+                "usb_writes",
+                lua.create_function(move |lua, _self: Table| {
+                    let written = usb.written.lock().expect("recording USB poisoned");
+                    let out = lua.create_table()?;
+                    for (i, rec) in written.iter().enumerate() {
+                        let entry = lua.create_table()?;
+                        entry.set("device", rec.device.clone())?;
+                        entry.set("endpoint", rec.endpoint)?;
+                        entry.set("request_type", rec.request_type)?;
+                        entry.set("request", rec.request)?;
+                        entry.set("data", lua.create_sequence_from(rec.data.iter().copied())?)?;
+                        out.set(i + 1, entry)?;
+                    }
+                    Ok(out)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
         let device = device.clone();
         let handle = handle.clone();
         dev_table
@@ -786,6 +1016,7 @@ fn open_device(
 
     {
         let recording = recording.clone();
+        let usb = usb_recording.clone();
         dev_table
             .set(
                 "clear",
@@ -795,6 +1026,9 @@ fn open_device(
                         .lock()
                         .expect("recording poisoned")
                         .clear();
+                    if let Some(usb) = &usb {
+                        usb.written.lock().expect("recording USB poisoned").clear();
+                    }
                     Ok(())
                 })
                 .anyhow()?,

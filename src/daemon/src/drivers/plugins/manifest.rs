@@ -99,28 +99,80 @@ impl Default for TcpConfig {
     }
 }
 
-/// A secondary USB vendor-control device a plugin bundles alongside its matched
-/// device, so several physical chips present as one merged device. Opened by
-/// VID/PID and reached from Lua by `id` (the matched device is the unnamed
-/// primary endpoint).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsbTransferType {
+    Bulk,
+    Interrupt,
+}
+
+fn default_usb_transfer_size() -> usize {
+    1024 * 1024
+}
+fn default_usb_timeout_ms() -> u64 {
+    10_000
+}
+
+/// One endpoint a plugin may use. The address includes the USB direction bit;
+/// undeclared endpoint addresses are never exposed to Lua.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsbControlEndpoint {
+#[serde(deny_unknown_fields)]
+pub struct UsbEndpointConfig {
+    pub address: u8,
+    #[serde(rename = "type")]
+    pub transfer_type: UsbTransferType,
+    #[serde(default = "default_usb_transfer_size")]
+    pub max_transfer_size: usize,
+    #[serde(default = "default_usb_timeout_ms")]
+    pub max_timeout_ms: u64,
+}
+
+/// Opt-in policy for endpoint-zero transfers on one named USB device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbControlConfig {
+    #[serde(default = "default_usb_transfer_size")]
+    pub max_transfer_size: usize,
+    #[serde(default = "default_usb_timeout_ms")]
+    pub max_timeout_ms: u64,
+}
+
+/// A named physical USB device. `primary` inherits VID/PID and physical
+/// identity from discovery; companion devices declare their own VID/PID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbDeviceConfig {
     pub id: String,
+    #[serde(default)]
+    pub vid: Option<u16>,
+    #[serde(default)]
+    pub pid: Option<u16>,
+    #[serde(default)]
+    pub interface: Option<u8>,
+    #[serde(default)]
+    pub alternate_setting: Option<u8>,
+    #[serde(default)]
+    pub endpoints: Vec<UsbEndpointConfig>,
+    #[serde(default)]
+    pub control: Option<UsbControlConfig>,
+}
+
+/// General endpoint-oriented USB authority attached to either a USB-primary
+/// worker or a composite device whose primary stream remains HID.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbConfig {
+    #[serde(default)]
+    pub devices: Vec<UsbDeviceConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbMatch {
     pub vid: u16,
     pub pid: u16,
     #[serde(default)]
     pub interface: u8,
-}
-
-/// USB vendor-control transport parameters. `interface` claims the matched
-/// device's interface; `endpoints` lists any extra control devices the plugin
-/// drives (the DDC controller + Ambiglow LED controller of one monitor, say).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct UsbControlConfig {
-    #[serde(default)]
-    pub interface: u8,
-    #[serde(default)]
-    pub endpoints: Vec<UsbControlEndpoint>,
 }
 
 /// Executables a command plugin may launch. Names are deliberately bare
@@ -151,7 +203,7 @@ pub struct TransportsConfig {
     #[serde(default)]
     pub tcp: Option<TcpConfig>,
     #[serde(default)]
-    pub usb_control: Option<UsbControlConfig>,
+    pub usb: Option<UsbConfig>,
     #[serde(default)]
     pub command: Option<CommandConfig>,
     #[serde(default)]
@@ -164,7 +216,7 @@ impl TransportsConfig {
     fn is_empty(&self) -> bool {
         self.hid.is_none()
             && self.tcp.is_none()
-            && self.usb_control.is_none()
+            && self.usb.is_none()
             && self.command.is_none()
             && self.amd_smn.is_none()
             && self.lpcio.is_none()
@@ -464,7 +516,7 @@ pub struct DeviceMatch {
     #[serde(default)]
     pub hid: Option<HidMatch>,
     #[serde(default)]
-    pub usb_control: Option<UsbControlMatch>,
+    pub usb: Option<UsbMatch>,
     #[serde(default)]
     pub smbus: Option<SmbusMatch>,
     #[serde(default)]
@@ -484,17 +536,6 @@ pub struct DeviceMatch {
 pub struct HwmonMatch {
     #[serde(default)]
     pub any: bool,
-}
-
-/// USB vendor-control hardware identity. The transport configuration declares
-/// endpoint behavior; this match only selects the primary physical device.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UsbControlMatch {
-    pub vid: u16,
-    pub pid: u16,
-    #[serde(default)]
-    pub interface: u8,
 }
 
 /// A command-backed device is identified by the exact executable that reports
@@ -578,7 +619,7 @@ pub struct HidMatch {
 impl DeviceMatch {
     fn count(&self) -> usize {
         usize::from(self.hid.is_some())
-            + usize::from(self.usb_control.is_some())
+            + usize::from(self.usb.is_some())
             + usize::from(self.smbus.is_some())
             + usize::from(self.hwmon.is_some())
             + usize::from(self.command.is_some())
@@ -1042,6 +1083,9 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 if spec.transport == "hid" && !manifest.permissions.contains(&Permission::Hid) {
                     bail!("a device using the hid transport must declare the `hid` permission");
                 }
+                if spec.transport == "usb" && !manifest.permissions.contains(&Permission::Usb) {
+                    bail!("a device using the usb transport must declare the `usb` permission");
+                }
                 let required_permission = match spec.transport.as_str() {
                     "hwmon" => Some(Permission::Hwmon),
                     "command" => Some(Permission::Command),
@@ -1089,6 +1133,9 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     }
     if manifest.transports.lpcio.is_some() && !manifest.permissions.contains(&Permission::Lpcio) {
         bail!("an lpcio transport requires the 'lpcio' permission to be declared");
+    }
+    if manifest.transports.usb.is_some() && !manifest.permissions.contains(&Permission::Usb) {
+        bail!("a usb transport requires the 'usb' permission to be declared");
     }
     validate_component("plugin id", &manifest.plugin_id)?;
     Ok(())
@@ -1153,14 +1200,14 @@ fn normalize_device_matches(manifest: &mut PluginManifest) -> Result<()> {
             device.interface = hid.interface;
             device.max_bytes_per_sec = hid.max_bytes_per_sec;
             device.generic_hid = hid.any;
-        } else if let Some(usb_control) = &device.r#match.usb_control {
-            if usb_control.vid == 0 || usb_control.pid == 0 {
-                bail!("usb_control match requires non-zero vid and pid");
+        } else if let Some(usb) = &device.r#match.usb {
+            if usb.vid == 0 || usb.pid == 0 {
+                bail!("usb match requires non-zero vid and pid");
             }
-            device.transport = "usb_control".to_owned();
-            device.vid = Some(usb_control.vid);
-            device.pid = Some(usb_control.pid);
-            device.interface = Some(usb_control.interface.into());
+            device.transport = "usb".to_owned();
+            device.vid = Some(usb.vid);
+            device.pid = Some(usb.pid);
+            device.interface = Some(usb.interface.into());
         } else if let Some(smbus) = &device.r#match.smbus {
             device.transport = "smbus".to_owned();
             device.bus = Some(smbus.bus.clone());
@@ -1447,30 +1494,73 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
             }
         }
     }
-    if let Some(usb) = &manifest.transports.usb_control {
+    if let Some(usb) = &manifest.transports.usb {
         if manifest.plugin_type != PluginKind::Device {
-            bail!("usb_control transport is only valid for a device plugin");
+            bail!("usb transport is only valid for a device plugin");
         }
-        check_count(
-            "usb_control endpoints",
-            usb.endpoints.len(),
-            MAX_USB_ENDPOINTS,
-        )?;
-        let mut seen = HashSet::new();
-        for ep in &usb.endpoints {
-            validate_component("usb_control endpoint id", &ep.id)?;
-            if !seen.insert(&ep.id) {
+        check_count("usb devices", usb.devices.len(), MAX_USB_ENDPOINTS)?;
+        if usb.devices.is_empty() {
+            bail!("usb transport must declare a named `primary` device");
+        }
+        let mut device_ids = HashSet::new();
+        for device in &usb.devices {
+            validate_component("usb device id", &device.id)?;
+            if !device_ids.insert(device.id.as_str()) {
+                bail!("usb device id '{}' is declared more than once", device.id);
+            }
+            if device.id == "primary" {
+                if device.vid.is_some() || device.pid.is_some() {
+                    bail!("usb device `primary` inherits vid/pid from discovery");
+                }
+            } else if device.vid.is_none_or(|v| v == 0) || device.pid.is_none_or(|p| p == 0) {
                 bail!(
-                    "usb_control endpoint id '{}' is declared more than once",
-                    ep.id
+                    "companion usb device '{}' requires non-zero vid and pid",
+                    device.id
                 );
             }
-            if ep.vid == 0 || ep.pid == 0 {
+            if device.endpoints.is_empty() && device.control.is_none() {
                 bail!(
-                    "usb_control endpoint '{}' must declare a non-zero vid and pid",
-                    ep.id
+                    "usb device '{}' declares no endpoint or control authority",
+                    device.id
                 );
             }
+            let mut addresses = HashSet::new();
+            for endpoint in &device.endpoints {
+                if !addresses.insert(endpoint.address) {
+                    bail!(
+                        "usb device '{}' repeats endpoint 0x{:02x}",
+                        device.id,
+                        endpoint.address
+                    );
+                }
+                if endpoint.address & 0x0f == 0 || endpoint.address & 0x70 != 0 {
+                    bail!("usb endpoint address 0x{:02x} is invalid", endpoint.address);
+                }
+                if endpoint.max_transfer_size == 0 || endpoint.max_transfer_size > 16 * 1024 * 1024
+                {
+                    bail!(
+                        "usb endpoint 0x{:02x} max_transfer_size must be 1..=16777216",
+                        endpoint.address
+                    );
+                }
+                if !(1..=60_000).contains(&endpoint.max_timeout_ms) {
+                    bail!(
+                        "usb endpoint 0x{:02x} max_timeout_ms must be 1..=60000",
+                        endpoint.address
+                    );
+                }
+            }
+            if let Some(control) = &device.control {
+                if control.max_transfer_size == 0 || control.max_transfer_size > 1024 * 1024 {
+                    bail!("usb control max_transfer_size must be 1..=1048576");
+                }
+                if !(1..=60_000).contains(&control.max_timeout_ms) {
+                    bail!("usb control max_timeout_ms must be 1..=60000");
+                }
+            }
+        }
+        if !device_ids.contains("primary") {
+            bail!("usb transport must declare a device named `primary`");
         }
     }
     if let Some(command) = &manifest.transports.command {
@@ -1923,18 +2013,57 @@ mod tests {
     }
 
     #[test]
-    fn directory_plugin_uses_nested_usb_control_match() {
+    fn directory_plugin_uses_nested_usb_match() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("nested_usb");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: nested_usb\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: Panel\n    type: monitor\n    match:\n      usb_control: { vid: 0x1234, pid: 0x5678 }\ntransports:\n  usb_control: { interface: 0 }\n",
+            "id: nested_usb\npermissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: Panel\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pid: 0x5678, interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
         let manifest = parse_manifest_from_dir(&dir).unwrap();
-        assert_eq!(manifest.devices[0].transport, "usb_control");
+        assert_eq!(manifest.devices[0].transport, "usb");
         assert_eq!(manifest.devices[0].vid, Some(0x1234));
+    }
+
+    #[test]
+    fn usb_manifest_requires_permission_and_primary_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "usb_no_permission",
+            "capabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 1, pid: 2, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(format!("{error:#}").contains("usb` permission"));
+    }
+
+    #[test]
+    fn usb_manifest_rejects_undeclared_or_duplicate_endpoint_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "usb_bad_endpoints",
+            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 1, pid: 2, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        endpoints:\n          - { address: 0x02, type: bulk, max_transfer_size: 64, max_timeout_ms: 1000 }\n          - { address: 0x02, type: interrupt, max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(format!("{error:#}").contains("repeats endpoint 0x02"));
+    }
+
+    #[test]
+    fn removed_usb_control_manifest_field_has_no_compatibility_shim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "old_usb",
+            "capabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb_control: { vid: 1, pid: 2 } }\n",
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field `usb_control`"));
     }
 }

@@ -9,4 +9,4 @@ mod hid;
 mod lpcio;
 mod smbus;
 pub(crate) mod tcp;
-mod usb_control;
+pub(crate) mod usb;

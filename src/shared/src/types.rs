@@ -768,6 +768,9 @@ pub struct AppState {
 pub enum Permission {
     /// Open a matched HID endpoint and receive its input reports.
     Hid,
+    /// Claim explicitly declared USB interfaces and use only their allowlisted
+    /// bulk/interrupt endpoints or bounded control-transfer policy.
+    Usb,
     /// Enumerate and access the scoped Linux hwmon handle selected by discovery.
     Hwmon,
     /// Access the typed, broker-backed LPC/SuperIO operations.
