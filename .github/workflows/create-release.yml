@@ -425,7 +425,7 @@ jobs:
 
       - name: Stage release files
         shell: pwsh
-          run: ./packaging/windows/stage-release.ps1 -Ucrt64 "$env:UCRT64" -PluginLicensesDir plugin-bundle
+        run: ./packaging/windows/stage-release.ps1 -Ucrt64 "$env:UCRT64" -PluginLicensesDir plugin-bundle
 
       - name: Install Inno Setup
         shell: pwsh
