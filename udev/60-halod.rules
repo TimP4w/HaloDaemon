@@ -1,98 +1,15 @@
-# HaloDaemon udev rules
+# HaloDaemon base udev rules
 #
-# Install:
-#   sudo cp 60-halod.rules /etc/udev/rules.d/
+# Device-specific HID and USB rules are derived from installed plugin
+# manifests. Print the complete assembled file with:
+#
+#   halod udev-rules
+#
+# Install or refresh it without running HaloDaemon as root:
+#
+#   halod udev-rules | sudo tee /etc/udev/rules.d/60-halod.rules >/dev/null
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger
-#
-# USB peripherals (HID, raw USB, uinput) are granted to the user of the active
-# local session via the "uaccess" tag — no group membership required.
-#
-# SMBus/I2C access (ASUS/ENE DRAM and GPU RGB) still needs the 'i2c' group:
-#   sudo usermod -aG i2c $USER
-#   (log out and back in for changes to take effect)
-
-# ─── NZXT ─────────────────────────────────────────────────────────────────────
-
-# NZXT Control Hub
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2022", TAG+="uaccess"
-
-# NZXT Kraken X53/X63/X73
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2007", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2014", TAG+="uaccess"
-# NZXT Kraken Z53/63/73
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3008", TAG+="uaccess"
-# NZXT Kraken Elite 2023
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", TAG+="uaccess"
-# NZXT Kraken 2023
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300e", TAG+="uaccess"
-# NZXT Kraken Elite V2
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3012", TAG+="uaccess"
-# NZXT Kraken Plus 2024
-KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3014", TAG+="uaccess"
-
-# USB device nodes for Kraken models with LCD panels (needed for libusb bulk transfers).
-# The hidraw rules above only grant access to the HID interface; the LCD engine
-# also opens the raw USB device via rusb for bulk OUT transfers.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3008", TAG+="uaccess"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", TAG+="uaccess"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300e", TAG+="uaccess"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3012", TAG+="uaccess"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3014", TAG+="uaccess"
-
-# ─── Logitech ─────────────────────────────────────────────────────────────────
-
-# Logitech Lightspeed Receiver (manages wireless G502 X Plus, G PRO X TKL)
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c547", TAG+="uaccess"
-# Logitech G502 X Plus (wired)
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c095", TAG+="uaccess"
-# Logitech G502 Hero (wired-only)
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c08b", TAG+="uaccess"
-# Logitech G PRO X TKL (wired)
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c352", TAG+="uaccess"
-# Logitech G560 Gaming Speaker
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a78", TAG+="uaccess"
-# Logitech LIGHTSPEED gaming headsets (PRO X / PRO X 2 / G733 / G535 / G935 / G533)
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0aba", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0af7", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0ab5", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0afe", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0ac4", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a87", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a66", TAG+="uaccess"
-
-# ─── SteelSeries ──────────────────────────────────────────────────────────────
-
-# SteelSeries Arctis Nova Pro Wireless
-KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12e0", TAG+="uaccess"
-# SteelSeries Arctis Nova Pro X Wireless
-KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12e5", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="225d", TAG+="uaccess"
-
-# ─── ASUS ─────────────────────────────────────────────────────────────────────
-
-# ASUS Aura USB controllers (motherboard RGB headers)
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1866", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1867", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1872", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18a3", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18a5", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18f3", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1939", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="19af", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1a30", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1a6c", TAG+="uaccess"
-# ASUS X870E
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1aa6", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1b3b", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1bed", TAG+="uaccess"
-
-# ─── Philips ──────────────────────────────────────────────────────────────────
-
-# Philips Evnia 49 Ultrawide — USB DDC-CI interface (via USB hub chip)
-SUBSYSTEM=="usb", ATTRS{idVendor}=="2109", ATTRS{idProduct}=="8884", TAG+="uaccess"
-# Philips Evnia 49 Ultrawide — Ambiglow rear LEDs (ENE Technology RGB controller)
-SUBSYSTEM=="usb", ATTRS{idVendor}=="0cf2", ATTRS{idProduct}=="b201", TAG+="uaccess"
 
 # ─── uinput (key remapper / action executor) ──────────────────────────────────
 
@@ -102,28 +19,10 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="0cf2", ATTRS{idProduct}=="b201", TAG+="uacce
 # the uinput module is loaded; opening it then autoloads the module.
 KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
 
-# ─── SMBus / I2C (ASUS/ENE DRAM + GPU RGB) ────────────────────────────────────
-
-# Grant I2C bus access for SMBus RGB devices.
-# User must be in the 'i2c' group: sudo usermod -aG i2c $USER
-SUBSYSTEM=="i2c-dev", GROUP="i2c", MODE="0660"
-
 # ─── hwmon PWM fan control ────────────────────────────────────────────────────
 
-# Grant write access to hwmon PWM control files (pwmN, pwmN_enable) so the
-# daemon can run without root. Covers nct6775, it87, and other SuperIO drivers.
-# The shell glob expands pwm1..pwm7 and their _enable counterparts.
-#
-# These files are scoped to the `halod` group (mode 0664) rather than made
-# world-writable: any local user with write access could otherwise drive a fan
-# or pump to 0. 
-#   sudo groupadd -f halod && sudo usermod -aG halod $USER
-# (uaccess is not usable here — hwmon nodes have no seat association.)
-SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ATTR{name}=="nct6775", ACTION=="add|change", RUN{program}+="/bin/sh -c 'chgrp halod /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; chmod g+w /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; true'"
-SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ATTR{name}=="nct6776", ACTION=="add|change", RUN{program}+="/bin/sh -c 'chgrp halod /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; chmod g+w /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; true'"
-SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ATTR{name}=="nct6796", ACTION=="add|change", RUN{program}+="/bin/sh -c 'chgrp halod /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; chmod g+w /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; true'"
-SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ATTR{name}=="nct6798", ACTION=="add|change", RUN{program}+="/bin/sh -c 'chgrp halod /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; chmod g+w /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; true'"
-SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ATTR{name}=="nct6799", ACTION=="add|change", RUN{program}+="/bin/sh -c 'chgrp halod /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; chmod g+w /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; true'"
-SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ATTR{name}=="it8686", ACTION=="add|change", RUN{program}+="/bin/sh -c 'chgrp halod /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; chmod g+w /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; true'"
-SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ATTR{name}=="it8720", ACTION=="add|change", RUN{program}+="/bin/sh -c 'chgrp halod /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; chmod g+w /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; true'"
-SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ATTR{name}=="it8728", ACTION=="add|change", RUN{program}+="/bin/sh -c 'chgrp halod /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; chmod g+w /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; true'"
+# Grant write access to pwm1..pwm7 and their optional _enable siblings,
+# independent of the hwmon driver's chip name. These files are scoped to the
+# `halod` group; uaccess is not usable because hwmon nodes have no seat
+# association.
+SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ACTION=="add|change", RUN{program}+="/bin/sh -c 'chgrp halod /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; chmod g+w /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; true'"

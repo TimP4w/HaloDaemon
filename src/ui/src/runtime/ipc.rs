@@ -83,6 +83,7 @@ pub struct UiRx {
     pub repo_updates: watch::Receiver<Vec<RepoUpdateStatus>>,
     /// Latest per-plugin update-check result; empty until one is requested.
     pub plugin_updates: watch::Receiver<Vec<PluginUpdateStatus>>,
+    pub udev_rules: watch::Receiver<Option<halod_shared::types::UdevRulesStatus>>,
     /// Remote branch lists keyed by the repo URL they were fetched for; empty
     /// until the Add-repository picker requests one via `ListRepoBranches`.
     pub repo_branches: watch::Receiver<HashMap<String, Vec<String>>>,
@@ -108,6 +109,7 @@ struct UiTx {
     plugin_assets: watch::Sender<HashMap<String, Vec<u8>>>,
     repo_updates: watch::Sender<Vec<RepoUpdateStatus>>,
     plugin_updates: watch::Sender<Vec<PluginUpdateStatus>>,
+    udev_rules: watch::Sender<Option<halod_shared::types::UdevRulesStatus>>,
     repo_branches: watch::Sender<HashMap<String, Vec<String>>>,
     lcd_upload: watch::Sender<Option<LcdUploadProgress>>,
     lcd_template: watch::Sender<Option<(String, CustomTemplateDef)>>,
@@ -144,6 +146,7 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
     let (assets_s, assets_r) = watch::channel(HashMap::new());
     let (repo_updates_s, repo_updates_r) = watch::channel(Vec::new());
     let (plugin_updates_s, plugin_updates_r) = watch::channel(Vec::new());
+    let (udev_rules_s, udev_rules_r) = watch::channel(None);
     let (repo_branches_s, repo_branches_r) = watch::channel(HashMap::new());
     let (upload_s, upload_r) = watch::channel(None);
     let (template_s, template_r) = watch::channel(None);
@@ -161,6 +164,7 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
         plugin_assets: assets_s,
         repo_updates: repo_updates_s,
         plugin_updates: plugin_updates_s,
+        udev_rules: udev_rules_s,
         repo_branches: repo_branches_s,
         lcd_upload: upload_s,
         lcd_template: template_s,
@@ -178,6 +182,7 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
         plugin_assets: assets_r,
         repo_updates: repo_updates_r,
         plugin_updates: plugin_updates_r,
+        udev_rules: udev_rules_r,
         repo_branches: repo_branches_r,
         lcd_upload: upload_r,
         lcd_template: template_r,
@@ -269,6 +274,8 @@ where
     ] {
         write_cmd(stream, &cmd).await?;
     }
+    #[cfg(target_os = "linux")]
+    write_cmd(stream, &DaemonCommand::GetUdevRulesStatus).await?;
     stream.flush().await?;
 
     // Keepalive: the daemon drops any client that sends nothing for 60 s, so an
@@ -286,6 +293,8 @@ where
             biased;
             _ = heartbeat.tick() => {
                 write_cmd(stream, &DaemonCommand::Ping).await?;
+                #[cfg(target_os = "linux")]
+                write_cmd(stream, &DaemonCommand::GetUdevRulesStatus).await?;
                 stream.flush().await?;
             }
             cmd = cmd_rx.recv() => {
@@ -538,6 +547,14 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             repaint();
             return false;
         }
+        Some("udev_rules_status") => {
+            let status = value
+                .get("data")
+                .and_then(|data| serde_json::from_value(data.clone()).ok());
+            tx.udev_rules.send_replace(status);
+            repaint();
+            return false;
+        }
         Some("repo_branches") => {
             let url = value.get("url").and_then(|u| u.as_str());
             let branches: Option<Vec<String>> = value
@@ -606,6 +623,7 @@ mod tests {
             plugin_assets: watch::channel(HashMap::new()).0,
             repo_updates: watch::channel(Vec::new()).0,
             plugin_updates: watch::channel(Vec::new()).0,
+            udev_rules: watch::channel(None).0,
             repo_branches: watch::channel(HashMap::new()).0,
             lcd_upload: upload_s,
             lcd_template: watch::channel(None).0,
@@ -680,6 +698,18 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].slug, "foo");
         assert!(got[0].behind);
+    }
+
+    #[test]
+    fn udev_status_frame_lands_on_the_watch_channel() {
+        let (tx, _) = test_tx();
+        let mut rx = tx.udev_rules.subscribe();
+        let payload = br#"{"type":"udev_rules_status","data":{"supported":true,"current":false,"installed_path":"/usr/lib/udev/rules.d/60-halod.rules","generated_rule_count":43}}"#;
+        assert!(!handle_json(payload, &tx, &|| {}));
+        let got = rx.borrow_and_update().clone().unwrap();
+        assert!(got.supported);
+        assert!(!got.current);
+        assert_eq!(got.generated_rule_count, 43);
     }
 
     #[test]

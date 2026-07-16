@@ -114,6 +114,9 @@ pub struct PluginsUi {
     /// The open plugin-issue Details modal (title + detail), when the user
     /// clicked Details on a plugin's issue banner.
     issue_modal: Option<(String, String)>,
+    next_udev_status_check: f64,
+    udev_command_copied: bool,
+    udev_info_open: bool,
 }
 
 /// Failsafe: drop an update spinner after this long even if the daemon never
@@ -131,7 +134,17 @@ impl PluginsUi {
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
         repo_branches: &HashMap<String, Vec<String>>,
+        udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     ) {
+        let now = ui.input(|input| input.time);
+        #[cfg(target_os = "linux")]
+        if now >= self.next_udev_status_check {
+            ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::GetUdevRulesStatus,
+            );
+            self.next_udev_status_check = now + 5.0;
+        }
         self.selection = resolve_selection(
             self.selection.clone(),
             &state.plugins.plugins,
@@ -141,7 +154,7 @@ impl PluginsUi {
         self.sync_assets(ui.ctx(), cmd, &state.plugins.plugins, plugin_assets);
 
         widgets::page_frame(ui, |ui| {
-            self.body(ui, state, cmd, repo_updates, plugin_updates)
+            self.body(ui, state, cmd, repo_updates, plugin_updates, udev_status)
         });
 
         self.add_modal(ui.ctx(), cmd);
@@ -154,6 +167,9 @@ impl PluginsUi {
             if widgets::issue_modal(ui.ctx(), "plugin_issue_page", title, detail) {
                 self.issue_modal = None;
             }
+        }
+        if self.udev_info_open && udev_info_modal(ui.ctx()) {
+            self.udev_info_open = false;
         }
     }
 
@@ -215,6 +231,7 @@ impl PluginsUi {
         cmd: &CommandTx,
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
+        udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     ) {
         let title_resp = ui.label(
             egui::RichText::new(t!("plugins.title"))
@@ -233,6 +250,18 @@ impl PluginsUi {
                 .color(theme::TEXT_MUT),
         );
         ui.add_space(18.0);
+
+        if let Some(status) = udev_status.filter(|status| status.supported) {
+            match udev_rules_banner(ui, status, self.udev_command_copied) {
+                UdevBannerAction::Install => {
+                    ui.ctx().copy_text(udev_install_commands());
+                    self.udev_command_copied = true;
+                }
+                UdevBannerAction::Info => self.udev_info_open = true,
+                UdevBannerAction::None => {}
+            }
+            ui.add_space(18.0);
+        }
 
         reconcile_in_flight(
             &mut self.in_flight,
@@ -263,8 +292,8 @@ impl PluginsUi {
         }
 
         widgets::split_columns(ui, 320.0, 18.0, |left, right| {
-            self.list_column(left, state, cmd, repo_updates, plugin_updates);
-            self.detail_column(right, state, cmd, plugin_updates);
+            self.list_column(left, state, cmd, repo_updates, plugin_updates, udev_status);
+            self.detail_column(right, state, cmd, plugin_updates, udev_status);
         });
     }
 
@@ -277,6 +306,7 @@ impl PluginsUi {
         cmd: &CommandTx,
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
+        udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     ) {
         widgets::card(ui, |ui| {
             // Platform-unsupported plugins are hidden from this screen, so the
@@ -352,6 +382,14 @@ impl PluginsUi {
                             // An on-disk change only flags the row while the
                             // plugin is held disabled; re-enabling accepts it.
                             let needs_action = plugin_requires_regrant(p)
+                                || udev_status.is_some_and(|status| {
+                                    status.supported
+                                        && !status.current
+                                        && status
+                                            .plugins_requiring_update
+                                            .iter()
+                                            .any(|id| id == &p.id)
+                                })
                                 || plugin_updates.iter().any(|s| {
                                     s.plugin_id == p.id
                                         && (s.update_available || (s.on_disk_changed && !p.enabled))
@@ -491,6 +529,7 @@ impl PluginsUi {
         state: &AppState,
         cmd: &CommandTx,
         plugin_updates: &[PluginUpdateStatus],
+        udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     ) {
         match &self.selection {
             Selection::Plugin(id) => {
@@ -513,6 +552,17 @@ impl PluginsUi {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        if udev_status.is_some_and(|status| {
+                            status.supported
+                                && !status.current
+                                && status
+                                    .plugins_requiring_update
+                                    .iter()
+                                    .any(|item| item == id)
+                        }) {
+                            udev_plugin_warning_banner(ui);
+                            ui.add_space(10.0);
+                        }
                         widgets::card(ui, |ui| {
                             detail_body(
                                 ui,
@@ -1018,6 +1068,26 @@ impl PluginsUi {
             self.pending_consent = None;
         }
     }
+}
+
+fn udev_plugin_warning_banner(ui: &mut egui::Ui) {
+    egui::Frame::NONE
+        .fill(theme::a(theme::STAT_AMBER, 0.10))
+        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(14, 10))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_plugin_action"))
+                    .font(theme::semibold(12.0))
+                    .color(theme::STAT_AMBER),
+            );
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_plugin_action_sub"))
+                    .font(theme::body(11.0))
+                    .color(theme::TEXT_DIM),
+            );
+        });
 }
 
 /// Map a skipped absolute path back to one of the package layouts accepted by
@@ -2498,6 +2568,175 @@ fn update_all_banner(ui: &mut egui::Ui, count: usize, updating: bool) -> bool {
     clicked
 }
 
+fn udev_install_commands() -> String {
+    "halod udev-rules | sudo tee /etc/udev/rules.d/60-halod.rules >/dev/null\n\
+sudo udevadm control --reload-rules\n\
+sudo udevadm trigger"
+        .to_owned()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UdevBannerAction {
+    None,
+    Install,
+    Info,
+}
+
+fn udev_rules_banner(
+    ui: &mut egui::Ui,
+    status: &halod_shared::types::UdevRulesStatus,
+    copied: bool,
+) -> UdevBannerAction {
+    let mut action = UdevBannerAction::None;
+    let installed = status.installed_path.is_some();
+    let color = if status.current {
+        theme::STAT_GREEN
+    } else {
+        theme::STAT_AMBER
+    };
+    let (title, subtitle) = if status.current {
+        (
+            t!("plugins.udev_installed"),
+            t!(
+                "plugins.udev_installed_sub",
+                count = status.generated_rule_count,
+                path = status.installed_path.as_deref().unwrap_or_default()
+            ),
+        )
+    } else if installed {
+        (
+            t!("plugins.udev_outdated"),
+            t!(
+                "plugins.udev_outdated_sub",
+                count = status.generated_rule_count,
+                path = status.installed_path.as_deref().unwrap_or_default()
+            ),
+        )
+    } else {
+        (
+            t!("plugins.udev_missing"),
+            t!(
+                "plugins.udev_missing_sub",
+                count = status.generated_rule_count
+            ),
+        )
+    };
+    egui::Frame::NONE
+        .fill(theme::a(color, 0.10))
+        .stroke(Stroke::new(1.0, theme::a(color, 0.35)))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(title)
+                                .font(theme::semibold(12.5))
+                                .color(theme::TEXT),
+                        );
+                        ui.label(
+                            egui::RichText::new(subtitle)
+                                .font(theme::body(11.0))
+                                .color(theme::TEXT_MUT),
+                        );
+                    });
+                },
+                |ui| {
+                    if widgets::button(
+                        ui,
+                        &t!("plugins.udev_info"),
+                        ButtonKind::Ghost,
+                        Vec2::new(92.0, 32.0),
+                    )
+                    .clicked()
+                    {
+                        action = UdevBannerAction::Info;
+                    }
+                    ui.add_space(6.0);
+                    if !status.current {
+                        let label = if copied {
+                            t!("plugins.udev_copied")
+                        } else {
+                            t!("plugins.udev_generate")
+                        };
+                        if widgets::button(ui, &label, ButtonKind::Warn, Vec2::new(170.0, 32.0))
+                            .clicked()
+                        {
+                            action = UdevBannerAction::Install;
+                        }
+                    }
+                },
+            );
+        });
+    action
+}
+
+fn udev_info_modal(ctx: &egui::Context) -> bool {
+    let mut close = false;
+    let dismissed = widgets::dialog(
+        ctx,
+        "udev_rules_info",
+        &t!("plugins.udev_info_title"),
+        560.0,
+        |ui| {
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_info_intro"))
+                    .font(theme::body(12.0))
+                    .color(theme::TEXT_DIM),
+            );
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_info_scope_title"))
+                    .font(theme::semibold(12.0))
+                    .color(theme::TEXT),
+            );
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_info_scope"))
+                    .font(theme::body(12.0))
+                    .color(theme::TEXT_DIM),
+            );
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_info_install_title"))
+                    .font(theme::semibold(12.0))
+                    .color(theme::TEXT),
+            );
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_info_install"))
+                    .font(theme::body(12.0))
+                    .color(theme::TEXT_DIM),
+            );
+            ui.add_space(8.0);
+            egui::Frame::NONE
+                .fill(theme::a(egui::Color32::BLACK, 0.22))
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(udev_install_commands())
+                            .font(theme::mono(10.5))
+                            .color(theme::TEXT_DIM),
+                    );
+                });
+        },
+        |ui| {
+            if widgets::button(
+                ui,
+                &t!("plugins.issue_close"),
+                ButtonKind::Primary,
+                Vec2::new(100.0, 32.0),
+            )
+            .clicked()
+            {
+                close = true;
+            }
+        },
+    );
+    close || dismissed
+}
+
 /// Amber "Update available vX → vY / Update" banner in a plugin's detail. Never
 /// automatic.
 /// Banner shown when a plugin's on-disk content differs from its checked-out
@@ -3772,5 +4011,14 @@ mod tests {
             plugin_type_color(PluginKind::Device),
             plugin_type_color(PluginKind::Effect)
         );
+    }
+
+    #[test]
+    fn udev_install_command_generates_then_reloads_rules() {
+        let command = udev_install_commands();
+        assert!(command.contains("halod udev-rules"));
+        assert!(command.contains("/etc/udev/rules.d/60-halod.rules"));
+        assert!(command.contains("udevadm control --reload-rules"));
+        assert!(command.contains("udevadm trigger"));
     }
 }

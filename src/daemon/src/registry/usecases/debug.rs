@@ -196,7 +196,7 @@ fn portal_service_in_dirs(data_dirs: &str) -> bool {
 }
 
 /// True when a `/dev/i2c-*` node exists and is read/write openable now (covers a
-/// missing `i2c-dev` module or `i2c` group membership).
+/// missing `i2c-dev` module or `halod` group membership).
 #[cfg(target_os = "linux")]
 fn i2c_reachable() -> bool {
     let Ok(entries) = std::fs::read_dir("/dev") else {

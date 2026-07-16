@@ -94,6 +94,15 @@ pub async fn get_asset(
     Ok(())
 }
 
+/// Return current Linux udev-rule drift without modifying system files.
+pub async fn get_udev_rules_status(client: ClientHandle, app: Arc<AppState>) -> Result<()> {
+    client.send_json(&json!({
+        "type": "udev_rules_status",
+        "data": app.registry.udev_rules_status(),
+    }));
+    Ok(())
+}
+
 /// Replace a plugin's user-editable config values and reconcile its devices.
 pub async fn set_config(
     id: String,

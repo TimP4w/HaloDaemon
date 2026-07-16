@@ -46,8 +46,8 @@ operation object is valid only for the duration of the batch.
 
 ## Access requirements
 
-**Linux:** the user needs access to the system's I2C devices, normally through
-the `i2c` group and the HaloDaemon udev rules.
+**Linux:** generated HaloDaemon udev rules grant plugin-matching I2C adapters
+to the `halod` group. The user must be a member of that group.
 
 **Windows:** chipset SMBus access requires PawnIO. The non-elevated daemon sends
 scoped operations to the privileged HaloDaemon broker. GPU-bus availability

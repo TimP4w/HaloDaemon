@@ -1093,6 +1093,24 @@ pub struct PluginRecommendation {
     pub accessible: bool,
 }
 
+/// Whether the effective Linux udev file matches the rules assembled from the
+/// daemon baseline and currently installed plugins.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdevRulesStatus {
+    /// False on hosts where udev is not used.
+    pub supported: bool,
+    /// True when the highest-precedence installed `60-halod.rules` is byte-for-
+    /// byte equal to the daemon's current deterministic output.
+    pub current: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_path: Option<String>,
+    pub generated_rule_count: usize,
+    /// Plugins whose declared device rules are absent from the effective file.
+    /// Empty when the rules are current or when only the daemon baseline drifted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugins_requiring_update: Vec<String>,
+}
+
 /// One plugin as shown in the GUI's Plugins screen.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInfo {

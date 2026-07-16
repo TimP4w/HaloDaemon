@@ -35,6 +35,7 @@ pub(crate) mod requirements;
 mod sandbox;
 mod transport;
 mod transport_api;
+mod udev;
 mod worker;
 
 pub use device::LuaDevice;
@@ -201,6 +202,19 @@ fn write_recover<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 }
 
 impl Registry {
+    /// Render the daemon baseline plus every loaded Linux plugin's declarative
+    /// HID/USB/SMBus access rules. Disabled plugins remain included so permissions
+    /// are already available when the user enables one.
+    pub fn udev_rules(&self) -> String {
+        udev::assemble(&self.snapshot().manifests)
+    }
+
+    pub fn udev_rules_status(&self) -> halod_shared::types::UdevRulesStatus {
+        let snapshot = self.snapshot();
+        let manifests = &snapshot.manifests;
+        udev::status(&udev::assemble(manifests), manifests)
+    }
+
     /// The current registry snapshot. The lock is held only for the `Arc` clone,
     /// never across the caller's use of the data — so re-entrant reads can't deadlock.
     fn snapshot(&self) -> Arc<PluginState> {
@@ -216,6 +230,26 @@ impl Registry {
         f(&mut next);
         *guard = Arc::new(next);
     }
+}
+
+/// Assemble release rules from the exact signed repository bundle embedded in
+/// the daemon binary, without reading or modifying the user's plugin config.
+pub fn udev_rules_from_bundle(bytes: &[u8]) -> anyhow::Result<String> {
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("halod-udev-{}", uuid::Uuid::new_v4()));
+    let cleanup = Cleanup(root.clone());
+    halod_plugin_signing::extract_bundle(bytes, &root)?;
+    let registry = Registry::default();
+    registry.load_all_with_priority_repo(&root.join("__local__"), Some(&root), &[]);
+    let rules = registry.udev_rules();
+    drop(cleanup);
+    Ok(rules)
 }
 
 fn consent_satisfied_in(state: &PluginState, manifest: &PluginManifest) -> bool {

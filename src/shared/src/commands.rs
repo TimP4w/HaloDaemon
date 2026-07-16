@@ -123,6 +123,9 @@ pub enum DaemonCommand {
 
     // Misc / global
     Rediscover,
+    /// Report whether the effective Linux udev rules match the currently
+    /// installed plugin catalog.
+    GetUdevRulesStatus,
     /// Enable or disable a device plugin by id. Applies immediately and only
     /// reconciles devices owned by that plugin.
     SetPluginEnabled {
@@ -681,6 +684,12 @@ mod tests {
     fn rediscover_wire_format() {
         let v = roundtrip(&DaemonCommand::Rediscover);
         assert_eq!(v, json!({"type": "rediscover"}));
+    }
+
+    #[test]
+    fn get_udev_rules_status_wire_format() {
+        let value = roundtrip(&DaemonCommand::GetUdevRulesStatus);
+        assert_eq!(value, json!({"type": "get_udev_rules_status"}));
     }
 
     #[test]

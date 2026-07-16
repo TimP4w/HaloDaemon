@@ -2,7 +2,9 @@
 //! Left sidebar: workspace nav, live device list, and the daemon-health footer.
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{AppState, FanCurveStatus, PluginIssueKind, PluginUpdateStatus};
+use halod_shared::types::{
+    AppState, FanCurveStatus, PluginIssueKind, PluginUpdateStatus, UdevRulesStatus,
+};
 
 use crate::domain::models::device as model;
 use crate::domain::state::Page;
@@ -57,6 +59,10 @@ pub fn integrations_needing_action(state: &AppState) -> usize {
         .count()
 }
 
+fn udev_rules_need_action(status: Option<&UdevRulesStatus>) -> bool {
+    status.is_some_and(|status| status.supported && !status.current)
+}
+
 /// Whether the Plugins attention badge includes a real failure. Load warnings,
 /// updates, and consent prompts remain amber; connect/runtime/load failures use
 /// the same red severity color as their plugin issue banner.
@@ -102,8 +108,10 @@ pub fn sidebar(
     connected: bool,
     page: &mut Page,
     plugin_updates: &[PluginUpdateStatus],
+    udev_status: Option<&UdevRulesStatus>,
 ) {
-    let plugin_actions = plugins_needing_action(state, plugin_updates);
+    let plugin_actions = plugins_needing_action(state, plugin_updates)
+        + usize::from(udev_rules_need_action(udev_status));
     let plugin_errors = plugins_have_errors(state);
     let integration_actions = integrations_needing_action(state);
     let cooling_actions = cooling_needing_action(state);
@@ -561,6 +569,24 @@ mod tests {
         let mut state = AppState::default();
         state.plugins.plugins = vec![plugin("a", true), plugin("b", true)];
         assert_eq!(plugins_needing_action(&state, &[]), 0);
+    }
+
+    #[test]
+    fn udev_sidebar_attention_is_linux_supported_and_stale_only() {
+        let stale = UdevRulesStatus {
+            supported: true,
+            current: false,
+            ..Default::default()
+        };
+        assert!(udev_rules_need_action(Some(&stale)));
+
+        let current = UdevRulesStatus {
+            current: true,
+            ..stale.clone()
+        };
+        assert!(!udev_rules_need_action(Some(&current)));
+        assert!(!udev_rules_need_action(Some(&UdevRulesStatus::default())));
+        assert!(!udev_rules_need_action(None));
     }
 
     #[test]

@@ -31,6 +31,7 @@ impl App {
         // applied by each backend after `draw` — not here, so it isn't run twice.
         let connected = *self.ui.connected.borrow();
         let debug = self.ui.debug.borrow().clone();
+        let udev_rules = self.ui.udev_rules.borrow().clone();
         if self.ui.lcd_images.has_changed().unwrap_or_else(|_| {
             log::warn!("IPC lcd_images channel closed");
             false
@@ -301,6 +302,7 @@ impl App {
                     connected,
                     &mut self.page,
                     &self.plugin_updates_cache,
+                    udev_rules.as_ref(),
                 );
             });
 
@@ -400,6 +402,7 @@ impl App {
                             &self.repo_updates_cache,
                             &self.plugin_updates_cache,
                             &self.repo_branches_cache,
+                            udev_rules.as_ref(),
                         );
                     }
                     Page::Integrations => {

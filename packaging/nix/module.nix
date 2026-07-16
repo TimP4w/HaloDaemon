@@ -49,9 +49,8 @@ in
     i2c = {
       enable = lib.mkEnableOption ''
         SMBus / I2C access for chipset RGB (ASUS/ENE DRAM and GPU). Turns
-        on `hardware.i2c.enable`, which loads i2c-dev and creates the
-        `i2c` group — add your user to it with
-        `users.users.<you>.extraGroups = [ "i2c" ]`'';
+        on `hardware.i2c.enable`, which loads i2c-dev. Generated plugin
+        rules grant matching adapters to the `halod` group'';
 
       platform = lib.mkOption {
         type = lib.types.nullOr (
@@ -88,7 +87,8 @@ in
     ]
     ++ lib.optional cfg.enableGnomeExtension (mkHalodExtension pkgs);
 
-    # hidraw / uinput / i2c-dev access rules shipped by the package.
+    # hidraw / i2c-dev rules derived from embedded plugins, plus the daemon's
+    # uinput/hwmon baseline rules.
     services.udev.packages = [ cfg.package ];
 
     # hwmon PWM control files are scoped to this group (mode 0664) rather
@@ -96,9 +96,8 @@ in
     #   users.users.<you>.extraGroups = [ "halod" ];
     users.groups.halod = { };
 
-    # SMBus (DRAM + GPU RGB). hardware.i2c.enable loads i2c-dev and
-    # creates the `i2c` group — add your user with
-    #   users.users.<you>.extraGroups = [ "i2c" ];
+    # SMBus (DRAM + GPU RGB). hardware.i2c.enable loads i2c-dev; generated
+    # plugin rules grant matching adapters to the halod group above.
     hardware.i2c.enable = lib.mkIf cfg.i2c.enable true;
 
     # Chip-specific kernel modules, opt-in per board. i2c-dev itself is

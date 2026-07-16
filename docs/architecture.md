@@ -299,9 +299,9 @@ checklist (see the `add-device` skill and `CLAUDE.md` → *Adding a device*):
 4. **Supported-devices table** — add the row (Vendor, Model, VID:PID, Protocol link,
    Transport link, Platform) in [docs/supported-devices.md](supported-devices.md); this is the
    user-facing source of truth (linked from [README.md](../README.md)).
-5. **udev rule** (Linux) — add the VID:PID to
-   [udev/60-halod.rules](../udev/60-halod.rules), or the device isn't reachable
-   without root.
+5. **udev rule** (Linux) — add built-in-driver access to
+   [udev/60-halod.rules](../udev/60-halod.rules). Plugin HID/USB access is
+   instead derived from the manifest by `halod udev-rules`.
 6. **Docs** — new protocol/transport pages, and any kernel-module/PawnIO setup
    notes in [development.md](development.md).
 7. **Test** — exercise the new frame encode/decode and parsing. `MockDevice` in

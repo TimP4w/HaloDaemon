@@ -117,7 +117,8 @@ The usual workflow is:
 4. Document the protocol alongside the plugin and update the plugin repository
    index.
 5. If a Linux HID or USB device needs an ACL, add its VID:PID to
-   [`udev/60-halod.rules`](../udev/60-halod.rules) in this repository.
+   the plugin's HID/USB/SMBus declarations. Use `halod udev-rules` to print the
+   assembled baseline and installed-plugin rules.
 
 The authoritative authoring references are:
 

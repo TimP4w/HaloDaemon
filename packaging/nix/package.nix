@@ -97,10 +97,15 @@ pkgs.rustPlatform.buildRustPackage {
     export HALOD_OFFICIAL_PLUGIN_LICENSES=$PWD/plugin-bundle/official-plugins-licenses.txt
   '';
 
+  postBuild = ''
+    target/release/halod udev-rules --embedded \
+      > plugin-bundle/60-halod.rules
+  '';
+
   # Ship the udev rules so the NixOS module can install them via
   # services.udev.packages.
   postInstall = ''
-    install -Dm444 udev/60-halod.rules \
+    install -Dm444 plugin-bundle/60-halod.rules \
       $out/lib/udev/rules.d/60-halod.rules
     install -Dm444 assets/dev.timp4w.Halod.desktop \
       $out/share/applications/dev.timp4w.Halod.desktop

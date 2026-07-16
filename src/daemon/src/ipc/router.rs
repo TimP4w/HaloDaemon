@@ -382,6 +382,9 @@ async fn dispatch(
             profiles::usecases::app_rules::remove(index, app).await
         }
         DaemonCommand::Rediscover => registry::usecases::settings::rediscover(app).await,
+        DaemonCommand::GetUdevRulesStatus => {
+            registry::usecases::plugins::get_udev_rules_status(client, app).await
+        }
         DaemonCommand::SetPluginEnabled { id, enabled } => {
             registry::usecases::plugins::set_enabled(id, enabled, app).await
         }

@@ -51,6 +51,23 @@ plugins:
   update_available: Update available
   modified_on_disk: Disabled because it was modified on disk
   modified_on_disk_sub: This plugin's files changed since they were installed, so it was disabled for safety. Re-enable it to accept the change.
+  udev_installed: Linux device access is installed
+  udev_installed_sub: "%{count} generated device rules are current at %{path}."
+  udev_missing: Linux device access is not installed
+  udev_missing_sub: "No HaloDaemon udev file was found. Generate and install the %{count} device rules to enable access."
+  udev_outdated: Linux device access needs updating
+  udev_outdated_sub: "%{count} generated device rules differ from the installed file at %{path}. Copy the installation command, run it in a terminal, then reload udev."
+  udev_generate: Generate udev rules
+  udev_copied: Install command copied
+  udev_info: How it works
+  udev_info_title: Linux device access rules
+  udev_info_intro: udev rules let HaloDaemon access supported hardware as your normal user. HaloDaemon never installs these rules itself or asks the GUI for administrator privileges.
+  udev_info_scope_title: Rules follow installed plugins
+  udev_info_scope: HaloDaemon derives access from each plugin manifest. HID and USB rules match declared vendor and product IDs. SMBus rules are limited to declared chipset drivers or GPU PCI vendors. Plugins without matching Linux hardware declarations add no rule.
+  udev_info_install_title: Manual installation
+  udev_info_install: Generate the deterministic file, review it, then install it system-wide and reload udev. Repeat this after adding, removing, or updating a plugin when the status says action is needed.
+  udev_plugin_action: Device-access rules needed
+  udev_plugin_action_sub: This plugin declares Linux hardware access that is missing from the installed udev file. Use Generate udev rules above.
   # Plugin issues (connect/runtime failures, load warnings)
   issue_connect_failed: Can't connect
   issue_init_failed: Device initialization failed
