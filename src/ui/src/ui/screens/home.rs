@@ -252,7 +252,7 @@ fn attention_banner(ui: &mut egui::Ui, count: usize) -> bool {
             Pos2::new(tx, rect.center().y - 9.0),
             Align2::LEFT_CENTER,
             title,
-            theme::semibold(13.0),
+            theme::heading(),
             theme::hex(0xf0dca0),
         );
         p.text(
@@ -336,7 +336,7 @@ fn conflict_modal(
             }
             ui.label(
                 egui::RichText::new(t!("home.conflict_modal_note"))
-                    .font(theme::body(11.0))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_FAINT),
             );
         },
@@ -416,7 +416,7 @@ fn conflict_group_card(ui: &mut egui::Ui, group: &mut ConflictGroup) {
                     );
                     ui.label(
                         egui::RichText::new(model::device_type_label(dev_type))
-                            .font(theme::body(10.5))
+                            .font(theme::caption())
                             .color(theme::TEXT_MUT),
                     );
                 });
@@ -543,7 +543,7 @@ fn owner_option(
             theme::CYAN,
         );
     }
-    let source_font = theme::body(10.5);
+    let source_font = theme::caption();
     let source = ellipsize(
         p,
         &conflict_source_label(&device.source),
@@ -838,7 +838,7 @@ fn header(
             };
             ui.label(
                 egui::RichText::new(sub)
-                    .font(theme::body(13.0))
+                    .font(theme::body_lg())
                     .color(theme::TEXT_MUT),
             );
         });
@@ -952,9 +952,9 @@ fn segmented(ui: &mut egui::Ui, variant: &mut Variant) {
             Align2::CENTER_CENTER,
             label,
             if active {
-                theme::semibold(12.0)
+                theme::subhead()
             } else {
-                theme::body(12.0)
+                theme::body_md()
             },
             if active {
                 theme::hex(0x0a0d13)
@@ -1053,7 +1053,7 @@ fn sensor_card(
         Pos2::new(rect.left() + 28.0, rect.top() + 18.0),
         Align2::LEFT_CENTER,
         &s.label,
-        theme::body(11.0),
+        theme::body_sm(),
         theme::TEXT_MUT,
     );
     // Value + unit, with trend at the right.
@@ -1068,7 +1068,7 @@ fn sensor_card(
         Pos2::new(vrect.right() + 6.0, vrect.bottom() - 4.0),
         Align2::LEFT_BOTTOM,
         s.unit,
-        theme::body(12.0),
+        theme::body_md(),
         theme::TEXT_FAINT,
     );
     if let Some(trend) = history
@@ -1351,7 +1351,7 @@ fn device_card(
         Pos2::new(rect.left() + 16.0, type_y),
         Align2::LEFT_TOP,
         model::type_label(d),
-        theme::body(11.0),
+        theme::body_sm(),
         theme::TEXT_MUT,
     );
     let name_font = theme::semibold(13.5);
@@ -1414,7 +1414,7 @@ fn conflict_control(
         chip.right_top(),
         Align2::RIGHT_TOP,
         &label,
-        theme::body(9.0),
+        theme::micro(),
         color,
     );
     let clicked = response.clicked();
@@ -1467,7 +1467,7 @@ fn status_chip(p: &egui::Painter, right: f32, cy: f32, dot: Color32, text: &str,
         Pos2::new(right, cy),
         Align2::RIGHT_CENTER,
         text,
-        theme::body(10.5),
+        theme::caption(),
         color,
     );
     p.circle_filled(Pos2::new(st.left() - 8.0, cy), 3.0, dot);
@@ -1574,14 +1574,14 @@ fn list_row(
         Pos2::new(chip.right() + 14.0, rect.center().y - 8.0),
         Align2::LEFT_CENTER,
         &d.name,
-        theme::semibold(13.0),
+        theme::heading(),
         theme::TEXT,
     );
     p.text(
         Pos2::new(chip.right() + 14.0, rect.center().y + 9.0),
         Align2::LEFT_CENTER,
         model::type_label(d),
-        theme::body(11.0),
+        theme::body_sm(),
         theme::TEXT_MUT,
     );
 

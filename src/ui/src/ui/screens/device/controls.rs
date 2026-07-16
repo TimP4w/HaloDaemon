@@ -252,7 +252,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                 ChoiceDisplay::Inline => {
                     ui.label(
                         egui::RichText::new(&c.label)
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_DIM),
                     );
                     ui.add_space(6.0);
@@ -275,7 +275,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                 ChoiceDisplay::List => {
                     ui.label(
                         egui::RichText::new(&c.label)
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_DIM),
                     );
                     ui.add_space(6.0);
@@ -308,7 +308,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         |ui| {
                             ui.label(
                                 egui::RichText::new(&c.label)
-                                    .font(theme::body(12.0))
+                                    .font(theme::body_md())
                                     .color(theme::TEXT_DIM),
                             );
                         },
@@ -391,7 +391,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                 |ui| {
                     ui.label(
                         egui::RichText::new(&b.label)
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_DIM),
                     );
                 },

@@ -80,8 +80,8 @@ pub fn truncate_to_width(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) 
 pub fn value_row(ui: &mut egui::Ui, label: &str, value: &str, value_color: Color32) {
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
-    let label_font = theme::body(12.0);
-    let value_font = theme::mono_semibold(12.0);
+    let label_font = theme::body_md();
+    let value_font = theme::value();
     let p = ui.painter();
     let label_w = p
         .layout_no_wrap(label.to_string(), label_font.clone(), theme::TEXT_MUT)
@@ -125,14 +125,14 @@ pub fn empty_state(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) {
     ui.vertical_centered(|ui| {
         ui.label(
             egui::RichText::new(title)
-                .font(theme::semibold(15.0))
+                .font(theme::title())
                 .color(theme::TEXT_DIM),
         );
         if let Some(sub) = subtitle {
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(sub)
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_FAINT),
             );
         }

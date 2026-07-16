@@ -29,7 +29,7 @@ fn chip_close_zones(rect: Rect) -> (Rect, Rect) {
 pub fn chip_closable(ui: &mut egui::Ui, label: &str) -> (bool, bool) {
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_string(), theme::body(12.0), theme::TEXT_DIM);
+        .layout_no_wrap(label.to_string(), theme::body_md(), theme::TEXT_DIM);
     let h = 31.0;
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(galley.size().x + 20.0 + h, h), Sense::click());
@@ -52,7 +52,7 @@ pub fn chip_closable(ui: &mut egui::Ui, label: &str) -> (bool, bool) {
         close.center(),
         Align2::CENTER_CENTER,
         "×",
-        theme::body(13.0),
+        theme::body_lg(),
         if close_hovered {
             theme::TRAFFIC_RED
         } else {
@@ -84,7 +84,7 @@ pub fn pill_styled(
 ) -> bool {
     let galley = ui.painter().layout_no_wrap(
         label.to_string(),
-        theme::body(12.0),
+        theme::body_md(),
         if active {
             theme::hex(0x0a0d13)
         } else {
@@ -125,7 +125,7 @@ pub fn pill_styled(
 pub fn pill_row(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
     let galley = ui.painter().layout_no_wrap(
         label.to_string(),
-        theme::body(12.0),
+        theme::body_md(),
         if active {
             theme::hex(0x0a0d13)
         } else {
@@ -191,7 +191,7 @@ fn chip_impl(
 ) -> Response {
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_string(), theme::body(10.5), text);
+        .layout_no_wrap(label.to_string(), theme::caption(), text);
     let size = galley.size() + Vec2::new(18.0, 10.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     ui.painter().rect_filled(rect, 7.0, fill);

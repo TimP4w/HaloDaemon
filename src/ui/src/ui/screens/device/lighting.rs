@@ -285,7 +285,7 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, 
                     |ui| {
                         ui.label(
                             egui::RichText::new(t!("lighting.paint_hint"))
-                                .font(theme::body(11.0))
+                                .font(theme::body_sm())
                                 .color(theme::TEXT_MUT),
                         );
                     },
@@ -1052,7 +1052,7 @@ fn param_sliders(
                 ui.add_space(14.0);
                 ui.label(
                     egui::RichText::new(&d.label)
-                        .font(theme::body(11.0))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
                 if let Some(new_c) = widgets::color_picker(ui, current) {

@@ -141,7 +141,7 @@ pub fn show(
                     ui.add_space(3.0);
                     ui.label(
                         egui::RichText::new(subtitle)
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_MUT),
                     );
                 });
@@ -613,7 +613,7 @@ fn effect_params_card(
                             |ui| {
                                 ui.label(
                                     egui::RichText::new(&d.label)
-                                        .font(theme::body(12.0))
+                                        .font(theme::body_md())
                                         .color(theme::TEXT_DIM),
                                 );
                             },
@@ -668,7 +668,7 @@ fn effect_params_card(
                         let current = st.param_colors.get(&key).copied().unwrap_or(default);
                         ui.label(
                             egui::RichText::new(&d.label)
-                                .font(theme::body(12.0))
+                                .font(theme::body_md())
                                 .color(theme::TEXT_DIM),
                         );
                         if let Some(new_c) = widgets::color_picker(ui, current) {
@@ -733,13 +733,13 @@ fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut L
                 ui.vertical(|ui| {
                     ui.label(
                         egui::RichText::new(t!("lighting.target_devices_zones"))
-                            .font(theme::semibold(13.0))
+                            .font(theme::heading())
                             .color(theme::TEXT),
                     );
                     ui.add_space(3.0);
                     ui.label(
                         egui::RichText::new(t!("lighting.targets_subtitle"))
-                            .font(theme::body(11.0))
+                            .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
                 });
@@ -891,7 +891,7 @@ fn rgb_zone_pairs(dev: &WireDevice) -> Vec<(String, String)> {
 /// Allocated width of a zone pill for `label` (matches [`widgets::pill`]).
 fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
     ui.painter()
-        .layout_no_wrap(label.to_string(), theme::body(12.0), Color32::WHITE)
+        .layout_no_wrap(label.to_string(), theme::body_md(), Color32::WHITE)
         .size()
         .x
         + 24.0
@@ -1070,7 +1070,7 @@ fn device_card(
             Pos2::new(rect.right() - 14.0, hdr.center().y),
             Align2::RIGHT_CENTER,
             &zone_summary,
-            theme::body(10.5),
+            theme::caption(),
             theme::TEXT_FAINT,
         );
     }

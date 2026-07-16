@@ -55,13 +55,13 @@ fn modal_shell(
                     ui.spacing_mut().item_spacing.y = 1.0;
                     let title_resp = ui.label(
                         egui::RichText::new(title)
-                            .font(theme::semibold(15.0))
+                            .font(theme::title())
                             .color(theme::TEXT),
                     );
                     if let Some(subtitle) = subtitle {
                         ui.label(
                             egui::RichText::new(subtitle)
-                                .font(theme::body(11.0))
+                                .font(theme::body_sm())
                                 .color(theme::TEXT_MUT),
                         );
                     }
@@ -100,7 +100,7 @@ fn close_button(ui: &mut egui::Ui, id: &str, center_y: f32) -> bool {
         rect.center(),
         Align2::CENTER_CENTER,
         "×",
-        theme::semibold(15.0),
+        theme::title(),
         col,
     );
     resp.clicked()
@@ -238,7 +238,7 @@ pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> 
                 ui.add_space(10.0);
                 ui.label(
                     egui::RichText::new(t!("plugins.issue_copied"))
-                        .font(theme::semibold(12.0))
+                        .font(theme::subhead())
                         .color(theme::TRAFFIC_GREEN),
                 );
                 ui.ctx().request_repaint();

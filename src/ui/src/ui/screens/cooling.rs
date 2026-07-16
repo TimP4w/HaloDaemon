@@ -71,7 +71,7 @@ pub fn show(
                 ui.add_space(3.0);
                 ui.label(
                     egui::RichText::new(t!("cooling.subtitle", count = coolers.len()))
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_MUT),
                 );
                 ui.add_space(22.0);
@@ -170,7 +170,7 @@ fn cooler_card(
                     |ui| {
                         ui.label(
                             egui::RichText::new(model::type_label(dev))
-                                .font(theme::body(11.0))
+                                .font(theme::body_sm())
                                 .color(theme::TEXT_MUT),
                         );
                     },
@@ -269,7 +269,7 @@ fn cooler_card(
             Pos2::new(rect.left() + 10.0, rect.top() + 8.0),
             Align2::LEFT_TOP,
             t!("cooling.rpm_vs", sensor = &sensor_name),
-            theme::mono(9.5),
+            theme::value_xs(),
             theme::TEXT_FAINT2,
         );
 
@@ -278,7 +278,7 @@ fn cooler_card(
             ui.add_space(10.0);
             ui.label(
                 egui::RichText::new(warning)
-                    .font(theme::body(11.0))
+                    .font(theme::body_sm())
                     .color(theme::STAT_AMBER),
             );
         }

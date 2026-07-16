@@ -142,7 +142,7 @@ fn bands(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, eq: &Equa
             Pos2::new(cx, rect.top() + 190.0),
             Align2::CENTER_CENTER,
             format!("{}{:.0}", if val >= 0.0 { "+" } else { "" }, val),
-            theme::mono(9.5),
+            theme::value_xs(),
             if val >= 0.0 {
                 theme::CYAN
             } else {

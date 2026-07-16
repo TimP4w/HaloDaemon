@@ -207,7 +207,7 @@ impl DesignerUi {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(t!("misc.designer_subtitle"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -215,7 +215,7 @@ impl DesignerUi {
                 if let Some(err) = &self.error {
                     ui.label(
                         egui::RichText::new(err)
-                            .font(theme::body(11.0))
+                            .font(theme::body_sm())
                             .color(theme::hex(0xef5f63)),
                     );
                 }
@@ -349,7 +349,7 @@ impl DesignerUi {
     ) {
         ui.label(
             egui::RichText::new(label)
-                .font(theme::body(10.5))
+                .font(theme::caption())
                 .color(theme::TEXT_FAINT),
         );
         ui.add_space(4.0);
@@ -448,7 +448,7 @@ impl DesignerUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("misc.designer_direction"))
-                        .font(theme::body(10.5))
+                        .font(theme::caption())
                         .color(theme::TEXT_MUT),
                 );
                 ui.add_space(6.0);
@@ -487,7 +487,7 @@ impl DesignerUi {
                 ui.add_space(14.0);
                 ui.label(
                     egui::RichText::new(t!("misc.designer_ring_scope"))
-                        .font(theme::body(10.5))
+                        .font(theme::caption())
                         .color(theme::TEXT_MUT),
                 );
                 ui.add_space(6.0);
@@ -580,7 +580,7 @@ impl DesignerUi {
                 ui.add_space(12.0);
                 ui.label(
                     egui::RichText::new(t!("misc.designer_color_a"))
-                        .font(theme::body(10.5))
+                        .font(theme::caption())
                         .color(theme::TEXT_MUT),
                 );
                 if let Some(c) = widgets::color_picker(ui, self.params.color_a) {
@@ -590,7 +590,7 @@ impl DesignerUi {
                     ui.add_space(10.0);
                     ui.label(
                         egui::RichText::new(t!("misc.designer_color_b"))
-                            .font(theme::body(10.5))
+                            .font(theme::caption())
                             .color(theme::TEXT_MUT),
                     );
                     if let Some(c) = widgets::color_picker(ui, self.params.color_b) {
@@ -651,7 +651,7 @@ impl DesignerUi {
                 ui.add_space(14.0);
                 ui.label(
                     egui::RichText::new(t!("misc.designer_ambient_color"))
-                        .font(theme::body(10.5))
+                        .font(theme::caption())
                         .color(theme::TEXT_MUT),
                 );
                 if let Some(c) = widgets::color_picker(ui, self.params.ambient_color) {

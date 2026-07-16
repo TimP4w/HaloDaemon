@@ -52,7 +52,7 @@ fn sampling_card(ui: &mut egui::Ui, state: &AppState, canvas_ui: &mut CanvasUi, 
         |ui| {
             ui.label(
                 egui::RichText::new(t!("canvas.sampling_desc").to_string())
-                    .font(theme::body(11.0))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_FAINT),
             );
             ui.add_space(10.0);
@@ -293,7 +293,7 @@ fn instance_rack(
     if ids.is_empty() {
         ui.label(
             egui::RichText::new(t!("canvas.no_instances").to_string())
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(theme::TEXT_FAINT),
         );
         return;
@@ -363,7 +363,7 @@ fn default_effect_card(
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(t!("canvas.default_effect_hint").to_string())
-                    .font(theme::body(10.5))
+                    .font(theme::caption())
                     .color(theme::TEXT_FAINT),
             );
         },
@@ -435,11 +435,11 @@ fn instance_row(
         Pos2::new(head.right() - 6.0, top_y),
         Align2::RIGHT_CENTER,
         if expanded { "▾" } else { "▸" },
-        theme::body(9.0),
+        theme::micro(),
         theme::TEXT_FAINT,
     );
     // Row 2: effect · zones · devices, truncated to leave room for SYNCED.
-    let sub_font = theme::mono(9.5);
+    let sub_font = theme::value_xs();
     let synced_font = theme::mono(8.5);
     let synced_label = format!("⛓ {}", t!("canvas.synced"));
     let synced_w = if synced {

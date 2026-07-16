@@ -313,7 +313,7 @@ fn mode_seg_width(max_label_w: f32) -> f32 {
 
 fn mode_toggle(ui: &mut egui::Ui, canvas_rect: Rect, canvas_ui: &mut CanvasUi) {
     const H: f32 = 26.0;
-    let font = theme::body(11.0);
+    let font = theme::body_sm();
     let segments = [
         (t!("canvas.mode_frame"), LedMode::Frame),
         (t!("canvas.mode_leds"), LedMode::Leds),
@@ -510,7 +510,7 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
                 badge,
                 Align2::CENTER_CENTER,
                 "×",
-                theme::body(12.0),
+                theme::body_md(),
                 Color32::WHITE,
             );
         }

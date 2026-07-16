@@ -73,7 +73,7 @@ pub fn slider_row(
         |ui| {
             ui.label(
                 egui::RichText::new(label)
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_DIM),
             );
         },
@@ -117,7 +117,7 @@ pub fn num_input_row(
         |ui| {
             ui.label(
                 egui::RichText::new(label)
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_DIM),
             );
         },
@@ -145,7 +145,7 @@ pub fn stepper_row(ui: &mut egui::Ui, label: &str, value_text: &str) -> i32 {
         |ui| {
             ui.label(
                 egui::RichText::new(label)
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_DIM),
             );
         },

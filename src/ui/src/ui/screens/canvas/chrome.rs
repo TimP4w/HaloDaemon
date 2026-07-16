@@ -133,7 +133,7 @@ fn fps_chip(ui: &mut egui::Ui, canvas_ui: &CanvasUi) -> bool {
         rect.center(),
         Align2::CENTER_CENTER,
         fps_txt,
-        theme::mono(11.0),
+        theme::value_sm(),
         theme::CYAN,
     );
     resp.clicked()

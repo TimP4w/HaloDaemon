@@ -34,7 +34,7 @@ pub fn combo_param_row(
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(label)
-                .font(theme::body(12.0))
+                .font(theme::body_md())
                 .color(theme::TEXT_DIM),
         );
         if let Some(new_val) = combo_picker(ui, &key, options, &current, none_label) {
@@ -68,7 +68,7 @@ pub fn steps_editor(ui: &mut egui::Ui, label: &str, steps: &mut Vec<ColorStep>) 
     let mut changed = false;
     ui.label(
         egui::RichText::new(label)
-            .font(theme::body(12.0))
+            .font(theme::body_md())
             .color(theme::TEXT_DIM),
     );
     ui.add_space(6.0);
@@ -95,7 +95,7 @@ pub fn steps_editor(ui: &mut egui::Ui, label: &str, steps: &mut Vec<ColorStep>) 
                 } else {
                     t!("misc.widget_from")
                 },
-                theme::body(11.0),
+                theme::body_sm(),
                 theme::TEXT_MUT,
             );
             let mut v = step.value as f32;

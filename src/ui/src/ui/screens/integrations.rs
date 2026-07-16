@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use egui::{Sense, Stroke, Vec2};
+use egui::{Sense, Vec2};
 use halod_shared::types::{AppState, PluginInfo, PluginIssue, PluginIssueKind, PluginKind};
 
 use crate::domain::models::plugin_issues::plugin_issue_detail;
@@ -166,7 +166,7 @@ impl IntegrationsUi {
         ui.add_space(3.0);
         ui.label(
             egui::RichText::new(t!("integrations.subtitle"))
-                .font(theme::body(12.0))
+                .font(theme::body_md())
                 .color(theme::TEXT_MUT),
         );
         ui.add_space(18.0);
@@ -215,7 +215,7 @@ impl IntegrationsUi {
                             ui.horizontal(|ui| {
                                 ui.label(
                                     egui::RichText::new(&p.name)
-                                        .font(theme::semibold(15.0))
+                                        .font(theme::title())
                                         .color(theme::TEXT),
                                 );
                                 if !p.version.is_empty() {
@@ -337,7 +337,6 @@ impl IntegrationsUi {
 /// Runtime/connection failure attached to one integration card. The short bar
 /// keeps the page scannable; Details exposes the complete transport/Lua error.
 fn integration_issue_bar(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
-    let mut clicked = false;
     let label = match issue.kind {
         PluginIssueKind::ConnectFailed => t!("integrations.issue_connect_failed"),
         PluginIssueKind::InitFailed => t!("plugins.issue_init_failed"),
@@ -345,36 +344,14 @@ fn integration_issue_bar(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
         PluginIssueKind::LoadWarning => t!("plugins.issue_load_warning"),
         PluginIssueKind::LoadFailed => t!("plugins.issue_load_failed"),
     };
-    egui::Frame::NONE
-        .fill(theme::a(theme::TRAFFIC_RED, 0.10))
-        .stroke(Stroke::new(1.0, theme::a(theme::TRAFFIC_RED, 0.35)))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(14, 9))
-        .show(ui, |ui| {
-            egui::Sides::new().height(28.0).show(
-                ui,
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(label)
-                            .font(theme::semibold(12.0))
-                            .color(theme::TRAFFIC_RED),
-                    );
-                },
-                |ui| {
-                    if widgets::button(
-                        ui,
-                        &t!("integrations.issue_details"),
-                        ButtonKind::Ghost,
-                        Vec2::new(90.0, 28.0),
-                    )
-                    .clicked()
-                    {
-                        clicked = true;
-                    }
-                },
-            );
-        });
-    clicked
+    let details = t!("integrations.issue_details");
+    widgets::Banner::danger(label.as_ref())
+        .action(widgets::BannerAction::new(
+            &details,
+            ButtonKind::Ghost,
+            Vec2::new(90.0, 28.0),
+        ))
+        .show(ui)
 }
 
 /// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
@@ -415,7 +392,7 @@ fn status_row(ui: &mut egui::Ui, p: &PluginInfo, status: &IntegrationStatus) {
         ui.painter().circle_filled(rect.center(), 3.0, color);
         ui.label(
             egui::RichText::new(label.as_ref())
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(color),
         );
         if status.device_count > 0 {

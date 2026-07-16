@@ -145,7 +145,7 @@ fn top_row(
                 );
                 ui.label(
                     egui::RichText::new(t!("cooling.celsius_now"))
-                        .font(theme::body(11.0))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_FAINT),
                 );
             });
@@ -252,7 +252,7 @@ fn curve_card(
         );
         ui.label(
             egui::RichText::new(t!("cooling.curve_hint"))
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
         );
         if let Some(warning) = status
@@ -262,7 +262,7 @@ fn curve_card(
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(warning)
-                    .font(theme::body(11.0))
+                    .font(theme::body_sm())
                     .color(theme::STAT_AMBER),
             );
         }
@@ -288,7 +288,7 @@ fn curve_card(
                 Pos2::new(plot.left() - 8.0, y),
                 Align2::RIGHT_CENTER,
                 format!("{}", (frac * 100.0) as i32),
-                theme::mono(9.5),
+                theme::value_xs(),
                 theme::TEXT_FAINT2,
             );
             let x = plot.left() + frac * plot.width();
@@ -296,7 +296,7 @@ fn curve_card(
                 Pos2::new(x, plot.bottom() + 12.0),
                 Align2::CENTER_CENTER,
                 format!("{}", 20 + (frac * 80.0) as i32),
-                theme::mono(9.5),
+                theme::value_xs(),
                 theme::TEXT_FAINT2,
             );
         }

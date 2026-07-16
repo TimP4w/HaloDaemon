@@ -43,7 +43,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
 
     ui.label(
         egui::RichText::new(t!("devtabs.onboard_intro"))
-            .font(theme::body(12.0))
+            .font(theme::body_md())
             .color(theme::TEXT_MUT),
     );
     ui.add_space(12.0);
@@ -74,13 +74,13 @@ fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
                 ui.vertical(|ui| {
                     ui.label(
                         egui::RichText::new(t!("devtabs.host_mode"))
-                            .font(theme::semibold(13.0))
+                            .font(theme::heading())
                             .color(theme::TEXT),
                     );
                     ui.add_space(2.0);
                     ui.label(
                         egui::RichText::new(t!("devtabs.host_mode_desc"))
-                            .font(theme::body(11.0))
+                            .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
                 });
@@ -135,7 +135,7 @@ fn slot_row(
         Pos2::new(row.left() + 38.0, cy),
         Align2::LEFT_CENTER,
         t!("devtabs.slot_n", n = slot.index),
-        theme::body(13.0),
+        theme::body_lg(),
         if active { theme::TEXT } else { theme::TEXT_DIM },
     );
 

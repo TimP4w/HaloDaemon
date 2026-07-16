@@ -67,7 +67,7 @@ pub(super) fn render_param(
             };
             ui.label(
                 egui::RichText::new(param_label(widget_type, param))
-                    .font(theme::body(11.0))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_MUT),
             );
             ui.add_space(6.0);
@@ -86,7 +86,7 @@ pub(super) fn render_param(
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(param_label(widget_type, param))
-                        .font(theme::body(11.0))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
                 ui.text_edit_singleline(&mut s);
@@ -109,7 +109,7 @@ pub(super) fn render_param(
                 |ui| {
                     ui.label(
                         egui::RichText::new(param_label(widget_type, param))
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_DIM),
                     );
                 },
@@ -145,7 +145,7 @@ pub(super) fn render_param(
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(param_label(widget_type, param))
-                        .font(theme::body(11.0))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
                 new_val =
@@ -172,7 +172,7 @@ pub(super) fn render_param(
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(param_label(widget_type, param))
-                        .font(theme::body(11.0))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
                 new_val = widgets::combo_picker(ui, &param.id, &opts, &current, None);

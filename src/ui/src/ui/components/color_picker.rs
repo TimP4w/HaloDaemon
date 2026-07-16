@@ -66,7 +66,7 @@ pub fn color_swatch_row(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor
             center,
             egui::Align2::CENTER_CENTER,
             "+",
-            theme::mono(11.0),
+            theme::value_sm(),
             mini_glyph_color(c32),
         );
         if resp.hovered() {

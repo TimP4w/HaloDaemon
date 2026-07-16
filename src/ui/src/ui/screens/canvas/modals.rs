@@ -79,7 +79,7 @@ pub(super) fn zones_assign_modal(
         |ui| {
             ui.label(
                 egui::RichText::new(subtitle.to_string())
-                    .font(theme::body(11.0))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_FAINT),
             );
             ui.add_space(6.0);
@@ -121,7 +121,7 @@ pub(super) fn zones_assign_modal(
                         ui.vertical(|ui| {
                             ui.label(
                                 egui::RichText::new(&dev.name)
-                                    .font(theme::semibold(13.0))
+                                    .font(theme::heading())
                                     .color(theme::TEXT),
                             );
                             let zw = if total == 1 {
@@ -204,7 +204,7 @@ pub(super) fn zones_assign_modal(
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(t!("canvas.reassign_hint").to_string())
-                        .font(theme::body(10.5))
+                        .font(theme::caption())
                         .color(theme::TEXT_FAINT),
                 );
             });

@@ -113,7 +113,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
             hdr.left_top() + Vec2::new(0.0, 1.0),
             Align2::LEFT_TOP,
             t!("device.chains_title"),
-            theme::semibold(13.0),
+            theme::heading(),
             theme::TEXT,
         );
         p.text(
@@ -124,14 +124,14 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
                 leds = total_leds,
                 headers = channels.len()
             ),
-            theme::mono(11.0),
+            theme::value_sm(),
             theme::TEXT_FAINT,
         );
         p.text(
             hdr.left_top() + Vec2::new(0.0, 21.0),
             Align2::LEFT_TOP,
             t!("device.chains_subtitle"),
-            theme::body(12.0),
+            theme::body_md(),
             theme::TEXT_MUT,
         );
     }
@@ -257,7 +257,7 @@ fn channel_header(
             disc_rect.center(),
             Align2::CENTER_CENTER,
             t!("device.chains_flashing"),
-            theme::body(11.0),
+            theme::body_sm(),
             theme::TEXT,
         );
         ui.interact(disc_rect, disc_id, Sense::click())
@@ -286,7 +286,7 @@ fn channel_header(
 
     let p = ui.painter();
     let usage = t!("device.chains_usage", used = used, max = channel.max_leds);
-    let usage_galley = p.layout_no_wrap(usage.to_string(), theme::mono(11.0), theme::TEXT_MUT);
+    let usage_galley = p.layout_no_wrap(usage.to_string(), theme::value_sm(), theme::TEXT_MUT);
     let usage_size = usage_galley.size();
     let usage_r = disc_rect.left() - 8.0;
     p.galley(
@@ -333,7 +333,7 @@ fn empty_placeholder(ui: &mut egui::Ui) {
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new(t!("device.chains_no_links"))
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                 );
             });
@@ -421,7 +421,7 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &ChainLinkInfo) {
                 chip.center(),
                 Align2::CENTER_CENTER,
                 t!("device.chains_discovered"),
-                theme::body(9.0),
+                theme::micro(),
                 theme::TEXT_DIM,
             );
         });
@@ -489,7 +489,7 @@ fn led_dots(ui: &mut egui::Ui, link: &ChainLinkInfo) {
         if extra > 0 {
             ui.label(
                 egui::RichText::new(format!("+{extra}"))
-                    .font(theme::mono(9.5))
+                    .font(theme::value_xs())
                     .color(theme::TEXT_FAINT),
             );
         }
@@ -499,7 +499,7 @@ fn led_dots(ui: &mut egui::Ui, link: &ChainLinkInfo) {
 fn locked_right(ui: &mut egui::Ui, link: &ChainLinkInfo) {
     ui.label(
         egui::RichText::new("🔒")
-            .font(theme::body(12.0))
+            .font(theme::body_md())
             .color(theme::hex(0x3a4860)),
     );
     ui.add_space(8.0);
@@ -511,7 +511,7 @@ fn locked_right(ui: &mut egui::Ui, link: &ChainLinkInfo) {
     ui.add_space(8.0);
     ui.label(
         egui::RichText::new(topology_label(&link.topology))
-            .font(theme::body(11.0))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
 }
@@ -548,7 +548,7 @@ fn editable_right(
         btn.center(),
         Align2::CENTER_CENTER,
         "×",
-        theme::body(13.0),
+        theme::body_lg(),
         icon_col,
     );
     if btn_resp.clicked() {
@@ -571,7 +571,7 @@ fn editable_right(
     ui.add_space(8.0);
     ui.label(
         egui::RichText::new(topology_label(&link.topology))
-            .font(theme::body(11.0))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
 }

@@ -33,7 +33,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, page: &mut Page) {
                     Pos2::new(title_rect.left() + 18.0, title_rect.center().y),
                     Align2::LEFT_CENTER,
                     t!("device.children_connected_devices"),
-                    theme::semibold(13.0),
+                    theme::heading(),
                     theme::TEXT,
                 );
                 ui.painter().line_segment(
@@ -99,7 +99,7 @@ fn child_row(ui: &mut egui::Ui, d: &WireDevice) -> bool {
         Pos2::new(row.right() - 18.0, cy),
         Align2::RIGHT_CENTER,
         model::type_label(d),
-        theme::body(11.0),
+        theme::body_sm(),
         theme::TEXT_MUT,
     );
     resp.clicked()
@@ -287,7 +287,7 @@ fn slots_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus) {
                 Pos2::new(title_rect.left() + 18.0, title_rect.center().y),
                 Align2::LEFT_CENTER,
                 t!("device.children_paired_slots"),
-                theme::semibold(13.0),
+                theme::heading(),
                 theme::TEXT,
             );
             ui.painter().line_segment(
@@ -385,7 +385,7 @@ fn pair_slot_row(
             Pos2::new(row.right() - 18.0, cy),
             Align2::RIGHT_CENTER,
             t!("device.children_available"),
-            theme::body(11.0),
+            theme::body_sm(),
             theme::TEXT_FAINT,
         );
     }

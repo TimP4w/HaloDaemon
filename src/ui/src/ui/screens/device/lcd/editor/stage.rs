@@ -454,7 +454,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                 badge_c,
                 egui::Align2::CENTER_CENTER,
                 "×",
-                theme::body(12.0),
+                theme::body_md(),
                 Color32::WHITE,
             );
             if badge.hovered() {
@@ -596,7 +596,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
     if st.lcd.editor.def.widgets.is_empty() {
         ui.label(
             egui::RichText::new(t!("lcd.empty_screen_hint"))
-                .font(theme::body(10.5))
+                .font(theme::caption())
                 .color(theme::TEXT_FAINT),
         );
     } else {
@@ -699,7 +699,7 @@ fn paint_stage_background(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     label,
-                    theme::mono(11.0),
+                    theme::value_sm(),
                     theme::TEXT_DIM,
                 );
             }

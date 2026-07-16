@@ -35,7 +35,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         widgets::card(ui, |ui| {
             ui.label(
                 egui::RichText::new(t!("device.keys_host_mode_required"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::STAT_AMBER),
             );
         });
@@ -175,14 +175,14 @@ fn button_selector_card(
             Pos2::new(hdr.left() + 18.0, hdr.center().y - 8.0),
             Align2::LEFT_CENTER,
             tab_label,
-            theme::semibold(13.0),
+            theme::heading(),
             theme::TEXT,
         );
         p.text(
             Pos2::new(hdr.left() + 18.0, hdr.center().y + 8.0),
             Align2::LEFT_CENTER,
             t!("device.keys_select_button_hint"),
-            theme::body(11.0),
+            theme::body_sm(),
             theme::TEXT_FAINT,
         );
 
@@ -432,7 +432,7 @@ fn action_card(
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("device.keys_assign_action"))
-                        .font(theme::semibold(13.0))
+                        .font(theme::heading())
                         .color(theme::TEXT),
                 );
             },
@@ -463,7 +463,7 @@ fn action_card(
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(t!("device.keys_editing"))
-                        .font(theme::body(9.0))
+                        .font(theme::micro())
                         .color(theme::TEXT_FAINT2),
                 );
             },
@@ -471,7 +471,7 @@ fn action_card(
         ui.add_space(5.0);
         ui.label(
             egui::RichText::new(t!("device.keys_assign_hint", button = sel_label))
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
         );
         ui.add_space(14.0);
@@ -542,7 +542,7 @@ fn params_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
         if st.keys.keys_sel_cid.is_none() {
             ui.label(
                 egui::RichText::new(t!("device.keys_select_button_prompt"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_FAINT),
             );
             return;
@@ -568,13 +568,13 @@ fn params_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, 
         ui.painter().circle_filled(dot.center(), 3.5, type_color);
         ui.label(
             egui::RichText::new(layer.title())
-                .font(theme::semibold(13.0))
+                .font(theme::heading())
                 .color(theme::TEXT),
         );
         ui.add_space(2.0);
         ui.label(
             egui::RichText::new(format!("· {type_name}"))
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(theme::TEXT_FAINT),
         );
     });
@@ -591,7 +591,7 @@ fn params_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, 
     if let Some(msg) = no_params {
         ui.label(
             egui::RichText::new(msg)
-                .font(theme::body(12.0))
+                .font(theme::body_md())
                 .color(theme::TEXT_MUT),
         );
         return;
@@ -698,7 +698,7 @@ fn params_editor(
                 |ui| {
                     ui.label(
                         egui::RichText::new(t!("device.keys_sniper_dpi"))
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_DIM),
                     );
                 },
@@ -873,7 +873,7 @@ fn params_editor(
         _ => {
             ui.label(
                 egui::RichText::new(t!("device.keys_no_params"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         }

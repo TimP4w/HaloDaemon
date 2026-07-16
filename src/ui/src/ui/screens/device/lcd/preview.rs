@@ -186,7 +186,7 @@ pub(super) fn display_card(
                         center,
                         egui::Align2::CENTER_CENTER,
                         format!("{}×{}", lcd.descriptor.width, lcd.descriptor.height),
-                        theme::mono(11.0),
+                        theme::value_sm(),
                         theme::TEXT_MUT,
                     );
                 }
@@ -269,7 +269,7 @@ pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, lcd: 
         |ui| {
             ui.label(
                 egui::RichText::new(t!("lcd.raw_streaming"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_DIM),
             )
             .on_hover_text(t!("lcd.raw_streaming_hint"));

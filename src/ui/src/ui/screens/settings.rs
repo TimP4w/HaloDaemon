@@ -100,7 +100,7 @@ fn page_body(
     ui.add_space(3.0);
     ui.label(
         egui::RichText::new(t!("settings.subtitle"))
-            .font(theme::body(12.0))
+            .font(theme::body_md())
             .color(theme::TEXT_MUT),
     );
     ui.add_space(22.0);
@@ -227,7 +227,7 @@ fn row_label(ui: &mut egui::Ui, rect: Rect, title: &str, subtitle: &str) {
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
         subtitle,
-        theme::body(10.5),
+        theme::caption(),
         theme::TEXT_FAINT,
     );
 }
@@ -299,7 +299,7 @@ fn start_on_boot_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
             Pos2::new(rect.right(), rect.center().y),
             Align2::RIGHT_CENTER,
             t!("settings.start_on_boot_managed_value"),
-            theme::body(10.5),
+            theme::caption(),
             theme::TEXT_FAINT,
         );
         return;
@@ -818,7 +818,7 @@ fn config_folder_row(ui: &mut egui::Ui, state: &AppState) {
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
         config_path,
-        theme::body(10.5),
+        theme::caption(),
         theme::TEXT_FAINT,
     );
 
@@ -878,7 +878,7 @@ fn diagnostics_row(ui: &mut egui::Ui, cmd: &CommandTx, st: &mut SettingsUi) {
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
         t!("settings.diagnostics_sub"),
-        theme::body(10.5),
+        theme::caption(),
         theme::TEXT_FAINT,
     );
 
@@ -932,7 +932,7 @@ fn about_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
             env!("CARGO_PKG_VERSION"),
             t!("settings.app_tagline")
         ),
-        theme::body(10.5),
+        theme::caption(),
         theme::TEXT_FAINT,
     );
 
@@ -952,7 +952,7 @@ fn third_party_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
         t!("settings.third_party_sub"),
-        theme::body(10.5),
+        theme::caption(),
         theme::TEXT_FAINT,
     );
 
@@ -975,7 +975,7 @@ fn repo_row(ui: &mut egui::Ui) {
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
         REPO_URL.trim_start_matches("https://"),
-        theme::body(10.5),
+        theme::caption(),
         if resp.hovered() {
             theme::CYAN
         } else {
@@ -1018,7 +1018,7 @@ fn footer(ui: &mut egui::Ui, _state: &AppState) {
             " · ",
             env!("HALOD_BUILD_HASH")
         ))
-        .font(theme::body(11.0))
+        .font(theme::body_sm())
         .color(theme::TEXT_FAINT),
     );
 }
@@ -1050,7 +1050,7 @@ fn licenses_modal(ctx: &egui::Context, st: &mut SettingsUi) {
         |ui| {
             ui.label(
                 egui::RichText::new(t!("settings.licenses_modal_body"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
             ui.add_space(10.0);
@@ -1080,7 +1080,7 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
         );
         ui.label(
             egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
-                .font(theme::body(12.0))
+                .font(theme::body_md())
                 .color(theme::TEXT_MUT),
         );
         ui.add_space(8.0);
@@ -1090,7 +1090,7 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
                 t!("settings.credits_developer"),
                 halod_shared::app::AUTHOR
             ))
-            .font(theme::body(12.0))
+            .font(theme::body_md())
             .color(theme::TEXT_DIM),
         );
         ui.label(
@@ -1098,12 +1098,12 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
                 "{} GPL-3.0-or-later",
                 t!("settings.credits_license")
             ))
-            .font(theme::body(12.0))
+            .font(theme::body_md())
             .color(theme::TEXT_DIM),
         );
         ui.hyperlink_to(
             egui::RichText::new(REPO_URL)
-                .font(theme::body(12.0))
+                .font(theme::body_md())
                 .color(theme::CYAN),
             REPO_URL,
         );
@@ -1111,7 +1111,7 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
 
         ui.label(
             egui::RichText::new(t!("settings.acknowledgments"))
-                .font(theme::semibold(13.0))
+                .font(theme::heading())
                 .color(theme::TEXT),
         );
         ui.add_space(4.0);
@@ -1176,7 +1176,7 @@ fn diagnostics_modal(ctx: &egui::Context, debug: Option<&DebugInfo>, st: &mut Se
                 None => {
                     ui.label(
                         egui::RichText::new(t!("settings.diagnostics_no_data"))
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_MUT),
                     );
                 }
@@ -1214,7 +1214,7 @@ fn diagnostics_modal(ctx: &egui::Context, debug: Option<&DebugInfo>, st: &mut Se
                             ui.add_space(10.0);
                             ui.label(
                                 egui::RichText::new(t!("settings.copied_feedback"))
-                                    .font(theme::semibold(12.0))
+                                    .font(theme::subhead())
                                     .color(theme::TRAFFIC_GREEN),
                             );
                             // Keep repainting so the confirmation clears without input.
@@ -1357,7 +1357,7 @@ fn section_label(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
     ui.label(
         egui::RichText::new(text)
-            .font(theme::semibold(12.0))
+            .font(theme::subhead())
             .color(theme::TEXT),
     );
     ui.add_space(6.0);

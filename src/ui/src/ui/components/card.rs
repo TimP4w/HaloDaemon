@@ -7,7 +7,7 @@ use crate::ui::theme;
 
 /// The shared raised card surface. `body` paints inside the 20 px inner margin.
 pub fn card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    card_with_margin(ui, egui::Margin::same(20), body)
+    card_with_margin(ui, theme::PAD_CARD, body)
 }
 
 /// A card surface with no inner margin, for bodies that lay out edge-to-edge
@@ -38,7 +38,7 @@ pub fn card_with_surface<R>(
     egui::Frame::NONE
         .fill(fill)
         .stroke(Stroke::new(1.0, border))
-        .corner_radius(14.0)
+        .corner_radius(theme::RADIUS_XL)
         .inner_margin(margin)
         .show(ui, body)
         .inner
@@ -58,7 +58,7 @@ pub fn card_titled<R>(
             |ui| {
                 ui.label(
                     egui::RichText::new(title)
-                        .font(theme::semibold(13.0))
+                        .font(theme::heading())
                         .color(theme::TEXT),
                 );
             },

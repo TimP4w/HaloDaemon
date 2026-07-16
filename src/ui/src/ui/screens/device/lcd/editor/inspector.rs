@@ -86,7 +86,7 @@ fn font_picker(
     let mut chosen = None;
     ui.label(
         egui::RichText::new(t!("lcd.font"))
-            .font(theme::body(11.0))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
     ui.horizontal_wrapped(|ui| {
@@ -205,7 +205,7 @@ pub(super) fn selected_widget_card(
             .unwrap_or(st.lcd.editor.def.style.accent);
         ui.label(
             egui::RichText::new(t!("lcd.color"))
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
         );
         ui.add_space(6.0);
@@ -322,7 +322,7 @@ pub(super) fn screen_style_card(
 ) {
     ui.label(
         egui::RichText::new(t!("lcd.screen_style"))
-            .font(theme::semibold(13.0))
+            .font(theme::heading())
             .color(theme::TEXT),
     );
     ui.add_space(14.0);
@@ -331,7 +331,7 @@ pub(super) fn screen_style_card(
 
     ui.label(
         egui::RichText::new(t!("lcd.accent"))
-            .font(theme::body(11.0))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
     ui.add_space(6.0);
@@ -343,7 +343,7 @@ pub(super) fn screen_style_card(
 
     ui.label(
         egui::RichText::new(t!("lcd.background"))
-            .font(theme::body(11.0))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
     ui.horizontal_wrapped(|ui| {

@@ -200,7 +200,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                             ui.add_space(10.0);
                             ui.label(
                                 egui::RichText::new(t!("devtabs.copied"))
-                                    .font(theme::semibold(12.0))
+                                    .font(theme::subhead())
                                     .color(theme::TRAFFIC_GREEN),
                             );
                             ui.ctx().request_repaint();
@@ -210,7 +210,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                         ui.add_space(8.0);
                         ui.label(
                             egui::RichText::new(t!("devtabs.fetching_debug"))
-                                .font(theme::body(10.5))
+                                .font(theme::caption())
                                 .color(theme::TEXT_FAINT2),
                         );
                     }

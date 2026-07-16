@@ -414,7 +414,7 @@ pub(super) fn show(
                     pos + Vec2::new(12.0, -12.0),
                     Align2::LEFT_CENTER,
                     atom_label(step),
-                    theme::body(11.0),
+                    theme::body_sm(),
                     atom_color(&step.kind),
                 );
             }
@@ -455,7 +455,7 @@ fn hint(ui: &mut egui::Ui, text: &str, color: Color32) {
     ui.add_space(6.0);
     ui.label(
         egui::RichText::new(text)
-            .font(theme::body(10.5))
+            .font(theme::caption())
             .color(color),
     );
 }
@@ -546,7 +546,7 @@ fn pill_strip(
             let is_delay = matches!(step.kind, MacroAtom::Delay);
             let color = atom_color(&step.kind);
             let label = atom_label(step);
-            let galley = ui.painter().layout_no_wrap(label, theme::body(11.0), color);
+            let galley = ui.painter().layout_no_wrap(label, theme::body_sm(), color);
             let w = if is_delay {
                 delay_pill_width(step.delay_after_ms)
                     .max(galley.size().x + 10.0 + CLOSE_W + RESIZE_W)
@@ -592,7 +592,7 @@ fn pill_strip(
                 close.center(),
                 Align2::CENTER_CENTER,
                 "×",
-                theme::body(12.0),
+                theme::body_md(),
                 if close_hovered {
                     theme::TRAFFIC_RED
                 } else {
@@ -706,7 +706,7 @@ fn record_ui(
         zone.center(),
         Align2::CENTER_CENTER,
         t!("misc.macro_click_to_record"),
-        theme::body(11.0),
+        theme::body_sm(),
         theme::STAT_AMBER,
     );
 

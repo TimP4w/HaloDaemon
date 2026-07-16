@@ -167,7 +167,7 @@ pub(super) fn header(
         Pos2::new(tx, cy + if editing_rename { 13.0 } else { 11.0 }),
         Align2::LEFT_CENTER,
         sub,
-        theme::body(12.0),
+        theme::body_md(),
         theme::TEXT_MUT,
     );
     status_chips(p, rect, dev);
@@ -266,7 +266,7 @@ fn connection_chip(p: &egui::Painter, right: f32, cy: f32, ct: ConnectionType) {
         Pos2::new(tx, cy - 8.0),
         Align2::LEFT_CENTER,
         t!("devtabs.info_connection"),
-        theme::body(9.0),
+        theme::micro(),
         theme::TEXT_FAINT,
     );
     p.text(
@@ -277,7 +277,7 @@ fn connection_chip(p: &egui::Painter, right: f32, cy: f32, ct: ConnectionType) {
         } else {
             t!("devtabs.wired")
         },
-        theme::semibold(12.0),
+        theme::subhead(),
         a(col, 0.95),
     );
 }
@@ -299,14 +299,14 @@ fn battery_chip(p: &egui::Painter, right: f32, cy: f32, b: &Battery, label: &str
         Pos2::new(tx, cy - 8.0),
         Align2::LEFT_CENTER,
         label,
-        theme::body(9.0),
+        theme::micro(),
         theme::TEXT_FAINT,
     );
     let pct = p.text(
         Pos2::new(tx, cy + 7.0),
         Align2::LEFT_CENTER,
         format!("{}%", b.level),
-        theme::mono_semibold(12.0),
+        theme::value(),
         theme::TEXT_BRIGHT,
     );
     let state = if charging {

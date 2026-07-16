@@ -207,7 +207,7 @@ pub fn sidebar(
                     ui.add_space(14.0);
                     ui.label(
                         egui::RichText::new(t!("shell.no_devices"))
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_FAINT),
                     );
                 });
@@ -256,7 +256,7 @@ fn footer(ui: &mut egui::Ui, rect: Rect, connected: bool) {
             Pos2::new(dot.x + 14.0, y + 21.0),
             Align2::LEFT_CENTER,
             title,
-            theme::semibold(12.0),
+            theme::subhead(),
             theme::TEXT,
         );
         p.text(
@@ -359,9 +359,9 @@ fn nav_row(
     );
     icons::draw(ui, icon_rect, icon, icon_tint);
     let font = if active {
-        theme::semibold(13.0)
+        theme::heading()
     } else {
-        theme::body(13.0)
+        theme::body_lg()
     };
     ui.painter().text(
         Pos2::new(rect.left() + 44.0, rect.center().y),
@@ -478,7 +478,7 @@ fn device_row(ui: &mut egui::Ui, d: &halod_shared::types::WireDevice, active: bo
         Pos2::new(chip.right() + 10.0, rect.center().y),
         Align2::LEFT_CENTER,
         &d.name,
-        theme::body(12.0),
+        theme::body_md(),
         theme::TEXT,
     );
     resp.clicked()

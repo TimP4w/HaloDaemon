@@ -4,6 +4,7 @@
 //! editor). New screens MUST reuse these rather than hand-rolling painters.
 
 mod badge;
+mod banner;
 mod button;
 mod card;
 mod chips;
@@ -23,6 +24,7 @@ mod toggle;
 mod util;
 
 pub use badge::*;
+pub use banner::*;
 pub use button::*;
 pub use card::*;
 pub use chips::*;

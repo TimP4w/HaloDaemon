@@ -348,11 +348,7 @@ pub fn title_button(
 
     // Measure the name to size the pill.
     let name_width = p
-        .layout_no_wrap(
-            profile_name.to_string(),
-            theme::semibold(12.0),
-            Color32::WHITE,
-        )
+        .layout_no_wrap(profile_name.to_string(), theme::subhead(), Color32::WHITE)
         .size()
         .x;
     // padding(12) + name(nw) + gap(8) + chevron(8) + padding(12)
@@ -386,7 +382,7 @@ pub fn title_button(
         Pos2::new(x, cy),
         Align2::LEFT_CENTER,
         profile_name,
-        theme::semibold(12.0),
+        theme::subhead(),
         theme::TEXT,
     );
     x += name_width + 8.0;
@@ -514,9 +510,9 @@ pub fn title_dropdown(
                 theme::TEXT_DIM
             };
             let name_font = if is_active {
-                theme::semibold(13.0)
+                theme::heading()
             } else {
-                theme::body(13.0)
+                theme::body_lg()
             };
             ui.painter().text(
                 Pos2::new(dot_x + 14.0, dot_y),
@@ -696,7 +692,7 @@ pub fn add_modal(ctx: &egui::Context, state: &AppState, cmd: &CommandTx, st: &mu
                 .desired_width(f32::INFINITY)
                 .hint_text(t!("profile.profile_name_hint").to_string())
                 .margin(egui::vec2(12.0, 11.0))
-                .font(theme::body(13.0));
+                .font(theme::body_lg());
             let te_resp = ui.add(te);
             te_resp.request_focus();
 
@@ -709,7 +705,7 @@ pub fn add_modal(ctx: &egui::Context, state: &AppState, cmd: &CommandTx, st: &mu
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(t!("profile.name_taken"))
-                        .font(theme::body(11.0))
+                        .font(theme::body_sm())
                         .color(theme::TRAFFIC_RED),
                 );
             }
@@ -855,7 +851,7 @@ pub fn show(
                     let back_resp = ui.add(
                         egui::Label::new(
                             egui::RichText::new(t!("profile.back"))
-                                .font(theme::body(12.0))
+                                .font(theme::body_md())
                                 .color(theme::TEXT_FAINT),
                         )
                         .sense(Sense::click()),
@@ -969,7 +965,7 @@ pub fn show(
                         } else {
                             t!("profile.profile_desc")
                         })
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                     );
                     ui.add_space(24.0);
@@ -1057,7 +1053,7 @@ fn auto_activate_card(
         |ui| {
             ui.label(
                 egui::RichText::new(t!("profile.auto_activate_desc"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_FAINT),
             );
             ui.add_space(10.0);
@@ -1188,7 +1184,7 @@ fn process_chip(
         Pos2::new(rect.right() - 10.0, rect.center().y),
         Align2::CENTER_CENTER,
         "×",
-        theme::semibold(13.0),
+        theme::heading(),
         x_col,
     );
     if hovered {
@@ -1221,7 +1217,7 @@ fn overrides_section(
             if !is_active {
                 ui.label(
                     egui::RichText::new(t!("profile.overrides_inactive"))
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                 );
                 return;
@@ -1231,7 +1227,7 @@ fn overrides_section(
             if overrides.device_capabilities.is_empty() && !overrides.canvas {
                 ui.label(
                     egui::RichText::new(t!("profile.overrides_empty"))
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                 );
                 return;
@@ -1247,7 +1243,7 @@ fn overrides_section(
                     |ui| {
                         ui.label(
                             egui::RichText::new(t!("profile.canvas_effects"))
-                                .font(theme::semibold(13.0))
+                                .font(theme::heading())
                                 .color(theme::TEXT),
                         );
                     },
@@ -1285,7 +1281,7 @@ fn overrides_section(
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(label.as_ref())
-                                .font(theme::body(13.0))
+                                .font(theme::body_lg())
                                 .color(theme::TEXT_DIM),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1346,7 +1342,7 @@ pub fn process_picker(
         |ui| {
             ui.label(
                 egui::RichText::new(t!("profile.select_processes_desc"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_FAINT),
             );
             ui.add_space(12.0);
@@ -1356,7 +1352,7 @@ pub fn process_picker(
                 .desired_width(f32::INFINITY)
                 .hint_text(t!("profile.filter_processes_hint").to_string())
                 .margin(egui::vec2(10.0, 9.0))
-                .font(theme::body(13.0));
+                .font(theme::body_lg());
             ui.add(search_te);
             ui.add_space(8.0);
 
@@ -1382,7 +1378,7 @@ pub fn process_picker(
             if entries.is_empty() {
                 ui.label(
                     egui::RichText::new(t!("profile.no_processes"))
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                 );
             }
@@ -1460,7 +1456,7 @@ pub fn process_picker(
                             Pos2::new(text_x, row.center().y - 5.0),
                             Align2::LEFT_CENTER,
                             display,
-                            theme::semibold(12.0),
+                            theme::subhead(),
                             if selected {
                                 theme::TEXT
                             } else {
@@ -1471,7 +1467,7 @@ pub fn process_picker(
                             Pos2::new(text_x, row.center().y + 7.0),
                             Align2::LEFT_CENTER,
                             proc_name,
-                            theme::mono(9.5),
+                            theme::value_xs(),
                             theme::TEXT_FAINT,
                         );
 

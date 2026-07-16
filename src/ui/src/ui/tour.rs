@@ -143,7 +143,7 @@ fn overlay(
                 Pos2::new(bubble.left() + 16.0, bubble.bottom() - 16.0),
                 Align2::LEFT_BOTTOM,
                 format!("{} / {step_count}", step_index + 1),
-                theme::body(11.0),
+                theme::body_sm(),
                 theme::TEXT_FAINT,
             );
 

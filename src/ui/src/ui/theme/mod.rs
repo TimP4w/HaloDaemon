@@ -8,6 +8,12 @@ use egui::{
     Stroke,
 };
 
+mod tokens;
+mod type_scale;
+
+pub use tokens::*;
+pub use type_scale::*;
+
 // ── Surfaces ─────────────────────────────────────────────────────────────────
 pub const BODY: Color32 = hex(0x090b11);
 #[expect(dead_code, reason = "theme token reserved for native window chrome")]
@@ -122,15 +128,31 @@ macro_rules! font {
 
 pub fn install_fonts(ctx: &Context) {
     let mut defs = FontDefinitions::default();
-    font!(defs, "it400", "../../../assets/fonts/InterTight-400.ttf");
-    font!(defs, "it600", "../../../assets/fonts/InterTight-600.ttf");
-    font!(defs, "it700", "../../../assets/fonts/InterTight-700.ttf");
-    font!(defs, "jm400", "../../../assets/fonts/JetBrainsMono-400.ttf");
-    font!(defs, "jm600", "../../../assets/fonts/JetBrainsMono-600.ttf");
-    font!(defs, "jm700", "../../../assets/fonts/JetBrainsMono-700.ttf");
+    font!(defs, "it400", "../../../../assets/fonts/InterTight-400.ttf");
+    font!(defs, "it600", "../../../../assets/fonts/InterTight-600.ttf");
+    font!(defs, "it700", "../../../../assets/fonts/InterTight-700.ttf");
+    font!(
+        defs,
+        "jm400",
+        "../../../../assets/fonts/JetBrainsMono-400.ttf"
+    );
+    font!(
+        defs,
+        "jm600",
+        "../../../../assets/fonts/JetBrainsMono-600.ttf"
+    );
+    font!(
+        defs,
+        "jm700",
+        "../../../../assets/fonts/JetBrainsMono-700.ttf"
+    );
     // The exact NotoSans face the daemon's LCD renderer embeds, so the LCD
     // editor preview's Sans text matches the device pixel-for-pixel.
-    font!(defs, "noto", "../../../assets/fonts/NotoSans-Regular.ttf");
+    font!(
+        defs,
+        "noto",
+        "../../../../assets/fonts/NotoSans-Regular.ttf"
+    );
 
     // Our custom faces lack symbol glyphs (×, ▾, →, …), so append egui's
     // Monospace fallback chain (Hack covers the missing shapes/arrows).

@@ -134,7 +134,7 @@ pub fn show(
         |ui| {
             ui.label(
                 RichText::new(t!("depcheck.intro"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
             ui.add_space(12.0);
@@ -208,7 +208,7 @@ pub(crate) fn issue_card_with_surface(
             |ui| {
                 ui.label(
                     RichText::new(title_text(dep))
-                        .font(theme::semibold(13.0))
+                        .font(theme::heading())
                         .color(theme::TEXT),
                 );
             },
@@ -218,7 +218,7 @@ pub(crate) fn issue_card_with_surface(
                 } else {
                     (t!("depcheck.optional"), theme::STAT_AMBER)
                 };
-                ui.label(RichText::new(tag).font(theme::body(10.5)).color(color));
+                ui.label(RichText::new(tag).font(theme::caption()).color(color));
             },
         );
         ui.add_space(6.0);

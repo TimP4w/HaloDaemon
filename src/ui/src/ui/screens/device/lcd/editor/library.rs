@@ -90,7 +90,7 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
     ui.add_space(14.0);
     ui.label(
         egui::RichText::new(t!("lcd.start_from_preset"))
-            .font(theme::body(9.0))
+            .font(theme::micro())
             .color(theme::TEXT_FAINT),
     );
     ui.add_space(6.0);
@@ -113,7 +113,7 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
 pub(super) fn my_templates_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     ui.label(
         egui::RichText::new(t!("lcd.my_templates"))
-            .font(theme::body(9.0))
+            .font(theme::micro())
             .color(theme::TEXT_FAINT),
     );
     ui.add_space(6.0);
@@ -226,7 +226,7 @@ fn library_header(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
         egui::pos2(rect.left(), cy),
         egui::Align2::LEFT_CENTER,
         t!("lcd.add_a_widget"),
-        theme::semibold(13.0),
+        theme::heading(),
         theme::TEXT,
     );
     let box_rect = Rect::from_min_size(
@@ -286,7 +286,7 @@ fn library_tile(ui: &mut egui::Ui, badge: &str, label: &str) -> egui::Response {
         rect.center() + egui::vec2(0.0, 22.0),
         egui::Align2::CENTER_CENTER,
         label,
-        theme::body(10.5),
+        theme::caption(),
         theme::TEXT_MUT,
     );
     if resp.hovered() {
