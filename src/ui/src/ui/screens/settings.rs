@@ -1136,15 +1136,27 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
 }
 
 /// Upstream projects credited in the Credits modal, mirroring the README
-/// Acknowledgments table — `(name, url)`.
-const CREDIT_REFS: [(&str, &str); 5] = [
+/// Acknowledgments table — `(name, url)`. Mirrors the plugin repository's
+/// licensing table (HaloDaemon-plugins/README.md) plus the core PawnIO blobs.
+const CREDIT_REFS: [(&str, &str); 10] = [
     ("Solaar", "https://github.com/pwr-Solaar/Solaar"),
-    ("OpenRGB", "https://gitlab.com/CalcProgrammer1/OpenRGB"),
+    ("liquidctl", "https://github.com/liquidctl/liquidctl"),
+    (
+        "Linux kernel nzxt-smart2",
+        "https://github.com/torvalds/linux/blob/master/drivers/hwmon/nzxt-smart2.c",
+    ),
+    ("OpenRazer", "https://github.com/openrazer/openrazer"),
+    (
+        "linux-arctis-manager",
+        "https://github.com/elegos/Linux-Arctis-Manager",
+    ),
+    ("tomasf/evnia", "https://github.com/tomasf/evnia"),
+    ("mijoe/g560-led", "https://github.com/mijoe/g560-led"),
     (
         "LibreHardwareMonitor",
         "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor",
     ),
-    ("g560-led", "https://github.com/mijoe/g560-led"),
+    ("OpenRGB", "https://gitlab.com/CalcProgrammer1/OpenRGB"),
     (
         "PawnIO modules",
         "https://github.com/namazso/PawnIO_modules",
