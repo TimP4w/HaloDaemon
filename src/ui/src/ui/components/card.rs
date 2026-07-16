@@ -64,7 +64,7 @@ pub fn card_titled<R>(
             },
             right,
         );
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         body(ui)
     })
 }

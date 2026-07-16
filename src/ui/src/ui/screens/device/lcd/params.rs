@@ -70,7 +70,7 @@ pub(super) fn render_param(
                     .font(theme::body_sm())
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             if let Some(c) = widgets::color_swatch_row(ui, current) {
                 values.insert(param.id.clone(), EffectParamValue::Color(c));
                 return true;

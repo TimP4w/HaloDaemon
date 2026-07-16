@@ -46,7 +46,7 @@ fn modal_shell(
                 .fill(theme::MODAL_BG)
                 .stroke(Stroke::new(1.0, theme::BORDER))
                 .corner_radius(theme::RADIUS_LG)
-                .inner_margin(egui::Margin::same(MODAL_MARGIN as i8)),
+                .inner_margin(theme::PAD_MODAL),
         )
         .show(ctx, |ui| {
             ui.set_width(w);
@@ -68,7 +68,7 @@ fn modal_shell(
                     title_resp.rect.center().y
                 })
                 .inner;
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             contents(ui);
             if close_button(ui, id, title_center_y) {
                 x_clicked = true;
@@ -148,7 +148,7 @@ pub fn dialog(
             .auto_shrink([false, true])
             .max_height(max_body)
             .show(ui, body);
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         // Height-bound the centered action row: with padding below it, an
         // unbounded row claims the auto-sizing modal's full height and grows it
         // every frame. Zero desired height still expands to fit tall buttons.
@@ -157,7 +157,7 @@ pub fn dialog(
             egui::Layout::right_to_left(egui::Align::Center),
             actions,
         );
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
     })
 }
 
@@ -177,11 +177,11 @@ pub fn dialog_with_subtitle(
             .auto_shrink([false, true])
             .max_height(max_body)
             .show(ui, body);
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         ui.separator();
         // The modal frame's 18px bottom margin is the button→bottom gap, so match
         // the divider→button gap to it and add no trailing space of our own.
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_9);
         ui.allocate_ui_with_layout(
             egui::Vec2::new(ui.available_width(), 0.0),
             egui::Layout::right_to_left(egui::Align::Center),
@@ -219,7 +219,7 @@ pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> 
             {
                 close = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if button(
                 ui,
                 &t!("plugins.issue_copy"),
@@ -235,7 +235,7 @@ pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> 
             let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(copied_key));
             let now = ui.ctx().input(|i| i.time);
             if crate::ui::screens::settings::copied_feedback_visible(copied_at, now) {
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
                 ui.label(
                     egui::RichText::new(t!("plugins.issue_copied"))
                         .font(theme::subhead())
@@ -301,14 +301,14 @@ mod tests {
             let _ = ctx.run_ui(input(), |ui| {
                 modal_frame_raw(ui.ctx(), "t", "T", 440.0, 520.0, |ui| {
                     ui.label("Choose which running apps trigger this profile.");
-                    ui.add_space(12.0);
+                    ui.add_space(theme::SPACE_6);
                     let mut s = String::new();
                     ui.add(
                         egui::TextEdit::singleline(&mut s)
                             .desired_width(f32::INFINITY)
                             .margin(egui::vec2(10.0, 9.0)),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     avail.borrow_mut().push(ui.available_height());
                     let list = (ui.available_height() - 60.0).max(60.0);
                     egui::ScrollArea::vertical()
@@ -322,9 +322,9 @@ mod tests {
                                 );
                             }
                         });
-                    ui.add_space(12.0);
+                    ui.add_space(theme::SPACE_6);
                     ui.separator();
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     let _ = button(ui, "OK", ButtonKind::Primary, Vec2::new(160.0, 34.0));
                 });
             });
@@ -392,7 +392,7 @@ mod dialog_tests {
                     420.0,
                     |ui| {
                         ui.label("Body text.");
-                        ui.add_space(12.0);
+                        ui.add_space(theme::SPACE_6);
                     },
                     |ui| {
                         let _ = button(ui, "OK", ButtonKind::Primary, Vec2::new(120.0, button_h));

@@ -108,7 +108,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                 );
             }
         });
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
     }
 }
 
@@ -255,7 +255,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                             .font(theme::body_md())
                             .color(theme::TEXT_DIM),
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(theme::SPACE_3);
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
                         for (i, opt) in c.options.iter().enumerate() {
@@ -278,7 +278,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                             .font(theme::body_md())
                             .color(theme::TEXT_DIM),
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(theme::SPACE_3);
                     let options: Vec<(String, String)> = c
                         .options
                         .iter()
@@ -328,7 +328,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     );
                 }
             }
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
         }
         Setting::Range(r) => {
             let key = format!("range:{}", r.key);
@@ -383,7 +383,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     }
                 }
             }
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
         }
         Setting::Boolean(b) => {
             egui::Sides::new().show(
@@ -418,7 +418,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     }
                 },
             );
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
         }
         Setting::Action(a) => {
             if widgets::button(
@@ -437,7 +437,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     },
                 );
             }
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
         }
     }
 }

@@ -97,7 +97,7 @@ fn page_body(
             .font(theme::bold(22.0))
             .color(theme::TEXT),
     );
-    ui.add_space(3.0);
+    ui.add_space(theme::SPACE_1);
     ui.label(
         egui::RichText::new(t!("settings.subtitle"))
             .font(theme::body_md())
@@ -107,7 +107,7 @@ fn page_body(
 
     // ── APPLICATION ───────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_application"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     let app_card = ui.scope(|ui| {
         widgets::card(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -125,11 +125,11 @@ fn page_body(
         crate::domain::tour::AnchorId::SettingsApplication,
         app_card.response.rect,
     );
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── ENGINES ───────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_engines"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     let engines_card = ui.scope(|ui| {
         widgets::card(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -141,52 +141,52 @@ fn page_body(
         crate::domain::tour::AnchorId::SettingsEngines,
         engines_card.response.rect,
     );
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── DEVICES ───────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_devices"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         daemon_status_row(ui, connected);
         rediscover_row(ui, state, cmd);
     });
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── HEALTHCHECK ───────────────────────────────────────────────────────
     healthcheck_section(ui, cmd, debug);
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── LOGGING ───────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_logging"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         log_level_row(ui, state, cmd);
     });
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── ADVANCED ──────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_advanced"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         config_folder_row(ui, state);
     });
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── DEBUG ─────────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_debug"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         diagnostics_row(ui, cmd, st);
     });
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── ABOUT ─────────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_about"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         about_row(ui, st);
@@ -194,7 +194,7 @@ fn page_body(
         repo_row(ui);
     });
 
-    ui.add_space(24.0);
+    ui.add_space(theme::SPACE_10);
     footer(ui, state);
 }
 
@@ -590,7 +590,7 @@ fn healthcheck_section(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugI
     {
         crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
     }
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
 
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -1053,12 +1053,12 @@ fn licenses_modal(ctx: &egui::Context, st: &mut SettingsUi) {
                     .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             egui::Frame::NONE
                 .fill(theme::hex(0x080b10))
                 .stroke(Stroke::new(1.0, theme::hex(0x1c2230)))
                 .corner_radius(theme::RADIUS_SM)
-                .inner_margin(egui::Margin::same(12))
+                .inner_margin(theme::PAD_WELL)
                 .show(ui, |ui| {
                     ui.label(
                         egui::RichText::new(THIRD_PARTY_LICENSES)
@@ -1083,7 +1083,7 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
                 .font(theme::body_md())
                 .color(theme::TEXT_MUT),
         );
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
         ui.label(
             egui::RichText::new(format!(
                 "{} {}",
@@ -1107,14 +1107,14 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
                 .color(theme::CYAN),
             REPO_URL,
         );
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
 
         ui.label(
             egui::RichText::new(t!("settings.acknowledgments"))
                 .font(theme::heading())
                 .color(theme::TEXT),
         );
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
         for (name, url) in &CREDIT_REFS {
             if url.is_empty() {
                 ui.label(
@@ -1196,7 +1196,7 @@ fn diagnostics_modal(ctx: &egui::Context, debug: Option<&DebugInfo>, st: &mut Se
                             let now = ui.ctx().input(|i| i.time);
                             ui.ctx().data_mut(|d| d.insert_temp(copied_key, now));
                         }
-                        ui.add_space(8.0);
+                        ui.add_space(theme::SPACE_4);
                         if widgets::button(
                             ui,
                             &t!("settings.export_button"),
@@ -1211,7 +1211,7 @@ fn diagnostics_modal(ctx: &egui::Context, debug: Option<&DebugInfo>, st: &mut Se
                         let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(copied_key));
                         let now = ui.ctx().input(|i| i.time);
                         if copied_feedback_visible(copied_at, now) {
-                            ui.add_space(10.0);
+                            ui.add_space(theme::SPACE_5);
                             ui.label(
                                 egui::RichText::new(t!("settings.copied_feedback"))
                                     .font(theme::subhead())
@@ -1221,7 +1221,7 @@ fn diagnostics_modal(ctx: &egui::Context, debug: Option<&DebugInfo>, st: &mut Se
                             ui.ctx().request_repaint();
                         }
                     });
-                    ui.add_space(12.0);
+                    ui.add_space(theme::SPACE_6);
 
                     // ── System ────────────────────────────────────────────────
                     section_label(ui, &t!("settings.diag_system"));
@@ -1329,13 +1329,13 @@ fn diag_card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .fill(theme::hex(0x080b10))
         .stroke(Stroke::new(1.0, theme::hex(0x1c2230)))
         .corner_radius(theme::RADIUS_SM)
-        .inner_margin(egui::Margin::same(12))
+        .inner_margin(theme::PAD_WELL)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             body(ui)
         })
         .inner;
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_6);
     r
 }
 
@@ -1354,13 +1354,13 @@ fn mono_line(ui: &mut egui::Ui, text: &str, color: Color32) {
 }
 
 fn section_label(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(2.0);
+    ui.add_space(theme::SPACE_1);
     ui.label(
         egui::RichText::new(text)
             .font(theme::subhead())
             .color(theme::TEXT),
     );
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
 }
 
 fn diagnostics_json(info: &DebugInfo) -> String {

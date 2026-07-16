@@ -136,12 +136,12 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
         );
     }
 
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
 
     let dev_id = ctx.dev.id.clone();
     for channel in channels {
         channel_card(ui, ctx, &dev_id, channel);
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
     }
 }
 
@@ -160,7 +160,7 @@ fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &Chainab
         })
         .show(ui, |ui| {
             channel_header(ui, ctx, dev_id, channel, used);
-            ui.add_space(13.0);
+            ui.add_space(theme::SPACE_6);
 
             let prev_spacing = ui.style().spacing.item_spacing;
             ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 9.0);
@@ -177,7 +177,7 @@ fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &Chainab
 
             let remaining = channel.max_leds.saturating_sub(used);
             if remaining > 0 {
-                ui.add_space(9.0);
+                ui.add_space(theme::SPACE_4);
                 add_link_panel(ui, ctx, dev_id, channel, remaining);
             }
         });
@@ -378,12 +378,12 @@ fn link_row(
                     theme::TEXT_FAINT,
                 );
 
-                ui.add_space(13.0);
+                ui.add_space(theme::SPACE_6);
 
                 // Name + dots column
                 ui.vertical(|ui| {
                     name_field(ui, ctx, link);
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     led_dots(ui, link);
                 });
 
@@ -407,7 +407,7 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &ChainLinkInfo) {
                     .font(theme::semibold(12.5))
                     .color(theme::TEXT),
             );
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             let (chip, _) = ui.allocate_exact_size(Vec2::new(94.0, 19.0), Sense::hover());
             let p = ui.painter();
             p.rect_filled(chip, 6.0, theme::hex(0x181d29));
@@ -502,13 +502,13 @@ fn locked_right(ui: &mut egui::Ui, link: &ChainLinkInfo) {
             .font(theme::body_md())
             .color(theme::hex(0x3a4860)),
     );
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     ui.label(
         egui::RichText::new(t!("device.chains_led_count", count = link.led_count))
             .font(theme::mono(12.0))
             .color(theme::TEXT_MUT),
     );
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     ui.label(
         egui::RichText::new(topology_label(&link.topology))
             .font(theme::body_sm())
@@ -562,13 +562,13 @@ fn editable_right(
         );
     }
 
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     ui.label(
         egui::RichText::new(t!("device.chains_led_count", count = link.led_count))
             .font(theme::mono(12.0))
             .color(theme::TEXT_DIM),
     );
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     ui.label(
         egui::RichText::new(topology_label(&link.topology))
             .font(theme::body_sm())
@@ -646,7 +646,7 @@ fn add_link_panel(
                             .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     ui.add(
                         egui::TextEdit::singleline(&mut name)
                             .font(theme::semibold(12.5))
@@ -654,7 +654,7 @@ fn add_link_panel(
                             .margin(egui::Margin::symmetric(10, 7)),
                     );
                 });
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
 
                 // Topology picker
                 ui.horizontal(|ui| {
@@ -663,7 +663,7 @@ fn add_link_panel(
                             .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     let current = topology_label(&topology_from_idx(topo_idx));
                     egui::ComboBox::from_id_salt(("ch_topo_cb", dev_id, &channel.channel_id))
                         .selected_text(current)
@@ -680,7 +680,7 @@ fn add_link_panel(
                     leds = leds.max(new_divisor).div_ceil(new_divisor) * new_divisor;
                 }
 
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
 
                 // LED count stepper
                 ui.horizontal(|ui| {
@@ -689,7 +689,7 @@ fn add_link_panel(
                             .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     led_stepper(
                         ui,
                         &mut leds,
@@ -700,7 +700,7 @@ fn add_link_panel(
                     );
                 });
 
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
 
                 // Cancel (left) / Add (right)
                 ui.horizontal(|ui| {
@@ -715,7 +715,7 @@ fn add_link_panel(
                     {
                         ui.ctx().data_mut(|d| d.insert_temp(open_key, false));
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     if widgets::button(
                         ui,
                         &t!("device.chains_add"),

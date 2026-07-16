@@ -132,7 +132,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         }
     }
 
-    ui.add_space(14.0);
+    ui.add_space(crate::ui::theme::SPACE_7);
 
     match st.lcd.media_tab {
         LcdMediaTab::Template => editor::show(ui, ctx, st, &id, lcd),

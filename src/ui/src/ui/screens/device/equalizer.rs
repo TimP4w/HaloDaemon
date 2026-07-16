@@ -42,7 +42,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         |ui| {
             ui.horizontal_top(|ui| {
                 preset_list(ui, ctx, &id, &eq);
-                ui.add_space(24.0);
+                ui.add_space(theme::SPACE_10);
                 if eq.editable {
                     ui.vertical(|ui| bands(ui, ctx, st, &id, &eq));
                 }

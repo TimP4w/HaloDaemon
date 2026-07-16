@@ -71,7 +71,7 @@ pub fn steps_editor(ui: &mut egui::Ui, label: &str, steps: &mut Vec<ColorStep>) 
             .font(theme::body_md())
             .color(theme::TEXT_DIM),
     );
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     let mut remove: Option<usize> = None;
     for (i, step) in steps.iter_mut().enumerate() {
         ui.horizontal(|ui| {
@@ -128,7 +128,7 @@ pub fn steps_editor(ui: &mut egui::Ui, label: &str, steps: &mut Vec<ColorStep>) 
                 remove = Some(i);
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
     }
     if let Some(i) = remove {
         if steps.len() > 1 {

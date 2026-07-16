@@ -53,7 +53,7 @@ pub fn back_link(ui: &mut egui::Ui, label: &str) -> bool {
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_6);
     resp.clicked()
 }
 
@@ -121,7 +121,7 @@ pub fn value_row(ui: &mut egui::Ui, label: &str, value: &str, value_color: Color
 /// subtitle — matching the Home page's "no devices" placeholder. Shared by every
 /// page so empty views read the same everywhere instead of a stray top-left line.
 pub fn empty_state(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) {
-    ui.add_space(60.0);
+    ui.add_space(theme::SPACE_16);
     ui.vertical_centered(|ui| {
         ui.label(
             egui::RichText::new(title)
@@ -129,7 +129,7 @@ pub fn empty_state(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) {
                 .color(theme::TEXT_DIM),
         );
         if let Some(sub) = subtitle {
-            ui.add_space(4.0);
+            ui.add_space(theme::SPACE_2);
             ui.label(
                 egui::RichText::new(sub)
                     .font(theme::body_md())

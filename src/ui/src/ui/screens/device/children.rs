@@ -167,7 +167,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
     widgets::card(ui, |ui| {
         ui.vertical_centered(|ui| {
             widgets::caps_label(ui, &t!("device.children_receiver"));
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 egui::RichText::new(&ctx.dev.name)
                     .font(theme::title())
@@ -205,7 +205,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                 );
             }
 
-            ui.add_space(18.0);
+            ui.add_space(theme::SPACE_9);
 
             let used = ps.slots.len();
             let max = ps.max_slots as usize;
@@ -216,7 +216,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                         .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
-                ui.add_space(16.0);
+                ui.add_space(theme::SPACE_8);
                 if widgets::button(
                     ui,
                     &t!("device.children_cancel"),
@@ -239,7 +239,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                         .font(theme::body_md())
                         .color(theme::TEXT_MUT),
                 );
-                ui.add_space(16.0);
+                ui.add_space(theme::SPACE_8);
                 if widgets::button(
                     ui,
                     &t!("device.children_pair_new_device"),
@@ -357,7 +357,7 @@ fn pair_slot_row(
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(btn_area), |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(18.0);
+                ui.add_space(theme::SPACE_9);
                 if widgets::button(
                     ui,
                     &t!("device.children_unpair"),

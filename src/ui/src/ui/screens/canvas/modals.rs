@@ -82,7 +82,7 @@ pub(super) fn zones_assign_modal(
                     .font(theme::body_sm())
                     .color(theme::TEXT_FAINT),
             );
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             for dev in &state.devices {
                 if crate::domain::models::device::is_hidden(dev) {
                     continue;
@@ -114,7 +114,7 @@ pub(super) fn zones_assign_modal(
                 let total = rgb.descriptor.zones.len();
                 let all_on = on_count == total;
 
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
                 egui::Sides::new().show(
                     ui,
                     |ui| {
@@ -172,7 +172,7 @@ pub(super) fn zones_assign_modal(
                         );
                     },
                 );
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                     for z in &rgb.descriptor.zones {
@@ -271,7 +271,7 @@ pub(super) fn new_instance_modal(
             }
 
             widgets::caps_label(ui, &t!("canvas.effect_caps"));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             let gap = 10.0;
             let cols = 4usize;
             let cell_w =
@@ -350,7 +350,7 @@ pub(crate) fn fps_modal(
                     .font(theme::body_sm())
                     .color(theme::TEXT_FAINT),
             );
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
             let mut fps = canvas_ui.canvas_fps;
             let readout = format!("{} fps", fps.round() as u32);
             if widgets::slider_row(ui, &t!("canvas.frame_rate"), &mut fps, 1.0..=60.0, &readout) {

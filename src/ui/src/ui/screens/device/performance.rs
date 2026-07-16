@@ -80,13 +80,13 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                 }
             },
         );
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         ui.label(
             egui::RichText::new(t!("devtabs.dpi_help"))
                 .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
         );
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_9);
         if axis(ui, st, lo, hi, dpi.current_index, &available) {
             changed = true;
         }
@@ -289,11 +289,11 @@ fn list(
 
     for i in 0..n {
         if i > 0 {
-            ui.add_space(1.0);
+            ui.add_space(theme::SPACE_1);
             let (sep, _) =
                 ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(sep, 0.0, theme::hex(0x1e2738));
-            ui.add_space(1.0);
+            ui.add_space(theme::SPACE_1);
         }
 
         let is_current = i == current;

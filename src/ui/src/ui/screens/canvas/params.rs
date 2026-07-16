@@ -178,7 +178,7 @@ pub(super) fn instance_params(
                     EffectParamValue::Float(v) => *v as f32,
                     _ => *min as f32,
                 };
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 let readout = format!("{val:.0}%");
                 if widgets::slider_row(
                     ui,
@@ -202,7 +202,7 @@ pub(super) fn instance_params(
                     EffectParamValue::Str(s) => s.clone(),
                     _ => options.first().cloned().unwrap_or_default(),
                 };
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 ui.horizontal_wrapped(|ui| {
                     for opt in options {
                         let label = effect_enum_option_label(&param.id, opt);
@@ -222,7 +222,7 @@ pub(super) fn instance_params(
                         b: 232,
                     },
                 };
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 if let Some(new_color) = widgets::color_picker(ui, color) {
                     edits.insert(param.id.clone(), EffectParamValue::Color(new_color));
                     changed = true;
@@ -230,7 +230,7 @@ pub(super) fn instance_params(
             }
             ParamKind::Boolean => {
                 let on = matches!(&current, EffectParamValue::Bool(true));
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
                 egui::Sides::new().show(
                     ui,
                     |ui| {

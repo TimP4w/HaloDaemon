@@ -163,13 +163,13 @@ impl IntegrationsUi {
             crate::domain::tour::AnchorId::IntegrationsOverview,
             title_resp.rect,
         );
-        ui.add_space(3.0);
+        ui.add_space(theme::SPACE_1);
         ui.label(
             egui::RichText::new(t!("integrations.subtitle"))
                 .font(theme::body_md())
                 .color(theme::TEXT_MUT),
         );
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_9);
 
         let integrations: Vec<&PluginInfo> = state
             .plugins
@@ -210,7 +210,7 @@ impl IntegrationsUi {
                             Some(tex) => draw_logo_fit(ui.painter(), rect, tex),
                             None => initials_tile_at(ui, rect, &p.name, &p.id),
                         }
-                        ui.add_space(6.0);
+                        ui.add_space(theme::SPACE_3);
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
@@ -227,7 +227,7 @@ impl IntegrationsUi {
                                 }
                             });
                             if !p.description.is_empty() {
-                                ui.add_space(4.0);
+                                ui.add_space(theme::SPACE_2);
                                 ui.label(
                                     egui::RichText::new(&p.description)
                                         .font(theme::body_sm())
@@ -265,7 +265,7 @@ impl IntegrationsUi {
                 },
             );
 
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             let status = integration_status(state, &p.id);
             let has_config = !p.config_fields.is_empty();
             let expanded = self.expanded.as_deref() == Some(p.id.as_str());
@@ -296,7 +296,7 @@ impl IntegrationsUi {
             );
 
             if let Some(issue) = &p.health.issue {
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
                 if integration_issue_bar(ui, issue) {
                     self.issue_modal = Some((
                         t!("integrations.issue_modal_title", integration = &p.name).to_string(),
@@ -306,7 +306,7 @@ impl IntegrationsUi {
             }
 
             if has_config && expanded {
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
                 seed_config_edit_if_needed(&mut self.config_edit, &p.id, &p.config_values);
                 let edits = &mut self.config_edit.as_mut().expect("just seeded above").1;
                 config_section(ui, p, edits, |values| {

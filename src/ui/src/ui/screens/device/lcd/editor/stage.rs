@@ -572,7 +572,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
         send_def(ctx, st, id, false);
     }
 
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(t!("lcd.widget_count", n = st.lcd.editor.def.widgets.len()))

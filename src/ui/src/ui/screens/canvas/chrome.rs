@@ -17,7 +17,7 @@ pub(crate) fn chrome(ui: &mut egui::Ui, canvas_ui: &mut CanvasUi, cmd: &CommandT
         if fps_chip(ui, canvas_ui) {
             canvas_ui.fps_modal_open = true;
         }
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
         transport_controls(ui, cmd, playing);
     });
 }

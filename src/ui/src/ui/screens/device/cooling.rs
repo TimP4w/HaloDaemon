@@ -53,7 +53,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         .map(|(_, s)| s.value as f32);
 
     top_row(ui, ctx, st, &fan, &pump, &sensors, sensor_temp);
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
 
     let curve_title = match (&fan, &pump) {
         (Some(_), None) => t!("cooling.fan_curve"),
@@ -84,7 +84,7 @@ fn top_row(
         // Curve sensor selector + live temp.
         widgets::card(&mut cols[0], |ui| {
             widgets::caps_label(ui, &t!("cooling.curve_sensor_caps"));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             let current = st
                 .cooling
                 .curve_sensor
@@ -133,7 +133,7 @@ fn top_row(
                     },
                 );
             }
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             let t = sensor_temp
                 .map(|t| format!("{t:.0}"))
                 .unwrap_or_else(|| "-".into());
@@ -259,14 +259,14 @@ fn curve_card(
             .as_ref()
             .and_then(crate::ui::screens::cooling::curve_status_text)
         {
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 egui::RichText::new(warning)
                     .font(theme::body_sm())
                     .color(theme::STAT_AMBER),
             );
         }
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
 
         // Plot area with axis labels.
         let (outer, _) =

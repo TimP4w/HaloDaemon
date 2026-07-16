@@ -375,7 +375,7 @@ pub(super) fn show(
         .as_ref()
         .is_some_and(|r| mine(r.cid, r.shifted));
 
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     let (rects, remove, resize_to) = pill_strip(ui, st, cid, shifted, &steps, recording);
 
     if let Some(i) = remove {
@@ -452,7 +452,7 @@ pub(super) fn show(
 }
 
 fn hint(ui: &mut egui::Ui, text: &str, color: Color32) {
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     ui.label(
         egui::RichText::new(text)
             .font(theme::caption())
@@ -689,7 +689,7 @@ fn record_ui(
     st.last_edit = ctx.time;
     ui.memory_mut(|m| m.request_focus(egui::Id::new(("macro_rec_focus", cid, layer.tag()))));
 
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     let (zone, _resp) = ui.allocate_exact_size(
         Vec2::new(ui.available_width().max(120.0), 40.0),
         Sense::click_and_drag(), // swallow presses so they don't hit widgets below
@@ -753,9 +753,9 @@ fn palette_row(
         commit(ctx, st, id, cid, layer, s, true);
     };
 
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
     widgets::caps_label(ui, &t!("misc.macro_add_step"));
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
 
     // One-shot key capture armed from the palette.
     let capture = st
@@ -837,7 +837,7 @@ fn palette_row(
     });
 
     if let Some(up) = menu {
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
             for (label, btn) in [

@@ -77,7 +77,7 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
     if st.lcd.editor.library_collapsed {
         return;
     }
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(9.0, 9.0);
         for &(widget_type, badge) in LIBRARY {
@@ -87,13 +87,13 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
             }
         }
     });
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     ui.label(
         egui::RichText::new(t!("lcd.start_from_preset"))
             .font(theme::micro())
             .color(theme::TEXT_FAINT),
     );
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
         for &preset in PRESETS {
@@ -103,7 +103,7 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
             }
         }
     });
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     my_templates_section(ui, ctx, st);
 }
 
@@ -116,7 +116,7 @@ pub(super) fn my_templates_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Dev
             .font(theme::micro())
             .color(theme::TEXT_FAINT),
     );
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut st.lcd.editor.template_name)
@@ -146,7 +146,7 @@ pub(super) fn my_templates_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Dev
     if ctx.state.lcd.templates.is_empty() {
         return;
     }
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
         for name in &ctx.state.lcd.templates {
@@ -192,7 +192,7 @@ pub(super) fn delete_template_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut De
             {
                 confirm = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("lcd.cancel"),

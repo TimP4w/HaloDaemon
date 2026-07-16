@@ -85,7 +85,7 @@ pub fn slider_row(
             );
         },
     );
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     slider(ui, value, range)
 }
 

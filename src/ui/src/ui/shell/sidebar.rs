@@ -121,9 +121,9 @@ pub fn sidebar(
         Stroke::new(1.0, theme::DIVIDER),
     );
 
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     ui.horizontal(|ui| {
-        ui.add_space(12.0);
+        ui.add_space(theme::SPACE_6);
         ui.vertical(|ui| {
             ui.set_width(rect.width() - 24.0);
             section_label(ui, &t!("shell.workspace"));
@@ -166,10 +166,10 @@ pub fn sidebar(
                 crate::domain::tour::anchor(ui.ctx(), anchor, row_rect);
             }
 
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             section_label(ui, &t!("shell.my_devices"));
         });
-        ui.add_space(12.0);
+        ui.add_space(theme::SPACE_6);
     });
 
     // Device list (scrolls, with side padding), then a pinned footer.
@@ -186,7 +186,7 @@ pub fn sidebar(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(&mut list_ui, |ui| {
-            ui.add_space(2.0);
+            ui.add_space(theme::SPACE_1);
             let mut any = false;
             let mut devices: Vec<_> = state
                 .devices
@@ -202,9 +202,9 @@ pub fn sidebar(
                 }
             }
             if !any {
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 ui.horizontal(|ui| {
-                    ui.add_space(14.0);
+                    ui.add_space(theme::SPACE_7);
                     ui.label(
                         egui::RichText::new(t!("shell.no_devices"))
                             .font(theme::body_md())
@@ -291,7 +291,7 @@ fn footer(ui: &mut egui::Ui, rect: Rect, connected: bool) {
 }
 
 fn section_label(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
     let mut job = egui::text::LayoutJob::default();
     job.append(

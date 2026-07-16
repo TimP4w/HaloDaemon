@@ -418,7 +418,7 @@ pub fn show(
                     *page = Page::Home;
                 }
                 header(ui, dev, ui_state, cmd);
-                ui.add_space(8.0);
+                ui.add_space(crate::ui::theme::SPACE_4);
 
                 let labels: Vec<std::borrow::Cow<'static, str>> =
                     tabs.iter().map(|t| tab_label(t.kind, dev)).collect();

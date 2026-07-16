@@ -588,7 +588,7 @@ pub fn title_dropdown(
             }
         }
 
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
         ui.painter().line_segment(
             [
                 Pos2::new(ui.max_rect().left(), ui.cursor().top()),
@@ -596,7 +596,7 @@ pub fn title_dropdown(
             ],
             Stroke::new(1.0, theme::BORDER_SOFT),
         );
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
 
         // Bottom actions row
         ui.horizontal(|ui| {
@@ -611,7 +611,7 @@ pub fn title_dropdown(
             {
                 open_add = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("profile.profile_settings_btn"),
@@ -702,7 +702,7 @@ pub fn add_modal(ctx: &egui::Context, state: &AppState, cmd: &CommandTx, st: &mu
             }
 
             if !name_ok && !st.add_name_buf.trim().is_empty() {
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 ui.label(
                     egui::RichText::new(t!("profile.name_taken"))
                         .font(theme::body_sm())
@@ -722,7 +722,7 @@ pub fn add_modal(ctx: &egui::Context, state: &AppState, cmd: &CommandTx, st: &mu
             {
                 create = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("profile.cancel"),
@@ -790,7 +790,7 @@ pub fn delete_confirm_modal(ctx: &egui::Context, cmd: &CommandTx, st: &mut Profi
             {
                 confirm = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("profile.cancel"),
@@ -862,7 +862,7 @@ pub fn show(
                     if back_resp.clicked() {
                         *page = Page::Home;
                     }
-                    ui.add_space(16.0);
+                    ui.add_space(theme::SPACE_8);
 
                     // Profile name heading (editable for non-default)
                     let heading = ui.horizontal(|ui| {
@@ -898,7 +898,7 @@ pub fn show(
                             }
                         }
 
-                        ui.add_space(12.0);
+                        ui.add_space(theme::SPACE_6);
                         if is_active {
                             // Active badge
                             let badge_rect =
@@ -958,7 +958,7 @@ pub fn show(
                         heading.response.rect,
                     );
 
-                    ui.add_space(6.0);
+                    ui.add_space(theme::SPACE_3);
                     ui.label(
                         egui::RichText::new(if is_default {
                             t!("profile.default_desc")
@@ -968,7 +968,7 @@ pub fn show(
                         .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                     );
-                    ui.add_space(24.0);
+                    ui.add_space(theme::SPACE_10);
 
                     // ── AUTO-ACTIVATE section ────────────────────────────────
                     auto_activate_card(ui, state, cmd, st, profile);
@@ -1056,7 +1056,7 @@ fn auto_activate_card(
                     .font(theme::body_md())
                     .color(theme::TEXT_FAINT),
             );
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
 
             if !chips.is_empty() {
                 ui.horizontal_wrapped(|ui| {
@@ -1068,7 +1068,7 @@ fn auto_activate_card(
                         }
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(theme::SPACE_4);
             }
 
             let add_btn_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(150.0, 32.0));
@@ -1237,7 +1237,7 @@ fn overrides_section(
 
             // Canvas override
             if overrides.canvas {
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
                 egui::Sides::new().show(
                     ui,
                     |ui| {
@@ -1260,7 +1260,7 @@ fn overrides_section(
                         }
                     },
                 );
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
             }
 
             // Per-device capability overrides
@@ -1272,9 +1272,9 @@ fn overrides_section(
                     .map(|d| d.name.as_str())
                     .unwrap_or(device_id.as_str());
 
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
                 widgets::caps_label(ui, device_name);
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
 
                 for key in keys {
                     let label = capability_label(key);
@@ -1345,7 +1345,7 @@ pub fn process_picker(
                     .font(theme::body_md())
                     .color(theme::TEXT_FAINT),
             );
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
 
             // Search box (taller for an easier hit target).
             let search_te = egui::TextEdit::singleline(&mut st.pick_filter)
@@ -1354,7 +1354,7 @@ pub fn process_picker(
                 .margin(egui::vec2(10.0, 9.0))
                 .font(theme::body_lg());
             ui.add(search_te);
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
 
             // Union of running apps + already-selected processes.
             let mut entries: Vec<(String, String, String)> = running_apps
@@ -1481,9 +1481,9 @@ pub fn process_picker(
                     }
                 });
 
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             ui.separator();
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
 
             let n = st.pick_selected.len();
             let btn_label = if n > 0 {
@@ -1498,7 +1498,7 @@ pub fn process_picker(
                 {
                     confirm = true;
                 }
-                ui.add_space(8.0);
+                ui.add_space(theme::SPACE_4);
                 if widgets::button(
                     ui,
                     &t!("profile.cancel"),

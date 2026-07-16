@@ -46,7 +46,7 @@ pub fn show(
                     header(ui, state, show_hidden, variant, search);
                     let conflicts = conflict_group_count(&state.devices);
                     if conflicts > 0 {
-                        ui.add_space(18.0);
+                        ui.add_space(theme::SPACE_9);
                         if attention_banner(ui, conflicts) {
                             *conflict_resolve = Some(conflict_groups(&state.devices));
                         }
@@ -329,10 +329,10 @@ fn conflict_modal(
                     .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
             for group in groups.iter_mut() {
                 conflict_group_card(ui, group);
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
             }
             ui.label(
                 egui::RichText::new(t!("home.conflict_modal_note"))
@@ -351,7 +351,7 @@ fn conflict_modal(
             {
                 apply = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("home.conflict_decide_later"),
@@ -406,9 +406,9 @@ fn conflict_group_card(ui: &mut egui::Ui, group: &mut ConflictGroup) {
             ui.horizontal(|ui| {
                 let (badge, _) = ui.allocate_exact_size(Vec2::new(40.0, 30.0), Sense::hover());
                 widgets::device_badge(ui.painter(), badge, dev_type);
-                ui.add_space(11.0);
+                ui.add_space(theme::SPACE_6);
                 ui.vertical(|ui| {
-                    ui.add_space(1.0);
+                    ui.add_space(theme::SPACE_1);
                     ui.label(
                         egui::RichText::new(&dev_name)
                             .font(theme::heading())
@@ -424,7 +424,7 @@ fn conflict_group_card(ui: &mut egui::Ui, group: &mut ConflictGroup) {
                     sources_pill(ui, sources);
                 });
             });
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             let gap = 9.0;
             let side = ((ui.available_width() - gap) / 2.0).max(120.0);
             let mut picked = None;
@@ -665,7 +665,7 @@ fn remove_confirm_modal(
             {
                 confirm = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("home.cancel"),
@@ -717,7 +717,7 @@ fn card_menu(
         edit.request_focus();
         let mut save = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         let mut cancel = false;
-        ui.add_space(7.0);
+        ui.add_space(theme::SPACE_4);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let bw = egui::vec2((inner_w - 6.0) / 2.0, 28.0);
@@ -845,7 +845,7 @@ fn header(
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             segmented(ui, variant);
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             if hidden > 0 {
                 let label = if *show_hidden {
                     t!("home.hide_hidden")
@@ -861,7 +861,7 @@ fn header(
                 if clicked {
                     *show_hidden = !*show_hidden;
                 }
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
             }
             search_box(ui, search);
         });

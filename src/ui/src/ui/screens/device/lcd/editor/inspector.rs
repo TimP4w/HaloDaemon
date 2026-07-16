@@ -21,13 +21,13 @@ use crate::ui::theme;
 /// widget is selected on the stage.
 pub(super) fn empty_selection_card(ui: &mut egui::Ui) {
     ui.vertical_centered(|ui| {
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         ui.label(
             egui::RichText::new(t!("lcd.empty_selection_hint"))
                 .font(theme::body_sm())
                 .color(theme::TEXT_FAINT),
         );
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
     });
 }
 
@@ -125,7 +125,7 @@ pub(super) fn selected_widget_card(
         .font(theme::caption())
         .color(theme::TEXT_FAINT2),
     );
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
 
     let widget_type = st.lcd.editor.def.widgets[idx].widget_type;
     let schema = widget_schema(widget_type);
@@ -180,18 +180,18 @@ pub(super) fn selected_widget_card(
                 };
                 if group != last_group {
                     if let Some(g) = group {
-                        ui.add_space(6.0);
+                        ui.add_space(theme::SPACE_3);
                         ui.label(
                             egui::RichText::new(t!(g))
                                 .font(theme::semibold(10.5))
                                 .color(theme::TEXT_FAINT2),
                         );
-                        ui.add_space(2.0);
+                        ui.add_space(theme::SPACE_1);
                     }
                     last_group = group;
                 }
                 changed |= render_param(ui, ctx, widget_type, p, &mut widget.params);
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
             }
         }
     }
@@ -208,12 +208,12 @@ pub(super) fn selected_widget_card(
                 .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
         );
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         if let Some(c) = widgets::color_swatch_row(ui, cur) {
             st.lcd.editor.def.widgets[idx].color = Some(c);
             changed = true;
         }
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
     }
 
     // Per-widget font override for every text-drawing widget.
@@ -224,7 +224,7 @@ pub(super) fn selected_widget_card(
             st.lcd.editor.def.widgets[idx].font = Some(f);
             changed = true;
         }
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
     }
 
     // The `filename` param is a `ParamKind::Image` no-op above — the image is
@@ -239,7 +239,7 @@ pub(super) fn selected_widget_card(
             );
             changed = true;
         }
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
     }
 
     // Size.
@@ -249,7 +249,7 @@ pub(super) fn selected_widget_card(
         st.lcd.editor.def.widgets[idx].scale = scale;
         changed = true;
     }
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
 
     if changed {
         send_def(ctx, st, id, false);
@@ -325,7 +325,7 @@ pub(super) fn screen_style_card(
             .font(theme::heading())
             .color(theme::TEXT),
     );
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
 
     let mut changed = false;
 
@@ -334,12 +334,12 @@ pub(super) fn screen_style_card(
             .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     if let Some(c) = widgets::color_swatch_row(ui, st.lcd.editor.def.style.accent) {
         st.lcd.editor.def.style.accent = c;
         changed = true;
     }
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_6);
 
     ui.label(
         egui::RichText::new(t!("lcd.background"))
@@ -367,7 +367,7 @@ pub(super) fn screen_style_card(
     });
 
     if let BgKind::Image { filename, dim } = st.lcd.editor.def.style.background.clone() {
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
         background_image_picker(ui, ctx, st, id, &filename, dim, &mut changed);
     }
 
@@ -377,7 +377,7 @@ pub(super) fn screen_style_card(
 
     // Screen brightness — same underlying command/scratch key as the Display
     // card's slider (the design duplicates it here too; both edit one value).
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     let key = "lcd_bright";
     let mut b = st.guarded(key, lcd.brightness as f32, ctx.time);
     let readout = format!("{}%", b.round() as i32);
@@ -393,7 +393,7 @@ pub(super) fn screen_style_card(
         );
     }
 
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     raw_streaming_row(ui, ctx, id, lcd);
 }
 
@@ -413,7 +413,7 @@ fn background_image_picker(
         };
         *changed = true;
     }
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     let mut dim_pct = dim as f32;
     let readout = format!("{}%", dim_pct.round() as i32);
     if widgets::slider_row(ui, &t!("lcd.dim"), &mut dim_pct, 0.0..=100.0, &readout) {

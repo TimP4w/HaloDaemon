@@ -171,7 +171,7 @@ pub(super) fn header(
         theme::TEXT_MUT,
     );
     status_chips(p, rect, dev);
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
 }
 
 /// All reported battery cells across the device's `Battery` capability.

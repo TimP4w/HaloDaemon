@@ -138,7 +138,7 @@ pub fn show(
                             .font(theme::bold(22.0))
                             .color(theme::TEXT),
                     );
-                    ui.add_space(3.0);
+                    ui.add_space(theme::SPACE_1);
                     ui.label(
                         egui::RichText::new(subtitle)
                             .font(theme::body_md())
@@ -147,7 +147,7 @@ pub fn show(
                 });
                 canvas::chrome(ui, canvas_ui, cmd, state.lighting.config.canvas_enabled);
             });
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
             let labels = [t!("lighting.tab_canvas"), t!("lighting.tab_direct")];
             let refs: Vec<&str> = labels.iter().map(|c| c.as_ref()).collect();
             widgets::tab_bar(ui, &mut st.tab, &refs);
@@ -236,7 +236,7 @@ fn page_body(
     designer_ui: &mut DesignerUi,
     page: &mut Page,
 ) {
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
 
     let effects = available_effects(
         &state.lighting.canvas.available_direct_effects,
@@ -269,9 +269,9 @@ fn page_body(
         apply |= effect_extras(ui, state, st, selected_anim);
     }
 
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
     apply |= targets_card(ui, state, cmd, st);
-    ui.add_space(24.0);
+    ui.add_space(theme::SPACE_10);
 
     let now = ui.input(|i| i.time);
     if debounce_apply(&mut st.apply_deadline, apply, now) {
@@ -307,11 +307,11 @@ fn effect_extras(
 ) -> bool {
     match anim {
         _ if st.effect.is_empty() => {
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             sliders_card(ui, st)
         }
         Some(anim) => {
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             effect_params_card(ui, state, st, anim)
         }
         None => false,
@@ -371,7 +371,7 @@ fn effect_actions_row(
     let Some(def) = selected_custom(st, custom) else {
         return;
     };
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         if widgets::button(
@@ -568,7 +568,7 @@ fn effect_params_card(
         |ui| {
             for (i, d) in params.iter().enumerate() {
                 if i > 0 {
-                    ui.add_space(14.0);
+                    ui.add_space(theme::SPACE_7);
                 }
                 let key = format!("{}:{}", anim.id, d.id);
                 match &d.kind {
@@ -703,7 +703,7 @@ fn sliders_card(ui: &mut egui::Ui, st: &mut LightingUi) -> bool {
         ) {
             changed = true;
         }
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_9);
         let rs = format!("{}%", st.saturation.round() as u32);
         if widgets::slider_row_debounced(
             ui,
@@ -736,7 +736,7 @@ fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut L
                             .font(theme::heading())
                             .color(theme::TEXT),
                     );
-                    ui.add_space(3.0);
+                    ui.add_space(theme::SPACE_1);
                     ui.label(
                         egui::RichText::new(t!("lighting.targets_subtitle"))
                             .font(theme::body_sm())
@@ -777,7 +777,7 @@ fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut L
             },
         );
 
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
 
         let gap = 10.0;
         let col_w = (ui.available_width() - gap) / 2.0;
@@ -1341,7 +1341,7 @@ fn delete_confirm_modal(ui: &mut egui::Ui, st: &mut LightingUi, cmd: &CommandTx)
             {
                 confirm = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("lighting.cancel"),

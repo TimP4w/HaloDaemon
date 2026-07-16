@@ -68,7 +68,7 @@ pub fn show(
                     crate::domain::tour::AnchorId::CoolingCurve,
                     title_resp.rect,
                 );
-                ui.add_space(3.0);
+                ui.add_space(theme::SPACE_1);
                 ui.label(
                     egui::RichText::new(t!("cooling.subtitle", count = coolers.len()))
                         .font(theme::body_md())
@@ -107,7 +107,7 @@ fn cooler_grid(
     let sensors = temp_sensors(state);
     for (row, pair) in coolers.chunks(2).enumerate() {
         if row > 0 {
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
         }
         ui.columns(2, |cols| {
             for (i, dev) in pair.iter().enumerate() {
@@ -143,7 +143,7 @@ fn cooler_card(
         ui.horizontal(|ui| {
             let (icon, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
             fan_icon(ui.painter(), icon.center(), 18.0, time, rpm, dev_color);
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             let col_w = ui.available_width();
             ui.vertical(|ui| {
                 ui.set_width(col_w);
@@ -188,7 +188,7 @@ fn cooler_card(
             ui.ctx().request_repaint();
         }
 
-        ui.add_space(13.0);
+        ui.add_space(theme::SPACE_6);
 
         // ── Preset pills ──────────────────────────────────────────────────────
         if !state.cooling.preset_curves.is_empty() {
@@ -216,13 +216,13 @@ fn cooler_card(
                     }
                 }
             });
-            ui.add_space(11.0);
+            ui.add_space(theme::SPACE_6);
         }
 
         // ── Curve sensor selector ─────────────────────────────────────────────
         ui.horizontal(|ui| {
             widgets::caps_label(ui, &t!("cooling.curve_sensor"));
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             let current = live
                 .map(|(d, s)| format!("{d} · {} ({:.0}°C)", s.name, s.value))
                 .unwrap_or_else(|| t!("cooling.no_sensor").to_string());
@@ -259,7 +259,7 @@ fn cooler_card(
             }
         });
 
-        ui.add_space(11.0);
+        ui.add_space(theme::SPACE_6);
 
         // ── Mini curve preview ────────────────────────────────────────────────
         let (rect, _) =
@@ -275,7 +275,7 @@ fn cooler_card(
 
         // ── Curve status warning (e.g. no sensor, stalled fan) ────────────────
         if let Some(warning) = curve.map(|c| &c.status).and_then(curve_status_text) {
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             ui.label(
                 egui::RichText::new(warning)
                     .font(theme::body_sm())
@@ -283,7 +283,7 @@ fn cooler_card(
             );
         }
 
-        ui.add_space(13.0);
+        ui.add_space(theme::SPACE_6);
 
         // ── Footer: sensor temp + open device ─────────────────────────────────
         ui.horizontal(|ui| {
@@ -293,7 +293,7 @@ fn cooler_card(
                         .font(theme::body_sm())
                         .color(theme::TEXT_DIM),
                 );
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 ui.label(
                     egui::RichText::new(format!("{t:.0}°C"))
                         .font(theme::mono_semibold(11.5))

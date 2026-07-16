@@ -208,12 +208,12 @@ fn color_picker_inner(ui: &mut egui::Ui, avail: f32, current: RgbColor) -> Optio
         }
     });
 
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     if let Some(nc) = hue_slider(ui, current) {
         out = Some(nc);
     }
 
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_6);
     let hex_id = ui.unique_id().with("hexbuf");
     let mut buf = ui
         .data(|d| d.get_temp::<String>(hex_id))

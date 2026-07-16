@@ -191,7 +191,7 @@ pub(super) fn display_card(
                     );
                 }
             }
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
 
             // Brightness.
             let key = "lcd_bright";
@@ -208,11 +208,11 @@ pub(super) fn display_card(
                     ctx.time,
                 );
             }
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
 
             // Rotation.
             widgets::caps_label(ui, &t!("lcd.rotation"));
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 7.0;
                 let rots = if lcd.descriptor.supported_rotations.is_empty() {
@@ -237,10 +237,10 @@ pub(super) fn display_card(
                     }
                 }
             });
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
 
             raw_streaming_row(ui, ctx, id, lcd);
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
 
             if widgets::button(
                 ui,

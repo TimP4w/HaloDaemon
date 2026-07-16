@@ -33,7 +33,7 @@ pub(super) fn right_panel(
         crate::domain::tour::AnchorId::CanvasInstanceRack,
         rack.response.rect,
     );
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     sampling_card(ui, state, canvas_ui, time);
 }
 
@@ -55,7 +55,7 @@ fn sampling_card(ui: &mut egui::Ui, state: &AppState, canvas_ui: &mut CanvasUi, 
                     .font(theme::body_sm())
                     .color(theme::TEXT_FAINT),
             );
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             let mut v = canvas_ui.sample_radius;
             let readout = format!("{v:.1} px");
             if widgets::slider_row(
@@ -262,7 +262,7 @@ fn instance_rack(
         state.lighting.canvas.default_effect.clone(),
         cmd,
     );
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
 
     // "Effect instances" header + New — a bare row, outside any card. Each
     // instance below is then its own widget.
@@ -288,7 +288,7 @@ fn instance_rack(
             }
         },
     );
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
 
     if ids.is_empty() {
         ui.label(
@@ -314,7 +314,7 @@ fn instance_rack(
                 page,
             );
         });
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
     }
 }
 
@@ -360,7 +360,7 @@ fn default_effect_card(
                     },
                 );
             }
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 egui::RichText::new(t!("canvas.default_effect_hint").to_string())
                     .font(theme::caption())
@@ -593,9 +593,9 @@ fn instance_row(
     }
 
     // Effect dropdown.
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     widgets::caps_label(ui, &t!("canvas.effect_caps"));
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     {
         let mut sel = def.effect_id.clone();
         let w = ui.available_width();
@@ -648,7 +648,7 @@ fn instance_row(
     }
 
     // Assigned zones: chips only; assignment happens in the Edit zones modal.
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
     egui::Sides::new().show(
         ui,
         |ui| widgets::caps_label(ui, &t!("canvas.assigned_zones")),
@@ -669,7 +669,7 @@ fn instance_row(
             }
         },
     );
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     if zones.is_empty() {
         if widgets::button(
             ui,
@@ -717,7 +717,7 @@ fn instance_row(
     }
 
     if def.effect_id == DESIGNER_PIXMAP_EFFECT_ID {
-        ui.add_space(10.0);
+        ui.add_space(theme::SPACE_5);
         if widgets::button(
             ui,
             &t!("canvas.edit_in_designer"),
@@ -736,7 +736,7 @@ fn instance_row(
         }
     }
 
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
     if widgets::button(
         ui,
         &t!("canvas.delete_instance"),

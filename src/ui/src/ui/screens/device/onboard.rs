@@ -46,11 +46,11 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
             .font(theme::body_md())
             .color(theme::TEXT_MUT),
     );
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_6);
 
     if let Some(b) = host_mode_boolean(&ctx.dev.capabilities) {
         host_mode_row(ui, &id, ctx, b);
-        ui.add_space(12.0);
+        ui.add_space(theme::SPACE_6);
     }
 
     egui::Frame::NONE
@@ -77,7 +77,7 @@ fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
                             .font(theme::heading())
                             .color(theme::TEXT),
                     );
-                    ui.add_space(2.0);
+                    ui.add_space(theme::SPACE_1);
                     ui.label(
                         egui::RichText::new(t!("devtabs.host_mode_desc"))
                             .font(theme::body_sm())
@@ -152,7 +152,7 @@ fn slot_row(
         // visual order: Restore to ROM → Delete → Switch (left to right).
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
             // Switch — greyed out (non-interactive) in host mode or on the
             // already-active slot.
             if slot.enabled {

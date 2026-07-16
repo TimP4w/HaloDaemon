@@ -223,13 +223,13 @@ fn chip_impl(
 
 /// A tracked-caps section header inside a popover / context menu.
 pub fn context_menu_title(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(2.0);
+    ui.add_space(theme::SPACE_1);
     ui.label(
         egui::RichText::new(text)
             .font(theme::body(9.5))
             .color(theme::TEXT_FAINT2),
     );
-    ui.add_space(2.0);
+    ui.add_space(theme::SPACE_1);
 }
 
 /// A full-width, left-aligned context-menu row with a subtle hover fill.

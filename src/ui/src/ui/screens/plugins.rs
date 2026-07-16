@@ -372,13 +372,13 @@ impl PluginsUi {
                 }
             },
         );
-        ui.add_space(2.0);
+        ui.add_space(theme::SPACE_1);
         ui.label(
             egui::RichText::new(t!("plugins.counts", count = total, active = active))
                 .font(theme::mono(10.0))
                 .color(theme::TEXT_FAINT),
         );
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
 
         // Global banners sit above the plugin list.
         let now = ui.input(|i| i.time);
@@ -391,7 +391,7 @@ impl PluginsUi {
                 UdevBannerAction::Info => self.udev_info_open = true,
                 UdevBannerAction::None => {}
             }
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
         }
         let due = plugin_updates.iter().filter(|s| s.update_available).count();
         if due > 0 {
@@ -402,7 +402,7 @@ impl PluginsUi {
                     halod_shared::commands::DaemonCommand::UpdateAllPlugins,
                 );
             }
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
         }
 
         // Plugins, skipped packages, and repositories share one scroll region
@@ -485,7 +485,7 @@ impl PluginsUi {
         state: &AppState,
         repo_updates: &[RepoUpdateStatus],
     ) {
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_9);
         egui::Sides::new().show(
             ui,
             |ui| {
@@ -504,7 +504,7 @@ impl PluginsUi {
                 }
             },
         );
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
 
         let rows = repo_rows(&state.plugins.repos, repo_updates);
         if rows.is_empty() {
@@ -527,9 +527,9 @@ impl PluginsUi {
         if state.plugins.skipped.is_empty() {
             return;
         }
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_9);
         widgets::caps_label_inline(ui, &t!("plugins.skipped_heading"));
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         for s in &state.plugins.skipped {
             let name = std::path::Path::new(&s.path)
                 .file_name()
@@ -561,7 +561,7 @@ impl PluginsUi {
                         {
                             self.pending_repo_repair = Some(PendingRepoRepair { slug });
                         }
-                        ui.add_space(6.0);
+                        ui.add_space(theme::SPACE_3);
                     }
                     if widgets::button(
                         ui,
@@ -578,7 +578,7 @@ impl PluginsUi {
                     }
                 },
             );
-            ui.add_space(4.0);
+            ui.add_space(theme::SPACE_2);
         }
     }
 
@@ -819,7 +819,7 @@ impl PluginsUi {
                         .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut form.url)
                         .desired_width(f32::INFINITY)
@@ -836,9 +836,9 @@ impl PluginsUi {
                     form.fetch_at = None;
                     fetch_url = Some(url);
                 }
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
                 widgets::caps_label(ui, &t!("plugins.repos_branch_label"));
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 if let Some(picked) = branch_selector(ui, &form, repo_branches) {
                     form.branch = picked;
                 }
@@ -1102,7 +1102,7 @@ impl PluginsUi {
                 );
                 match consent_reason(p) {
                     ConsentReason::AuthorityExpanded => {
-                        ui.add_space(8.0);
+                        ui.add_space(theme::SPACE_4);
                         ui.label(
                             egui::RichText::new(t!("plugins.consent_permission_added"))
                                 .font(theme::body_sm())
@@ -1111,9 +1111,9 @@ impl PluginsUi {
                     }
                     ConsentReason::New => {}
                 }
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
                 authority_review_cards(ui, p);
-                ui.add_space(2.0);
+                ui.add_space(theme::SPACE_1);
                 ui.label(
                     egui::RichText::new(t!("plugins.consent_warning"))
                         .font(theme::body_sm())
@@ -2102,7 +2102,7 @@ fn detail_body(
             }
             None => initials_tile(ui, &p.name, &p.id, 44.0),
         }
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.label(
@@ -2128,7 +2128,7 @@ fn detail_body(
 
     if is_load_failed(p) {
         if let Some(issue) = &p.health.issue {
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
             if issue_banner(ui, issue) {
                 *issue_modal = Some((
                     t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
@@ -2143,7 +2143,7 @@ fn detail_body(
         if let Some(update) = update
             .filter(|u| u.update_available && p.provenance != PluginProvenance::LocalDevelopment)
         {
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
             let in_flight = updating.contains_key(&update.plugin_id);
             if update_banner(
                 ui,
@@ -2164,20 +2164,20 @@ fn detail_body(
     }
 
     if plugin_requires_regrant(p) {
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         regrant_warning_banner(ui, p);
     }
 
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     status_banner(ui, p);
 
     if udev_action_needed {
-        ui.add_space(10.0);
+        ui.add_space(theme::SPACE_5);
         udev_plugin_warning_banner(ui);
     }
 
     if let Some(issue) = &p.health.issue {
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         if issue_banner(ui, issue) {
             *issue_modal = Some((
                 t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
@@ -2187,7 +2187,7 @@ fn detail_body(
     }
 
     if !p.license.is_empty() || !matches!(p.source, PluginSource::Local) {
-        ui.add_space(10.0);
+        ui.add_space(theme::SPACE_5);
         ui.horizontal_wrapped(|ui| {
             if !p.license.is_empty() {
                 widgets::chip(ui, &format!("⚖ {}", p.license));
@@ -2206,19 +2206,19 @@ fn detail_body(
     // Only while the plugin is held inactive: once re-enabled, the risk is
     // accepted and the banner is gone.
     if update.is_some_and(|u| u.on_disk_changed) && !plugin_enabled_with_consent(p) {
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         modified_on_disk_banner(ui);
     } else if let Some(update) =
         update.filter(|u| u.update_available && p.provenance != PluginProvenance::LocalDevelopment)
     {
         // Informational only: a plugin is updated by pulling its whole repository
         // (the repo detail's "Update repo" action), never one plugin at a time.
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         update_info_banner(ui, &update.current_version, &update.available_version);
     }
 
     if !p.description.is_empty() {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         ui.label(
             egui::RichText::new(&p.description)
                 .font(theme::body_md())
@@ -2227,9 +2227,9 @@ fn detail_body(
     }
 
     if !p.author.is_empty() {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         widgets::caps_label(ui, &t!("plugins.author"));
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
         ui.label(
             egui::RichText::new(&p.author)
                 .font(theme::body_md())
@@ -2238,9 +2238,9 @@ fn detail_body(
     }
 
     if p.plugin_type == halod_shared::types::PluginKind::Device && !p.capabilities.is_empty() {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         widgets::caps_label(ui, &t!("plugins.capabilities"));
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         ui.horizontal_wrapped(|ui| {
             for c in &p.capabilities {
                 widgets::chip(ui, c);
@@ -2249,9 +2249,9 @@ fn detail_body(
     }
 
     if !p.effect_names.is_empty() {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         widgets::caps_label(ui, &t!("plugins.effects"));
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         ui.horizontal_wrapped(|ui| {
             for name in &p.effect_names {
                 widgets::chip(ui, name);
@@ -2263,7 +2263,7 @@ fn detail_body(
 
     ui.add_space(20.0);
     ui.separator();
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     ui.horizontal(|ui| {
         let active = plugin_enabled_with_consent(p);
         let locked = in_flight.contains_key(&p.id);
@@ -2386,7 +2386,7 @@ fn permission_bullet(
 ) {
     ui.horizontal(|ui| {
         dot(ui, color);
-        ui.add_space(2.0);
+        ui.add_space(theme::SPACE_1);
         ui.label(
             egui::RichText::new(permission_label(perm))
                 .font(theme::value_sm())
@@ -2412,14 +2412,14 @@ fn permission_card(ui: &mut egui::Ui, perm: halod_shared::types::Permission) {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 dot(ui, theme::STAT_AMBER);
-                ui.add_space(2.0);
+                ui.add_space(theme::SPACE_1);
                 ui.label(
                     egui::RichText::new(permission_label(perm))
                         .font(theme::mono(12.0))
                         .color(theme::TEXT),
                 );
             });
-            ui.add_space(3.0);
+            ui.add_space(theme::SPACE_1);
             ui.label(
                 egui::RichText::new(permission_description(perm))
                     .font(theme::body_sm())
@@ -2450,7 +2450,7 @@ fn command_authority_card(ui: &mut egui::Ui, commands: &[&str]) {
                     .strong()
                     .color(theme::STAT_AMBER),
             );
-            ui.add_space(3.0);
+            ui.add_space(theme::SPACE_1);
             ui.label(
                 egui::RichText::new(
                     "This plugin can start the following programs as your user account, with arguments it controls:",
@@ -2458,7 +2458,7 @@ fn command_authority_card(ui: &mut egui::Ui, commands: &[&str]) {
                 .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
             );
-            ui.add_space(5.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 egui::RichText::new(commands.join(", "))
                     .font(theme::mono(12.0))
@@ -2473,12 +2473,12 @@ fn command_authority_card(ui: &mut egui::Ui, commands: &[&str]) {
 pub(crate) fn authority_review_cards(ui: &mut egui::Ui, plugin: &PluginInfo) {
     for permission in &plugin.declared_permissions {
         permission_card(ui, *permission);
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
     }
     let commands = command_scope_names(&plugin.authority);
     if !commands.is_empty() {
         command_authority_card(ui, &commands);
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
     }
 }
 
@@ -2491,13 +2491,13 @@ fn targets_permissions_row(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
     if !has_targets && !has_perms {
         return;
     }
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
     ui.columns(2, |cols| {
         if has_targets {
             // Match the permissions column's header row height (a `PILL_H`
             // horizontal) so the two column headers align on the same row.
             cols[0].horizontal(|ui| widgets::caps_label_inline(ui, &t!("plugins.targets")));
-            cols[0].add_space(6.0);
+            cols[0].add_space(theme::SPACE_3);
             for target in &p.targets {
                 cols[0].label(
                     egui::RichText::new(target)
@@ -2534,7 +2534,7 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
                 .color(color),
         );
     });
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
 
     for perm in &p.declared_permissions {
         let color = if p
@@ -2547,7 +2547,7 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
             theme::STAT_AMBER
         };
         permission_bullet(ui, *perm, color);
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
     }
 
     if !p.consented {
@@ -2691,13 +2691,13 @@ fn udev_rules_banner(
                         .color(theme::TEXT),
                 );
             });
-            ui.add_space(3.0);
+            ui.add_space(theme::SPACE_1);
             ui.label(
                 egui::RichText::new(subtitle)
                     .font(theme::body_sm())
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             ui.horizontal(|ui| {
                 if !status.current {
                     let label = if copied {
@@ -2710,7 +2710,7 @@ fn udev_rules_banner(
                     {
                         action = UdevBannerAction::Install;
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(theme::SPACE_3);
                 }
                 if widgets::button(
                     ui,
@@ -2743,31 +2743,31 @@ fn udev_info_modal(
         700.0,
         |ui| {
             udev_modal_status(ui, status);
-            ui.add_space(18.0);
+            ui.add_space(theme::SPACE_9);
             ui.label(
                 egui::RichText::new(t!("plugins.udev_info_scope_title"))
                     .font(theme::heading())
                     .color(theme::TEXT),
             );
-            ui.add_space(3.0);
+            ui.add_space(theme::SPACE_1);
             ui.label(
                 egui::RichText::new(t!("plugins.udev_info_scope"))
                     .font(theme::body_md())
                     .color(theme::TEXT_DIM),
             );
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
             ui.label(
                 egui::RichText::new(t!("plugins.udev_info_install_title"))
                     .font(theme::heading())
                     .color(theme::TEXT),
             );
-            ui.add_space(3.0);
+            ui.add_space(theme::SPACE_1);
             ui.label(
                 egui::RichText::new(t!("plugins.udev_info_install"))
                     .font(theme::body_md())
                     .color(theme::TEXT_DIM),
             );
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             egui::Frame::NONE
                 .fill(theme::a(egui::Color32::BLACK, 0.22))
                 .stroke(Stroke::new(1.0, theme::BORDER))
@@ -2827,7 +2827,7 @@ fn udev_info_modal(
             {
                 recheck = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("plugins.issue_close"),
@@ -2838,7 +2838,7 @@ fn udev_info_modal(
             {
                 close = true;
             }
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(t!("plugins.udev_recheck_hint"))
@@ -3048,11 +3048,11 @@ fn stat_box(ui: &mut egui::Ui, label: &str, value: &str) {
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
         .corner_radius(theme::RADIUS_MD)
-        .inner_margin(egui::Margin::symmetric(14, 11))
+        .inner_margin(theme::PAD_BANNER)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             widgets::caps_label(ui, label);
-            ui.add_space(4.0);
+            ui.add_space(theme::SPACE_2);
             ui.label(
                 egui::RichText::new(value)
                     .font(theme::body_md())
@@ -3100,7 +3100,7 @@ fn updates_disabled_note(ui: &mut egui::Ui) {
         .fill(theme::a(theme::TEXT_MUT, 0.08))
         .stroke(Stroke::new(1.0, theme::BORDER))
         .corner_radius(theme::RADIUS_MD)
-        .inner_margin(egui::Margin::symmetric(14, 11))
+        .inner_margin(theme::PAD_BANNER)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
@@ -3136,7 +3136,7 @@ fn repo_detail_body(
         |ui| {
             ui.horizontal(|ui| {
                 repo_icon_tile(ui, 44.0);
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(
@@ -3198,7 +3198,7 @@ fn repo_detail_body(
         |_ui| {},
     );
 
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
     let repo_plugins: Vec<&PluginInfo> = plugins
         .iter()
         .filter(|p| matches!(&p.source, PluginSource::Repo { slug } if *slug == r.slug))
@@ -3220,10 +3220,10 @@ fn repo_detail_body(
         );
     });
 
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     if !updates_enabled {
         updates_disabled_note(ui);
-        ui.add_space(10.0);
+        ui.add_space(theme::SPACE_5);
     }
     ui.horizontal(|ui| {
         let size = Vec2::new(180.0, 32.0);
@@ -3236,7 +3236,7 @@ fn repo_detail_body(
             );
         } else if checking {
             ui.add(egui::Spinner::new().size(18.0).color(theme::CYAN));
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 egui::RichText::new(t!("plugins.repos_checking"))
                     .font(theme::body_md())
@@ -3255,7 +3255,7 @@ fn repo_detail_body(
 
         // The repo is the unit of update: pull it here rather than per plugin.
         if has_updates && (updating || (updates_enabled && !checking)) {
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             let size = Vec2::new(150.0, 32.0);
             if updating {
                 widgets::button_loading(ui, &t!("plugins.updating"), ButtonKind::Warn, size);
@@ -3269,7 +3269,7 @@ fn repo_detail_body(
 
     ui.add_space(20.0);
     widgets::caps_label(ui, &t!("plugins.repo_drivers_from"));
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
 
     if repo_plugins.is_empty() {
         repo_no_drivers_box(ui);
@@ -3323,7 +3323,7 @@ fn repo_detail_body(
     if !r.official {
         ui.add_space(20.0);
         ui.separator();
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         if widgets::button(
             ui,
             &t!("plugins.repos_remove"),
@@ -3347,7 +3347,7 @@ fn add_body(ui: &mut egui::Ui) {
             .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
 
     egui::Frame::NONE
         .fill(theme::INNER_BG)
@@ -3361,7 +3361,7 @@ fn add_body(ui: &mut egui::Ui) {
                         .font(theme::body_md())
                         .color(theme::TEXT),
                 );
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
                 ui.label(
                     egui::RichText::new(t!("plugins.upload_sub"))
                         .font(theme::body_sm())

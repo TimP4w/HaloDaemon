@@ -39,7 +39,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                     .color(theme::STAT_AMBER),
             );
         });
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
     }
 
     // Default to first button
@@ -65,7 +65,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     if let Some(status) = ctx.dev.keyboard_layout() {
         if !status.keys.is_empty() {
             keyboard_overview(ui, st, status);
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
         }
     }
 
@@ -461,7 +461,7 @@ fn action_card(
                     g,
                     Color32::WHITE,
                 );
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 ui.label(
                     egui::RichText::new(t!("device.keys_editing"))
                         .font(theme::micro())
@@ -469,16 +469,16 @@ fn action_card(
                 );
             },
         );
-        ui.add_space(5.0);
+        ui.add_space(theme::SPACE_3);
         ui.label(
             egui::RichText::new(t!("device.keys_assign_hint", button = sel_label))
                 .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
         );
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
 
         action_section(ui, ctx, st, id, Layer::Base);
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         action_section(ui, ctx, st, id, Layer::Shifted);
     });
 }
@@ -491,7 +491,7 @@ fn action_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, 
     let current_action = layer.get(st).unwrap_or_default();
 
     widgets::caps_label(ui, &layer.title());
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     let cat_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 30.0));
     match layer {
         Layer::Base => {
@@ -550,7 +550,7 @@ fn params_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
         }
 
         params_section(ui, ctx, st, id, Layer::Base);
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_9);
         params_section(ui, ctx, st, id, Layer::Shifted);
     });
 }
@@ -572,14 +572,14 @@ fn params_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, 
                 .font(theme::heading())
                 .color(theme::TEXT),
         );
-        ui.add_space(2.0);
+        ui.add_space(theme::SPACE_1);
         ui.label(
             egui::RichText::new(format!("· {type_name}"))
                 .font(theme::body_sm())
                 .color(theme::TEXT_FAINT),
         );
     });
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
 
     let no_params = match &action {
         ButtonAction::Native => Some(t!("device.keys_no_params_native")),
@@ -611,7 +611,7 @@ fn direction_pills(
     make_action: impl Fn(CycleDir) -> ButtonAction,
 ) {
     widgets::caps_label(ui, &t!("device.keys_direction"));
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
         for (label, dir) in [
@@ -659,7 +659,7 @@ fn params_editor(
     match action {
         ButtonAction::MouseButton { btn } => {
             widgets::caps_label(ui, &t!("device.keys_mouse_button"));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
                 for (label, mbtn) in [
@@ -691,7 +691,7 @@ fn params_editor(
         }
         ButtonAction::MomentaryDpi { dpi } => {
             widgets::caps_label(ui, &t!("device.keys_dpi_value"));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             let mut dpi_f = dpi as f32;
             let mut new_dpi: Option<u16> = None;
             egui::Sides::new().show(
@@ -713,7 +713,7 @@ fn params_editor(
                     }
                 },
             );
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::slider(ui, &mut dpi_f, 100.0..=26000.0) {
                 new_dpi = Some((dpi_f as u16).clamp(100, 26000));
             }
@@ -722,9 +722,9 @@ fn params_editor(
                 layer.set(st, a.clone());
                 st.queue(&format!("btn:dpi:{cid}:{tag}"), make_cmd(a), ctx.time);
             }
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             widgets::caps_label(ui, &t!("device.keys_presets"));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
                 for preset in [400u16, 800, 1600, 3200, 6400] {
@@ -740,7 +740,7 @@ fn params_editor(
         }
         ButtonAction::MediaKey { key } => {
             widgets::caps_label(ui, &t!("device.keys_media_key"));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
                 for (label, mkey) in [
@@ -761,7 +761,7 @@ fn params_editor(
         }
         ButtonAction::Scroll { axis, clicks } => {
             widgets::caps_label(ui, &t!("device.keys_axis"));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
                 for (label, saxis) in [
@@ -780,9 +780,9 @@ fn params_editor(
                     }
                 }
             });
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             widgets::caps_label(ui, &t!("device.keys_clicks_per_event"));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             let mut v = clicks;
             if ui
                 .add(egui::DragValue::new(&mut v).speed(1).range(-10..=10))
@@ -795,7 +795,7 @@ fn params_editor(
         }
         ButtonAction::OpenApp { ref path } => {
             widgets::caps_label(ui, &t!("device.keys_application"));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             let mut buf = path.clone();
             let shifted = matches!(layer, Layer::Shifted);
 
@@ -843,7 +843,7 @@ fn params_editor(
         }
         ButtonAction::Command { ref cmd, ref args } => {
             widgets::caps_label(ui, &t!("device.keys_command"));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             let mut buf = cmd.clone();
             let resp = ui.add_sized(
                 Vec2::new(ui.available_width(), 34.0),

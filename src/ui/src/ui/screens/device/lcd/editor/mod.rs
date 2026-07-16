@@ -157,9 +157,9 @@ pub fn show(
             Some(sel) => selected_widget_card(ui, ctx, st, id, sel),
             None => empty_selection_card(ui),
         });
-        right.add_space(12.0);
+        right.add_space(crate::ui::theme::SPACE_6);
         widgets::card(right, |ui| library_card(ui, ctx, st, id));
-        right.add_space(12.0);
+        right.add_space(crate::ui::theme::SPACE_6);
         widgets::card(right, |ui| screen_style_card(ui, ctx, st, id, lcd));
         inspector_rect = right.min_rect();
     });

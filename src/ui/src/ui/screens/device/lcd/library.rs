@@ -53,7 +53,7 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
             .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
 
     let enabled = ctx.state.health.ffmpeg_available;
     if widgets::button(
@@ -75,7 +75,7 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
     }
 
     if !enabled {
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         ui.label(
             egui::RichText::new(t!("lcd.ffmpeg_unavailable_host"))
                 .font(theme::caption())
@@ -143,7 +143,7 @@ pub(super) fn image_section(
         }
     });
 
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
 
     // Upload button (with in-flight spinner + daemon-reported progress, so a
     // long GIF re-encode doesn't look stuck).
@@ -217,7 +217,7 @@ pub(super) fn image_picker(
         }
     });
 
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     if st.lcd.upload_base.is_some() {
         widgets::button_loading(
             ui,
@@ -273,7 +273,7 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
             {
                 confirm = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("lcd.cancel"),
