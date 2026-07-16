@@ -61,16 +61,6 @@ KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0ac4", TAG+="uacc
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a87", TAG+="uaccess"
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a66", TAG+="uaccess"
 
-# ─── Corsair ──────────────────────────────────────────────────────────────────
-
-# Corsair K70 RGB MK.2 Low Profile
-KERNEL=="hidraw*", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b55", TAG+="uaccess"
-
-# ─── Razer ────────────────────────────────────────────────────────────────────
-
-# Razer Basilisk V3
-KERNEL=="hidraw*", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0099", TAG+="uaccess"
-
 # ─── SteelSeries ──────────────────────────────────────────────────────────────
 
 # SteelSeries Arctis Nova Pro Wireless
@@ -107,14 +97,14 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="0cf2", ATTRS{idProduct}=="b201", TAG+="uacce
 # ─── uinput (key remapper / action executor) ──────────────────────────────────
 
 # Grant write access to /dev/uinput for the key remapper's virtual input devices.
-# Required for Wayland and headless operation (no X11 dependency).
+# Required for Wayland and headless operation.
 # static_node=uinput creates the node (with the uaccess ACL) at boot even before
 # the uinput module is loaded; opening it then autoloads the module.
 KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
 
 # ─── SMBus / I2C (ASUS/ENE DRAM + GPU RGB) ────────────────────────────────────
 
-# Grant I2C bus access for SMBus RGB devices (ENE DRAM sticks + GPU, Zotac GPU).
+# Grant I2C bus access for SMBus RGB devices.
 # User must be in the 'i2c' group: sudo usermod -aG i2c $USER
 SUBSYSTEM=="i2c-dev", GROUP="i2c", MODE="0660"
 
@@ -126,8 +116,7 @@ SUBSYSTEM=="i2c-dev", GROUP="i2c", MODE="0660"
 #
 # These files are scoped to the `halod` group (mode 0664) rather than made
 # world-writable: any local user with write access could otherwise drive a fan
-# or pump to 0. The NixOS module provisions the group; manual installers must
-# create it and add the daemon's user:
+# or pump to 0. 
 #   sudo groupadd -f halod && sudo usermod -aG halod $USER
 # (uaccess is not usable here — hwmon nodes have no seat association.)
 SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ATTR{name}=="nct6775", ACTION=="add|change", RUN{program}+="/bin/sh -c 'chgrp halod /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; chmod g+w /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; true'"

@@ -1,85 +1,64 @@
 # SMBus Transport
 
-System Management Bus (I2C) transport for DRAM and GPU RGB controllers.
+System Management Bus (SMBus/I2C) access for plugins that support motherboard,
+DRAM, and GPU controllers.
 
-**Platform:** Linux (`/dev/i2c-*`), Windows (PawnIO chipset + NvAPI GPU)
-
----
+**Platform:** Linux and Windows
 
 ## Overview
 
-SMBus is a two-wire serial protocol derived from I2C, used on PC motherboards to communicate with voltage regulators, SPD EEPROMs, and RGB controllers. HaloDaemon uses it to address ENE RGB controllers on DRAM sticks and GPUs.
+SMBus is a two-wire bus commonly used for PC hardware management. HaloDaemon
+discovers chipset and GPU buses and gives plugins scoped access to only the bus
+and addresses declared in their manifests.
 
----
+Operations are grouped into a batch so a plugin can complete a related sequence
+while holding one bus lock. This prevents transactions from different devices
+from interleaving.
 
-## Bus discovery
+## Bus discovery and scope
 
-Two bus kinds:
+Plugins declare whether a device is expected on a chipset or GPU bus, the
+addresses they may access, and how discovery may probe them. A plugin cannot
+access an address outside that allowlist.
 
-| Kind | Detection |
-|------|-----------|
-| Chipset | Adapter name does not contain "nvidia", "amd radeon", or "radeon" |
-| GPU | Adapter name contains "nvidia", "amd radeon", or "radeon" |
+GPU buses may also carry display-management traffic, so plugins must restrict
+GPU discovery to explicitly supported PCI devices. Unknown GPU buses are not
+opened or probed. Chipset buses do not require that PCI allowlist unless a
+plugin chooses to provide one.
 
-On Linux, buses are enumerated from `/dev/i2c-*` with adapter names read from `/sys/class/i2c-adapter/`. On Windows, chipset buses are enumerated via WMI, GPU buses via `NvAPI_EnumPhysicalGPUs`. Each `BusInfo` also carries the bus's PCI ids (vendor, device, subsystem vendor/device), read from sysfs on Linux and NvAPI on Windows.
+## Operations for plugins
 
-### GPU-bus PCI gate
+SMBus operations are available only inside `dev.transport:batch(function(ops)
+... end)`.
 
-A GPU's I²C segment is shared with the monitor's DDC/EDID lines, so poking an RGB address on an unrecognised card can wedge the bus — tripping driver resets or knocking out display detection. The DRAM/chipset bus has no such coupling.
+| Operation | Purpose |
+|---|---|
+| `read_byte(address)` | Read a single byte. |
+| `read_byte_data(address, command)` | Read one byte using an SMBus command. |
+| `write_quick(address)` | Perform an acknowledgement probe. |
+| `write_byte_data(address, command, data)` | Write one byte using an SMBus command. |
+| `write_word_data(address, command, data)` | Write one word using an SMBus command. |
+| `write_block_data(address, command, data)` | Write a short data block using an SMBus command. |
+| `supports_block_write()` | Check whether the current bus supports block writes. |
 
-The scanner therefore **gates every GPU-bus scan on the card's PCI id**. A scan entry (native `SmBusScanEntry` or a plugin's `pci_match`) declares which cards it covers; before opening a GPU bus the scanner keeps only buses matching an entry:
-
-- **no match** → the bus is never opened or probed;
-- **`confirmed` match** → emitted with no probe transaction (curated whitelist);
-- **any other match** → confirmed with the entry's probe — prefer `read_byte` over the intrusive `write_quick`.
-
-A GPU scan with an empty gate is refused (rejected at load for plugins; skipped with a warning for native entries). Chipset buses are ungated by default.
-
----
-
-## Operations
-
-All SMBus calls are blocking. They are batched via `SmBusDevice::run_batch` — a closure receiving a `&mut dyn SmBusSyncOps` reference, dispatched in a single `tokio::task::spawn_blocking` call. This keeps the async executor unblocked and eliminates per-operation overhead.
-
-| Method | SMBus operation |
-|--------|-----------------|
-| `read_byte(addr)` | Read a single byte |
-| `read_byte_data(addr, cmd)` | Read one byte from register `cmd` |
-| `write_byte_data(addr, cmd, val)` | Write one byte to register `cmd` |
-| `write_quick(addr)` | Zero-length write (ACK probe) |
-| `write_word_data(addr, cmd, val)` | Write a 16-bit word to register `cmd` |
-| `write_block_data(addr, cmd, data)` | Write up to 32 bytes to register `cmd` |
-
-Block writes are supported on Linux and Windows chipset buses (PawnIO).
-
----
-
-## Platform files
-
-| File | Target | Contents |
-|------|--------|---------|
-| `mod.rs` | all | Shared types, discovery, `run_batch` |
-| `linux.rs` | Linux | i2c-dev ioctl interface |
-| `windows/chipset.rs` | Windows | PawnIO chipset SMBus |
-| `fallback.rs` | other | Stub returning "not supported" |
-
----
+Failed reads return no data and failed writes report failure. The scoped
+operation object is valid only for the duration of the batch.
 
 ## Access requirements
 
-**Linux:** add your user to the `i2c` group and install the udev rule from `udev/60-halod.rules`:
-```bash
-sudo usermod -aG i2c $USER
-sudo cp udev/60-halod.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
+**Linux:** the user needs access to the system's I2C devices, normally through
+the `i2c` group and the HaloDaemon udev rules.
 
-**Windows:** requires [PawnIO](https://pawnio.eu/) installed. The non-elevated daemon delegates chipset SMBus access to the on-demand LocalSystem `halod-broker` service; development runs without that service launch only the broker through UAC.
+**Windows:** chipset SMBus access requires PawnIO. The non-elevated daemon sends
+scoped operations to the privileged HaloDaemon broker. GPU-bus availability
+depends on the installed graphics driver and supported platform interface.
 
----
+## Security and limitations
 
-## Security note
-
-On Windows `halod.exe` and its plugin host remain at medium integrity. Only `halod-broker.exe` loads PawnIO and performs register-bus operations. The broker pipe is restricted to the coordinator's exact SID/session and authenticated, capability-scoped requests.
-
----
+- Bus kind, address range, probe behavior, and optional PCI matches are fixed by
+  the plugin manifest.
+- GPU buses without an explicit supported-device match are not probed.
+- The daemon and plugin remain unprivileged on Windows; only the broker performs
+  privileged chipset access.
+- Not every platform backend supports every optional SMBus operation. Plugins
+  can query block-write support before using it.
