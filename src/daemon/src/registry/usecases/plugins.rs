@@ -188,13 +188,16 @@ pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
         bail!("a plugin '{id}' is already installed");
     }
 
-    // Copy into a uniquely-named private temp sibling, validate the completed
-    // copy, then atomically rename it into place so a failed import never leaves
-    // a partial installed plugin behind.
+    // Copy into a uniquely-named private temp dir, validate the completed copy,
+    // then atomically rename it into place so a failed import never leaves a
+    // partial installed plugin behind. The re-parse re-checks that the directory
+    // name equals the manifest id, so the copy's leaf must keep the id — the
+    // uniqueness goes on the parent dir instead.
     std::fs::create_dir_all(&plugins_dir)?;
     let seq = IMPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let staging = plugins_dir.join(format!(".{id}.import.{}.{seq}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&staging);
+    let staging_parent = plugins_dir.join(format!(".import.{}.{seq}", std::process::id()));
+    let staging = staging_parent.join(&id);
+    let _ = std::fs::remove_dir_all(&staging_parent);
     let manifest = (|| {
         copy_dir_all(src, &staging)?;
         crate::drivers::plugins::parse_manifest_from_dir(&staging)
@@ -203,14 +206,15 @@ pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
     let manifest = match manifest {
         Ok(m) => m,
         Err(e) => {
-            let _ = std::fs::remove_dir_all(&staging);
+            let _ = std::fs::remove_dir_all(&staging_parent);
             return Err(e);
         }
     };
     if let Err(e) = std::fs::rename(&staging, &dst) {
-        let _ = std::fs::remove_dir_all(&staging);
+        let _ = std::fs::remove_dir_all(&staging_parent);
         return Err(e).with_context(|| format!("installing plugin into {}", dst.display()));
     }
+    let _ = std::fs::remove_dir_all(&staging_parent);
     log::info!(
         "Imported plugin package {} into {}",
         src.display(),
@@ -659,6 +663,38 @@ mod tests {
         drop(_a);
         // Once released, a fresh acquire succeeds.
         assert!(ImportGuard::acquire("dup-id").is_ok());
+    }
+
+    #[tokio::test]
+    async fn import_installs_a_local_package_under_its_id() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let pkg = src.path().join("demo_plugin");
+            std::fs::create_dir_all(&pkg).unwrap();
+            std::fs::write(
+                pkg.join("plugin.yaml"),
+                "id: demo_plugin\nname: Demo\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Example\n    model: Device\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678 }\n",
+            )
+            .unwrap();
+            std::fs::write(pkg.join("main.lua"), "return {}\n").unwrap();
+
+            import(pkg.to_string_lossy().into_owned(), app.clone())
+                .await
+                .unwrap();
+
+            // The re-parse of the staged copy checks that its directory name
+            // equals the manifest id, so the install must land at plugins_dir/<id>
+            // and leave no `.import.*` staging dir behind.
+            let installed = crate::config::plugins_dir().join("demo_plugin");
+            assert!(installed.join("plugin.yaml").is_file());
+            let leftovers: Vec<_> = std::fs::read_dir(crate::config::plugins_dir())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .filter(|n| n.to_string_lossy().starts_with(".import."))
+                .collect();
+            assert!(leftovers.is_empty(), "staging dir left behind: {leftovers:?}");
+        })
+        .await;
     }
 
     #[test]
