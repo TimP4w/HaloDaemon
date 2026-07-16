@@ -91,7 +91,7 @@ fn page_body(
     debug: Option<&DebugInfo>,
     st: &mut SettingsUi,
 ) {
-    ui.set_max_width(600.0);
+    ui.set_max_width(ui.available_width().min(840.0));
     ui.label(
         egui::RichText::new(t!("settings.title"))
             .font(theme::bold(22.0))
@@ -1380,6 +1380,38 @@ fn export_diagnostics(json: String) {
 mod tests {
     use super::*;
     use halod_shared::types::DiscoveryStatus;
+
+    fn card_divider_count(rows: usize) -> usize {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(700.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| {
+            widgets::card(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for _ in 0..rows {
+                    let _ = row_rect(ui);
+                }
+            });
+        });
+        out.shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::LineSegment { .. }))
+            .count()
+    }
+
+    #[test]
+    fn row_list_draws_no_trailing_divider() {
+        // N rows separate with N-1 dividers — the last row must not add one.
+        assert_eq!(card_divider_count(1), 0);
+        assert_eq!(card_divider_count(3), 2);
+        assert_eq!(card_divider_count(7), 6);
+    }
 
     #[test]
     fn scanning_only_during_discovering_phase() {

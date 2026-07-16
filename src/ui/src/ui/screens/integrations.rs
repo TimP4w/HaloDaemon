@@ -151,6 +151,7 @@ impl IntegrationsUi {
     }
 
     fn body(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+        ui.set_max_width(ui.available_width().min(840.0));
         reconcile_in_flight(&mut self.in_flight, &state.plugins.plugins);
         let title_resp = ui.label(
             egui::RichText::new(t!("integrations.title"))
