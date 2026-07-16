@@ -11,7 +11,7 @@ use halod_shared::types::{
 };
 
 use crate::{
-    drivers::{CapabilityRef, Device, VisibilitySlot},
+    drivers::{CapabilityRef, Device, KeyboardLayoutSlot, VisibilitySlot},
     registry::discovery::DiscoveryHandle,
 };
 
@@ -499,6 +499,15 @@ impl Device for IdentifiedDevice {
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
         self.inner.capabilities()
     }
+    fn chain_host(&self) -> Option<&Arc<crate::drivers::chain::ChainHost>> {
+        self.inner.chain_host()
+    }
+    fn keyboard_layout_slot(&self) -> Option<&KeyboardLayoutSlot> {
+        self.inner.keyboard_layout_slot()
+    }
+    fn is_unrecoverable(&self) -> bool {
+        self.inner.is_unrecoverable()
+    }
     fn visibility_slot(&self) -> Option<&VisibilitySlot> {
         self.inner.visibility_slot()
     }
@@ -610,6 +619,70 @@ mod tests {
             Some(LocationKey::HidPath("/dev/hidraw6".into()))
         );
     }
+    #[tokio::test]
+    async fn wrapper_forwards_chain_host_to_inner() {
+        use crate::drivers::chain::{ChainAdapter, ChainHost, ChannelDescriptor};
+        use anyhow::Result;
+        use async_trait::async_trait;
+        use halod_shared::types::RgbColor;
+
+        struct StubAdapter;
+        #[async_trait]
+        impl ChainAdapter for StubAdapter {
+            fn parent_id(&self) -> String {
+                "p".into()
+            }
+            fn channels(&self) -> Vec<ChannelDescriptor> {
+                vec![]
+            }
+            async fn write_composed_frame(&self, _: &str, _: &[RgbColor]) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        struct ChainDevice(Arc<ChainHost>);
+        #[async_trait]
+        impl Device for ChainDevice {
+            fn id(&self) -> &str {
+                "d"
+            }
+            fn name(&self) -> &str {
+                "d"
+            }
+            fn vendor(&self) -> &str {
+                "v"
+            }
+            fn model(&self) -> &str {
+                "m"
+            }
+            async fn initialize(&self) -> anyhow::Result<bool> {
+                Ok(true)
+            }
+            async fn close(&self) {}
+            fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
+                vec![]
+            }
+            fn chain_host(&self) -> Option<&Arc<ChainHost>> {
+                Some(&self.0)
+            }
+        }
+
+        let host = ChainHost::new(Arc::new(StubAdapter));
+        let inner: Arc<dyn Device> = Arc::new(ChainDevice(host));
+        let identity = DeviceIdentity {
+            scope: Some(IdentityScope::Local),
+            serial: None,
+            location: None,
+            usb: None,
+            usb_address: None,
+        };
+        let wrapped = IdentifiedDevice::new(inner, identity, DeviceOrigin::Builtin);
+        assert!(
+            wrapped.chain_host().is_some(),
+            "IdentifiedDevice must forward chain_host so chain usecases reach the host"
+        );
+    }
+
     #[test]
     fn conflicting_serials_do_not_merge_through_location() {
         let entries = vec![
