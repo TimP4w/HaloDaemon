@@ -197,7 +197,7 @@ impl App {
         let screen = ui.max_rect();
         ctx.layer_painter(egui::LayerId::background()).rect_filled(
             screen,
-            12.0,
+            crate::ui::theme::RADIUS_LG,
             crate::ui::theme::SIDEBAR_BG,
         );
 
@@ -222,7 +222,7 @@ impl App {
         );
         border.rect_stroke(
             screen,
-            12.0,
+            crate::ui::theme::RADIUS_LG,
             egui::Stroke::new(1.0, crate::ui::theme::BORDER),
             egui::StrokeKind::Inside,
         );

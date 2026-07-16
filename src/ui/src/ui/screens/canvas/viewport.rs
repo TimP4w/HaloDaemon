@@ -473,10 +473,10 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
             let g = p.layout_no_wrap(label.to_string(), theme::mono_semibold(8.5), col);
             let rect =
                 Rect::from_min_size(Pos2::new(bx, by - 17.0), Vec2::new(g.size().x + 22.0, 14.0));
-            p.rect_filled(rect, 4.0, a(theme::hex(0x0b0e14), 0.92));
+            p.rect_filled(rect, theme::RADIUS_XS, a(theme::hex(0x0b0e14), 0.92));
             p.rect_stroke(
                 rect,
-                4.0,
+                theme::RADIUS_XS,
                 Stroke::new(1.0, a(col, 0.5)),
                 egui::StrokeKind::Middle,
             );

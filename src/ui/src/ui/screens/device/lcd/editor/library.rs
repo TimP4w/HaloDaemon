@@ -265,10 +265,10 @@ fn library_tile(ui: &mut egui::Ui, badge: &str, label: &str) -> egui::Response {
     let size = egui::vec2(80.0, 74.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::drag());
     let p = ui.painter();
-    p.rect_filled(rect, 10.0, theme::INNER_BG);
+    p.rect_filled(rect, theme::RADIUS_MD, theme::INNER_BG);
     p.rect_stroke(
         rect,
-        10.0,
+        theme::RADIUS_MD,
         Stroke::new(1.0, theme::BORDER),
         egui::StrokeKind::Middle,
     );

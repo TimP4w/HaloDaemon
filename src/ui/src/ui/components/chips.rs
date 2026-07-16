@@ -194,10 +194,10 @@ fn chip_impl(
         .layout_no_wrap(label.to_string(), theme::caption(), text);
     let size = galley.size() + Vec2::new(18.0, 10.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    ui.painter().rect_filled(rect, 7.0, fill);
+    ui.painter().rect_filled(rect, theme::RADIUS_SM, fill);
     ui.painter().rect_stroke(
         rect,
-        7.0,
+        theme::RADIUS_SM,
         Stroke::new(1.0, border),
         egui::StrokeKind::Middle,
     );
@@ -239,7 +239,8 @@ pub fn context_menu_item(ui: &mut egui::Ui, label: &str, color: Color32) -> Resp
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, 7.0, theme::hex(0x1a2230));
+        ui.painter()
+            .rect_filled(rect, theme::RADIUS_SM, theme::hex(0x1a2230));
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     ui.painter().text(

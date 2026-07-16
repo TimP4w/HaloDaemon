@@ -4,7 +4,7 @@
 // spacing, and painter sweeps); allow until every site is routed through them.
 #![allow(dead_code)]
 
-use egui::{Color32, CornerRadius, Margin, Rect, Stroke, Vec2};
+use egui::{Color32, Margin, Rect, Stroke, Vec2};
 
 use super::{BORDER, CARD_BG, INNER_BG};
 
@@ -14,7 +14,6 @@ pub const RADIUS_MD: f32 = 10.0;
 pub const RADIUS_LG: f32 = 12.0;
 pub const RADIUS_XL: f32 = 14.0;
 pub const RADIUS_2XL: f32 = 18.0;
-pub const CR_MD: CornerRadius = CornerRadius::same(10);
 
 pub const SPACE_1: f32 = 2.0;
 pub const SPACE_2: f32 = 4.0;

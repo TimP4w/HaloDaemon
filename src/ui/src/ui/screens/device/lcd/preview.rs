@@ -167,13 +167,13 @@ pub(super) fn display_card(
                         p.circle_stroke(center, radius, Stroke::new(1.0, theme::BORDER));
                     }
                     ScreenShape::Square => {
-                        p.rect_filled(rect, 12.0, theme::INNER_BG);
+                        p.rect_filled(rect, theme::RADIUS_LG, theme::INNER_BG);
                         if let Some(tex) = &st.lcd.preview_tex {
                             p.image(tex.id(), rect, cover_uv(tex), Color32::WHITE);
                         }
                         p.rect_stroke(
                             rect,
-                            12.0,
+                            theme::RADIUS_LG,
                             Stroke::new(1.0, theme::BORDER),
                             egui::StrokeKind::Middle,
                         );

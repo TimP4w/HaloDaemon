@@ -72,7 +72,7 @@ pub fn config_section(
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(14, 4))
         .show(ui, |ui| {
             let mut first = true;

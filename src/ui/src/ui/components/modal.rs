@@ -45,7 +45,7 @@ fn modal_shell(
             egui::Frame::NONE
                 .fill(theme::MODAL_BG)
                 .stroke(Stroke::new(1.0, theme::BORDER))
-                .corner_radius(12.0)
+                .corner_radius(theme::RADIUS_LG)
                 .inner_margin(egui::Margin::same(MODAL_MARGIN as i8)),
         )
         .show(ctx, |ui| {

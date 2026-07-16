@@ -56,7 +56,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
     egui::Frame::NONE
         .fill(theme::CARD_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(14.0)
+        .corner_radius(theme::RADIUS_XL)
         .show(ui, |ui| {
             ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 0.0);
             let host_mode = host_mode_boolean(&ctx.dev.capabilities).is_some_and(|b| b.value);
@@ -114,7 +114,11 @@ fn slot_row(
     let p = ui.painter();
 
     if active {
-        p.rect_filled(row.shrink2(Vec2::new(6.0, 5.0)), 10.0, theme::ROW_ACTIVE);
+        p.rect_filled(
+            row.shrink2(Vec2::new(6.0, 5.0)),
+            theme::RADIUS_MD,
+            theme::ROW_ACTIVE,
+        );
     }
     p.line_segment(
         [row.left_bottom(), row.right_bottom()],

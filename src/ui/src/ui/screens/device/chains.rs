@@ -151,7 +151,7 @@ fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &Chainab
     egui::Frame::NONE
         .fill(theme::CARD_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(14.0)
+        .corner_radius(theme::RADIUS_XL)
         .inner_margin(egui::Margin {
             left: 18,
             right: 18,
@@ -327,7 +327,7 @@ fn channel_header(
 fn empty_placeholder(ui: &mut egui::Ui) {
     egui::Frame::NONE
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.vertical_centered(|ui| {
@@ -351,7 +351,7 @@ fn link_row(
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(11.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin {
             left: 13,
             right: 13,
@@ -636,7 +636,7 @@ fn add_link_panel(
         egui::Frame::NONE
             .fill(theme::INNER_BG)
             .stroke(Stroke::new(1.0, theme::BORDER))
-            .corner_radius(11.0)
+            .corner_radius(theme::RADIUS_MD)
             .inner_margin(egui::Margin::same(14))
             .show(ui, |ui| {
                 // Name field

@@ -155,7 +155,7 @@ fn color_picker_inner(ui: &mut egui::Ui, avail: f32, current: RgbColor) -> Optio
         let (swatch_rect, swatch_resp) =
             ui.allocate_exact_size(Vec2::new(64.0, grid_h), Sense::click());
         let painter = ui.painter();
-        painter.rect_filled(swatch_rect, 10.0, c32);
+        painter.rect_filled(swatch_rect, theme::RADIUS_MD, c32);
         theme::halo(painter, swatch_rect, 10.0, c32, 26.0);
         if swatch_resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);

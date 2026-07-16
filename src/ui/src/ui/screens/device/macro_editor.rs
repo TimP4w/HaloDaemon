@@ -575,10 +575,10 @@ fn pill_strip(
             } else {
                 theme::INNER_BG
             };
-            p.rect_filled(rect, 7.0, fill);
+            p.rect_filled(rect, theme::RADIUS_SM, fill);
             p.rect_stroke(
                 rect,
-                7.0,
+                theme::RADIUS_SM,
                 Stroke::new(1.0, a(color, 0.55)),
                 egui::StrokeKind::Middle,
             );
@@ -695,10 +695,10 @@ fn record_ui(
         Sense::click_and_drag(), // swallow presses so they don't hit widgets below
     );
     let p = ui.painter();
-    p.rect_filled(zone, 7.0, a(theme::STAT_AMBER, 0.06));
+    p.rect_filled(zone, theme::RADIUS_SM, a(theme::STAT_AMBER, 0.06));
     p.rect_stroke(
         zone,
-        7.0,
+        theme::RADIUS_SM,
         Stroke::new(1.0, a(theme::STAT_AMBER, 0.5)),
         egui::StrokeKind::Middle,
     );

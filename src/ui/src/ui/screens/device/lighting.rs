@@ -712,10 +712,10 @@ fn led_canvas(
         Sense::click_and_drag(),
     );
     let p = ui.painter();
-    p.rect_filled(rect, 10.0, theme::hex(0x0a0d13));
+    p.rect_filled(rect, theme::RADIUS_MD, theme::hex(0x0a0d13));
     p.rect_stroke(
         rect,
-        10.0,
+        theme::RADIUS_MD,
         Stroke::new(1.0, theme::BORDER_INNER),
         egui::StrokeKind::Middle,
     );

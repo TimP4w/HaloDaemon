@@ -98,7 +98,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
         ScreenShape::Square => {
             ui.painter().rect_stroke(
                 rect,
-                14.0,
+                theme::RADIUS_XL,
                 Stroke::new(6.0, theme::BODY),
                 egui::StrokeKind::Outside,
             );
@@ -317,9 +317,9 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             } else {
                 // Unrotated: keep the rounded-rect look of the original outline.
                 if selected {
-                    p.rect_filled(content, 4.0, fill);
+                    p.rect_filled(content, theme::RADIUS_XS, fill);
                 }
-                p.rect_stroke(content, 4.0, stroke, egui::StrokeKind::Outside);
+                p.rect_stroke(content, theme::RADIUS_XS, stroke, egui::StrokeKind::Outside);
             }
         }
         if !editing {
@@ -339,7 +339,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                     // widget still reads as present while the render arrives.
                     ui.painter().with_clip_rect(rect).rect_filled(
                         content,
-                        4.0,
+                        theme::RADIUS_XS,
                         theme::a(theme::TEXT_MUT, 0.10),
                     );
                 }
@@ -626,7 +626,7 @@ fn paint_stage_background(
         ScreenShape::Circle => theme::CARD_BG,
         ScreenShape::Square => theme::BODY,
     };
-    p.rect_filled(rect, 12.0, screen_bg);
+    p.rect_filled(rect, theme::RADIUS_LG, screen_bg);
     match &style.background {
         BgKind::Flow => theme::glow(p, rect.center(), rect.width() * 0.45, accent, 0.45),
         BgKind::Glow => theme::glow(p, rect.center(), rect.width() * 0.6, accent, 0.60),
@@ -640,7 +640,7 @@ fn paint_stage_background(
                     p.circle_filled(rect.center(), r, fill);
                 }
                 ScreenShape::Square => {
-                    p.rect_filled(rect, 12.0, fill);
+                    p.rect_filled(rect, theme::RADIUS_LG, fill);
                 }
             }
         }
@@ -683,7 +683,7 @@ fn paint_stage_background(
                     ScreenShape::Square => {
                         p.image(tex.id(), rect, uv, Color32::WHITE);
                         if dim_a > 0 {
-                            p.rect_filled(rect, 12.0, Color32::from_black_alpha(dim_a));
+                            p.rect_filled(rect, theme::RADIUS_LG, Color32::from_black_alpha(dim_a));
                         }
                     }
                 }

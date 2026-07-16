@@ -1165,7 +1165,7 @@ fn udev_plugin_warning_banner(ui: &mut egui::Ui) {
     egui::Frame::NONE
         .fill(theme::a(theme::STAT_AMBER, 0.10))
         .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(14, 10))
         .show(ui, |ui| {
             ui.label(
@@ -2406,7 +2406,7 @@ fn permission_card(ui: &mut egui::Ui, perm: halod_shared::types::Permission) {
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -2440,7 +2440,7 @@ fn command_authority_card(ui: &mut egui::Ui, commands: &[&str]) {
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::STAT_AMBER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -2678,7 +2678,7 @@ fn udev_rules_banner(
     egui::Frame::NONE
         .fill(theme::a(color, 0.10))
         .stroke(Stroke::new(1.0, theme::a(color, 0.35)))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -2883,7 +2883,7 @@ fn udev_modal_status(ui: &mut egui::Ui, status: &halod_shared::types::UdevRulesS
     egui::Frame::NONE
         .fill(theme::a(color, 0.08))
         .stroke(Stroke::new(1.0, theme::a(color, 0.35)))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -3047,7 +3047,7 @@ fn stat_box(ui: &mut egui::Ui, label: &str, value: &str) {
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(14, 11))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -3099,7 +3099,7 @@ fn updates_disabled_note(ui: &mut egui::Ui) {
     egui::Frame::NONE
         .fill(theme::a(theme::TEXT_MUT, 0.08))
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(14, 11))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -3352,7 +3352,7 @@ fn add_body(ui: &mut egui::Ui) {
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(20, 26))
         .show(ui, |ui| {
             ui.vertical_centered(|ui| {

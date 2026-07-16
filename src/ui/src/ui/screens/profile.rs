@@ -437,7 +437,7 @@ pub fn title_dropdown(
     let frame = egui::Frame::NONE
         .fill(theme::MODAL_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(12.0)
+        .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin::same(8))
         .shadow(egui::epaint::Shadow {
             offset: [0, 18],
@@ -1153,10 +1153,10 @@ fn process_chip(
     } else {
         a(Color32::WHITE, 0.05)
     };
-    ui.painter().rect_filled(rect, 7.0, bg);
+    ui.painter().rect_filled(rect, theme::RADIUS_SM, bg);
     ui.painter().rect_stroke(
         rect,
-        7.0,
+        theme::RADIUS_SM,
         Stroke::new(1.0, theme::BORDER_SOFT),
         egui::StrokeKind::Middle,
     );

@@ -118,10 +118,10 @@ fn overlay(
             let bubble = bubble_rect(cutout, bubble_size, screen);
 
             theme::halo(p, bubble, 12.0, a(Color32::BLACK, 0.5 * fade), 24.0);
-            p.rect_filled(bubble, 12.0, theme::CARD_BG);
+            p.rect_filled(bubble, theme::RADIUS_LG, theme::CARD_BG);
             p.rect_stroke(
                 bubble,
-                12.0,
+                theme::RADIUS_LG,
                 Stroke::new(1.0, theme::BORDER),
                 egui::StrokeKind::Inside,
             );

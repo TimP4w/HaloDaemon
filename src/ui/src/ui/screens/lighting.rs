@@ -979,10 +979,10 @@ fn device_card(
     } else {
         theme::BORDER
     };
-    p.rect_filled(rect, 10.0, bg);
+    p.rect_filled(rect, theme::RADIUS_MD, bg);
     p.rect_stroke(
         rect,
-        10.0,
+        theme::RADIUS_MD,
         Stroke::new(1.0, border),
         egui::StrokeKind::Middle,
     );

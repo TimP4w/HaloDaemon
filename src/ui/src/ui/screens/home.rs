@@ -222,10 +222,10 @@ fn attention_banner(ui: &mut egui::Ui, count: usize) -> bool {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 62.0), Sense::hover());
     {
         let p = ui.painter();
-        p.rect_filled(rect, 12.0, a(theme::STAT_AMBER, 0.09));
+        p.rect_filled(rect, theme::RADIUS_LG, a(theme::STAT_AMBER, 0.09));
         p.rect_stroke(
             rect,
-            12.0,
+            theme::RADIUS_LG,
             Stroke::new(1.0, a(theme::STAT_AMBER, 0.34)),
             egui::StrokeKind::Middle,
         );
@@ -233,10 +233,10 @@ fn attention_banner(ui: &mut egui::Ui, count: usize) -> bool {
             Pos2::new(rect.left() + 35.0, rect.center().y),
             Vec2::splat(34.0),
         );
-        p.rect_filled(icon, 9.0, a(theme::STAT_AMBER, 0.12));
+        p.rect_filled(icon, theme::RADIUS_MD, a(theme::STAT_AMBER, 0.12));
         p.rect_stroke(
             icon,
-            9.0,
+            theme::RADIUS_MD,
             Stroke::new(1.0, a(theme::STAT_AMBER, 0.35)),
             egui::StrokeKind::Middle,
         );
@@ -386,7 +386,7 @@ fn conflict_group_card(ui: &mut egui::Ui, group: &mut ConflictGroup) {
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(12.0)
+        .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin {
             left: 15,
             right: 15,
@@ -497,10 +497,10 @@ fn owner_option(
     } else {
         theme::CARD_BG
     };
-    p.rect_filled(rect, 10.0, fill);
+    p.rect_filled(rect, theme::RADIUS_MD, fill);
     p.rect_stroke(
         rect,
-        10.0,
+        theme::RADIUS_MD,
         Stroke::new(
             if selected { 1.5 } else { 1.0 },
             if selected { theme::CYAN } else { theme::BORDER },
@@ -872,10 +872,11 @@ fn header(
 fn search_box(ui: &mut egui::Ui, search: &mut String) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(190.0, 33.0), Sense::hover());
     crate::domain::tour::anchor(ui.ctx(), crate::domain::tour::AnchorId::HomeSearch, rect);
-    ui.painter().rect_filled(rect, 10.0, theme::CARD_BG);
+    ui.painter()
+        .rect_filled(rect, theme::RADIUS_MD, theme::CARD_BG);
     ui.painter().rect_stroke(
         rect,
-        10.0,
+        theme::RADIUS_MD,
         Stroke::new(1.0, theme::BORDER),
         egui::StrokeKind::Middle,
     );
@@ -913,10 +914,10 @@ fn search_box(ui: &mut egui::Ui, search: &mut String) {
 fn segmented(ui: &mut egui::Ui, variant: &mut Variant) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(108.0, 33.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, 10.0, theme::CARD_BG);
+    p.rect_filled(rect, theme::RADIUS_MD, theme::CARD_BG);
     p.rect_stroke(
         rect,
-        10.0,
+        theme::RADIUS_MD,
         Stroke::new(1.0, theme::BORDER),
         egui::StrokeKind::Middle,
     );
@@ -934,14 +935,15 @@ fn segmented(ui: &mut egui::Ui, variant: &mut Variant) {
         let active = *variant == v;
         let resp = ui.interact(chip, ui.id().with(("seg", i)), Sense::click());
         if active {
-            ui.painter().rect_filled(chip, 7.0, theme::CYAN);
+            ui.painter()
+                .rect_filled(chip, theme::RADIUS_SM, theme::CYAN);
         } else {
             let t =
                 ui.ctx()
                     .animate_bool_with_time(ui.id().with(("seg_h", i)), resp.hovered(), 0.12);
             if t > 0.001 {
                 ui.painter()
-                    .rect_filled(chip, 7.0, a(Color32::WHITE, 0.05 * t));
+                    .rect_filled(chip, theme::RADIUS_SM, a(Color32::WHITE, 0.05 * t));
             }
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -1025,7 +1027,7 @@ fn sensor_card(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let p = ui.painter();
-    p.rect_filled(rect, 12.0, theme::CARD_BG);
+    p.rect_filled(rect, theme::RADIUS_LG, theme::CARD_BG);
 
     // Background sparkline from the rolling history.
     if let Some(samples) = history.get(&s.id) {
@@ -1041,7 +1043,7 @@ fn sensor_card(
     };
     p.rect_stroke(
         rect,
-        12.0,
+        theme::RADIUS_LG,
         Stroke::new(1.0, border_color),
         egui::StrokeKind::Middle,
     );
@@ -1085,11 +1087,11 @@ fn sensor_card(
     }
     // Greyed when hidden; right-click to toggle visibility.
     if s.hidden {
-        p.rect_filled(rect, 12.0, a(theme::MAIN_BG, 0.45));
+        p.rect_filled(rect, theme::RADIUS_LG, a(theme::MAIN_BG, 0.45));
         theme::round_corners(p, rect, 12.0, theme::MAIN_BG);
         p.rect_stroke(
             rect,
-            12.0,
+            theme::RADIUS_LG,
             Stroke::new(1.0, theme::BORDER),
             egui::StrokeKind::Middle,
         );
@@ -1238,7 +1240,7 @@ fn draw_card_glow(ui: &egui::Ui, rect: Rect, d: &WireDevice, color: Color32, t: 
     let badge_r = egui::lerp(16.0..=30.0, t);
     let badge_s = egui::lerp(0.154..=0.36, t);
 
-    p.rect_filled(rect, 14.0, theme::CARD_BG);
+    p.rect_filled(rect, theme::RADIUS_XL, theme::CARD_BG);
     let anchor = Pos2::new(rect.right(), rect.top());
     let animating = t > 0.002;
     let time = ui.input(|i| i.time) as f32;
@@ -1366,7 +1368,7 @@ fn device_card(
 
     // Grey out hidden/disabled/offline devices with a uniform scrim.
     if dimmed {
-        p.rect_filled(rect, 14.0, a(theme::MAIN_BG, 0.5));
+        p.rect_filled(rect, theme::RADIUS_XL, a(theme::MAIN_BG, 0.5));
     }
 
     // Restore the rounded silhouette (the clipped glow filled the corners),
@@ -1375,7 +1377,7 @@ fn device_card(
     let border = theme::lerp_color(theme::BORDER, a(color, 0.55), t);
     p.rect_stroke(
         rect,
-        14.0,
+        theme::RADIUS_XL,
         Stroke::new(1.0, border),
         egui::StrokeKind::Middle,
     );
@@ -1506,7 +1508,7 @@ fn list(
     egui::Frame::NONE
         .fill(theme::CARD_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(14.0)
+        .corner_radius(theme::RADIUS_XL)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             for (i, d) in devices.iter().enumerate() {

@@ -25,7 +25,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, page: &mut Page) {
         egui::Frame::NONE
             .fill(theme::CARD_BG)
             .stroke(Stroke::new(1.0, theme::BORDER))
-            .corner_radius(14.0)
+            .corner_radius(theme::RADIUS_XL)
             .show(ui, |ui| {
                 let (title_rect, _) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), Sense::hover());
@@ -74,7 +74,11 @@ fn child_row(ui: &mut egui::Ui, d: &WireDevice) -> bool {
     let hovered = resp.hovered();
     let p = ui.painter();
     if hovered {
-        p.rect_filled(row.shrink2(Vec2::new(6.0, 5.0)), 10.0, theme::ROW_ACTIVE);
+        p.rect_filled(
+            row.shrink2(Vec2::new(6.0, 5.0)),
+            theme::RADIUS_MD,
+            theme::ROW_ACTIVE,
+        );
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     p.line_segment(
@@ -85,7 +89,7 @@ fn child_row(ui: &mut egui::Ui, d: &WireDevice) -> bool {
     let cy = row.center().y;
     let badge_rect =
         Rect::from_center_size(Pos2::new(row.left() + 37.0, cy), Vec2::new(38.0, 28.0));
-    p.rect_filled(badge_rect, 7.0, theme::device_color(d));
+    p.rect_filled(badge_rect, theme::RADIUS_SM, theme::device_color(d));
     let glyph = Rect::from_center_size(badge_rect.center(), Vec2::splat(badge_rect.height() * 0.8));
     crate::ui::icons::draw_device(p, glyph, d.device_type, theme::hex(0x0a0d13));
     p.text(
@@ -278,7 +282,7 @@ fn slots_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus) {
     egui::Frame::NONE
         .fill(theme::CARD_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(14.0)
+        .corner_radius(theme::RADIUS_XL)
         .show(ui, |ui| {
             // Title row
             let (title_rect, _) =
@@ -330,7 +334,7 @@ fn pair_slot_row(
 
     if let Some(slot) = slot {
         let badge_color = theme::DEVICE_HUES[slot_idx as usize % theme::DEVICE_HUES.len()];
-        p.rect_filled(badge_rect, 7.0, badge_color);
+        p.rect_filled(badge_rect, theme::RADIUS_SM, badge_color);
         let code = slot_code(&slot.name);
         p.text(
             badge_rect.center(),
@@ -373,7 +377,7 @@ fn pair_slot_row(
             });
         });
     } else {
-        p.rect_filled(badge_rect, 7.0, theme::BORDER);
+        p.rect_filled(badge_rect, theme::RADIUS_SM, theme::BORDER);
         p.text(
             Pos2::new(name_x, cy),
             Align2::LEFT_CENTER,

@@ -179,9 +179,9 @@ fn paint_button(
     // Buttons use fill, border, and hover contrast only. Animated halos made
     // ordinary actions such as “Update all” look like alerts and competed
     // with the content around them.
-    p.rect_filled(rect, 7.0, fill);
+    p.rect_filled(rect, theme::RADIUS_SM, fill);
     if stroke != Stroke::NONE {
-        p.rect_stroke(rect, 7.0, stroke, egui::StrokeKind::Middle);
+        p.rect_stroke(rect, theme::RADIUS_SM, stroke, egui::StrokeKind::Middle);
     }
 
     let text = label.to_string();

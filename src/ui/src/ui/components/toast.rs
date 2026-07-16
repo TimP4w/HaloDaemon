@@ -162,10 +162,10 @@ fn toast_card(ui: &mut egui::Ui, rect: Rect, note: &Notification, idx: usize) ->
     let color = severity_color(note.code.severity());
     let p = ui.painter();
     theme::halo(p, rect, 12.0, a(Color32::BLACK, 0.5), 24.0);
-    p.rect_filled(rect, 12.0, theme::CARD_BG);
+    p.rect_filled(rect, theme::RADIUS_LG, theme::CARD_BG);
     p.rect_stroke(
         rect,
-        12.0,
+        theme::RADIUS_LG,
         Stroke::new(1.0, a(color, 0.34)),
         egui::StrokeKind::Middle,
     );

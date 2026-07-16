@@ -545,7 +545,7 @@ pub(super) fn draw_thumb_tile(
             Color32::WHITE,
         );
     } else {
-        p.rect_filled(rect, 4.0, theme::INNER_BG);
+        p.rect_filled(rect, theme::RADIUS_XS, theme::INNER_BG);
     }
     let ring = if selected {
         theme::CYAN
@@ -554,7 +554,12 @@ pub(super) fn draw_thumb_tile(
     } else {
         Color32::TRANSPARENT
     };
-    p.rect_stroke(rect, 4.0, Stroke::new(2.0, ring), egui::StrokeKind::Middle);
+    p.rect_stroke(
+        rect,
+        theme::RADIUS_XS,
+        Stroke::new(2.0, ring),
+        egui::StrokeKind::Middle,
+    );
 
     if show_badge {
         p.circle_filled(badge_c, badge_r, theme::OFFLINE);

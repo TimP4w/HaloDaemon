@@ -172,7 +172,7 @@ pub fn show(
             egui::Frame::NONE
                 .fill(theme::MODAL_BG)
                 .stroke(Stroke::new(1.0, theme::BORDER))
-                .corner_radius(18.0)
+                .corner_radius(theme::RADIUS_2XL)
                 .inner_margin(egui::Margin {
                     left: 28,
                     right: 28,
@@ -328,7 +328,7 @@ fn pref_card(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&m
     egui::Frame::NONE
         .fill(theme::CARD_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(13.0)
+        .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {

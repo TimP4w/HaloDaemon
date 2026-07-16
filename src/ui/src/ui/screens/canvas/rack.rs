@@ -428,7 +428,7 @@ fn instance_row(
     // Row 1: swatch, name, chevron.
     p.rect_filled(
         Rect::from_center_size(Pos2::new(head.left() + 11.0, top_y), Vec2::splat(13.0)),
-        4.0,
+        theme::RADIUS_XS,
         color,
     );
     p.text(

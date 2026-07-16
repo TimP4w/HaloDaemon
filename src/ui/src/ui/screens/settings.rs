@@ -1057,7 +1057,7 @@ fn licenses_modal(ctx: &egui::Context, st: &mut SettingsUi) {
             egui::Frame::NONE
                 .fill(theme::hex(0x080b10))
                 .stroke(Stroke::new(1.0, theme::hex(0x1c2230)))
-                .corner_radius(8.0)
+                .corner_radius(theme::RADIUS_SM)
                 .inner_margin(egui::Margin::same(12))
                 .show(ui, |ui| {
                     ui.label(
@@ -1328,7 +1328,7 @@ fn diag_card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let r = egui::Frame::NONE
         .fill(theme::hex(0x080b10))
         .stroke(Stroke::new(1.0, theme::hex(0x1c2230)))
-        .corner_radius(8.0)
+        .corner_radius(theme::RADIUS_SM)
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

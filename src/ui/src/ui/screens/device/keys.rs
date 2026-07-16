@@ -269,10 +269,10 @@ fn button_selector_card(
                 Pos2::new(rect.left() + 18.0, rect.center().y - 15.0),
                 Vec2::new(chip_w, 30.0),
             );
-            p.rect_filled(chip, 7.0, theme::INNER_BG);
+            p.rect_filled(chip, theme::RADIUS_SM, theme::INNER_BG);
             p.rect_stroke(
                 chip,
-                7.0,
+                theme::RADIUS_SM,
                 Stroke::new(1.0, if selected { type_color } else { theme::BORDER }),
                 egui::StrokeKind::Middle,
             );
@@ -307,7 +307,7 @@ fn button_selector_card(
             );
             p.rect_stroke(
                 tag_rect,
-                7.0,
+                theme::RADIUS_SM,
                 Stroke::new(1.0, theme::BORDER),
                 egui::StrokeKind::Middle,
             );
@@ -445,10 +445,11 @@ fn action_card(
                 );
                 let (chip, _) =
                     ui.allocate_exact_size(Vec2::new(g.size().x + 18.0, 26.0), Sense::hover());
-                ui.painter().rect_filled(chip, 7.0, theme::INNER_BG);
+                ui.painter()
+                    .rect_filled(chip, theme::RADIUS_SM, theme::INNER_BG);
                 ui.painter().rect_stroke(
                     chip,
-                    7.0,
+                    theme::RADIUS_SM,
                     Stroke::new(1.0, theme::hex(0x2a3446)),
                     egui::StrokeKind::Middle,
                 );

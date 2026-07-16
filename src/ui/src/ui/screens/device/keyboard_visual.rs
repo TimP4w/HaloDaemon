@@ -16,10 +16,10 @@ use crate::ui::theme;
 pub fn panel(ui: &mut egui::Ui, height: f32, sense: Sense) -> (egui::Response, Rect) {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), sense);
     let p = ui.painter();
-    p.rect_filled(rect, 10.0, theme::hex(0x0a0d13));
+    p.rect_filled(rect, theme::RADIUS_MD, theme::hex(0x0a0d13));
     p.rect_stroke(
         rect,
-        10.0,
+        theme::RADIUS_MD,
         Stroke::new(1.0, theme::BORDER_INNER),
         egui::StrokeKind::Middle,
     );
