@@ -1395,6 +1395,21 @@ fn scan_repo(repo_dir: &Path, scan: &mut LoadScan) {
     scan_plugin_subdirs(&repo_dir.join("plugins"), scan);
 }
 
+/// Scan a repo without integrity verification — for the local development repo
+/// (`--dev-plugin-repo`), whose working tree is edited in place and whose hashes
+/// intentionally won't match the generated `repository.yaml`.
+fn scan_repo_trusted(repo_dir: &Path, scan: &mut LoadScan) {
+    if let Ok(repository) = repo::read_repository_index(repo_dir) {
+        for package in repository.packages {
+            try_load_plugin_dir(&repo_dir.join(package.path), scan);
+        }
+        return;
+    }
+    try_load_plugin_dir(repo_dir, scan);
+    scan_plugin_subdirs(repo_dir, scan);
+    scan_plugin_subdirs(&repo_dir.join("plugins"), scan);
+}
+
 /// Plugin ids discoverable under a repo's clone directory, for purging a removed repo's state.
 pub fn repo_plugin_ids(repo_dir: &Path) -> Vec<String> {
     let mut scan = LoadScan::default();
@@ -1439,17 +1454,15 @@ impl Registry {
                 == Some(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
         };
         if let Some(repo_dir) = priority_repo {
-            scan_repo(repo_dir, &mut scan);
+            scan_repo_trusted(repo_dir, &mut scan);
         } else {
             for repo_dir in repo_dirs.iter().filter(|d| is_official(d)) {
                 scan_repo(repo_dir, &mut scan);
             }
-        }
-        scan_plugin_subdirs(dir, &mut scan);
-        for repo_dir in repo_dirs.iter().filter(|d| {
-            !is_official(d) && priority_repo.is_none_or(|priority| d.as_path() != priority)
-        }) {
-            scan_repo(repo_dir, &mut scan);
+            scan_plugin_subdirs(dir, &mut scan);
+            for repo_dir in repo_dirs.iter().filter(|d| !is_official(d)) {
+                scan_repo(repo_dir, &mut scan);
+            }
         }
         let effects: Vec<PluginEffectEntry> =
             scan.manifests.iter().flat_map(effect_entries_for).collect();

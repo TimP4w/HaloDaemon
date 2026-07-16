@@ -244,3 +244,33 @@ fn indexed_repository_with_a_bad_digest_does_not_fall_back_to_loose_scanning() {
         }) if package == "demo"
     ));
 }
+
+#[test]
+fn trusted_repo_scan_loads_packages_despite_a_bad_digest() {
+    // The dev repo (`--dev-plugin-repo`) is edited in place, so its hashes won't
+    // match the generated index. A trusted scan must load anyway.
+    let root = tempfile::tempdir().unwrap();
+    let package = root.path().join("plugins").join("demo");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("plugin.yaml"),
+        "id: demo\nversion: 1.0.0\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
+    )
+    .unwrap();
+    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
+    std::fs::write(
+        root.path().join("repository.yaml"),
+        format!(
+            "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.0.0'\n  plugin_api: 1\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {}\n",
+            "0".repeat(64)
+        ),
+    )
+    .unwrap();
+
+    let mut scan = super::LoadScan::default();
+    super::scan_repo_trusted(root.path(), &mut scan);
+
+    assert_eq!(scan.manifests.len(), 1);
+    assert_eq!(scan.manifests[0].plugin_id, "demo");
+    assert!(scan.invalid.is_empty());
+}
