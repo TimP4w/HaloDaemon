@@ -19,6 +19,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../assets/fonts");
     println!("cargo:rerun-if-changed=assets/icons");
     println!("cargo:rerun-if-changed=../../LICENSES");
+    println!("cargo:rerun-if-env-changed=HALOD_OFFICIAL_PLUGIN_LICENSES");
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let workspace = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
@@ -39,6 +40,7 @@ fn main() {
             let mut content = refs_section.into_bytes();
             content.extend_from_slice(&o.stdout);
             append_bundled_asset_licenses(&workspace, &mut content);
+            append_official_plugin_licenses(&mut content);
             std::fs::write(out_dir.join("third_party_licenses.txt"), &content)
                 .expect("failed to write third_party_licenses.txt");
         }
@@ -146,8 +148,26 @@ fn license_failure(
         .as_bytes(),
     );
     append_bundled_asset_licenses(workspace, &mut content);
+    append_official_plugin_licenses(&mut content);
     std::fs::write(out_dir.join("third_party_licenses.txt"), &content)
         .expect("failed to write license fallback");
+}
+
+/// Official release builds provide a generated notice for the Lua package
+/// snapshot. Development builds deliberately omit it when no snapshot exists.
+fn append_official_plugin_licenses(buf: &mut Vec<u8>) {
+    let Some(path) = std::env::var_os("HALOD_OFFICIAL_PLUGIN_LICENSES") else {
+        return;
+    };
+    match std::fs::read(&path) {
+        Ok(content) => {
+            buf.extend_from_slice(b"\n===================================================================\nOFFICIAL PLUGINS\n===================================================================\n\n");
+            buf.extend_from_slice(&content);
+        }
+        Err(error) => {
+            println!("cargo:warning=reading official plugin license notice failed: {error}")
+        }
+    }
 }
 
 fn scan_protocol_references(workspace: &std::path::Path) -> String {

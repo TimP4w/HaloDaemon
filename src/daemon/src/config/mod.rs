@@ -281,6 +281,13 @@ pub fn plugin_repos_dir() -> PathBuf {
     config_dir().join("plugin_repos")
 }
 
+/// Immutable revisions materialized from the daemon's release-embedded plugin
+/// bundle. Kept outside Git checkout roots so a later official clone can use
+/// the normal mutable repository location unchanged.
+pub fn embedded_plugin_revisions_dir() -> PathBuf {
+    config_dir().join("embedded_plugin_revisions")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MainFile {
     #[serde(default = "default_profile_name")]
@@ -378,6 +385,10 @@ pub struct PluginRepoRecord {
     /// means the source is registered but has not installed a revision yet.
     #[serde(default)]
     pub active_revision: Option<String>,
+    /// Storage backing the active revision. Older configurations predate
+    /// embedded bundles and therefore resolve to the managed Git revision.
+    #[serde(default)]
+    pub active_source: PluginRevisionSource,
     /// Last verified official revision retained for rollback diagnostics.
     #[serde(default)]
     pub previous_verified_sha: Option<String>,
@@ -385,6 +396,14 @@ pub struct PluginRepoRecord {
     /// (RFC 3339), for the GUI's repo detail panel. `None` until the first sync.
     #[serde(default)]
     pub last_sync: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginRevisionSource {
+    Embedded,
+    #[default]
+    Managed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -711,6 +730,7 @@ mod tests {
             branch: Some("main".into()),
             locked_sha: "deadbeef".into(),
             active_revision: Some("deadbeef".into()),
+            active_source: PluginRevisionSource::Managed,
             previous_verified_sha: None,
             last_sync: None,
         });

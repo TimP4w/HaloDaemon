@@ -337,7 +337,13 @@ fn materialize_tree(repo: &git2::Repository, tree: &git2::Tree<'_>, dest: &Path)
 /// an installed revision resolves to a deliberately nonexistent directory;
 /// the mutable Git worktree is never executable plugin input.
 pub fn active_revision_dir(record: &crate::config::PluginRepoRecord) -> PathBuf {
-    let root = crate::config::plugin_repos_dir().join(&record.slug);
+    let root = if record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG
+        && record.active_source == crate::config::PluginRevisionSource::Embedded
+    {
+        crate::config::embedded_plugin_revisions_dir().join(&record.slug)
+    } else {
+        crate::config::plugin_repos_dir().join(&record.slug)
+    };
     root.join("revisions").join(
         record
             .active_revision

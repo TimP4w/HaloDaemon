@@ -27,13 +27,33 @@ fn run(args: Vec<String>) -> Result<()> {
             Ok(())
         }
         Some("index") => index(&args[1..]),
+        Some("bundle") => bundle(&args[1..]),
         Some("sign") => sign(&args[1..]),
         Some("verify") => verify(&args[1..]),
         Some("keygen") => keygen(args.get(1).map(String::as_str)),
         _ => bail!(
-            "usage:\n  halod-plugin-signing validate <repo>\n  halod-plugin-signing index <repo> [--version <semver>] [--check]\n  halod-plugin-signing sign <repo> --key-id <id> [--key-env <name>]\n  halod-plugin-signing verify <repo> --trusted-key <id=base64>...\n  halod-plugin-signing keygen [key-id]"
+            "usage:\n  halod-plugin-signing validate <repo>\n  halod-plugin-signing index <repo> [--version <semver>] [--check]\n  halod-plugin-signing bundle <repo> --commit <sha> --output <tar>\n  halod-plugin-signing sign <repo> --key-id <id> [--key-env <name>]\n  halod-plugin-signing verify <repo> --trusted-key <id=base64>...\n  halod-plugin-signing keygen [key-id]"
         ),
     }
+}
+
+fn bundle(args: &[String]) -> Result<()> {
+    let repo = args
+        .first()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("missing <repo>"))?;
+    let commit = option(args, "--commit")?.ok_or_else(|| anyhow!("missing --commit"))?;
+    let output = option(args, "--output")?
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("missing --output"))?;
+    let metadata = signing::write_bundle(&repo, commit, &output)?;
+    println!(
+        "wrote {} for {} at {}",
+        output.display(),
+        metadata.repository_id,
+        metadata.commit
+    );
+    Ok(())
 }
 
 fn index(args: &[String]) -> Result<()> {

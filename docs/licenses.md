@@ -19,6 +19,7 @@ audit has a single starting point.
 | Bundled fonts and icons | `.ttf` and third-party `.svg` files embedded in the GUI/daemon | `REUSE.toml` overrides + SVG SPDX headers | GUI *About* dialog "Bundled assets" | `build.rs` |
 | PawnIO blobs | Windows kernel-access `.bin` files | `REUSE.toml` `pwnio/**` | Windows installer (`PawnIO-LICENSE.txt`) | `stage-release.ps1` |
 | External tools | FFmpeg (subprocess, bundled on Windows) | `packaging/windows/FFmpeg-*` + `REUSE.toml` | Windows installer (`ffmpeg.exe` + `FFmpeg-LICENSE.md`) | — |
+| Official plugins | Signed Lua package snapshot embedded in release `halod` | Plugin repo `REUSE.toml`, SPDX headers, and `LICENSES/` | About → Licenses, release archives, Windows installer, Nix package | `halod-plugin-signing bundle` |
 
 The single most complete artifact is the GUI **About → Licenses** dialog: it stitches
 together protocol references, every Rust crate license, and the bundled asset licenses
@@ -185,6 +186,20 @@ is a **GPL** build of FFmpeg (GPL-3.0-compatible with this project).
   `PawnIO-LICENSE.txt`.
 - The **full** third-party license text (crates + protocol references + fonts/icons) travels
   inside the binary and is viewable at runtime in **About → Licenses**.
+
+## 8. Embedded official plugins
+
+Official release builds embed a deterministic, signed snapshot of the official
+Lua plugin repository. The release workflow validates the selected repository
+commit, packages its scripts, `REUSE.toml`, and complete `LICENSES/` directory,
+and passes the archive to the daemon build. At first launch the daemon validates
+the signature and indexed package hashes again before extracting any script.
+
+The GUI appends the generated plugin license notice to **About → Licenses**.
+The Windows installer and Linux tarball also ship the notice under
+`ThirdPartyLicenses/Plugins`; Nix installs the full material under
+`share/licenses/halod/plugins`. Plugin source licenses come from the plugin
+repository's SPDX/REUSE metadata, not `cargo-about`.
 
 ## Reference clones — `refs/`
 

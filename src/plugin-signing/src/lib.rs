@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 
 pub const REPOSITORY_SCHEMA: u32 = 1;
 pub const SIGNATURE_ALGORITHM: &str = "ed25519";
+pub const BUNDLE_METADATA_PATH: &str = ".halod-plugin-bundle.yaml";
+const BUNDLE_MAGIC: &[u8] = b"HALODPLUG1\n";
 pub const GENERATED_HEADER: &str = concat!(
     "# SPDX-License-",
     "Identifier: GPL-3.0-or-later\n",
@@ -73,6 +75,151 @@ pub struct RepositorySignature {
     pub algorithm: String,
     pub key_id: String,
     pub signature: String,
+}
+
+/// Provenance stored alongside a deterministic embedded repository snapshot.
+/// The commit is informational and is used as the immutable revision id after
+/// extraction; repository.yaml and repository.sig remain the authority for
+/// executable package integrity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleMetadata {
+    pub commit: String,
+    pub repository_id: String,
+    pub repository_version: String,
+}
+
+/// Produce a deterministic tar archive suitable for embedding in a Halo
+/// release. The complete REUSE licensing material travels with the scripts.
+pub fn write_bundle(repo_dir: &Path, commit: &str, output: &Path) -> Result<BundleMetadata> {
+    if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("bundle commit must be a 40-character hexadecimal SHA");
+    }
+    let manifest = read_repository_index(repo_dir)?;
+    validate_repository(repo_dir, &manifest)?;
+    reject_symlinks(repo_dir)?;
+    if !repo_dir.join("repository.sig").is_file() {
+        bail!("repository.sig is missing");
+    }
+    let metadata = BundleMetadata {
+        commit: commit.to_ascii_lowercase(),
+        repository_id: manifest.id.clone(),
+        repository_version: manifest.version.clone(),
+    };
+    let mut paths = Vec::new();
+    collect_bundle_paths(repo_dir, repo_dir, &mut paths)?;
+    paths.sort();
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    let writer = temp.as_file_mut();
+    writer.write_all(BUNDLE_MAGIC)?;
+    append_bundle_file(
+        writer,
+        Path::new(BUNDLE_METADATA_PATH),
+        serde_yaml::to_string(&metadata)?.as_bytes(),
+    )?;
+    for relative in paths {
+        let bytes = fs::read(repo_dir.join(&relative))?;
+        append_bundle_file(writer, &relative, &bytes)?;
+    }
+    writer.write_all(&0_u32.to_be_bytes())?;
+    temp.as_file().sync_all()?;
+    temp.persist(output).map_err(|error| error.error)?;
+    Ok(metadata)
+}
+
+/// Extract a bundle without permitting archive path traversal, links, device
+/// nodes, or oversized entries. The caller validates the resulting repository
+/// before atomically activating it.
+pub fn extract_bundle(bytes: &[u8], destination: &Path) -> Result<BundleMetadata> {
+    if destination.exists() {
+        bail!(
+            "bundle destination already exists: {}",
+            destination.display()
+        );
+    }
+    fs::create_dir_all(destination)?;
+    let mut metadata = None;
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut magic = vec![0; BUNDLE_MAGIC.len()];
+    cursor.read_exact(&mut magic)?;
+    if magic != BUNDLE_MAGIC {
+        bail!("bundle has an unknown format");
+    }
+    loop {
+        let mut length = [0_u8; 4];
+        cursor.read_exact(&mut length)?;
+        let length = u32::from_be_bytes(length) as usize;
+        if length == 0 {
+            break;
+        }
+        if length > 4096 {
+            bail!("bundle path is too long");
+        }
+        let mut path = vec![0; length];
+        cursor.read_exact(&mut path)?;
+        let path = std::str::from_utf8(&path).context("bundle path is not UTF-8")?;
+        let normalized = normalized_relative_path(Path::new(path))?;
+        let mut size = [0_u8; 8];
+        cursor.read_exact(&mut size)?;
+        let size = u64::from_be_bytes(size);
+        if size > 64 * 1024 * 1024 {
+            bail!("bundle entry is too large: {normalized}");
+        }
+        let mut content = vec![0; size as usize];
+        cursor.read_exact(&mut content)?;
+        let target = destination.join(&normalized);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if normalized == BUNDLE_METADATA_PATH {
+            metadata = Some(serde_yaml::from_slice(&content).context("parsing bundle metadata")?);
+        } else {
+            fs::write(target, content)?;
+        }
+    }
+    let metadata: BundleMetadata = metadata.ok_or_else(|| anyhow!("bundle metadata is missing"))?;
+    if metadata.commit.len() != 40 || !metadata.commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("bundle metadata has an invalid commit SHA");
+    }
+    Ok(metadata)
+}
+
+fn collect_bundle_paths(root: &Path, current: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        if file_type.is_symlink() {
+            bail!("repository contains a symlink: {}", path.display());
+        }
+        if file_type.is_dir() {
+            collect_bundle_paths(root, &path, out)?;
+        } else if file_type.is_file() {
+            out.push(path.strip_prefix(root)?.to_path_buf());
+        } else {
+            bail!(
+                "repository contains an unsupported file: {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn append_bundle_file(writer: &mut fs::File, path: &Path, bytes: &[u8]) -> Result<()> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| anyhow!("bundle path is not UTF-8"))?;
+    let length = u32::try_from(path.len()).context("bundle path is too long")?;
+    writer.write_all(&length.to_be_bytes())?;
+    writer.write_all(path.as_bytes())?;
+    writer.write_all(&(bytes.len() as u64).to_be_bytes())?;
+    writer.write_all(bytes)?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

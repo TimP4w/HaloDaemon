@@ -214,6 +214,7 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
             branch,
             locked_sha,
             active_revision: Some(active_revision),
+            active_source: crate::config::PluginRevisionSource::Managed,
             previous_verified_sha: None,
             last_sync: Some(now_rfc3339()),
         });
@@ -717,6 +718,7 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
             }
             r.locked_sha = remote_sha.clone();
             r.active_revision = Some(remote_sha);
+            r.active_source = crate::config::PluginRevisionSource::Managed;
             r.last_sync = Some(now_rfc3339());
         }
         for package in &manifest.packages {
@@ -991,6 +993,7 @@ mod tests {
                     branch: None,
                     locked_sha,
                     active_revision: None,
+                    active_source: crate::config::PluginRevisionSource::Managed,
                     previous_verified_sha: None,
                     last_sync: None,
                 });
@@ -1555,6 +1558,7 @@ mod tests {
                     branch: None,
                     locked_sha: String::new(),
                     active_revision: None,
+                    active_source: crate::config::PluginRevisionSource::Managed,
                     previous_verified_sha: None,
                     last_sync: None,
                 });

@@ -29,7 +29,8 @@
 param(
     [string]$Ucrt64     = "C:\msys64\ucrt64",
     [string]$TargetDir  = (Join-Path $PSScriptRoot "..\..\src\target\release"),
-    [string]$StagingDir = (Join-Path $PSScriptRoot "staging")
+    [string]$StagingDir = (Join-Path $PSScriptRoot "staging"),
+    [string]$PluginLicensesDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -117,6 +118,14 @@ foreach ($blob in "SmbusI801.bin", "SmbusPIIX4.bin", "LpcIO.bin", "AMDFamily17.b
 # The PawnIO modules are LGPL-2.1-or-later (c) namazso; ship their license text.
 Copy-Item (Join-Path $repoRoot "pwnio\COPYING") -Destination (Join-Path $StagingDir "PawnIO-LICENSE.txt")
 Write-Host "  asset PawnIO-LICENSE.txt"
+
+# --- 2b. Official plugin notices ---------------------------------------------
+if ($PluginLicensesDir -and (Test-Path $PluginLicensesDir)) {
+    $dest = Join-Path $StagingDir "ThirdPartyLicenses\Plugins"
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    Copy-Item (Join-Path $PluginLicensesDir "*") -Destination $dest -Recurse -Force
+    Write-Host "  licenses official plugins"
+}
 
 # --- 3. ffmpeg's runtime DLLs -------------------------------------------------
 # ntldd -R prints lines like:  libavcodec-61.dll => /ucrt64/bin/libavcodec-61.dll (0x..)

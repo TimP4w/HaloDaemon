@@ -152,12 +152,15 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
                 branch: None,
                 locked_sha: String::new(),
                 active_revision: None,
+                active_source: crate::config::PluginRevisionSource::Managed,
                 previous_verified_sha: None,
                 last_sync: None,
             });
             app.request_config_save();
         }
     }
+
+    install_embedded_official_bundle(app).await;
 
     // Contacting GitHub requires the user's consent (asked once on first run).
     // Until granted, keep the record but download nothing.
@@ -176,6 +179,7 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
         .repos
         .iter()
         .find(|repo| repo.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+        .filter(|repo| repo.active_source == crate::config::PluginRevisionSource::Managed)
         .and_then(|repo| repo.active_revision.as_deref())
         .is_some_and(|revision| !revision.is_empty());
     if has_active_revision {
@@ -263,6 +267,7 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
             {
                 r.locked_sha = sha;
                 r.active_revision = Some(r.locked_sha.clone());
+                r.active_source = crate::config::PluginRevisionSource::Managed;
                 r.previous_verified_sha = None;
                 r.last_sync = Some(chrono::Utc::now().to_rfc3339());
             }
@@ -272,6 +277,56 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
             log::warn!("official plugin repo clone failed (continuing with none): {e:#}");
         }
         Err(e) => log::warn!("official plugin repo clone task panicked: {e:#}"),
+    }
+}
+
+/// Materialize the release-supplied signed plugin archive before the optional
+/// network checkout. It intentionally lives outside the managed Git root so a
+/// first online update can still clone into that root normally.
+async fn install_embedded_official_bundle(app: &Arc<AppState>) {
+    let Some(bytes) = crate::embedded_plugins::BUNDLE else {
+        return;
+    };
+    let root = crate::config::embedded_plugin_revisions_dir()
+        .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
+    let staging = root.join(format!(".staging-{}", uuid::Uuid::new_v4()));
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, String)> {
+        let metadata = halod_plugin_signing::extract_bundle(bytes, &staging)?;
+        let revision = root.join(&metadata.commit);
+        if revision.is_dir() {
+            std::fs::remove_dir_all(&staging)?;
+        } else {
+            crate::drivers::plugins::repo::verify_official_repository(&staging)?;
+            std::fs::create_dir_all(&root)?;
+            std::fs::rename(&staging, &revision)?;
+        }
+        Ok((metadata.commit, metadata.repository_id))
+    })
+    .await;
+    match result {
+        Ok(Ok((commit, repository_id))) => {
+            let mut cfg = app.config.write().await;
+            if let Some(record) = cfg
+                .plugins
+                .repos
+                .iter_mut()
+                .find(|r| r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+            {
+                if record.active_revision.is_none()
+                    || record.active_source == crate::config::PluginRevisionSource::Embedded
+                {
+                    record.locked_sha = commit.clone();
+                    record.active_revision = Some(commit);
+                    record.active_source = crate::config::PluginRevisionSource::Embedded;
+                    record.repository_id = Some(repository_id);
+                    app.request_config_save();
+                }
+            }
+        }
+        Ok(Err(error)) => {
+            log::warn!("embedded official plugin bundle failed validation: {error:#}")
+        }
+        Err(error) => log::warn!("embedded official plugin bundle task panicked: {error}"),
     }
 }
 

@@ -3,6 +3,9 @@ mod config;
 mod constants;
 mod cooling;
 mod drivers;
+mod embedded_plugins {
+    include!(concat!(env!("OUT_DIR"), "/embedded_plugin_bundle.rs"));
+}
 mod input;
 mod ipc;
 mod lcd;

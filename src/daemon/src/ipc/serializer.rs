@@ -139,6 +139,7 @@ mod tests {
             branch: None,
             locked_sha: String::new(),
             active_revision: None,
+            active_source: crate::config::PluginRevisionSource::Managed,
             previous_verified_sha: None,
             last_sync: None,
         }
