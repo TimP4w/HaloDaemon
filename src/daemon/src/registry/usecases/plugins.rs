@@ -217,11 +217,6 @@ pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
         dst.display()
     );
 
-    // A manual import gets the GUI's blocking consent modal instead of the
-    // auto-discovery toast — suppress it before the reload below would
-    // otherwise fire one for this exact plugin.
-    app.registry.suppress_permission_notice(&manifest.plugin_id);
-
     reconcile_plugins(&app, &[manifest.plugin_id]).await;
     Ok(())
 }

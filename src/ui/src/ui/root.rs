@@ -136,8 +136,7 @@ impl App {
             incoming.retain(|notification| {
                 !matches!(
                     notification.code,
-                    halod_shared::types::NotificationCode::PluginNeedsPermission { .. }
-                        | halod_shared::types::NotificationCode::PluginContentChanged { .. }
+                    halod_shared::types::NotificationCode::PluginContentChanged { .. }
                         | halod_shared::types::NotificationCode::PluginRecommended { .. }
                 )
             });

@@ -29,9 +29,6 @@ notify:
   fan_stalled:
     title: "Ventola bloccata: %{fan}"
     message: "La ventola non gira (0 RPM) mentre viene applicato il ciclo di lavoro. Controlla i cavi della ventola o sostituiscila."
-  plugin_needs_permission:
-    title: Il plugin richiede permessi
-    message: "%{plugin} richiede permessi non ancora concessi. Apri la schermata Plugin per concederli o rimuovere il plugin."
   plugin_content_changed:
     title: Plugin modificato su disco
     message: "I file di %{plugin} sono cambiati su disco, quindi è stato disabilitato per sicurezza. Apri la schermata Plugin per rivederlo e riabilitarlo."

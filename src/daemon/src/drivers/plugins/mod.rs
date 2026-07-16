@@ -168,9 +168,6 @@ struct PluginState {
 pub struct Registry {
     /// The read-mostly plugin snapshot (manifests/effects/consent/config).
     plugins: RwLock<Arc<PluginState>>,
-    /// Plugin ids already surfaced via a "needs permission" notice (see
-    /// [`Registry::take_newly_ungranted_plugins`]).
-    notified: RwLock<HashSet<String>>,
     /// Health episodes keyed by a plugin id or by `plugin_id::device_id`.
     /// Keeping device failures separate makes recovery and one-shot
     /// notifications precise while `health_for` derives the plugin aggregate.
@@ -842,12 +839,6 @@ impl Registry {
         consent_satisfied_in(&self.snapshot(), manifest)
     }
 
-    /// Why `manifest` is not consent-satisfied.
-    fn ungranted_reason(&self, manifest: &PluginManifest) -> UngrantedReason {
-        let _ = manifest;
-        UngrantedReason::NeedsPermission
-    }
-
     /// The single gate for "may this plugin activate, and with what?": disabled,
     /// awaiting consent (with the reason), or [`Ready`](ActivationState::Ready) with
     /// the resolved grants + config a spawn needs. Every device spawn resolves
@@ -913,49 +904,6 @@ impl Registry {
         self.integration_manifests()
             .into_iter()
             .find(|m| m.plugin_id == plugin_id)
-    }
-
-    /// Suppress the auto-discovery notification for a plugin id — used when the
-    /// GUI is already showing its own consent modal (a manual "Add plugin"
-    /// import), so the user isn't told about it twice.
-    pub fn suppress_permission_notice(&self, plugin_id: &str) {
-        write_recover(&self.notified).insert(plugin_id.to_owned());
-    }
-}
-
-/// Why a plugin can't currently activate, so the daemon picks the right alert.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UngrantedReason {
-    /// Never approved (or explicitly revoked): the user must grant permissions.
-    NeedsPermission,
-}
-
-impl Registry {
-    /// Filter behind [`Registry::take_newly_ungranted_plugins`]: which manifests
-    /// can't activate and aren't yet in `notified` (inserting each as returned),
-    /// paired with the reason so the caller can choose the notification.
-    fn ungranted_in(
-        &self,
-        manifests: &[PluginManifest],
-        notified: &mut HashSet<String>,
-    ) -> Vec<(String, UngrantedReason)> {
-        manifests
-            .iter()
-            .filter(|m| {
-                m.supports_current_platform()
-                    && !self.consent_satisfied(m)
-                    && notified.insert(m.plugin_id.clone())
-            })
-            .map(|m| (m.display_name().to_owned(), self.ungranted_reason(m)))
-            .collect()
-    }
-
-    /// Display names (with reason) of plugins that can't activate and haven't been
-    /// announced yet. Marks every returned plugin as notified.
-    pub fn take_newly_ungranted_plugins(&self) -> Vec<(String, UngrantedReason)> {
-        let state = self.snapshot();
-        let mut notified = write_recover(&self.notified);
-        self.ungranted_in(&state.manifests, &mut notified)
     }
 }
 

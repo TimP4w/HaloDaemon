@@ -111,7 +111,6 @@ pub async fn initialize_app_state(
     if dev_plugin_repo.is_none() {
         usecases::repos::quarantine_changed_plugins(app.clone()).await;
     }
-    notify_ungranted_plugins(&app).await;
     if dev_plugin_repo.is_none() {
         start_update_check(app.clone()).await;
     }
@@ -293,34 +292,6 @@ pub(crate) async fn start_update_check(app: Arc<AppState>) {
         app.discovery.lock().await.checking_updates = false;
         crate::ipc::broadcast_state(&app).await;
     });
-}
-
-/// Toast one notification per auto-discovered plugin that can't activate: a
-/// "needs permission" warning for each unapproved plugin. A manually-imported
-/// plugin is pre-marked notified by the import usecase (the GUI shows a
-/// blocking consent modal for that flow instead).
-pub(crate) async fn notify_ungranted_plugins(app: &Arc<AppState>) {
-    use crate::drivers::plugins::UngrantedReason;
-    use halod_shared::types::NotificationCode;
-    let notices = app.registry.take_newly_ungranted_plugins();
-    // First-run onboarding owns initial plugin selection and authority review.
-    // Consume the dedup entries but do not race it with desktop/toast notices.
-    if !app
-        .config
-        .read()
-        .await
-        .gui
-        .seen_tours
-        .contains(halod_shared::types::ONBOARDING_TOUR_KEY)
-    {
-        return;
-    }
-    for (plugin, reason) in notices {
-        let code = match reason {
-            UngrantedReason::NeedsPermission => NotificationCode::PluginNeedsPermission { plugin },
-        };
-        crate::platform::notify::send(app, code).await;
-    }
 }
 
 #[cfg(test)]

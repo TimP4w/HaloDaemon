@@ -502,12 +502,6 @@ pub enum NotificationCode {
     FanStalled {
         fan: String,
     },
-    /// An auto-discovered plugin (found by a directory scan, not a manual
-    /// "Add plugin" import — those get a blocking consent modal instead)
-    /// declares permissions the user hasn't granted yet, so it stays inert.
-    PluginNeedsPermission {
-        plugin: String,
-    },
     /// A plugin's on-disk content hash differs from the installed package
     /// revision, for example after a manual edit. This is dirty-update
     /// metadata, not a consent decision.
@@ -557,7 +551,6 @@ impl NotificationCode {
             KeyRemapUnavailable { .. }
             | DeviceReconnectFailed { .. }
             | FanStalled { .. }
-            | PluginNeedsPermission { .. }
             | PluginContentChanged { .. }
             | PluginRuntimeError { .. }
             | PluginConnectFailed { .. } => NotificationSeverity::Warning,

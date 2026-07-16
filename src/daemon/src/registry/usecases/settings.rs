@@ -151,7 +151,6 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
         }
         crate::registry::ensure_official_repo(&app).await;
         super::plugins::reload_registry(&app).await;
-        crate::registry::notify_ungranted_plugins(&app).await;
         let official_plugins = app
             .registry
             .list(&*app.secret_store)
@@ -195,7 +194,6 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     // "Scan now" without restarting the daemon. This must use the shared
     // reload path to retain a process-local development repository.
     super::plugins::reload_registry(&app).await;
-    crate::registry::notify_ungranted_plugins(&app).await;
     crate::registry::usecases::plugins::reconcile_full(&app).await;
 
     let controllers: Vec<std::sync::Arc<dyn crate::drivers::Device>> =
