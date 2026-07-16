@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Modal dialogs and the shared delete-confirmation reducer.
 
-use egui::Stroke;
+use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::ui::theme;
+
+/// Inner margin of every modal frame; the close × is inset from the frame edge.
+const MODAL_MARGIN: f32 = 18.0;
+/// Inset of the close × from the modal's top and right edges.
+const CLOSE_INSET: f32 = 16.0;
 
 /// A centered modal dialog over a dimmed backdrop, with a title bar, close ×
 /// button, and a scrollable body. Returns `true` when the user closed it
@@ -41,39 +46,64 @@ fn modal_shell(
                 .fill(theme::MODAL_BG)
                 .stroke(Stroke::new(1.0, theme::BORDER))
                 .corner_radius(12.0)
-                .inner_margin(egui::Margin::same(18)),
+                .inner_margin(egui::Margin::same(MODAL_MARGIN as i8)),
         )
         .show(ctx, |ui| {
             ui.set_width(w);
-            egui::Sides::new().show(
-                ui,
-                |ui| {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
+            let title_center_y = ui
+                .vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    let title_resp = ui.label(
+                        egui::RichText::new(title)
+                            .font(theme::semibold(15.0))
+                            .color(theme::TEXT),
+                    );
+                    if let Some(subtitle) = subtitle {
                         ui.label(
-                            egui::RichText::new(title)
-                                .font(theme::semibold(15.0))
-                                .color(theme::TEXT),
+                            egui::RichText::new(subtitle)
+                                .font(theme::body(11.0))
+                                .color(theme::TEXT_MUT),
                         );
-                        if let Some(subtitle) = subtitle {
-                            ui.label(
-                                egui::RichText::new(subtitle)
-                                    .font(theme::body(11.0))
-                                    .color(theme::TEXT_MUT),
-                            );
-                        }
-                    });
-                },
-                |ui| {
-                    if ui.button("×").clicked() {
-                        x_clicked = true;
                     }
-                },
-            );
+                    title_resp.rect.center().y
+                })
+                .inner;
             ui.add_space(8.0);
             contents(ui);
+            if close_button(ui, id, title_center_y) {
+                x_clicked = true;
+            }
         });
     x_clicked || resp.should_close()
+}
+
+fn close_button_rect(content: Rect, size: f32, center_y: f32) -> Rect {
+    let frame_right = content.right() + MODAL_MARGIN;
+    Rect::from_min_size(
+        Pos2::new(frame_right - CLOSE_INSET - size, center_y - size / 2.0),
+        Vec2::splat(size),
+    )
+}
+
+fn close_button(ui: &mut egui::Ui, id: &str, center_y: f32) -> bool {
+    let rect = close_button_rect(ui.min_rect(), 24.0, center_y);
+    let resp = ui.interact(rect, ui.id().with((id, "close")), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let col = if resp.hovered() {
+        theme::TEXT
+    } else {
+        theme::TEXT_FAINT
+    };
+    ui.ctx().layer_painter(ui.layer_id()).text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        "×",
+        theme::semibold(15.0),
+        col,
+    );
+    resp.clicked()
 }
 
 /// Like [`modal_frame`] but without the outer vertical scroll area, so the
@@ -240,6 +270,19 @@ mod tests {
     use super::super::button::{button, ButtonKind};
     use super::*;
     use egui::{Pos2, Rect, Sense, Vec2};
+
+    #[test]
+    fn close_button_is_16px_from_right_and_centered_on_the_title() {
+        // Right edge inset 16px from the frame edge (18px beyond content);
+        // vertically centered on the title's line, wherever that sits.
+        let content = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(300.0, 200.0));
+        let size = 24.0;
+        let title_center_y = 118.0;
+        let r = close_button_rect(content, size, title_center_y);
+        assert_eq!(r.right(), content.right() + MODAL_MARGIN - CLOSE_INSET);
+        assert_eq!(r.center().y, title_center_y);
+        assert_eq!(r.size(), Vec2::splat(size));
+    }
 
     #[test]
     fn modal_frame_raw_height_stays_bounded_across_frames() {
