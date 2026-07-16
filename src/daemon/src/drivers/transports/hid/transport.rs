@@ -381,10 +381,16 @@ impl HidTransport {
     fn start_event_listener(&self) -> Result<()> {
         let mut started = self.event_listener_started.lock().unwrap();
         if *started {
-            log::trace!("[HidTransport] event listener already started for {}", self.primary_path);
+            log::trace!(
+                "[HidTransport] event listener already started for {}",
+                self.primary_path
+            );
             return Ok(());
         }
-        log::debug!("[HidTransport] starting event listener for {}", self.primary_path);
+        log::debug!(
+            "[HidTransport] starting event listener for {}",
+            self.primary_path
+        );
         let api = hidapi::HidApi::new().context("failed to create HidApi for event listener")?;
         let primary = HidIo::open_input(&api, &self.primary_path, "event")?;
         spawn_event_reader(

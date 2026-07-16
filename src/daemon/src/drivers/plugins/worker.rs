@@ -961,7 +961,10 @@ impl PluginHandle {
                 .block_on(transport.drain_events(EVENT_DISPATCH_BATCH))
                 .map_err(|e| anyhow!("draining transport events: {e:#}"))?;
             if !events.is_empty() {
-                log::trace!("[plugin worker] drained {} transport event(s)", events.len());
+                log::trace!(
+                    "[plugin worker] drained {} transport event(s)",
+                    events.len()
+                );
             }
             let Some(callback) = func(&ctx.manifest, "event") else {
                 return Ok(Vec::new());

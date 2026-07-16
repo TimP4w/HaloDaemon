@@ -1641,9 +1641,7 @@ impl Device for LuaDevice {
                 }
                 mappings
                     .values()
-                    .filter(|m| {
-                        m.base != ButtonAction::Native || m.shifted != ButtonAction::Native
-                    })
+                    .filter(|m| m.base != ButtonAction::Native || m.shifted != ButtonAction::Native)
                     .cloned()
                     .collect()
             };
