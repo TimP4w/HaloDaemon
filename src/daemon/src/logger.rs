@@ -5,9 +5,14 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use log::{Level, LevelFilter, Metadata, Record};
+
+/// Diagnostic escape hatch: `HALOD_TRACE=1` lifts the Debug clamp for one run so
+/// `trace!` records reach the file/stderr. Off by default; never set in normal use.
+static TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_ROTATED: u32 = 3;
@@ -55,7 +60,12 @@ fn open_log(path: &Path) -> Option<LogState> {
 }
 
 fn allowed(metadata: &Metadata<'_>) -> bool {
-    metadata.level() <= Level::Debug
+    let ceiling = if TRACE_ENABLED.load(Ordering::Relaxed) {
+        Level::Trace
+    } else {
+        Level::Debug
+    };
+    metadata.level() <= ceiling
         && !NOISY_TARGETS
             .iter()
             .any(|target| metadata.target().starts_with(target))
@@ -116,7 +126,12 @@ pub fn init(path: PathBuf, level: LevelFilter) {
         state: Mutex::new(state),
     });
     let _ = log::set_boxed_logger(logger);
-    log::set_max_level(without_trace(level));
+    if std::env::var_os("HALOD_TRACE").is_some() {
+        TRACE_ENABLED.store(true, Ordering::Relaxed);
+        log::set_max_level(LevelFilter::Trace);
+    } else {
+        log::set_max_level(without_trace(level));
+    }
 }
 
 pub fn without_trace(level: LevelFilter) -> LevelFilter {

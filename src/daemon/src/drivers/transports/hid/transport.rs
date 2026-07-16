@@ -172,6 +172,11 @@ impl HidEvents {
             reports.pop_front();
             log::debug!("[HidTransport] event queue full; dropping oldest event");
         }
+        log::trace!(
+            "[HidTransport] event push endpoint={endpoint} depth={} bytes={:02x?}",
+            reports.len() + 1,
+            data
+        );
         reports.push_back(TransportEvent { endpoint, data });
         drop(reports);
         self.bump_wake();
@@ -207,6 +212,10 @@ fn spawn_event_reader(dev: hidapi::HidDevice, endpoint: InputEndpoint, events: W
                 Ok(0) => {}
                 Ok(n) => {
                     buf.truncate(n);
+                    log::trace!(
+                        "[HidTransport] {} event reader read {n} bytes",
+                        endpoint.name()
+                    );
                     events.push(endpoint.name(), buf);
                 }
                 Err(error) => {
@@ -372,8 +381,10 @@ impl HidTransport {
     fn start_event_listener(&self) -> Result<()> {
         let mut started = self.event_listener_started.lock().unwrap();
         if *started {
+            log::trace!("[HidTransport] event listener already started for {}", self.primary_path);
             return Ok(());
         }
+        log::debug!("[HidTransport] starting event listener for {}", self.primary_path);
         let api = hidapi::HidApi::new().context("failed to create HidApi for event listener")?;
         let primary = HidIo::open_input(&api, &self.primary_path, "event")?;
         spawn_event_reader(
