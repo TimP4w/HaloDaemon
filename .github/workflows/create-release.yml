@@ -18,6 +18,7 @@ on:
           - patch
           - minor
           - major
+          - keep
       plugin_branch:
         description: "Official plugin branch containing the release commit"
         required: true
@@ -58,6 +59,8 @@ jobs:
               MINOR=$((MINOR + 1)); PATCH=0 ;;
             patch)
               PATCH=$((PATCH + 1)) ;;
+            keep)
+              ;;
           esac
           NEW="${MAJOR}.${MINOR}.${PATCH}"
           echo "new=$NEW" >> "$GITHUB_OUTPUT"
@@ -317,7 +320,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/Cargo.toml src/Cargo.lock packaging/arch/PKGBUILD packaging/nix/package.nix
-          git commit -m "chore: bump version to v${v}"
+          # A `keep` re-release stages nothing when the version and plugin pin
+          # already match; the commit must still exist to be the release SHA.
+          git commit --allow-empty -m "chore: bump version to v${v}"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Pin PKGBUILD to release commit
@@ -629,7 +634,15 @@ jobs:
   # ── Publish ──────────────────────────────────────────────────────
   # Creates the GitHub release with all platform artifacts attached.
   publish:
-    needs: [prepare, prepare-plugins, windows-installer, linux-tarball, linux-deb, linux-rpm]
+    needs:
+      [
+        prepare,
+        prepare-plugins,
+        windows-installer,
+        linux-tarball,
+        linux-deb,
+        linux-rpm,
+      ]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
