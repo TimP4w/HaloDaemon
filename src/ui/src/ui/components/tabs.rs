@@ -20,9 +20,9 @@ pub fn tab_bar(ui: &mut egui::Ui, sel: &mut usize, tabs: &[&str]) -> Rect {
         let galley = ui.painter().layout_no_wrap(
             label.to_string(),
             if active {
-                theme::semibold(13.0)
+                theme::heading()
             } else {
-                theme::body(13.0)
+                theme::body_lg()
             },
             text_color,
         );

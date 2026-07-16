@@ -25,7 +25,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, page: &mut Page) {
         egui::Frame::NONE
             .fill(theme::CARD_BG)
             .stroke(Stroke::new(1.0, theme::BORDER))
-            .corner_radius(14.0)
+            .corner_radius(theme::RADIUS_XL)
             .show(ui, |ui| {
                 let (title_rect, _) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), Sense::hover());
@@ -33,7 +33,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, page: &mut Page) {
                     Pos2::new(title_rect.left() + 18.0, title_rect.center().y),
                     Align2::LEFT_CENTER,
                     t!("device.children_connected_devices"),
-                    theme::semibold(13.0),
+                    theme::heading(),
                     theme::TEXT,
                 );
                 ui.painter().line_segment(
@@ -50,7 +50,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, page: &mut Page) {
                         Pos2::new(row.left() + 18.0, row.center().y),
                         Align2::LEFT_CENTER,
                         t!("device.children_no_child_devices"),
-                        theme::body(12.5),
+                        theme::body_md(),
                         theme::TEXT_FAINT,
                     );
                     return;
@@ -74,7 +74,11 @@ fn child_row(ui: &mut egui::Ui, d: &WireDevice) -> bool {
     let hovered = resp.hovered();
     let p = ui.painter();
     if hovered {
-        p.rect_filled(row.shrink2(Vec2::new(6.0, 5.0)), 10.0, theme::ROW_ACTIVE);
+        p.rect_filled(
+            row.shrink2(Vec2::new(6.0, 5.0)),
+            theme::RADIUS_MD,
+            theme::ROW_ACTIVE,
+        );
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     p.line_segment(
@@ -85,7 +89,7 @@ fn child_row(ui: &mut egui::Ui, d: &WireDevice) -> bool {
     let cy = row.center().y;
     let badge_rect =
         Rect::from_center_size(Pos2::new(row.left() + 37.0, cy), Vec2::new(38.0, 28.0));
-    p.rect_filled(badge_rect, 7.0, theme::device_color(d));
+    p.rect_filled(badge_rect, theme::RADIUS_SM, theme::device_color(d));
     let glyph = Rect::from_center_size(badge_rect.center(), Vec2::splat(badge_rect.height() * 0.8));
     crate::ui::icons::draw_device(p, glyph, d.device_type, theme::hex(0x0a0d13));
     p.text(
@@ -99,7 +103,7 @@ fn child_row(ui: &mut egui::Ui, d: &WireDevice) -> bool {
         Pos2::new(row.right() - 18.0, cy),
         Align2::RIGHT_CENTER,
         model::type_label(d),
-        theme::body(11.0),
+        theme::body_sm(),
         theme::TEXT_MUT,
     );
     resp.clicked()
@@ -163,10 +167,10 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
     widgets::card(ui, |ui| {
         ui.vertical_centered(|ui| {
             widgets::caps_label(ui, &t!("device.children_receiver"));
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 egui::RichText::new(&ctx.dev.name)
-                    .font(theme::semibold(14.0))
+                    .font(theme::title())
                     .color(theme::TEXT),
             );
             ui.add_space(20.0);
@@ -201,7 +205,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                 );
             }
 
-            ui.add_space(18.0);
+            ui.add_space(theme::SPACE_9);
 
             let used = ps.slots.len();
             let max = ps.max_slots as usize;
@@ -209,10 +213,10 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
             if listening {
                 ui.label(
                     egui::RichText::new(t!("device.children_hold_pair_button"))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
-                ui.add_space(16.0);
+                ui.add_space(theme::SPACE_8);
                 if widgets::button(
                     ui,
                     &t!("device.children_cancel"),
@@ -232,10 +236,10 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
             } else {
                 ui.label(
                     egui::RichText::new(t!("device.children_slots_in_use", used = used, max = max))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_MUT),
                 );
-                ui.add_space(16.0);
+                ui.add_space(theme::SPACE_8);
                 if widgets::button(
                     ui,
                     &t!("device.children_pair_new_device"),
@@ -278,7 +282,7 @@ fn slots_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus) {
     egui::Frame::NONE
         .fill(theme::CARD_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(14.0)
+        .corner_radius(theme::RADIUS_XL)
         .show(ui, |ui| {
             // Title row
             let (title_rect, _) =
@@ -287,7 +291,7 @@ fn slots_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus) {
                 Pos2::new(title_rect.left() + 18.0, title_rect.center().y),
                 Align2::LEFT_CENTER,
                 t!("device.children_paired_slots"),
-                theme::semibold(13.0),
+                theme::heading(),
                 theme::TEXT,
             );
             ui.painter().line_segment(
@@ -330,7 +334,7 @@ fn pair_slot_row(
 
     if let Some(slot) = slot {
         let badge_color = theme::DEVICE_HUES[slot_idx as usize % theme::DEVICE_HUES.len()];
-        p.rect_filled(badge_rect, 7.0, badge_color);
+        p.rect_filled(badge_rect, theme::RADIUS_SM, badge_color);
         let code = slot_code(&slot.name);
         p.text(
             badge_rect.center(),
@@ -343,7 +347,7 @@ fn pair_slot_row(
             Pos2::new(name_x, cy),
             Align2::LEFT_CENTER,
             &slot.name,
-            theme::body(12.5),
+            theme::body_md(),
             theme::TEXT,
         );
 
@@ -353,7 +357,7 @@ fn pair_slot_row(
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(btn_area), |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(18.0);
+                ui.add_space(theme::SPACE_9);
                 if widgets::button(
                     ui,
                     &t!("device.children_unpair"),
@@ -373,19 +377,19 @@ fn pair_slot_row(
             });
         });
     } else {
-        p.rect_filled(badge_rect, 7.0, theme::BORDER);
+        p.rect_filled(badge_rect, theme::RADIUS_SM, theme::BORDER);
         p.text(
             Pos2::new(name_x, cy),
             Align2::LEFT_CENTER,
             t!("device.children_empty_slot"),
-            theme::body(12.5),
+            theme::body_md(),
             theme::TEXT_FAINT,
         );
         p.text(
             Pos2::new(row.right() - 18.0, cy),
             Align2::RIGHT_CENTER,
             t!("device.children_available"),
-            theme::body(11.0),
+            theme::body_sm(),
             theme::TEXT_FAINT,
         );
     }

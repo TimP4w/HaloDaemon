@@ -1,76 +1,52 @@
-# hwmon Plugin Transport
+# hwmon Transport
 
-Scoped Linux hardware-monitoring transport for integration plugins.
+Scoped access to Linux hardware-monitoring sensors and fan controls for
+integration plugins.
 
 **Platform:** Linux only
 
----
-
 ## Overview
 
-The Linux `hwmon` subsystem exposes sensor data from CPUs, GPUs, NVMe drives,
-and embedded controllers at `/sys/class/hwmon/hwmon*/`. The official
-[`hwmon`](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/hwmon)
-integration uses this host transport to surface temperatures and motherboard
-fan headers. The udev rules in `udev/60-halod.rules` grant write permission to
-approved PWM attributes on device add.
+Linux hwmon provides temperatures, fan speeds, and PWM controls for hardware
+supported by kernel drivers. HaloDaemon discovers the available hwmon devices
+and presents them to an integration plugin as an allowlisted collection.
 
----
+Plugins receive opaque device keys and attribute names, never filesystem paths.
+Reads are limited to supported sensor and fan attributes, while writes are
+limited to PWM control. HaloDaemon restores fan-control modes when the transport
+is closed, including after plugin failure.
 
-## Discovery
+## Operations for plugins
 
-The host enumerates every `hwmon*` directory and gives the integration an
-opaque key, stable identifier, display name, and allowlisted attribute names.
-Filesystem paths are never exposed to Lua. Reads are limited to `name`,
-`tempN_input`/`label`, `fanN_input`/`label`, and `pwmN`/`pwmN_enable`; only PWM
-and PWM-enable attributes are writable.
+| Operation | Purpose |
+|---|---|
+| `hwmon_list()` | List the scoped hwmon devices and their available attributes. |
+| `hwmon_read(key, attribute)` | Read an allowed sensor, fan, or PWM attribute. |
+| `hwmon_write(key, attribute, data)` | Write an allowed PWM or PWM-mode attribute. |
 
----
+Each listed device includes an opaque key, a stable identifier, a display name,
+and the attributes available to the plugin. Unsupported attributes and devices
+outside the supplied collection cannot be accessed.
 
-## Polling
+## Discovery and scope
 
-The generic plugin worker samples sensor and fan callbacks every second. The
-integration also caches each result for one second so multiple consumers share
-the same sysfs snapshot.
+Available devices depend on the Linux kernel modules loaded for the host's CPU,
+GPU, storage, and motherboard monitoring chips. Missing drivers produce missing
+devices rather than granting broader filesystem access.
 
-Before the first `pwmN_enable` mutation, the host records its original value.
-Transport teardown restores every recorded value independently of Lua cleanup,
-including after a callback timeout or error.
+The official hwmon integration turns the scoped collection into HaloDaemon
+sensor and fan devices.
 
----
+## Access requirements
 
-## Stable IDs
-
-The `hwmonN` index suffix is dynamic and changes across reboots. HaloDaemon derives a stable ID by resolving the sysfs symlink to its canonical `/sys/devices/...` path, stripping the leading prefix and trailing `hwmonN` component, and replacing non-alphanumeric characters with underscores.
-
-Example: `/sys/devices/pci0000:00/0000:00:18.3/hwmon/hwmon6` → `pci0000_00_0000_00_18_3`
-
-The integration retains the former built-in device and sensor ID formats, so
-fan curve assignments and visibility settings survive the port.
-
----
-
-## Kernel module dependency
-
-Sensors only appear if the corresponding kernel module is loaded:
-
-| Sensor | Module |
-|--------|--------|
-| AMD CPU | `k10temp` |
-| Intel CPU | `coretemp` |
-| Nuvoton NCT677x SuperIO (motherboard) | `nct6775` |
-| ITE SuperIO | `it87` |
-
-Missing modules produce missing sensors, not errors. NixOS users: the NixOS module loads `nct6775` at boot automatically.
-
----
+Sensor reads normally work for regular users. Fan control requires write
+permission supplied by the HaloDaemon installation rules and may require the
+user to belong to the configured hardware-control group.
 
 ## Limitations
 
-- Linux only — excluded from Windows builds at the compiler level.
-- Opt-in plugin — install and approve the official hwmon integration before
-  sensors and fan headers appear.
-- Module dependency — sensors and fan headers only appear if the corresponding kernel module is loaded. Missing modules produce missing devices, not errors.
-- Permission and contract failures are unrecoverable for the current plugin
-  runtime. HaloDaemon reports them once and stops automatic calls/reconnects;
-  fix the permissions, then re-enable or rediscover the integration.
+- Linux only.
+- Requires an enabled hwmon integration plugin.
+- Only attributes selected by the host are exposed.
+- Only PWM and PWM-mode attributes are writable.
+- Hardware not supported by a loaded kernel driver does not appear.

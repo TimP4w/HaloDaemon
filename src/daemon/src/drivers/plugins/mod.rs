@@ -35,12 +35,17 @@ pub(crate) mod requirements;
 mod sandbox;
 mod transport;
 mod transport_api;
+mod udev;
+mod widget_worker;
 mod worker;
 
 pub use device::LuaDevice;
 use device::{LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
 pub use effect_worker::{LedCoord, PluginEffectHandle};
 pub use manifest::{parse_manifest_from_dir, DeviceSpec, EffectKind, PluginManifest, ProbeMode};
+pub use widget_worker::{
+    PluginWidgetHandle, WidgetImageInput, WidgetMediaInput, WidgetRenderInput, WidgetSensorInput,
+};
 pub use worker::run_pre_scan;
 
 /// Lua host/plugin ABI implemented by this daemon. Repository compatibility
@@ -104,6 +109,24 @@ pub struct PluginEffectEntry {
     pub descriptor: Animation,
 }
 
+#[derive(Clone)]
+pub struct PluginWidgetEntry {
+    pub plugin_id: String,
+    pub script_source: String,
+    pub module_sources: std::collections::BTreeMap<String, String>,
+    pub catalog_id: String,
+    pub descriptor: halod_shared::types::LcdWidgetDescriptor,
+    pub plugin_dir: std::path::PathBuf,
+}
+
+#[derive(Clone)]
+pub struct PluginPresetEntry {
+    pub plugin_id: String,
+    pub catalog_id: String,
+    pub descriptor: halod_shared::types::LcdPresetDescriptor,
+    pub plugin_dir: std::path::PathBuf,
+}
+
 /// The validated inputs a device spawn needs, produced by
 /// [`Registry::activation_status`] only after the consent gate passes.
 /// [`Registry::build_device`] accepts one of these, so it is unreachable without
@@ -136,6 +159,8 @@ enum ActivationState {
 struct PluginState {
     manifests: Vec<PluginManifest>,
     effects: Vec<PluginEffectEntry>,
+    widgets: Vec<PluginWidgetEntry>,
+    presets: Vec<PluginPresetEntry>,
     /// Plugin ids the user disabled. `match_handle` skips these, so a disabled
     /// plugin no longer shadows its built-in host device.
     disabled: HashSet<String>,
@@ -181,6 +206,7 @@ pub struct Registry {
     /// at event points (startup, reconcile) so probes — some of which spawn
     /// processes or open device nodes — never run on every state poll.
     requirement_cache: RwLock<HashMap<String, Vec<halod_shared::types::PluginRequirementStatus>>>,
+    content_revision: std::sync::atomic::AtomicU64,
 }
 
 /// Recover the guard if a panicked plugin poisoned the lock, so one bad plugin
@@ -201,6 +227,24 @@ fn write_recover<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 }
 
 impl Registry {
+    pub fn content_revision(&self) -> u64 {
+        self.content_revision
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Render the daemon baseline plus every loaded Linux plugin's declarative
+    /// HID/USB/SMBus access rules. Disabled plugins remain included so permissions
+    /// are already available when the user enables one.
+    pub fn udev_rules(&self) -> String {
+        udev::assemble(&self.snapshot().manifests)
+    }
+
+    pub fn udev_rules_status(&self) -> halod_shared::types::UdevRulesStatus {
+        let snapshot = self.snapshot();
+        let manifests = &snapshot.manifests;
+        udev::status(&udev::assemble(manifests), manifests)
+    }
+
     /// The current registry snapshot. The lock is held only for the `Arc` clone,
     /// never across the caller's use of the data — so re-entrant reads can't deadlock.
     fn snapshot(&self) -> Arc<PluginState> {
@@ -216,6 +260,26 @@ impl Registry {
         f(&mut next);
         *guard = Arc::new(next);
     }
+}
+
+/// Assemble release rules from the exact signed repository bundle embedded in
+/// the daemon binary, without reading or modifying the user's plugin config.
+pub fn udev_rules_from_bundle(bytes: &[u8]) -> anyhow::Result<String> {
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("halod-udev-{}", uuid::Uuid::new_v4()));
+    let cleanup = Cleanup(root.clone());
+    halod_plugin_signing::extract_bundle(bytes, &root)?;
+    let registry = Registry::default();
+    registry.load_all_with_priority_repo(&root.join("__local__"), Some(&root), &[]);
+    let rules = registry.udev_rules();
+    drop(cleanup);
+    Ok(rules)
 }
 
 fn consent_satisfied_in(state: &PluginState, manifest: &PluginManifest) -> bool {
@@ -279,6 +343,37 @@ fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
         .collect()
 }
 
+fn widget_entries_for(manifest: &PluginManifest) -> Vec<PluginWidgetEntry> {
+    manifest
+        .widgets
+        .iter()
+        .map(|widget| PluginWidgetEntry {
+            plugin_id: manifest.plugin_id.clone(),
+            script_source: manifest.script_source.clone(),
+            module_sources: manifest.module_sources.clone(),
+            catalog_id: widget.catalog_id(&manifest.plugin_id),
+            descriptor: widget.descriptor(&manifest.plugin_id),
+            plugin_dir: manifest.plugin_dir.clone(),
+        })
+        .collect()
+}
+
+fn preset_entries_for(manifest: &PluginManifest) -> Vec<PluginPresetEntry> {
+    manifest
+        .presets
+        .iter()
+        .map(|preset| {
+            let descriptor = preset.descriptor(&manifest.plugin_id);
+            PluginPresetEntry {
+                plugin_id: manifest.plugin_id.clone(),
+                catalog_id: descriptor.id.clone(),
+                descriptor,
+                plugin_dir: manifest.plugin_dir.clone(),
+            }
+        })
+        .collect()
+}
+
 impl Registry {
     /// Whether the plugin owning an effect remains within its accepted authority.
     /// Installed content hashes intentionally do not gate code.
@@ -311,6 +406,96 @@ impl Registry {
     /// Descriptors for every enabled plugin-declared direct effect.
     pub fn direct_effect_descriptors(&self) -> Vec<Animation> {
         self.effect_descriptors(EffectKind::Direct)
+    }
+
+    fn lcd_entry_active(state: &PluginState, plugin_id: &str) -> bool {
+        state
+            .manifests
+            .iter()
+            .find(|manifest| manifest.plugin_id == plugin_id)
+            .is_some_and(|manifest| {
+                !state.disabled.contains(plugin_id) && consent_satisfied_in(state, manifest)
+            })
+    }
+
+    pub fn widget_descriptors(&self) -> Vec<halod_shared::types::LcdWidgetDescriptor> {
+        let state = self.snapshot();
+        state
+            .widgets
+            .iter()
+            .filter(|entry| Self::lcd_entry_active(&state, &entry.plugin_id))
+            .map(|entry| entry.descriptor.clone())
+            .collect()
+    }
+
+    pub fn widget_descriptor(
+        &self,
+        catalog_id: &str,
+    ) -> Option<halod_shared::types::LcdWidgetDescriptor> {
+        self.widget_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == catalog_id)
+    }
+
+    pub fn preset_descriptors(&self) -> Vec<halod_shared::types::LcdPresetDescriptor> {
+        let state = self.snapshot();
+        state
+            .presets
+            .iter()
+            .filter(|entry| Self::lcd_entry_active(&state, &entry.plugin_id))
+            .map(|entry| entry.descriptor.clone())
+            .collect()
+    }
+
+    pub fn widget_entry(&self, catalog_id: &str) -> Option<PluginWidgetEntry> {
+        let state = self.snapshot();
+        state
+            .widgets
+            .iter()
+            .find(|entry| {
+                entry.catalog_id == catalog_id && Self::lcd_entry_active(&state, &entry.plugin_id)
+            })
+            .cloned()
+    }
+
+    pub fn build_widget_handle(
+        &self,
+        secrets: &dyn crate::secrets::SecretStore,
+        catalog_id: &str,
+    ) -> Option<PluginWidgetHandle> {
+        let entry = self.widget_entry(catalog_id)?;
+        let state = self.snapshot();
+        let widget_ids = state
+            .widgets
+            .iter()
+            .filter(|candidate| candidate.plugin_id == entry.plugin_id)
+            .filter_map(|candidate| {
+                candidate
+                    .catalog_id
+                    .strip_prefix(&format!("{}:", entry.plugin_id))
+                    .map(str::to_owned)
+            })
+            .collect();
+        let granted = self.granted_for(&entry.plugin_id);
+        let config = self.resolved_config_for(secrets, &entry.plugin_id, &granted);
+        Some(PluginWidgetHandle::spawn(
+            entry.script_source,
+            entry.module_sources,
+            widget_ids,
+            granted,
+            config,
+        ))
+    }
+
+    pub fn preset_entry(&self, catalog_id: &str) -> Option<PluginPresetEntry> {
+        let state = self.snapshot();
+        state
+            .presets
+            .iter()
+            .find(|entry| {
+                entry.catalog_id == catalog_id && Self::lcd_entry_active(&state, &entry.plugin_id)
+            })
+            .cloned()
     }
 
     /// Look up a registered effect entry by its namespaced catalog id. `None` if
@@ -403,6 +588,8 @@ impl Registry {
             s.installed_hashes = policy.installed_hashes.clone();
             s.config_values = policy.config.clone();
         });
+        self.content_revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     fn is_disabled(&self, plugin_id: &str) -> bool {
@@ -1166,6 +1353,97 @@ impl Registry {
             .map_err(|e| anyhow::anyhow!("asset '{name}' is not a decodable image: {e}"))?;
         Ok(data)
     }
+
+    fn read_declared_file(
+        plugin_dir: &std::path::Path,
+        name: &str,
+        max_bytes: u64,
+    ) -> anyhow::Result<Vec<u8>> {
+        manifest::validate_asset_filename(name)?;
+        let path = plugin_dir.join("assets").join(name);
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|error| anyhow::anyhow!("reading {}: {error}", path.display()))?;
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            anyhow::bail!("asset '{name}' must be a regular file");
+        }
+        if meta.len() > max_bytes {
+            anyhow::bail!("asset '{name}' exceeds the plugin asset size limit");
+        }
+        std::fs::read(&path).map_err(Into::into)
+    }
+
+    /// Validate and rasterize a widget's mandatory SVG before it reaches the GUI.
+    pub fn read_widget_icon(&self, catalog_id: &str) -> anyhow::Result<Vec<u8>> {
+        use image::ImageEncoder as _;
+        let image = self.read_widget_icon_rgba_at(catalog_id, 64)?;
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png).write_image(
+            &image.rgba,
+            image.width,
+            image.height,
+            image::ExtendedColorType::Rgba8,
+        )?;
+        Ok(png)
+    }
+
+    /// Rasterize a widget SVG at the resolution needed by the LCD renderer.
+    /// The GUI thumbnail intentionally remains 64 px, but render assets must
+    /// never be enlarged from that thumbnail.
+    pub fn read_widget_icon_rgba_at(
+        &self,
+        catalog_id: &str,
+        target_edge: u32,
+    ) -> anyhow::Result<WidgetImageInput> {
+        use resvg::{tiny_skia, usvg};
+
+        let entry = self
+            .widget_entry(catalog_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown LCD widget '{catalog_id}'"))?;
+        let data = Self::read_declared_file(
+            &entry.plugin_dir,
+            &entry.descriptor.icon,
+            halod_shared::types::MAX_PLUGIN_ASSET_BYTES,
+        )?;
+        let tree = usvg::Tree::from_data(&data, &usvg::Options::default())
+            .map_err(|error| anyhow::anyhow!("invalid widget SVG: {error}"))?;
+        let size = tree.size().to_int_size();
+        let source_edge = size.width().max(size.height()) as f32;
+        anyhow::ensure!(source_edge > 0.0, "widget SVG has no drawable size");
+        let target_edge = target_edge.clamp(1, 1024);
+        let mut pixmap = tiny_skia::Pixmap::new(target_edge, target_edge)
+            .ok_or_else(|| anyhow::anyhow!("allocating widget SVG raster"))?;
+        let scale = target_edge as f32 / source_edge;
+        let tx = (target_edge as f32 - size.width() as f32 * scale) / 2.0;
+        let ty = (target_edge as f32 - size.height() as f32 * scale) / 2.0;
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, tx, ty),
+            &mut pixmap.as_mut(),
+        );
+        let mut rgba = Vec::with_capacity(target_edge as usize * target_edge as usize * 4);
+        for pixel in pixmap.pixels() {
+            let pixel = pixel.demultiply();
+            rgba.extend_from_slice(&[pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()]);
+        }
+        Ok(WidgetImageInput {
+            width: target_edge,
+            height: target_edge,
+            rgba,
+        })
+    }
+
+    pub fn read_lcd_preset(
+        &self,
+        catalog_id: &str,
+    ) -> anyhow::Result<halod_shared::lcd_custom::CustomTemplateDef> {
+        let entry = self
+            .preset_entry(catalog_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown LCD preset '{catalog_id}'"))?;
+        let data = Self::read_declared_file(&entry.plugin_dir, &entry.descriptor.file, 512 * 1024)?;
+        let def = serde_json::from_slice(&data)?;
+        halod_shared::lcd_custom::validate_widgets(&def).map_err(anyhow::Error::msg)?;
+        Ok(def)
+    }
 }
 
 /// A rejected plugin load: an id collision (with an earlier source) or a bad manifest.
@@ -1319,6 +1597,8 @@ fn record_invalid_plugin_dir(
                 plugin_type: PluginKind::Device,
                 dynamic_children: false,
                 effects: vec![],
+                widgets: vec![],
+                presets: vec![],
                 transports: Default::default(),
                 requirements: vec![],
                 permissions: vec![],
@@ -1466,6 +1746,10 @@ impl Registry {
         }
         let effects: Vec<PluginEffectEntry> =
             scan.manifests.iter().flat_map(effect_entries_for).collect();
+        let widgets: Vec<PluginWidgetEntry> =
+            scan.manifests.iter().flat_map(widget_entries_for).collect();
+        let presets: Vec<PluginPresetEntry> =
+            scan.manifests.iter().flat_map(preset_entries_for).collect();
         let provenance = scan
             .manifests
             .iter()
@@ -1532,8 +1816,12 @@ impl Registry {
         self.update(|s| {
             s.manifests = scan.manifests;
             s.effects = effects;
+            s.widgets = widgets;
+            s.presets = presets;
             s.provenance = provenance;
         });
+        self.content_revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     pub fn skipped(&self) -> Vec<SkippedPlugin> {

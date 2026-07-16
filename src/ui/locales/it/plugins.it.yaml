@@ -21,6 +21,7 @@ plugins:
   repos_add_sub: Collega HaloDaemon a un repository Git remoto per esplorare, installare e aggiornare i plugin disponibili.
   repos_empty: Nessun repository di plugin registrato.
   repos_update: Aggiorna
+  repos_update_repo: Aggiorna il repository
   repos_repair: Pull forzato
   repos_repair_title: Riparare il repository?
   repos_repair_body: Questa operazione ripristina la revisione attiva del repository dalla sua sorgente verificata. Tutte le modifiche locali nel repository andranno perse.
@@ -49,8 +50,34 @@ plugins:
   update_all: Aggiorna tutto
   updating: Aggiornamento…
   update_available: Aggiornamento disponibile
+  update_via_repo: Aggiorna dal repository di questo plugin.
   modified_on_disk: Disabilitato perché modificato su disco
   modified_on_disk_sub: I file di questo plugin sono cambiati dall'installazione, quindi è stato disabilitato per sicurezza. Riabilitalo per accettare la modifica.
+  udev_installed: L'accesso ai dispositivi Linux è installato
+  udev_installed_sub: "%{count} regole dispositivo generate sono aggiornate in %{path}."
+  udev_missing: L'accesso ai dispositivi Linux non è installato
+  udev_missing_sub: "Nessun file udev di HaloDaemon trovato. Genera e installa le %{count} regole dispositivo per abilitare l'accesso."
+  udev_outdated: L'accesso ai dispositivi Linux deve essere aggiornato
+  udev_outdated_sub: "%{count} regole dispositivo generate differiscono dal file installato in %{path}. Copia il comando di installazione, eseguilo in un terminale e ricarica udev."
+  udev_generate: Genera regole udev
+  udev_copied: Comando di installazione copiato
+  udev_info: Come funziona
+  udev_info_title: Regole di accesso ai dispositivi Linux
+  udev_info_intro: Le regole udev consentono a HaloDaemon di accedere all'hardware supportato come utente normale. HaloDaemon non installa mai queste regole autonomamente e la GUI non richiede privilegi di amministratore.
+  udev_info_scope_title: Le regole seguono i plugin installati
+  udev_info_scope: HaloDaemon deriva l'accesso dal manifest di ogni plugin. Le regole HID e USB corrispondono agli ID vendor e prodotto dichiarati. Le regole SMBus sono limitate ai driver chipset o ai vendor PCI delle GPU dichiarati. I plugin senza hardware Linux corrispondente non aggiungono regole.
+  udev_info_install_title: Installazione manuale
+  udev_info_install: Genera il file deterministico, controllalo, poi installalo a livello di sistema e ricarica udev. Ripeti l'operazione dopo aver aggiunto, rimosso o aggiornato un plugin quando lo stato richiede un intervento.
+  udev_modal_current: "%{count} regole generate corrispondono a %{path}. Accesso aggiornato."
+  udev_modal_outdated: "%{count} regole generate differiscono da %{path}. Intervento necessario."
+  udev_modal_missing: "%{count} regole generate non sono installate. Intervento necessario."
+  udev_copy_command: Copia comando
+  udev_command_copied: Copiato
+  udev_recheck: Ricontrolla regole
+  udev_rechecking: Ricontrollo…
+  udev_recheck_hint: Esegui il comando in un terminale, poi ricontrolla. HaloDaemon confronta le regole generate con il file installato effettivo.
+  udev_plugin_action: Regole di accesso necessarie
+  udev_plugin_action_sub: Questo plugin dichiara un accesso hardware Linux assente dal file udev installato. Usa Genera regole udev qui sopra.
   # Problemi del plugin (errori di connessione/runtime, avvisi di caricamento)
   issue_connect_failed: Impossibile connettersi
   issue_init_failed: Inizializzazione del dispositivo non riuscita

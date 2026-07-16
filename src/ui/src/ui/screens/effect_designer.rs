@@ -93,7 +93,7 @@ impl DesignerUi {
                         *page = self.back_page.clone();
                     }
                     self.title_row(ui, cmd, page);
-                    ui.add_space(6.0);
+                    ui.add_space(theme::SPACE_3);
                     self.subtitle_row(ui);
                     ui.add_space(20.0);
 
@@ -187,7 +187,7 @@ impl DesignerUi {
                         self.error = Some(t!("misc.designer_invalid_name").to_string());
                     }
                 }
-                ui.add_space(8.0);
+                ui.add_space(theme::SPACE_4);
                 if widgets::button(
                     ui,
                     &t!("misc.designer_reset"),
@@ -207,7 +207,7 @@ impl DesignerUi {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(t!("misc.designer_subtitle"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -215,7 +215,7 @@ impl DesignerUi {
                 if let Some(err) = &self.error {
                     ui.label(
                         egui::RichText::new(err)
-                            .font(theme::body(11.0))
+                            .font(theme::body_sm())
                             .color(theme::hex(0xef5f63)),
                     );
                 }
@@ -239,7 +239,7 @@ impl DesignerUi {
                     None,
                     t,
                 );
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
                 self.rig(
                     ui,
                     &t!("misc.designer_rig_ring"),
@@ -248,7 +248,7 @@ impl DesignerUi {
                     Some((1.0, 1.0)),
                     t,
                 );
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
                 self.rig(
                     ui,
                     &t!("misc.designer_rig_matrix"),
@@ -257,7 +257,7 @@ impl DesignerUi {
                     Some((8.0, 4.0)),
                     t,
                 );
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
                 self.rig(
                     ui,
                     &t!("misc.designer_rig_triple"),
@@ -266,13 +266,13 @@ impl DesignerUi {
                     Some((3.0, 1.0)),
                     t,
                 );
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
                 ui.separator();
-                ui.add_space(8.0);
+                ui.add_space(theme::SPACE_4);
                 self.pixmap_strip(ui, t);
             },
         );
-        ui.add_space(12.0);
+        ui.add_space(theme::SPACE_6);
         widgets::card_titled(
             ui,
             &t!("misc.designer_brightness_formula"),
@@ -349,10 +349,10 @@ impl DesignerUi {
     ) {
         ui.label(
             egui::RichText::new(label)
-                .font(theme::body(10.5))
+                .font(theme::caption())
                 .color(theme::TEXT_FAINT),
         );
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
         let painter = ui.painter();
@@ -440,7 +440,7 @@ impl DesignerUi {
             },
         );
 
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         widgets::card_titled(
             ui,
             &t!("misc.designer_motion"),
@@ -448,10 +448,10 @@ impl DesignerUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("misc.designer_direction"))
-                        .font(theme::body(10.5))
+                        .font(theme::caption())
                         .color(theme::TEXT_MUT),
                 );
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     for &d in Direction::ALL.iter() {
@@ -460,7 +460,7 @@ impl DesignerUi {
                         }
                     }
                 });
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 let mut speed = self.params.speed;
                 let readout = format!("{}", speed.round() as i32);
                 if widgets::slider_row(
@@ -472,7 +472,7 @@ impl DesignerUi {
                 ) {
                     self.params.speed = speed;
                 }
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 let mut density = self.params.density;
                 let readout = format!("{}x", density.round() as i32);
                 if widgets::slider_row(
@@ -484,13 +484,13 @@ impl DesignerUi {
                 ) {
                     self.params.density = density.round();
                 }
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 ui.label(
                     egui::RichText::new(t!("misc.designer_ring_scope"))
-                        .font(theme::body(10.5))
+                        .font(theme::caption())
                         .color(theme::TEXT_MUT),
                 );
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     for &s in RingScope::ALL.iter() {
@@ -499,7 +499,7 @@ impl DesignerUi {
                         }
                     }
                 });
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 let mut spread = self.params.phase_spread;
                 let readout = format!("{}%", spread.round() as i32);
                 if widgets::slider_row(
@@ -514,7 +514,7 @@ impl DesignerUi {
             },
         );
 
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         let rel = slider_relevance(self.params.generator);
         widgets::card_titled(
             ui,
@@ -534,7 +534,7 @@ impl DesignerUi {
                         self.params.decay = decay;
                     }
                 });
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 ui.add_enabled_ui(rel.width, |ui| {
                     let mut width = self.params.width;
                     let readout = format!("{}%", width.round() as i32);
@@ -548,7 +548,7 @@ impl DesignerUi {
                         self.params.width = width;
                     }
                 });
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 let mut sharp = self.params.sharpness;
                 let readout = format!("{}%", sharp.round() as i32);
                 if widgets::slider_row(
@@ -563,7 +563,7 @@ impl DesignerUi {
             },
         );
 
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         widgets::card_titled(
             ui,
             &t!("misc.designer_color"),
@@ -577,27 +577,27 @@ impl DesignerUi {
                         }
                     }
                 });
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
                 ui.label(
                     egui::RichText::new(t!("misc.designer_color_a"))
-                        .font(theme::body(10.5))
+                        .font(theme::caption())
                         .color(theme::TEXT_MUT),
                 );
                 if let Some(c) = widgets::color_picker(ui, self.params.color_a) {
                     self.params.color_a = c;
                 }
                 if self.params.color_mode == ColorMode::Gradient {
-                    ui.add_space(10.0);
+                    ui.add_space(theme::SPACE_5);
                     ui.label(
                         egui::RichText::new(t!("misc.designer_color_b"))
-                            .font(theme::body(10.5))
+                            .font(theme::caption())
                             .color(theme::TEXT_MUT),
                     );
                     if let Some(c) = widgets::color_picker(ui, self.params.color_b) {
                         self.params.color_b = c;
                     }
                 }
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 let mut floor = self.params.floor;
                 let readout = format!("{}%", floor.round() as i32);
                 if widgets::slider_row(
@@ -610,7 +610,7 @@ impl DesignerUi {
                     self.params.floor = floor;
                 }
                 if self.params.color_mode != ColorMode::Gradient {
-                    ui.add_space(14.0);
+                    ui.add_space(theme::SPACE_7);
                     let mut sat = self.params.saturation;
                     let readout = format!("{}%", sat.round() as i32);
                     if widgets::slider_row(
@@ -622,7 +622,7 @@ impl DesignerUi {
                     ) {
                         self.params.saturation = sat;
                     }
-                    ui.add_space(14.0);
+                    ui.add_space(theme::SPACE_7);
                     let mut hue = self.params.hue_drift;
                     let sign = if hue > 0.0 { "+" } else { "" };
                     let readout = format!("{sign}{}", hue.round() as i32);
@@ -636,7 +636,7 @@ impl DesignerUi {
                         self.params.hue_drift = hue;
                     }
                 }
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 let mut ccs = self.params.color_cycle_speed;
                 let readout = format!("{}%", ccs.round() as i32);
                 if widgets::slider_row(
@@ -648,10 +648,10 @@ impl DesignerUi {
                 ) {
                     self.params.color_cycle_speed = ccs;
                 }
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 ui.label(
                     egui::RichText::new(t!("misc.designer_ambient_color"))
-                        .font(theme::body(10.5))
+                        .font(theme::caption())
                         .color(theme::TEXT_MUT),
                 );
                 if let Some(c) = widgets::color_picker(ui, self.params.ambient_color) {

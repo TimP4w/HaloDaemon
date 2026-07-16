@@ -516,13 +516,7 @@ pub fn daemon_overlay(ui: &mut egui::Ui) {
     p.rect_filled(area, 0.0, a(theme::MAIN_BG, 0.82));
 
     let card = Rect::from_center_size(area.center(), Vec2::new(420.0, 220.0));
-    p.rect_filled(card, 16.0, theme::CARD_BG);
-    p.rect_stroke(
-        card,
-        16.0,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
+    theme::paint_card_rect(p, card, 16.0);
 
     let cx = card.center().x;
     let dot = Pos2::new(cx, card.top() + 40.0);
@@ -539,14 +533,14 @@ pub fn daemon_overlay(ui: &mut egui::Ui) {
         Pos2::new(cx, card.top() + 106.0),
         Align2::CENTER_CENTER,
         t!("shell.daemon_unreachable"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT_MUT,
     );
     p.text(
         Pos2::new(cx, card.top() + 124.0),
         Align2::CENTER_CENTER,
         t!("shell.daemon_start_hint"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT_MUT,
     );
 

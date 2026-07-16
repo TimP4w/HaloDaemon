@@ -68,10 +68,10 @@ pub fn show(
                     crate::domain::tour::AnchorId::CoolingCurve,
                     title_resp.rect,
                 );
-                ui.add_space(3.0);
+                ui.add_space(theme::SPACE_1);
                 ui.label(
                     egui::RichText::new(t!("cooling.subtitle", count = coolers.len()))
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_MUT),
                 );
                 ui.add_space(22.0);
@@ -107,7 +107,7 @@ fn cooler_grid(
     let sensors = temp_sensors(state);
     for (row, pair) in coolers.chunks(2).enumerate() {
         if row > 0 {
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
         }
         ui.columns(2, |cols| {
             for (i, dev) in pair.iter().enumerate() {
@@ -143,7 +143,7 @@ fn cooler_card(
         ui.horizontal(|ui| {
             let (icon, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
             fan_icon(ui.painter(), icon.center(), 18.0, time, rpm, dev_color);
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             let col_w = ui.available_width();
             ui.vertical(|ui| {
                 ui.set_width(col_w);
@@ -153,7 +153,7 @@ fn cooler_card(
                     |ui| {
                         ui.label(
                             egui::RichText::new(&dev.name)
-                                .font(theme::semibold(14.0))
+                                .font(theme::title())
                                 .color(theme::TEXT),
                         );
                     },
@@ -170,14 +170,14 @@ fn cooler_card(
                     |ui| {
                         ui.label(
                             egui::RichText::new(model::type_label(dev))
-                                .font(theme::body(11.0))
+                                .font(theme::body_sm())
                                 .color(theme::TEXT_MUT),
                         );
                     },
                     |ui| {
                         ui.label(
                             egui::RichText::new("RPM")
-                                .font(theme::body(10.0))
+                                .font(theme::caption())
                                 .color(theme::TEXT_FAINT),
                         );
                     },
@@ -188,7 +188,7 @@ fn cooler_card(
             ui.ctx().request_repaint();
         }
 
-        ui.add_space(13.0);
+        ui.add_space(theme::SPACE_6);
 
         // ── Preset pills ──────────────────────────────────────────────────────
         if !state.cooling.preset_curves.is_empty() {
@@ -216,13 +216,13 @@ fn cooler_card(
                     }
                 }
             });
-            ui.add_space(11.0);
+            ui.add_space(theme::SPACE_6);
         }
 
         // ── Curve sensor selector ─────────────────────────────────────────────
         ui.horizontal(|ui| {
             widgets::caps_label(ui, &t!("cooling.curve_sensor"));
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             let current = live
                 .map(|(d, s)| format!("{d} · {} ({:.0}°C)", s.name, s.value))
                 .unwrap_or_else(|| t!("cooling.no_sensor").to_string());
@@ -259,7 +259,7 @@ fn cooler_card(
             }
         });
 
-        ui.add_space(11.0);
+        ui.add_space(theme::SPACE_6);
 
         // ── Mini curve preview ────────────────────────────────────────────────
         let (rect, _) =
@@ -269,31 +269,31 @@ fn cooler_card(
             Pos2::new(rect.left() + 10.0, rect.top() + 8.0),
             Align2::LEFT_TOP,
             t!("cooling.rpm_vs", sensor = &sensor_name),
-            theme::mono(9.5),
+            theme::value_xs(),
             theme::TEXT_FAINT2,
         );
 
         // ── Curve status warning (e.g. no sensor, stalled fan) ────────────────
         if let Some(warning) = curve.map(|c| &c.status).and_then(curve_status_text) {
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             ui.label(
                 egui::RichText::new(warning)
-                    .font(theme::body(11.0))
+                    .font(theme::body_sm())
                     .color(theme::STAT_AMBER),
             );
         }
 
-        ui.add_space(13.0);
+        ui.add_space(theme::SPACE_6);
 
         // ── Footer: sensor temp + open device ─────────────────────────────────
         ui.horizontal(|ui| {
             if let Some(t) = sensor_temp {
                 ui.label(
                     egui::RichText::new(&sensor_name)
-                        .font(theme::body(11.5))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_DIM),
                 );
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 ui.label(
                     egui::RichText::new(format!("{t:.0}°C"))
                         .font(theme::mono_semibold(11.5))

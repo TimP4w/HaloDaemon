@@ -132,7 +132,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         }
     }
 
-    ui.add_space(14.0);
+    ui.add_space(crate::ui::theme::SPACE_7);
 
     match st.lcd.media_tab {
         LcdMediaTab::Template => editor::show(ui, ctx, st, &id, lcd),
@@ -448,6 +448,7 @@ mod tests {
                         lcd_editor_render: None,
                         led_colors: crate::ui::screens::device::empty_led_colors(),
                         write_rate_history: None,
+                        plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
                     };
                     show(ui, &tab, st);
                 });
@@ -781,6 +782,7 @@ mod tests {
             lcd_editor_render: None,
             led_colors: crate::ui::screens::device::empty_led_colors(),
             write_rate_history: None,
+            plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
         };
         super::select_image(&ctx, &mut st, "lcd", "bg.png", None);
         assert_eq!(st.lcd.preview_pending.as_deref(), Some("bg.png"));
@@ -810,6 +812,7 @@ mod tests {
             lcd_editor_render: None,
             led_colors: crate::ui::screens::device::empty_led_colors(),
             write_rate_history: None,
+            plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
         };
         super::select_image(&ctx, &mut st, "lcd", "bg.png", Some("custom"));
         let first = fx.rx.try_recv().expect("deactivate dispatched");

@@ -50,10 +50,10 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
 
     ui.label(
         egui::RichText::new(&label)
-            .font(theme::body(11.5))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
 
     let enabled = ctx.state.health.ffmpeg_available;
     if widgets::button(
@@ -75,10 +75,10 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
     }
 
     if !enabled {
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         ui.label(
             egui::RichText::new(t!("lcd.ffmpeg_unavailable_host"))
-                .font(theme::body(10.0))
+                .font(theme::caption())
                 .color(theme::TEXT_FAINT2),
         );
     }
@@ -143,7 +143,7 @@ pub(super) fn image_section(
         }
     });
 
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
 
     // Upload button (with in-flight spinner + daemon-reported progress, so a
     // long GIF re-encode doesn't look stuck).
@@ -217,7 +217,7 @@ pub(super) fn image_picker(
         }
     });
 
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     if st.lcd.upload_base.is_some() {
         widgets::button_loading(
             ui,
@@ -258,7 +258,7 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
         |ui| {
             ui.label(
                 egui::RichText::new(t!("lcd.delete_confirm_body", name = filename))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         },
@@ -273,7 +273,7 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
             {
                 confirm = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("lcd.cancel"),
@@ -545,7 +545,7 @@ pub(super) fn draw_thumb_tile(
             Color32::WHITE,
         );
     } else {
-        p.rect_filled(rect, 4.0, theme::INNER_BG);
+        p.rect_filled(rect, theme::RADIUS_XS, theme::INNER_BG);
     }
     let ring = if selected {
         theme::CYAN
@@ -554,7 +554,12 @@ pub(super) fn draw_thumb_tile(
     } else {
         Color32::TRANSPARENT
     };
-    p.rect_stroke(rect, 4.0, Stroke::new(2.0, ring), egui::StrokeKind::Middle);
+    p.rect_stroke(
+        rect,
+        theme::RADIUS_XS,
+        Stroke::new(2.0, ring),
+        egui::StrokeKind::Middle,
+    );
 
     if show_badge {
         p.circle_filled(badge_c, badge_r, theme::OFFLINE);

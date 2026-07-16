@@ -53,7 +53,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         .map(|(_, s)| s.value as f32);
 
     top_row(ui, ctx, st, &fan, &pump, &sensors, sensor_temp);
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
 
     let curve_title = match (&fan, &pump) {
         (Some(_), None) => t!("cooling.fan_curve"),
@@ -84,7 +84,7 @@ fn top_row(
         // Curve sensor selector + live temp.
         widgets::card(&mut cols[0], |ui| {
             widgets::caps_label(ui, &t!("cooling.curve_sensor_caps"));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             let current = st
                 .cooling
                 .curve_sensor
@@ -133,7 +133,7 @@ fn top_row(
                     },
                 );
             }
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             let t = sensor_temp
                 .map(|t| format!("{t:.0}"))
                 .unwrap_or_else(|| "-".into());
@@ -145,7 +145,7 @@ fn top_row(
                 );
                 ui.label(
                     egui::RichText::new(t!("cooling.celsius_now"))
-                        .font(theme::body(11.0))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_FAINT),
                 );
             });
@@ -200,7 +200,7 @@ fn curve_card(
             |ui| {
                 ui.label(
                     egui::RichText::new(title)
-                        .font(theme::semibold(14.0))
+                        .font(theme::title())
                         .color(theme::TEXT),
                 );
             },
@@ -252,21 +252,21 @@ fn curve_card(
         );
         ui.label(
             egui::RichText::new(t!("cooling.curve_hint"))
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
         );
         if let Some(warning) = status
             .as_ref()
             .and_then(crate::ui::screens::cooling::curve_status_text)
         {
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 egui::RichText::new(warning)
-                    .font(theme::body(11.0))
+                    .font(theme::body_sm())
                     .color(theme::STAT_AMBER),
             );
         }
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
 
         // Plot area with axis labels.
         let (outer, _) =
@@ -288,7 +288,7 @@ fn curve_card(
                 Pos2::new(plot.left() - 8.0, y),
                 Align2::RIGHT_CENTER,
                 format!("{}", (frac * 100.0) as i32),
-                theme::mono(9.5),
+                theme::value_xs(),
                 theme::TEXT_FAINT2,
             );
             let x = plot.left() + frac * plot.width();
@@ -296,7 +296,7 @@ fn curve_card(
                 Pos2::new(x, plot.bottom() + 12.0),
                 Align2::CENTER_CENTER,
                 format!("{}", 20 + (frac * 80.0) as i32),
-                theme::mono(9.5),
+                theme::value_xs(),
                 theme::TEXT_FAINT2,
             );
         }

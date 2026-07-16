@@ -382,6 +382,9 @@ async fn dispatch(
             profiles::usecases::app_rules::remove(index, app).await
         }
         DaemonCommand::Rediscover => registry::usecases::settings::rediscover(app).await,
+        DaemonCommand::GetUdevRulesStatus => {
+            registry::usecases::plugins::get_udev_rules_status(client, app).await
+        }
         DaemonCommand::SetPluginEnabled { id, enabled } => {
             registry::usecases::plugins::set_enabled(id, enabled, app).await
         }
@@ -411,7 +414,11 @@ async fn dispatch(
             registry::usecases::repos::check_repo_updates(app, client).await
         }
         DaemonCommand::UpdatePluginRepo { slug } => {
-            registry::usecases::repos::update_repo(slug, app).await
+            let result = registry::usecases::repos::update_repo(slug, app.clone()).await;
+            // Refresh per-plugin update flags so the banners clear once the pull
+            // lands (a single update, unlike update-all, otherwise leaves them stale).
+            registry::usecases::repos::broadcast_plugin_updates(&app, None).await;
+            result
         }
         DaemonCommand::UpdateAllPlugins => registry::usecases::repos::update_all_plugins(app).await,
         DaemonCommand::SetIntegrationEnabled { id, enabled } => {
@@ -620,6 +627,12 @@ async fn dispatch(
         }
         DaemonCommand::GetPluginAsset { plugin_id, name } => {
             registry::usecases::plugins::get_asset(plugin_id, name, client, app).await
+        }
+        DaemonCommand::GetLcdWidgetIcon { catalog_id } => {
+            registry::usecases::plugins::get_lcd_widget_icon(catalog_id, client, app).await
+        }
+        DaemonCommand::GetLcdPluginPreset { catalog_id } => {
+            registry::usecases::plugins::get_lcd_preset(catalog_id, client, app).await
         }
 
         DaemonCommand::CanvasUpsertEffect { instance_id, def } => {

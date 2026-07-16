@@ -91,22 +91,23 @@ fn page_body(
     debug: Option<&DebugInfo>,
     st: &mut SettingsUi,
 ) {
+    ui.set_max_width(ui.available_width().min(840.0));
     ui.label(
         egui::RichText::new(t!("settings.title"))
             .font(theme::bold(22.0))
             .color(theme::TEXT),
     );
-    ui.add_space(3.0);
+    ui.add_space(theme::SPACE_1);
     ui.label(
         egui::RichText::new(t!("settings.subtitle"))
-            .font(theme::body(12.0))
+            .font(theme::body_md())
             .color(theme::TEXT_MUT),
     );
     ui.add_space(22.0);
 
     // ── APPLICATION ───────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_application"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     let app_card = ui.scope(|ui| {
         widgets::card(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -124,11 +125,11 @@ fn page_body(
         crate::domain::tour::AnchorId::SettingsApplication,
         app_card.response.rect,
     );
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── ENGINES ───────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_engines"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     let engines_card = ui.scope(|ui| {
         widgets::card(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -140,52 +141,52 @@ fn page_body(
         crate::domain::tour::AnchorId::SettingsEngines,
         engines_card.response.rect,
     );
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── DEVICES ───────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_devices"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         daemon_status_row(ui, connected);
         rediscover_row(ui, state, cmd);
     });
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── HEALTHCHECK ───────────────────────────────────────────────────────
     healthcheck_section(ui, cmd, debug);
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── LOGGING ───────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_logging"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         log_level_row(ui, state, cmd);
     });
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── ADVANCED ──────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_advanced"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         config_folder_row(ui, state);
     });
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── DEBUG ─────────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_debug"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         diagnostics_row(ui, cmd, st);
     });
-    ui.add_space(18.0);
+    ui.add_space(theme::SPACE_9);
 
     // ── ABOUT ─────────────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_about"));
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         about_row(ui, st);
@@ -193,14 +194,24 @@ fn page_body(
         repo_row(ui);
     });
 
-    ui.add_space(24.0);
+    ui.add_space(theme::SPACE_10);
     footer(ui, state);
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 fn row_rect(ui: &mut egui::Ui) -> Rect {
+    // Divider goes above every row but the first, so a list never ends on a
+    // trailing divider. Each card body is a fresh child ui, so an empty
+    // min_rect means this is the first row.
+    let first = ui.min_rect().height() <= 0.5;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::hover());
+    if !first {
+        ui.painter().line_segment(
+            [rect.left_top(), rect.right_top()],
+            Stroke::new(1.0, theme::BORDER_SOFT),
+        );
+    }
     rect
 }
 
@@ -209,22 +220,15 @@ fn row_label(ui: &mut egui::Ui, rect: Rect, title: &str, subtitle: &str) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         title,
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     ui.painter().text(
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
         subtitle,
-        theme::body(10.5),
+        theme::caption(),
         theme::TEXT_FAINT,
-    );
-}
-
-fn bottom_border(ui: &mut egui::Ui, rect: Rect) {
-    ui.painter().line_segment(
-        [rect.left_bottom(), rect.right_bottom()],
-        Stroke::new(1.0, theme::BORDER_SOFT),
     );
 }
 
@@ -246,7 +250,7 @@ fn row_toggle_at(ui: &mut egui::Ui, x: f32, y: f32, on: bool, id: &str) -> bool 
 fn right_button(ui: &mut egui::Ui, rect: Rect, label: &str, st: &mut SettingsUi, modal: Modal) {
     let btn_w = 80.0_f32.max(
         ui.painter()
-            .layout_no_wrap(label.to_string(), theme::body(11.5), theme::TEXT)
+            .layout_no_wrap(label.to_string(), theme::body_sm(), theme::TEXT)
             .size()
             .x
             + 20.0,
@@ -295,10 +299,9 @@ fn start_on_boot_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
             Pos2::new(rect.right(), rect.center().y),
             Align2::RIGHT_CENTER,
             t!("settings.start_on_boot_managed_value"),
-            theme::body(10.5),
+            theme::caption(),
             theme::TEXT_FAINT,
         );
-        bottom_border(ui, rect);
         return;
     }
     row_label(
@@ -316,7 +319,6 @@ fn start_on_boot_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
             .is_ok();
         st.start_on_boot = cache_after_toggle(st.start_on_boot, !on, ok);
     }
-    bottom_border(ui, rect);
 }
 
 fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
@@ -338,7 +340,6 @@ fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             },
         );
     }
-    bottom_border(ui, rect);
 }
 
 fn plugin_downloads_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
@@ -356,7 +357,6 @@ fn plugin_downloads_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             halod_shared::commands::DaemonCommand::SetPluginDownloadConsent { allowed: !on },
         );
     }
-    bottom_border(ui, rect);
 }
 
 fn window_controls_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
@@ -378,7 +378,6 @@ fn window_controls_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             },
         );
     }
-    bottom_border(ui, rect);
 }
 
 fn dependency_warning_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
@@ -400,7 +399,6 @@ fn dependency_warning_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) 
             },
         );
     }
-    bottom_border(ui, rect);
 }
 
 fn replay_tutorials_row(ui: &mut egui::Ui, cmd: &CommandTx) {
@@ -431,7 +429,6 @@ fn replay_tutorials_row(ui: &mut egui::Ui, cmd: &CommandTx) {
         crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::ResetToursSeen);
         crate::domain::tour::request_reset(ui.ctx());
     }
-    bottom_border(ui, rect);
 }
 
 // ── ENGINES rows ──────────────────────────────────────────────────────────────
@@ -497,8 +494,6 @@ fn lcd_engine_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             ),
         );
     }
-
-    bottom_border(ui, rect);
 }
 
 // ── DEVICES rows ──────────────────────────────────────────────────────────────
@@ -523,7 +518,6 @@ fn daemon_status_row(ui: &mut egui::Ui, connected: bool) {
         theme::mono_semibold(11.0),
         status_color,
     );
-    bottom_border(ui, rect);
 }
 
 fn is_scanning(state: &AppState) -> bool {
@@ -565,8 +559,6 @@ fn rediscover_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     {
         crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::Rediscover);
     }
-
-    bottom_border(ui, rect);
 }
 
 // ── HEALTHCHECK rows ───────────────────────────────────────────────────────────
@@ -577,7 +569,7 @@ fn healthcheck_section(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugI
         Pos2::new(rect.left(), rect.center().y),
         Align2::LEFT_CENTER,
         t!("settings.section_healthcheck"),
-        theme::body(10.0),
+        theme::caption(),
         theme::TEXT_FAINT2,
     );
     let btn_w = 76.0;
@@ -598,7 +590,7 @@ fn healthcheck_section(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugI
     {
         crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
     }
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
 
     widgets::card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -611,7 +603,6 @@ fn healthcheck_section(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugI
                     &t!("settings.running_healthcheck_title"),
                     &t!("settings.running_healthcheck_sub"),
                 );
-                bottom_border(ui, rect);
             }
             Some(info) if info.dependencies.is_empty() => {
                 let rect = row_rect(ui);
@@ -621,7 +612,6 @@ fn healthcheck_section(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugI
                     &t!("settings.no_checks_title"),
                     &t!("settings.no_checks_sub"),
                 );
-                bottom_border(ui, rect);
             }
             Some(info) => {
                 for dep in &info.dependencies {
@@ -680,8 +670,6 @@ fn dependency_row(ui: &mut egui::Ui, dep: &DependencyStatus) {
         (t!("settings.dep_optional"), theme::TEXT_MUT)
     };
     tag_pill(ui, rect.right() - 10.0, rect.top() + 30.0, &tag, tag_color);
-
-    bottom_border(ui, rect);
 }
 
 /// A small right-anchored pill (rounded outline + label).
@@ -760,8 +748,6 @@ fn language_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             );
         }
     }
-
-    bottom_border(ui, rect);
 }
 
 // ── LOGGING rows ──────────────────────────────────────────────────────────────
@@ -809,8 +795,6 @@ fn log_level_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             );
         }
     }
-
-    bottom_border(ui, rect);
 }
 
 // ── ADVANCED rows ─────────────────────────────────────────────────────────────
@@ -821,7 +805,7 @@ fn config_folder_row(ui: &mut egui::Ui, state: &AppState) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         t!("settings.config_folder_title"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     let config_unknown = t!("settings.unknown");
@@ -834,7 +818,7 @@ fn config_folder_row(ui: &mut egui::Ui, state: &AppState) {
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
         config_path,
-        theme::body(10.5),
+        theme::caption(),
         theme::TEXT_FAINT,
     );
 
@@ -857,8 +841,6 @@ fn config_folder_row(ui: &mut egui::Ui, state: &AppState) {
     {
         open_path(&state.config_dir);
     }
-
-    bottom_border(ui, rect);
 }
 
 /// Spawn the platform file/URL opener for `p` on a detached thread so the UI
@@ -889,14 +871,14 @@ fn diagnostics_row(ui: &mut egui::Ui, cmd: &CommandTx, st: &mut SettingsUi) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         t!("settings.diagnostics_title"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     ui.painter().text(
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
         t!("settings.diagnostics_sub"),
-        theme::body(10.5),
+        theme::caption(),
         theme::TEXT_FAINT,
     );
 
@@ -904,7 +886,7 @@ fn diagnostics_row(ui: &mut egui::Ui, cmd: &CommandTx, st: &mut SettingsUi) {
         ui.painter()
             .layout_no_wrap(
                 t!("settings.open_button").to_string(),
-                theme::body(11.5),
+                theme::body_sm(),
                 theme::TEXT,
             )
             .size()
@@ -929,7 +911,6 @@ fn diagnostics_row(ui: &mut egui::Ui, cmd: &CommandTx, st: &mut SettingsUi) {
         crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
         st.modal = Some(Modal::Diagnostics);
     }
-    bottom_border(ui, rect);
 }
 
 // ── ABOUT rows ────────────────────────────────────────────────────────────────
@@ -940,7 +921,7 @@ fn about_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         halod_shared::app::APP_DISPLAY_NAME,
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     ui.painter().text(
@@ -951,12 +932,11 @@ fn about_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
             env!("CARGO_PKG_VERSION"),
             t!("settings.app_tagline")
         ),
-        theme::body(10.5),
+        theme::caption(),
         theme::TEXT_FAINT,
     );
 
     right_button(ui, rect, &t!("settings.credits_button"), st, Modal::Credits);
-    bottom_border(ui, rect);
 }
 
 fn third_party_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
@@ -965,19 +945,18 @@ fn third_party_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         t!("settings.third_party_title"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     ui.painter().text(
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
         t!("settings.third_party_sub"),
-        theme::body(10.5),
+        theme::caption(),
         theme::TEXT_FAINT,
     );
 
     right_button(ui, rect, &t!("settings.view_button"), st, Modal::Licenses);
-    bottom_border(ui, rect);
 }
 
 const REPO_URL: &str = halod_shared::app::REPO_URL;
@@ -989,14 +968,14 @@ fn repo_row(ui: &mut egui::Ui) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         t!("settings.repository_title"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     ui.painter().text(
         Pos2::new(rect.left(), rect.top() + 28.0),
         Align2::LEFT_TOP,
         REPO_URL.trim_start_matches("https://"),
-        theme::body(10.5),
+        theme::caption(),
         if resp.hovered() {
             theme::CYAN
         } else {
@@ -1009,7 +988,6 @@ fn repo_row(ui: &mut egui::Ui) {
     if resp.clicked() {
         open_path(REPO_URL);
     }
-    bottom_border(ui, rect);
 }
 
 /// Parse `buf` as a u32 FPS value, falling back to `fallback`, clamped to 1–60.
@@ -1025,7 +1003,7 @@ fn section_header(ui: &mut egui::Ui, text: &str) {
         Pos2::new(rect.left(), rect.center().y),
         Align2::LEFT_CENTER,
         text,
-        theme::body(10.0),
+        theme::caption(),
         theme::TEXT_FAINT2,
     );
 }
@@ -1040,7 +1018,7 @@ fn footer(ui: &mut egui::Ui, _state: &AppState) {
             " · ",
             env!("HALOD_BUILD_HASH")
         ))
-        .font(theme::body(11.0))
+        .font(theme::body_sm())
         .color(theme::TEXT_FAINT),
     );
 }
@@ -1072,15 +1050,15 @@ fn licenses_modal(ctx: &egui::Context, st: &mut SettingsUi) {
         |ui| {
             ui.label(
                 egui::RichText::new(t!("settings.licenses_modal_body"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             egui::Frame::NONE
                 .fill(theme::hex(0x080b10))
                 .stroke(Stroke::new(1.0, theme::hex(0x1c2230)))
-                .corner_radius(8.0)
-                .inner_margin(egui::Margin::same(12))
+                .corner_radius(theme::RADIUS_SM)
+                .inner_margin(theme::PAD_WELL)
                 .show(ui, |ui| {
                     ui.label(
                         egui::RichText::new(THIRD_PARTY_LICENSES)
@@ -1102,17 +1080,17 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
         );
         ui.label(
             egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
-                .font(theme::body(12.0))
+                .font(theme::body_md())
                 .color(theme::TEXT_MUT),
         );
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
         ui.label(
             egui::RichText::new(format!(
                 "{} {}",
                 t!("settings.credits_developer"),
                 halod_shared::app::AUTHOR
             ))
-            .font(theme::body(12.0))
+            .font(theme::body_md())
             .color(theme::TEXT_DIM),
         );
         ui.label(
@@ -1120,34 +1098,34 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
                 "{} GPL-3.0-or-later",
                 t!("settings.credits_license")
             ))
-            .font(theme::body(12.0))
+            .font(theme::body_md())
             .color(theme::TEXT_DIM),
         );
         ui.hyperlink_to(
             egui::RichText::new(REPO_URL)
-                .font(theme::body(12.0))
+                .font(theme::body_md())
                 .color(theme::CYAN),
             REPO_URL,
         );
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
 
         ui.label(
             egui::RichText::new(t!("settings.acknowledgments"))
-                .font(theme::semibold(13.0))
+                .font(theme::heading())
                 .color(theme::TEXT),
         );
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
         for (name, url) in &CREDIT_REFS {
             if url.is_empty() {
                 ui.label(
                     egui::RichText::new(*name)
-                        .font(theme::body(11.5))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_DIM),
                 );
             } else {
                 ui.hyperlink_to(
                     egui::RichText::new(*name)
-                        .font(theme::body(11.5))
+                        .font(theme::body_sm())
                         .color(theme::CYAN),
                     *url,
                 )
@@ -1158,15 +1136,27 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
 }
 
 /// Upstream projects credited in the Credits modal, mirroring the README
-/// Acknowledgments table — `(name, url)`.
-const CREDIT_REFS: [(&str, &str); 5] = [
+/// Acknowledgments table — `(name, url)`. Mirrors the plugin repository's
+/// licensing table (HaloDaemon-plugins/README.md) plus the core PawnIO blobs.
+const CREDIT_REFS: [(&str, &str); 10] = [
     ("Solaar", "https://github.com/pwr-Solaar/Solaar"),
-    ("OpenRGB", "https://gitlab.com/CalcProgrammer1/OpenRGB"),
+    ("liquidctl", "https://github.com/liquidctl/liquidctl"),
+    (
+        "Linux kernel nzxt-smart2",
+        "https://github.com/torvalds/linux/blob/master/drivers/hwmon/nzxt-smart2.c",
+    ),
+    ("OpenRazer", "https://github.com/openrazer/openrazer"),
+    (
+        "linux-arctis-manager",
+        "https://github.com/elegos/Linux-Arctis-Manager",
+    ),
+    ("tomasf/evnia", "https://github.com/tomasf/evnia"),
+    ("mijoe/g560-led", "https://github.com/mijoe/g560-led"),
     (
         "LibreHardwareMonitor",
         "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor",
     ),
-    ("g560-led", "https://github.com/mijoe/g560-led"),
+    ("OpenRGB", "https://gitlab.com/CalcProgrammer1/OpenRGB"),
     (
         "PawnIO modules",
         "https://github.com/namazso/PawnIO_modules",
@@ -1186,7 +1176,7 @@ fn diagnostics_modal(ctx: &egui::Context, debug: Option<&DebugInfo>, st: &mut Se
                 None => {
                     ui.label(
                         egui::RichText::new(t!("settings.diagnostics_no_data"))
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_MUT),
                     );
                 }
@@ -1206,7 +1196,7 @@ fn diagnostics_modal(ctx: &egui::Context, debug: Option<&DebugInfo>, st: &mut Se
                             let now = ui.ctx().input(|i| i.time);
                             ui.ctx().data_mut(|d| d.insert_temp(copied_key, now));
                         }
-                        ui.add_space(8.0);
+                        ui.add_space(theme::SPACE_4);
                         if widgets::button(
                             ui,
                             &t!("settings.export_button"),
@@ -1221,17 +1211,17 @@ fn diagnostics_modal(ctx: &egui::Context, debug: Option<&DebugInfo>, st: &mut Se
                         let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(copied_key));
                         let now = ui.ctx().input(|i| i.time);
                         if copied_feedback_visible(copied_at, now) {
-                            ui.add_space(10.0);
+                            ui.add_space(theme::SPACE_5);
                             ui.label(
                                 egui::RichText::new(t!("settings.copied_feedback"))
-                                    .font(theme::semibold(12.0))
+                                    .font(theme::subhead())
                                     .color(theme::TRAFFIC_GREEN),
                             );
                             // Keep repainting so the confirmation clears without input.
                             ui.ctx().request_repaint();
                         }
                     });
-                    ui.add_space(12.0);
+                    ui.add_space(theme::SPACE_6);
 
                     // ── System ────────────────────────────────────────────────
                     section_label(ui, &t!("settings.diag_system"));
@@ -1338,14 +1328,14 @@ fn diag_card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let r = egui::Frame::NONE
         .fill(theme::hex(0x080b10))
         .stroke(Stroke::new(1.0, theme::hex(0x1c2230)))
-        .corner_radius(8.0)
-        .inner_margin(egui::Margin::same(12))
+        .corner_radius(theme::RADIUS_SM)
+        .inner_margin(theme::PAD_WELL)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             body(ui)
         })
         .inner;
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_6);
     r
 }
 
@@ -1364,13 +1354,13 @@ fn mono_line(ui: &mut egui::Ui, text: &str, color: Color32) {
 }
 
 fn section_label(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(2.0);
+    ui.add_space(theme::SPACE_1);
     ui.label(
         egui::RichText::new(text)
-            .font(theme::semibold(12.0))
+            .font(theme::subhead())
             .color(theme::TEXT),
     );
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
 }
 
 fn diagnostics_json(info: &DebugInfo) -> String {
@@ -1402,6 +1392,38 @@ fn export_diagnostics(json: String) {
 mod tests {
     use super::*;
     use halod_shared::types::DiscoveryStatus;
+
+    fn card_divider_count(rows: usize) -> usize {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(700.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| {
+            widgets::card(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for _ in 0..rows {
+                    let _ = row_rect(ui);
+                }
+            });
+        });
+        out.shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::LineSegment { .. }))
+            .count()
+    }
+
+    #[test]
+    fn row_list_draws_no_trailing_divider() {
+        // N rows separate with N-1 dividers — the last row must not add one.
+        assert_eq!(card_divider_count(1), 0);
+        assert_eq!(card_divider_count(3), 2);
+        assert_eq!(card_divider_count(7), 6);
+    }
 
     #[test]
     fn scanning_only_during_discovering_phase() {

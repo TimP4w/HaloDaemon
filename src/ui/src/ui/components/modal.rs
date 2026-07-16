@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Modal dialogs and the shared delete-confirmation reducer.
 
-use egui::Stroke;
+use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::ui::theme;
+
+/// Inner margin of every modal frame; the close × is inset from the frame edge.
+const MODAL_MARGIN: f32 = 18.0;
+/// Inset of the close × from the modal's top and right edges.
+const CLOSE_INSET: f32 = 16.0;
 
 /// A centered modal dialog over a dimmed backdrop, with a title bar, close ×
 /// button, and a scrollable body. Returns `true` when the user closed it
@@ -29,6 +34,7 @@ fn modal_shell(
     ctx: &egui::Context,
     id: &str,
     title: &str,
+    subtitle: Option<&str>,
     width: f32,
     contents: impl FnOnce(&mut egui::Ui),
 ) -> bool {
@@ -39,30 +45,65 @@ fn modal_shell(
             egui::Frame::NONE
                 .fill(theme::MODAL_BG)
                 .stroke(Stroke::new(1.0, theme::BORDER))
-                .corner_radius(12.0)
-                .inner_margin(egui::Margin::same(18)),
+                .corner_radius(theme::RADIUS_LG)
+                .inner_margin(theme::PAD_MODAL),
         )
         .show(ctx, |ui| {
             ui.set_width(w);
-            egui::Sides::new().show(
-                ui,
-                |ui| {
-                    ui.label(
+            let title_center_y = ui
+                .vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    let title_resp = ui.label(
                         egui::RichText::new(title)
-                            .font(theme::semibold(15.0))
+                            .font(theme::title())
                             .color(theme::TEXT),
                     );
-                },
-                |ui| {
-                    if ui.button("×").clicked() {
-                        x_clicked = true;
+                    if let Some(subtitle) = subtitle {
+                        ui.label(
+                            egui::RichText::new(subtitle)
+                                .font(theme::body_sm())
+                                .color(theme::TEXT_MUT),
+                        );
                     }
-                },
-            );
-            ui.add_space(8.0);
+                    title_resp.rect.center().y
+                })
+                .inner;
+            ui.add_space(theme::SPACE_4);
             contents(ui);
+            if close_button(ui, id, title_center_y) {
+                x_clicked = true;
+            }
         });
     x_clicked || resp.should_close()
+}
+
+fn close_button_rect(content: Rect, size: f32, center_y: f32) -> Rect {
+    let frame_right = content.right() + MODAL_MARGIN;
+    Rect::from_min_size(
+        Pos2::new(frame_right - CLOSE_INSET - size, center_y - size / 2.0),
+        Vec2::splat(size),
+    )
+}
+
+fn close_button(ui: &mut egui::Ui, id: &str, center_y: f32) -> bool {
+    let rect = close_button_rect(ui.min_rect(), 24.0, center_y);
+    let resp = ui.interact(rect, ui.id().with((id, "close")), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let col = if resp.hovered() {
+        theme::TEXT
+    } else {
+        theme::TEXT_FAINT
+    };
+    ui.ctx().layer_painter(ui.layer_id()).text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        "×",
+        theme::title(),
+        col,
+    );
+    resp.clicked()
 }
 
 /// Like [`modal_frame`] but without the outer vertical scroll area, so the
@@ -82,7 +123,7 @@ pub fn modal_frame_raw<R>(
     // title row rewinds its cursor to the top, painting the body over the
     // title bar.
     let h = default_h.min(ctx.content_rect().height() - 80.0);
-    modal_shell(ctx, id, title, default_w, |ui| {
+    modal_shell(ctx, id, title, None, default_w, |ui| {
         ui.allocate_ui(egui::Vec2::new(ui.available_width(), h), |ui| {
             ui.set_min_height(h);
             ui.set_max_height(h);
@@ -102,12 +143,12 @@ pub fn dialog(
     actions: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let max_body = (ctx.content_rect().height() - 220.0).max(120.0);
-    modal_shell(ctx, id, title, width, |ui| {
+    modal_shell(ctx, id, title, None, width, |ui| {
         egui::ScrollArea::vertical()
             .auto_shrink([false, true])
             .max_height(max_body)
             .show(ui, body);
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         // Height-bound the centered action row: with padding below it, an
         // unbounded row claims the auto-sizing modal's full height and grows it
         // every frame. Zero desired height still expands to fit tall buttons.
@@ -116,7 +157,36 @@ pub fn dialog(
             egui::Layout::right_to_left(egui::Align::Center),
             actions,
         );
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
+    })
+}
+
+/// Content-sized dialog with a compact subtitle directly beneath its title.
+pub fn dialog_with_subtitle(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    subtitle: &str,
+    width: f32,
+    body: impl FnOnce(&mut egui::Ui),
+    actions: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let max_body = (ctx.content_rect().height() - 220.0).max(120.0);
+    modal_shell(ctx, id, title, Some(subtitle), width, |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .max_height(max_body)
+            .show(ui, body);
+        ui.add_space(theme::SPACE_8);
+        ui.separator();
+        // The modal frame's 18px bottom margin is the button→bottom gap, so match
+        // the divider→button gap to it and add no trailing space of our own.
+        ui.add_space(theme::SPACE_9);
+        ui.allocate_ui_with_layout(
+            egui::Vec2::new(ui.available_width(), 0.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            actions,
+        );
     })
 }
 
@@ -149,7 +219,7 @@ pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> 
             {
                 close = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if button(
                 ui,
                 &t!("plugins.issue_copy"),
@@ -165,10 +235,10 @@ pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> 
             let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(copied_key));
             let now = ui.ctx().input(|i| i.time);
             if crate::ui::screens::settings::copied_feedback_visible(copied_at, now) {
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
                 ui.label(
                     egui::RichText::new(t!("plugins.issue_copied"))
-                        .font(theme::semibold(12.0))
+                        .font(theme::subhead())
                         .color(theme::TRAFFIC_GREEN),
                 );
                 ui.ctx().request_repaint();
@@ -202,6 +272,19 @@ mod tests {
     use egui::{Pos2, Rect, Sense, Vec2};
 
     #[test]
+    fn close_button_is_16px_from_right_and_centered_on_the_title() {
+        // Right edge inset 16px from the frame edge (18px beyond content);
+        // vertically centered on the title's line, wherever that sits.
+        let content = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(300.0, 200.0));
+        let size = 24.0;
+        let title_center_y = 118.0;
+        let r = close_button_rect(content, size, title_center_y);
+        assert_eq!(r.right(), content.right() + MODAL_MARGIN - CLOSE_INSET);
+        assert_eq!(r.center().y, title_center_y);
+        assert_eq!(r.size(), Vec2::splat(size));
+    }
+
+    #[test]
     fn modal_frame_raw_height_stays_bounded_across_frames() {
         // Reproduces the picker layout: a scroll area sized from
         // `available_height` with `auto_shrink=false`. Before the height was
@@ -218,14 +301,14 @@ mod tests {
             let _ = ctx.run_ui(input(), |ui| {
                 modal_frame_raw(ui.ctx(), "t", "T", 440.0, 520.0, |ui| {
                     ui.label("Choose which running apps trigger this profile.");
-                    ui.add_space(12.0);
+                    ui.add_space(theme::SPACE_6);
                     let mut s = String::new();
                     ui.add(
                         egui::TextEdit::singleline(&mut s)
                             .desired_width(f32::INFINITY)
                             .margin(egui::vec2(10.0, 9.0)),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     avail.borrow_mut().push(ui.available_height());
                     let list = (ui.available_height() - 60.0).max(60.0);
                     egui::ScrollArea::vertical()
@@ -239,9 +322,9 @@ mod tests {
                                 );
                             }
                         });
-                    ui.add_space(12.0);
+                    ui.add_space(theme::SPACE_6);
                     ui.separator();
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     let _ = button(ui, "OK", ButtonKind::Primary, Vec2::new(160.0, 34.0));
                 });
             });
@@ -309,7 +392,7 @@ mod dialog_tests {
                     420.0,
                     |ui| {
                         ui.label("Body text.");
-                        ui.add_space(12.0);
+                        ui.add_space(theme::SPACE_6);
                     },
                     |ui| {
                         let _ = button(ui, "OK", ButtonKind::Primary, Vec2::new(120.0, button_h));

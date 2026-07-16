@@ -59,7 +59,7 @@ pub fn config_section(
     mut on_save: impl FnMut(HashMap<String, String>),
 ) {
     widgets::caps_label(ui, &t!("plugins.settings"));
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
 
     let mut groups: std::collections::BTreeMap<String, Vec<&PluginConfigField>> =
         std::collections::BTreeMap::new();
@@ -72,7 +72,7 @@ pub fn config_section(
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(14, 4))
         .show(ui, |ui| {
             let mut first = true;
@@ -81,7 +81,7 @@ pub fn config_section(
                     if !first {
                         field_separator(ui);
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     widgets::caps_label(ui, category);
                 }
                 for f in fields {
@@ -94,7 +94,7 @@ pub fn config_section(
             }
         });
 
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_6);
     if widgets::button(
         ui,
         &t!("plugins.save_settings"),
@@ -131,7 +131,7 @@ fn config_field_row(
     );
     left.label(
         egui::RichText::new(&f.label)
-            .font(theme::body(12.5))
+            .font(theme::body_md())
             .color(theme::TEXT),
     );
 

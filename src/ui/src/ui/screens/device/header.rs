@@ -167,11 +167,11 @@ pub(super) fn header(
         Pos2::new(tx, cy + if editing_rename { 13.0 } else { 11.0 }),
         Align2::LEFT_CENTER,
         sub,
-        theme::body(12.0),
+        theme::body_md(),
         theme::TEXT_MUT,
     );
     status_chips(p, rect, dev);
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
 }
 
 /// All reported battery cells across the device's `Battery` capability.
@@ -203,7 +203,7 @@ pub(super) fn status_chips(p: &egui::Painter, rect: Rect, dev: &WireDevice) {
             Pos2::new(rect.right(), cy),
             Align2::RIGHT_CENTER,
             t!("devtabs.offline"),
-            theme::body(11.5),
+            theme::body_sm(),
             theme::OFFLINE_TEXT,
         );
         p.circle_filled(Pos2::new(st.left() - 9.0, cy), 3.5, theme::OFFLINE);
@@ -236,13 +236,7 @@ pub(super) fn status_chips(p: &egui::Painter, rect: Rect, dev: &WireDevice) {
 /// edge at `right`, returning the pill rect for glyph/text placement.
 fn chip_pill(p: &egui::Painter, right: f32, cy: f32, w: f32) -> Rect {
     let pill = Rect::from_min_size(Pos2::new(right - w, cy - 17.0), Vec2::new(w, 34.0));
-    p.rect_filled(pill, 9.0, theme::CARD_BG);
-    p.rect_stroke(
-        pill,
-        9.0,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
+    theme::paint_card_rect(p, pill, 9.0);
     pill
 }
 
@@ -266,7 +260,7 @@ fn connection_chip(p: &egui::Painter, right: f32, cy: f32, ct: ConnectionType) {
         Pos2::new(tx, cy - 8.0),
         Align2::LEFT_CENTER,
         t!("devtabs.info_connection"),
-        theme::body(9.0),
+        theme::micro(),
         theme::TEXT_FAINT,
     );
     p.text(
@@ -277,7 +271,7 @@ fn connection_chip(p: &egui::Painter, right: f32, cy: f32, ct: ConnectionType) {
         } else {
             t!("devtabs.wired")
         },
-        theme::semibold(12.0),
+        theme::subhead(),
         a(col, 0.95),
     );
 }
@@ -299,14 +293,14 @@ fn battery_chip(p: &egui::Painter, right: f32, cy: f32, b: &Battery, label: &str
         Pos2::new(tx, cy - 8.0),
         Align2::LEFT_CENTER,
         label,
-        theme::body(9.0),
+        theme::micro(),
         theme::TEXT_FAINT,
     );
     let pct = p.text(
         Pos2::new(tx, cy + 7.0),
         Align2::LEFT_CENTER,
         format!("{}%", b.level),
-        theme::mono_semibold(12.0),
+        theme::value(),
         theme::TEXT_BRIGHT,
     );
     let state = if charging {

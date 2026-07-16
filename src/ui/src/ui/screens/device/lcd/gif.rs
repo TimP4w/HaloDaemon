@@ -134,47 +134,13 @@ pub(super) fn decode_next_thumb<'a>(
         if st.lcd.image_cache.contains_key(filename) || !st.lcd.requested.insert(filename.clone()) {
             continue;
         }
-        let tex = if filename == halod_shared::lcd_custom::LOGO_IMAGE {
-            rasterize_logo_tex(ui.ctx())
-        } else {
-            load_tex_from_file(ctx, ui.ctx(), filename)
-        };
+        let tex = load_tex_from_file(ctx, ui.ctx(), filename);
         if let Some(tex) = tex {
             st.lcd.image_cache.insert(filename.clone(), tex);
         }
         ui.ctx().request_repaint(); // decode the next file next frame
         break; // one decode per frame
     }
-}
-
-/// Rasterize the bundled logo SVG into a texture for the sentinel image widget.
-fn rasterize_logo_tex(egui_ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    use resvg::{tiny_skia, usvg};
-    const SIDE: u32 = 256;
-    let tree = usvg::Tree::from_data(
-        halod_shared::lcd_custom::LOGO_SVG,
-        &usvg::Options::default(),
-    )
-    .ok()?;
-    let size = tree.size().to_int_size();
-    let long_edge = size.width().max(size.height()) as f32;
-    if long_edge <= 0.0 {
-        return None;
-    }
-    let scale = SIDE as f32 / long_edge;
-    let mut pixmap = tiny_skia::Pixmap::new(SIDE, SIDE)?;
-    resvg::render(
-        &tree,
-        tiny_skia::Transform::from_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-    Some(rgba_texture(
-        egui_ctx,
-        halod_shared::lcd_custom::LOGO_IMAGE,
-        pixmap.data(),
-        SIDE as usize,
-        SIDE as usize,
-    ))
 }
 
 /// Drop any GIF animation state. A no-op once already cleared, so it's cheap to

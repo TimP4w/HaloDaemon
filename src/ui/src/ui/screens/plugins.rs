@@ -111,10 +111,26 @@ pub struct PluginsUi {
     updating: HashMap<String, f64>,
     /// "Update all" in flight → egui time it began, cleared the same way.
     updating_all: Option<f64>,
+    /// The repo whose whole-repo update is in flight → (slug, egui time it began).
+    /// The Update-repo button shows a spinner until the repo drops its "update
+    /// available" plugins (the daemon re-broadcasts once the pull lands) or it
+    /// times out.
+    updating_repo: Option<(String, f64)>,
     /// The open plugin-issue Details modal (title + detail), when the user
     /// clicked Details on a plugin's issue banner.
     issue_modal: Option<(String, String)>,
+    #[cfg(target_os = "linux")]
+    next_udev_status_check: f64,
+    udev_command_copied: bool,
+    udev_info_open: bool,
+    /// egui time a udev "Recheck rules" began, driving the button's spinner; the
+    /// spinner runs for [`UDEV_RECHECK_SPINNER`] to acknowledge the request.
+    udev_rechecking: Option<f64>,
 }
+
+/// How long the udev "Recheck rules" button shows its spinner, giving the
+/// action visible feedback while the fresh status is fetched.
+const UDEV_RECHECK_SPINNER: f64 = 1.0;
 
 /// Failsafe: drop an update spinner after this long even if the daemon never
 /// re-broadcasts (e.g. an unreachable remote mid-update).
@@ -131,7 +147,17 @@ impl PluginsUi {
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
         repo_branches: &HashMap<String, Vec<String>>,
+        udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     ) {
+        let now = ui.input(|input| input.time);
+        #[cfg(target_os = "linux")]
+        if now >= self.next_udev_status_check {
+            ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::GetUdevRulesStatus,
+            );
+            self.next_udev_status_check = now + 5.0;
+        }
         self.selection = resolve_selection(
             self.selection.clone(),
             &state.plugins.plugins,
@@ -140,9 +166,7 @@ impl PluginsUi {
         self.detect_new_plugin_needing_consent(&state.plugins.plugins);
         self.sync_assets(ui.ctx(), cmd, &state.plugins.plugins, plugin_assets);
 
-        widgets::page_frame(ui, |ui| {
-            self.body(ui, state, cmd, repo_updates, plugin_updates)
-        });
+        self.body(ui, state, cmd, repo_updates, plugin_updates, udev_status);
 
         self.add_modal(ui.ctx(), cmd);
         self.add_repo_modal(ui.ctx(), cmd, repo_branches);
@@ -153,6 +177,33 @@ impl PluginsUi {
         if let Some((title, detail)) = &self.issue_modal {
             if widgets::issue_modal(ui.ctx(), "plugin_issue_page", title, detail) {
                 self.issue_modal = None;
+            }
+        }
+        if self.udev_info_open {
+            if let Some(status) = udev_status.filter(|status| status.supported) {
+                let rechecking = self
+                    .udev_rechecking
+                    .is_some_and(|started| now - started < UDEV_RECHECK_SPINNER);
+                if !rechecking {
+                    self.udev_rechecking = None;
+                }
+                let (close, recheck) =
+                    udev_info_modal(ui.ctx(), status, rechecking, &mut self.udev_command_copied);
+                if recheck && !rechecking {
+                    self.udev_rechecking = Some(now);
+                    ipc::send(
+                        cmd,
+                        halod_shared::commands::DaemonCommand::GetUdevRulesStatus,
+                    );
+                }
+                if rechecking {
+                    ui.ctx().request_repaint();
+                }
+                if close {
+                    self.udev_info_open = false;
+                }
+            } else {
+                self.udev_info_open = false;
             }
         }
     }
@@ -215,25 +266,8 @@ impl PluginsUi {
         cmd: &CommandTx,
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
+        udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     ) {
-        let title_resp = ui.label(
-            egui::RichText::new(t!("plugins.title"))
-                .font(theme::bold(22.0))
-                .color(theme::TEXT),
-        );
-        crate::domain::tour::anchor(
-            ui.ctx(),
-            crate::domain::tour::AnchorId::PluginsOverview,
-            title_resp.rect,
-        );
-        ui.add_space(3.0);
-        ui.label(
-            egui::RichText::new(t!("plugins.subtitle"))
-                .font(theme::body(12.0))
-                .color(theme::TEXT_MUT),
-        );
-        ui.add_space(18.0);
-
         reconcile_in_flight(
             &mut self.in_flight,
             &state.plugins.plugins,
@@ -242,10 +276,124 @@ impl PluginsUi {
                 halod_shared::types::DiscoveryPhase::Discovering
             ),
         );
-
         let now = ui.input(|i| i.time);
         self.sync_update_progress(plugin_updates, now);
+        if self.updating_all.is_some() || !self.updating.is_empty() {
+            // Keep the timeout advancing and the spinner animating.
+            ui.ctx().request_repaint();
+        }
 
+        // Full-bleed master–detail: a fixed sidebar (its own surface + right
+        // divider) beside a detail pane that fills the rest of the page.
+        const SIDEBAR_W: f32 = 344.0;
+        let full = ui.max_rect();
+        let sidebar_rect =
+            Rect::from_min_max(full.min, Pos2::new(full.left() + SIDEBAR_W, full.bottom()));
+        let detail_rect = Rect::from_min_max(Pos2::new(sidebar_rect.right(), full.top()), full.max);
+
+        ui.painter()
+            .rect_filled(sidebar_rect, 0.0, theme::SIDEBAR_BG);
+        ui.painter().vline(
+            sidebar_rect.right(),
+            sidebar_rect.y_range(),
+            Stroke::new(1.0, theme::BORDER),
+        );
+
+        let mut side = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(sidebar_rect.shrink2(Vec2::new(16.0, 18.0)))
+                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+        );
+        side.set_width(sidebar_rect.width() - 32.0);
+        self.sidebar(
+            &mut side,
+            state,
+            cmd,
+            repo_updates,
+            plugin_updates,
+            udev_status,
+        );
+
+        let mut detail = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(detail_rect)
+                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+        );
+        self.detail_column(&mut detail, state, cmd, plugin_updates, udev_status);
+    }
+
+    // ── Left: sidebar — banners, plugin list, repositories ──────────────────
+
+    fn sidebar(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &AppState,
+        cmd: &CommandTx,
+        repo_updates: &[RepoUpdateStatus],
+        plugin_updates: &[PluginUpdateStatus],
+        udev_status: Option<&halod_shared::types::UdevRulesStatus>,
+    ) {
+        // Platform-unsupported plugins are hidden from this screen, so the
+        // header counts only what the list actually shows.
+        let shown = state
+            .plugins
+            .plugins
+            .iter()
+            .filter(|p| p.platform_supported);
+        let total = shown.clone().count();
+        let active = shown.filter(|p| p.active).count();
+        egui::Sides::new().show(
+            ui,
+            |ui| {
+                let title_resp = ui.label(
+                    egui::RichText::new(t!("plugins.title"))
+                        .font(theme::bold(18.0))
+                        .color(theme::TEXT),
+                );
+                crate::domain::tour::anchor(
+                    ui.ctx(),
+                    crate::domain::tour::AnchorId::PluginsOverview,
+                    title_resp.rect,
+                );
+            },
+            |ui| {
+                let add_resp = widgets::button(
+                    ui,
+                    &t!("plugins.add"),
+                    ButtonKind::Primary,
+                    Vec2::new(90.0, 30.0),
+                );
+                crate::domain::tour::anchor(
+                    ui.ctx(),
+                    crate::domain::tour::AnchorId::PluginsAddPlugin,
+                    add_resp.rect,
+                );
+                if add_resp.clicked() {
+                    self.add = Some(AddState);
+                }
+            },
+        );
+        ui.add_space(theme::SPACE_1);
+        ui.label(
+            egui::RichText::new(t!("plugins.counts", count = total, active = active))
+                .font(theme::mono(10.0))
+                .color(theme::TEXT_FAINT),
+        );
+        ui.add_space(theme::SPACE_7);
+
+        // Global banners sit above the plugin list.
+        let now = ui.input(|i| i.time);
+        if let Some(status) = udev_status.filter(|status| status.supported) {
+            match udev_rules_banner(ui, status, self.udev_command_copied) {
+                UdevBannerAction::Install => {
+                    ui.ctx().copy_text(udev_install_commands());
+                    self.udev_command_copied = true;
+                }
+                UdevBannerAction::Info => self.udev_info_open = true,
+                UdevBannerAction::None => {}
+            }
+            ui.add_space(theme::SPACE_5);
+        }
         let due = plugin_updates.iter().filter(|s| s.update_available).count();
         if due > 0 {
             if update_all_banner(ui, due, self.updating_all.is_some()) {
@@ -255,182 +403,134 @@ impl PluginsUi {
                     halod_shared::commands::DaemonCommand::UpdateAllPlugins,
                 );
             }
-            ui.add_space(18.0);
-        }
-        if self.updating_all.is_some() || !self.updating.is_empty() {
-            // Keep the timeout advancing and the spinner animating.
-            ui.ctx().request_repaint();
+            ui.add_space(theme::SPACE_5);
         }
 
-        widgets::split_columns(ui, 320.0, 18.0, |left, right| {
-            self.list_column(left, state, cmd, repo_updates, plugin_updates);
-            self.detail_column(right, state, cmd, plugin_updates);
-        });
+        // Plugins, skipped packages, and repositories share one scroll region
+        // that fills the remaining sidebar height.
+        egui::ScrollArea::vertical()
+            .id_salt("plugins_sidebar_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.plugin_list(ui, state, cmd, plugin_updates, udev_status);
+                self.skipped_notice(ui, state);
+                self.repositories(ui, state, repo_updates);
+            });
     }
 
-    // ── Left: plugin list + repositories ────────────────────────────────────
-
-    fn list_column(
+    fn plugin_list(
         &mut self,
         ui: &mut egui::Ui,
         state: &AppState,
         cmd: &CommandTx,
-        repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
+        udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     ) {
-        widgets::card(ui, |ui| {
-            // Platform-unsupported plugins are hidden from this screen, so the
-            // header counts only what the list actually shows.
-            let shown = state
-                .plugins
-                .plugins
-                .iter()
-                .filter(|p| p.platform_supported);
-            let total = shown.clone().count();
-            let active = shown.filter(|p| p.active).count();
-            egui::Sides::new().show(
-                ui,
-                |ui| {
-                    ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new(t!("plugins.title"))
-                                .font(theme::semibold(15.0))
-                                .color(theme::TEXT),
-                        );
-                        ui.label(
-                            egui::RichText::new(t!(
-                                "plugins.counts",
-                                count = total,
-                                active = active
-                            ))
-                            .font(theme::mono(10.0))
-                            .color(theme::TEXT_FAINT),
-                        );
-                    });
-                },
-                |ui| {
-                    let add_resp = widgets::button(
-                        ui,
-                        &t!("plugins.add"),
-                        ButtonKind::Primary,
-                        Vec2::new(96.0, 30.0),
-                    );
-                    crate::domain::tour::anchor(
-                        ui.ctx(),
-                        crate::domain::tour::AnchorId::PluginsAddPlugin,
-                        add_resp.rect,
-                    );
-                    if add_resp.clicked() {
-                        self.add = Some(AddState);
-                    }
-                },
+        // Platform-unsupported plugins can never activate on this host, so
+        // they're hidden from the list entirely.
+        let visible: Vec<&PluginInfo> = state
+            .plugins
+            .plugins
+            .iter()
+            .filter(|p| p.platform_supported)
+            .collect();
+        if visible.is_empty() {
+            ui.label(
+                egui::RichText::new(t!("plugins.empty_title"))
+                    .font(theme::body_md())
+                    .color(theme::TEXT_MUT),
             );
-            ui.add_space(12.0);
-
-            // Platform-unsupported plugins can never activate on this host, so
-            // they're hidden from the list entirely.
-            let visible: Vec<&PluginInfo> = state
-                .plugins
-                .plugins
-                .iter()
-                .filter(|p| p.platform_supported)
-                .collect();
-            if visible.is_empty() {
-                ui.label(
-                    egui::RichText::new(t!("plugins.empty_title"))
-                        .font(theme::body(12.0))
-                        .color(theme::TEXT_MUT),
-                );
+            return;
+        }
+        ui.spacing_mut().item_spacing.y = 3.0;
+        for p in visible {
+            let selected = self.selection == Selection::Plugin(p.id.clone());
+            // An on-disk change only flags the row while the
+            // plugin is held disabled; re-enabling accepts it.
+            let needs_action = plugin_requires_regrant(p)
+                || udev_status.is_some_and(|status| {
+                    status.supported
+                        && !status.current
+                        && status.plugins_requiring_update.iter().any(|id| id == &p.id)
+                })
+                || plugin_updates.iter().any(|s| {
+                    s.plugin_id == p.id && (s.update_available || (s.on_disk_changed && !p.enabled))
+                });
+            let logo_tex = p
+                .logo
+                .as_deref()
+                .map(|name| ipc::plugin_asset_cache_key(&p.id, name))
+                .and_then(|key| self.asset_textures.get(&key));
+            let locked = if is_load_failed(p) {
+                Some(false)
             } else {
-                egui::ScrollArea::vertical()
-                    .max_height(360.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 3.0;
-                        for p in visible {
-                            let selected = self.selection == Selection::Plugin(p.id.clone());
-                            // An on-disk change only flags the row while the
-                            // plugin is held disabled; re-enabling accepts it.
-                            let needs_action = plugin_requires_regrant(p)
-                                || plugin_updates.iter().any(|s| {
-                                    s.plugin_id == p.id
-                                        && (s.update_available || (s.on_disk_changed && !p.enabled))
-                                });
-                            let logo_tex = p
-                                .logo
-                                .as_deref()
-                                .map(|name| ipc::plugin_asset_cache_key(&p.id, name))
-                                .and_then(|key| self.asset_textures.get(&key));
-                            let locked = if is_load_failed(p) {
-                                Some(false)
-                            } else {
-                                self.in_flight.get(&p.id).copied()
-                            };
-                            match list_row(ui, p, selected, needs_action, logo_tex, locked) {
-                                RowAction::Select => {
-                                    self.selection = Selection::Plugin(p.id.clone())
-                                }
-                                RowAction::Toggle => {
-                                    let out = request_toggle(cmd, p, self.pending_consent.take());
-                                    self.pending_consent = out.pending_consent;
-                                    if let Some(target) = out.dispatched {
-                                        apply_and_lock(&mut self.in_flight, &p.id, target);
-                                    }
-                                }
-                                RowAction::None => {}
-                            }
-                        }
-                    });
-            }
-
-            self.skipped_notice(ui, state);
-
-            ui.add_space(18.0);
-            egui::Sides::new().show(
-                ui,
-                |ui| {
-                    widgets::caps_label_inline(ui, &t!("plugins.repos_title"));
-                },
-                |ui| {
-                    let add_repo_resp =
-                        widgets::button(ui, "+", ButtonKind::Ghost, Vec2::new(28.0, 26.0));
-                    crate::domain::tour::anchor(
-                        ui.ctx(),
-                        crate::domain::tour::AnchorId::PluginsAddRepo,
-                        add_repo_resp.rect,
-                    );
-                    if add_repo_resp.clicked() {
-                        self.add_repo = Some(AddRepoState::default());
+                self.in_flight.get(&p.id).copied()
+            };
+            match list_row(ui, p, selected, needs_action, logo_tex, locked) {
+                RowAction::Select => self.selection = Selection::Plugin(p.id.clone()),
+                RowAction::Toggle => {
+                    let out = request_toggle(cmd, p, self.pending_consent.take());
+                    self.pending_consent = out.pending_consent;
+                    if let Some(target) = out.dispatched {
+                        apply_and_lock(&mut self.in_flight, &p.id, target);
                     }
-                },
-            );
-            ui.add_space(8.0);
-
-            let rows = repo_rows(&state.plugins.repos, repo_updates);
-            if rows.is_empty() {
-                ui.label(
-                    egui::RichText::new(t!("plugins.repos_empty"))
-                        .font(theme::body(11.5))
-                        .color(theme::TEXT_MUT),
-                );
-                return;
-            }
-            for row in rows {
-                let selected = self.selection == Selection::Repo(row.slug.to_owned());
-                if repo_row(ui, &row, selected) {
-                    self.selection = Selection::Repo(row.slug.to_owned());
                 }
+                RowAction::None => {}
             }
-        });
+        }
+    }
+
+    fn repositories(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &AppState,
+        repo_updates: &[RepoUpdateStatus],
+    ) {
+        ui.add_space(theme::SPACE_9);
+        egui::Sides::new().show(
+            ui,
+            |ui| {
+                widgets::caps_label_inline(ui, &t!("plugins.repos_title"));
+            },
+            |ui| {
+                let add_repo_resp =
+                    widgets::button(ui, "+", ButtonKind::Ghost, Vec2::new(28.0, 26.0));
+                crate::domain::tour::anchor(
+                    ui.ctx(),
+                    crate::domain::tour::AnchorId::PluginsAddRepo,
+                    add_repo_resp.rect,
+                );
+                if add_repo_resp.clicked() {
+                    self.add_repo = Some(AddRepoState::default());
+                }
+            },
+        );
+        ui.add_space(theme::SPACE_4);
+
+        let rows = repo_rows(&state.plugins.repos, repo_updates);
+        if rows.is_empty() {
+            ui.label(
+                egui::RichText::new(t!("plugins.repos_empty"))
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_MUT),
+            );
+            return;
+        }
+        for row in rows {
+            let selected = self.selection == Selection::Repo(row.slug.to_owned());
+            if repo_row(ui, &row, selected) {
+                self.selection = Selection::Repo(row.slug.to_owned());
+            }
+        }
     }
 
     fn skipped_notice(&mut self, ui: &mut egui::Ui, state: &AppState) {
         if state.plugins.skipped.is_empty() {
             return;
         }
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_9);
         widgets::caps_label_inline(ui, &t!("plugins.skipped_heading"));
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         for s in &state.plugins.skipped {
             let name = std::path::Path::new(&s.path)
                 .file_name()
@@ -445,7 +545,7 @@ impl PluginsUi {
                             .circle_filled(dot.center(), 3.0, theme::TRAFFIC_RED);
                         ui.label(
                             egui::RichText::new(name)
-                                .font(theme::body(12.0))
+                                .font(theme::body_md())
                                 .color(theme::TEXT_DIM),
                         );
                     });
@@ -462,7 +562,7 @@ impl PluginsUi {
                         {
                             self.pending_repo_repair = Some(PendingRepoRepair { slug });
                         }
-                        ui.add_space(6.0);
+                        ui.add_space(theme::SPACE_3);
                     }
                     if widgets::button(
                         ui,
@@ -479,7 +579,7 @@ impl PluginsUi {
                     }
                 },
             );
-            ui.add_space(4.0);
+            ui.add_space(theme::SPACE_2);
         }
     }
 
@@ -491,6 +591,7 @@ impl PluginsUi {
         state: &AppState,
         cmd: &CommandTx,
         plugin_updates: &[PluginUpdateStatus],
+        udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     ) {
         match &self.selection {
             Selection::Plugin(id) => {
@@ -509,11 +610,20 @@ impl PluginsUi {
                     .and_then(|key| self.asset_textures.get(&key));
                 let update = plugin_updates.iter().find(|s| &s.plugin_id == id);
                 let now = ui.input(|i| i.time);
+                let udev_action_needed = udev_status.is_some_and(|status| {
+                    status.supported
+                        && !status.current
+                        && status
+                            .plugins_requiring_update
+                            .iter()
+                            .any(|item| item == id)
+                });
 
                 egui::ScrollArea::vertical()
+                    .id_salt("plugin_detail_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        widgets::card(ui, |ui| {
+                        detail_pane(ui, |ui| {
                             detail_body(
                                 ui,
                                 p,
@@ -525,6 +635,7 @@ impl PluginsUi {
                                 &mut self.in_flight,
                                 &mut self.updating,
                                 &mut self.issue_modal,
+                                udev_action_needed,
                                 now,
                             )
                         });
@@ -554,12 +665,31 @@ impl PluginsUi {
                     .is_some_and(|c| c.slug == r.slug);
                 let updates_enabled = plugin_updates_enabled(state.gui.plugin_downloads);
 
+                // The whole repo is updatable when any of its plugins report an
+                // upstream update. Drop the spinner once they clear (the daemon
+                // re-broadcasts after the pull) or it times out.
+                let repo_has_updates = plugin_updates
+                    .iter()
+                    .any(|s| s.slug == r.slug && s.update_available);
+                if let Some((upd_slug, started)) = &self.updating_repo {
+                    if *upd_slug == r.slug && (!repo_has_updates || now - *started > UPDATE_TIMEOUT)
+                    {
+                        self.updating_repo = None;
+                    }
+                }
+                let updating_repo = self
+                    .updating_repo
+                    .as_ref()
+                    .is_some_and(|(s, _)| s == &r.slug);
+
                 let mut select_plugin = None;
                 let mut start_check = false;
+                let mut start_update = false;
                 egui::ScrollArea::vertical()
+                    .id_salt("plugin_detail_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        widgets::card(ui, |ui| {
+                        detail_pane(ui, |ui| {
                             select_plugin = repo_detail_body(
                                 ui,
                                 r,
@@ -567,7 +697,10 @@ impl PluginsUi {
                                 &mut self.pending_repo_delete,
                                 checking,
                                 updates_enabled,
+                                repo_has_updates,
+                                updating_repo,
                                 &mut start_check,
+                                &mut start_update,
                             );
                         });
                     });
@@ -582,7 +715,16 @@ impl PluginsUi {
                         halod_shared::commands::DaemonCommand::CheckPluginRepoUpdates,
                     );
                 }
-                if self.checking_repo.is_some() {
+                if start_update {
+                    self.updating_repo = Some((r.slug.clone(), now));
+                    crate::runtime::ipc::send(
+                        cmd,
+                        halod_shared::commands::DaemonCommand::UpdatePluginRepo {
+                            slug: r.slug.clone(),
+                        },
+                    );
+                }
+                if self.checking_repo.is_some() || updating_repo {
                     // Keep animating the spinner and advancing the timeout.
                     ui.ctx().request_repaint();
                 }
@@ -675,10 +817,10 @@ impl PluginsUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.repos_add_sub"))
-                        .font(theme::body(11.5))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut form.url)
                         .desired_width(f32::INFINITY)
@@ -695,9 +837,9 @@ impl PluginsUi {
                     form.fetch_at = None;
                     fetch_url = Some(url);
                 }
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
                 widgets::caps_label(ui, &t!("plugins.repos_branch_label"));
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 if let Some(picked) = branch_selector(ui, &form, repo_branches) {
                     form.branch = picked;
                 }
@@ -784,7 +926,7 @@ impl PluginsUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.delete_body", name = name))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
             },
@@ -838,7 +980,7 @@ impl PluginsUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.repos_remove_body", name = slug.clone()))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
             },
@@ -894,7 +1036,7 @@ impl PluginsUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.repos_repair_body"))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
             },
@@ -956,26 +1098,26 @@ impl PluginsUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.consent_body", name = p.name.clone()))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
                 match consent_reason(p) {
                     ConsentReason::AuthorityExpanded => {
-                        ui.add_space(8.0);
+                        ui.add_space(theme::SPACE_4);
                         ui.label(
                             egui::RichText::new(t!("plugins.consent_permission_added"))
-                                .font(theme::body(11.5))
+                                .font(theme::body_sm())
                                 .color(theme::STAT_AMBER),
                         );
                     }
                     ConsentReason::New => {}
                 }
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
                 authority_review_cards(ui, p);
-                ui.add_space(2.0);
+                ui.add_space(theme::SPACE_1);
                 ui.label(
                     egui::RichText::new(t!("plugins.consent_warning"))
-                        .font(theme::body(11.5))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
             },
@@ -1018,6 +1160,26 @@ impl PluginsUi {
             self.pending_consent = None;
         }
     }
+}
+
+fn udev_plugin_warning_banner(ui: &mut egui::Ui) {
+    egui::Frame::NONE
+        .fill(theme::a(theme::STAT_AMBER, 0.10))
+        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
+        .corner_radius(theme::RADIUS_MD)
+        .inner_margin(egui::Margin::symmetric(14, 10))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_plugin_action"))
+                    .font(theme::subhead())
+                    .color(theme::STAT_AMBER),
+            );
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_plugin_action_sub"))
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_DIM),
+            );
+        });
 }
 
 /// Map a skipped absolute path back to one of the package layouts accepted by
@@ -1154,23 +1316,23 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
+    // Match the plugin-row tile size (28 px); the fork glyph keeps its size, so
+    // the extra room becomes padding inside the larger holder.
     let icon_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 8.0, rect.center().y - 12.0),
-        Vec2::splat(24.0),
+        Pos2::new(rect.left() + 8.0, rect.center().y - 14.0),
+        Vec2::splat(28.0),
     );
     ui.painter()
-        .rect_filled(icon_rect, 6.0, theme::hex(0x161320));
+        .rect_filled(icon_rect, 8.0, theme::hex(0x161320));
     ui.painter().rect_stroke(
         icon_rect,
-        6.0,
+        8.0,
         Stroke::new(1.0, theme::BORDER),
         egui::StrokeKind::Middle,
     );
-    // Keep the fork comfortably inset from the holder so the glyph does not
-    // visually crowd the rounded tile at the compact row size.
-    icons::draw_fork(ui.painter(), icon_rect.shrink(5.0), theme::TEXT_DIM);
+    icons::draw_fork(ui.painter(), icon_rect.shrink(7.0), theme::TEXT_DIM);
 
-    let text_x = rect.left() + 40.0;
+    let text_x = rect.left() + 46.0;
     let sha_text = match &row.remote_short {
         Some(remote) => format!("{} → {}", row.locked_short, remote),
         None => row.locked_short.clone(),
@@ -1182,7 +1344,7 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
             Pos2::new(text_x, rect.center().y),
             Align2::LEFT_CENTER,
             row.slug,
-            theme::semibold(12.0),
+            theme::subhead(),
             theme::TEXT,
         );
     } else {
@@ -1190,14 +1352,14 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
             Pos2::new(text_x, rect.top() + 12.0),
             Align2::LEFT_TOP,
             row.slug,
-            theme::semibold(12.0),
+            theme::subhead(),
             theme::TEXT,
         );
         ui.painter().text(
             Pos2::new(text_x, rect.top() + 26.0),
             Align2::LEFT_TOP,
             sha_text,
-            theme::mono(9.5),
+            theme::value_xs(),
             if row.behind {
                 theme::STAT_AMBER
             } else {
@@ -1218,7 +1380,7 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
             branch_pos,
             Align2::RIGHT_CENTER,
             branch,
-            theme::mono(9.5),
+            theme::value_xs(),
             theme::TEXT_FAINT,
         );
     }
@@ -1389,14 +1551,6 @@ fn assets_to_request(
 
 // ── Row + detail painters ───────────────────────────────────────────────────
 
-#[cfg(test)]
-fn plugin_file_name(p: &PluginInfo) -> &str {
-    std::path::Path::new(&p.path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&p.path)
-}
-
 enum RowAction {
     None,
     Select,
@@ -1538,21 +1692,6 @@ pub(crate) fn consent_reason(p: &PluginInfo) -> ConsentReason {
     } else {
         ConsentReason::New
     }
-}
-
-/// The permissions `p` declares that haven't been granted yet — the ones an
-/// update newly requires.
-#[cfg(test)]
-fn newly_required_permissions(p: &PluginInfo) -> Vec<halod_shared::types::Permission> {
-    p.declared_permissions
-        .iter()
-        .filter(|perm| {
-            !p.accepted_authority
-                .as_ref()
-                .is_some_and(|accepted| accepted.permissions.contains(perm))
-        })
-        .copied()
-        .collect()
 }
 
 /// True when the user's enable intent is consent-satisfied. Runtime `active`
@@ -1772,7 +1911,7 @@ fn list_row(
             Pos2::new(text_x, rect.top() + 27.0),
             Align2::LEFT_TOP,
             &p.version,
-            theme::mono(9.5),
+            theme::value_xs(),
             theme::TEXT_FAINT,
         );
     }
@@ -1908,6 +2047,24 @@ fn initials_tile(ui: &mut egui::Ui, name: &str, id: &str, size: f32) {
     initials_tile_at(ui, rect, name, id);
 }
 
+/// Edge-to-edge padding for the detail pane. The detail view fills the page
+/// rather than sitting in a card, so this supplies the inset the card's inner
+/// margin used to provide.
+fn detail_pane<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::NONE
+        .inner_margin(egui::Margin {
+            left: 32,
+            right: 32,
+            top: 26,
+            bottom: 30,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(ui)
+        })
+        .inner
+}
+
 #[allow(clippy::too_many_arguments)] // detail pane mutates independent modal/task state slots
 fn detail_body(
     ui: &mut egui::Ui,
@@ -1920,53 +2077,44 @@ fn detail_body(
     in_flight: &mut HashMap<String, bool>,
     updating: &mut HashMap<String, f64>,
     issue_modal: &mut Option<(String, String)>,
+    udev_action_needed: bool,
     now: f64,
 ) {
-    egui::Sides::new().show(
-        ui,
-        |ui| {
-            match logo_tex {
-                Some(tex) => {
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
-                    draw_logo_fit(ui.painter(), rect, tex);
-                }
-                None => initials_tile(ui, &p.name, &p.id, 44.0),
+    ui.horizontal(|ui| {
+        match logo_tex {
+            Some(tex) => {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+                draw_logo_fit(ui.painter(), rect, tex);
             }
-            ui.add_space(4.0);
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(&p.name)
-                            .font(theme::bold(18.0))
-                            .color(theme::TEXT),
-                    );
-                    if !p.version.is_empty() {
-                        ui.label(
-                            egui::RichText::new(&p.version)
-                                .font(theme::mono(11.0))
-                                .color(theme::TEXT_FAINT),
-                        );
-                    }
-                });
+            None => initials_tile(ui, &p.name, &p.id, 44.0),
+        }
+        ui.add_space(theme::SPACE_2);
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(&p.path)
-                        .font(theme::mono(10.0))
-                        .color(theme::TEXT_FAINT2),
+                    egui::RichText::new(&p.name)
+                        .font(theme::bold(18.0))
+                        .color(theme::TEXT),
+                );
+                let _ = widgets::chip_colored(
+                    ui,
+                    &plugin_type_label(p.plugin_type),
+                    plugin_type_color(p.plugin_type),
                 );
             });
-        },
-        |ui| {
-            let _ = widgets::chip_colored(
-                ui,
-                &plugin_type_label(p.plugin_type),
-                plugin_type_color(p.plugin_type),
-            );
-        },
-    );
+            if !p.version.is_empty() {
+                ui.label(
+                    egui::RichText::new(&p.version)
+                        .font(theme::value_sm())
+                        .color(theme::TEXT_FAINT),
+                );
+            }
+        });
+    });
 
     if is_load_failed(p) {
         if let Some(issue) = &p.health.issue {
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
             if issue_banner(ui, issue) {
                 *issue_modal = Some((
                     t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
@@ -1981,7 +2129,7 @@ fn detail_body(
         if let Some(update) = update
             .filter(|u| u.update_available && p.provenance != PluginProvenance::LocalDevelopment)
         {
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
             let in_flight = updating.contains_key(&update.plugin_id);
             if update_banner(
                 ui,
@@ -2002,15 +2150,20 @@ fn detail_body(
     }
 
     if plugin_requires_regrant(p) {
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         regrant_warning_banner(ui, p);
     }
 
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     status_banner(ui, p);
 
+    if udev_action_needed {
+        ui.add_space(theme::SPACE_5);
+        udev_plugin_warning_banner(ui);
+    }
+
     if let Some(issue) = &p.health.issue {
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         if issue_banner(ui, issue) {
             *issue_modal = Some((
                 t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
@@ -2020,7 +2173,7 @@ fn detail_body(
     }
 
     if !p.license.is_empty() || !matches!(p.source, PluginSource::Local) {
-        ui.add_space(10.0);
+        ui.add_space(theme::SPACE_5);
         ui.horizontal_wrapped(|ui| {
             if !p.license.is_empty() {
                 widgets::chip(ui, &format!("⚖ {}", p.license));
@@ -2039,53 +2192,41 @@ fn detail_body(
     // Only while the plugin is held inactive: once re-enabled, the risk is
     // accepted and the banner is gone.
     if update.is_some_and(|u| u.on_disk_changed) && !plugin_enabled_with_consent(p) {
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         modified_on_disk_banner(ui);
     } else if let Some(update) =
         update.filter(|u| u.update_available && p.provenance != PluginProvenance::LocalDevelopment)
     {
-        ui.add_space(14.0);
-        let in_flight = updating.contains_key(&update.plugin_id);
-        if update_banner(
-            ui,
-            &update.current_version,
-            &update.available_version,
-            in_flight,
-        ) {
-            updating.insert(update.plugin_id.clone(), now);
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::UpdatePluginRepo {
-                    slug: update.slug.clone(),
-                },
-            );
-        }
+        // Informational only: a plugin is updated by pulling its whole repository
+        // (the repo detail's "Update repo" action), never one plugin at a time.
+        ui.add_space(theme::SPACE_7);
+        update_info_banner(ui, &update.current_version, &update.available_version);
     }
 
     if !p.description.is_empty() {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         ui.label(
             egui::RichText::new(&p.description)
-                .font(theme::body(12.5))
+                .font(theme::body_md())
                 .color(theme::TEXT_DIM),
         );
     }
 
     if !p.author.is_empty() {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         widgets::caps_label(ui, &t!("plugins.author"));
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
         ui.label(
             egui::RichText::new(&p.author)
-                .font(theme::body(12.5))
+                .font(theme::body_md())
                 .color(theme::TEXT),
         );
     }
 
     if p.plugin_type == halod_shared::types::PluginKind::Device && !p.capabilities.is_empty() {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         widgets::caps_label(ui, &t!("plugins.capabilities"));
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         ui.horizontal_wrapped(|ui| {
             for c in &p.capabilities {
                 widgets::chip(ui, c);
@@ -2094,9 +2235,9 @@ fn detail_body(
     }
 
     if !p.effect_names.is_empty() {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
         widgets::caps_label(ui, &t!("plugins.effects"));
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         ui.horizontal_wrapped(|ui| {
             for name in &p.effect_names {
                 widgets::chip(ui, name);
@@ -2108,7 +2249,7 @@ fn detail_body(
 
     ui.add_space(20.0);
     ui.separator();
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     ui.horizontal(|ui| {
         let active = plugin_enabled_with_consent(p);
         let locked = in_flight.contains_key(&p.id);
@@ -2157,6 +2298,7 @@ fn plugin_type_label(kind: halod_shared::types::PluginKind) -> std::borrow::Cow<
         PluginKind::Device => t!("plugins.type_device"),
         PluginKind::Effect => t!("plugins.type_effect"),
         PluginKind::Integration => t!("plugins.type_integration"),
+        PluginKind::Lcd => std::borrow::Cow::Borrowed("LCD"),
     }
 }
 
@@ -2166,6 +2308,7 @@ fn plugin_type_color(kind: halod_shared::types::PluginKind) -> egui::Color32 {
         PluginKind::Device => theme::STAT_CYAN,
         PluginKind::Effect => theme::STAT_PURPLE,
         PluginKind::Integration => theme::STAT_GREEN,
+        PluginKind::Lcd => theme::STAT_CYAN,
     }
 }
 
@@ -2231,16 +2374,16 @@ fn permission_bullet(
 ) {
     ui.horizontal(|ui| {
         dot(ui, color);
-        ui.add_space(2.0);
+        ui.add_space(theme::SPACE_1);
         ui.label(
             egui::RichText::new(permission_label(perm))
-                .font(theme::mono(11.0))
+                .font(theme::value_sm())
                 .color(theme::TEXT),
         );
     });
     ui.label(
         egui::RichText::new(permission_description(perm))
-            .font(theme::body(11.0))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
 }
@@ -2251,23 +2394,23 @@ fn permission_card(ui: &mut egui::Ui, perm: halod_shared::types::Permission) {
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 dot(ui, theme::STAT_AMBER);
-                ui.add_space(2.0);
+                ui.add_space(theme::SPACE_1);
                 ui.label(
                     egui::RichText::new(permission_label(perm))
                         .font(theme::mono(12.0))
                         .color(theme::TEXT),
                 );
             });
-            ui.add_space(3.0);
+            ui.add_space(theme::SPACE_1);
             ui.label(
                 egui::RichText::new(permission_description(perm))
-                    .font(theme::body(11.5))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_MUT),
             );
         });
@@ -2285,25 +2428,25 @@ fn command_authority_card(ui: &mut egui::Ui, commands: &[&str]) {
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::STAT_AMBER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(
                 egui::RichText::new("Can run programs")
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .strong()
                     .color(theme::STAT_AMBER),
             );
-            ui.add_space(3.0);
+            ui.add_space(theme::SPACE_1);
             ui.label(
                 egui::RichText::new(
                     "This plugin can start the following programs as your user account, with arguments it controls:",
                 )
-                .font(theme::body(11.5))
+                .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
             );
-            ui.add_space(5.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 egui::RichText::new(commands.join(", "))
                     .font(theme::mono(12.0))
@@ -2318,12 +2461,12 @@ fn command_authority_card(ui: &mut egui::Ui, commands: &[&str]) {
 pub(crate) fn authority_review_cards(ui: &mut egui::Ui, plugin: &PluginInfo) {
     for permission in &plugin.declared_permissions {
         permission_card(ui, *permission);
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
     }
     let commands = command_scope_names(&plugin.authority);
     if !commands.is_empty() {
         command_authority_card(ui, &commands);
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
     }
 }
 
@@ -2336,15 +2479,17 @@ fn targets_permissions_row(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
     if !has_targets && !has_perms {
         return;
     }
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
     ui.columns(2, |cols| {
         if has_targets {
-            widgets::caps_label(&mut cols[0], &t!("plugins.targets"));
-            cols[0].add_space(6.0);
+            // Match the permissions column's header row height (a `PILL_H`
+            // horizontal) so the two column headers align on the same row.
+            cols[0].horizontal(|ui| widgets::caps_label_inline(ui, &t!("plugins.targets")));
+            cols[0].add_space(theme::SPACE_3);
             for target in &p.targets {
                 cols[0].label(
                     egui::RichText::new(target)
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
             }
@@ -2373,11 +2518,11 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
         };
         ui.label(
             egui::RichText::new(text)
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(color),
         );
     });
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
 
     for perm in &p.declared_permissions {
         let color = if p
@@ -2390,13 +2535,13 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
             theme::STAT_AMBER
         };
         permission_bullet(ui, *perm, color);
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
     }
 
     if !p.consented {
         ui.label(
             egui::RichText::new(t!("plugins.permissions_enable_hint"))
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
         );
     } else if widgets::button(
@@ -2423,26 +2568,16 @@ fn status_banner(ui: &mut egui::Ui, p: &PluginInfo) {
     // user can act; the pill above already signals which kind.
     let unmet: Vec<&PluginRequirementStatus> =
         p.requirements.iter().filter(|r| !r.satisfied).collect();
-    egui::Frame::NONE
-        .fill(theme::INNER_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(14, 11))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                ui.painter().circle_filled(r.center(), 3.5, dot);
-                ui.label(
-                    egui::RichText::new(text)
-                        .font(theme::body(12.0))
-                        .color(color),
-                );
-            });
+    widgets::Banner::neutral(&text)
+        .title_color(color)
+        .title_font(theme::body_md())
+        .dot(dot)
+        .show_with(ui, |ui| {
             for req in unmet {
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
                 ui.label(
                     egui::RichText::new(requirement_line(req))
-                        .font(theme::body(11.0))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
             }
@@ -2458,44 +2593,299 @@ fn updates_available_key(count: usize) -> &'static str {
 }
 
 fn update_all_banner(ui: &mut egui::Ui, count: usize, updating: bool) -> bool {
-    let mut clicked = false;
+    let title = t!(updates_available_key(count), count = count).to_string();
+    let label = if updating {
+        t!("plugins.updating")
+    } else {
+        t!("plugins.update_all")
+    };
+    widgets::Banner::warn(&title)
+        .title_color(theme::TEXT)
+        .title_font(theme::body_md())
+        .dot(theme::STAT_AMBER)
+        .action(
+            widgets::BannerAction::new(&label, ButtonKind::Warn, Vec2::new(130.0, 30.0))
+                .loading(updating),
+        )
+        .show(ui)
+}
+
+fn udev_install_commands() -> String {
+    "halod udev-rules | sudo tee /etc/udev/rules.d/60-halod.rules >/dev/null\n\
+sudo udevadm control --reload-rules\n\
+sudo udevadm trigger"
+        .to_owned()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UdevBannerAction {
+    None,
+    Install,
+    Info,
+}
+
+fn udev_rules_banner(
+    ui: &mut egui::Ui,
+    status: &halod_shared::types::UdevRulesStatus,
+    copied: bool,
+) -> UdevBannerAction {
+    let mut action = UdevBannerAction::None;
+    let installed = status.installed_path.is_some();
+    let color = if status.current {
+        theme::STAT_GREEN
+    } else {
+        theme::STAT_AMBER
+    };
+    let (title, subtitle) = if status.current {
+        (
+            t!("plugins.udev_installed"),
+            t!(
+                "plugins.udev_installed_sub",
+                count = status.generated_rule_count,
+                path = status.installed_path.as_deref().unwrap_or_default()
+            ),
+        )
+    } else if installed {
+        (
+            t!("plugins.udev_outdated"),
+            t!(
+                "plugins.udev_outdated_sub",
+                count = status.generated_rule_count,
+                path = status.installed_path.as_deref().unwrap_or_default()
+            ),
+        )
+    } else {
+        (
+            t!("plugins.udev_missing"),
+            t!(
+                "plugins.udev_missing_sub",
+                count = status.generated_rule_count
+            ),
+        )
+    };
     egui::Frame::NONE
-        .fill(theme::a(theme::STAT_AMBER, 0.10))
-        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(16, 12))
+        .fill(theme::a(color, 0.10))
+        .stroke(Stroke::new(1.0, theme::a(color, 0.35)))
+        .corner_radius(theme::RADIUS_MD)
+        .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
-            // Match the band height to the button so the text centers against it.
-            egui::Sides::new().height(32.0).show(
-                ui,
-                |ui| {
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                    ui.painter()
-                        .circle_filled(r.center(), 3.5, theme::STAT_AMBER);
-                    ui.label(
-                        egui::RichText::new(t!(updates_available_key(count), count = count))
-                            .font(theme::body(12.5))
-                            .color(theme::TEXT),
-                    );
-                },
-                |ui| {
-                    let size = Vec2::new(120.0, 32.0);
-                    if updating {
-                        widgets::button_loading(
-                            ui,
-                            &t!("plugins.updating"),
-                            ButtonKind::Warn,
-                            size,
-                        );
-                    } else if widgets::button(ui, &t!("plugins.update_all"), ButtonKind::Warn, size)
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                ui.painter().circle_filled(dot.center(), 3.5, color);
+                ui.label(
+                    egui::RichText::new(title)
+                        .font(theme::semibold(12.5))
+                        .color(theme::TEXT),
+                );
+            });
+            ui.add_space(theme::SPACE_1);
+            ui.label(
+                egui::RichText::new(subtitle)
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_MUT),
+            );
+            ui.add_space(theme::SPACE_5);
+            ui.horizontal(|ui| {
+                if !status.current {
+                    let label = if copied {
+                        t!("plugins.udev_copied")
+                    } else {
+                        t!("plugins.udev_generate")
+                    };
+                    if widgets::button(ui, &label, ButtonKind::Warn, Vec2::new(150.0, 30.0))
                         .clicked()
                     {
-                        clicked = true;
+                        action = UdevBannerAction::Install;
                     }
-                },
-            );
+                    ui.add_space(theme::SPACE_3);
+                }
+                if widgets::button(
+                    ui,
+                    &t!("plugins.udev_info"),
+                    ButtonKind::Ghost,
+                    Vec2::new(78.0, 30.0),
+                )
+                .clicked()
+                {
+                    action = UdevBannerAction::Info;
+                }
+            });
         });
-    clicked
+    action
+}
+
+fn udev_info_modal(
+    ctx: &egui::Context,
+    status: &halod_shared::types::UdevRulesStatus,
+    rechecking: bool,
+    copied: &mut bool,
+) -> (bool, bool) {
+    let mut close = false;
+    let mut recheck = false;
+    let dismissed = widgets::dialog_with_subtitle(
+        ctx,
+        "udev_rules_info",
+        &t!("plugins.udev_info_title"),
+        &t!("plugins.udev_info_intro"),
+        700.0,
+        |ui| {
+            udev_modal_status(ui, status);
+            ui.add_space(theme::SPACE_9);
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_info_scope_title"))
+                    .font(theme::heading())
+                    .color(theme::TEXT),
+            );
+            ui.add_space(theme::SPACE_1);
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_info_scope"))
+                    .font(theme::body_md())
+                    .color(theme::TEXT_DIM),
+            );
+            ui.add_space(theme::SPACE_8);
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_info_install_title"))
+                    .font(theme::heading())
+                    .color(theme::TEXT),
+            );
+            ui.add_space(theme::SPACE_1);
+            ui.label(
+                egui::RichText::new(t!("plugins.udev_info_install"))
+                    .font(theme::body_md())
+                    .color(theme::TEXT_DIM),
+            );
+            ui.add_space(theme::SPACE_4);
+            egui::Frame::NONE
+                .fill(theme::a(egui::Color32::BLACK, 0.22))
+                .stroke(Stroke::new(1.0, theme::BORDER))
+                .corner_radius(9.0)
+                .inner_margin(egui::Margin::same(14))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    egui::Sides::new().show(
+                        ui,
+                        |ui| {
+                            ui.label(
+                                egui::RichText::new(udev_install_commands())
+                                    .font(theme::mono(10.5))
+                                    .color(theme::TEXT_DIM),
+                            );
+                        },
+                        |ui| {
+                            let label = if *copied {
+                                t!("plugins.udev_command_copied")
+                            } else {
+                                t!("plugins.udev_copy_command")
+                            };
+                            if widgets::button(
+                                ui,
+                                &label,
+                                ButtonKind::Ghost,
+                                Vec2::new(125.0, 28.0),
+                            )
+                            .clicked()
+                            {
+                                ui.ctx().copy_text(udev_install_commands());
+                                *copied = true;
+                            }
+                        },
+                    );
+                });
+        },
+        |ui| {
+            // The action row lays out right-to-left: buttons hug the right edge,
+            // then the hint fills the space that remains, folding onto extra lines
+            // instead of running under the buttons.
+            let recheck_size = Vec2::new(132.0, 34.0);
+            if rechecking {
+                widgets::button_loading(
+                    ui,
+                    &t!("plugins.udev_rechecking"),
+                    ButtonKind::Primary,
+                    recheck_size,
+                );
+            } else if widgets::button(
+                ui,
+                &t!("plugins.udev_recheck"),
+                ButtonKind::Primary,
+                recheck_size,
+            )
+            .clicked()
+            {
+                recheck = true;
+            }
+            ui.add_space(theme::SPACE_4);
+            if widgets::button(
+                ui,
+                &t!("plugins.issue_close"),
+                ButtonKind::Ghost,
+                Vec2::new(100.0, 32.0),
+            )
+            .clicked()
+            {
+                close = true;
+            }
+            ui.add_space(theme::SPACE_7);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(t!("plugins.udev_recheck_hint"))
+                        .font(theme::caption())
+                        .color(theme::TEXT_FAINT),
+                )
+                .wrap(),
+            );
+        },
+    );
+    (close || dismissed, recheck)
+}
+
+fn udev_modal_status(ui: &mut egui::Ui, status: &halod_shared::types::UdevRulesStatus) {
+    let (color, text) = if status.current {
+        (
+            theme::STAT_GREEN,
+            t!(
+                "plugins.udev_modal_current",
+                count = status.generated_rule_count,
+                path = status.installed_path.as_deref().unwrap_or_default()
+            ),
+        )
+    } else if let Some(path) = &status.installed_path {
+        (
+            theme::STAT_AMBER,
+            t!(
+                "plugins.udev_modal_outdated",
+                count = status.generated_rule_count,
+                path = path
+            ),
+        )
+    } else {
+        (
+            theme::STAT_AMBER,
+            t!(
+                "plugins.udev_modal_missing",
+                count = status.generated_rule_count
+            ),
+        )
+    };
+    egui::Frame::NONE
+        .fill(theme::a(color, 0.08))
+        .stroke(Stroke::new(1.0, theme::a(color, 0.35)))
+        .corner_radius(theme::RADIUS_MD)
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                ui.painter().circle_filled(dot.center(), 4.0, color);
+                ui.label(egui::RichText::new(text).font(theme::semibold(11.5)).color(
+                    if status.current {
+                        theme::TEXT_DIM
+                    } else {
+                        color
+                    },
+                ));
+            });
+        });
 }
 
 /// Amber "Update available vX → vY / Update" banner in a plugin's detail. Never
@@ -2505,24 +2895,11 @@ fn update_all_banner(ui: &mut egui::Ui, count: usize, updating: bool) -> bool {
 /// safety; this explains why and how to recover. Purely informational: the user
 /// re-enables it with the normal toggle, which accepts the current content.
 fn modified_on_disk_banner(ui: &mut egui::Ui) {
-    egui::Frame::NONE
-        .fill(theme::a(theme::STAT_AMBER, 0.10))
-        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(14, 11))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(t!("plugins.modified_on_disk"))
-                    .font(theme::semibold(12.0))
-                    .color(theme::STAT_AMBER),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(t!("plugins.modified_on_disk_sub"))
-                    .font(theme::body(11.5))
-                    .color(theme::TEXT_DIM),
-            );
-        });
+    let title = t!("plugins.modified_on_disk");
+    let sub = t!("plugins.modified_on_disk_sub");
+    widgets::Banner::warn(title.as_ref())
+        .subtitle(sub.as_ref())
+        .show(ui);
 }
 
 /// Prominent recovery hint for a plugin disabled after its previously approved
@@ -2533,24 +2910,10 @@ fn regrant_warning_banner(ui: &mut egui::Ui, p: &PluginInfo) {
         ConsentReason::AuthorityExpanded => t!("plugins.consent_permission_added"),
         ConsentReason::New => t!("plugins.consent_modified"),
     };
-    egui::Frame::NONE
-        .fill(theme::a(theme::STAT_AMBER, 0.10))
-        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(14, 11))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(t!("plugins.regrant_required"))
-                    .font(theme::semibold(12.0))
-                    .color(theme::STAT_AMBER),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(detail)
-                    .font(theme::body(11.5))
-                    .color(theme::TEXT_DIM),
-            );
-        });
+    let title = t!("plugins.regrant_required");
+    widgets::Banner::warn(title.as_ref())
+        .subtitle(detail.as_ref())
+        .show(ui);
 }
 
 /// The i18n label key for a plugin issue banner, by kind.
@@ -2574,92 +2937,71 @@ fn is_load_failed(p: &PluginInfo) -> bool {
 /// A per-plugin issue banner with a "Details" button; returns `true` when
 /// Details is clicked. Load warnings tint amber, connect/runtime errors red.
 fn issue_banner(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
-    let accent = match issue.kind {
-        PluginIssueKind::LoadWarning => theme::STAT_AMBER,
-        _ => theme::TRAFFIC_RED,
+    let title = t!(issue_label_key(&issue.kind));
+    let label = t!("plugins.issue_details");
+    let banner = if issue.kind == PluginIssueKind::LoadWarning {
+        widgets::Banner::warn(title.as_ref())
+    } else {
+        widgets::Banner::danger(title.as_ref())
     };
-    let mut clicked = false;
-    egui::Frame::NONE
-        .fill(theme::a(accent, 0.10))
-        .stroke(Stroke::new(1.0, theme::a(accent, 0.35)))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(14, 11))
-        .show(ui, |ui| {
-            egui::Sides::new().height(30.0).show(
-                ui,
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(t!(issue_label_key(&issue.kind)))
-                            .font(theme::semibold(12.0))
-                            .color(accent),
-                    );
-                },
-                |ui| {
-                    if widgets::button(
-                        ui,
-                        &t!("plugins.issue_details"),
-                        ButtonKind::Ghost,
-                        Vec2::new(90.0, 30.0),
-                    )
-                    .clicked()
-                    {
-                        clicked = true;
-                    }
-                },
+    banner
+        .action(widgets::BannerAction::new(
+            &label,
+            ButtonKind::Ghost,
+            Vec2::new(90.0, 30.0),
+        ))
+        .show(ui)
+}
+
+/// Informational "Update available vX → vY" banner in a plugin's detail, with
+/// no action: a plugin is updated by pulling its whole repository, so the button
+/// lives on the repo detail instead.
+fn update_info_banner(ui: &mut egui::Ui, current: &str, available: &str) {
+    let title = t!("plugins.update_available");
+    widgets::Banner::warn(title.as_ref())
+        .title_color(theme::TEXT)
+        .title_font(theme::body_md())
+        .show_with(ui, |ui| {
+            if !current.is_empty() || !available.is_empty() {
+                ui.add_space(theme::SPACE_1);
+                ui.label(
+                    egui::RichText::new(format!("{current} → {available}"))
+                        .font(theme::value_sm())
+                        .color(theme::STAT_AMBER),
+                );
+            }
+            ui.add_space(theme::SPACE_1);
+            ui.label(
+                egui::RichText::new(t!("plugins.update_via_repo"))
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_MUT),
             );
         });
-    clicked
 }
 
 fn update_banner(ui: &mut egui::Ui, current: &str, available: &str, updating: bool) -> bool {
-    let mut clicked = false;
-    egui::Frame::NONE
-        .fill(theme::a(theme::STAT_AMBER, 0.10))
-        .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(14, 11))
-        .show(ui, |ui| {
-            egui::Sides::new().height(30.0).show(
-                ui,
-                |ui| {
-                    ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new(t!("plugins.update_available"))
-                                .font(theme::body(12.0))
-                                .color(theme::TEXT),
-                        );
-                        if !current.is_empty() || !available.is_empty() {
-                            ui.label(
-                                egui::RichText::new(format!("{current} → {available}"))
-                                    .font(theme::mono(11.0))
-                                    .color(theme::STAT_AMBER),
-                            );
-                        }
-                    });
-                },
-                |ui| {
-                    let size = Vec2::new(90.0, 30.0);
-                    if updating {
-                        widgets::button_loading(
-                            ui,
-                            &t!("plugins.updating"),
-                            ButtonKind::Warn,
-                            size,
-                        );
-                    } else if widgets::button(
-                        ui,
-                        &t!("plugins.repos_update"),
-                        ButtonKind::Warn,
-                        size,
-                    )
-                    .clicked()
-                    {
-                        clicked = true;
-                    }
-                },
-            );
-        });
-    clicked
+    let title = t!("plugins.update_available");
+    let label = if updating {
+        t!("plugins.updating")
+    } else {
+        t!("plugins.repos_update")
+    };
+    widgets::Banner::warn(title.as_ref())
+        .title_color(theme::TEXT)
+        .title_font(theme::body_md())
+        .action(
+            widgets::BannerAction::new(&label, ButtonKind::Warn, Vec2::new(90.0, 30.0))
+                .loading(updating),
+        )
+        .show_action_with(ui, |ui| {
+            if !current.is_empty() || !available.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("{current} → {available}"))
+                        .font(theme::value_sm())
+                        .color(theme::STAT_AMBER),
+                );
+            }
+        })
 }
 
 /// `last_sync` is stored as an RFC3339 timestamp. Keep the stat compact by
@@ -2693,15 +3035,15 @@ fn stat_box(ui: &mut egui::Ui, label: &str, value: &str) {
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(14, 11))
+        .corner_radius(theme::RADIUS_MD)
+        .inner_margin(theme::PAD_BANNER)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             widgets::caps_label(ui, label);
-            ui.add_space(4.0);
+            ui.add_space(theme::SPACE_2);
             ui.label(
                 egui::RichText::new(value)
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT),
             );
         });
@@ -2728,7 +3070,7 @@ fn repo_no_drivers_box(ui: &mut egui::Ui) {
         rect.center(),
         Align2::CENTER_CENTER,
         t!("plugins.repo_no_drivers"),
-        theme::body(12.0),
+        theme::body_md(),
         theme::TEXT_MUT,
     );
 }
@@ -2745,8 +3087,8 @@ fn updates_disabled_note(ui: &mut egui::Ui) {
     egui::Frame::NONE
         .fill(theme::a(theme::TEXT_MUT, 0.08))
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(14, 11))
+        .corner_radius(theme::RADIUS_MD)
+        .inner_margin(theme::PAD_BANNER)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
@@ -2754,7 +3096,7 @@ fn updates_disabled_note(ui: &mut egui::Ui) {
                     .circle_filled(dot.center(), 3.5, theme::TEXT_FAINT);
                 ui.label(
                     egui::RichText::new(t!("plugins.repos_updates_disabled"))
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_MUT),
                 );
             });
@@ -2764,6 +3106,7 @@ fn updates_disabled_note(ui: &mut egui::Ui) {
 /// The repo detail panel: header, stat boxes, "Check for updates", the list
 /// of plugins it provides, and Remove (hidden for the official repo). Returns
 /// a clicked plugin id, if any, so the caller can switch the selection to it.
+#[allow(clippy::too_many_arguments)] // repo detail threads independent check/update UI state
 fn repo_detail_body(
     ui: &mut egui::Ui,
     r: &PluginRepoInfo,
@@ -2771,14 +3114,17 @@ fn repo_detail_body(
     pending_repo_delete: &mut Option<String>,
     checking: bool,
     updates_enabled: bool,
+    has_updates: bool,
+    updating: bool,
     start_check: &mut bool,
+    start_update: &mut bool,
 ) -> Option<String> {
     egui::Sides::new().show(
         ui,
         |ui| {
             ui.horizontal(|ui| {
                 repo_icon_tile(ui, 44.0);
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(
@@ -2840,7 +3186,7 @@ fn repo_detail_body(
         |_ui| {},
     );
 
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
     let repo_plugins: Vec<&PluginInfo> = plugins
         .iter()
         .filter(|p| matches!(&p.source, PluginSource::Repo { slug } if *slug == r.slug))
@@ -2862,40 +3208,56 @@ fn repo_detail_body(
         );
     });
 
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     if !updates_enabled {
         updates_disabled_note(ui);
-        ui.add_space(10.0);
-        widgets::button_disabled(
+        ui.add_space(theme::SPACE_5);
+    }
+    ui.horizontal(|ui| {
+        let size = Vec2::new(180.0, 32.0);
+        if !updates_enabled {
+            widgets::button_disabled(
+                ui,
+                &t!("plugins.repos_check_updates"),
+                ButtonKind::Primary,
+                size,
+            );
+        } else if checking {
+            ui.add(egui::Spinner::new().size(18.0).color(theme::CYAN));
+            ui.add_space(theme::SPACE_3);
+            ui.label(
+                egui::RichText::new(t!("plugins.repos_checking"))
+                    .font(theme::body_md())
+                    .color(theme::TEXT_MUT),
+            );
+        } else if widgets::button(
             ui,
             &t!("plugins.repos_check_updates"),
             ButtonKind::Primary,
-            Vec2::new(180.0, 32.0),
-        );
-    } else if checking {
-        ui.horizontal(|ui| {
-            ui.add(egui::Spinner::new().size(18.0).color(theme::CYAN));
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(t!("plugins.repos_checking"))
-                    .font(theme::body(12.5))
-                    .color(theme::TEXT_MUT),
-            );
-        });
-    } else if widgets::button(
-        ui,
-        &t!("plugins.repos_check_updates"),
-        ButtonKind::Primary,
-        Vec2::new(180.0, 32.0),
-    )
-    .clicked()
-    {
-        *start_check = true;
-    }
+            size,
+        )
+        .clicked()
+        {
+            *start_check = true;
+        }
+
+        // The repo is the unit of update: pull it here rather than per plugin.
+        if has_updates && (updating || (updates_enabled && !checking)) {
+            ui.add_space(theme::SPACE_5);
+            let size = Vec2::new(150.0, 32.0);
+            if updating {
+                widgets::button_loading(ui, &t!("plugins.updating"), ButtonKind::Warn, size);
+            } else if widgets::button(ui, &t!("plugins.repos_update_repo"), ButtonKind::Warn, size)
+                .clicked()
+            {
+                *start_update = true;
+            }
+        }
+    });
 
     ui.add_space(20.0);
     widgets::caps_label(ui, &t!("plugins.repo_drivers_from"));
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
 
     if repo_plugins.is_empty() {
         repo_no_drivers_box(ui);
@@ -2920,7 +3282,7 @@ fn repo_detail_body(
             Pos2::new(text_x, rect.top() + 6.0),
             Align2::LEFT_TOP,
             &p.name,
-            theme::semibold(12.0),
+            theme::subhead(),
             theme::TEXT,
         );
         let sub = match (p.version.is_empty(), p.license.is_empty()) {
@@ -2933,7 +3295,7 @@ fn repo_detail_body(
             Pos2::new(text_x, rect.top() + 22.0),
             Align2::LEFT_TOP,
             sub,
-            theme::mono(9.5),
+            theme::value_xs(),
             theme::TEXT_FAINT,
         );
         ui.painter().circle_filled(
@@ -2949,7 +3311,7 @@ fn repo_detail_body(
     if !r.official {
         ui.add_space(20.0);
         ui.separator();
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         if widgets::button(
             ui,
             &t!("plugins.repos_remove"),
@@ -2970,27 +3332,27 @@ fn repo_detail_body(
 fn add_body(ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new(t!("plugins.add_sub"))
-            .font(theme::body(11.5))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
 
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(20, 26))
         .show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.upload_hint"))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT),
                 );
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
                 ui.label(
                     egui::RichText::new(t!("plugins.upload_sub"))
-                        .font(theme::body(11.0))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
             });
@@ -3393,7 +3755,6 @@ mod tests {
             transport_scopes: vec![],
         });
         assert_eq!(consent_reason(&p), ConsentReason::AuthorityExpanded);
-        assert_eq!(newly_required_permissions(&p), vec![Permission::Os]);
 
         // Approved before, content changed, but no new permission.
         let mut p = info("a", false);
@@ -3404,7 +3765,6 @@ mod tests {
             transport_scopes: vec![],
         });
         assert_eq!(consent_reason(&p), ConsentReason::New);
-        assert!(newly_required_permissions(&p).is_empty());
     }
 
     #[test]
@@ -3607,14 +3967,6 @@ mod tests {
     }
 
     #[test]
-    fn file_name_is_basename() {
-        assert_eq!(plugin_file_name(&info("kraken", true)), "kraken.lua");
-        let mut p = info("x", true);
-        p.path = "ene_smbus.lua".into();
-        assert_eq!(plugin_file_name(&p), "ene_smbus.lua");
-    }
-
-    #[test]
     fn status_dot_reflects_enabled() {
         assert_eq!(status_dot(&info("a", true)), theme::ONLINE);
         assert_eq!(status_dot(&info("a", false)), theme::TEXT_FAINT2);
@@ -3772,5 +4124,14 @@ mod tests {
             plugin_type_color(PluginKind::Device),
             plugin_type_color(PluginKind::Effect)
         );
+    }
+
+    #[test]
+    fn udev_install_command_generates_then_reloads_rules() {
+        let command = udev_install_commands();
+        assert!(command.contains("halod udev-rules"));
+        assert!(command.contains("/etc/udev/rules.d/60-halod.rules"));
+        assert!(command.contains("udevadm control --reload-rules"));
+        assert!(command.contains("udevadm trigger"));
     }
 }

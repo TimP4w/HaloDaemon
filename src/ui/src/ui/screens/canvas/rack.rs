@@ -33,7 +33,7 @@ pub(super) fn right_panel(
         crate::domain::tour::AnchorId::CanvasInstanceRack,
         rack.response.rect,
     );
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     sampling_card(ui, state, canvas_ui, time);
 }
 
@@ -52,10 +52,10 @@ fn sampling_card(ui: &mut egui::Ui, state: &AppState, canvas_ui: &mut CanvasUi, 
         |ui| {
             ui.label(
                 egui::RichText::new(t!("canvas.sampling_desc").to_string())
-                    .font(theme::body(11.0))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_FAINT),
             );
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             let mut v = canvas_ui.sample_radius;
             let readout = format!("{v:.1} px");
             if widgets::slider_row(
@@ -162,19 +162,6 @@ pub(super) fn instance_name<'a>(effects: &'a HashMap<String, EffectDef>, id: &'a
         .unwrap_or(id)
 }
 
-/// The first `max` labels plus a "+N more" overflow chip label.
-#[cfg(test)]
-fn chip_overflow(labels: &[String], max: usize) -> (&[String], Option<String>) {
-    if labels.len() > max {
-        (
-            &labels[..max],
-            Some(t!("canvas.overflow_more", n = labels.len() - max).to_string()),
-        )
-    } else {
-        (labels, None)
-    }
-}
-
 fn device_name<'a>(state: &'a AppState, device_id: &'a str) -> &'a str {
     state
         .devices
@@ -262,7 +249,7 @@ fn instance_rack(
         state.lighting.canvas.default_effect.clone(),
         cmd,
     );
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
 
     // "Effect instances" header + New — a bare row, outside any card. Each
     // instance below is then its own widget.
@@ -288,12 +275,12 @@ fn instance_rack(
             }
         },
     );
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
 
     if ids.is_empty() {
         ui.label(
             egui::RichText::new(t!("canvas.no_instances").to_string())
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(theme::TEXT_FAINT),
         );
         return;
@@ -314,7 +301,7 @@ fn instance_rack(
                 page,
             );
         });
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
     }
 }
 
@@ -360,10 +347,10 @@ fn default_effect_card(
                     },
                 );
             }
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 egui::RichText::new(t!("canvas.default_effect_hint").to_string())
-                    .font(theme::body(10.5))
+                    .font(theme::caption())
                     .color(theme::TEXT_FAINT),
             );
         },
@@ -428,18 +415,18 @@ fn instance_row(
     // Row 1: swatch, name, chevron.
     p.rect_filled(
         Rect::from_center_size(Pos2::new(head.left() + 11.0, top_y), Vec2::splat(13.0)),
-        4.0,
+        theme::RADIUS_XS,
         color,
     );
     p.text(
         Pos2::new(head.right() - 6.0, top_y),
         Align2::RIGHT_CENTER,
         if expanded { "▾" } else { "▸" },
-        theme::body(9.0),
+        theme::micro(),
         theme::TEXT_FAINT,
     );
     // Row 2: effect · zones · devices, truncated to leave room for SYNCED.
-    let sub_font = theme::mono(9.5);
+    let sub_font = theme::value_xs();
     let synced_font = theme::mono(8.5);
     let synced_label = format!("⛓ {}", t!("canvas.synced"));
     let synced_w = if synced {
@@ -593,9 +580,9 @@ fn instance_row(
     }
 
     // Effect dropdown.
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     widgets::caps_label(ui, &t!("canvas.effect_caps"));
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     {
         let mut sel = def.effect_id.clone();
         let w = ui.available_width();
@@ -648,7 +635,7 @@ fn instance_row(
     }
 
     // Assigned zones: chips only; assignment happens in the Edit zones modal.
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
     egui::Sides::new().show(
         ui,
         |ui| widgets::caps_label(ui, &t!("canvas.assigned_zones")),
@@ -669,7 +656,7 @@ fn instance_row(
             }
         },
     );
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     if zones.is_empty() {
         if widgets::button(
             ui,
@@ -717,7 +704,7 @@ fn instance_row(
     }
 
     if def.effect_id == DESIGNER_PIXMAP_EFFECT_ID {
-        ui.add_space(10.0);
+        ui.add_space(theme::SPACE_5);
         if widgets::button(
             ui,
             &t!("canvas.edit_in_designer"),
@@ -736,7 +723,7 @@ fn instance_row(
         }
     }
 
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
     if widgets::button(
         ui,
         &t!("canvas.delete_instance"),
@@ -830,22 +817,6 @@ mod tests {
         ui.pending.effect = Some(("live".to_string(), DaemonCommand::CanvasStop, 0.0));
         prune_stale_instance_refs(&mut ui, &["live".to_string()]);
         assert!(ui.pending.effect.is_some());
-    }
-
-    #[test]
-    fn chip_overflow_caps_and_counts() {
-        let labels: Vec<String> = (0..9).map(|i| format!("z{i}")).collect();
-        let (shown, more) = chip_overflow(&labels, 7);
-        assert_eq!(shown.len(), 7);
-        assert_eq!(more.as_deref(), Some("+2 more"));
-
-        let (shown, more) = chip_overflow(&labels[..7], 7);
-        assert_eq!(shown.len(), 7);
-        assert_eq!(more, None);
-
-        let (shown, more) = chip_overflow(&[], 7);
-        assert!(shown.is_empty());
-        assert_eq!(more, None);
     }
 
     #[test]

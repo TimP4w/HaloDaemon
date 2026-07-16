@@ -6,10 +6,8 @@ post_install() {
     udevadm trigger 2>/dev/null || true
     cat <<'EOF'
 ==> HaloDaemon installed. Notes:
-    * Add yourself to the `halod` group for hwmon PWM fan control:
+    * Add yourself to the `halod` group for hwmon PWM and plugin-scoped SMBus access:
         sudo usermod -aG halod $USER
-    * For SMBus/DRAM + GPU RGB, install i2c-tools and join the `i2c` group:
-        sudo usermod -aG i2c $USER
       (log out and back in for group changes to take effect)
     * The GUI starts the daemon on demand. To run it as a session service:
         systemctl --user enable --now halod.service

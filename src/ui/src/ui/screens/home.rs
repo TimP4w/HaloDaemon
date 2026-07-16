@@ -46,7 +46,7 @@ pub fn show(
                     header(ui, state, show_hidden, variant, search);
                     let conflicts = conflict_group_count(&state.devices);
                     if conflicts > 0 {
-                        ui.add_space(18.0);
+                        ui.add_space(theme::SPACE_9);
                         if attention_banner(ui, conflicts) {
                             *conflict_resolve = Some(conflict_groups(&state.devices));
                         }
@@ -222,10 +222,10 @@ fn attention_banner(ui: &mut egui::Ui, count: usize) -> bool {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 62.0), Sense::hover());
     {
         let p = ui.painter();
-        p.rect_filled(rect, 12.0, a(theme::STAT_AMBER, 0.09));
+        p.rect_filled(rect, theme::RADIUS_LG, a(theme::STAT_AMBER, 0.09));
         p.rect_stroke(
             rect,
-            12.0,
+            theme::RADIUS_LG,
             Stroke::new(1.0, a(theme::STAT_AMBER, 0.34)),
             egui::StrokeKind::Middle,
         );
@@ -233,10 +233,10 @@ fn attention_banner(ui: &mut egui::Ui, count: usize) -> bool {
             Pos2::new(rect.left() + 35.0, rect.center().y),
             Vec2::splat(34.0),
         );
-        p.rect_filled(icon, 9.0, a(theme::STAT_AMBER, 0.12));
+        p.rect_filled(icon, theme::RADIUS_MD, a(theme::STAT_AMBER, 0.12));
         p.rect_stroke(
             icon,
-            9.0,
+            theme::RADIUS_MD,
             Stroke::new(1.0, a(theme::STAT_AMBER, 0.35)),
             egui::StrokeKind::Middle,
         );
@@ -252,14 +252,14 @@ fn attention_banner(ui: &mut egui::Ui, count: usize) -> bool {
             Pos2::new(tx, rect.center().y - 9.0),
             Align2::LEFT_CENTER,
             title,
-            theme::semibold(13.0),
+            theme::heading(),
             theme::hex(0xf0dca0),
         );
         p.text(
             Pos2::new(tx, rect.center().y + 9.0),
             Align2::LEFT_CENTER,
             t!("home.conflict_banner_sub"),
-            theme::body(11.5),
+            theme::body_sm(),
             theme::hex(0xb39f6a),
         );
     }
@@ -326,17 +326,17 @@ fn conflict_modal(
         |ui| {
             ui.label(
                 egui::RichText::new(t!("home.conflict_modal_intro"))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
             for group in groups.iter_mut() {
                 conflict_group_card(ui, group);
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
             }
             ui.label(
                 egui::RichText::new(t!("home.conflict_modal_note"))
-                    .font(theme::body(11.0))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_FAINT),
             );
         },
@@ -351,7 +351,7 @@ fn conflict_modal(
             {
                 apply = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("home.conflict_decide_later"),
@@ -386,7 +386,7 @@ fn conflict_group_card(ui: &mut egui::Ui, group: &mut ConflictGroup) {
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(12.0)
+        .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin {
             left: 15,
             right: 15,
@@ -406,17 +406,17 @@ fn conflict_group_card(ui: &mut egui::Ui, group: &mut ConflictGroup) {
             ui.horizontal(|ui| {
                 let (badge, _) = ui.allocate_exact_size(Vec2::new(40.0, 30.0), Sense::hover());
                 widgets::device_badge(ui.painter(), badge, dev_type);
-                ui.add_space(11.0);
+                ui.add_space(theme::SPACE_6);
                 ui.vertical(|ui| {
-                    ui.add_space(1.0);
+                    ui.add_space(theme::SPACE_1);
                     ui.label(
                         egui::RichText::new(&dev_name)
-                            .font(theme::semibold(13.5))
+                            .font(theme::heading())
                             .color(theme::TEXT),
                     );
                     ui.label(
                         egui::RichText::new(model::device_type_label(dev_type))
-                            .font(theme::body(10.5))
+                            .font(theme::caption())
                             .color(theme::TEXT_MUT),
                     );
                 });
@@ -424,7 +424,7 @@ fn conflict_group_card(ui: &mut egui::Ui, group: &mut ConflictGroup) {
                     sources_pill(ui, sources);
                 });
             });
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             let gap = 9.0;
             let side = ((ui.available_width() - gap) / 2.0).max(120.0);
             let mut picked = None;
@@ -497,10 +497,10 @@ fn owner_option(
     } else {
         theme::CARD_BG
     };
-    p.rect_filled(rect, 10.0, fill);
+    p.rect_filled(rect, theme::RADIUS_MD, fill);
     p.rect_stroke(
         rect,
-        10.0,
+        theme::RADIUS_MD,
         Stroke::new(
             if selected { 1.5 } else { 1.0 },
             if selected { theme::CYAN } else { theme::BORDER },
@@ -543,7 +543,7 @@ fn owner_option(
             theme::CYAN,
         );
     }
-    let source_font = theme::body(10.5);
+    let source_font = theme::caption();
     let source = ellipsize(
         p,
         &conflict_source_label(&device.source),
@@ -650,7 +650,7 @@ fn remove_confirm_modal(
         |ui| {
             ui.label(
                 egui::RichText::new(t!("home.remove_device_confirm", name = target.child_name))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         },
@@ -665,7 +665,7 @@ fn remove_confirm_modal(
             {
                 confirm = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("home.cancel"),
@@ -717,7 +717,7 @@ fn card_menu(
         edit.request_focus();
         let mut save = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         let mut cancel = false;
-        ui.add_space(7.0);
+        ui.add_space(theme::SPACE_4);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let bw = egui::vec2((inner_w - 6.0) / 2.0, 28.0);
@@ -838,14 +838,14 @@ fn header(
             };
             ui.label(
                 egui::RichText::new(sub)
-                    .font(theme::body(13.0))
+                    .font(theme::body_lg())
                     .color(theme::TEXT_MUT),
             );
         });
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             segmented(ui, variant);
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             if hidden > 0 {
                 let label = if *show_hidden {
                     t!("home.hide_hidden")
@@ -861,7 +861,7 @@ fn header(
                 if clicked {
                     *show_hidden = !*show_hidden;
                 }
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
             }
             search_box(ui, search);
         });
@@ -872,13 +872,7 @@ fn header(
 fn search_box(ui: &mut egui::Ui, search: &mut String) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(190.0, 33.0), Sense::hover());
     crate::domain::tour::anchor(ui.ctx(), crate::domain::tour::AnchorId::HomeSearch, rect);
-    ui.painter().rect_filled(rect, 10.0, theme::CARD_BG);
-    ui.painter().rect_stroke(
-        rect,
-        10.0,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
+    theme::paint_card_rect(ui.painter(), rect, theme::RADIUS_MD);
     // Magnifier glyph.
     let icon = Pos2::new(rect.left() + 13.0, rect.center().y);
     ui.painter()
@@ -903,7 +897,7 @@ fn search_box(ui: &mut egui::Ui, search: &mut String) {
         egui::TextEdit::singleline(search)
             .frame(egui::Frame::NONE)
             .desired_width(f32::INFINITY)
-            .font(theme::body(12.5))
+            .font(theme::body_md())
             .hint_text(t!("home.search_devices")),
     );
 }
@@ -913,13 +907,7 @@ fn search_box(ui: &mut egui::Ui, search: &mut String) {
 fn segmented(ui: &mut egui::Ui, variant: &mut Variant) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(108.0, 33.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, 10.0, theme::CARD_BG);
-    p.rect_stroke(
-        rect,
-        10.0,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
+    theme::paint_card_rect(p, rect, theme::RADIUS_MD);
     for (i, (v, label)) in [
         (Variant::Grid, t!("home.grid")),
         (Variant::List, t!("home.list")),
@@ -934,14 +922,15 @@ fn segmented(ui: &mut egui::Ui, variant: &mut Variant) {
         let active = *variant == v;
         let resp = ui.interact(chip, ui.id().with(("seg", i)), Sense::click());
         if active {
-            ui.painter().rect_filled(chip, 7.0, theme::CYAN);
+            ui.painter()
+                .rect_filled(chip, theme::RADIUS_SM, theme::CYAN);
         } else {
             let t =
                 ui.ctx()
                     .animate_bool_with_time(ui.id().with(("seg_h", i)), resp.hovered(), 0.12);
             if t > 0.001 {
                 ui.painter()
-                    .rect_filled(chip, 7.0, a(Color32::WHITE, 0.05 * t));
+                    .rect_filled(chip, theme::RADIUS_SM, a(Color32::WHITE, 0.05 * t));
             }
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -952,9 +941,9 @@ fn segmented(ui: &mut egui::Ui, variant: &mut Variant) {
             Align2::CENTER_CENTER,
             label,
             if active {
-                theme::semibold(12.0)
+                theme::subhead()
             } else {
-                theme::body(12.0)
+                theme::body_md()
             },
             if active {
                 theme::hex(0x0a0d13)
@@ -1025,7 +1014,7 @@ fn sensor_card(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let p = ui.painter();
-    p.rect_filled(rect, 12.0, theme::CARD_BG);
+    p.rect_filled(rect, theme::RADIUS_LG, theme::CARD_BG);
 
     // Background sparkline from the rolling history.
     if let Some(samples) = history.get(&s.id) {
@@ -1041,7 +1030,7 @@ fn sensor_card(
     };
     p.rect_stroke(
         rect,
-        12.0,
+        theme::RADIUS_LG,
         Stroke::new(1.0, border_color),
         egui::StrokeKind::Middle,
     );
@@ -1053,7 +1042,7 @@ fn sensor_card(
         Pos2::new(rect.left() + 28.0, rect.top() + 18.0),
         Align2::LEFT_CENTER,
         &s.label,
-        theme::body(11.0),
+        theme::body_sm(),
         theme::TEXT_MUT,
     );
     // Value + unit, with trend at the right.
@@ -1068,7 +1057,7 @@ fn sensor_card(
         Pos2::new(vrect.right() + 6.0, vrect.bottom() - 4.0),
         Align2::LEFT_BOTTOM,
         s.unit,
-        theme::body(12.0),
+        theme::body_md(),
         theme::TEXT_FAINT,
     );
     if let Some(trend) = history
@@ -1085,11 +1074,11 @@ fn sensor_card(
     }
     // Greyed when hidden; right-click to toggle visibility.
     if s.hidden {
-        p.rect_filled(rect, 12.0, a(theme::MAIN_BG, 0.45));
+        p.rect_filled(rect, theme::RADIUS_LG, a(theme::MAIN_BG, 0.45));
         theme::round_corners(p, rect, 12.0, theme::MAIN_BG);
         p.rect_stroke(
             rect,
-            12.0,
+            theme::RADIUS_LG,
             Stroke::new(1.0, theme::BORDER),
             egui::StrokeKind::Middle,
         );
@@ -1238,7 +1227,7 @@ fn draw_card_glow(ui: &egui::Ui, rect: Rect, d: &WireDevice, color: Color32, t: 
     let badge_r = egui::lerp(16.0..=30.0, t);
     let badge_s = egui::lerp(0.154..=0.36, t);
 
-    p.rect_filled(rect, 14.0, theme::CARD_BG);
+    p.rect_filled(rect, theme::RADIUS_XL, theme::CARD_BG);
     let anchor = Pos2::new(rect.right(), rect.top());
     let animating = t > 0.002;
     let time = ui.input(|i| i.time) as f32;
@@ -1351,10 +1340,10 @@ fn device_card(
         Pos2::new(rect.left() + 16.0, type_y),
         Align2::LEFT_TOP,
         model::type_label(d),
-        theme::body(11.0),
+        theme::body_sm(),
         theme::TEXT_MUT,
     );
-    let name_font = theme::semibold(13.5);
+    let name_font = theme::heading();
     let display_name = ellipsize(p, &d.name, &name_font, rect.width() - 32.0);
     p.text(
         Pos2::new(rect.left() + 16.0, type_y - 6.0 - 16.0),
@@ -1366,7 +1355,7 @@ fn device_card(
 
     // Grey out hidden/disabled/offline devices with a uniform scrim.
     if dimmed {
-        p.rect_filled(rect, 14.0, a(theme::MAIN_BG, 0.5));
+        p.rect_filled(rect, theme::RADIUS_XL, a(theme::MAIN_BG, 0.5));
     }
 
     // Restore the rounded silhouette (the clipped glow filled the corners),
@@ -1375,7 +1364,7 @@ fn device_card(
     let border = theme::lerp_color(theme::BORDER, a(color, 0.55), t);
     p.rect_stroke(
         rect,
-        14.0,
+        theme::RADIUS_XL,
         Stroke::new(1.0, border),
         egui::StrokeKind::Middle,
     );
@@ -1414,7 +1403,7 @@ fn conflict_control(
         chip.right_top(),
         Align2::RIGHT_TOP,
         &label,
-        theme::body(9.0),
+        theme::micro(),
         color,
     );
     let clicked = response.clicked();
@@ -1467,7 +1456,7 @@ fn status_chip(p: &egui::Painter, right: f32, cy: f32, dot: Color32, text: &str,
         Pos2::new(right, cy),
         Align2::RIGHT_CENTER,
         text,
-        theme::body(10.5),
+        theme::caption(),
         color,
     );
     p.circle_filled(Pos2::new(st.left() - 8.0, cy), 3.0, dot);
@@ -1506,7 +1495,7 @@ fn list(
     egui::Frame::NONE
         .fill(theme::CARD_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(14.0)
+        .corner_radius(theme::RADIUS_XL)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             for (i, d) in devices.iter().enumerate() {
@@ -1574,14 +1563,14 @@ fn list_row(
         Pos2::new(chip.right() + 14.0, rect.center().y - 8.0),
         Align2::LEFT_CENTER,
         &d.name,
-        theme::semibold(13.0),
+        theme::heading(),
         theme::TEXT,
     );
     p.text(
         Pos2::new(chip.right() + 14.0, rect.center().y + 9.0),
         Align2::LEFT_CENTER,
         model::type_label(d),
-        theme::body(11.0),
+        theme::body_sm(),
         theme::TEXT_MUT,
     );
 
@@ -1592,7 +1581,7 @@ fn list_row(
             Pos2::new(mx, rect.center().y - 8.0),
             Align2::LEFT_CENTER,
             &m.label,
-            theme::body(10.0),
+            theme::caption(),
             theme::TEXT_MUT,
         );
         p.text(

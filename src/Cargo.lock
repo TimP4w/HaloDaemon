@@ -2655,6 +2655,7 @@ dependencies = [
 name = "halod-shared"
 version = "0.3.0"
 dependencies = [
+ "fontdb",
  "libc",
  "proptest",
  "serde",

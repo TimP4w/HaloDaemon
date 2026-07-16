@@ -2,7 +2,9 @@
 //! Left sidebar: workspace nav, live device list, and the daemon-health footer.
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{AppState, FanCurveStatus, PluginIssueKind, PluginUpdateStatus};
+use halod_shared::types::{
+    AppState, FanCurveStatus, PluginIssueKind, PluginUpdateStatus, UdevRulesStatus,
+};
 
 use crate::domain::models::device as model;
 use crate::domain::state::Page;
@@ -57,6 +59,10 @@ pub fn integrations_needing_action(state: &AppState) -> usize {
         .count()
 }
 
+fn udev_rules_need_action(status: Option<&UdevRulesStatus>) -> bool {
+    status.is_some_and(|status| status.supported && !status.current)
+}
+
 /// Whether the Plugins attention badge includes a real failure. Load warnings,
 /// updates, and consent prompts remain amber; connect/runtime/load failures use
 /// the same red severity color as their plugin issue banner.
@@ -102,8 +108,10 @@ pub fn sidebar(
     connected: bool,
     page: &mut Page,
     plugin_updates: &[PluginUpdateStatus],
+    udev_status: Option<&UdevRulesStatus>,
 ) {
-    let plugin_actions = plugins_needing_action(state, plugin_updates);
+    let plugin_actions = plugins_needing_action(state, plugin_updates)
+        + usize::from(udev_rules_need_action(udev_status));
     let plugin_errors = plugins_have_errors(state);
     let integration_actions = integrations_needing_action(state);
     let cooling_actions = cooling_needing_action(state);
@@ -113,9 +121,9 @@ pub fn sidebar(
         Stroke::new(1.0, theme::DIVIDER),
     );
 
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     ui.horizontal(|ui| {
-        ui.add_space(12.0);
+        ui.add_space(theme::SPACE_6);
         ui.vertical(|ui| {
             ui.set_width(rect.width() - 24.0);
             section_label(ui, &t!("shell.workspace"));
@@ -158,10 +166,10 @@ pub fn sidebar(
                 crate::domain::tour::anchor(ui.ctx(), anchor, row_rect);
             }
 
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             section_label(ui, &t!("shell.my_devices"));
         });
-        ui.add_space(12.0);
+        ui.add_space(theme::SPACE_6);
     });
 
     // Device list (scrolls, with side padding), then a pinned footer.
@@ -178,7 +186,7 @@ pub fn sidebar(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(&mut list_ui, |ui| {
-            ui.add_space(2.0);
+            ui.add_space(theme::SPACE_1);
             let mut any = false;
             let mut devices: Vec<_> = state
                 .devices
@@ -194,12 +202,12 @@ pub fn sidebar(
                 }
             }
             if !any {
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 ui.horizontal(|ui| {
-                    ui.add_space(14.0);
+                    ui.add_space(theme::SPACE_7);
                     ui.label(
                         egui::RichText::new(t!("shell.no_devices"))
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_FAINT),
                     );
                 });
@@ -248,14 +256,14 @@ fn footer(ui: &mut egui::Ui, rect: Rect, connected: bool) {
             Pos2::new(dot.x + 14.0, y + 21.0),
             Align2::LEFT_CENTER,
             title,
-            theme::semibold(12.0),
+            theme::subhead(),
             theme::TEXT,
         );
         p.text(
             Pos2::new(dot.x + 14.0, y + 35.0),
             Align2::LEFT_CENTER,
             sub,
-            theme::body(10.0),
+            theme::caption(),
             sub_col,
         );
     }
@@ -283,14 +291,14 @@ fn footer(ui: &mut egui::Ui, rect: Rect, connected: bool) {
 }
 
 fn section_label(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
     let mut job = egui::text::LayoutJob::default();
     job.append(
         text,
         0.0,
         egui::TextFormat {
-            font_id: theme::body(10.0),
+            font_id: theme::caption(),
             color: theme::TEXT_FAINT2,
             extra_letter_spacing: 2.0,
             ..Default::default()
@@ -351,9 +359,9 @@ fn nav_row(
     );
     icons::draw(ui, icon_rect, icon, icon_tint);
     let font = if active {
-        theme::semibold(13.0)
+        theme::heading()
     } else {
-        theme::body(13.0)
+        theme::body_lg()
     };
     ui.painter().text(
         Pos2::new(rect.left() + 44.0, rect.center().y),
@@ -470,7 +478,7 @@ fn device_row(ui: &mut egui::Ui, d: &halod_shared::types::WireDevice, active: bo
         Pos2::new(chip.right() + 10.0, rect.center().y),
         Align2::LEFT_CENTER,
         &d.name,
-        theme::body(12.0),
+        theme::body_md(),
         theme::TEXT,
     );
     resp.clicked()
@@ -561,6 +569,24 @@ mod tests {
         let mut state = AppState::default();
         state.plugins.plugins = vec![plugin("a", true), plugin("b", true)];
         assert_eq!(plugins_needing_action(&state, &[]), 0);
+    }
+
+    #[test]
+    fn udev_sidebar_attention_is_linux_supported_and_stale_only() {
+        let stale = UdevRulesStatus {
+            supported: true,
+            current: false,
+            ..Default::default()
+        };
+        assert!(udev_rules_need_action(Some(&stale)));
+
+        let current = UdevRulesStatus {
+            current: true,
+            ..stale.clone()
+        };
+        assert!(!udev_rules_need_action(Some(&current)));
+        assert!(!udev_rules_need_action(Some(&UdevRulesStatus::default())));
+        assert!(!udev_rules_need_action(None));
     }
 
     #[test]

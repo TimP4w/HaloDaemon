@@ -31,6 +31,7 @@ impl App {
         // applied by each backend after `draw` — not here, so it isn't run twice.
         let connected = *self.ui.connected.borrow();
         let debug = self.ui.debug.borrow().clone();
+        let udev_rules = self.ui.udev_rules.borrow().clone();
         if self.ui.lcd_images.has_changed().unwrap_or_else(|_| {
             log::warn!("IPC lcd_images channel closed");
             false
@@ -196,7 +197,7 @@ impl App {
         let screen = ui.max_rect();
         ctx.layer_painter(egui::LayerId::background()).rect_filled(
             screen,
-            12.0,
+            crate::ui::theme::RADIUS_LG,
             crate::ui::theme::SIDEBAR_BG,
         );
 
@@ -221,7 +222,7 @@ impl App {
         );
         border.rect_stroke(
             screen,
-            12.0,
+            crate::ui::theme::RADIUS_LG,
             egui::Stroke::new(1.0, crate::ui::theme::BORDER),
             egui::StrokeKind::Inside,
         );
@@ -301,6 +302,7 @@ impl App {
                     connected,
                     &mut self.page,
                     &self.plugin_updates_cache,
+                    udev_rules.as_ref(),
                 );
             });
 
@@ -353,6 +355,7 @@ impl App {
                             lcd_editor_render,
                             self.canvas_ui.led_colors(),
                             self.write_rate_history.get(&id),
+                            &plugin_assets,
                         );
                     }
                     Page::Cooling => {
@@ -400,6 +403,7 @@ impl App {
                             &self.repo_updates_cache,
                             &self.plugin_updates_cache,
                             &self.repo_branches_cache,
+                            udev_rules.as_ref(),
                         );
                     }
                     Page::Integrations => {

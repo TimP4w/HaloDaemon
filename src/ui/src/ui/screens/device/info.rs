@@ -37,7 +37,7 @@ fn draw_write_rate_graph(
     if samples.len() < 2 {
         return;
     }
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_2);
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 50.0), egui::Sense::hover());
     let painter = ui.painter();
@@ -139,7 +139,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                 None => (find_hub_write_rate(ctx.state, &dev.id), true),
             };
             if let Some(wr) = write_rate {
-                ui.add_space(16.0);
+                ui.add_space(theme::SPACE_8);
                 let wr_title = if via_hub {
                     t!("devtabs.write_rate_shared")
                 } else {
@@ -164,7 +164,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                     },
                 );
             }
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
             widgets::card_titled(
                 ui,
                 &t!("devtabs.diagnostics"),
@@ -197,20 +197,20 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                         let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(copied_key));
                         let now = ui.ctx().input(|i| i.time);
                         if super::super::settings::copied_feedback_visible(copied_at, now) {
-                            ui.add_space(10.0);
+                            ui.add_space(theme::SPACE_5);
                             ui.label(
                                 egui::RichText::new(t!("devtabs.copied"))
-                                    .font(theme::semibold(12.0))
+                                    .font(theme::subhead())
                                     .color(theme::TRAFFIC_GREEN),
                             );
                             ui.ctx().request_repaint();
                         }
                     });
                     if ctx.debug.is_none() {
-                        ui.add_space(8.0);
+                        ui.add_space(theme::SPACE_4);
                         ui.label(
                             egui::RichText::new(t!("devtabs.fetching_debug"))
-                                .font(theme::body(10.5))
+                                .font(theme::caption())
                                 .color(theme::TEXT_FAINT2),
                         );
                     }

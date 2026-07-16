@@ -57,7 +57,7 @@ pub async fn serialize_state(
     lighting.config = cfg.rgb.clone();
     let mut lcd = app
         .lcd
-        .snapshot(snap.lcd_templates, snap.lcd_template_params)
+        .snapshot(&app.registry, snap.lcd_templates, snap.lcd_template_params)
         .await;
     lcd.config = cfg.lcd.clone();
     let observed_repo_signatures = app.repo_signature_status.lock().await.clone();

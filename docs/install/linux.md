@@ -1,6 +1,6 @@
 # Installing on Linux
 
-Pick the section for your distro. All installs ship the `halod` daemon, the `halod-gui` UI, and the udev rules. After installing, read [Runtime dependencies](#runtime-dependencies), [Groups & permissions](#groups--permissions), and [Avoid conflicting software](#avoid-conflicting-software).
+Pick the section for your distro. All installs ship the `halod` daemon, the `halod-gui` UI, and the base udev rules; installed plugins contribute their own rules dynamically. After installing, read [Runtime dependencies](#runtime-dependencies), [Groups & permissions](#groups--permissions), and [Avoid conflicting software](#avoid-conflicting-software).
 
 ## NixOS
 
@@ -17,7 +17,7 @@ programs.halod = {
   enable = true;
 
   # SMBus / DRAM + GPU RGB (ASUS/ENE, Corsair DRAM). Loads i2c-dev and
-  # creates the `i2c` group; pick the chipset driver for your board.
+  # exposes the device nodes; pick the chipset driver for your board.
   i2c.enable = true;
   i2c.platform = "amd";          # "amd" → i2c-piix4 | "intel" → i2c-i801
 
@@ -29,17 +29,15 @@ programs.halod = {
   enableGnomeExtension = true;
 };
 
-# Required for i2c.enable — grants your user SMBus access.
-# Add "halod" too if you use hwmon PWM fan control — the pwm files are
-# group-scoped (mode 0664) rather than world-writable.
-users.users.<you>.extraGroups = [ "i2c" "halod" ];
+# Grants access to plugin-scoped SMBus nodes and hwmon PWM controls.
+users.users.<you>.extraGroups = [ "halod" ];
 ```
 
-This installs the binaries and udev rules and runs `halod` as a per-user service. Every option except `enable` defaults to `false`, so enable only what your hardware needs:
+This installs the binaries and base udev rules and runs `halod` as a per-user service. Every option except `enable` defaults to `false`, so enable only what your hardware needs:
 
 | Option | Effect |
 |--------|--------|
-| `i2c.enable` | Turns on `hardware.i2c.enable` (loads `i2c-dev`, creates the `i2c` group) for SMBus DRAM/GPU RGB |
+| `i2c.enable` | Turns on `hardware.i2c.enable` (loads `i2c-dev`) for SMBus DRAM/GPU RGB; generated rules grant matching nodes to `halod` |
 | `i2c.platform` | Chipset SMBus driver: `"amd"` → `i2c-piix4`, `"intel"` → `i2c-i801` (`null` = load neither) |
 | `enableNuvotonFanControl` | Loads `nct6775` for NCT677x SuperIO temperature sensors and PWM fan headers (no-op if the chip is absent) |
 | `enableGnomeExtension` | Installs the GNOME Shell extension system-wide (each user still runs `gnome-extensions enable halod@halod`) |
@@ -52,7 +50,7 @@ Download `halod_<version>_amd64.deb` from the [releases page](https://github.com
 ```bash
 sudo apt install ./halod_*.deb
 ```
-The package installs both binaries, the udev rules, and a desktop entry, pulls in the runtime libraries automatically, and creates the `halod` group. `ffmpeg` (LCD video) is a recommended dependency; `nvidia-utils` and `i2c-tools` are suggested. Then join the groups you need (see [Groups & permissions](#groups--permissions)).
+The package installs both binaries, the base udev rules, and a desktop entry, pulls in the runtime libraries automatically, and creates the `halod` group. `ffmpeg` (LCD video) is a recommended dependency; `nvidia-utils` and `i2c-tools` are suggested. Then join the groups you need (see [Groups & permissions](#groups--permissions)).
 
 ## Fedora
 
@@ -95,19 +93,26 @@ The tarball install does **not** set up the udev rules, groups, or kernel module
 
 Required — without these the daemon needs root:
 ```bash
-sudo cp udev/60-halod.rules /etc/udev/rules.d/
+halod udev-rules | sudo tee /etc/udev/rules.d/60-halod.rules >/dev/null
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
+Official release packages generate this file from the exact signed plugin
+bundle embedded in that release. Run the same command again after installing,
+removing, or updating plugins. The Plugins screen reports when the effective
+installed file is stale and can copy these manual installation commands.
+
 ## Groups & permissions
 
-USB peripherals (HID, raw USB, uinput key remapper) are granted to the user of the active local session via the `uaccess` tag, so no group membership is needed for them. Two groups cover the rest — the `.deb`/`.rpm`/Arch packages create `halod` for you; on a tarball install add yourself to whichever you need (log out and back in afterwards):
+USB peripherals (HID, raw USB, uinput key remapper) are granted to the user of the active local session via the `uaccess` tag, so no group membership is needed for them. The `halod` group covers hwmon and plugin-scoped SMBus access; the `.deb`/`.rpm`/Arch packages create it for you. On a tarball install, create it and add yourself (then log out and back in):
 ```bash
-sudo usermod -aG halod $USER   # motherboard PWM fan control via hwmon
-sudo usermod -aG i2c $USER     # SMBus/DRAM + GPU RGB (ASUS/ENE, Corsair DRAM)
+sudo groupadd -f halod
+sudo usermod -aG halod $USER
 ```
-For motherboard PWM fan control the udev rules scope the hwmon `pwm` files to the `halod` group (mode 0664) on device add.
+For PWM fan control the udev rules scope every hwmon device's `pwm1`–`pwm7`
+and corresponding `_enable` files to the `halod` group on device add. This is
+independent of the kernel driver's chip name.
 After adding the user to `halod`, log out and back in, then repair permissions
 for already-present devices with:
 
@@ -130,7 +135,7 @@ Add it to `/etc/modules-load.d/` to persist across reboots.
 
 ### SMBus DRAM / GPU RGB
 
-Chipset SMBus access needs the `i2c-dev` module plus your platform's bus driver (`i2c-piix4` on AMD, `i2c-i801` on Intel). Load them and join the `i2c` group above.
+Chipset SMBus access needs the `i2c-dev` module plus your platform's bus driver (`i2c-piix4` on AMD, `i2c-i801` on Intel). Generated plugin rules grant only matching adapters to the `halod` group.
 
 ### Screen capture (canvas screen sampler)
 

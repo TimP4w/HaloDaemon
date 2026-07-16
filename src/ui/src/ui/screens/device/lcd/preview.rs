@@ -167,13 +167,13 @@ pub(super) fn display_card(
                         p.circle_stroke(center, radius, Stroke::new(1.0, theme::BORDER));
                     }
                     ScreenShape::Square => {
-                        p.rect_filled(rect, 12.0, theme::INNER_BG);
+                        p.rect_filled(rect, theme::RADIUS_LG, theme::INNER_BG);
                         if let Some(tex) = &st.lcd.preview_tex {
                             p.image(tex.id(), rect, cover_uv(tex), Color32::WHITE);
                         }
                         p.rect_stroke(
                             rect,
-                            12.0,
+                            theme::RADIUS_LG,
                             Stroke::new(1.0, theme::BORDER),
                             egui::StrokeKind::Middle,
                         );
@@ -186,12 +186,12 @@ pub(super) fn display_card(
                         center,
                         egui::Align2::CENTER_CENTER,
                         format!("{}×{}", lcd.descriptor.width, lcd.descriptor.height),
-                        theme::mono(11.0),
+                        theme::value_sm(),
                         theme::TEXT_MUT,
                     );
                 }
             }
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
 
             // Brightness.
             let key = "lcd_bright";
@@ -208,11 +208,11 @@ pub(super) fn display_card(
                     ctx.time,
                 );
             }
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
 
             // Rotation.
             widgets::caps_label(ui, &t!("lcd.rotation"));
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 7.0;
                 let rots = if lcd.descriptor.supported_rotations.is_empty() {
@@ -237,10 +237,10 @@ pub(super) fn display_card(
                     }
                 }
             });
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
 
             raw_streaming_row(ui, ctx, id, lcd);
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
 
             if widgets::button(
                 ui,
@@ -269,7 +269,7 @@ pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, lcd: 
         |ui| {
             ui.label(
                 egui::RichText::new(t!("lcd.raw_streaming"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_DIM),
             )
             .on_hover_text(t!("lcd.raw_streaming_hint"));

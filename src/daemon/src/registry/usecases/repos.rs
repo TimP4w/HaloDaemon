@@ -474,7 +474,7 @@ async fn touch_last_sync(app: &Arc<AppState>, slugs: &[String]) {
 /// Recompute per-plugin update status (optionally scoped to one repo) and
 /// broadcast it to every client, so their update banners reflect reality after
 /// an update lands.
-async fn broadcast_plugin_updates(app: &Arc<AppState>, slug_filter: Option<&str>) {
+pub(crate) async fn broadcast_plugin_updates(app: &Arc<AppState>, slug_filter: Option<&str>) {
     let (statuses, reached) = compute_plugin_updates(app, slug_filter).await;
     touch_last_sync(app, &reached).await;
     publish_plugin_updates(app, statuses).await;
@@ -624,6 +624,9 @@ pub async fn check_repo_updates(app: Arc<AppState>, client: ClientHandle) -> Res
         "type": "plugin_repo_updates",
         "repos": statuses,
     }));
+    // A repo check must also refresh the per-plugin update flags, or the plugin
+    // update banners never appear until the daemon restarts.
+    broadcast_plugin_updates(&app, None).await;
     Ok(())
 }
 

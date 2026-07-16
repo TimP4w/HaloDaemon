@@ -113,7 +113,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
             hdr.left_top() + Vec2::new(0.0, 1.0),
             Align2::LEFT_TOP,
             t!("device.chains_title"),
-            theme::semibold(13.0),
+            theme::heading(),
             theme::TEXT,
         );
         p.text(
@@ -124,24 +124,24 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
                 leds = total_leds,
                 headers = channels.len()
             ),
-            theme::mono(11.0),
+            theme::value_sm(),
             theme::TEXT_FAINT,
         );
         p.text(
             hdr.left_top() + Vec2::new(0.0, 21.0),
             Align2::LEFT_TOP,
             t!("device.chains_subtitle"),
-            theme::body(12.0),
+            theme::body_md(),
             theme::TEXT_MUT,
         );
     }
 
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
 
     let dev_id = ctx.dev.id.clone();
     for channel in channels {
         channel_card(ui, ctx, &dev_id, channel);
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
     }
 }
 
@@ -151,7 +151,7 @@ fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &Chainab
     egui::Frame::NONE
         .fill(theme::CARD_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(14.0)
+        .corner_radius(theme::RADIUS_XL)
         .inner_margin(egui::Margin {
             left: 18,
             right: 18,
@@ -160,7 +160,7 @@ fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &Chainab
         })
         .show(ui, |ui| {
             channel_header(ui, ctx, dev_id, channel, used);
-            ui.add_space(13.0);
+            ui.add_space(theme::SPACE_6);
 
             let prev_spacing = ui.style().spacing.item_spacing;
             ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 9.0);
@@ -177,7 +177,7 @@ fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &Chainab
 
             let remaining = channel.max_leds.saturating_sub(used);
             if remaining > 0 {
-                ui.add_space(9.0);
+                ui.add_space(theme::SPACE_4);
                 add_link_panel(ui, ctx, dev_id, channel, remaining);
             }
         });
@@ -216,13 +216,7 @@ fn channel_header(
     let badge = Rect::from_min_size(row.left_top(), Vec2::new(30.0, 30.0));
     {
         let p = ui.painter();
-        p.rect_filled(badge, 8.0, theme::INNER_BG);
-        p.rect_stroke(
-            badge,
-            8.0,
-            Stroke::new(1.0, theme::BORDER),
-            egui::StrokeKind::Middle,
-        );
+        theme::paint_well(p, badge, 8.0);
         p.text(
             badge.center(),
             Align2::CENTER_CENTER,
@@ -257,7 +251,7 @@ fn channel_header(
             disc_rect.center(),
             Align2::CENTER_CENTER,
             t!("device.chains_flashing"),
-            theme::body(11.0),
+            theme::body_sm(),
             theme::TEXT,
         );
         ui.interact(disc_rect, disc_id, Sense::click())
@@ -286,7 +280,7 @@ fn channel_header(
 
     let p = ui.painter();
     let usage = t!("device.chains_usage", used = used, max = channel.max_leds);
-    let usage_galley = p.layout_no_wrap(usage.to_string(), theme::mono(11.0), theme::TEXT_MUT);
+    let usage_galley = p.layout_no_wrap(usage.to_string(), theme::value_sm(), theme::TEXT_MUT);
     let usage_size = usage_galley.size();
     let usage_r = disc_rect.left() - 8.0;
     p.galley(
@@ -327,13 +321,13 @@ fn channel_header(
 fn empty_placeholder(ui: &mut egui::Ui) {
     egui::Frame::NONE
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(10.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new(t!("device.chains_no_links"))
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                 );
             });
@@ -351,7 +345,7 @@ fn link_row(
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(11.0)
+        .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin {
             left: 13,
             right: 13,
@@ -363,13 +357,7 @@ fn link_row(
                 // Index badge
                 let (badge, _) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::hover());
                 let p = ui.painter();
-                p.rect_filled(badge, 6.0, theme::CARD_BG);
-                p.rect_stroke(
-                    badge,
-                    6.0,
-                    Stroke::new(1.0, theme::BORDER),
-                    egui::StrokeKind::Middle,
-                );
+                theme::paint_card_rect(p, badge, 6.0);
                 p.text(
                     badge.center(),
                     Align2::CENTER_CENTER,
@@ -378,12 +366,12 @@ fn link_row(
                     theme::TEXT_FAINT,
                 );
 
-                ui.add_space(13.0);
+                ui.add_space(theme::SPACE_6);
 
                 // Name + dots column
                 ui.vertical(|ui| {
                     name_field(ui, ctx, link);
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     led_dots(ui, link);
                 });
 
@@ -407,7 +395,7 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &ChainLinkInfo) {
                     .font(theme::semibold(12.5))
                     .color(theme::TEXT),
             );
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             let (chip, _) = ui.allocate_exact_size(Vec2::new(94.0, 19.0), Sense::hover());
             let p = ui.painter();
             p.rect_filled(chip, 6.0, theme::hex(0x181d29));
@@ -421,7 +409,7 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &ChainLinkInfo) {
                 chip.center(),
                 Align2::CENTER_CENTER,
                 t!("device.chains_discovered"),
-                theme::body(9.0),
+                theme::micro(),
                 theme::TEXT_DIM,
             );
         });
@@ -489,7 +477,7 @@ fn led_dots(ui: &mut egui::Ui, link: &ChainLinkInfo) {
         if extra > 0 {
             ui.label(
                 egui::RichText::new(format!("+{extra}"))
-                    .font(theme::mono(9.5))
+                    .font(theme::value_xs())
                     .color(theme::TEXT_FAINT),
             );
         }
@@ -499,19 +487,19 @@ fn led_dots(ui: &mut egui::Ui, link: &ChainLinkInfo) {
 fn locked_right(ui: &mut egui::Ui, link: &ChainLinkInfo) {
     ui.label(
         egui::RichText::new("🔒")
-            .font(theme::body(12.0))
+            .font(theme::body_md())
             .color(theme::hex(0x3a4860)),
     );
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     ui.label(
         egui::RichText::new(t!("device.chains_led_count", count = link.led_count))
             .font(theme::mono(12.0))
             .color(theme::TEXT_MUT),
     );
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     ui.label(
         egui::RichText::new(topology_label(&link.topology))
-            .font(theme::body(11.0))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
 }
@@ -548,7 +536,7 @@ fn editable_right(
         btn.center(),
         Align2::CENTER_CENTER,
         "×",
-        theme::body(13.0),
+        theme::body_lg(),
         icon_col,
     );
     if btn_resp.clicked() {
@@ -562,16 +550,16 @@ fn editable_right(
         );
     }
 
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     ui.label(
         egui::RichText::new(t!("device.chains_led_count", count = link.led_count))
             .font(theme::mono(12.0))
             .color(theme::TEXT_DIM),
     );
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_4);
     ui.label(
         egui::RichText::new(topology_label(&link.topology))
-            .font(theme::body(11.0))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
 }
@@ -601,7 +589,7 @@ fn add_link_panel(
         let label = format!("+ {}", t!("device.chains_add_link"));
         let btn_w = ui
             .painter()
-            .layout_no_wrap(label.clone(), theme::body(11.5), theme::TEXT_DIM)
+            .layout_no_wrap(label.clone(), theme::body_sm(), theme::TEXT_DIM)
             .size()
             .x
             + 26.0;
@@ -636,17 +624,17 @@ fn add_link_panel(
         egui::Frame::NONE
             .fill(theme::INNER_BG)
             .stroke(Stroke::new(1.0, theme::BORDER))
-            .corner_radius(11.0)
+            .corner_radius(theme::RADIUS_MD)
             .inner_margin(egui::Margin::same(14))
             .show(ui, |ui| {
                 // Name field
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(t!("device.chains_name"))
-                            .font(theme::body(11.5))
+                            .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     ui.add(
                         egui::TextEdit::singleline(&mut name)
                             .font(theme::semibold(12.5))
@@ -654,16 +642,16 @@ fn add_link_panel(
                             .margin(egui::Margin::symmetric(10, 7)),
                     );
                 });
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
 
                 // Topology picker
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(t!("device.chains_type"))
-                            .font(theme::body(11.5))
+                            .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     let current = topology_label(&topology_from_idx(topo_idx));
                     egui::ComboBox::from_id_salt(("ch_topo_cb", dev_id, &channel.channel_id))
                         .selected_text(current)
@@ -680,16 +668,16 @@ fn add_link_panel(
                     leds = leds.max(new_divisor).div_ceil(new_divisor) * new_divisor;
                 }
 
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
 
                 // LED count stepper
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(t!("device.chains_leds"))
-                            .font(theme::body(11.5))
+                            .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     led_stepper(
                         ui,
                         &mut leds,
@@ -700,7 +688,7 @@ fn add_link_panel(
                     );
                 });
 
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
 
                 // Cancel (left) / Add (right)
                 ui.horizontal(|ui| {
@@ -715,7 +703,7 @@ fn add_link_panel(
                     {
                         ui.ctx().data_mut(|d| d.insert_temp(open_key, false));
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(theme::SPACE_4);
                     if widgets::button(
                         ui,
                         &t!("device.chains_add"),
@@ -978,6 +966,7 @@ mod tests {
                             lcd_editor_render: None,
                             led_colors: crate::ui::screens::device::empty_led_colors(),
                             write_rate_history: None,
+                            plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
                         };
                         show(ui, &tab);
                     });

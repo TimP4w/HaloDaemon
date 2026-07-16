@@ -127,6 +127,18 @@ mod tests {
         }
     }
 
+    /// Poll `f` until it returns true, or panic after `timeout` — avoids the
+    /// flakiness of sleep-then-assert when the scheduler is under load.
+    async fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) {
+        tokio::time::timeout(timeout, async {
+            while !f() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("condition not met within timeout");
+    }
+
     #[tokio::test]
     async fn idle_gate_parks_until_woken_then_stops_when_work_gone() {
         let (tx, rx) = watch::channel(cfg(true));
@@ -165,13 +177,24 @@ mod tests {
         // Work appears + wake → ticking starts.
         has_work.store(true, Ordering::SeqCst);
         wake.notify_one();
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        assert!(ticks.load(Ordering::SeqCst) > 0, "should tick once woken");
+        wait_until(Duration::from_secs(5), || ticks.load(Ordering::SeqCst) > 0).await;
 
         // Work removed → ticking stops (allow one trailing tick, then it parks).
         has_work.store(false, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let settled = ticks.load(Ordering::SeqCst);
+        // Wait for ticks to stop advancing: two reads equal across a gap wider
+        // than tick_ms, so a still-active loop would have ticked in between.
+        let gap = Duration::from_millis(cfg(true).tick_ms * 4);
+        let settled = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let before = ticks.load(Ordering::SeqCst);
+                tokio::time::sleep(gap).await;
+                if ticks.load(Ordering::SeqCst) == before {
+                    return before;
+                }
+            }
+        })
+        .await
+        .expect("ticking never settled");
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(
             ticks.load(Ordering::SeqCst),

@@ -121,6 +121,13 @@ jobs:
           cp src/target/plugin-test/release/halod \
             plugin-tools-linux/halod-plugin-test-linux-x64
 
+      - name: Generate release udev rules from embedded plugins
+        run: |
+          mkdir -p generated-udev
+          src/target/release/halod udev-rules --embedded \
+            > generated-udev/60-halod.rules
+          udevadm verify generated-udev/60-halod.rules
+
       - name: Upload plugin tools
         uses: actions/upload-artifact@v7.0.1
         with:
@@ -134,6 +141,12 @@ jobs:
           path: |
             src/target/release/halod
             src/target/release/halod-gui
+
+      - name: Upload generated udev rules
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: linux-udev-rules
+          path: generated-udev/60-halod.rules
 
   # ── Test (Windows) ───────────────────────────────────────────────
   # Run tests + clippy first (fail fast), then build the release
@@ -467,6 +480,12 @@ jobs:
           name: official-plugin-bundle
           path: plugin-bundle
 
+      - name: Download generated udev rules
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: linux-udev-rules
+          path: udev
+
       - name: Stage tarball
         run: |
           d=halod-linux-x64
@@ -541,6 +560,12 @@ jobs:
       - name: Restore executable bit
         run: chmod +x src/target/release/halod src/target/release/halod-gui
 
+      - name: Download generated udev rules
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: linux-udev-rules
+          path: udev
+
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
 
@@ -577,6 +602,12 @@ jobs:
 
       - name: Restore executable bit
         run: chmod +x src/target/release/halod src/target/release/halod-gui
+
+      - name: Download generated udev rules
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: linux-udev-rules
+          path: udev
 
       - name: Install rpm tooling and cargo-generate-rpm
         run: |

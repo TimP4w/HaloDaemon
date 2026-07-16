@@ -40,9 +40,8 @@ pub struct EditorState {
     pub marquee: Option<Marquee>,
     /// True once seeded from the daemon's device_template_params (or defaulted).
     pub seeded: bool,
-    /// Widget type being dragged from the library, mid-gesture (`None` once
-    /// released or cancelled).
-    pub dragging_new: Option<halod_shared::lcd_custom::WidgetType>,
+    /// Catalog id currently being dragged from the widget library.
+    pub dragging_new: Option<String>,
     /// The stage canvas rect from the current/last frame, so a library-tile
     /// drag release (handled after the stage/inspector split closure returns)
     /// can hit-test against it.
@@ -57,6 +56,13 @@ pub struct EditorState {
     /// Cached widget-sprite textures from the daemon's editor render, keyed by
     /// widget id → `(signature, texture)`. An unchanged signature skips re-upload.
     pub sprite_tex: HashMap<String, (u64, egui::TextureHandle)>,
+    /// Plugin widgets unavailable on the daemon. The stage draws these locally.
+    pub missing_widgets: HashSet<String>,
+    pub widget_icon_tex: HashMap<String, egui::TextureHandle>,
+    pub requested_widget_icons: HashSet<String>,
+    /// Font families already resolved locally, including unavailable ones.
+    pub attempted_fonts: HashSet<String>,
+    pub registered_fonts: HashSet<String>,
     /// Egui time of the last `RenderLcdEditor` request, for rate-limiting.
     pub last_render_req: f64,
     /// Device canvas dims from the most recent render, cached since a delta
@@ -157,12 +163,66 @@ pub fn show(
             Some(sel) => selected_widget_card(ui, ctx, st, id, sel),
             None => empty_selection_card(ui),
         });
-        right.add_space(12.0);
+        right.add_space(crate::ui::theme::SPACE_6);
         widgets::card(right, |ui| library_card(ui, ctx, st, id));
-        right.add_space(12.0);
+        right.add_space(crate::ui::theme::SPACE_6);
         widgets::card(right, |ui| screen_style_card(ui, ctx, st, id, lcd));
         inspector_rect = right.min_rect();
     });
+
+    // Library and stage live in different split-column UIs, so complete the
+    // cross-column drop here after both have recorded their response geometry.
+    if let Some(catalog_id) = st.lcd.editor.dragging_new.clone() {
+        if let Some(pos) = ui.input(|input| input.pointer.hover_pos()) {
+            let name = ctx
+                .state
+                .lcd
+                .engine
+                .available_widgets
+                .iter()
+                .find(|descriptor| descriptor.id == catalog_id)
+                .map(|descriptor| descriptor.name.as_str())
+                .unwrap_or("Widget");
+            let ghost = Rect::from_center_size(pos, Vec2::new(80.0, 42.0));
+            ui.painter().rect_filled(
+                ghost,
+                crate::ui::theme::RADIUS_MD,
+                crate::ui::theme::a(crate::ui::theme::CYAN, 0.16),
+            );
+            ui.painter().text(
+                ghost.center(),
+                egui::Align2::CENTER_CENTER,
+                name,
+                crate::ui::theme::caption(),
+                crate::ui::theme::TEXT,
+            );
+        }
+        if ui.input(|input| input.pointer.primary_released()) {
+            st.lcd.editor.dragging_new = None;
+            if let (Some(stage_rect), Some(pos)) = (
+                st.lcd.editor.stage_rect,
+                ui.input(|input| input.pointer.interact_pos()),
+            ) {
+                if stage_rect.contains(pos) {
+                    let descriptor = ctx
+                        .state
+                        .lcd
+                        .engine
+                        .available_widgets
+                        .iter()
+                        .find(|descriptor| descriptor.id == catalog_id)
+                        .cloned();
+                    if let Some(descriptor) = descriptor {
+                        let x = ((pos.x - stage_rect.min.x) / stage_rect.width()).clamp(0.0, 1.0);
+                        let y = ((pos.y - stage_rect.min.y) / stage_rect.height()).clamp(0.0, 1.0);
+                        let new_id = library::spawn_plugin_widget(st, &descriptor, x, y);
+                        st.lcd.editor.select_only(new_id);
+                        send_def(ctx, st, id, true);
+                    }
+                }
+            }
+        }
+    }
 
     // A click anywhere outside both columns deselects.
     if ui.input(|i| i.pointer.primary_clicked()) {
@@ -177,60 +237,7 @@ pub fn show(
         }
     }
 
-    // Drop a widget being dragged from the library, once the pointer releases
-    // anywhere — handled here (outside the split) since it needs the stage
-    // rect captured during this frame's `stage()` call, and both columns are
-    // done by now.
-    if let Some(widget_type) = st.lcd.editor.dragging_new {
-        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-            let badge = library::LIBRARY
-                .iter()
-                .find(|(t, _)| *t == widget_type)
-                .map(|(_, b)| *b)
-                .unwrap_or("");
-            let label = library::library_label(widget_type);
-            ui.painter().circle_filled(
-                pos,
-                18.0,
-                crate::ui::theme::a(crate::ui::theme::CYAN, 0.22),
-            );
-            ui.painter().text(
-                pos,
-                egui::Align2::CENTER_CENTER,
-                badge,
-                crate::ui::theme::mono(13.0),
-                crate::ui::theme::CYAN,
-            );
-            ui.painter().text(
-                pos + egui::vec2(0.0, 22.0),
-                egui::Align2::CENTER_CENTER,
-                label.as_ref(),
-                crate::ui::theme::body(10.0),
-                crate::ui::theme::TEXT_MUT,
-            );
-        }
-        if ui.input(|i| i.pointer.primary_released()) {
-            let widget_type = st.lcd.editor.dragging_new.take().unwrap();
-            if let (Some(stage_rect), Some(pos)) = (
-                st.lcd.editor.stage_rect,
-                ui.input(|i| i.pointer.interact_pos()),
-            ) {
-                if stage_rect.contains(pos) {
-                    let nx = normalized_stage_offset(pos.x, stage_rect.min.x, stage_rect.width());
-                    let ny = normalized_stage_offset(pos.y, stage_rect.min.y, stage_rect.height());
-                    let new_id = library::spawn_widget(st, widget_type, nx, ny);
-                    st.lcd.editor.select_only(new_id);
-                    send_def(ctx, st, id, true);
-                }
-            }
-        }
-    }
-
     delete_template_modal(ui, ctx, st);
-}
-
-fn normalized_stage_offset(pos: f32, origin: f32, extent: f32) -> f32 {
-    ((pos - origin) / extent).clamp(0.0, 1.0)
 }
 
 /// Seed the editor's local `def` from the daemon-reported params once per tab
@@ -302,12 +309,11 @@ fn send_def(ctx: &TabCtx, st: &mut DeviceUi, id: &str, immediate: bool) {
 mod tests {
     use super::*;
     use halod_shared::types::WireDevice;
-    use proptest::prelude::*;
 
     fn widget(id: &str, x: f32, y: f32) -> halod_shared::lcd_custom::WidgetDef {
         halod_shared::lcd_custom::WidgetDef {
             id: id.to_string(),
-            widget_type: halod_shared::lcd_custom::WidgetType::Text,
+            widget: "test:text".to_owned(),
             x,
             y,
             scale: 1.0,
@@ -339,6 +345,7 @@ mod tests {
             lcd_editor_render: None,
             led_colors: crate::ui::screens::device::empty_led_colors(),
             write_rate_history: None,
+            plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
         }
     }
 
@@ -396,8 +403,8 @@ mod tests {
         let mut st = DeviceUi::new("lcd".into());
         seed_if_needed(&ctx, &mut st, "lcd");
         assert!(!st.lcd.editor.seeded);
-        // With no daemon params the editor stays at the default template (the
-        // bundled logo) rather than adopting anything — a later snapshot seeds.
+        // With no daemon params the editor stays at the default plugin template
+        // rather than adopting anything — a later snapshot seeds.
         assert_eq!(st.lcd.editor.def, CustomTemplateDef::default());
     }
 
@@ -490,25 +497,6 @@ mod tests {
             st.lcd.editor.def, loaded,
             "loaded template survives a late snapshot"
         );
-    }
-
-    #[test]
-    fn normalized_stage_offset_maps_pointer_pos_to_fraction() {
-        assert_eq!(normalized_stage_offset(120.0, 10.0, 220.0), 0.5);
-        assert_eq!(normalized_stage_offset(10.0, 10.0, 220.0), 0.0);
-        assert_eq!(normalized_stage_offset(230.0, 10.0, 220.0), 1.0);
-    }
-
-    proptest! {
-        #[test]
-        fn normalized_stage_offset_stays_in_bounds(
-            pos in -10_000.0f32..10_000.0,
-            origin in -1_000.0f32..1_000.0,
-            extent in 1.0f32..2_000.0,
-        ) {
-            let frac = normalized_stage_offset(pos, origin, extent);
-            prop_assert!((0.0..=1.0).contains(&frac));
-        }
     }
 
     #[test]

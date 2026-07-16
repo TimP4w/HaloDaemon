@@ -168,7 +168,7 @@ fn leave_canvas_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         |ui| {
             ui.label(
                 egui::RichText::new(t!("lighting.remove_from_canvas_body"))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         },
@@ -183,7 +183,7 @@ fn leave_canvas_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
             {
                 confirm = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("lighting.cancel"),
@@ -238,12 +238,12 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, 
                     }
                 }
             });
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
 
             let kbd_status = ctx.dev.keyboard_layout();
             if let Some(status) = kbd_status {
                 layout_selector(ui, ctx, status);
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
             }
 
             let zone = rgb
@@ -275,17 +275,17 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, 
             }
 
             // Zone transform controls
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             transform_controls(ui, ctx, st, rgb);
 
             if painting {
-                ui.add_space(11.0);
+                ui.add_space(theme::SPACE_6);
                 egui::Sides::new().show(
                     ui,
                     |ui| {
                         ui.label(
                             egui::RichText::new(t!("lighting.paint_hint"))
-                                .font(theme::body(11.0))
+                                .font(theme::body_sm())
                                 .color(theme::TEXT_MUT),
                         );
                     },
@@ -424,7 +424,7 @@ fn transform_controls(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &
     if is_ring {
         let n = zone.leds.len() as i32;
         let offset = live_tx.led_offset.rem_euclid(n);
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
         let readout = format!("{offset} / {n}");
         let delta = widgets::stepper_row(ui, &t!("lighting.rotate"), &readout);
         if delta != 0 {
@@ -712,10 +712,10 @@ fn led_canvas(
         Sense::click_and_drag(),
     );
     let p = ui.painter();
-    p.rect_filled(rect, 10.0, theme::hex(0x0a0d13));
+    p.rect_filled(rect, theme::RADIUS_MD, theme::hex(0x0a0d13));
     p.rect_stroke(
         rect,
-        10.0,
+        theme::RADIUS_MD,
         Stroke::new(1.0, theme::BORDER_INNER),
         egui::StrokeKind::Middle,
     );
@@ -1017,7 +1017,7 @@ fn param_sliders(
                         _ => min as f32,
                     });
                 let mut v = st.guarded(&key, live, ctx.time);
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 let readout = widgets::range_readout(v, step);
                 if widgets::slider_row(ui, &d.label, &mut v, min as f32..=max as f32, &readout) {
                     let snapped = widgets::snap_to_step(v, min as f32, max as f32, step as f32);
@@ -1032,7 +1032,7 @@ fn param_sliders(
                         _ => 0.0,
                     });
                 let mut v = st.guarded(&key, live, ctx.time);
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 let (edited, committed) =
                     widgets::num_input_row(ui, &d.label, &mut v, *min as f32..=*max as f32);
                 if edited || committed {
@@ -1049,10 +1049,10 @@ fn param_sliders(
                 };
                 let live = current_param_color(rgb, kind, effect_id, &d.id).unwrap_or(default);
                 let current = st.lighting.param_colors.get(&key).copied().unwrap_or(live);
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 ui.label(
                     egui::RichText::new(&d.label)
-                        .font(theme::body(11.0))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
                 if let Some(new_c) = widgets::color_picker(ui, current) {
@@ -1064,14 +1064,14 @@ fn param_sliders(
                 let live = current_param_steps(rgb, kind, effect_id, &d.id)
                     .unwrap_or_else(|| widgets::steps_default(d));
                 let steps = st.lighting.param_steps.entry(key).or_insert(live);
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 changed |= widgets::steps_editor(ui, &d.label, steps);
             }
             ParamKind::Sensor => {
                 let sensors = crate::ui::screens::lighting::sensor_options(ctx.state);
                 let default = current_param_str(rgb, kind, effect_id, &d.id).unwrap_or_default();
                 let current = st.lighting.param_strs.get(&key).cloned().unwrap_or(default);
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 changed |= widgets::combo_param_row(
                     ui,
                     &d.label,
@@ -1092,7 +1092,7 @@ fn param_sliders(
                 let current = st.lighting.param_strs.get(&key).cloned().unwrap_or(default);
                 let opts: Vec<(String, String)> =
                     options.iter().map(|o| (o.clone(), o.clone())).collect();
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 changed |= widgets::combo_param_row(
                     ui,
                     &d.label,

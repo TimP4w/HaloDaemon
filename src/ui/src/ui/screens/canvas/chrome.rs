@@ -17,7 +17,7 @@ pub(crate) fn chrome(ui: &mut egui::Ui, canvas_ui: &mut CanvasUi, cmd: &CommandT
         if fps_chip(ui, canvas_ui) {
             canvas_ui.fps_modal_open = true;
         }
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
         transport_controls(ui, cmd, playing);
     });
 }
@@ -25,13 +25,7 @@ pub(crate) fn chrome(ui: &mut egui::Ui, canvas_ui: &mut CanvasUi, cmd: &CommandT
 fn transport_controls(ui: &mut egui::Ui, cmd: &CommandTx, playing: bool) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(104.0, 34.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, 9.0, theme::CARD_BG);
-    p.rect_stroke(
-        rect,
-        9.0,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
+    theme::paint_card_rect(p, rect, 9.0);
 
     let inner = rect.shrink(4.0);
     let bw = inner.width() / 3.0;
@@ -133,7 +127,7 @@ fn fps_chip(ui: &mut egui::Ui, canvas_ui: &CanvasUi) -> bool {
         rect.center(),
         Align2::CENTER_CENTER,
         fps_txt,
-        theme::mono(11.0),
+        theme::value_sm(),
         theme::CYAN,
     );
     resp.clicked()

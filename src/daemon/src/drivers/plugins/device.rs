@@ -2533,9 +2533,15 @@ impl EqualizerCapability for LuaDevice {
     }
 
     async fn set_eq_preset(&self, preset_index: usize) -> Result<()> {
-        self.worker()?.equalizer_set_preset(preset_index).await?;
-        if let Some(equalizer) = self.eq_cache.lock_recover().as_mut() {
-            equalizer.selected_preset = preset_index;
+        let worker = self.worker()?;
+        worker.equalizer_set_preset(preset_index).await?;
+        match worker.equalizer_get().await {
+            Ok(equalizer) => *self.eq_cache.lock_recover() = Some(equalizer),
+            Err(_) => {
+                if let Some(equalizer) = self.eq_cache.lock_recover().as_mut() {
+                    equalizer.selected_preset = preset_index;
+                }
+            }
         }
         Ok(())
     }
@@ -3127,6 +3133,46 @@ mod tests {
 
         dev.refresh_status_cache().await;
         assert_eq!(dev.fan_cache.lock_recover().rpm, Some(1200));
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_eq_preset_refreshes_cached_bands_to_the_new_preset() {
+        // Each preset carries a distinct curve; get_equalizer derives bands from the
+        // selected preset. Switching preset must leave the cache self-consistent —
+        // bands matching selected_preset, not the previously cached curve.
+        let script = r#"
+            local sel = 0
+            return {
+              initialize = function() return true end,
+              get_equalizer = function()
+                return {
+                  presets = { { id = "a", label = "A" }, { id = "b", label = "B" } },
+                  selected_preset = sel,
+                  editable = false,
+                  bands = { {
+                    index = 0, label = "60", min = -10, max = 10, step = 1,
+                    value = (sel == 0) and 0.0 or 5.0,
+                  } },
+                }
+              end,
+              set_eq_preset = function(dev, p) sel = p end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("eq_preset", &["equalizer"], script);
+        let dev = hid_device("eq_preset-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+
+        dev.refresh_status_cache().await;
+        assert_eq!(
+            dev.eq_cache.lock_recover().as_ref().unwrap().bands[0].value,
+            0.0
+        );
+
+        dev.set_eq_preset(1).await.unwrap();
+        let eq = dev.eq_cache.lock_recover().clone().unwrap();
+        assert_eq!(eq.selected_preset, 1);
+        assert_eq!(eq.bands[0].value, 5.0);
         dev.close().await;
     }
 }

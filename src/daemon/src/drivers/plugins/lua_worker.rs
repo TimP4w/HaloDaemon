@@ -188,6 +188,14 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
         self.state.lock().unwrap().clone()
     }
 
+    pub(super) fn is_usable(&self) -> bool {
+        !self.tx.is_closed()
+            && matches!(
+                *self.state.lock().unwrap(),
+                WorkerState::Starting | WorkerState::Healthy
+            )
+    }
+
     /// Send a command carrying a `oneshot` reply sender and await the answer,
     /// giving up after `call_timeout`. A timeout marks the worker dead so no
     /// later request queues behind the (presumed wedged) job.

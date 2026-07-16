@@ -140,7 +140,7 @@ impl Toasts {
 fn message_galley(ui: &egui::Ui, note: &Notification, w: f32) -> std::sync::Arc<egui::Galley> {
     let (_, message) = notification_text(&note.code);
     ui.painter()
-        .layout(message, theme::body(12.0), theme::TEXT_DIM, w - 28.0)
+        .layout(message, theme::body_md(), theme::TEXT_DIM, w - 28.0)
 }
 
 fn toast_height(ui: &egui::Ui, note: &Notification, w: f32) -> f32 {
@@ -162,10 +162,10 @@ fn toast_card(ui: &mut egui::Ui, rect: Rect, note: &Notification, idx: usize) ->
     let color = severity_color(note.code.severity());
     let p = ui.painter();
     theme::halo(p, rect, 12.0, a(Color32::BLACK, 0.5), 24.0);
-    p.rect_filled(rect, 12.0, theme::CARD_BG);
+    p.rect_filled(rect, theme::RADIUS_LG, theme::CARD_BG);
     p.rect_stroke(
         rect,
-        12.0,
+        theme::RADIUS_LG,
         Stroke::new(1.0, a(color, 0.34)),
         egui::StrokeKind::Middle,
     );
@@ -178,7 +178,7 @@ fn toast_card(ui: &mut egui::Ui, rect: Rect, note: &Notification, idx: usize) ->
         Pos2::new(rect.left() + 28.0, rect.top() + 14.0),
         Align2::LEFT_TOP,
         &title,
-        theme::semibold(13.0),
+        theme::heading(),
         color,
     );
     let galley = message_galley(ui, note, rect.width());
@@ -210,7 +210,7 @@ fn toast_card(ui: &mut egui::Ui, rect: Rect, note: &Notification, idx: usize) ->
         x_rect.center(),
         Align2::CENTER_CENTER,
         "×",
-        theme::body(13.0),
+        theme::body_lg(),
         x_col,
     );
 
@@ -261,7 +261,7 @@ fn toast_card(ui: &mut egui::Ui, rect: Rect, note: &Notification, idx: usize) ->
             d_rect.center(),
             Align2::CENTER_CENTER,
             &label,
-            theme::semibold(12.0),
+            theme::subhead(),
             d_col,
         );
         action.details = d_resp.clicked();

@@ -144,7 +144,7 @@ pub fn effect_cell(
         Pos2::new(rect.left() + 10.0, rect.bottom() - 12.0),
         Align2::LEFT_CENTER,
         label,
-        theme::body(11.5),
+        theme::body_sm(),
         if active { theme::TEXT } else { theme::TEXT_DIM },
     );
     if resp.hovered() {

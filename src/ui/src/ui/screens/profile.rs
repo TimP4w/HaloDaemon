@@ -346,25 +346,13 @@ pub fn title_button(
         &state.profiles.active
     };
 
-    // Measure the text components to size the pill.
-    let label_width = p
-        .layout_no_wrap(
-            t!("profile.profile_label").to_string(),
-            theme::body(9.0),
-            Color32::WHITE,
-        )
-        .size()
-        .x;
+    // Measure the name to size the pill.
     let name_width = p
-        .layout_no_wrap(
-            profile_name.to_string(),
-            theme::semibold(12.0),
-            Color32::WHITE,
-        )
+        .layout_no_wrap(profile_name.to_string(), theme::subhead(), Color32::WHITE)
         .size()
         .x;
-    // dot(6) + gap(9) + "PROFILE"(lw) + gap(9) + name(nw) + gap(8) + chevron(8) + padding(22)
-    let pill_w = 6.0 + 9.0 + label_width + 9.0 + name_width + 8.0 + 8.0 + 22.0;
+    // padding(12) + name(nw) + gap(8) + chevron(8) + padding(12)
+    let pill_w = 12.0 + name_width + 8.0 + 8.0 + 12.0;
     let pill_h = 28.0;
     let pill_rect = Rect::from_min_size(
         Pos2::new(right_x - pill_w, cy - pill_h / 2.0),
@@ -377,9 +365,9 @@ pub fn title_button(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let bg = if hovered || st.dropdown_open {
-        theme::hex(0x14192a)
+        theme::ROW_ACTIVE
     } else {
-        theme::hex(0x10141d)
+        theme::INNER_BG
     };
     p.rect_filled(pill_rect, 9.0, bg);
     p.rect_stroke(
@@ -389,24 +377,12 @@ pub fn title_button(
         egui::StrokeKind::Middle,
     );
 
-    let mut x = pill_rect.left() + 11.0;
-    let dot = Pos2::new(x + 3.0, cy);
-    theme::glow(p, dot, 5.0, theme::CYAN, 0.6);
-    p.circle_filled(dot, 3.0, theme::CYAN);
-    x += 6.0 + 9.0;
-    p.text(
-        Pos2::new(x, cy),
-        Align2::LEFT_CENTER,
-        t!("profile.profile_label"),
-        theme::body(9.0),
-        theme::TEXT_FAINT,
-    );
-    x += label_width + 9.0;
+    let mut x = pill_rect.left() + 12.0;
     p.text(
         Pos2::new(x, cy),
         Align2::LEFT_CENTER,
         profile_name,
-        theme::semibold(12.0),
+        theme::subhead(),
         theme::TEXT,
     );
     x += name_width + 8.0;
@@ -421,7 +397,7 @@ pub fn title_button(
             Pos2::new(x + 4.0, cy),
             Align2::CENTER_CENTER,
             if st.dropdown_open { "▴" } else { "▾" },
-            theme::body(8.0),
+            theme::body(16.0),
             theme::TEXT_FAINT,
         );
     }
@@ -461,7 +437,7 @@ pub fn title_dropdown(
     let frame = egui::Frame::NONE
         .fill(theme::MODAL_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(12.0)
+        .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin::same(8))
         .shadow(egui::epaint::Shadow {
             offset: [0, 18],
@@ -534,9 +510,9 @@ pub fn title_dropdown(
                 theme::TEXT_DIM
             };
             let name_font = if is_active {
-                theme::semibold(13.0)
+                theme::heading()
             } else {
-                theme::body(13.0)
+                theme::body_lg()
             };
             ui.painter().text(
                 Pos2::new(dot_x + 14.0, dot_y),
@@ -571,7 +547,7 @@ pub fn title_dropdown(
                 gear_rect.center(),
                 Align2::CENTER_CENTER,
                 "⚙",
-                theme::body(13.0),
+                theme::body(16.0),
                 gear_col,
             );
             if gear_resp.clicked() {
@@ -595,7 +571,7 @@ pub fn title_dropdown(
                     del_rect.center(),
                     Align2::CENTER_CENTER,
                     "×",
-                    theme::semibold(16.0),
+                    theme::title(),
                     del_col,
                 );
                 if del_resp.clicked() {
@@ -612,7 +588,7 @@ pub fn title_dropdown(
             }
         }
 
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
         ui.painter().line_segment(
             [
                 Pos2::new(ui.max_rect().left(), ui.cursor().top()),
@@ -620,7 +596,7 @@ pub fn title_dropdown(
             ],
             Stroke::new(1.0, theme::BORDER_SOFT),
         );
-        ui.add_space(4.0);
+        ui.add_space(theme::SPACE_2);
 
         // Bottom actions row
         ui.horizontal(|ui| {
@@ -635,7 +611,7 @@ pub fn title_dropdown(
             {
                 open_add = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("profile.profile_settings_btn"),
@@ -716,7 +692,7 @@ pub fn add_modal(ctx: &egui::Context, state: &AppState, cmd: &CommandTx, st: &mu
                 .desired_width(f32::INFINITY)
                 .hint_text(t!("profile.profile_name_hint").to_string())
                 .margin(egui::vec2(12.0, 11.0))
-                .font(theme::body(13.0));
+                .font(theme::body_lg());
             let te_resp = ui.add(te);
             te_resp.request_focus();
 
@@ -726,10 +702,10 @@ pub fn add_modal(ctx: &egui::Context, state: &AppState, cmd: &CommandTx, st: &mu
             }
 
             if !name_ok && !st.add_name_buf.trim().is_empty() {
-                ui.add_space(6.0);
+                ui.add_space(theme::SPACE_3);
                 ui.label(
                     egui::RichText::new(t!("profile.name_taken"))
-                        .font(theme::body(11.0))
+                        .font(theme::body_sm())
                         .color(theme::TRAFFIC_RED),
                 );
             }
@@ -746,7 +722,7 @@ pub fn add_modal(ctx: &egui::Context, state: &AppState, cmd: &CommandTx, st: &mu
             {
                 create = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("profile.cancel"),
@@ -799,7 +775,7 @@ pub fn delete_confirm_modal(ctx: &egui::Context, cmd: &CommandTx, st: &mut Profi
         |ui| {
             ui.label(
                 egui::RichText::new(t!("profile.delete_confirm", name = name))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         },
@@ -814,7 +790,7 @@ pub fn delete_confirm_modal(ctx: &egui::Context, cmd: &CommandTx, st: &mut Profi
             {
                 confirm = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("profile.cancel"),
@@ -875,7 +851,7 @@ pub fn show(
                     let back_resp = ui.add(
                         egui::Label::new(
                             egui::RichText::new(t!("profile.back"))
-                                .font(theme::body(12.0))
+                                .font(theme::body_md())
                                 .color(theme::TEXT_FAINT),
                         )
                         .sense(Sense::click()),
@@ -886,7 +862,7 @@ pub fn show(
                     if back_resp.clicked() {
                         *page = Page::Home;
                     }
-                    ui.add_space(16.0);
+                    ui.add_space(theme::SPACE_8);
 
                     // Profile name heading (editable for non-default)
                     let heading = ui.horizontal(|ui| {
@@ -922,7 +898,7 @@ pub fn show(
                             }
                         }
 
-                        ui.add_space(12.0);
+                        ui.add_space(theme::SPACE_6);
                         if is_active {
                             // Active badge
                             let badge_rect =
@@ -982,17 +958,17 @@ pub fn show(
                         heading.response.rect,
                     );
 
-                    ui.add_space(6.0);
+                    ui.add_space(theme::SPACE_3);
                     ui.label(
                         egui::RichText::new(if is_default {
                             t!("profile.default_desc")
                         } else {
                             t!("profile.profile_desc")
                         })
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                     );
-                    ui.add_space(24.0);
+                    ui.add_space(theme::SPACE_10);
 
                     // ── AUTO-ACTIVATE section ────────────────────────────────
                     auto_activate_card(ui, state, cmd, st, profile);
@@ -1077,10 +1053,10 @@ fn auto_activate_card(
         |ui| {
             ui.label(
                 egui::RichText::new(t!("profile.auto_activate_desc"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_FAINT),
             );
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
 
             if !chips.is_empty() {
                 ui.horizontal_wrapped(|ui| {
@@ -1092,7 +1068,7 @@ fn auto_activate_card(
                         }
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(theme::SPACE_4);
             }
 
             let add_btn_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(150.0, 32.0));
@@ -1160,7 +1136,7 @@ fn process_chip(
     icon_name: &str,
     cache: &IconCache,
 ) -> egui::Response {
-    let font = theme::body(11.5);
+    let font = theme::body_sm();
     let text_galley =
         ui.painter()
             .layout_no_wrap(proc_name.to_string(), font.clone(), Color32::WHITE);
@@ -1177,10 +1153,10 @@ fn process_chip(
     } else {
         a(Color32::WHITE, 0.05)
     };
-    ui.painter().rect_filled(rect, 7.0, bg);
+    ui.painter().rect_filled(rect, theme::RADIUS_SM, bg);
     ui.painter().rect_stroke(
         rect,
-        7.0,
+        theme::RADIUS_SM,
         Stroke::new(1.0, theme::BORDER_SOFT),
         egui::StrokeKind::Middle,
     );
@@ -1208,7 +1184,7 @@ fn process_chip(
         Pos2::new(rect.right() - 10.0, rect.center().y),
         Align2::CENTER_CENTER,
         "×",
-        theme::semibold(13.0),
+        theme::heading(),
         x_col,
     );
     if hovered {
@@ -1241,7 +1217,7 @@ fn overrides_section(
             if !is_active {
                 ui.label(
                     egui::RichText::new(t!("profile.overrides_inactive"))
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                 );
                 return;
@@ -1251,7 +1227,7 @@ fn overrides_section(
             if overrides.device_capabilities.is_empty() && !overrides.canvas {
                 ui.label(
                     egui::RichText::new(t!("profile.overrides_empty"))
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                 );
                 return;
@@ -1261,13 +1237,13 @@ fn overrides_section(
 
             // Canvas override
             if overrides.canvas {
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
                 egui::Sides::new().show(
                     ui,
                     |ui| {
                         ui.label(
                             egui::RichText::new(t!("profile.canvas_effects"))
-                                .font(theme::semibold(13.0))
+                                .font(theme::heading())
                                 .color(theme::TEXT),
                         );
                     },
@@ -1284,7 +1260,7 @@ fn overrides_section(
                         }
                     },
                 );
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
             }
 
             // Per-device capability overrides
@@ -1296,16 +1272,16 @@ fn overrides_section(
                     .map(|d| d.name.as_str())
                     .unwrap_or(device_id.as_str());
 
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
                 widgets::caps_label(ui, device_name);
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACE_2);
 
                 for key in keys {
                     let label = capability_label(key);
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(label.as_ref())
-                                .font(theme::body(13.0))
+                                .font(theme::body_lg())
                                 .color(theme::TEXT_DIM),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1366,19 +1342,19 @@ pub fn process_picker(
         |ui| {
             ui.label(
                 egui::RichText::new(t!("profile.select_processes_desc"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_FAINT),
             );
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
 
             // Search box (taller for an easier hit target).
             let search_te = egui::TextEdit::singleline(&mut st.pick_filter)
                 .desired_width(f32::INFINITY)
                 .hint_text(t!("profile.filter_processes_hint").to_string())
                 .margin(egui::vec2(10.0, 9.0))
-                .font(theme::body(13.0));
+                .font(theme::body_lg());
             ui.add(search_te);
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
 
             // Union of running apps + already-selected processes.
             let mut entries: Vec<(String, String, String)> = running_apps
@@ -1402,7 +1378,7 @@ pub fn process_picker(
             if entries.is_empty() {
                 ui.label(
                     egui::RichText::new(t!("profile.no_processes"))
-                        .font(theme::body(12.0))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                 );
             }
@@ -1480,7 +1456,7 @@ pub fn process_picker(
                             Pos2::new(text_x, row.center().y - 5.0),
                             Align2::LEFT_CENTER,
                             display,
-                            theme::semibold(12.0),
+                            theme::subhead(),
                             if selected {
                                 theme::TEXT
                             } else {
@@ -1491,7 +1467,7 @@ pub fn process_picker(
                             Pos2::new(text_x, row.center().y + 7.0),
                             Align2::LEFT_CENTER,
                             proc_name,
-                            theme::mono(9.5),
+                            theme::value_xs(),
                             theme::TEXT_FAINT,
                         );
 
@@ -1505,9 +1481,9 @@ pub fn process_picker(
                     }
                 });
 
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             ui.separator();
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
 
             let n = st.pick_selected.len();
             let btn_label = if n > 0 {
@@ -1522,7 +1498,7 @@ pub fn process_picker(
                 {
                     confirm = true;
                 }
-                ui.add_space(8.0);
+                ui.add_space(theme::SPACE_4);
                 if widgets::button(
                     ui,
                     &t!("profile.cancel"),

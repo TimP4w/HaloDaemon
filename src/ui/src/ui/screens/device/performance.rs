@@ -50,7 +50,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("devtabs.dpi_stages"))
-                        .font(theme::semibold(13.0))
+                        .font(theme::heading())
                         .color(theme::TEXT),
                 );
             },
@@ -80,13 +80,13 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                 }
             },
         );
-        ui.add_space(14.0);
+        ui.add_space(theme::SPACE_7);
         ui.label(
             egui::RichText::new(t!("devtabs.dpi_help"))
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
         );
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_9);
         if axis(ui, st, lo, hi, dpi.current_index, &available) {
             changed = true;
         }
@@ -261,7 +261,7 @@ fn axis(
             Pos2::new(cx, track_y - 18.0),
             Align2::CENTER_CENTER,
             fmt_dpi(v),
-            theme::mono(9.5),
+            theme::value_xs(),
             if is_current {
                 theme::CYAN
             } else {
@@ -289,11 +289,11 @@ fn list(
 
     for i in 0..n {
         if i > 0 {
-            ui.add_space(1.0);
+            ui.add_space(theme::SPACE_1);
             let (sep, _) =
                 ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(sep, 0.0, theme::hex(0x1e2738));
-            ui.add_space(1.0);
+            ui.add_space(theme::SPACE_1);
         }
 
         let is_current = i == current;
@@ -316,7 +316,7 @@ fn list(
             };
             ui.add_sized(
                 [120.0, 34.0],
-                egui::Label::new(egui::RichText::new(label).font(theme::body(11.0)).color(
+                egui::Label::new(egui::RichText::new(label).font(theme::body_sm()).color(
                     if is_current {
                         theme::CYAN
                     } else {
@@ -347,7 +347,7 @@ fn list(
 
             ui.label(
                 egui::RichText::new("DPI")
-                    .font(theme::body(11.0))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_FAINT),
             );
 

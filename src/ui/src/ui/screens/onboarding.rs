@@ -172,7 +172,7 @@ pub fn show(
             egui::Frame::NONE
                 .fill(theme::MODAL_BG)
                 .stroke(Stroke::new(1.0, theme::BORDER))
-                .corner_radius(18.0)
+                .corner_radius(theme::RADIUS_2XL)
                 .inner_margin(egui::Margin {
                     left: 28,
                     right: 28,
@@ -226,7 +226,7 @@ fn step_welcome(ui: &mut egui::Ui, time: f32) {
                     .font(theme::bold(30.0))
                     .color(theme::TEXT),
             );
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
             centered_wrapped(
                 ui,
                 &t!("onboarding.welcome_body"),
@@ -234,7 +234,7 @@ fn step_welcome(ui: &mut egui::Ui, time: f32) {
                 theme::TEXT_DIM,
                 15.0,
             );
-            ui.add_space(24.0);
+            ui.add_space(theme::SPACE_10);
             ui.label(
                 RichText::new(format!(
                     "{} v{}",
@@ -251,7 +251,7 @@ fn step_welcome(ui: &mut egui::Ui, time: f32) {
 fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
     ui.add_space(26.0);
     ui.horizontal(|ui| {
-        ui.add_space(40.0);
+        ui.add_space(theme::SPACE_12);
         ui.vertical(|ui| {
             ui.set_width(520.0);
             ui.label(
@@ -259,19 +259,19 @@ fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
                     .font(theme::bold(21.0))
                     .color(theme::TEXT),
             );
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 RichText::new(t!("onboarding.health_sub"))
-                    .font(theme::body(13.0))
+                    .font(theme::body_lg())
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(18.0);
+            ui.add_space(theme::SPACE_9);
             match debug {
                 None => {
                     ui.spinner();
                     ui.label(
                         RichText::new(t!("onboarding.health_checking"))
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_FAINT),
                     );
                 }
@@ -280,13 +280,13 @@ fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
                     if failing.is_empty() {
                         widgets::card_with_surface(
                             ui,
-                            egui::Margin::same(20),
+                            theme::PAD_CARD,
                             theme::CARD_BG,
                             theme::BORDER,
                             |ui| {
                                 ui.label(
                                     RichText::new(t!("onboarding.health_ok"))
-                                        .font(theme::semibold(13.0))
+                                        .font(theme::heading())
                                         .color(theme::ONLINE_TEXT),
                                 );
                             },
@@ -304,7 +304,7 @@ fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
                                         theme::CARD_BG,
                                         theme::BORDER,
                                     );
-                                    ui.add_space(10.0);
+                                    ui.add_space(theme::SPACE_5);
                                 }
                             });
                     }
@@ -328,7 +328,7 @@ fn pref_card(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&m
     egui::Frame::NONE
         .fill(theme::CARD_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(13.0)
+        .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
@@ -336,15 +336,11 @@ fn pref_card(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&m
                     Vec2::new(ui.available_width() - 60.0, 0.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        ui.label(
-                            RichText::new(title)
-                                .font(theme::semibold(14.0))
-                                .color(theme::TEXT),
-                        );
-                        ui.add_space(4.0);
+                        ui.label(RichText::new(title).font(theme::title()).color(theme::TEXT));
+                        ui.add_space(theme::SPACE_2);
                         ui.label(
                             RichText::new(desc)
-                                .font(theme::body(12.0))
+                                .font(theme::body_md())
                                 .color(theme::TEXT_MUT),
                         );
                     },
@@ -357,7 +353,7 @@ fn pref_card(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&m
 fn step_prefs(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     ui.add_space(30.0);
     ui.horizontal(|ui| {
-        ui.add_space(40.0);
+        ui.add_space(theme::SPACE_12);
         ui.vertical(|ui| {
             ui.set_width(520.0);
             ui.label(
@@ -365,10 +361,10 @@ fn step_prefs(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
                     .font(theme::bold(21.0))
                     .color(theme::TEXT),
             );
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 RichText::new(t!("onboarding.prefs_sub"))
-                    .font(theme::body(13.0))
+                    .font(theme::body_lg())
                     .color(theme::TEXT_MUT),
             );
             ui.add_space(22.0);
@@ -383,7 +379,7 @@ fn step_prefs(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
                     }
                 },
             );
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             pref_card(
                 ui,
                 &t!("settings.window_controls_title"),
@@ -396,7 +392,7 @@ fn step_prefs(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
                     }
                 },
             );
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             let on = plugins_on(state);
             pref_card(
                 ui,
@@ -416,7 +412,7 @@ fn step_prefs(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
 }
 
 fn step_scanning(ui: &mut egui::Ui, time: f64) {
-    ui.add_space(40.0);
+    ui.add_space(theme::SPACE_12);
     ui.vertical_centered(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(230.0), Sense::hover());
         crate::ui::screens::radar::draw_radar(ui.painter(), rect.center(), 112.0, time);
@@ -429,10 +425,10 @@ fn step_scanning(ui: &mut egui::Ui, time: f64) {
         ui.add_space(22.0);
         ui.label(
             RichText::new(t!("onboarding.scanning"))
-                .font(theme::semibold(16.0))
+                .font(theme::title())
                 .color(theme::TEXT),
         );
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_4);
         let line = SCAN_LINES[((time * 1.6) as usize) % SCAN_LINES.len()];
         ui.label(
             RichText::new(format!("{line}_"))
@@ -451,16 +447,12 @@ fn plugin_toggle_row(ui: &mut egui::Ui, title: &str, description: &str, on: bool
                     Vec2::new(ui.available_width() - 58.0, 62.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        ui.label(
-                            RichText::new(title)
-                                .font(theme::semibold(14.0))
-                                .color(theme::TEXT),
-                        );
-                        ui.add_space(4.0);
+                        ui.label(RichText::new(title).font(theme::title()).color(theme::TEXT));
+                        ui.add_space(theme::SPACE_2);
                         if !description.is_empty() {
                             ui.label(
                                 RichText::new(description)
-                                    .font(theme::body(12.0))
+                                    .font(theme::body_md())
                                     .color(theme::TEXT_MUT),
                             );
                         }
@@ -480,9 +472,9 @@ fn plugin_toggle_row(ui: &mut egui::Ui, title: &str, description: &str, on: bool
 
 fn step_permissions(ui: &mut egui::Ui, st: &OnboardingUi, plugins: &[PluginInfo]) {
     let selected = enable_targets(st, plugins);
-    ui.add_space(24.0);
+    ui.add_space(theme::SPACE_10);
     ui.horizontal(|ui| {
-        ui.add_space(40.0);
+        ui.add_space(theme::SPACE_12);
         ui.vertical(|ui| {
             ui.set_width(520.0);
             ui.label(
@@ -490,13 +482,13 @@ fn step_permissions(ui: &mut egui::Ui, st: &OnboardingUi, plugins: &[PluginInfo]
                     .font(theme::bold(21.0))
                     .color(theme::TEXT),
             );
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 RichText::new(t!("onboarding.permissions_sub"))
-                    .font(theme::body(13.0))
+                    .font(theme::body_lg())
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
             egui::ScrollArea::vertical()
                 .max_height(270.0)
                 .min_scrolled_height(270.0)
@@ -514,14 +506,14 @@ fn step_permissions(ui: &mut egui::Ui, st: &OnboardingUi, plugins: &[PluginInfo]
                             |ui| {
                                 ui.label(
                                     RichText::new(&plugin.name)
-                                        .font(theme::semibold(14.0))
+                                        .font(theme::title())
                                         .color(theme::TEXT),
                                 );
-                                ui.add_space(8.0);
+                                ui.add_space(theme::SPACE_4);
                                 if plugin.declared_permissions.is_empty() {
                                     ui.label(
                                         RichText::new(t!("onboarding.permissions_none"))
-                                            .font(theme::body(11.5))
+                                            .font(theme::body_sm())
                                             .color(theme::TEXT_MUT),
                                     );
                                 } else {
@@ -529,13 +521,13 @@ fn step_permissions(ui: &mut egui::Ui, st: &OnboardingUi, plugins: &[PluginInfo]
                                 }
                             },
                         );
-                        ui.add_space(10.0);
+                        ui.add_space(theme::SPACE_5);
                     }
                 });
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 RichText::new(t!("plugins.consent_warning"))
-                    .font(theme::body(11.5))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_MUT),
             );
         });
@@ -556,9 +548,9 @@ fn step_plugins(
     if !candidates.is_empty() {
         st.official_retry_started = None;
     }
-    ui.add_space(24.0);
+    ui.add_space(theme::SPACE_10);
     ui.horizontal(|ui| {
-        ui.add_space(40.0);
+        ui.add_space(theme::SPACE_12);
         ui.vertical(|ui| {
             ui.set_width(520.0);
             ui.label(
@@ -566,13 +558,13 @@ fn step_plugins(
                     .font(theme::bold(21.0))
                     .color(theme::TEXT),
             );
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_3);
             ui.label(
                 RichText::new(t!("onboarding.plugins_page_sub"))
-                    .font(theme::body(13.0))
+                    .font(theme::body_lg())
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
             if candidates.is_empty() && official_unavailable {
                 let retrying = st
                     .official_retry_started
@@ -589,14 +581,14 @@ fn step_plugins(
                             } else {
                                 t!("onboarding.plugins_error")
                             })
-                            .font(theme::body(12.5))
+                            .font(theme::body_md())
                             .color(if retrying {
                                 theme::TEXT_MUT
                             } else {
                                 theme::OFFLINE
                             }),
                         );
-                        ui.add_space(14.0);
+                        ui.add_space(theme::SPACE_7);
                         if retrying {
                             ui.add(
                                 egui::ProgressBar::new(0.35)
@@ -625,10 +617,10 @@ fn step_plugins(
             } else if candidates.is_empty() {
                 ui.label(
                     RichText::new(t!("onboarding.plugins_loading"))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                 );
-                ui.add_space(14.0);
+                ui.add_space(theme::SPACE_7);
                 ui.add(
                     egui::ProgressBar::new(0.35)
                         .desired_width(520.0)
@@ -672,13 +664,13 @@ fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &AppState, plugins: &[
             icons::Icon::Check,
             theme::ONLINE,
         );
-        ui.add_space(24.0);
+        ui.add_space(theme::SPACE_10);
         ui.label(
             RichText::new(t!("onboarding.done_title"))
                 .font(theme::bold(25.0))
                 .color(theme::TEXT),
         );
-        ui.add_space(12.0);
+        ui.add_space(theme::SPACE_6);
         let summary = if plugins_on(state) && active_count(st, plugins) > 0 {
             t!("onboarding.done_summary_plugins")
         } else {
@@ -697,9 +689,9 @@ fn footer(
     state: &AppState,
     cmd: &CommandTx,
 ) {
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
     ui.horizontal(|ui| {
-        ui.add_space(24.0);
+        ui.add_space(theme::SPACE_10);
         let show_back = matches!(st.step, HEALTH | PREFS | PLUGINS | PERMISSIONS);
         if show_back
             && widgets::button(
@@ -721,7 +713,7 @@ fn footer(
 
         // Centered progress dots.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(24.0);
+            ui.add_space(theme::SPACE_10);
             if st.step != SCANNING {
                 let label = primary_label(st.step, plugins, active);
                 if widgets::button(ui, &label, ButtonKind::Primary, Vec2::new(0.0, 38.0)).clicked()
@@ -731,7 +723,7 @@ fn footer(
             } else {
                 ui.label(
                     RichText::new(t!("onboarding.please_wait"))
-                        .font(theme::mono(11.0))
+                        .font(theme::value_sm())
                         .color(theme::TEXT_FAINT),
                 );
             }
@@ -740,7 +732,7 @@ fn footer(
             });
         });
     });
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
 }
 
 fn dots(ui: &mut egui::Ui, step: u8) {
@@ -755,7 +747,7 @@ fn dots(ui: &mut egui::Ui, step: u8) {
                 theme::hex(0x3a3546)
             };
             ui.painter().rect_filled(rect, 3.0, c);
-            ui.add_space(4.0);
+            ui.add_space(theme::SPACE_2);
         }
     });
 }

@@ -9,7 +9,11 @@ use serde_json::json;
 
 use crate::ipc::ClientHandle;
 use crate::state::AppState;
-use halod_shared::lcd_custom::CustomTemplateDef;
+use halod_shared::lcd_custom::{
+    CustomTemplateDef, TEXT_ITALIC_PARAM, TEXT_STRIKETHROUGH_PARAM, TEXT_UNDERLINE_PARAM,
+    TEXT_WEIGHT_PARAM,
+};
+use halod_shared::types::{EffectParamValue, LcdWidgetResize, ParamKind};
 
 pub fn lcd_templates_dir() -> std::path::PathBuf {
     crate::config::config_dir().join("lcd")
@@ -68,9 +72,154 @@ pub fn validate_template(def: &CustomTemplateDef) -> Result<()> {
     Ok(())
 }
 
+/// Validate parameters against the active plugin catalog. Missing plugins are
+/// deliberately accepted so saved layouts can retain their placeholder.
+pub fn validate_template_catalog(
+    def: &CustomTemplateDef,
+    registry: &crate::drivers::plugins::Registry,
+) -> Result<()> {
+    for widget in &def.widgets {
+        let Some(descriptor) = registry.widget_descriptor(&widget.widget) else {
+            continue;
+        };
+        for (id, value) in &widget.params {
+            if id == "opacity" {
+                validate_number(value, 0.0, 100.0, &widget.id, id)?;
+                continue;
+            }
+            if id == "scale_y" {
+                anyhow::ensure!(
+                    descriptor.resize == LcdWidgetResize::Box,
+                    "widget '{}' does not support independent height",
+                    widget.id
+                );
+                validate_number(value, 0.1, 8.0, &widget.id, id)?;
+                continue;
+            }
+            if descriptor.uses_font {
+                if let Some(result) = validate_host_font_param(value, &widget.id, id) {
+                    result?;
+                    continue;
+                }
+            }
+            let param = descriptor
+                .params
+                .iter()
+                .find(|param| param.id == *id)
+                .ok_or_else(|| anyhow!("widget '{}' has unknown parameter '{id}'", widget.id))?;
+            validate_param(value, &param.kind, &widget.id, id)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_host_font_param(
+    value: &EffectParamValue,
+    widget_id: &str,
+    param_id: &str,
+) -> Option<Result<()>> {
+    match param_id {
+        TEXT_WEIGHT_PARAM => Some(
+            if matches!(
+                value,
+                EffectParamValue::Str(weight)
+                    if matches!(weight.as_str(), "normal" | "semibold" | "bold")
+            ) {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "widget '{widget_id}' parameter 'text_weight' is not a supported weight"
+                ))
+            },
+        ),
+        TEXT_ITALIC_PARAM | TEXT_UNDERLINE_PARAM | TEXT_STRIKETHROUGH_PARAM => {
+            Some(if matches!(value, EffectParamValue::Bool(_)) {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "widget '{widget_id}' parameter '{param_id}' must be boolean"
+                ))
+            })
+        }
+        _ => None,
+    }
+}
+
+fn validate_number(
+    value: &EffectParamValue,
+    min: f64,
+    max: f64,
+    widget_id: &str,
+    param_id: &str,
+) -> Result<()> {
+    let EffectParamValue::Float(value) = value else {
+        anyhow::bail!("widget '{widget_id}' parameter '{param_id}' must be numeric");
+    };
+    anyhow::ensure!(
+        value.is_finite() && (min..=max).contains(value),
+        "widget '{widget_id}' parameter '{param_id}' is out of range"
+    );
+    Ok(())
+}
+
+fn validate_param(
+    value: &EffectParamValue,
+    kind: &ParamKind,
+    widget_id: &str,
+    param_id: &str,
+) -> Result<()> {
+    match kind {
+        ParamKind::Range { min, max, .. } | ParamKind::Number { min, max } => {
+            validate_number(value, *min, *max, widget_id, param_id)?;
+        }
+        ParamKind::Enum { options } => {
+            anyhow::ensure!(
+                matches!(value, EffectParamValue::Str(value) if options.contains(value)),
+                "widget '{widget_id}' parameter '{param_id}' is not a declared option"
+            );
+        }
+        ParamKind::Color => {
+            anyhow::ensure!(
+                matches!(value, EffectParamValue::Color(_)),
+                "widget '{widget_id}' parameter '{param_id}' must be a color"
+            );
+        }
+        ParamKind::Boolean => {
+            anyhow::ensure!(
+                matches!(value, EffectParamValue::Bool(_)),
+                "widget '{widget_id}' parameter '{param_id}' must be boolean"
+            );
+        }
+        ParamKind::Text | ParamKind::Sensor => {
+            anyhow::ensure!(
+                matches!(value, EffectParamValue::Str(_)),
+                "widget '{widget_id}' parameter '{param_id}' must be text"
+            );
+        }
+        ParamKind::Steps => {
+            anyhow::ensure!(
+                matches!(value, EffectParamValue::Steps(_)),
+                "widget '{widget_id}' parameter '{param_id}' must be a step list"
+            );
+        }
+        ParamKind::Image => {
+            let EffectParamValue::Str(value) = value else {
+                anyhow::bail!("widget '{widget_id}' parameter '{param_id}' must be an image");
+            };
+            if !value.is_empty() {
+                halod_shared::types::validate_image_filename(value).map_err(|_| {
+                    anyhow!("widget '{widget_id}' parameter '{param_id}' is invalid")
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn save_template(name: String, def: CustomTemplateDef, app: Arc<AppState>) -> Result<()> {
     validate_template_name(&name)?;
     validate_template(&def)?;
+    validate_template_catalog(&def, &app.registry)?;
     let yaml = serde_yaml::to_string(&def)?;
     anyhow::ensure!(
         yaml.len() as u64 <= MAX_TEMPLATE_BYTES,
@@ -143,6 +292,28 @@ mod tests {
     fn validate_template_name_rejects_overlong() {
         let name = "a".repeat(65);
         assert!(validate_template_name(&name).is_err());
+    }
+
+    #[test]
+    fn host_font_parameters_accept_the_generic_editor_values() {
+        assert!(validate_host_font_param(
+            &EffectParamValue::Str("bold".to_owned()),
+            "w1",
+            TEXT_WEIGHT_PARAM
+        )
+        .unwrap()
+        .is_ok());
+        for id in [
+            TEXT_ITALIC_PARAM,
+            TEXT_UNDERLINE_PARAM,
+            TEXT_STRIKETHROUGH_PARAM,
+        ] {
+            assert!(
+                validate_host_font_param(&EffectParamValue::Bool(true), "w1", id)
+                    .unwrap()
+                    .is_ok()
+            );
+        }
     }
 
     proptest::proptest! {

@@ -138,16 +138,16 @@ pub fn show(
                             .font(theme::bold(22.0))
                             .color(theme::TEXT),
                     );
-                    ui.add_space(3.0);
+                    ui.add_space(theme::SPACE_1);
                     ui.label(
                         egui::RichText::new(subtitle)
-                            .font(theme::body(12.0))
+                            .font(theme::body_md())
                             .color(theme::TEXT_MUT),
                     );
                 });
                 canvas::chrome(ui, canvas_ui, cmd, state.lighting.config.canvas_enabled);
             });
-            ui.add_space(14.0);
+            ui.add_space(theme::SPACE_7);
             let labels = [t!("lighting.tab_canvas"), t!("lighting.tab_direct")];
             let refs: Vec<&str> = labels.iter().map(|c| c.as_ref()).collect();
             widgets::tab_bar(ui, &mut st.tab, &refs);
@@ -236,7 +236,7 @@ fn page_body(
     designer_ui: &mut DesignerUi,
     page: &mut Page,
 ) {
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_3);
 
     let effects = available_effects(
         &state.lighting.canvas.available_direct_effects,
@@ -269,9 +269,9 @@ fn page_body(
         apply |= effect_extras(ui, state, st, selected_anim);
     }
 
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_8);
     apply |= targets_card(ui, state, cmd, st);
-    ui.add_space(24.0);
+    ui.add_space(theme::SPACE_10);
 
     let now = ui.input(|i| i.time);
     if debounce_apply(&mut st.apply_deadline, apply, now) {
@@ -307,11 +307,11 @@ fn effect_extras(
 ) -> bool {
     match anim {
         _ if st.effect.is_empty() => {
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             sliders_card(ui, st)
         }
         Some(anim) => {
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             effect_params_card(ui, state, st, anim)
         }
         None => false,
@@ -371,7 +371,7 @@ fn effect_actions_row(
     let Some(def) = selected_custom(st, custom) else {
         return;
     };
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_5);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         if widgets::button(
@@ -568,7 +568,7 @@ fn effect_params_card(
         |ui| {
             for (i, d) in params.iter().enumerate() {
                 if i > 0 {
-                    ui.add_space(14.0);
+                    ui.add_space(theme::SPACE_7);
                 }
                 let key = format!("{}:{}", anim.id, d.id);
                 match &d.kind {
@@ -613,7 +613,7 @@ fn effect_params_card(
                             |ui| {
                                 ui.label(
                                     egui::RichText::new(&d.label)
-                                        .font(theme::body(12.0))
+                                        .font(theme::body_md())
                                         .color(theme::TEXT_DIM),
                                 );
                             },
@@ -668,7 +668,7 @@ fn effect_params_card(
                         let current = st.param_colors.get(&key).copied().unwrap_or(default);
                         ui.label(
                             egui::RichText::new(&d.label)
-                                .font(theme::body(12.0))
+                                .font(theme::body_md())
                                 .color(theme::TEXT_DIM),
                         );
                         if let Some(new_c) = widgets::color_picker(ui, current) {
@@ -703,7 +703,7 @@ fn sliders_card(ui: &mut egui::Ui, st: &mut LightingUi) -> bool {
         ) {
             changed = true;
         }
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_9);
         let rs = format!("{}%", st.saturation.round() as u32);
         if widgets::slider_row_debounced(
             ui,
@@ -733,13 +733,13 @@ fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut L
                 ui.vertical(|ui| {
                     ui.label(
                         egui::RichText::new(t!("lighting.target_devices_zones"))
-                            .font(theme::semibold(13.0))
+                            .font(theme::heading())
                             .color(theme::TEXT),
                     );
-                    ui.add_space(3.0);
+                    ui.add_space(theme::SPACE_1);
                     ui.label(
                         egui::RichText::new(t!("lighting.targets_subtitle"))
-                            .font(theme::body(11.0))
+                            .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
                 });
@@ -777,7 +777,7 @@ fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut L
             },
         );
 
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_8);
 
         let gap = 10.0;
         let col_w = (ui.available_width() - gap) / 2.0;
@@ -857,6 +857,20 @@ struct CardResult {
     zone_changed: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CardClick {
+    Toggle,
+    Expand,
+}
+
+fn card_click(on_checkbox: bool, selected: bool, has_zones: bool) -> CardClick {
+    if !on_checkbox && selected && has_zones {
+        CardClick::Expand
+    } else {
+        CardClick::Toggle
+    }
+}
+
 /// The `(zone id, zone name)` pairs a device exposes via its `Rgb` capability.
 fn rgb_zone_pairs(dev: &WireDevice) -> Vec<(String, String)> {
     dev.capabilities
@@ -877,7 +891,7 @@ fn rgb_zone_pairs(dev: &WireDevice) -> Vec<(String, String)> {
 /// Allocated width of a zone pill for `label` (matches [`widgets::pill`]).
 fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
     ui.painter()
-        .layout_no_wrap(label.to_string(), theme::body(12.0), Color32::WHITE)
+        .layout_no_wrap(label.to_string(), theme::body_md(), Color32::WHITE)
         .size()
         .x
         + 24.0
@@ -965,41 +979,37 @@ fn device_card(
     } else {
         theme::BORDER
     };
-    p.rect_filled(rect, 10.0, bg);
+    p.rect_filled(rect, theme::RADIUS_MD, bg);
     p.rect_stroke(
         rect,
-        10.0,
+        theme::RADIUS_MD,
         Stroke::new(1.0, border),
         egui::StrokeKind::Middle,
     );
 
-    // Header (clickable row).
+    // Header (clickable row) plus the checkbox it contains. A single interact
+    // owns the whole row so the checkbox and header can't both fire on one
+    // click; the click is dispatched by where it landed.
     let hdr = Rect::from_min_size(rect.min, Vec2::new(rect.width(), CARD_BASE_H));
-    let hdr_resp = ui.interact(hdr, ui.id().with(("hdr", &dev.id)), Sense::click());
-    if hdr_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if hdr_resp.clicked() {
-        if selected && !all_zone_ids.is_empty() {
-            result.expand_toggled = true;
-        } else {
-            result.toggled = true;
-        }
-    }
-
-    // Checkbox.
     let cb = 18.0;
     let cb_rect = Rect::from_center_size(
         Pos2::new(rect.left() + 14.0 + cb / 2.0, hdr.center().y),
         Vec2::splat(cb),
     );
-    let cb_resp = ui.interact(cb_rect, ui.id().with(("cb", &dev.id)), Sense::click());
-    if cb_resp.hovered() {
+    let hdr_resp = ui.interact(hdr, ui.id().with(("hdr", &dev.id)), Sense::click());
+    if hdr_resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    if cb_resp.clicked() {
-        result.toggled = true;
+    if hdr_resp.clicked() {
+        let on_checkbox = hdr_resp
+            .interact_pointer_pos()
+            .is_some_and(|p| cb_rect.contains(p));
+        match card_click(on_checkbox, selected, !all_zone_ids.is_empty()) {
+            CardClick::Expand => result.expand_toggled = true,
+            CardClick::Toggle => result.toggled = true,
+        }
     }
+
     let (cb_fill, cb_border) = if selected {
         (theme::CYAN, theme::CYAN)
     } else {
@@ -1060,7 +1070,7 @@ fn device_card(
             Pos2::new(rect.right() - 14.0, hdr.center().y),
             Align2::RIGHT_CENTER,
             &zone_summary,
-            theme::body(10.5),
+            theme::caption(),
             theme::TEXT_FAINT,
         );
     }
@@ -1316,7 +1326,7 @@ fn delete_confirm_modal(ui: &mut egui::Ui, st: &mut LightingUi, cmd: &CommandTx)
         |ui| {
             ui.label(
                 egui::RichText::new(t!("lighting.delete_confirm", name = name))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         },
@@ -1331,7 +1341,7 @@ fn delete_confirm_modal(ui: &mut egui::Ui, st: &mut LightingUi, cmd: &CommandTx)
             {
                 confirm = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
             if widgets::button(
                 ui,
                 &t!("lighting.cancel"),
@@ -1374,20 +1384,28 @@ fn has_rgb_zones(d: &WireDevice) -> bool {
         .any(|c| matches!(c, DeviceCapability::Rgb(r) if !r.descriptor.zones.is_empty()))
 }
 
-/// Selected devices that are actually present — offline ids stay saved but
-/// don't count toward "applies to N devices".
-#[cfg(test)]
-fn effective_sel_count(state: &AppState, st: &LightingUi) -> usize {
-    rgb_devices(state)
-        .filter(|d| st.sel_ids.contains(&d.id))
-        .count()
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkbox_click_only_toggles_never_expands() {
+        // Regression: a checkbox hit must never open the zone picker, even on a
+        // selected device with zones — otherwise one click both toggles and
+        // expands.
+        assert_eq!(card_click(true, true, true), CardClick::Toggle);
+        assert_eq!(card_click(true, false, true), CardClick::Toggle);
+    }
+
+    #[test]
+    fn row_expands_only_when_selected_with_zones() {
+        assert_eq!(card_click(false, true, true), CardClick::Expand);
+        // Not selected → row click selects; no zones → nothing to expand.
+        assert_eq!(card_click(false, false, true), CardClick::Toggle);
+        assert_eq!(card_click(false, true, false), CardClick::Toggle);
+    }
 
     #[test]
     fn adjusted_full_brightness_identity() {
@@ -1988,20 +2006,5 @@ mod tests {
         // 24 equal pills in a narrow row → many rows, height grows with them
         // (the bug: fixed height clipped everything past the first row).
         assert!(wrapped_rows(&[80.0; 24], 300.0, 6.0) >= 7);
-    }
-
-    #[test]
-    fn effective_sel_count_ignores_offline_ids() {
-        let mut state = state_with_targets("default", &[]);
-        state.devices = vec![WireDevice {
-            id: "online".into(),
-            capabilities: vec![rgb_cap(vec![zone()])],
-            ..Default::default()
-        }];
-        let st = LightingUi {
-            sel_ids: vec!["online".into(), "unplugged".into()],
-            ..Default::default()
-        };
-        assert_eq!(effective_sel_count(&state, &st), 1);
     }
 }

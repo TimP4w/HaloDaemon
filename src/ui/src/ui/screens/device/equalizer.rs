@@ -42,7 +42,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         |ui| {
             ui.horizontal_top(|ui| {
                 preset_list(ui, ctx, &id, &eq);
-                ui.add_space(24.0);
+                ui.add_space(theme::SPACE_10);
                 if eq.editable {
                     ui.vertical(|ui| bands(ui, ctx, st, &id, &eq));
                 }
@@ -134,7 +134,7 @@ fn bands(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, eq: &Equa
             Pos2::new(cx, rect.top() + 174.0),
             Align2::CENTER_CENTER,
             &b.label,
-            theme::body(10.0),
+            theme::caption(),
             theme::TEXT_MUT,
         );
         let val = st.equalizer.eq.get(i).copied().unwrap_or(b.value);
@@ -142,7 +142,7 @@ fn bands(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, eq: &Equa
             Pos2::new(cx, rect.top() + 190.0),
             Align2::CENTER_CENTER,
             format!("{}{:.0}", if val >= 0.0 { "+" } else { "" }, val),
-            theme::mono(9.5),
+            theme::value_xs(),
             if val >= 0.0 {
                 theme::CYAN
             } else {

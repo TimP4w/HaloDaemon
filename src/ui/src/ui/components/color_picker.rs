@@ -6,6 +6,7 @@
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::RgbColor;
+use std::hash::Hash;
 
 use crate::ui::theme;
 
@@ -35,7 +36,16 @@ pub const MINI_SWATCHES: [u32; 7] = [
     0xef5f63, 0xfbbf24, 0x34d399, 0x38bdf8, 0x8b6fd8, 0xf472b6, 0xffffff,
 ];
 
-pub fn color_swatch_row(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor> {
+pub fn color_swatch_row(
+    ui: &mut egui::Ui,
+    id_salt: impl Hash + std::fmt::Debug,
+    current: RgbColor,
+) -> Option<RgbColor> {
+    ui.push_id(id_salt, |ui| color_swatch_row_inner(ui, current))
+        .inner
+}
+
+fn color_swatch_row_inner(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor> {
     const D: f32 = 22.0;
     let mut out: Option<RgbColor> = None;
     ui.horizontal_wrapped(|ui| {
@@ -66,7 +76,7 @@ pub fn color_swatch_row(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor
             center,
             egui::Align2::CENTER_CENTER,
             "+",
-            theme::mono(11.0),
+            theme::value_sm(),
             mini_glyph_color(c32),
         );
         if resp.hovered() {
@@ -155,7 +165,7 @@ fn color_picker_inner(ui: &mut egui::Ui, avail: f32, current: RgbColor) -> Optio
         let (swatch_rect, swatch_resp) =
             ui.allocate_exact_size(Vec2::new(64.0, grid_h), Sense::click());
         let painter = ui.painter();
-        painter.rect_filled(swatch_rect, 10.0, c32);
+        painter.rect_filled(swatch_rect, theme::RADIUS_MD, c32);
         theme::halo(painter, swatch_rect, 10.0, c32, 26.0);
         if swatch_resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -208,12 +218,12 @@ fn color_picker_inner(ui: &mut egui::Ui, avail: f32, current: RgbColor) -> Optio
         }
     });
 
-    ui.add_space(14.0);
+    ui.add_space(theme::SPACE_7);
     if let Some(nc) = hue_slider(ui, current) {
         out = Some(nc);
     }
 
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_6);
     let hex_id = ui.unique_id().with("hexbuf");
     let mut buf = ui
         .data(|d| d.get_temp::<String>(hex_id))

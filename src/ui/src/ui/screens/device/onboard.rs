@@ -43,20 +43,20 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
 
     ui.label(
         egui::RichText::new(t!("devtabs.onboard_intro"))
-            .font(theme::body(12.0))
+            .font(theme::body_md())
             .color(theme::TEXT_MUT),
     );
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_6);
 
     if let Some(b) = host_mode_boolean(&ctx.dev.capabilities) {
         host_mode_row(ui, &id, ctx, b);
-        ui.add_space(12.0);
+        ui.add_space(theme::SPACE_6);
     }
 
     egui::Frame::NONE
         .fill(theme::CARD_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(14.0)
+        .corner_radius(theme::RADIUS_XL)
         .show(ui, |ui| {
             ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 0.0);
             let host_mode = host_mode_boolean(&ctx.dev.capabilities).is_some_and(|b| b.value);
@@ -74,13 +74,13 @@ fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
                 ui.vertical(|ui| {
                     ui.label(
                         egui::RichText::new(t!("devtabs.host_mode"))
-                            .font(theme::semibold(13.0))
+                            .font(theme::heading())
                             .color(theme::TEXT),
                     );
-                    ui.add_space(2.0);
+                    ui.add_space(theme::SPACE_1);
                     ui.label(
                         egui::RichText::new(t!("devtabs.host_mode_desc"))
-                            .font(theme::body(11.0))
+                            .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
                 });
@@ -114,7 +114,11 @@ fn slot_row(
     let p = ui.painter();
 
     if active {
-        p.rect_filled(row.shrink2(Vec2::new(6.0, 5.0)), 10.0, theme::ROW_ACTIVE);
+        p.rect_filled(
+            row.shrink2(Vec2::new(6.0, 5.0)),
+            theme::RADIUS_MD,
+            theme::ROW_ACTIVE,
+        );
     }
     p.line_segment(
         [row.left_bottom(), row.right_bottom()],
@@ -135,7 +139,7 @@ fn slot_row(
         Pos2::new(row.left() + 38.0, cy),
         Align2::LEFT_CENTER,
         t!("devtabs.slot_n", n = slot.index),
-        theme::body(13.0),
+        theme::body_lg(),
         if active { theme::TEXT } else { theme::TEXT_DIM },
     );
 
@@ -148,7 +152,7 @@ fn slot_row(
         // visual order: Restore to ROM → Delete → Switch (left to right).
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_8);
             // Switch — greyed out (non-interactive) in host mode or on the
             // already-active slot.
             if slot.enabled {

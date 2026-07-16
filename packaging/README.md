@@ -66,10 +66,9 @@ the result.
 
 ## After installing (all distros)
 
-- Fan control via hwmon PWM needs membership of the `halod` group (created by the
-  package): `sudo usermod -aG halod $USER`.
-- SMBus / DRAM + GPU RGB needs `i2c-tools` and the `i2c` group:
-  `sudo usermod -aG i2c $USER`.
+- Fan control via hwmon PWM and plugin-scoped SMBus access need membership of
+  the `halod` group (created by the package): `sudo usermod -aG halod $USER`.
+- `i2c-tools` is useful for SMBus / DRAM + GPU RGB diagnostics.
 - Log out and back in for group changes to apply.
 - The GUI spawns the daemon on demand. To run it as a session service instead:
   `systemctl --user enable --now halod.service`.

@@ -134,15 +134,15 @@ pub fn show(
         |ui| {
             ui.label(
                 RichText::new(t!("depcheck.intro"))
-                    .font(theme::body(12.0))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_6);
             for dep in &failing {
                 issue_card(ui, dep);
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
             }
-            ui.add_space(2.0);
+            ui.add_space(theme::SPACE_1);
             ui.checkbox(&mut st.dont_show_again, t!("depcheck.dont_show_again"));
         },
         |ui| {
@@ -201,14 +201,14 @@ pub(crate) fn issue_card_with_surface(
     fill: egui::Color32,
     border: egui::Color32,
 ) {
-    widgets::card_with_surface(ui, egui::Margin::same(20), fill, border, |ui| {
+    widgets::card_with_surface(ui, theme::PAD_CARD, fill, border, |ui| {
         ui.set_width(ui.available_width());
         egui::Sides::new().show(
             ui,
             |ui| {
                 ui.label(
                     RichText::new(title_text(dep))
-                        .font(theme::semibold(13.0))
+                        .font(theme::heading())
                         .color(theme::TEXT),
                 );
             },
@@ -218,13 +218,13 @@ pub(crate) fn issue_card_with_surface(
                 } else {
                     (t!("depcheck.optional"), theme::STAT_AMBER)
                 };
-                ui.label(RichText::new(tag).font(theme::body(10.5)).color(color));
+                ui.label(RichText::new(tag).font(theme::caption()).color(color));
             },
         );
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         caption(ui, &t!("depcheck.impact"));
         body_text(ui, &impact_text(dep));
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_3);
         caption(ui, &t!("depcheck.how_to_fix"));
         body_text(ui, &fix_text(dep));
     });
@@ -241,7 +241,7 @@ fn caption(ui: &mut egui::Ui, text: &str) {
 fn body_text(ui: &mut egui::Ui, text: &str) {
     ui.label(
         RichText::new(text)
-            .font(theme::body(11.5))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
 }

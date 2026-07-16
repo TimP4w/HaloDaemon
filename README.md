@@ -4,7 +4,7 @@
 
 # HaloDaemon
 
-A Linux/Windows peripheral control daemon, inspired by SignalRGB.
+A scriptable Linux/Windows peripheral control daemon, inspired by SignalRGB.
 
 <img src="./docs/images/home.png" width="640" alt="HaloDaemon home screen">
 
@@ -101,14 +101,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 
 - **ChatMix** — for SteelSeries Arctis Nova
 - **Key remap** — divert buttons to custom actions (key chord, mouse button, media key, DPI cycle, macro, command, …)
-
----
-
-## Supported Devices
-
-NZXT Kraken AIOs and Control Hub, Logitech/Razer/Corsair peripherals, SteelSeries Arctis headsets, Philips Evnia monitors, ASUS Aura & SMBus DRAM/GPU RGB, motherboard fans and sensors, and more.
-
-See the full list with VID:PIDs, protocols, and platform support: **[Supported devices](docs/supported-devices.md)**.
+- **Lua scripting** — implement device plugin callbacks and custom hardware behavior in Lua
 
 ---
 
@@ -133,14 +126,12 @@ Both guides cover the runtime dependencies, permissions/PawnIO setup, and the ve
 
 ## Acknowledgments
 
-HaloDaemon would not exist without the reverse-engineering work and documentation produced by these open-source projects (see [docs/licenses.md](docs/licenses.md) for how licensing and attribution are tracked across the app):
+HaloDaemon would not exist without the reverse-engineering work and documentation produced by these open-source projects (and others, tracked individually in the [plugin repository](https://github.com/TimP4w/HaloDaemon-plugins)):
 
 | Project | License | Used for |
 |---------|---------|----------|
-| [Solaar](https://github.com/pwr-Solaar/Solaar) | GPL-2.0-or-later | Logitech HID++ protocol (feature pages, onboard profiles, RGB effects) |
-| [OpenRGB](https://gitlab.com/CalcProgrammer1/OpenRGB) | GPL-2.0-or-later | SMBus transport and ENE SMBus probing |
-| [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) | MPL-2.0 | NCT677x SuperIO register map, AMD Ryzen (Zen) SMN thermal decode |
-| [g560-led](https://github.com/mijoe/g560-led) | MIT | Logitech G560 protocol |
+| [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) | MPL-2.0 | LpcIO via PawnIO |
+| [OpenRGB](https://gitlab.com/CalcProgrammer1/OpenRGB) | GPL-2.0-or-later | SMBus, PawnIO |
 | [PawnIO modules](https://github.com/namazso/PawnIO_modules) | LGPL-2.1-or-later | Bundled `LpcIO.bin`, `SmbusI801.bin`, `SmbusPIIX4.bin`, `AMDFamily17.bin` for Windows SuperIO / chipset SMBus / AMD SMN access (© 2023 namazso) |
 
 ## License

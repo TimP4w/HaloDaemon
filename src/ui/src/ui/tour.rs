@@ -113,15 +113,15 @@ fn overlay(
             );
 
             let body_w = 260.0;
-            let galley = p.layout(body.to_string(), theme::body(12.5), theme::TEXT_DIM, body_w);
+            let galley = p.layout(body.to_string(), theme::body_md(), theme::TEXT_DIM, body_w);
             let bubble_size = Vec2::new(body_w + 32.0, 24.0 + 22.0 + galley.size().y + 16.0 + 32.0);
             let bubble = bubble_rect(cutout, bubble_size, screen);
 
             theme::halo(p, bubble, 12.0, a(Color32::BLACK, 0.5 * fade), 24.0);
-            p.rect_filled(bubble, 12.0, theme::CARD_BG);
+            p.rect_filled(bubble, theme::RADIUS_LG, theme::CARD_BG);
             p.rect_stroke(
                 bubble,
-                12.0,
+                theme::RADIUS_LG,
                 Stroke::new(1.0, theme::BORDER),
                 egui::StrokeKind::Inside,
             );
@@ -130,7 +130,7 @@ fn overlay(
                 Pos2::new(bubble.left() + 16.0, bubble.top() + 16.0),
                 Align2::LEFT_TOP,
                 title,
-                theme::semibold(14.0),
+                theme::title(),
                 theme::TEXT,
             );
             p.galley(
@@ -143,7 +143,7 @@ fn overlay(
                 Pos2::new(bubble.left() + 16.0, bubble.bottom() - 16.0),
                 Align2::LEFT_BOTTOM,
                 format!("{} / {step_count}", step_index + 1),
-                theme::body(11.0),
+                theme::body_sm(),
                 theme::TEXT_FAINT,
             );
 

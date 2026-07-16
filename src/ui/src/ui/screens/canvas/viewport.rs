@@ -17,10 +17,7 @@ use super::geometry::{
     zone_key, zones_in_marquee,
 };
 use super::rack::{instance_color, instance_indices, rgb_zone_descriptor, ring_zone_context_menu};
-use super::{
-    CanvasUi, DragState, Handle, LedMode, MarqueeState, DEBOUNCE, HANDLE_HIT_R, HANDLE_R,
-    MIN_CANVAS_H,
-};
+use super::{CanvasUi, DragState, Handle, LedMode, MarqueeState, DEBOUNCE, HANDLE_HIT_R, HANDLE_R};
 
 /// Screen position of the rotation handle — delegated to the shared widget helper.
 use widgets::rotation_handle_pos;
@@ -32,11 +29,8 @@ pub(super) fn canvas_view(
     canvas_ui: &mut CanvasUi,
     cmd: &CommandTx,
     time: f64,
-    width: f32,
+    outer: Rect,
 ) {
-    // Fill the central area's height too (not a fixed CANVAS_H).
-    let h = ui.available_height().max(MIN_CANVAS_H);
-    let (outer, _) = ui.allocate_exact_size(Vec2::new(width, h), Sense::hover());
     crate::domain::tour::anchor(ui.ctx(), crate::domain::tour::AnchorId::CanvasStage, outer);
     let canvas_rect = letterbox(outer, canvas_ui.canvas_aspect);
     const ROUND: f32 = 16.0;
@@ -319,7 +313,7 @@ fn mode_seg_width(max_label_w: f32) -> f32 {
 
 fn mode_toggle(ui: &mut egui::Ui, canvas_rect: Rect, canvas_ui: &mut CanvasUi) {
     const H: f32 = 26.0;
-    let font = theme::body(11.0);
+    let font = theme::body_sm();
     let segments = [
         (t!("canvas.mode_frame"), LedMode::Frame),
         (t!("canvas.mode_leds"), LedMode::Leds),
@@ -479,10 +473,10 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
             let g = p.layout_no_wrap(label.to_string(), theme::mono_semibold(8.5), col);
             let rect =
                 Rect::from_min_size(Pos2::new(bx, by - 17.0), Vec2::new(g.size().x + 22.0, 14.0));
-            p.rect_filled(rect, 4.0, a(theme::hex(0x0b0e14), 0.92));
+            p.rect_filled(rect, theme::RADIUS_XS, a(theme::hex(0x0b0e14), 0.92));
             p.rect_stroke(
                 rect,
-                4.0,
+                theme::RADIUS_XS,
                 Stroke::new(1.0, a(col, 0.5)),
                 egui::StrokeKind::Middle,
             );
@@ -516,7 +510,7 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
                 badge,
                 Align2::CENTER_CENTER,
                 "×",
-                theme::body(12.0),
+                theme::body_md(),
                 Color32::WHITE,
             );
         }

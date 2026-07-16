@@ -10,7 +10,6 @@ capability:
   boolean: Toggles
 
 profile:
-  profile_label: "PROFILE"
   new_profile_btn: "+ New profile"
   profile_settings_btn: "Profile settings"
   new_profile_title: "New Profile"

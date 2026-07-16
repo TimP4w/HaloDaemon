@@ -4,11 +4,12 @@
 use anyhow::{anyhow, bail, Context, Result};
 use halod_shared::types::{
     Animation, ChoiceDisplay, ChoiceOption, DeviceType, EffectParamDescriptor, EffectParamValue,
-    ParamKind, Permission, PluginConfigFieldKind, PluginKind, RangeDisplay, RgbDescriptor, RgbZone,
+    LcdPresetDescriptor, LcdWidgetDescriptor, LcdWidgetResize, LcdWidgetUpdates, ParamKind,
+    Permission, PluginConfigFieldKind, PluginKind, RangeDisplay, RgbDescriptor, RgbZone,
     ZoneTopology,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::transport::{descriptor_for, known_kinds};
@@ -397,6 +398,104 @@ impl EffectManifest {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WidgetManifest {
+    pub id: String,
+    pub name: String,
+    /// Mandatory SVG used for the GUI catalog tile.
+    pub icon: String,
+    #[serde(default)]
+    pub params: Vec<EffectParamDescriptor>,
+    #[serde(default)]
+    pub resize: LcdWidgetResize,
+    #[serde(default = "default_widget_scale")]
+    pub default_scale: f32,
+    #[serde(default = "default_widget_min_scale")]
+    pub min_scale: f32,
+    #[serde(default = "default_widget_aspect")]
+    pub default_aspect: f32,
+    #[serde(default)]
+    pub auto_width_param: Option<String>,
+    #[serde(default)]
+    pub param_visibility: HashMap<String, halod_shared::types::LcdParamVisibility>,
+    #[serde(default)]
+    pub uses_color: bool,
+    #[serde(default)]
+    pub uses_font: bool,
+    #[serde(default = "default_true")]
+    pub font_controls: bool,
+    #[serde(default)]
+    pub default_font: Option<String>,
+    #[serde(default)]
+    pub fixed_text_weight: Option<String>,
+    #[serde(default)]
+    pub updates: LcdWidgetUpdates,
+}
+
+impl WidgetManifest {
+    pub fn catalog_id(&self, plugin_id: &str) -> String {
+        format!("{plugin_id}:{}", self.id)
+    }
+
+    pub fn descriptor(&self, plugin_id: &str) -> LcdWidgetDescriptor {
+        LcdWidgetDescriptor {
+            id: self.catalog_id(plugin_id),
+            plugin_id: plugin_id.to_owned(),
+            name: self.name.clone(),
+            icon: self.icon.clone(),
+            params: self.params.clone(),
+            resize: self.resize,
+            default_scale: self.default_scale,
+            min_scale: self.min_scale,
+            default_aspect: self.default_aspect,
+            auto_width_param: self.auto_width_param.clone(),
+            param_visibility: self.param_visibility.clone(),
+            uses_color: self.uses_color,
+            uses_font: self.uses_font,
+            font_controls: self.font_controls,
+            default_font: self.default_font.clone(),
+            fixed_text_weight: self.fixed_text_weight.clone(),
+            updates: self.updates.clone(),
+        }
+    }
+}
+
+fn default_widget_scale() -> f32 {
+    1.0
+}
+
+fn default_widget_min_scale() -> f32 {
+    0.6
+}
+
+fn default_widget_aspect() -> f32 {
+    1.0
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresetManifest {
+    pub id: String,
+    pub name: String,
+    pub file: String,
+}
+
+impl PresetManifest {
+    pub fn descriptor(&self, plugin_id: &str) -> LcdPresetDescriptor {
+        LcdPresetDescriptor {
+            id: format!("{plugin_id}:{}", self.id),
+            plugin_id: plugin_id.to_owned(),
+            name: self.name.clone(),
+            file: self.file.clone(),
+        }
+    }
+}
+
 impl From<&ConfigFieldDef> for halod_shared::types::PluginConfigField {
     fn from(f: &ConfigFieldDef) -> Self {
         halod_shared::types::PluginConfigField {
@@ -736,6 +835,8 @@ pub struct PluginManifest {
     /// Opt in to runtime child devices returned by `enumerate_controllers`.
     pub dynamic_children: bool,
     pub effects: Vec<EffectManifest>,
+    pub widgets: Vec<WidgetManifest>,
+    pub presets: Vec<PresetManifest>,
     pub transports: TransportsConfig,
     /// Explicitly declared host requirements (see [`RequirementDef`]). Auto-
     /// derived requirements are computed on demand, not stored here.
@@ -795,6 +896,10 @@ pub struct PluginMeta {
     pub dynamic_children: bool,
     #[serde(default)]
     pub effects: Vec<EffectManifest>,
+    #[serde(default)]
+    pub widgets: Vec<WidgetManifest>,
+    #[serde(default)]
+    pub presets: Vec<PresetManifest>,
     #[serde(default)]
     pub config: Option<ConfigManifest>,
     /// Display-only logo, a bare filename under the plugin's `assets/` directory.
@@ -921,6 +1026,8 @@ pub const MAX_PLUGIN_CONTROLLERS: usize = 256;
 
 const MAX_PLUGIN_DEVICES: usize = 256;
 const MAX_PLUGIN_EFFECTS: usize = 256;
+const MAX_PLUGIN_WIDGETS: usize = 256;
+const MAX_PLUGIN_PRESETS: usize = 128;
 const MAX_EFFECT_PARAMS: usize = 64;
 const MAX_CONFIG_FIELDS: usize = 128;
 const MAX_USB_ENDPOINTS: usize = 32;
@@ -1084,6 +1191,8 @@ fn declares_only_platform(platforms: &[String], os: &str) -> bool {
 pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     check_count("devices", manifest.devices.len(), MAX_PLUGIN_DEVICES)?;
     check_count("effects", manifest.effects.len(), MAX_PLUGIN_EFFECTS)?;
+    check_count("widgets", manifest.widgets.len(), MAX_PLUGIN_WIDGETS)?;
+    check_count("presets", manifest.presets.len(), MAX_PLUGIN_PRESETS)?;
     check_count(
         "effect thumbnails",
         manifest.effect_thumbnails.len(),
@@ -1093,6 +1202,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     validate_catalog(manifest)?;
     validate_device_identifiers(manifest)?;
     validate_effects(&manifest.effects, "effect")?;
+    validate_lcd_content(manifest)?;
     validate_effect_assets(manifest)?;
     validate_transports(manifest)?;
     validate_requirements(manifest)?;
@@ -1169,6 +1279,23 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 || manifest.transports.lpcio.is_some()
             {
                 bail!("integration plugin declares a non-integration transport");
+            }
+        }
+        PluginKind::Lcd => {
+            if manifest.widgets.is_empty() && manifest.presets.is_empty() {
+                bail!("lcd plugin declares no widgets or presets");
+            }
+            if !manifest.devices.is_empty() {
+                bail!("lcd plugin must not declare devices");
+            }
+            if !manifest.effects.is_empty() {
+                bail!("lcd plugin must not declare effects");
+            }
+            if !manifest.transports.is_empty() {
+                bail!("lcd plugin must not declare transports");
+            }
+            if manifest.dynamic_children {
+                bail!("lcd plugin must not declare dynamic children");
             }
         }
     }
@@ -1475,6 +1602,169 @@ fn validate_effects(effects: &[EffectManifest], what: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_lcd_content(manifest: &PluginManifest) -> Result<()> {
+    let mut widget_ids = HashSet::new();
+    for widget in &manifest.widgets {
+        validate_component("widget id", &widget.id)?;
+        validate_short_text("widget name", &widget.name)?;
+        if !widget_ids.insert(&widget.id) {
+            bail!("widget id '{}' is declared more than once", widget.id);
+        }
+        validate_asset_name("widget icon", &widget.icon)?;
+        if Path::new(&widget.icon).extension().and_then(|v| v.to_str()) != Some("svg") {
+            bail!("widget icon '{}' must be an SVG", widget.icon);
+        }
+        if !manifest.plugin_dir.as_os_str().is_empty() {
+            let path = manifest.plugin_dir.join("assets").join(&widget.icon);
+            check_package_file(&path, halod_shared::types::MAX_PLUGIN_ASSET_BYTES)?;
+            let bytes = std::fs::read(&path)?;
+            resvg::usvg::Tree::from_data(&bytes, &resvg::usvg::Options::default())
+                .map_err(|error| anyhow!("widget '{}' icon is invalid: {error}", widget.id))?;
+        }
+        validate_effect_params(&widget.params, &format!("widget '{}'", widget.id))?;
+        if !widget.min_scale.is_finite() || !(0.1..=0.6).contains(&widget.min_scale) {
+            bail!(
+                "widget '{}' min_scale must be between 0.1 and 0.6",
+                widget.id
+            );
+        }
+        if !widget.default_scale.is_finite()
+            || !(widget.min_scale..=3.0).contains(&widget.default_scale)
+        {
+            bail!(
+                "widget '{}' default_scale must be between min_scale and 3",
+                widget.id,
+            );
+        }
+        if !widget.default_aspect.is_finite() || !(0.1..=3.0).contains(&widget.default_aspect) {
+            bail!(
+                "widget '{}' default_aspect must be between 0.1 and 3",
+                widget.id
+            );
+        }
+        if widget.default_aspect != 1.0 && widget.resize != LcdWidgetResize::Box {
+            bail!(
+                "widget '{}' needs resize: box for a non-square default",
+                widget.id
+            );
+        }
+        if let Some(default_font) = &widget.default_font {
+            if !widget.uses_font {
+                bail!(
+                    "widget '{}' declares default_font without uses_font",
+                    widget.id
+                );
+            }
+            validate_short_text("default font family", default_font)?;
+        }
+        if !widget.font_controls && !widget.uses_font {
+            bail!(
+                "widget '{}' disables font_controls without uses_font",
+                widget.id
+            );
+        }
+        if let Some(weight) = &widget.fixed_text_weight {
+            if !widget.uses_font || !matches!(weight.as_str(), "normal" | "semibold" | "bold") {
+                bail!(
+                    "widget '{}' fixed_text_weight must be normal, semibold, or bold on a font widget",
+                    widget.id
+                );
+            }
+            if widget.font_controls {
+                bail!(
+                    "widget '{}' fixed_text_weight requires font_controls: false",
+                    widget.id
+                );
+            }
+        }
+        if let Some(param) = &widget.auto_width_param {
+            let valid = widget.params.iter().any(|candidate| {
+                candidate.id == *param && matches!(candidate.kind, ParamKind::Text)
+            });
+            if !valid || widget.resize != LcdWidgetResize::Box {
+                bail!(
+                    "widget '{}' auto_width_param must name a text parameter on a box widget",
+                    widget.id
+                );
+            }
+        }
+        for (target, rule) in &widget.param_visibility {
+            if !widget.params.iter().any(|param| param.id == *target) {
+                bail!(
+                    "widget '{}' visibility target '{target}' is not declared",
+                    widget.id
+                );
+            }
+            let valid_source = widget.params.iter().any(|param| {
+                param.id == rule.param
+                    && matches!(&param.kind, ParamKind::Enum { options } if options.contains(&rule.equals))
+            });
+            if !valid_source {
+                bail!(
+                    "widget '{}' visibility rule for '{target}' is invalid",
+                    widget.id
+                );
+            }
+        }
+        for (source, enabled, rule) in [
+            (
+                "sensors",
+                widget.updates.sensors,
+                widget.updates.sensors_when.as_ref(),
+            ),
+            (
+                "audio",
+                widget.updates.audio,
+                widget.updates.audio_when.as_ref(),
+            ),
+        ] {
+            let Some(rule) = rule else { continue };
+            let valid_param = widget.params.iter().any(|param| {
+                param.id == rule.param
+                    && matches!(&param.kind, ParamKind::Enum { options } if options.contains(&rule.equals))
+            });
+            if !enabled || !valid_param {
+                bail!(
+                    "widget '{}' {source}_when requires the matching update source and enum value",
+                    widget.id
+                );
+            }
+        }
+        if let Some(ms) = widget.updates.interval_ms {
+            if !(16..=60_000).contains(&ms) {
+                bail!(
+                    "widget '{}' interval_ms must be between 16 and 60000",
+                    widget.id
+                );
+            }
+        }
+    }
+
+    let mut preset_ids = HashSet::new();
+    for preset in &manifest.presets {
+        validate_component("preset id", &preset.id)?;
+        validate_short_text("preset name", &preset.name)?;
+        if !preset_ids.insert(&preset.id) {
+            bail!("preset id '{}' is declared more than once", preset.id);
+        }
+        validate_asset_name("preset file", &preset.file)?;
+        if Path::new(&preset.file).extension().and_then(|v| v.to_str()) != Some("json") {
+            bail!("preset '{}' must use a .json file", preset.id);
+        }
+        if !manifest.plugin_dir.as_os_str().is_empty() {
+            let path = manifest.plugin_dir.join("assets").join(&preset.file);
+            check_package_file(&path, 512 * 1024)?;
+            let bytes = std::fs::read(&path)?;
+            let def: halod_shared::lcd_custom::CustomTemplateDef =
+                serde_json::from_slice(&bytes)
+                    .with_context(|| format!("parsing preset '{}'", preset.id))?;
+            halod_shared::lcd_custom::validate_widgets(&def)
+                .map_err(|error| anyhow!("preset '{}' is invalid: {error}", preset.id))?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_effect_params(params: &[EffectParamDescriptor], owner: &str) -> Result<()> {
     check_count(
         &format!("parameters for {owner}"),
@@ -1583,6 +1873,10 @@ fn validate_asset_name(what: &str, value: &str) -> Result<()> {
         bail!("{what} must be a non-empty bare filename no longer than {MAX_TEXT_BYTES} bytes");
     }
     Ok(())
+}
+
+pub(crate) fn validate_asset_filename(value: &str) -> Result<()> {
+    validate_asset_name("plugin asset", value)
 }
 
 fn validate_transports(manifest: &PluginManifest) -> Result<()> {
@@ -1897,6 +2191,8 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         plugin_type: meta.plugin_type,
         dynamic_children: meta.dynamic_children,
         effects: meta.effects,
+        widgets: meta.widgets,
+        presets: meta.presets,
         transports: meta.transports,
         requirements: meta.requirements,
         permissions: meta.permissions,
@@ -1932,6 +2228,48 @@ mod tests {
         std::fs::write(dir.join("plugin.yaml"), format!("id: {id}\n{yaml_extra}")).unwrap();
         std::fs::write(dir.join("main.lua"), lua).unwrap();
         dir
+    }
+
+    fn write_widget_icon(dir: &Path) {
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(
+            dir.join("assets/widget.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16"/></svg>"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn lcd_widget_default_font_requires_and_preserves_font_support() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "lcd_system_font",
+            "type: lcd\nwidgets:\n  - id: wordmark\n    name: Wordmark\n    icon: widget.svg\n    uses_font: true\n    font_controls: false\n    default_font: Inter Tight\n    fixed_text_weight: bold\n",
+            ENTRY_LUA,
+        );
+        write_widget_icon(&dir);
+
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest.widgets[0].default_font.as_deref(),
+            Some("Inter Tight")
+        );
+        assert!(!manifest.widgets[0].font_controls);
+        assert_eq!(
+            manifest.widgets[0].fixed_text_weight.as_deref(),
+            Some("bold")
+        );
+
+        let invalid = write_plugin_dir(
+            tmp.path(),
+            "lcd_no_font_support",
+            "type: lcd\nwidgets:\n  - id: wordmark\n    name: Wordmark\n    icon: widget.svg\n    default_font: Inter Tight\n",
+            ENTRY_LUA,
+        );
+        write_widget_icon(&invalid);
+        let error = parse_manifest_from_dir(&invalid).unwrap_err();
+        assert!(format!("{error:#}").contains("default_font without uses_font"));
     }
 
     #[test]

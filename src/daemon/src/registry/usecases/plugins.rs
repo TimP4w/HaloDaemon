@@ -94,6 +94,43 @@ pub async fn get_asset(
     Ok(())
 }
 
+pub async fn get_lcd_widget_icon(
+    catalog_id: String,
+    client: ClientHandle,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let bytes = app.registry.read_widget_icon(&catalog_id)?;
+    client.send_json(&json!({
+        "type": "lcd_widget_icon",
+        "catalog_id": catalog_id,
+        "data_b64": base64::engine::general_purpose::STANDARD.encode(bytes),
+    }));
+    Ok(())
+}
+
+pub async fn get_lcd_preset(
+    catalog_id: String,
+    client: ClientHandle,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let def = app.registry.read_lcd_preset(&catalog_id)?;
+    client.send_json(&json!({
+        "type": "lcd_plugin_preset",
+        "catalog_id": catalog_id,
+        "def": def,
+    }));
+    Ok(())
+}
+
+/// Return current Linux udev-rule drift without modifying system files.
+pub async fn get_udev_rules_status(client: ClientHandle, app: Arc<AppState>) -> Result<()> {
+    client.send_json(&json!({
+        "type": "udev_rules_status",
+        "data": app.registry.udev_rules_status(),
+    }));
+    Ok(())
+}
+
 /// Replace a plugin's user-editable config values and reconcile its devices.
 pub async fn set_config(
     id: String,

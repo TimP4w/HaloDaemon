@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use egui::{Sense, Stroke, Vec2};
+use egui::{Sense, Vec2};
 use halod_shared::types::{AppState, PluginInfo, PluginIssue, PluginIssueKind, PluginKind};
 
 use crate::domain::models::plugin_issues::plugin_issue_detail;
@@ -151,6 +151,7 @@ impl IntegrationsUi {
     }
 
     fn body(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+        ui.set_max_width(ui.available_width().min(840.0));
         reconcile_in_flight(&mut self.in_flight, &state.plugins.plugins);
         let title_resp = ui.label(
             egui::RichText::new(t!("integrations.title"))
@@ -162,13 +163,13 @@ impl IntegrationsUi {
             crate::domain::tour::AnchorId::IntegrationsOverview,
             title_resp.rect,
         );
-        ui.add_space(3.0);
+        ui.add_space(theme::SPACE_1);
         ui.label(
             egui::RichText::new(t!("integrations.subtitle"))
-                .font(theme::body(12.0))
+                .font(theme::body_md())
                 .color(theme::TEXT_MUT),
         );
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_9);
 
         let integrations: Vec<&PluginInfo> = state
             .plugins
@@ -209,12 +210,12 @@ impl IntegrationsUi {
                             Some(tex) => draw_logo_fit(ui.painter(), rect, tex),
                             None => initials_tile_at(ui, rect, &p.name, &p.id),
                         }
-                        ui.add_space(6.0);
+                        ui.add_space(theme::SPACE_3);
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
                                     egui::RichText::new(&p.name)
-                                        .font(theme::semibold(15.0))
+                                        .font(theme::title())
                                         .color(theme::TEXT),
                                 );
                                 if !p.version.is_empty() {
@@ -226,10 +227,10 @@ impl IntegrationsUi {
                                 }
                             });
                             if !p.description.is_empty() {
-                                ui.add_space(4.0);
+                                ui.add_space(theme::SPACE_2);
                                 ui.label(
                                     egui::RichText::new(&p.description)
-                                        .font(theme::body(11.5))
+                                        .font(theme::body_sm())
                                         .color(theme::TEXT_MUT),
                                 );
                             }
@@ -264,7 +265,7 @@ impl IntegrationsUi {
                 },
             );
 
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_5);
             let status = integration_status(state, &p.id);
             let has_config = !p.config_fields.is_empty();
             let expanded = self.expanded.as_deref() == Some(p.id.as_str());
@@ -295,7 +296,7 @@ impl IntegrationsUi {
             );
 
             if let Some(issue) = &p.health.issue {
-                ui.add_space(10.0);
+                ui.add_space(theme::SPACE_5);
                 if integration_issue_bar(ui, issue) {
                     self.issue_modal = Some((
                         t!("integrations.issue_modal_title", integration = &p.name).to_string(),
@@ -305,7 +306,7 @@ impl IntegrationsUi {
             }
 
             if has_config && expanded {
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_6);
                 seed_config_edit_if_needed(&mut self.config_edit, &p.id, &p.config_values);
                 let edits = &mut self.config_edit.as_mut().expect("just seeded above").1;
                 config_section(ui, p, edits, |values| {
@@ -336,7 +337,6 @@ impl IntegrationsUi {
 /// Runtime/connection failure attached to one integration card. The short bar
 /// keeps the page scannable; Details exposes the complete transport/Lua error.
 fn integration_issue_bar(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
-    let mut clicked = false;
     let label = match issue.kind {
         PluginIssueKind::ConnectFailed => t!("integrations.issue_connect_failed"),
         PluginIssueKind::InitFailed => t!("plugins.issue_init_failed"),
@@ -344,36 +344,14 @@ fn integration_issue_bar(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
         PluginIssueKind::LoadWarning => t!("plugins.issue_load_warning"),
         PluginIssueKind::LoadFailed => t!("plugins.issue_load_failed"),
     };
-    egui::Frame::NONE
-        .fill(theme::a(theme::TRAFFIC_RED, 0.10))
-        .stroke(Stroke::new(1.0, theme::a(theme::TRAFFIC_RED, 0.35)))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(14, 9))
-        .show(ui, |ui| {
-            egui::Sides::new().height(28.0).show(
-                ui,
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(label)
-                            .font(theme::semibold(12.0))
-                            .color(theme::TRAFFIC_RED),
-                    );
-                },
-                |ui| {
-                    if widgets::button(
-                        ui,
-                        &t!("integrations.issue_details"),
-                        ButtonKind::Ghost,
-                        Vec2::new(90.0, 28.0),
-                    )
-                    .clicked()
-                    {
-                        clicked = true;
-                    }
-                },
-            );
-        });
-    clicked
+    let details = t!("integrations.issue_details");
+    widgets::Banner::danger(label.as_ref())
+        .action(widgets::BannerAction::new(
+            &details,
+            ButtonKind::Ghost,
+            Vec2::new(90.0, 28.0),
+        ))
+        .show(ui)
 }
 
 /// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
@@ -414,7 +392,7 @@ fn status_row(ui: &mut egui::Ui, p: &PluginInfo, status: &IntegrationStatus) {
         ui.painter().circle_filled(rect.center(), 3.0, color);
         ui.label(
             egui::RichText::new(label.as_ref())
-                .font(theme::body(11.0))
+                .font(theme::body_sm())
                 .color(color),
         );
         if status.device_count > 0 {

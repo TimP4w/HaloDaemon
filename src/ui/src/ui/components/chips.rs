@@ -29,20 +29,14 @@ fn chip_close_zones(rect: Rect) -> (Rect, Rect) {
 pub fn chip_closable(ui: &mut egui::Ui, label: &str) -> (bool, bool) {
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_string(), theme::body(12.0), theme::TEXT_DIM);
+        .layout_no_wrap(label.to_string(), theme::body_md(), theme::TEXT_DIM);
     let h = 31.0;
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(galley.size().x + 20.0 + h, h), Sense::click());
     let (body, close) = chip_close_zones(rect);
     let close_hovered = resp.hover_pos().is_some_and(|p| close.contains(p));
     let p = ui.painter();
-    p.rect_filled(rect, 8.0, theme::INNER_BG);
-    p.rect_stroke(
-        rect,
-        8.0,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
+    theme::paint_well(p, rect, 8.0);
     p.galley(
         Pos2::new(body.min.x + 12.0, rect.center().y - galley.size().y / 2.0),
         galley,
@@ -52,7 +46,7 @@ pub fn chip_closable(ui: &mut egui::Ui, label: &str) -> (bool, bool) {
         close.center(),
         Align2::CENTER_CENTER,
         "×",
-        theme::body(13.0),
+        theme::body_lg(),
         if close_hovered {
             theme::TRAFFIC_RED
         } else {
@@ -84,7 +78,7 @@ pub fn pill_styled(
 ) -> bool {
     let galley = ui.painter().layout_no_wrap(
         label.to_string(),
-        theme::body(12.0),
+        theme::body_md(),
         if active {
             theme::hex(0x0a0d13)
         } else {
@@ -125,7 +119,7 @@ pub fn pill_styled(
 pub fn pill_row(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
     let galley = ui.painter().layout_no_wrap(
         label.to_string(),
-        theme::body(12.0),
+        theme::body_md(),
         if active {
             theme::hex(0x0a0d13)
         } else {
@@ -191,13 +185,13 @@ fn chip_impl(
 ) -> Response {
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_string(), theme::body(10.5), text);
+        .layout_no_wrap(label.to_string(), theme::caption(), text);
     let size = galley.size() + Vec2::new(18.0, 10.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    ui.painter().rect_filled(rect, 7.0, fill);
+    ui.painter().rect_filled(rect, theme::RADIUS_SM, fill);
     ui.painter().rect_stroke(
         rect,
-        7.0,
+        theme::RADIUS_SM,
         Stroke::new(1.0, border),
         egui::StrokeKind::Middle,
     );
@@ -223,13 +217,13 @@ fn chip_impl(
 
 /// A tracked-caps section header inside a popover / context menu.
 pub fn context_menu_title(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(2.0);
+    ui.add_space(theme::SPACE_1);
     ui.label(
         egui::RichText::new(text)
             .font(theme::body(9.5))
             .color(theme::TEXT_FAINT2),
     );
-    ui.add_space(2.0);
+    ui.add_space(theme::SPACE_1);
 }
 
 /// A full-width, left-aligned context-menu row with a subtle hover fill.
@@ -239,14 +233,15 @@ pub fn context_menu_item(ui: &mut egui::Ui, label: &str, color: Color32) -> Resp
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, 7.0, theme::hex(0x1a2230));
+        ui.painter()
+            .rect_filled(rect, theme::RADIUS_SM, theme::hex(0x1a2230));
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     ui.painter().text(
         Pos2::new(rect.left() + 9.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        theme::body(12.5),
+        theme::body_md(),
         color,
     );
     resp

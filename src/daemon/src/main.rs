@@ -52,15 +52,27 @@ enum ProcessRole {
         dev_plugin_repo: Option<std::path::PathBuf>,
     },
     #[cfg(feature = "plugin-test")]
-    PluginTest { package: std::path::PathBuf },
+    PluginTest {
+        package: std::path::PathBuf,
+    },
+    UdevRules {
+        embedded: bool,
+    },
 }
 
 #[cfg(feature = "dev-plugin-repo")]
-const USAGE: &str = "usage: halod [--headless] [--dev-plugin-repo <DIR>]";
+const USAGE: &str = "usage: halod [--headless] [--dev-plugin-repo <DIR>] | halod udev-rules";
 #[cfg(not(feature = "dev-plugin-repo"))]
-const USAGE: &str = "usage: halod [--headless]";
+const USAGE: &str = "usage: halod [--headless] | halod udev-rules";
 
 fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
+    if args.first().map(String::as_str) == Some("udev-rules") {
+        let embedded = args.get(1).is_some_and(|arg| arg == "--embedded");
+        if args.len() != 1 + usize::from(embedded) {
+            return Err("usage: halod udev-rules [--embedded]".to_owned());
+        }
+        return Ok(ProcessRole::UdevRules { embedded });
+    }
     #[cfg(feature = "plugin-test")]
     if args.first().map(String::as_str) == Some("plugin-test") {
         let package = args
@@ -132,8 +144,28 @@ fn main() -> Result<()> {
         std::process::exit(exit_code);
     }
 
+    if let ProcessRole::UdevRules { embedded } = role {
+        let rules = if embedded {
+            let bytes = embedded_plugins::BUNDLE
+                .ok_or_else(|| anyhow::anyhow!("this build has no embedded plugin bundle"))?;
+            drivers::plugins::udev_rules_from_bundle(bytes)?
+        } else {
+            let cfg = config::load()?;
+            let registry = drivers::plugins::Registry::default();
+            registry.load_all_with_priority_repo(
+                &config::plugins_dir(),
+                None,
+                &drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
+            );
+            registry.udev_rules()
+        };
+        print!("{rules}");
+        return Ok(());
+    }
+
     let headless = match &role {
         ProcessRole::Server { headless, .. } => *headless,
+        ProcessRole::UdevRules { .. } => unreachable!("handled above"),
         #[cfg(feature = "plugin-test")]
         ProcessRole::PluginTest { .. } => unreachable!("handled above"),
     };
@@ -142,6 +174,7 @@ fn main() -> Result<()> {
         ProcessRole::Server {
             dev_plugin_repo, ..
         } => dev_plugin_repo,
+        ProcessRole::UdevRules { .. } => unreachable!("handled above"),
         #[cfg(feature = "plugin-test")]
         ProcessRole::PluginTest { .. } => unreachable!("handled above"),
     };
@@ -485,6 +518,19 @@ mod tests {
                 dev_plugin_repo: None
             }
         );
+    }
+
+    #[test]
+    fn udev_rules_is_a_standalone_runtime_command() {
+        assert_eq!(
+            process_role(&argv(&["udev-rules"])).unwrap(),
+            ProcessRole::UdevRules { embedded: false }
+        );
+        assert_eq!(
+            process_role(&argv(&["udev-rules", "--embedded"])).unwrap(),
+            ProcessRole::UdevRules { embedded: true }
+        );
+        assert!(process_role(&argv(&["udev-rules", "extra"])).is_err());
     }
 
     #[cfg(feature = "dev-plugin-repo")]

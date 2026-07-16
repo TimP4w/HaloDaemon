@@ -22,7 +22,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
     ))
     .rect_stroke(
         ctx.content_rect(),
-        12.0,
+        theme::RADIUS_LG,
         egui::Stroke::new(1.0, theme::BORDER),
         egui::StrokeKind::Middle,
     );
