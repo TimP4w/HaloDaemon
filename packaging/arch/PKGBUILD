@@ -16,7 +16,7 @@ install="$pkgname.install"
 # Pin to an immutable commit, not the mutable `#tag=v$pkgver`: a tag can be force-moved after publication so "v$pkgver" is not reproducible, whereas `#commit=` locks makepkg to a fixed git object. 'SKIP' is still correct because makepkg cannot sha256 a VCS ref (no single downloaded file to hash) — integrity is delegated to git verifying the checked-out tree against the pinned commit SHA.
 # The release workflow updates this to the exact 40-character version-commit
 # SHA before publishing. Do NOT revert to `#tag=` — the tag is mutable.
-source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=839656e47f5d8f5b54bdf24a41a01812c9c0debb")
+source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=03136737640c92687f584868bd1d9b3e8d1fda8a")
 sha256sums=('SKIP')
 
 prepare() {
