@@ -126,7 +126,8 @@ jobs:
           mkdir -p generated-udev
           src/target/release/halod udev-rules --embedded \
             > generated-udev/60-halod.rules
-          udevadm verify generated-udev/60-halod.rules
+          # The halod group only exists on the target system after install.
+          udevadm verify --resolve-names=never generated-udev/60-halod.rules
 
       - name: Upload plugin tools
         uses: actions/upload-artifact@v7.0.1
