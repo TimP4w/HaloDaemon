@@ -126,11 +126,12 @@ pub fn status(rules: &str, manifests: &[PluginManifest]) -> halod_shared::types:
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = manifests;
+        let _ = (rules, manifests);
         halod_shared::types::UdevRulesStatus::default()
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn status_at_paths<'a>(
     rules: &str,
     manifests: &[PluginManifest],
@@ -184,10 +185,12 @@ fn status_at_paths<'a>(
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn device_rule_count(rules: &str) -> usize {
     generated_device_rules(rules).len()
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn generated_device_rules(rules: &str) -> Vec<&str> {
     rules
         .lines()
