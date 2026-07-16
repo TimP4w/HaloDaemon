@@ -2094,47 +2094,37 @@ fn detail_body(
     udev_action_needed: bool,
     now: f64,
 ) {
-    egui::Sides::new().show(
-        ui,
-        |ui| {
-            match logo_tex {
-                Some(tex) => {
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
-                    draw_logo_fit(ui.painter(), rect, tex);
-                }
-                None => initials_tile(ui, &p.name, &p.id, 44.0),
+    ui.horizontal(|ui| {
+        match logo_tex {
+            Some(tex) => {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+                draw_logo_fit(ui.painter(), rect, tex);
             }
-            ui.add_space(4.0);
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(&p.name)
-                            .font(theme::bold(18.0))
-                            .color(theme::TEXT),
-                    );
-                    if !p.version.is_empty() {
-                        ui.label(
-                            egui::RichText::new(&p.version)
-                                .font(theme::mono(11.0))
-                                .color(theme::TEXT_FAINT),
-                        );
-                    }
-                });
+            None => initials_tile(ui, &p.name, &p.id, 44.0),
+        }
+        ui.add_space(4.0);
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(&p.path)
-                        .font(theme::mono(10.0))
-                        .color(theme::TEXT_FAINT2),
+                    egui::RichText::new(&p.name)
+                        .font(theme::bold(18.0))
+                        .color(theme::TEXT),
+                );
+                let _ = widgets::chip_colored(
+                    ui,
+                    &plugin_type_label(p.plugin_type),
+                    plugin_type_color(p.plugin_type),
                 );
             });
-        },
-        |ui| {
-            let _ = widgets::chip_colored(
-                ui,
-                &plugin_type_label(p.plugin_type),
-                plugin_type_color(p.plugin_type),
-            );
-        },
-    );
+            if !p.version.is_empty() {
+                ui.label(
+                    egui::RichText::new(&p.version)
+                        .font(theme::mono(11.0))
+                        .color(theme::TEXT_FAINT),
+                );
+            }
+        });
+    });
 
     if is_load_failed(p) {
         if let Some(issue) = &p.health.issue {
@@ -2504,7 +2494,9 @@ fn targets_permissions_row(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
     ui.add_space(16.0);
     ui.columns(2, |cols| {
         if has_targets {
-            widgets::caps_label(&mut cols[0], &t!("plugins.targets"));
+            // Match the permissions column's header row height (a `PILL_H`
+            // horizontal) so the two column headers align on the same row.
+            cols[0].horizontal(|ui| widgets::caps_label_inline(ui, &t!("plugins.targets")));
             cols[0].add_space(6.0);
             for target in &p.targets {
                 cols[0].label(
