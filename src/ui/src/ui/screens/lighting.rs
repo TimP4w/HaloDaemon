@@ -857,6 +857,20 @@ struct CardResult {
     zone_changed: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CardClick {
+    Toggle,
+    Expand,
+}
+
+fn card_click(on_checkbox: bool, selected: bool, has_zones: bool) -> CardClick {
+    if !on_checkbox && selected && has_zones {
+        CardClick::Expand
+    } else {
+        CardClick::Toggle
+    }
+}
+
 /// The `(zone id, zone name)` pairs a device exposes via its `Rgb` capability.
 fn rgb_zone_pairs(dev: &WireDevice) -> Vec<(String, String)> {
     dev.capabilities
@@ -973,33 +987,29 @@ fn device_card(
         egui::StrokeKind::Middle,
     );
 
-    // Header (clickable row).
+    // Header (clickable row) plus the checkbox it contains. A single interact
+    // owns the whole row so the checkbox and header can't both fire on one
+    // click; the click is dispatched by where it landed.
     let hdr = Rect::from_min_size(rect.min, Vec2::new(rect.width(), CARD_BASE_H));
-    let hdr_resp = ui.interact(hdr, ui.id().with(("hdr", &dev.id)), Sense::click());
-    if hdr_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if hdr_resp.clicked() {
-        if selected && !all_zone_ids.is_empty() {
-            result.expand_toggled = true;
-        } else {
-            result.toggled = true;
-        }
-    }
-
-    // Checkbox.
     let cb = 18.0;
     let cb_rect = Rect::from_center_size(
         Pos2::new(rect.left() + 14.0 + cb / 2.0, hdr.center().y),
         Vec2::splat(cb),
     );
-    let cb_resp = ui.interact(cb_rect, ui.id().with(("cb", &dev.id)), Sense::click());
-    if cb_resp.hovered() {
+    let hdr_resp = ui.interact(hdr, ui.id().with(("hdr", &dev.id)), Sense::click());
+    if hdr_resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    if cb_resp.clicked() {
-        result.toggled = true;
+    if hdr_resp.clicked() {
+        let on_checkbox = hdr_resp
+            .interact_pointer_pos()
+            .is_some_and(|p| cb_rect.contains(p));
+        match card_click(on_checkbox, selected, !all_zone_ids.is_empty()) {
+            CardClick::Expand => result.expand_toggled = true,
+            CardClick::Toggle => result.toggled = true,
+        }
     }
+
     let (cb_fill, cb_border) = if selected {
         (theme::CYAN, theme::CYAN)
     } else {
@@ -1388,6 +1398,23 @@ fn effective_sel_count(state: &AppState, st: &LightingUi) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkbox_click_only_toggles_never_expands() {
+        // Regression: a checkbox hit must never open the zone picker, even on a
+        // selected device with zones — otherwise one click both toggles and
+        // expands.
+        assert_eq!(card_click(true, true, true), CardClick::Toggle);
+        assert_eq!(card_click(true, false, true), CardClick::Toggle);
+    }
+
+    #[test]
+    fn row_expands_only_when_selected_with_zones() {
+        assert_eq!(card_click(false, true, true), CardClick::Expand);
+        // Not selected → row click selects; no zones → nothing to expand.
+        assert_eq!(card_click(false, false, true), CardClick::Toggle);
+        assert_eq!(card_click(false, true, false), CardClick::Toggle);
+    }
 
     #[test]
     fn adjusted_full_brightness_identity() {
