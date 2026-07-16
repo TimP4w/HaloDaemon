@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Named radius / spacing / padding tokens and low-level surface painters.
-// Some tokens are consumed by later design-system migration batches (radius,
-// spacing, and painter sweeps); allow until every site is routed through them.
-#![allow(dead_code)]
 
 use egui::{Color32, Margin, Rect, Stroke, Vec2};
 

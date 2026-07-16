@@ -17,7 +17,7 @@ pub fn text_field(
         egui::TextEdit::singleline(buf)
             .hint_text(hint)
             .desired_width(desired_width)
-            .margin(egui::vec2(12.0, 9.0))
+            .margin(theme::PAD_FIELD)
             .font(theme::body(14.0)),
     )
 }
