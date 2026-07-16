@@ -1,7 +1,7 @@
 {
-  "name": "haloD companion",
-  "description": "haloD companion for gnome",
-  "uuid": "halod@halod",
+  "name": "HaloDaemon companion",
+  "description": "HaloDaemon companion for gnome",
+  "uuid": "companion@halodaemon",
   "version": 1,
   "shell-version": [
     "45",
