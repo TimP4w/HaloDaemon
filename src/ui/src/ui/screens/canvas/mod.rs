@@ -12,7 +12,7 @@ mod viewport;
 use std::collections::{HashMap, HashSet};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use egui::Color32;
+use egui::{Color32, Pos2, Rect, Vec2};
 use halod_shared::types::{AppState, CanvasFrame, EffectParamValue, PlacedZone, RgbColor};
 
 pub(crate) use chrome::chrome;
@@ -24,7 +24,16 @@ use viewport::canvas_view;
 // ── Constants ─────────────────────────────────────────────────────────────────
 /// Total right-panel width (card column + inner margins + scrollbar).
 const SIDEBAR_W: f32 = 292.0;
-const MIN_CANVAS_H: f32 = 320.0;
+/// Minimum canvas edge; the stage never shrinks below this in either axis.
+const MIN_CANVAS_H: f32 = 600.0;
+/// Fixed gap between the canvas's right edge and the sidebar column.
+const CANVAS_SIDEBAR_GAP: f32 = 20.0;
+/// Page margins around the canvas/sidebar region.
+const CANVAS_LEFT: f32 = 36.0;
+const CANVAS_TOP: f32 = 26.0;
+const CANVAS_BOTTOM: f32 = 26.0;
+/// Padding kept to the right of the sidebar so it isn't flush to the window edge.
+const CANVAS_RIGHT_PAD: f32 = 20.0;
 const DEBOUNCE: f64 = 0.14;
 const HANDLE_R: f32 = 5.0;
 const HANDLE_HIT_R: f32 = 14.0;
@@ -362,35 +371,34 @@ pub(crate) fn body(
         }
     }
 
-    egui::Panel::right("canvas_right")
-        .exact_size(SIDEBAR_W)
-        .resizable(false)
-        .show_separator_line(false)
-        .frame(egui::Frame::NONE.inner_margin(egui::Margin {
-            left: 8,
-            right: 20,
-            top: 26,
-            bottom: 0,
-        }))
-        .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    right_panel(ui, state, canvas_ui, cmd, time, designer_ui, page);
-                    ui.add_space(26.0);
-                });
-        });
+    // Lay out below the shared header (title/subtitle/tabs), not over it.
+    let area = ui.available_rect_before_wrap();
+    let canvas_rect = canvas_stage_rect(area, canvas_ui.canvas_aspect);
+    canvas_view(ui, state, canvas_ui, cmd, time, canvas_rect);
 
-    egui::CentralPanel::default()
-        .frame(egui::Frame::NONE.inner_margin(egui::Margin {
-            left: 36,
-            right: 16,
-            top: 0,
-            bottom: 26,
-        }))
-        .show(ui, |ui| {
-            let w = ui.available_width();
-            canvas_view(ui, state, canvas_ui, cmd, time, w);
+    // Sidebar hugs the canvas's right edge at a fixed gap, so it tracks the
+    // canvas rather than the window edge. `canvas_stage_rect` reserves its full
+    // width, so it is never clipped.
+    let sidebar_rect = Rect::from_min_max(
+        Pos2::new(
+            canvas_rect.right() + CANVAS_SIDEBAR_GAP,
+            area.top() + CANVAS_TOP,
+        ),
+        Pos2::new(
+            canvas_rect.right() + CANVAS_SIDEBAR_GAP + SIDEBAR_W,
+            area.bottom(),
+        ),
+    );
+    let mut sidebar = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(sidebar_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(&mut sidebar, |ui| {
+            right_panel(ui, state, canvas_ui, cmd, time, designer_ui, page);
+            ui.add_space(26.0);
         });
 
     if canvas_ui.zones_modal.is_some() {
@@ -399,6 +407,30 @@ pub(crate) fn body(
     if canvas_ui.new_instance_modal {
         new_instance_modal(&ui.ctx().clone(), state, canvas_ui, cmd);
     }
+}
+
+/// The canvas stage rect within `area`: top-left anchored (so it never drifts
+/// when the window widens), aspect-preserving, filling the available height
+/// down to [`MIN_CANVAS_H`]. Width is capped to the room left after reserving
+/// the sidebar (+ gap + margins), so the sidebar is never clipped — that
+/// reservation wins over the minimum when the window is too narrow for both.
+fn canvas_stage_rect(area: Rect, aspect: f32) -> Rect {
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        4.0 / 3.0
+    };
+    let mut ch = (area.height() - CANVAS_TOP - CANVAS_BOTTOM).max(MIN_CANVAS_H);
+    let mut cw = ch * aspect;
+    let room =
+        (area.width() - CANVAS_LEFT - CANVAS_SIDEBAR_GAP - SIDEBAR_W - CANVAS_RIGHT_PAD).max(1.0);
+    // Grow to the minimum where the window allows, but never past `room`.
+    cw = cw.max(MIN_CANVAS_H * aspect).min(room);
+    ch = cw / aspect;
+    Rect::from_min_size(
+        Pos2::new(area.left() + CANVAS_LEFT, area.top() + CANVAS_TOP),
+        Vec2::new(cw, ch),
+    )
 }
 
 // Remove drag overrides once the daemon confirms them.
@@ -501,6 +533,49 @@ mod test_fixtures {
 mod tests {
     use super::test_fixtures::{frame, led};
     use super::*;
+
+    #[test]
+    fn stage_is_top_left_anchored_and_width_tracks_canvas_not_window() {
+        let aspect = 4.0 / 3.0;
+        let r = canvas_stage_rect(
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(2000.0, 900.0)),
+            aspect,
+        );
+        // Top-left never moves off the page margin.
+        assert_eq!(r.min, Pos2::new(CANVAS_LEFT, CANVAS_TOP));
+        // Widening the window leaves the stage untouched (sidebar hugs it, so
+        // the extra width becomes empty space to the right of the sidebar).
+        let wider = canvas_stage_rect(
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(4000.0, 900.0)),
+            aspect,
+        );
+        assert_eq!(r.min, wider.min);
+        assert_eq!(r.size(), wider.size());
+    }
+
+    #[test]
+    fn stage_holds_minimum_when_the_window_has_room() {
+        // Short but wide enough for canvas-min + sidebar: the 600px floor holds.
+        let r = canvas_stage_rect(
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 400.0)),
+            4.0 / 3.0,
+        );
+        assert!(r.height() >= MIN_CANVAS_H);
+        assert!(r.width() >= MIN_CANVAS_H);
+    }
+
+    #[test]
+    fn sidebar_is_never_clipped_even_when_that_shrinks_the_canvas() {
+        // Narrow window: the canvas yields so the full sidebar + gap still fit.
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 1000.0));
+        let r = canvas_stage_rect(area, 4.0 / 3.0);
+        assert!(
+            r.right() + CANVAS_SIDEBAR_GAP + SIDEBAR_W <= area.right(),
+            "sidebar right {} must stay within window {}",
+            r.right() + CANVAS_SIDEBAR_GAP + SIDEBAR_W,
+            area.right()
+        );
+    }
 
     #[test]
     fn fps_counter_accumulates_over_one_second() {

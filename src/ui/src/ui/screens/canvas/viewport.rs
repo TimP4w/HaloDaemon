@@ -17,10 +17,7 @@ use super::geometry::{
     zone_key, zones_in_marquee,
 };
 use super::rack::{instance_color, instance_indices, rgb_zone_descriptor, ring_zone_context_menu};
-use super::{
-    CanvasUi, DragState, Handle, LedMode, MarqueeState, DEBOUNCE, HANDLE_HIT_R, HANDLE_R,
-    MIN_CANVAS_H,
-};
+use super::{CanvasUi, DragState, Handle, LedMode, MarqueeState, DEBOUNCE, HANDLE_HIT_R, HANDLE_R};
 
 /// Screen position of the rotation handle — delegated to the shared widget helper.
 use widgets::rotation_handle_pos;
@@ -32,11 +29,8 @@ pub(super) fn canvas_view(
     canvas_ui: &mut CanvasUi,
     cmd: &CommandTx,
     time: f64,
-    width: f32,
+    outer: Rect,
 ) {
-    // Fill the central area's height too (not a fixed CANVAS_H).
-    let h = ui.available_height().max(MIN_CANVAS_H);
-    let (outer, _) = ui.allocate_exact_size(Vec2::new(width, h), Sense::hover());
     crate::domain::tour::anchor(ui.ctx(), crate::domain::tour::AnchorId::CanvasStage, outer);
     let canvas_rect = letterbox(outer, canvas_ui.canvas_aspect);
     const ROUND: f32 = 16.0;
