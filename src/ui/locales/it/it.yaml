@@ -64,13 +64,11 @@ onboarding:
   plugins_desc: Consenti a HaloDaemon di scaricare i plugin ufficiali da GitHub e controllare gli aggiornamenti all'avvio.
   scanning: Ricerca plugin compatibili…
   plugins_page_title: Scegli i plugin
-  plugins_page_sub: I plugin consigliati sono già selezionati. Scegli eventuali altri plugin da attivare.
+  plugins_page_sub: I plugin consigliati sono già selezionati. Controlla l'accesso al sistema richiesto da ciascuno prima di attivarlo.
   plugins_loading: Il download dei plugin ufficiali è ancora in corso. Potrai attivarli in seguito dalla scheda Plugin.
   plugins_error: Impossibile scaricare i plugin ufficiali. Controlla la connessione a Internet e riprova.
   plugins_retry: Riprova
   plugins_retrying: Nuovo tentativo di download dei plugin ufficiali…
-  permissions_title: Controlla i permessi
-  permissions_sub: Controlla l'accesso al sistema richiesto dai plugin selezionati prima di attivarli.
   permissions_none: Non richiede accesso aggiuntivo al sistema.
   done_title: Tutto pronto
   done_summary_plugins: "I plugin sono pronti e verranno aggiornati automaticamente. Puoi gestirli dalla scheda Plugin."
@@ -80,7 +78,6 @@ onboarding:
   p_get_started: Inizia
   p_scan: Trova plugin
   p_finish_setup: Completa configurazione
-  p_review_permissions: Controlla permessi
   p_grant_enable: Concedi e attiva
   p_finish: Completa
   p_enter: Apri HaloDaemon

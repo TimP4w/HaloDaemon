@@ -21,8 +21,7 @@ const HEALTH: u8 = 1;
 const PREFS: u8 = 2;
 const SCANNING: u8 = 3;
 const PLUGINS: u8 = 4;
-const PERMISSIONS: u8 = 5;
-const DONE: u8 = 6;
+const DONE: u8 = 5;
 const OFFICIAL_REPO_SLUG: &str = "official";
 const BODY_HEIGHT: f32 = 420.0;
 
@@ -110,21 +109,20 @@ fn primary_label(step: u8, plugins: bool, active: usize) -> String {
         }
         PLUGINS => {
             if active > 0 {
-                t!("onboarding.p_review_permissions").to_string()
+                t!("onboarding.p_grant_enable").to_string()
             } else {
                 t!("onboarding.p_finish").to_string()
             }
         }
-        PERMISSIONS => t!("onboarding.p_grant_enable").to_string(),
         DONE => t!("onboarding.p_enter").to_string(),
         _ => t!("onboarding.p_continue").to_string(),
     }
 }
 
-/// Which of the six onboarding progress dots is active. The completion page
-/// keeps the permission-review dot active because it has no separate input.
+/// Which onboarding progress dot is active. The completion page keeps the
+/// plugin dot active because it has no separate input.
 fn active_dot(step: u8) -> usize {
-    usize::from(step.min(PERMISSIONS))
+    usize::from(step.min(PLUGINS))
 }
 
 /// Selected official plugins that are currently disabled.
@@ -195,7 +193,6 @@ pub fn show(
                     PREFS => step_prefs(ui, state, cmd),
                     SCANNING => step_scanning(ui, time),
                     PLUGINS => step_plugins(ui, st, state, cmd, time),
-                    PERMISSIONS => step_permissions(ui, st, &state.plugins.plugins),
                     _ => step_done(ui, st, state, &state.plugins.plugins),
                 }
             });
@@ -438,100 +435,56 @@ fn step_scanning(ui: &mut egui::Ui, time: f64) {
     });
 }
 
-fn plugin_toggle_row(ui: &mut egui::Ui, title: &str, description: &str, on: bool) -> bool {
+/// One plugin row: name, description, toggle, and — once selected — the system
+/// access it wants, so choosing a plugin and consenting to it are one decision.
+fn plugin_toggle_row(ui: &mut egui::Ui, plugin: &PluginInfo, on: bool) -> bool {
     let next = egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(4, 14))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    Vec2::new(ui.available_width() - 58.0, 62.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.label(RichText::new(title).font(theme::title()).color(theme::TEXT));
-                        ui.add_space(theme::SPACE_2);
-                        if !description.is_empty() {
+            let next = ui
+                .horizontal(|ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width() - 58.0, 62.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
                             ui.label(
-                                RichText::new(description)
-                                    .font(theme::body_md())
-                                    .color(theme::TEXT_MUT),
+                                RichText::new(&plugin.name)
+                                    .font(theme::title())
+                                    .color(theme::TEXT),
                             );
-                        }
-                    },
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    widgets::toggle(ui, on)
+                            ui.add_space(theme::SPACE_2);
+                            if !plugin.description.is_empty() {
+                                ui.label(
+                                    RichText::new(&plugin.description)
+                                        .font(theme::body_md())
+                                        .color(theme::TEXT_MUT),
+                                );
+                            }
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        widgets::toggle(ui, on)
+                    })
+                    .inner
                 })
-                .inner
-            })
+                .inner;
+            if on && !plugin.enabled {
+                ui.add_space(theme::SPACE_4);
+                if plugin.declared_permissions.is_empty() {
+                    ui.label(
+                        RichText::new(t!("onboarding.permissions_none"))
+                            .font(theme::body_sm())
+                            .color(theme::TEXT_MUT),
+                    );
+                } else {
+                    crate::ui::screens::plugins::authority_review_cards(ui, plugin);
+                }
+            }
+            next
         })
-        .inner
         .inner;
     ui.separator();
     next
-}
-
-fn step_permissions(ui: &mut egui::Ui, st: &OnboardingUi, plugins: &[PluginInfo]) {
-    let selected = enable_targets(st, plugins);
-    ui.add_space(theme::SPACE_10);
-    ui.horizontal(|ui| {
-        ui.add_space(theme::SPACE_12);
-        ui.vertical(|ui| {
-            ui.set_width(520.0);
-            ui.label(
-                RichText::new(t!("onboarding.permissions_title"))
-                    .font(theme::bold(21.0))
-                    .color(theme::TEXT),
-            );
-            ui.add_space(theme::SPACE_3);
-            ui.label(
-                RichText::new(t!("onboarding.permissions_sub"))
-                    .font(theme::body_lg())
-                    .color(theme::TEXT_MUT),
-            );
-            ui.add_space(theme::SPACE_8);
-            egui::ScrollArea::vertical()
-                .max_height(270.0)
-                .min_scrolled_height(270.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for id in &selected {
-                        let Some(plugin) = plugins.iter().find(|plugin| &plugin.id == id) else {
-                            continue;
-                        };
-                        widgets::card_with_surface(
-                            ui,
-                            egui::Margin::same(16),
-                            theme::CARD_BG,
-                            theme::BORDER,
-                            |ui| {
-                                ui.label(
-                                    RichText::new(&plugin.name)
-                                        .font(theme::title())
-                                        .color(theme::TEXT),
-                                );
-                                ui.add_space(theme::SPACE_4);
-                                if plugin.declared_permissions.is_empty() {
-                                    ui.label(
-                                        RichText::new(t!("onboarding.permissions_none"))
-                                            .font(theme::body_sm())
-                                            .color(theme::TEXT_MUT),
-                                    );
-                                } else {
-                                    crate::ui::screens::plugins::authority_review_cards(ui, plugin);
-                                }
-                            },
-                        );
-                        ui.add_space(theme::SPACE_5);
-                    }
-                });
-            ui.add_space(theme::SPACE_3);
-            ui.label(
-                RichText::new(t!("plugins.consent_warning"))
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_MUT),
-            );
-        });
-    });
 }
 
 fn step_plugins(
@@ -631,17 +584,23 @@ fn step_plugins(
             }
             if !candidates.is_empty() {
                 egui::ScrollArea::vertical()
-                    .max_height(290.0)
-                    .min_scrolled_height(290.0)
+                    .max_height(258.0)
+                    .min_scrolled_height(258.0)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for plugin in candidates {
                             let on = is_selected(st, &plugin.id);
-                            if plugin_toggle_row(ui, &plugin.name, &plugin.description, on) != on {
+                            if plugin_toggle_row(ui, plugin, on) != on {
                                 st.selected.insert(plugin.id.clone(), !on);
                             }
                         }
                     });
+                ui.add_space(theme::SPACE_3);
+                ui.label(
+                    RichText::new(t!("plugins.consent_warning"))
+                        .font(theme::body_sm())
+                        .color(theme::TEXT_MUT),
+                );
             }
         });
     });
@@ -691,8 +650,7 @@ fn footer(
 ) {
     ui.add_space(theme::SPACE_3);
     ui.horizontal(|ui| {
-        ui.add_space(theme::SPACE_10);
-        let show_back = matches!(st.step, HEALTH | PREFS | PLUGINS | PERMISSIONS);
+        let show_back = matches!(st.step, HEALTH | PREFS | PLUGINS);
         if show_back
             && widgets::button(
                 ui,
@@ -706,14 +664,12 @@ fn footer(
                 HEALTH => WELCOME,
                 PREFS => HEALTH,
                 PLUGINS => PREFS,
-                PERMISSIONS => PLUGINS,
                 _ => WELCOME,
             };
         }
 
         // Centered progress dots.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(theme::SPACE_10);
             if st.step != SCANNING {
                 let label = primary_label(st.step, plugins, active);
                 if widgets::button(ui, &label, ButtonKind::Primary, Vec2::new(0.0, 38.0)).clicked()
@@ -738,7 +694,7 @@ fn footer(
 fn dots(ui: &mut egui::Ui, step: u8) {
     let active = active_dot(step);
     ui.horizontal(|ui| {
-        for i in 0..=usize::from(PERMISSIONS) {
+        for i in 0..=usize::from(PLUGINS) {
             let w = if i == active { 22.0 } else { 6.0 };
             let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 6.0), Sense::hover());
             let c = if i == active {
@@ -777,13 +733,6 @@ fn advance_primary(
             }
         }
         PLUGINS => {
-            st.step = if enable_targets(st, &state.plugins.plugins).is_empty() {
-                DONE
-            } else {
-                PERMISSIONS
-            };
-        }
-        PERMISSIONS => {
             let plugins: Vec<halod_shared::commands::PluginEnableConfirmation> =
                 enable_targets(st, &state.plugins.plugins)
                     .into_iter()
@@ -861,8 +810,7 @@ mod tests {
         assert_eq!(active_dot(PREFS), 2);
         assert_eq!(active_dot(SCANNING), 3);
         assert_eq!(active_dot(PLUGINS), 4);
-        assert_eq!(active_dot(PERMISSIONS), 5);
-        assert_eq!(active_dot(DONE), 5);
+        assert_eq!(active_dot(DONE), 4);
     }
 
     #[test]
@@ -910,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_selection_reviews_and_grants_before_completion() {
+    fn plugin_selection_grants_authority_before_completion() {
         let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut state = AppState::default();
         state.plugins.plugins = vec![plugin("a", false)];
@@ -920,10 +868,6 @@ mod tests {
             ..Default::default()
         };
         let mut outcome = Outcome::Pending;
-
-        advance_primary(&mut st, true, &state, &cmd, &mut outcome);
-        assert_eq!(st.step, PERMISSIONS);
-        assert_eq!(outcome, Outcome::Pending);
 
         advance_primary(&mut st, true, &state, &cmd, &mut outcome);
         assert_eq!(st.step, DONE);
