@@ -142,7 +142,13 @@ fn status_at_paths<'a>(
             .map(|contents| (path.display().to_string(), contents))
     });
     let generated_rule_count = device_rule_count(rules);
-    let plugins_requiring_update = manifests
+    let mut contributing_plugin_ids = manifests
+        .iter()
+        .filter(|manifest| device_rule_count(&assemble(std::slice::from_ref(manifest))) > 0)
+        .map(|manifest| manifest.plugin_id.clone())
+        .collect::<Vec<_>>();
+    contributing_plugin_ids.sort();
+    let mut plugins_requiring_update = manifests
         .iter()
         .filter(|manifest| {
             let plugin_rules = assemble(std::slice::from_ref(manifest));
@@ -156,7 +162,8 @@ fn status_at_paths<'a>(
                 })
         })
         .map(|manifest| manifest.plugin_id.clone())
-        .collect();
+        .collect::<Vec<_>>();
+    plugins_requiring_update.sort();
     match installed {
         Some((path, contents)) => halod_shared::types::UdevRulesStatus {
             supported: true,
@@ -164,6 +171,7 @@ fn status_at_paths<'a>(
             installed_path: Some(path),
             generated_rule_count,
             plugins_requiring_update,
+            contributing_plugin_ids,
         },
         None => halod_shared::types::UdevRulesStatus {
             supported: true,
@@ -171,6 +179,7 @@ fn status_at_paths<'a>(
             installed_path: None,
             generated_rule_count,
             plugins_requiring_update,
+            contributing_plugin_ids,
         },
     }
 }
@@ -326,5 +335,6 @@ mod tests {
 
         assert!(!status.current);
         assert_eq!(status.plugins_requiring_update, ["second"]);
+        assert_eq!(status.contributing_plugin_ids, ["first", "second"]);
     }
 }

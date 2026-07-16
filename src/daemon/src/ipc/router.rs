@@ -414,7 +414,11 @@ async fn dispatch(
             registry::usecases::repos::check_repo_updates(app, client).await
         }
         DaemonCommand::UpdatePluginRepo { slug } => {
-            registry::usecases::repos::update_repo(slug, app).await
+            let result = registry::usecases::repos::update_repo(slug, app.clone()).await;
+            // Refresh per-plugin update flags so the banners clear once the pull
+            // lands (a single update, unlike update-all, otherwise leaves them stale).
+            registry::usecases::repos::broadcast_plugin_updates(&app, None).await;
+            result
         }
         DaemonCommand::UpdateAllPlugins => registry::usecases::repos::update_all_plugins(app).await,
         DaemonCommand::SetIntegrationEnabled { id, enabled } => {

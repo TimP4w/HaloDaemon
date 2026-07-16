@@ -29,6 +29,7 @@ fn modal_shell(
     ctx: &egui::Context,
     id: &str,
     title: &str,
+    subtitle: Option<&str>,
     width: f32,
     contents: impl FnOnce(&mut egui::Ui),
 ) -> bool {
@@ -47,11 +48,21 @@ fn modal_shell(
             egui::Sides::new().show(
                 ui,
                 |ui| {
-                    ui.label(
-                        egui::RichText::new(title)
-                            .font(theme::semibold(15.0))
-                            .color(theme::TEXT),
-                    );
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.label(
+                            egui::RichText::new(title)
+                                .font(theme::semibold(15.0))
+                                .color(theme::TEXT),
+                        );
+                        if let Some(subtitle) = subtitle {
+                            ui.label(
+                                egui::RichText::new(subtitle)
+                                    .font(theme::body(11.0))
+                                    .color(theme::TEXT_MUT),
+                            );
+                        }
+                    });
                 },
                 |ui| {
                     if ui.button("×").clicked() {
@@ -82,7 +93,7 @@ pub fn modal_frame_raw<R>(
     // title row rewinds its cursor to the top, painting the body over the
     // title bar.
     let h = default_h.min(ctx.content_rect().height() - 80.0);
-    modal_shell(ctx, id, title, default_w, |ui| {
+    modal_shell(ctx, id, title, None, default_w, |ui| {
         ui.allocate_ui(egui::Vec2::new(ui.available_width(), h), |ui| {
             ui.set_min_height(h);
             ui.set_max_height(h);
@@ -102,7 +113,7 @@ pub fn dialog(
     actions: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let max_body = (ctx.content_rect().height() - 220.0).max(120.0);
-    modal_shell(ctx, id, title, width, |ui| {
+    modal_shell(ctx, id, title, None, width, |ui| {
         egui::ScrollArea::vertical()
             .auto_shrink([false, true])
             .max_height(max_body)
@@ -117,6 +128,35 @@ pub fn dialog(
             actions,
         );
         ui.add_space(6.0);
+    })
+}
+
+/// Content-sized dialog with a compact subtitle directly beneath its title.
+pub fn dialog_with_subtitle(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    subtitle: &str,
+    width: f32,
+    body: impl FnOnce(&mut egui::Ui),
+    actions: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let max_body = (ctx.content_rect().height() - 220.0).max(120.0);
+    modal_shell(ctx, id, title, Some(subtitle), width, |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .max_height(max_body)
+            .show(ui, body);
+        ui.add_space(16.0);
+        ui.separator();
+        // The modal frame's 18px bottom margin is the button→bottom gap, so match
+        // the divider→button gap to it and add no trailing space of our own.
+        ui.add_space(18.0);
+        ui.allocate_ui_with_layout(
+            egui::Vec2::new(ui.available_width(), 0.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            actions,
+        );
     })
 }
 
