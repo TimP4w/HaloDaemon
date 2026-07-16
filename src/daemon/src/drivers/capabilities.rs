@@ -405,10 +405,7 @@ pub trait FanCapability: Send + Sync {
         Some(DeviceCapability::Fan(FanStatus {
             channel: self.fan_channel_id(),
             rpm: self.get_rpm().await.unwrap_or(0),
-            duty: self.get_duty().await.unwrap_or_else(|e| {
-                log::trace!("[FanCapability::to_wire] get_duty: {e}");
-                0
-            }),
+            duty: self.get_duty().await.unwrap_or(0),
             controllable: self.fan_controllable().await,
         }))
     }

@@ -813,6 +813,12 @@ impl LuaDevice {
                             .child_index
                             .and_then(|index| child_ids.read().unwrap().get(&index).cloned())
                             .unwrap_or_else(|| root_id.clone());
+                        log::trace!(
+                            "[plugin event] button event device={device_id} child_index={:?} pressed={:?} released={:?}",
+                            outcome.child_index,
+                            outcome.button_events.pressed,
+                            outcome.button_events.released
+                        );
                         let _ = app.input.button_event_tx.send(crate::state::ButtonEvent {
                             device_id,
                             pressed: outcome.button_events.pressed,
@@ -1628,9 +1634,31 @@ impl Device for LuaDevice {
                 requires_host_mode: key_remap.requires_host_mode,
                 default_mappings: key_remap.default_mappings,
             };
-            let mut mappings = self.key_remap_mappings.lock_recover();
-            if mappings.is_empty() {
-                mappings.extend(defaults.into_iter().map(|mapping| (mapping.cid, mapping)));
+            let to_arm: Vec<ButtonMapping> = {
+                let mut mappings = self.key_remap_mappings.lock_recover();
+                if mappings.is_empty() {
+                    mappings.extend(defaults.into_iter().map(|mapping| (mapping.cid, mapping)));
+                }
+                mappings
+                    .values()
+                    .filter(|m| {
+                        m.base != ButtonAction::Native || m.shifted != ButtonAction::Native
+                    })
+                    .cloned()
+                    .collect()
+            };
+            if !to_arm.is_empty() {
+                log::debug!(
+                    "[{}] re-arming {} active key mapping(s) on connect",
+                    self.id,
+                    to_arm.len()
+                );
+            }
+            for mapping in to_arm {
+                let cid = mapping.cid;
+                if let Err(e) = w.key_remap_set_mapping(mapping).await {
+                    log::warn!("[{}] key_remap re-arm failed for cid {cid}: {e:#}", self.id);
+                }
             }
         }
         // Seed the host range/choice caches with the values the device reported,
@@ -2931,6 +2959,38 @@ mod tests {
             .any(|cap| matches!(cap, CapabilityRef::Sensor(_))));
         assert_eq!(dev.fan_channel_id(), 3);
         assert_eq!(RgbCapability::descriptor(&dev).zones[0].leds[0].id, 7);
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_rearms_active_key_mappings_on_connect() {
+        let script = r#"
+            return {
+              initialize = function(dev)
+                return {
+                  key_remap = {
+                    buttons = { { cid = 5, label = "B5", divertable = true, group = 0 } },
+                    default_mappings = {
+                      { cid = 5, base = { type = "dpi_cycle", direction = "up" },
+                        shifted = { type = "native" } },
+                    },
+                  },
+                }
+              end,
+              set_button_mapping = function(dev, mapping)
+                dev.transport:write(string.char(0xEE, mapping.cid))
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("rearm", &["key_remap"], script);
+        let mock = Arc::new(MockTransport::empty());
+        let dev = hid_device("rearm-0", &manifest, mock.clone());
+        assert!(dev.initialize().await.unwrap());
+        assert_eq!(
+            *mock.written.lock().await,
+            vec![vec![0xEE, 5]],
+            "the seeded active default must be re-armed on the hardware at connect"
+        );
         dev.close().await;
     }
 
