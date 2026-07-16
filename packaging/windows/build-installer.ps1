@@ -30,6 +30,10 @@
 .PARAMETER SkipBuild
     Reuse the existing src\target\release binaries instead of rebuilding.
 
+.PARAMETER PluginLicensesFile
+    Plugin-repository-generated licenses.txt. Release CI stages this beside the
+    downloaded binaries; local builds can pass its path explicitly.
+
 .PARAMETER InstallDeps
     Install the missing prerequisites (ffmpeg + ntldd via pacman, Inno Setup via
     winget) before building.
@@ -38,6 +42,7 @@
 param(
     [string]$AppVersion = "0.0.0-dev",
     [string]$Ucrt64     = "C:\msys64\ucrt64",
+    [string]$PluginLicensesFile = "",
     [switch]$SkipBuild,
     [switch]$InstallDeps
 )
@@ -45,6 +50,10 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $srcDir   = Join-Path $repoRoot "src"
+if (-not $PluginLicensesFile) {
+    $siblingNotice = Join-Path (Split-Path $repoRoot -Parent) "HaloDaemon-plugins\licenses.txt"
+    if (Test-Path $siblingNotice) { $PluginLicensesFile = $siblingNotice }
+}
 
 function Fail($msg) { Write-Error $msg; exit 1 }
 function Stage($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
@@ -94,7 +103,9 @@ if ($SkipBuild) {
 
 # --- 2. Stage files -----------------------------------------------------------
 Stage "Staging installer payload"
-& (Join-Path $PSScriptRoot "stage-release.ps1") -Ucrt64 $Ucrt64
+$stageArgs = @{ Ucrt64 = $Ucrt64 }
+if ($PluginLicensesFile) { $stageArgs.PluginLicensesFile = $PluginLicensesFile }
+& (Join-Path $PSScriptRoot "stage-release.ps1") @stageArgs
 if ($LASTEXITCODE -ne 0) { Fail "staging failed" }
 
 # --- 3. Compile the installer -------------------------------------------------

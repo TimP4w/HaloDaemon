@@ -153,21 +153,16 @@ fn license_failure(
         .expect("failed to write license fallback");
 }
 
-/// Official release builds provide a generated notice for the Lua package
-/// snapshot. Development builds deliberately omit it when no snapshot exists.
+/// Official release builds append the notice produced by the plugin repository.
 fn append_official_plugin_licenses(buf: &mut Vec<u8>) {
     let Some(path) = std::env::var_os("HALOD_OFFICIAL_PLUGIN_LICENSES") else {
         return;
     };
-    match std::fs::read(&path) {
-        Ok(content) => {
-            buf.extend_from_slice(b"\n===================================================================\nOFFICIAL PLUGINS\n===================================================================\n\n");
-            buf.extend_from_slice(&content);
-        }
-        Err(error) => {
-            println!("cargo:warning=reading official plugin license notice failed: {error}")
-        }
-    }
+    let content = std::fs::read(&path).unwrap_or_else(|error| {
+        panic!("reading official plugin license notice {:?}: {error}", path)
+    });
+    buf.extend_from_slice(b"\n===================================================================\nOFFICIAL PLUGINS\n===================================================================\n\n");
+    buf.extend_from_slice(&content);
 }
 
 fn scan_protocol_references(workspace: &std::path::Path) -> String {

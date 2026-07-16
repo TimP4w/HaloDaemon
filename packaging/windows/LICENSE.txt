@@ -38,9 +38,10 @@ Bundled components:
 * Embedded icons from Pictogrammers Material Design Icons and Google Material
   Icons. License: Apache-2.0.
 
-Incorporated protocol code is attributed to OpenRGB (GPL-2.0-or-later),
-LibreHardwareMonitor (MPL-2.0), Solaar (GPL-2.0-or-later), and g560-led (MIT).
+Incorporated transport (Smbus / PawnIO) code is attributed to OpenRGB (GPL-2.0-or-later),
+LibreHardwareMonitor (MPL-2.0).
 Copyright notices and the full source/asset license texts are embedded in
 halod-gui.exe and are available under Settings -> About -> Licenses.
+
 
 Installing HaloDaemon means you accept the terms above.

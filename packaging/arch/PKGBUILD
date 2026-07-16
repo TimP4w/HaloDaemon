@@ -2,6 +2,7 @@
 pkgname=halod
 pkgver=0.4.0
 pkgrel=1
+plugin_commit=88ec5a81164a75f11e26b743afdeac8123ec1394
 pkgdesc="Peripheral control daemon (fan curves, RGB, LCD, audio EQ, DPI)"
 arch=('x86_64')
 url="https://github.com/TimP4w/HaloDaemon"
@@ -16,8 +17,9 @@ install="$pkgname.install"
 # Pin to an immutable commit, not the mutable `#tag=v$pkgver`: a tag can be force-moved after publication so "v$pkgver" is not reproducible, whereas `#commit=` locks makepkg to a fixed git object. 'SKIP' is still correct because makepkg cannot sha256 a VCS ref (no single downloaded file to hash) — integrity is delegated to git verifying the checked-out tree against the pinned commit SHA.
 # The release workflow updates this to the exact 40-character version-commit
 # SHA before publishing. Do NOT revert to `#tag=` — the tag is mutable.
-source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=03136737640c92687f584868bd1d9b3e8d1fda8a")
-sha256sums=('SKIP')
+source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=03136737640c92687f584868bd1d9b3e8d1fda8a"
+        "halod-plugins::git+https://github.com/TimP4w/HaloDaemon-plugins.git#commit=$plugin_commit")
+sha256sums=('SKIP' 'SKIP')
 
 prepare() {
     cd "$srcdir/$pkgname-$pkgver/src"
@@ -36,6 +38,18 @@ build() {
     export PATH="$srcdir/tools/bin:$PATH"
     export HALOD_REQUIRE_LICENSES=1
     export RUSTUP_TOOLCHAIN=stable
+    cargo build --release --frozen -p halod-plugin-signing
+    target/release/halod-plugin-signing verify "$srcdir/halod-plugins" \
+        --trusted-key halodaemon-official-2026=tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=
+    target/release/halod-plugin-signing bundle "$srcdir/halod-plugins" \
+        --commit "$plugin_commit" \
+        --output official-plugins.bundle
+    if [[ -f "$srcdir/halod-plugins/licenses.txt" ]]; then
+        cp "$srcdir/halod-plugins/licenses.txt" plugin-licenses.txt
+        export HALOD_OFFICIAL_PLUGIN_LICENSES="$PWD/plugin-licenses.txt"
+    fi
+    export HALOD_REQUIRE_PLUGIN_BUNDLE=1
+    export HALOD_OFFICIAL_PLUGIN_BUNDLE="$PWD/official-plugins.bundle"
     cargo build --release --frozen -p halod -p halod-gui
 }
 
@@ -52,4 +66,14 @@ package() {
     install -Dm644 packaging/systemd/halod.service \
         "$pkgdir/usr/lib/systemd/user/halod.service"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    if [[ -f src/plugin-licenses.txt ]]; then
+        install -Dm644 src/plugin-licenses.txt \
+            "$pkgdir/usr/share/licenses/$pkgname/plugins/licenses.txt"
+    fi
+    install -Dm644 "$srcdir/halod-plugins/REUSE.toml" \
+        "$pkgdir/usr/share/licenses/$pkgname/plugins/REUSE.toml"
+    for license in "$srcdir"/halod-plugins/LICENSES/*; do
+        install -Dm644 "$license" \
+            "$pkgdir/usr/share/licenses/$pkgname/plugins/$(basename "$license")"
+    done
 }

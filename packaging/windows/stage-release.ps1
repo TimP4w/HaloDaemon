@@ -30,11 +30,14 @@ param(
     [string]$Ucrt64     = "C:\msys64\ucrt64",
     [string]$TargetDir  = (Join-Path $PSScriptRoot "..\..\src\target\release"),
     [string]$StagingDir = (Join-Path $PSScriptRoot "staging"),
-    [string]$PluginLicensesDir = ""
+    [string]$PluginLicensesFile = ""
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+if (-not $PluginLicensesFile) {
+    $PluginLicensesFile = Join-Path $TargetDir "plugin-licenses.txt"
+}
 
 function Fail($msg) { Write-Error $msg; exit 1 }
 
@@ -120,12 +123,23 @@ Copy-Item (Join-Path $repoRoot "pwnio\COPYING") -Destination (Join-Path $Staging
 Write-Host "  asset PawnIO-LICENSE.txt"
 
 # --- 2b. Official plugin notices ---------------------------------------------
-if ($PluginLicensesDir -and (Test-Path $PluginLicensesDir)) {
-    $dest = Join-Path $StagingDir "ThirdPartyLicenses\Plugins"
-    New-Item -ItemType Directory -Force -Path $dest | Out-Null
-    Copy-Item (Join-Path $PluginLicensesDir "*") -Destination $dest -Recurse -Force
-    Write-Host "  licenses official plugins"
-}
+$pluginNotice = $PluginLicensesFile
+if (-not (Test-Path $pluginNotice)) { Fail "missing official plugin license notice: $pluginNotice" }
+$pluginLicenseDir = Join-Path $StagingDir "ThirdPartyLicenses\Plugins"
+New-Item -ItemType Directory -Force -Path $pluginLicenseDir | Out-Null
+Copy-Item $pluginNotice -Destination (Join-Path $pluginLicenseDir "licenses.txt")
+
+# Inno Setup shows one license document. Combine HaloDaemon's terms with the
+# generated per-plugin/SPDX notice so the user sees the embedded plugin list
+# before accepting the installation.
+$installerLicense = @(
+    (Get-Content -Raw (Join-Path $PSScriptRoot "LICENSE.txt")).TrimEnd(),
+    "`r`n`r`n============================================================================`r`nEMBEDDED PLUGIN LICENSES`r`n============================================================================`r`n",
+    (Get-Content -Raw $pluginNotice).TrimEnd(),
+    "`r`n"
+) -join ""
+$installerLicense | Set-Content -Encoding UTF8 (Join-Path $StagingDir "INSTALLER-LICENSE.txt")
+Write-Host "  licenses official plugins + installer license page"
 
 # --- 3. ffmpeg's runtime DLLs -------------------------------------------------
 # ntldd -R prints lines like:  libavcodec-61.dll => /ucrt64/bin/libavcodec-61.dll (0x..)

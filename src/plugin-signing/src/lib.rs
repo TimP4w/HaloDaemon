@@ -48,6 +48,8 @@ pub struct RepositoryManifest {
     pub id: String,
     pub name: String,
     pub version: String,
+    #[serde(default)]
+    pub licenses_sha256: Option<String>,
     pub compatibility: RepositoryCompatibility,
     pub packages: Vec<RepositoryPackage>,
 }
@@ -251,6 +253,11 @@ pub fn validate_repository_index(manifest: &RepositoryManifest) -> Result<()> {
         bail!("repository name must be non-empty");
     }
     validate_repository_version(&manifest.version)?;
+    if manifest.licenses_sha256.as_ref().is_some_and(|digest| {
+        digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        bail!("repository has an invalid licenses_sha256 digest");
+    }
     semver::VersionReq::parse(&manifest.compatibility.halod)
         .context("parsing repository compatibility.halod")?;
 
@@ -352,6 +359,18 @@ pub fn validate_repository_packages(repo_dir: &Path, manifest: &RepositoryManife
 /// one-to-one top-level package discovery, identity/version, and package hash.
 pub fn validate_repository(repo_dir: &Path, manifest: &RepositoryManifest) -> Result<()> {
     validate_repository_packages(repo_dir, manifest)?;
+    let notice = repo_dir.join("licenses.txt");
+    match (&manifest.licenses_sha256, notice.is_file()) {
+        (Some(expected), true) => {
+            let actual = file_sha256(&notice)?;
+            if !actual.eq_ignore_ascii_case(expected) {
+                bail!("repository licenses.txt hash mismatch: expected {expected}, got {actual}");
+            }
+        }
+        (Some(_), false) => bail!("repository licenses.txt is missing"),
+        (None, true) => bail!("repository index does not hash licenses.txt"),
+        (None, false) => {}
+    }
     let discovered = discover_packages(repo_dir)?;
     if discovered != manifest.packages {
         let indexed: Vec<_> = manifest
@@ -427,6 +446,8 @@ pub fn generated_manifest(
         generated.version = version.to_owned();
     }
     generated.packages = discover_packages(repo_dir)?;
+    let notice = repo_dir.join("licenses.txt");
+    generated.licenses_sha256 = notice.is_file().then(|| file_sha256(&notice)).transpose()?;
     validate_repository_index(&generated)?;
     Ok(generated)
 }
@@ -435,11 +456,20 @@ pub fn canonical_index_bytes(manifest: &RepositoryManifest) -> Result<Vec<u8>> {
     validate_repository_index(manifest)?;
     let mut out = String::from(GENERATED_HEADER);
     out.push_str(&format!(
-        "schema: {}\nid: {}\nname: {}\nversion: {}\n\ncompatibility:\n  halod: {}\n  plugin_api: {}\n\npackages:\n",
+        "schema: {}\nid: {}\nname: {}\nversion: {}\n",
         manifest.schema,
         yaml_string(&manifest.id),
         yaml_string(&manifest.name),
         yaml_string(&manifest.version),
+    ));
+    if let Some(digest) = &manifest.licenses_sha256 {
+        out.push_str(&format!(
+            "licenses_sha256: {}\n\n",
+            digest.to_ascii_lowercase()
+        ));
+    }
+    out.push_str(&format!(
+        "compatibility:\n  halod: {}\n  plugin_api: {}\n\npackages:\n",
         yaml_string(&manifest.compatibility.halod),
         manifest.compatibility.plugin_api
     ));
@@ -654,6 +684,11 @@ fn decode_array<const N: usize>(value: &str, label: &str) -> Result<[u8; N]> {
         .map_err(|_| anyhow!("{label} is not {N} bytes"))
 }
 
+fn file_sha256(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut temp = tempfile::NamedTempFile::new_in(parent)
@@ -735,6 +770,7 @@ mod tests {
             id: "test-repo".into(),
             name: "Test repository".into(),
             version: "1.0.0".into(),
+            licenses_sha256: None,
             compatibility: RepositoryCompatibility {
                 halod: ">=0.2.0, <0.3.0".into(),
                 plugin_api: 1,
@@ -759,6 +795,37 @@ mod tests {
         fs::write(root.path().join("repository.yaml"), stale).unwrap();
         assert!(rewrite_index(root.path(), None, false).unwrap());
         validate_repository(root.path(), &read_repository_index(root.path()).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn generated_index_hashes_the_plugin_license_notice() {
+        let root = tempfile::tempdir().unwrap();
+        package(root.path(), "demo", "1.0.0");
+        let initial = RepositoryManifest {
+            schema: 1,
+            id: "test-repo".into(),
+            name: "Test repository".into(),
+            version: "1.0.0".into(),
+            licenses_sha256: None,
+            compatibility: RepositoryCompatibility {
+                halod: ">=0.2.0".into(),
+                plugin_api: 1,
+            },
+            packages: vec![],
+        };
+        fs::write(
+            root.path().join("repository.yaml"),
+            canonical_index_bytes(&initial).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.path().join("licenses.txt"), "notice\n").unwrap();
+        rewrite_index(root.path(), None, false).unwrap();
+        let manifest = read_repository_index(root.path()).unwrap();
+        assert!(manifest.licenses_sha256.is_some());
+        validate_repository(root.path(), &manifest).unwrap();
+
+        fs::write(root.path().join("licenses.txt"), "tampered\n").unwrap();
+        assert!(validate_repository(root.path(), &manifest).is_err());
     }
 
     #[test]

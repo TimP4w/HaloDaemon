@@ -363,6 +363,7 @@ mod compatibility_tests {
             id: "test".to_owned(),
             name: "Test".to_owned(),
             version: "1.0.0".to_owned(),
+            licenses_sha256: None,
             compatibility: RepositoryCompatibility {
                 halod: halod.to_owned(),
                 plugin_api,

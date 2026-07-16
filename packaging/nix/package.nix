@@ -13,10 +13,11 @@ let
   # deliberately part of the existing package derivation: the NixOS module's
   # default package therefore embeds the same official plugin revision without
   # an extra option or a networked build step.
+  officialPluginsRev = "88ec5a81164a75f11e26b743afdeac8123ec1394";
   officialPlugins = pkgs.fetchFromGitHub {
     owner = "TimP4w";
     repo = "HaloDaemon-plugins";
-    rev = "88ec5a81164a75f11e26b743afdeac8123ec1394";
+    rev = officialPluginsRev;
     hash = "sha256-JRJb5KQJa6lKbGCeCuJ6ww+3CPBDpqlI+GVj9BuB9yw=";
   };
 in
@@ -80,21 +81,20 @@ pkgs.rustPlatform.buildRustPackage {
   # Generate the exact same embedded payload inside the sandbox from the
   # fixed-output plugin source. No network is available or needed here.
   preBuild = ''
-    cargo build -p halod-plugin-signing
+    export HALOD_REQUIRE_LICENSES=1
+    cargo build --release -p halod-plugin-signing
     mkdir -p plugin-bundle
-    target/debug/halod-plugin-signing verify ${officialPlugins} \
+    target/release/halod-plugin-signing verify ${officialPlugins} \
       --trusted-key halodaemon-official-2026=tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=
-    target/debug/halod-plugin-signing bundle ${officialPlugins} \
-      --commit 2769e9ceff857771f045ba28ebfe30abd07497c7 \
+    target/release/halod-plugin-signing bundle ${officialPlugins} \
+      --commit ${officialPluginsRev} \
       --output plugin-bundle/official-plugins.bundle
-    {
-      printf 'Official HaloDaemon plugin snapshot\nCommit: %s\n\n' \
-        2769e9ceff857771f045ba28ebfe30abd07497c7
-      find ${officialPlugins}/LICENSES -maxdepth 1 -type f -print0 | sort -z | xargs -0 -r cat
-    } > plugin-bundle/official-plugins-licenses.txt
+    if [ -f ${officialPlugins}/licenses.txt ]; then
+      cp ${officialPlugins}/licenses.txt plugin-bundle/official-plugins-licenses.txt
+      export HALOD_OFFICIAL_PLUGIN_LICENSES=$PWD/plugin-bundle/official-plugins-licenses.txt
+    fi
     export HALOD_REQUIRE_PLUGIN_BUNDLE=1
     export HALOD_OFFICIAL_PLUGIN_BUNDLE=$PWD/plugin-bundle/official-plugins.bundle
-    export HALOD_OFFICIAL_PLUGIN_LICENSES=$PWD/plugin-bundle/official-plugins-licenses.txt
   '';
 
   postBuild = ''
@@ -111,8 +111,10 @@ pkgs.rustPlatform.buildRustPackage {
       $out/share/applications/dev.timp4w.Halod.desktop
     install -Dm444 assets/icon.svg \
       $out/share/icons/hicolor/scalable/apps/halod.svg
-    install -Dm444 plugin-bundle/official-plugins-licenses.txt \
-      $out/share/licenses/halod/plugins/NOTICE.txt
+    if [ -f plugin-bundle/official-plugins-licenses.txt ]; then
+      install -Dm444 plugin-bundle/official-plugins-licenses.txt \
+        $out/share/licenses/halod/plugins/licenses.txt
+    fi
     install -Dm444 ${officialPlugins}/REUSE.toml \
       $out/share/licenses/halod/plugins/REUSE.toml
     for license in ${officialPlugins}/LICENSES/*; do

@@ -33,7 +33,7 @@ AppUpdatesURL={#AppURL}/releases
 DefaultDirName={autopf}\HaloDaemon
 DefaultGroupName=HaloDaemon
 DisableProgramGroupPage=yes
-LicenseFile=LICENSE.txt
+LicenseFile=staging\INSTALLER-LICENSE.txt
 ; Disclaimer shown to the user before installation proceeds.
 InfoBeforeFile=DISCLAIMER.txt
 OutputDir=Output

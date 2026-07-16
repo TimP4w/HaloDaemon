@@ -67,7 +67,7 @@ jobs:
           echo "Current: $CURRENT → New: $NEW"
 
   # ── Test (Linux) ─────────────────────────────────────────────────
-  # Run the full test suite + clippy first (fail fast), then build the
+  # Run clippy before executing the full test suite (fail fast), then build the
   # release binaries and cache them for the tarball packaging step.
   test-linux:
     needs: [prepare, prepare-plugins]
@@ -98,11 +98,11 @@ jobs:
       - name: Install cargo-about
         run: cargo install --locked --features cli cargo-about
 
-      - name: Test + clippy
+      - name: Clippy + test
         working-directory: src
         run: |
-          cargo test --workspace
-          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --release --workspace --all-targets -- -D warnings
+          cargo test --release --workspace
 
       - name: Build release binaries
         working-directory: src
@@ -113,21 +113,23 @@ jobs:
           HALOD_OFFICIAL_PLUGIN_LICENSES: ${{ github.workspace }}/plugin-bundle/official-plugins-licenses.txt
         run: |
           cargo build --release --workspace
-          CARGO_TARGET_DIR=target/plugin-test \
-            cargo build --release -p halod --features plugin-test
+          mkdir -p release-binaries
+          cp target/release/halod target/release/halod-gui release-binaries/
+          cp "$HALOD_OFFICIAL_PLUGIN_LICENSES" release-binaries/plugin-licenses.txt
+          cargo build --release -p halod --features plugin-test
 
       - name: Stage plugin tooling
         run: |
           mkdir plugin-tools-linux
           cp src/target/release/halod-plugin-signing \
             plugin-tools-linux/halod-plugin-signing-linux-x64
-          cp src/target/plugin-test/release/halod \
+          cp src/target/release/halod \
             plugin-tools-linux/halod-plugin-test-linux-x64
 
       - name: Generate release udev rules from embedded plugins
         run: |
           mkdir -p generated-udev
-          src/target/release/halod udev-rules --embedded \
+          src/release-binaries/halod udev-rules --embedded \
             > generated-udev/60-halod.rules
           # The halod group only exists on the target system after install.
           udevadm verify --resolve-names=never generated-udev/60-halod.rules
@@ -143,8 +145,9 @@ jobs:
         with:
           name: linux-release-bin
           path: |
-            src/target/release/halod
-            src/target/release/halod-gui
+            src/release-binaries/halod
+            src/release-binaries/halod-gui
+            src/release-binaries/plugin-licenses.txt
 
       - name: Upload generated udev rules
         uses: actions/upload-artifact@v7.0.1
@@ -153,7 +156,7 @@ jobs:
           path: generated-udev/60-halod.rules
 
   # ── Test (Windows) ───────────────────────────────────────────────
-  # Run tests + clippy first (fail fast), then build the release
+  # Run clippy before executing tests (fail fast), then build the release
   # binaries (daemon + egui UI + elevated broker) and cache them for the
   # installer step.
   test-windows:
@@ -183,12 +186,12 @@ jobs:
             mingw-w64-ucrt-x86_64-cargo-about
             mingw-w64-ucrt-x86_64-python
 
-      - name: Test + clippy
+      - name: Clippy + test
         shell: msys2 {0}
         run: |
           cd src
-          cargo test --workspace
-          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --release --workspace --all-targets -- -D warnings
+          cargo test --release --workspace
 
       - name: Build release binaries
         shell: msys2 {0}
@@ -200,6 +203,7 @@ jobs:
         run: |
           cd src
           cargo build --release --workspace
+          cp ../plugin-bundle/official-plugins-licenses.txt target/release/plugin-licenses.txt
 
       - name: Stage plugin tooling
         shell: pwsh
@@ -222,11 +226,12 @@ jobs:
             src/target/release/halod.exe
             src/target/release/halod-gui.exe
             src/target/release/halod-broker.exe
+            src/target/release/plugin-licenses.txt
 
   # ── Prepare ──────────────────────────────────────────────────────
   # Create the immutable release source commit before any build starts.
   prepare:
-    needs: version
+    needs: [version, prepare-plugins]
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ needs.version.outputs.new_version }}
@@ -236,36 +241,22 @@ jobs:
         with:
           ref: main
 
-      - uses: cachix/install-nix-action@v31
-
-      - uses: actions/checkout@v7.0.0
-        with:
-          repository: TimP4w/HaloDaemon-plugins
-          ref: ${{ inputs.plugin_commit }}
-          path: release-plugins
-          fetch-depth: 0
-
       - name: Pin existing Nix package to the selected plugin commit
+        env:
+          PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
+          PLUGIN_HASH: ${{ needs.prepare-plugins.outputs.plugin_hash }}
         run: |
           set -euo pipefail
-          commit='${{ inputs.plugin_commit }}'
-          branch='${{ inputs.plugin_branch }}'
-          [[ "$commit" =~ ^[0-9a-fA-F]{40}$ ]]
-          git -C release-plugins fetch origin "$branch"
-          git -C release-plugins merge-base --is-ancestor "$commit" "origin/$branch"
-          archive=$(mktemp -d)
-          git -C release-plugins archive "$commit" | tar -x -C "$archive"
-          hash=$(nix hash path --type sha256 --sri "$archive")
-          python3 - "$commit" "$hash" <<'PY'
+          python3 - "$PLUGIN_COMMIT" "$PLUGIN_HASH" <<'PY'
           import pathlib, re, sys
           commit, hash_ = sys.argv[1:]
           path = pathlib.Path("packaging/nix/package.nix")
           text = path.read_text()
           text, commits = re.subn(
-              r'(repo = "HaloDaemon-plugins";\n    rev = ")[0-9a-f]{40}(")',
+              r'(officialPluginsRev = ")[0-9a-f]{40}(")',
               lambda m: f"{m.group(1)}{commit}{m.group(2)}", text, count=1)
           text, hashes = re.subn(
-              r'(repo = "HaloDaemon-plugins";\n    rev = "[0-9a-f]{40}";\n    hash = ")[^"]+(";)',
+              r'(repo = "HaloDaemon-plugins";\n    rev = officialPluginsRev;\n    hash = ")[^"]+(";)',
               lambda m: f"{m.group(1)}{hash_}{m.group(2)}", text, count=1)
           if commits != 1 or hashes != 1:
               sys.exit("Failed to pin official plugin source in package.nix")
@@ -273,11 +264,13 @@ jobs:
           PY
 
       - name: Bump version in Cargo.toml and Cargo.lock
+        env:
+          PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
         run: |
           v="${{ needs.version.outputs.new_version }}"
-          python3 - "$v" <<'PY'
+          python3 - "$v" "$PLUGIN_COMMIT" <<'PY'
           import pathlib, re, sys
-          version = sys.argv[1]
+          version, plugin_commit = sys.argv[1:]
 
           toml = pathlib.Path("src/Cargo.toml")
           text, n = re.subn(
@@ -310,6 +303,14 @@ jobs:
           )
           if n == 0:
               sys.exit("Failed to patch pkgver in packaging/arch/PKGBUILD")
+          pbtext, n = re.subn(
+              r'(?m)^(plugin_commit=)[0-9a-f]{40}$',
+              lambda m: f'{m.group(1)}{plugin_commit}',
+              pbtext,
+              count=1,
+          )
+          if n == 0:
+              sys.exit("Failed to patch official plugin commit in packaging/arch/PKGBUILD")
           pkgbuild.write_text(pbtext)
           PY
 
@@ -319,7 +320,8 @@ jobs:
           v="${{ needs.version.outputs.new_version }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/Cargo.toml src/Cargo.lock packaging/arch/PKGBUILD packaging/nix/package.nix
+          git add src/Cargo.toml src/Cargo.lock packaging/arch/PKGBUILD \
+            packaging/nix/package.nix
           # A `keep` re-release stages nothing when the version and plugin pin
           # already match; the commit must still exist to be the release SHA.
           git commit --allow-empty -m "chore: bump version to v${v}"
@@ -354,12 +356,13 @@ jobs:
   # The branch establishes provenance; the supplied full SHA is the immutable
   # release input and is bundled once for every platform build.
   prepare-plugins:
-    needs: prepare
     runs-on: ubuntu-latest
+    outputs:
+      plugin_hash: ${{ steps.plugin_hash.outputs.value }}
     steps:
       - uses: actions/checkout@v7.0.0
         with:
-          ref: ${{ needs.prepare.outputs.release_sha }}
+          ref: main
 
       - uses: actions/checkout@v7.0.0
         with:
@@ -368,34 +371,48 @@ jobs:
           path: official-plugins
           fetch-depth: 0
 
+      - name: Verify selected plugin revision
+        env:
+          PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
+          PLUGIN_BRANCH: ${{ inputs.plugin_branch }}
+        run: |
+          set -euo pipefail
+          [[ "$PLUGIN_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]
+          git -C official-plugins fetch origin "$PLUGIN_BRANCH"
+          git -C official-plugins merge-base --is-ancestor \
+            "$PLUGIN_COMMIT" "origin/$PLUGIN_BRANCH"
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Verify plugin provenance and signature
         working-directory: src
         run: |
           set -euo pipefail
-          commit='${{ inputs.plugin_commit }}'
-          branch='${{ inputs.plugin_branch }}'
-          [[ "$commit" =~ ^[0-9a-fA-F]{40}$ ]]
-          git -C ../official-plugins fetch origin "$branch"
-          git -C ../official-plugins merge-base --is-ancestor "$commit" "origin/$branch"
-          cargo run -p halod-plugin-signing -- verify ../official-plugins \
+          cargo build -p halod-plugin-signing
+          target/debug/halod-plugin-signing verify ../official-plugins \
             --trusted-key halodaemon-official-2026=tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=
 
       - name: Create deterministic embedded bundle and license notice
         working-directory: src
+        env:
+          PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
         run: |
           set -euo pipefail
-          cargo run -p halod-plugin-signing -- bundle ../official-plugins \
-            --commit '${{ inputs.plugin_commit }}' \
+          target/debug/halod-plugin-signing bundle ../official-plugins \
+            --commit "$PLUGIN_COMMIT" \
             --output ../official-plugins.bundle
-          {
-            printf 'Official HaloDaemon plugin snapshot\n'
-            printf 'Branch: %s\nCommit: %s\n\n' '${{ inputs.plugin_branch }}' '${{ inputs.plugin_commit }}'
-            find ../official-plugins/LICENSES -maxdepth 1 -type f -print0 | sort -z | xargs -0 -r cat
-          } > ../official-plugins-licenses.txt
-          mkdir -p ../official-plugins-license-files
-          cp ../official-plugins/LICENSES/* ../official-plugins-license-files/
+          cp ../official-plugins/licenses.txt ../official-plugins-licenses.txt
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Calculate fixed-output plugin source hash
+        id: plugin_hash
+        env:
+          PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
+        run: |
+          archive=$(mktemp -d)
+          git -C official-plugins archive "$PLUGIN_COMMIT" | tar -x -C "$archive"
+          echo "value=$(nix hash path --type sha256 --sri "$archive")" >> "$GITHUB_OUTPUT"
 
       - name: Upload plugin bundle
         uses: actions/upload-artifact@v7.0.1
@@ -404,7 +421,6 @@ jobs:
           path: |
             official-plugins.bundle
             official-plugins-licenses.txt
-            official-plugins-license-files/
 
   # ── Windows installer ────────────────────────────────────────────
   # Takes the already-built Windows binaries from the test phase and
@@ -423,12 +439,6 @@ jobs:
           name: windows-release-bin
           path: src/target/release
 
-      - name: Download plugin license notice
-        uses: actions/download-artifact@v8.0.1
-        with:
-          name: official-plugin-bundle
-          path: plugin-bundle
-
       - name: Set up MSYS2 (UCRT64) for ffmpeg
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 #v2.32.0
         with:
@@ -444,7 +454,7 @@ jobs:
 
       - name: Stage release files
         shell: pwsh
-        run: ./packaging/windows/stage-release.ps1 -Ucrt64 "$env:UCRT64" -PluginLicensesDir plugin-bundle
+        run: ./packaging/windows/stage-release.ps1 -Ucrt64 "$env:UCRT64"
 
       - name: Install Inno Setup
         shell: pwsh
@@ -480,12 +490,6 @@ jobs:
           name: linux-release-bin
           path: src/target/release
 
-      - name: Download plugin license notice
-        uses: actions/download-artifact@v8.0.1
-        with:
-          name: official-plugin-bundle
-          path: plugin-bundle
-
       - name: Download generated udev rules
         uses: actions/download-artifact@v8.0.1
         with:
@@ -500,8 +504,8 @@ jobs:
           cp src/target/release/halod-gui "$d/"
           cp udev/60-halod.rules "$d/udev/"
           mkdir -p "$d/ThirdPartyLicenses/Plugins"
-          cp plugin-bundle/official-plugins-licenses.txt "$d/ThirdPartyLicenses/Plugins/NOTICE.txt"
-          cp plugin-bundle/official-plugins-license-files/* "$d/ThirdPartyLicenses/Plugins/"
+          cp src/target/release/plugin-licenses.txt \
+            "$d/ThirdPartyLicenses/Plugins/licenses.txt"
           cat > "$d/INSTALL.txt" <<'EOF'
           HaloDaemon - Linux binaries
 

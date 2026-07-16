@@ -19,7 +19,7 @@ audit has a single starting point.
 | Bundled fonts and icons | `.ttf` and third-party `.svg` files embedded in the GUI/daemon | `REUSE.toml` overrides + SVG SPDX headers | GUI *About* dialog "Bundled assets" | `build.rs` |
 | PawnIO blobs | Windows kernel-access `.bin` files | `REUSE.toml` `pwnio/**` | Windows installer (`PawnIO-LICENSE.txt`) | `stage-release.ps1` |
 | External tools | FFmpeg (subprocess, bundled on Windows) | `packaging/windows/FFmpeg-*` + `REUSE.toml` | Windows installer (`ffmpeg.exe` + `FFmpeg-LICENSE.md`) | — |
-| Official plugins | Signed Lua package snapshot embedded in release `halod` | Plugin repo `REUSE.toml`, SPDX headers, and `LICENSES/` | About → Licenses, release archives, Windows installer, Nix package | `halod-plugin-signing bundle` |
+| Official plugins | Signed Lua package snapshot embedded in release `halod` | Plugin manifests, SPDX headers, `LICENSES/`, and generated `licenses.txt` | About → Licenses, release archives, Windows installer, Linux packages | Plugin repo `scripts/generate-licenses.py` |
 
 The single most complete artifact is the GUI **About → Licenses** dialog: it stitches
 together protocol references, every Rust crate license, and the bundled asset licenses
@@ -180,7 +180,8 @@ is a **GPL** build of FFmpeg (GPL-3.0-compatible with this project).
 [`packaging/windows/halod.iss`](../packaging/windows/halod.iss) packages the staged tree
 ([`stage-release.ps1`](../packaging/windows/stage-release.ps1) output):
 
-- `LicenseFile=LICENSE.txt` — the GPL notice shown in the install wizard.
+- `LicenseFile=staging/INSTALLER-LICENSE.txt` — the HaloDaemon notice plus the
+  generated per-plugin/SPDX license list shown in the install wizard.
 - `InfoBeforeFile=DISCLAIMER.txt` — the pre-install disclaimer.
 - The staged tree carries the three HaloDaemon executables, the PawnIO blobs, and
   `PawnIO-LICENSE.txt`.
@@ -195,11 +196,18 @@ commit, packages its scripts, `REUSE.toml`, and complete `LICENSES/` directory,
 and passes the archive to the daemon build. At first launch the daemon validates
 the signature and indexed package hashes again before extracting any script.
 
-The GUI appends the generated plugin license notice to **About → Licenses**.
-The Windows installer and Linux tarball also ship the notice under
-`ThirdPartyLicenses/Plugins`; Nix installs the full material under
-`share/licenses/halod/plugins`. Plugin source licenses come from the plugin
-repository's SPDX/REUSE metadata, not `cargo-about`.
+The plugin publication workflow generates `licenses.txt` from every manifest's
+declared plugin license and every SPDX license/copyright found inside that
+package. Plugin CI rejects a stale notice. HaloDaemon verifies that file and
+its SHA-256 through the signed repository index, then copies the plugin-owned
+artifact into each build/package; no generated copy is kept in the HaloDaemon
+repository.
+
+The GUI appends the notice to **About → Licenses**. Windows shows it on the
+installer license page and installs it under `ThirdPartyLicenses/Plugins`;
+Linux tarballs, debs, RPMs, Arch, and Nix install it under their normal shared
+license path. The same source tree and license texts also travel inside the
+plugin bundle embedded in `halod`.
 
 ## Reference clones — `refs/`
 

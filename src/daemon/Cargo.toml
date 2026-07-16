@@ -149,6 +149,7 @@ assets = [
     ["../../assets/dev.timp4w.Halod.desktop", "usr/share/applications/dev.timp4w.Halod.desktop", "444"],
     ["../../assets/icon.svg", "usr/share/icons/hicolor/scalable/apps/halod.svg", "444"],
     ["../../packaging/systemd/halod.service", "usr/lib/systemd/user/halod.service", "644"],
+    ["target/release/plugin-licenses.txt", "usr/share/licenses/halod/plugins/licenses.txt", "444"],
 ]
 
 [package.metadata.generate-rpm]
@@ -166,6 +167,7 @@ assets = [
     { source = "../../assets/dev.timp4w.Halod.desktop", dest = "/usr/share/applications/dev.timp4w.Halod.desktop", mode = "444" },
     { source = "../../assets/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/halod.svg", mode = "444" },
     { source = "../../packaging/systemd/halod.service", dest = "/usr/lib/systemd/user/halod.service", mode = "644" },
+    { source = "target/release/plugin-licenses.txt", dest = "/usr/share/licenses/halod/plugins/licenses.txt", mode = "444", doc = true },
     { source = "../../packaging/rpm/halod-sysusers.conf", dest = "/usr/lib/sysusers.d/halod.conf", mode = "644" },
     { source = "../../LICENSE", dest = "/usr/share/licenses/halod/LICENSE", mode = "444", doc = true },
 ]
