@@ -3,9 +3,9 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use halod_shared::types::{
-    Animation, ChoiceDisplay, ChoiceOption, DeviceType, EffectParamDescriptor, EffectParamValue,
-    LcdPresetDescriptor, LcdWidgetDescriptor, LcdWidgetResize, LcdWidgetUpdates, ParamKind,
-    Permission, PluginConfigFieldKind, PluginKind, RangeDisplay, RgbDescriptor, RgbZone,
+    Animation, CategoryLayout, ChoiceDisplay, ChoiceOption, DeviceType, EffectParamDescriptor,
+    EffectParamValue, LcdPresetDescriptor, LcdWidgetDescriptor, LcdWidgetResize, LcdWidgetUpdates,
+    ParamKind, Permission, PluginConfigFieldKind, PluginKind, RangeDisplay, RgbDescriptor, RgbZone,
     ZoneTopology,
 };
 use serde::{Deserialize, Serialize};
@@ -594,6 +594,10 @@ pub struct DeviceSpec {
     pub name: Option<String>,
     #[serde(default, rename = "type")]
     pub device_type: Option<DeviceType>,
+    /// Grid placement for the Controls tab's category cards. Empty ⇒ one
+    /// full-width row per category, alphabetically.
+    #[serde(default)]
+    pub control_layout: Vec<CategoryLayout>,
 
     #[serde(skip)]
     pub transport: String,
@@ -1033,6 +1037,7 @@ const MAX_CONFIG_FIELDS: usize = 128;
 const MAX_USB_ENDPOINTS: usize = 32;
 const MAX_CHAIN_ACCESSORIES: usize = 256;
 const MAX_CONTROL_DEFS: usize = 256;
+const MAX_CONTROL_LAYOUT_ENTRIES: usize = 64;
 const MAX_TEXT_BYTES: usize = 256;
 const MAX_LONG_TEXT_BYTES: usize = 4_096;
 
@@ -1216,6 +1221,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 if spec.vendor.is_empty() || spec.model.is_empty() {
                     bail!("every device must declare a non-empty vendor and model");
                 }
+                validate_control_layout(spec)?;
                 match descriptor_for(&spec.transport) {
                     Some(desc) => {
                         if let Some(validate) = desc.validate {
@@ -2048,6 +2054,34 @@ pub(super) fn is_disallowed_command(name: &str) -> bool {
     )
 }
 
+/// Categories are matched against the controls a device reports at runtime, so
+/// an entry naming a category that never shows up is dropped by the GUI rather
+/// than rejected here.
+fn validate_control_layout(spec: &DeviceSpec) -> Result<()> {
+    check_count(
+        "control layout entries",
+        spec.control_layout.len(),
+        MAX_CONTROL_LAYOUT_ENTRIES,
+    )?;
+    let mut seen = HashSet::new();
+    for entry in &spec.control_layout {
+        validate_short_text("control layout category", &entry.category)?;
+        if entry.span == 0 {
+            bail!(
+                "control layout category '{}' must span at least one column",
+                entry.category
+            );
+        }
+        if !seen.insert(&entry.category) {
+            bail!(
+                "control layout category '{}' is placed more than once",
+                entry.category
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_controls(manifest: &PluginManifest) -> Result<()> {
     if let Some(config) = &manifest.config {
         check_count("config fields", config.fields.len(), MAX_CONFIG_FIELDS)?;
@@ -2270,6 +2304,66 @@ mod tests {
         write_widget_icon(&invalid);
         let error = parse_manifest_from_dir(&invalid).unwrap_err();
         assert!(format!("{error:#}").contains("default_font without uses_font"));
+    }
+
+    const LAYOUT_YAML: &str = "permissions: [hid]\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: headset\n    match:\n      hid: { vid: 1, pid: 2 }\n    control_layout:\n";
+
+    #[test]
+    fn device_control_layout_parses_with_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "layout_ok",
+            &format!(
+                "{LAYOUT_YAML}      - {{ category: Microphone, order: 0, column: 0 }}\n      - {{ category: Noise Cancelling, order: 1, column: 1, span: 2 }}\n      - {{ category: Audio }}\n"
+            ),
+            ENTRY_LUA,
+        );
+
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        let layout = &manifest.devices[0].control_layout;
+        assert_eq!(
+            layout[1],
+            CategoryLayout {
+                category: "Noise Cancelling".into(),
+                order: 1,
+                column: 1,
+                span: 2,
+            }
+        );
+        assert_eq!(
+            layout[2],
+            CategoryLayout {
+                category: "Audio".into(),
+                order: 0,
+                column: 0,
+                span: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn device_control_layout_rejects_duplicate_and_zero_span_categories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let duplicate = write_plugin_dir(
+            tmp.path(),
+            "layout_duplicate",
+            &format!(
+                "{LAYOUT_YAML}      - {{ category: Microphone, column: 0 }}\n      - {{ category: Microphone, column: 1 }}\n"
+            ),
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&duplicate).unwrap_err();
+        assert!(format!("{error:#}").contains("placed more than once"));
+
+        let zero_span = write_plugin_dir(
+            tmp.path(),
+            "layout_zero_span",
+            &format!("{LAYOUT_YAML}      - {{ category: Microphone, span: 0 }}\n"),
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&zero_span).unwrap_err();
+        assert!(format!("{error:#}").contains("span at least one column"));
     }
 
     #[test]

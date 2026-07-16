@@ -12,11 +12,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::keyboard::{KeyId, KeyVariant, KeyboardLayoutStatus, VisualKey};
 use halod_shared::types::{
-    Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, Choice,
-    ConnectionStatus, DeviceCapability, DeviceType, DpiMode, DpiStatus, Equalizer, KeyRemapStatus,
-    KeyboardFormFactor, KeyboardLayout, LcdDescriptor, NativeEffect, Permission, PluginKind, Range,
-    RgbColor, RgbDescriptor, RgbState, RgbZone, ScreenRotation, ScreenShape, Sensor,
-    WriteRateStatus,
+    Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, CategoryLayout,
+    Choice, ConnectionStatus, DeviceCapability, DeviceType, DpiMode, DpiStatus, Equalizer,
+    KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, NativeEffect, Permission,
+    PluginKind, Range, RgbColor, RgbDescriptor, RgbState, RgbZone, ScreenRotation, ScreenShape,
+    Sensor, WriteRateStatus,
 };
 use halod_shared::zone_transform::build_permutation;
 
@@ -462,6 +462,7 @@ pub struct LuaDevice {
     plugin_type: PluginKind,
     dynamic_children: bool,
     device_type: DeviceType,
+    control_layout: Vec<CategoryLayout>,
     visibility: VisibilitySlot,
     transport_kind: &'static str,
     dynamic_model: OnceLock<String>,
@@ -1031,6 +1032,7 @@ impl LuaDevice {
             plugin_type: manifest.plugin_type,
             dynamic_children: manifest.dynamic_children,
             device_type: spec.and_then(|s| s.device_type).unwrap_or_default(),
+            control_layout: spec.map(|s| s.control_layout.clone()).unwrap_or_default(),
             visibility: VisibilitySlot::default(),
             transport_kind: spec
                 .and_then(|s| super::transport::descriptor_for(&s.transport))
@@ -1473,6 +1475,10 @@ impl Device for LuaDevice {
 
     fn wire_device_type(&self) -> DeviceType {
         self.device_type
+    }
+
+    fn control_layout(&self) -> Vec<CategoryLayout> {
+        self.control_layout.clone()
     }
 
     fn keyboard_layout_slot(&self) -> Option<&KeyboardLayoutSlot> {
@@ -2799,6 +2805,53 @@ mod tests {
                 config: HashMap::new(),
             })),
         })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_control_layout_reaches_the_wire_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("layout_plug");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: layout_plug\nversion: 1.0.0\npermissions: [hid]\ncapabilities: [controls]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\n    control_layout:\n      - { category: Microphone, order: 0, column: 0 }\n      - { category: Noise Cancelling, order: 1, column: 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+        let manifest = super::super::parse_manifest_from_dir(&dir).unwrap();
+
+        let device = LuaDevice::new(LuaDeviceParts {
+            id: "layout_plug_0".into(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+
+        let wire = device.serialize().await;
+        assert_eq!(
+            wire.control_layout
+                .iter()
+                .map(|l| (l.category.as_str(), l.column, l.span))
+                .collect::<Vec<_>>(),
+            vec![("Microphone", 0, 1), ("Noise Cancelling", 1, 1)]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wire_device_control_layout_is_empty_without_a_manifest_layout() {
+        let (_tmp, manifest) = test_manifest("no_layout", &["controls"], "return {}");
+        let device = LuaDevice::new(LuaDeviceParts {
+            id: "no_layout_0".into(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+
+        assert!(device.serialize().await.control_layout.is_empty());
     }
 
     #[test]

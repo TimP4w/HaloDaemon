@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 
 use halod_shared::types::{
-    ConnectionType, DeviceCapability, DeviceType, LedPosition, RgbColor, RgbZone, WireDevice,
-    ZoneTopology,
+    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, LedPosition, RgbColor, RgbZone,
+    WireDevice, ZoneTopology,
 };
 use halod_shared::zone_transform::transform_colors;
 
@@ -110,6 +110,7 @@ pub struct WireDeviceBuilder {
     connection_type: Option<ConnectionType>,
     serial_number: Option<String>,
     integration_id: Option<String>,
+    control_layout: Vec<CategoryLayout>,
 }
 
 impl WireDeviceBuilder {
@@ -127,6 +128,7 @@ impl WireDeviceBuilder {
             connection_type: None,
             serial_number: None,
             integration_id: None,
+            control_layout: Vec::new(),
         }
     }
 
@@ -163,6 +165,11 @@ impl WireDeviceBuilder {
         self
     }
 
+    pub fn control_layout(mut self, control_layout: Vec<CategoryLayout>) -> Self {
+        self.control_layout = control_layout;
+        self
+    }
+
     pub fn build(self) -> WireDevice {
         WireDevice {
             id: self.id,
@@ -180,7 +187,7 @@ impl WireDeviceBuilder {
             // The serializer overlays live write-rate stats when the device
             // reports them.
             write_rate: Default::default(),
-            control_layout: Vec::new(),
+            control_layout: self.control_layout,
             integration_id: self.integration_id,
             conflict: None,
         }

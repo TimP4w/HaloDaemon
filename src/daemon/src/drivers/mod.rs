@@ -10,7 +10,8 @@ use crate::drivers::vendors::generic::devices::common::WireDeviceBuilder;
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{
-    ConnectionType, DeviceCapability, DeviceType, VisibilityState, WireDevice, WriteRateStatus,
+    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, VisibilityState, WireDevice,
+    WriteRateStatus,
 };
 use std::sync::Arc;
 
@@ -145,11 +146,18 @@ pub trait Device: Send + Sync {
         .connected(self.wire_device_connected())
         .capabilities(caps)
         .integration_id(self.integration_id())
+        .control_layout(self.control_layout())
         .build()
     }
 
     fn wire_device_type(&self) -> DeviceType {
         DeviceType::Other
+    }
+
+    /// Grid placement for the Controls tab's category cards. Empty (the
+    /// default) ⇒ one full-width row per category, alphabetically.
+    fn control_layout(&self) -> Vec<CategoryLayout> {
+        Vec::new()
     }
 
     /// The owning plugin id when this device *is* an integration's root
