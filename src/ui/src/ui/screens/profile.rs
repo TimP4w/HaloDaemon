@@ -571,7 +571,7 @@ pub fn title_dropdown(
                     del_rect.center(),
                     Align2::CENTER_CENTER,
                     "×",
-                    theme::semibold(16.0),
+                    theme::title(),
                     del_col,
                 );
                 if del_resp.clicked() {
@@ -775,7 +775,7 @@ pub fn delete_confirm_modal(ctx: &egui::Context, cmd: &CommandTx, st: &mut Profi
         |ui| {
             ui.label(
                 egui::RichText::new(t!("profile.delete_confirm", name = name))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         },
@@ -1136,7 +1136,7 @@ fn process_chip(
     icon_name: &str,
     cache: &IconCache,
 ) -> egui::Response {
-    let font = theme::body(11.5);
+    let font = theme::body_sm();
     let text_galley =
         ui.painter()
             .layout_no_wrap(proc_name.to_string(), font.clone(), Color32::WHITE);

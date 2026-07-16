@@ -246,7 +246,7 @@ pub fn context_menu_item(ui: &mut egui::Ui, label: &str, color: Color32) -> Resp
         Pos2::new(rect.left() + 9.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        theme::body(12.5),
+        theme::body_md(),
         color,
     );
     resp

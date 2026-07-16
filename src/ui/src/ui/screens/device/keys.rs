@@ -290,7 +290,7 @@ fn button_selector_card(
                 Pos2::new(chip.right() + 12.0, rect.center().y),
                 Align2::LEFT_CENTER,
                 label,
-                theme::body(12.5),
+                theme::body_md(),
                 if selected {
                     theme::TEXT
                 } else {
@@ -299,7 +299,7 @@ fn button_selector_card(
             );
 
             // Tag chip (right edge)
-            let tag_g = p.layout_no_wrap(tag.to_string(), theme::body(10.0), type_color);
+            let tag_g = p.layout_no_wrap(tag.to_string(), theme::caption(), type_color);
             let tag_w = tag_g.size().x + 18.0;
             let tag_rect = Rect::from_min_size(
                 Pos2::new(rect.right() - tag_w - 18.0, rect.center().y - 11.0),
@@ -885,7 +885,7 @@ fn params_editor(
 fn action_chip(ui: &mut egui::Ui, label: &str, active: bool, color: Color32) -> bool {
     let galley = ui.painter().layout_no_wrap(
         label.to_string(),
-        theme::body(11.5),
+        theme::body_sm(),
         if active {
             Color32::WHITE
         } else {

@@ -1326,7 +1326,7 @@ fn delete_confirm_modal(ui: &mut egui::Ui, st: &mut LightingUi, cmd: &CommandTx)
         |ui| {
             ui.label(
                 egui::RichText::new(t!("lighting.delete_confirm", name = name))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         },

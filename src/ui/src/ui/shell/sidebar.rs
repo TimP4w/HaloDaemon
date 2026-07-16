@@ -263,7 +263,7 @@ fn footer(ui: &mut egui::Ui, rect: Rect, connected: bool) {
             Pos2::new(dot.x + 14.0, y + 35.0),
             Align2::LEFT_CENTER,
             sub,
-            theme::body(10.0),
+            theme::caption(),
             sub_col,
         );
     }
@@ -298,7 +298,7 @@ fn section_label(ui: &mut egui::Ui, text: &str) {
         text,
         0.0,
         egui::TextFormat {
-            font_id: theme::body(10.0),
+            font_id: theme::caption(),
             color: theme::TEXT_FAINT2,
             extra_letter_spacing: 2.0,
             ..Default::default()

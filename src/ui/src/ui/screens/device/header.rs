@@ -203,7 +203,7 @@ pub(super) fn status_chips(p: &egui::Painter, rect: Rect, dev: &WireDevice) {
             Pos2::new(rect.right(), cy),
             Align2::RIGHT_CENTER,
             t!("devtabs.offline"),
-            theme::body(11.5),
+            theme::body_sm(),
             theme::OFFLINE_TEXT,
         );
         p.circle_filled(Pos2::new(st.left() - 9.0, cy), 3.5, theme::OFFLINE);

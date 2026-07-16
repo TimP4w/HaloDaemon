@@ -168,7 +168,7 @@ fn leave_canvas_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         |ui| {
             ui.label(
                 egui::RichText::new(t!("lighting.remove_from_canvas_body"))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         },

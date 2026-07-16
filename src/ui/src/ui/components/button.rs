@@ -79,7 +79,7 @@ pub fn button_at(
 fn button_font(kind: ButtonKind) -> FontId {
     match kind {
         ButtonKind::Primary | ButtonKind::Warn => theme::semibold(11.5),
-        ButtonKind::Ghost | ButtonKind::Danger => theme::body(11.5),
+        ButtonKind::Ghost | ButtonKind::Danger => theme::body_sm(),
     }
 }
 

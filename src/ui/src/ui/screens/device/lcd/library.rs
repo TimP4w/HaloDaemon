@@ -50,7 +50,7 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
 
     ui.label(
         egui::RichText::new(&label)
-            .font(theme::body(11.5))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
     ui.add_space(10.0);
@@ -78,7 +78,7 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
         ui.add_space(6.0);
         ui.label(
             egui::RichText::new(t!("lcd.ffmpeg_unavailable_host"))
-                .font(theme::body(10.0))
+                .font(theme::caption())
                 .color(theme::TEXT_FAINT2),
         );
     }
@@ -258,7 +258,7 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
         |ui| {
             ui.label(
                 egui::RichText::new(t!("lcd.delete_confirm_body", name = filename))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         },

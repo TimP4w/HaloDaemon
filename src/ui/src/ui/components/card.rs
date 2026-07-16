@@ -73,7 +73,7 @@ pub fn card_titled<R>(
 pub fn caps_label(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .font(theme::body(10.0))
+            .font(theme::caption())
             .color(theme::TEXT_FAINT2),
     );
 }
@@ -84,7 +84,7 @@ pub fn caps_label(ui: &mut egui::Ui, text: &str) {
 pub fn caps_label_inline(ui: &mut egui::Ui, text: &str) {
     let galley =
         ui.painter()
-            .layout_no_wrap(text.to_string(), theme::body(10.0), theme::TEXT_FAINT2);
+            .layout_no_wrap(text.to_string(), theme::caption(), theme::TEXT_FAINT2);
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(galley.size().x, super::PILL_H),
         egui::Sense::hover(),

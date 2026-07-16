@@ -134,7 +134,7 @@ pub(super) fn zones_assign_modal(
                                     "{} · {total} {zw}",
                                     crate::domain::models::device::type_label(dev),
                                 ))
-                                .font(theme::body(10.0))
+                                .font(theme::caption())
                                 .color(theme::TEXT_FAINT),
                             );
                         });
@@ -347,7 +347,7 @@ pub(crate) fn fps_modal(
         |ui| {
             ui.label(
                 egui::RichText::new(t!("canvas.fps_desc").to_string())
-                    .font(theme::body(11.5))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_FAINT),
             );
             ui.add_space(16.0);

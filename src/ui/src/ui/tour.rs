@@ -113,7 +113,7 @@ fn overlay(
             );
 
             let body_w = 260.0;
-            let galley = p.layout(body.to_string(), theme::body(12.5), theme::TEXT_DIM, body_w);
+            let galley = p.layout(body.to_string(), theme::body_md(), theme::TEXT_DIM, body_w);
             let bubble_size = Vec2::new(body_w + 32.0, 24.0 + 22.0 + galley.size().y + 16.0 + 32.0);
             let bubble = bubble_rect(cutout, bubble_size, screen);
 
@@ -130,7 +130,7 @@ fn overlay(
                 Pos2::new(bubble.left() + 16.0, bubble.top() + 16.0),
                 Align2::LEFT_TOP,
                 title,
-                theme::semibold(14.0),
+                theme::title(),
                 theme::TEXT,
             );
             p.galley(

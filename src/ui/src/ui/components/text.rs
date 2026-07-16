@@ -29,7 +29,7 @@ pub fn back_link(ui: &mut egui::Ui, label: &str) -> bool {
     // guaranteed to render (InterTight doesn't cover U+2190).
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_string(), theme::body(11.5), theme::TEXT_MUT);
+        .layout_no_wrap(label.to_string(), theme::body_sm(), theme::TEXT_MUT);
     let chevron_w = 10.0;
     let gap = 6.0;
     let total_size = Vec2::new(chevron_w + gap + galley.size().x, galley.size().y + 6.0);

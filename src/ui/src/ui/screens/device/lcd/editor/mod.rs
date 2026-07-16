@@ -205,7 +205,7 @@ pub fn show(
                 pos + egui::vec2(0.0, 22.0),
                 egui::Align2::CENTER_CENTER,
                 label.as_ref(),
-                crate::ui::theme::body(10.0),
+                crate::ui::theme::caption(),
                 crate::ui::theme::TEXT_MUT,
             );
         }

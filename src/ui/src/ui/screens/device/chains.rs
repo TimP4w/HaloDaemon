@@ -601,7 +601,7 @@ fn add_link_panel(
         let label = format!("+ {}", t!("device.chains_add_link"));
         let btn_w = ui
             .painter()
-            .layout_no_wrap(label.clone(), theme::body(11.5), theme::TEXT_DIM)
+            .layout_no_wrap(label.clone(), theme::body_sm(), theme::TEXT_DIM)
             .size()
             .x
             + 26.0;
@@ -643,7 +643,7 @@ fn add_link_panel(
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(t!("device.chains_name"))
-                            .font(theme::body(11.5))
+                            .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
                     ui.add_space(8.0);
@@ -660,7 +660,7 @@ fn add_link_panel(
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(t!("device.chains_type"))
-                            .font(theme::body(11.5))
+                            .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
                     ui.add_space(8.0);
@@ -686,7 +686,7 @@ fn add_link_panel(
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(t!("device.chains_leds"))
-                            .font(theme::body(11.5))
+                            .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
                     ui.add_space(8.0);

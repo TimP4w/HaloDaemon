@@ -134,7 +134,7 @@ fn bands(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, eq: &Equa
             Pos2::new(cx, rect.top() + 174.0),
             Align2::CENTER_CENTER,
             &b.label,
-            theme::body(10.0),
+            theme::caption(),
             theme::TEXT_MUT,
         );
         let val = st.equalizer.eq.get(i).copied().unwrap_or(b.value);

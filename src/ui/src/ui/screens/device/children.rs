@@ -50,7 +50,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, page: &mut Page) {
                         Pos2::new(row.left() + 18.0, row.center().y),
                         Align2::LEFT_CENTER,
                         t!("device.children_no_child_devices"),
-                        theme::body(12.5),
+                        theme::body_md(),
                         theme::TEXT_FAINT,
                     );
                     return;
@@ -166,7 +166,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(&ctx.dev.name)
-                    .font(theme::semibold(14.0))
+                    .font(theme::title())
                     .color(theme::TEXT),
             );
             ui.add_space(20.0);
@@ -209,7 +209,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
             if listening {
                 ui.label(
                     egui::RichText::new(t!("device.children_hold_pair_button"))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
                 ui.add_space(16.0);
@@ -232,7 +232,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
             } else {
                 ui.label(
                     egui::RichText::new(t!("device.children_slots_in_use", used = used, max = max))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_MUT),
                 );
                 ui.add_space(16.0);
@@ -343,7 +343,7 @@ fn pair_slot_row(
             Pos2::new(name_x, cy),
             Align2::LEFT_CENTER,
             &slot.name,
-            theme::body(12.5),
+            theme::body_md(),
             theme::TEXT,
         );
 
@@ -378,7 +378,7 @@ fn pair_slot_row(
             Pos2::new(name_x, cy),
             Align2::LEFT_CENTER,
             t!("device.children_empty_slot"),
-            theme::body(12.5),
+            theme::body_md(),
             theme::TEXT_FAINT,
         );
         p.text(

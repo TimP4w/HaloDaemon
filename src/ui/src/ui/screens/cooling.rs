@@ -153,7 +153,7 @@ fn cooler_card(
                     |ui| {
                         ui.label(
                             egui::RichText::new(&dev.name)
-                                .font(theme::semibold(14.0))
+                                .font(theme::title())
                                 .color(theme::TEXT),
                         );
                     },
@@ -177,7 +177,7 @@ fn cooler_card(
                     |ui| {
                         ui.label(
                             egui::RichText::new("RPM")
-                                .font(theme::body(10.0))
+                                .font(theme::caption())
                                 .color(theme::TEXT_FAINT),
                         );
                     },
@@ -290,7 +290,7 @@ fn cooler_card(
             if let Some(t) = sensor_temp {
                 ui.label(
                     egui::RichText::new(&sensor_name)
-                        .font(theme::body(11.5))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_DIM),
                 );
                 ui.add_space(6.0);

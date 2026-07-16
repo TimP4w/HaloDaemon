@@ -236,7 +236,7 @@ pub(super) fn instance_params(
                     |ui| {
                         ui.label(
                             egui::RichText::new(effect_param_label(param))
-                                .font(theme::body(11.5))
+                                .font(theme::body_sm())
                                 .color(theme::TEXT_DIM),
                         );
                     },

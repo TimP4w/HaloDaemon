@@ -177,7 +177,7 @@ pub(super) fn delete_template_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut De
         |ui| {
             ui.label(
                 egui::RichText::new(t!("lcd.delete_confirm_body", name = name))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         },
@@ -250,7 +250,7 @@ fn library_header(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
         egui::pos2(box_rect.left() - 10.0, cy),
         egui::Align2::RIGHT_CENTER,
         t!("lcd.drag_onto_screen"),
-        theme::body(10.0),
+        theme::caption(),
         theme::TEXT_FAINT,
     );
     if resp.hovered() {

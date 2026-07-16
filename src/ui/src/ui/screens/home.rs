@@ -259,7 +259,7 @@ fn attention_banner(ui: &mut egui::Ui, count: usize) -> bool {
             Pos2::new(tx, rect.center().y + 9.0),
             Align2::LEFT_CENTER,
             t!("home.conflict_banner_sub"),
-            theme::body(11.5),
+            theme::body_sm(),
             theme::hex(0xb39f6a),
         );
     }
@@ -326,7 +326,7 @@ fn conflict_modal(
         |ui| {
             ui.label(
                 egui::RichText::new(t!("home.conflict_modal_intro"))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
             ui.add_space(14.0);
@@ -411,7 +411,7 @@ fn conflict_group_card(ui: &mut egui::Ui, group: &mut ConflictGroup) {
                     ui.add_space(1.0);
                     ui.label(
                         egui::RichText::new(&dev_name)
-                            .font(theme::semibold(13.5))
+                            .font(theme::heading())
                             .color(theme::TEXT),
                     );
                     ui.label(
@@ -650,7 +650,7 @@ fn remove_confirm_modal(
         |ui| {
             ui.label(
                 egui::RichText::new(t!("home.remove_device_confirm", name = target.child_name))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         },
@@ -903,7 +903,7 @@ fn search_box(ui: &mut egui::Ui, search: &mut String) {
         egui::TextEdit::singleline(search)
             .frame(egui::Frame::NONE)
             .desired_width(f32::INFINITY)
-            .font(theme::body(12.5))
+            .font(theme::body_md())
             .hint_text(t!("home.search_devices")),
     );
 }
@@ -1354,7 +1354,7 @@ fn device_card(
         theme::body_sm(),
         theme::TEXT_MUT,
     );
-    let name_font = theme::semibold(13.5);
+    let name_font = theme::heading();
     let display_name = ellipsize(p, &d.name, &name_font, rect.width() - 32.0);
     p.text(
         Pos2::new(rect.left() + 16.0, type_y - 6.0 - 16.0),
@@ -1592,7 +1592,7 @@ fn list_row(
             Pos2::new(mx, rect.center().y - 8.0),
             Align2::LEFT_CENTER,
             &m.label,
-            theme::body(10.0),
+            theme::caption(),
             theme::TEXT_MUT,
         );
         p.text(

@@ -200,7 +200,7 @@ fn curve_card(
             |ui| {
                 ui.label(
                     egui::RichText::new(title)
-                        .font(theme::semibold(14.0))
+                        .font(theme::title())
                         .color(theme::TEXT),
                 );
             },

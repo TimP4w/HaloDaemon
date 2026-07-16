@@ -131,7 +131,7 @@ fn config_field_row(
     );
     left.label(
         egui::RichText::new(&f.label)
-            .font(theme::body(12.5))
+            .font(theme::body_md())
             .color(theme::TEXT),
     );
 

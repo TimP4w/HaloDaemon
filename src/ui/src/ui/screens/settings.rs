@@ -220,7 +220,7 @@ fn row_label(ui: &mut egui::Ui, rect: Rect, title: &str, subtitle: &str) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         title,
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     ui.painter().text(
@@ -250,7 +250,7 @@ fn row_toggle_at(ui: &mut egui::Ui, x: f32, y: f32, on: bool, id: &str) -> bool 
 fn right_button(ui: &mut egui::Ui, rect: Rect, label: &str, st: &mut SettingsUi, modal: Modal) {
     let btn_w = 80.0_f32.max(
         ui.painter()
-            .layout_no_wrap(label.to_string(), theme::body(11.5), theme::TEXT)
+            .layout_no_wrap(label.to_string(), theme::body_sm(), theme::TEXT)
             .size()
             .x
             + 20.0,
@@ -569,7 +569,7 @@ fn healthcheck_section(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugI
         Pos2::new(rect.left(), rect.center().y),
         Align2::LEFT_CENTER,
         t!("settings.section_healthcheck"),
-        theme::body(10.0),
+        theme::caption(),
         theme::TEXT_FAINT2,
     );
     let btn_w = 76.0;
@@ -805,7 +805,7 @@ fn config_folder_row(ui: &mut egui::Ui, state: &AppState) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         t!("settings.config_folder_title"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     let config_unknown = t!("settings.unknown");
@@ -871,7 +871,7 @@ fn diagnostics_row(ui: &mut egui::Ui, cmd: &CommandTx, st: &mut SettingsUi) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         t!("settings.diagnostics_title"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     ui.painter().text(
@@ -886,7 +886,7 @@ fn diagnostics_row(ui: &mut egui::Ui, cmd: &CommandTx, st: &mut SettingsUi) {
         ui.painter()
             .layout_no_wrap(
                 t!("settings.open_button").to_string(),
-                theme::body(11.5),
+                theme::body_sm(),
                 theme::TEXT,
             )
             .size()
@@ -921,7 +921,7 @@ fn about_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         halod_shared::app::APP_DISPLAY_NAME,
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     ui.painter().text(
@@ -945,7 +945,7 @@ fn third_party_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         t!("settings.third_party_title"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     ui.painter().text(
@@ -968,7 +968,7 @@ fn repo_row(ui: &mut egui::Ui) {
         Pos2::new(rect.left(), rect.top() + 10.0),
         Align2::LEFT_TOP,
         t!("settings.repository_title"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT,
     );
     ui.painter().text(
@@ -1003,7 +1003,7 @@ fn section_header(ui: &mut egui::Ui, text: &str) {
         Pos2::new(rect.left(), rect.center().y),
         Align2::LEFT_CENTER,
         text,
-        theme::body(10.0),
+        theme::caption(),
         theme::TEXT_FAINT2,
     );
 }
@@ -1119,13 +1119,13 @@ fn credits_modal(ctx: &egui::Context, st: &mut SettingsUi) {
             if url.is_empty() {
                 ui.label(
                     egui::RichText::new(*name)
-                        .font(theme::body(11.5))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_DIM),
                 );
             } else {
                 ui.hyperlink_to(
                     egui::RichText::new(*name)
-                        .font(theme::body(11.5))
+                        .font(theme::body_sm())
                         .color(theme::CYAN),
                     *url,
                 )

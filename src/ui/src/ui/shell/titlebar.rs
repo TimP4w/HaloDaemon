@@ -539,14 +539,14 @@ pub fn daemon_overlay(ui: &mut egui::Ui) {
         Pos2::new(cx, card.top() + 106.0),
         Align2::CENTER_CENTER,
         t!("shell.daemon_unreachable"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT_MUT,
     );
     p.text(
         Pos2::new(cx, card.top() + 124.0),
         Align2::CENTER_CENTER,
         t!("shell.daemon_start_hint"),
-        theme::body(12.5),
+        theme::body_md(),
         theme::TEXT_MUT,
     );
 

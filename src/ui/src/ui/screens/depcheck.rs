@@ -241,7 +241,7 @@ fn caption(ui: &mut egui::Ui, text: &str) {
 fn body_text(ui: &mut egui::Ui, text: &str) {
     ui.label(
         RichText::new(text)
-            .font(theme::body(11.5))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
 }

@@ -510,7 +510,7 @@ impl PluginsUi {
         if rows.is_empty() {
             ui.label(
                 egui::RichText::new(t!("plugins.repos_empty"))
-                    .font(theme::body(11.5))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_MUT),
             );
             return;
@@ -816,7 +816,7 @@ impl PluginsUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.repos_add_sub"))
-                        .font(theme::body(11.5))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
                 ui.add_space(14.0);
@@ -925,7 +925,7 @@ impl PluginsUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.delete_body", name = name))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
             },
@@ -979,7 +979,7 @@ impl PluginsUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.repos_remove_body", name = slug.clone()))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
             },
@@ -1035,7 +1035,7 @@ impl PluginsUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.repos_repair_body"))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
             },
@@ -1097,7 +1097,7 @@ impl PluginsUi {
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.consent_body", name = p.name.clone()))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
                 match consent_reason(p) {
@@ -1105,7 +1105,7 @@ impl PluginsUi {
                         ui.add_space(8.0);
                         ui.label(
                             egui::RichText::new(t!("plugins.consent_permission_added"))
-                                .font(theme::body(11.5))
+                                .font(theme::body_sm())
                                 .color(theme::STAT_AMBER),
                         );
                     }
@@ -1116,7 +1116,7 @@ impl PluginsUi {
                 ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new(t!("plugins.consent_warning"))
-                        .font(theme::body(11.5))
+                        .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
             },
@@ -2221,7 +2221,7 @@ fn detail_body(
         ui.add_space(16.0);
         ui.label(
             egui::RichText::new(&p.description)
-                .font(theme::body(12.5))
+                .font(theme::body_md())
                 .color(theme::TEXT_DIM),
         );
     }
@@ -2232,7 +2232,7 @@ fn detail_body(
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(&p.author)
-                .font(theme::body(12.5))
+                .font(theme::body_md())
                 .color(theme::TEXT),
         );
     }
@@ -2422,7 +2422,7 @@ fn permission_card(ui: &mut egui::Ui, perm: halod_shared::types::Permission) {
             ui.add_space(3.0);
             ui.label(
                 egui::RichText::new(permission_description(perm))
-                    .font(theme::body(11.5))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_MUT),
             );
         });
@@ -2455,7 +2455,7 @@ fn command_authority_card(ui: &mut egui::Ui, commands: &[&str]) {
                 egui::RichText::new(
                     "This plugin can start the following programs as your user account, with arguments it controls:",
                 )
-                .font(theme::body(11.5))
+                .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
             );
             ui.add_space(5.0);
@@ -3055,7 +3055,7 @@ fn stat_box(ui: &mut egui::Ui, label: &str, value: &str) {
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(value)
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT),
             );
         });
@@ -3239,7 +3239,7 @@ fn repo_detail_body(
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(t!("plugins.repos_checking"))
-                    .font(theme::body(12.5))
+                    .font(theme::body_md())
                     .color(theme::TEXT_MUT),
             );
         } else if widgets::button(
@@ -3344,7 +3344,7 @@ fn repo_detail_body(
 fn add_body(ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new(t!("plugins.add_sub"))
-            .font(theme::body(11.5))
+            .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
     ui.add_space(14.0);
@@ -3358,7 +3358,7 @@ fn add_body(ui: &mut egui::Ui) {
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.upload_hint"))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT),
                 );
                 ui.add_space(4.0);

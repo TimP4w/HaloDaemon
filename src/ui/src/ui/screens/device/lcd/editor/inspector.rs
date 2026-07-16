@@ -24,7 +24,7 @@ pub(super) fn empty_selection_card(ui: &mut egui::Ui) {
         ui.add_space(14.0);
         ui.label(
             egui::RichText::new(t!("lcd.empty_selection_hint"))
-                .font(theme::body(11.5))
+                .font(theme::body_sm())
                 .color(theme::TEXT_FAINT),
         );
         ui.add_space(14.0);
@@ -122,7 +122,7 @@ pub(super) fn selected_widget_card(
             "lcd.selected_caption",
             kind = selected_type_label(&st.lcd.editor.def.widgets[idx])
         ))
-        .font(theme::body(10.0))
+        .font(theme::caption())
         .color(theme::TEXT_FAINT2),
     );
     ui.add_space(14.0);

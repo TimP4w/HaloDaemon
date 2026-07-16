@@ -230,7 +230,7 @@ impl IntegrationsUi {
                                 ui.add_space(4.0);
                                 ui.label(
                                     egui::RichText::new(&p.description)
-                                        .font(theme::body(11.5))
+                                        .font(theme::body_sm())
                                         .color(theme::TEXT_MUT),
                                 );
                             }

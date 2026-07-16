@@ -336,11 +336,7 @@ fn pref_card(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&m
                     Vec2::new(ui.available_width() - 60.0, 0.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        ui.label(
-                            RichText::new(title)
-                                .font(theme::semibold(14.0))
-                                .color(theme::TEXT),
-                        );
+                        ui.label(RichText::new(title).font(theme::title()).color(theme::TEXT));
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new(desc)
@@ -429,7 +425,7 @@ fn step_scanning(ui: &mut egui::Ui, time: f64) {
         ui.add_space(22.0);
         ui.label(
             RichText::new(t!("onboarding.scanning"))
-                .font(theme::semibold(16.0))
+                .font(theme::title())
                 .color(theme::TEXT),
         );
         ui.add_space(8.0);
@@ -451,11 +447,7 @@ fn plugin_toggle_row(ui: &mut egui::Ui, title: &str, description: &str, on: bool
                     Vec2::new(ui.available_width() - 58.0, 62.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        ui.label(
-                            RichText::new(title)
-                                .font(theme::semibold(14.0))
-                                .color(theme::TEXT),
-                        );
+                        ui.label(RichText::new(title).font(theme::title()).color(theme::TEXT));
                         ui.add_space(4.0);
                         if !description.is_empty() {
                             ui.label(
@@ -514,14 +506,14 @@ fn step_permissions(ui: &mut egui::Ui, st: &OnboardingUi, plugins: &[PluginInfo]
                             |ui| {
                                 ui.label(
                                     RichText::new(&plugin.name)
-                                        .font(theme::semibold(14.0))
+                                        .font(theme::title())
                                         .color(theme::TEXT),
                                 );
                                 ui.add_space(8.0);
                                 if plugin.declared_permissions.is_empty() {
                                     ui.label(
                                         RichText::new(t!("onboarding.permissions_none"))
-                                            .font(theme::body(11.5))
+                                            .font(theme::body_sm())
                                             .color(theme::TEXT_MUT),
                                     );
                                 } else {
@@ -535,7 +527,7 @@ fn step_permissions(ui: &mut egui::Ui, st: &OnboardingUi, plugins: &[PluginInfo]
             ui.add_space(6.0);
             ui.label(
                 RichText::new(t!("plugins.consent_warning"))
-                    .font(theme::body(11.5))
+                    .font(theme::body_sm())
                     .color(theme::TEXT_MUT),
             );
         });
@@ -589,7 +581,7 @@ fn step_plugins(
                             } else {
                                 t!("onboarding.plugins_error")
                             })
-                            .font(theme::body(12.5))
+                            .font(theme::body_md())
                             .color(if retrying {
                                 theme::TEXT_MUT
                             } else {
@@ -625,7 +617,7 @@ fn step_plugins(
             } else if candidates.is_empty() {
                 ui.label(
                     RichText::new(t!("onboarding.plugins_loading"))
-                        .font(theme::body(12.5))
+                        .font(theme::body_md())
                         .color(theme::TEXT_FAINT),
                 );
                 ui.add_space(14.0);
