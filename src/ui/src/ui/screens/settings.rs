@@ -91,6 +91,7 @@ fn page_body(
     debug: Option<&DebugInfo>,
     st: &mut SettingsUi,
 ) {
+    ui.set_max_width(600.0);
     ui.label(
         egui::RichText::new(t!("settings.title"))
             .font(theme::bold(22.0))
@@ -200,7 +201,17 @@ fn page_body(
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 fn row_rect(ui: &mut egui::Ui) -> Rect {
+    // Divider goes above every row but the first, so a list never ends on a
+    // trailing divider. Each card body is a fresh child ui, so an empty
+    // min_rect means this is the first row.
+    let first = ui.min_rect().height() <= 0.5;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::hover());
+    if !first {
+        ui.painter().line_segment(
+            [rect.left_top(), rect.right_top()],
+            Stroke::new(1.0, theme::BORDER_SOFT),
+        );
+    }
     rect
 }
 
@@ -218,13 +229,6 @@ fn row_label(ui: &mut egui::Ui, rect: Rect, title: &str, subtitle: &str) {
         subtitle,
         theme::body(10.5),
         theme::TEXT_FAINT,
-    );
-}
-
-fn bottom_border(ui: &mut egui::Ui, rect: Rect) {
-    ui.painter().line_segment(
-        [rect.left_bottom(), rect.right_bottom()],
-        Stroke::new(1.0, theme::BORDER_SOFT),
     );
 }
 
@@ -298,7 +302,6 @@ fn start_on_boot_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
             theme::body(10.5),
             theme::TEXT_FAINT,
         );
-        bottom_border(ui, rect);
         return;
     }
     row_label(
@@ -316,7 +319,6 @@ fn start_on_boot_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
             .is_ok();
         st.start_on_boot = cache_after_toggle(st.start_on_boot, !on, ok);
     }
-    bottom_border(ui, rect);
 }
 
 fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
@@ -338,7 +340,6 @@ fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             },
         );
     }
-    bottom_border(ui, rect);
 }
 
 fn plugin_downloads_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
@@ -356,7 +357,6 @@ fn plugin_downloads_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             halod_shared::commands::DaemonCommand::SetPluginDownloadConsent { allowed: !on },
         );
     }
-    bottom_border(ui, rect);
 }
 
 fn window_controls_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
@@ -378,7 +378,6 @@ fn window_controls_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             },
         );
     }
-    bottom_border(ui, rect);
 }
 
 fn dependency_warning_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
@@ -400,7 +399,6 @@ fn dependency_warning_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) 
             },
         );
     }
-    bottom_border(ui, rect);
 }
 
 fn replay_tutorials_row(ui: &mut egui::Ui, cmd: &CommandTx) {
@@ -431,7 +429,6 @@ fn replay_tutorials_row(ui: &mut egui::Ui, cmd: &CommandTx) {
         crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::ResetToursSeen);
         crate::domain::tour::request_reset(ui.ctx());
     }
-    bottom_border(ui, rect);
 }
 
 // ── ENGINES rows ──────────────────────────────────────────────────────────────
@@ -497,8 +494,6 @@ fn lcd_engine_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             ),
         );
     }
-
-    bottom_border(ui, rect);
 }
 
 // ── DEVICES rows ──────────────────────────────────────────────────────────────
@@ -523,7 +518,6 @@ fn daemon_status_row(ui: &mut egui::Ui, connected: bool) {
         theme::mono_semibold(11.0),
         status_color,
     );
-    bottom_border(ui, rect);
 }
 
 fn is_scanning(state: &AppState) -> bool {
@@ -565,8 +559,6 @@ fn rediscover_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     {
         crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::Rediscover);
     }
-
-    bottom_border(ui, rect);
 }
 
 // ── HEALTHCHECK rows ───────────────────────────────────────────────────────────
@@ -611,7 +603,6 @@ fn healthcheck_section(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugI
                     &t!("settings.running_healthcheck_title"),
                     &t!("settings.running_healthcheck_sub"),
                 );
-                bottom_border(ui, rect);
             }
             Some(info) if info.dependencies.is_empty() => {
                 let rect = row_rect(ui);
@@ -621,7 +612,6 @@ fn healthcheck_section(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugI
                     &t!("settings.no_checks_title"),
                     &t!("settings.no_checks_sub"),
                 );
-                bottom_border(ui, rect);
             }
             Some(info) => {
                 for dep in &info.dependencies {
@@ -680,8 +670,6 @@ fn dependency_row(ui: &mut egui::Ui, dep: &DependencyStatus) {
         (t!("settings.dep_optional"), theme::TEXT_MUT)
     };
     tag_pill(ui, rect.right() - 10.0, rect.top() + 30.0, &tag, tag_color);
-
-    bottom_border(ui, rect);
 }
 
 /// A small right-anchored pill (rounded outline + label).
@@ -760,8 +748,6 @@ fn language_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             );
         }
     }
-
-    bottom_border(ui, rect);
 }
 
 // ── LOGGING rows ──────────────────────────────────────────────────────────────
@@ -809,8 +795,6 @@ fn log_level_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
             );
         }
     }
-
-    bottom_border(ui, rect);
 }
 
 // ── ADVANCED rows ─────────────────────────────────────────────────────────────
@@ -857,8 +841,6 @@ fn config_folder_row(ui: &mut egui::Ui, state: &AppState) {
     {
         open_path(&state.config_dir);
     }
-
-    bottom_border(ui, rect);
 }
 
 /// Spawn the platform file/URL opener for `p` on a detached thread so the UI
@@ -929,7 +911,6 @@ fn diagnostics_row(ui: &mut egui::Ui, cmd: &CommandTx, st: &mut SettingsUi) {
         crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
         st.modal = Some(Modal::Diagnostics);
     }
-    bottom_border(ui, rect);
 }
 
 // ── ABOUT rows ────────────────────────────────────────────────────────────────
@@ -956,7 +937,6 @@ fn about_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
     );
 
     right_button(ui, rect, &t!("settings.credits_button"), st, Modal::Credits);
-    bottom_border(ui, rect);
 }
 
 fn third_party_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
@@ -977,7 +957,6 @@ fn third_party_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
     );
 
     right_button(ui, rect, &t!("settings.view_button"), st, Modal::Licenses);
-    bottom_border(ui, rect);
 }
 
 const REPO_URL: &str = halod_shared::app::REPO_URL;
@@ -1009,7 +988,6 @@ fn repo_row(ui: &mut egui::Ui) {
     if resp.clicked() {
         open_path(REPO_URL);
     }
-    bottom_border(ui, rect);
 }
 
 /// Parse `buf` as a u32 FPS value, falling back to `fallback`, clamped to 1–60.
