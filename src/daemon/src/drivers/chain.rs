@@ -413,9 +413,7 @@ impl ChainHost {
 
         let saved = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let chain = state
-                .get_mut(channel_id)
-                .ok_or_else(|| anyhow::anyhow!("unknown channel: {channel_id}"))?;
+            let chain = state.entry(channel_id.to_string()).or_default();
             let saved = chain.composed_frame();
             chain.discovery_active = true;
             saved
@@ -851,6 +849,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn detect_channel_works_for_dynamic_channel_with_no_state_entry() {
+        // Plugins report channels at `initialize` time, after the host is built,
+        // so a channel the user never linked to has no state-map entry. Detect
+        // must still work (it did `unknown channel` before).
+        let (host, adapter) = stub_parts();
+        host.state.lock().unwrap_or_else(|e| e.into_inner()).clear();
+
+        let task = tokio::spawn({
+            let host = host.clone();
+            async move { host.detect_channel("a").await }
+        });
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_millis(300)).await;
+            tokio::time::advance(Duration::from_millis(200)).await;
+        }
+        task.await
+            .unwrap()
+            .expect("detect on empty channel succeeds");
+
+        assert_eq!(
+            adapter
+                .last_written
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            6
+        );
     }
 
     #[test]
