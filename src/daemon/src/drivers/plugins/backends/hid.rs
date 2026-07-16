@@ -125,7 +125,10 @@ fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {
         DiscoveryHandle::Hid {
             serial: Some(s), ..
         } => (*s).to_owned(),
-        DiscoveryHandle::Hid { idx, .. } => idx.to_string(),
+        // `idx` counts within one (vid, pid), so it alone collides across two
+        // serial-less models of the same plugin (e.g. a Logitech receiver and a
+        // direct-USB headset both landing on 0).
+        DiscoveryHandle::Hid { pid, idx, .. } => format!("{pid:04x}-{idx}"),
         _ => "0".to_owned(),
     }
 }
@@ -144,3 +147,47 @@ inventory::submit!(PluginTransportDescriptor {
     id_suffix: Some(id_suffix),
     validate: Some(validate),
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hid(pid: u16, serial: Option<&'static str>, idx: usize) -> DiscoveryHandle<'static> {
+        DiscoveryHandle::Hid {
+            vid: 0x046d,
+            pid,
+            path: "",
+            serial,
+            idx,
+            usage_page: 0,
+            usage: 0,
+            interface_number: Some(2),
+        }
+    }
+
+    #[test]
+    fn serial_less_models_of_one_plugin_get_distinct_ids() {
+        // Logitech LIGHTSPEED receiver and PRO X Wireless headset: both report no
+        // serial, so both are idx 0 within their own (vid, pid).
+        assert_ne!(
+            id_suffix(&hid(0xc547, None, 0)),
+            id_suffix(&hid(0x0aba, None, 0))
+        );
+    }
+
+    #[test]
+    fn same_model_instances_stay_distinct() {
+        assert_ne!(
+            id_suffix(&hid(0x0aba, None, 0)),
+            id_suffix(&hid(0x0aba, None, 1))
+        );
+    }
+
+    #[test]
+    fn serial_identifies_the_device_across_reenumeration() {
+        assert_eq!(
+            id_suffix(&hid(0x0aba, Some("ABC123"), 0)),
+            id_suffix(&hid(0x0aba, Some("ABC123"), 3))
+        );
+    }
+}
