@@ -236,13 +236,7 @@ pub(super) fn status_chips(p: &egui::Painter, rect: Rect, dev: &WireDevice) {
 /// edge at `right`, returning the pill rect for glyph/text placement.
 fn chip_pill(p: &egui::Painter, right: f32, cy: f32, w: f32) -> Rect {
     let pill = Rect::from_min_size(Pos2::new(right - w, cy - 17.0), Vec2::new(w, 34.0));
-    p.rect_filled(pill, 9.0, theme::CARD_BG);
-    p.rect_stroke(
-        pill,
-        9.0,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
+    theme::paint_card_rect(p, pill, 9.0);
     pill
 }
 

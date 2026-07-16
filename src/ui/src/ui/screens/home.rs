@@ -872,14 +872,7 @@ fn header(
 fn search_box(ui: &mut egui::Ui, search: &mut String) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(190.0, 33.0), Sense::hover());
     crate::domain::tour::anchor(ui.ctx(), crate::domain::tour::AnchorId::HomeSearch, rect);
-    ui.painter()
-        .rect_filled(rect, theme::RADIUS_MD, theme::CARD_BG);
-    ui.painter().rect_stroke(
-        rect,
-        theme::RADIUS_MD,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
+    theme::paint_card_rect(ui.painter(), rect, theme::RADIUS_MD);
     // Magnifier glyph.
     let icon = Pos2::new(rect.left() + 13.0, rect.center().y);
     ui.painter()
@@ -914,13 +907,7 @@ fn search_box(ui: &mut egui::Ui, search: &mut String) {
 fn segmented(ui: &mut egui::Ui, variant: &mut Variant) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(108.0, 33.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, theme::RADIUS_MD, theme::CARD_BG);
-    p.rect_stroke(
-        rect,
-        theme::RADIUS_MD,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
+    theme::paint_card_rect(p, rect, theme::RADIUS_MD);
     for (i, (v, label)) in [
         (Variant::Grid, t!("home.grid")),
         (Variant::List, t!("home.list")),

@@ -216,13 +216,7 @@ fn channel_header(
     let badge = Rect::from_min_size(row.left_top(), Vec2::new(30.0, 30.0));
     {
         let p = ui.painter();
-        p.rect_filled(badge, 8.0, theme::INNER_BG);
-        p.rect_stroke(
-            badge,
-            8.0,
-            Stroke::new(1.0, theme::BORDER),
-            egui::StrokeKind::Middle,
-        );
+        theme::paint_well(p, badge, 8.0);
         p.text(
             badge.center(),
             Align2::CENTER_CENTER,
@@ -363,13 +357,7 @@ fn link_row(
                 // Index badge
                 let (badge, _) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::hover());
                 let p = ui.painter();
-                p.rect_filled(badge, 6.0, theme::CARD_BG);
-                p.rect_stroke(
-                    badge,
-                    6.0,
-                    Stroke::new(1.0, theme::BORDER),
-                    egui::StrokeKind::Middle,
-                );
+                theme::paint_card_rect(p, badge, 6.0);
                 p.text(
                     badge.center(),
                     Align2::CENTER_CENTER,

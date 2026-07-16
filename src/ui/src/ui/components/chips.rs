@@ -36,13 +36,7 @@ pub fn chip_closable(ui: &mut egui::Ui, label: &str) -> (bool, bool) {
     let (body, close) = chip_close_zones(rect);
     let close_hovered = resp.hover_pos().is_some_and(|p| close.contains(p));
     let p = ui.painter();
-    p.rect_filled(rect, 8.0, theme::INNER_BG);
-    p.rect_stroke(
-        rect,
-        8.0,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
+    theme::paint_well(p, rect, 8.0);
     p.galley(
         Pos2::new(body.min.x + 12.0, rect.center().y - galley.size().y / 2.0),
         galley,

@@ -25,13 +25,7 @@ pub(crate) fn chrome(ui: &mut egui::Ui, canvas_ui: &mut CanvasUi, cmd: &CommandT
 fn transport_controls(ui: &mut egui::Ui, cmd: &CommandTx, playing: bool) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(104.0, 34.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, 9.0, theme::CARD_BG);
-    p.rect_stroke(
-        rect,
-        9.0,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
+    theme::paint_card_rect(p, rect, 9.0);
 
     let inner = rect.shrink(4.0);
     let bw = inner.width() / 3.0;
