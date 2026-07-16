@@ -16,8 +16,8 @@ let
   officialPlugins = pkgs.fetchFromGitHub {
     owner = "TimP4w";
     repo = "HaloDaemon-plugins";
-    rev = "2769e9ceff857771f045ba28ebfe30abd07497c7";
-    hash = "sha256-vQHGjkBWSobz0Q1lH+T9iMXMELJHLomJxpNQhVtafeA=";
+    rev = "88ec5a81164a75f11e26b743afdeac8123ec1394";
+    hash = "sha256-JRJb5KQJa6lKbGCeCuJ6ww+3CPBDpqlI+GVj9BuB9yw=";
   };
 in
 pkgs.rustPlatform.buildRustPackage {
