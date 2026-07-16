@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use halod_shared::commands::DaemonCommand;
 use halod_shared::frames::{decode_header, encode_json_frame, payload_exceeds_max, FRAME_JSON};
-use halod_shared::lcd_custom::{CustomTemplateDef, LcdEditorRender};
+use halod_shared::lcd_custom::{CustomTemplateDef, LcdEditorRender, WidgetRenderState};
 use halod_shared::socket::socket_path;
 use halod_shared::types::{
     AppState, CanvasFrame, LcdEngineFrame, LcdUploadProgress, Notification, NotificationCode,
@@ -63,6 +63,7 @@ pub struct DecodedEditorRender {
     pub canvas_h: u32,
     pub sprites: Vec<DecodedSprite>,
     pub signatures: Vec<(String, u64)>,
+    pub widgets: Vec<WidgetRenderState>,
 }
 
 /// Receiver side of every daemon-driven data stream, held by the GUI. Each
@@ -444,6 +445,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                         canvas_h: r.canvas_h,
                         sprites,
                         signatures: r.signatures,
+                        widgets: r.widgets,
                     }));
                     repaint();
                 }
@@ -529,6 +531,20 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             }
             return false;
         }
+        Some("lcd_widget_icon") => {
+            let catalog_id = value.get("catalog_id").and_then(|value| value.as_str());
+            let data_b64 = value.get("data_b64").and_then(|value| value.as_str());
+            if let (Some(catalog_id), Some(data_b64)) = (catalog_id, data_b64) {
+                use base64::Engine as _;
+                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data_b64) {
+                    tx.plugin_assets.send_modify(|assets| {
+                        assets.insert(format!("lcd/{catalog_id}"), bytes);
+                    });
+                    repaint();
+                }
+            }
+            return false;
+        }
         Some("plugin_repo_updates") => {
             let statuses: Vec<RepoUpdateStatus> = value
                 .get("repos")
@@ -577,6 +593,20 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             let def = value
                 .get("def")
                 .and_then(|d| serde_json::from_value::<CustomTemplateDef>(d.clone()).ok());
+            if let (Some(name), Some(def)) = (name, def) {
+                tx.lcd_template.send_replace(Some((name, def)));
+                repaint();
+            }
+            return false;
+        }
+        Some("lcd_plugin_preset") => {
+            let name = value
+                .get("catalog_id")
+                .and_then(|name| name.as_str())
+                .map(str::to_owned);
+            let def = value
+                .get("def")
+                .and_then(|def| serde_json::from_value::<CustomTemplateDef>(def.clone()).ok());
             if let (Some(name), Some(def)) = (name, def) {
                 tx.lcd_template.send_replace(Some((name, def)));
                 repaint();

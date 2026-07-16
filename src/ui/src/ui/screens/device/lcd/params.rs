@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 
-use halod_shared::lcd_custom::WidgetType;
 use halod_shared::types::{
     DeviceCapability, EffectParamDescriptor, EffectParamValue, ParamKind, RgbColor,
 };
@@ -12,27 +11,29 @@ use super::TabCtx;
 use crate::ui::components as widgets;
 use crate::ui::theme;
 
-fn param_label(widget_type: WidgetType, param: &EffectParamDescriptor) -> String {
-    let key = match (widget_type, param.id.as_str()) {
-        (WidgetType::AudioSpectrum, "fill") => "lcd.param_fill_bar".to_string(),
-        (WidgetType::Shape, "fill") => "lcd.param_fill_plain".to_string(),
-        (WidgetType::AudioSpectrum, "gradient") => "lcd.param_gradient_height".to_string(),
-        _ => format!("lcd.param_{}", param.id),
-    };
-    t!(key).to_string()
+fn param_label(param: &EffectParamDescriptor) -> &str {
+    &param.label
+}
+
+fn param_heading(ui: &mut egui::Ui, label: &str) {
+    ui.label(
+        egui::RichText::new(label)
+            .font(theme::body_sm())
+            .color(theme::TEXT_MUT),
+    );
+    ui.add_space(theme::SPACE_3);
 }
 
 /// Translated display text for one `ParamKind::Enum` option, keyed by the
 /// param's `id` and the raw option value (e.g. `lcd.enum_variant.24h`).
-fn enum_option_label(param_id: &str, option: &str) -> String {
-    t!(format!("lcd.enum_{param_id}.{option}")).to_string()
+fn enum_option_label(_param_id: &str, option: &str) -> String {
+    option.to_owned()
 }
 
 /// Render one template parameter widget. Returns true if the value changed.
 pub(super) fn render_param(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
-    widget_type: WidgetType,
     param: &EffectParamDescriptor,
     values: &mut HashMap<String, EffectParamValue>,
 ) -> bool {
@@ -46,7 +47,7 @@ pub(super) fn render_param(
             let readout = format!("{v:.0}");
             if widgets::slider_row(
                 ui,
-                &param_label(widget_type, param),
+                param_label(param),
                 &mut v,
                 (*min as f32)..=(*max as f32),
                 &readout,
@@ -65,14 +66,32 @@ pub(super) fn render_param(
                     b: 255,
                 },
             };
-            ui.label(
-                egui::RichText::new(param_label(widget_type, param))
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_MUT),
-            );
-            ui.add_space(theme::SPACE_3);
-            if let Some(c) = widgets::color_swatch_row(ui, current) {
+            param_heading(ui, param_label(param));
+            if let Some(c) =
+                widgets::color_swatch_row(ui, ("lcd_param_color", param.id.as_str()), current)
+            {
                 values.insert(param.id.clone(), EffectParamValue::Color(c));
+                return true;
+            }
+        }
+
+        ParamKind::Number { min, max } => {
+            let current = match values.get(&param.id) {
+                Some(EffectParamValue::Float(value)) => *value as f32,
+                _ => match param.default {
+                    EffectParamValue::Float(value) => value as f32,
+                    _ => 0.0,
+                },
+            };
+            let mut value = current;
+            let (edited, committed) = widgets::num_input_row(
+                ui,
+                param_label(param),
+                &mut value,
+                *min as f32..=*max as f32,
+            );
+            if edited || committed {
+                values.insert(param.id.clone(), EffectParamValue::Float(value as f64));
                 return true;
             }
         }
@@ -83,14 +102,8 @@ pub(super) fn render_param(
                 _ => String::new(),
             };
             let mut s = current.clone();
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(param_label(widget_type, param))
-                        .font(theme::body_sm())
-                        .color(theme::TEXT_MUT),
-                );
-                ui.text_edit_singleline(&mut s);
-            });
+            param_heading(ui, param_label(param));
+            widgets::text_field(ui, &mut s, "", ui.available_width());
             if s != current {
                 values.insert(param.id.clone(), EffectParamValue::Str(s));
                 return true;
@@ -108,9 +121,9 @@ pub(super) fn render_param(
                 ui,
                 |ui| {
                     ui.label(
-                        egui::RichText::new(param_label(widget_type, param))
-                            .font(theme::body_md())
-                            .color(theme::TEXT_DIM),
+                        egui::RichText::new(param_label(param))
+                            .font(theme::body_sm())
+                            .color(theme::TEXT_MUT),
                     );
                 },
                 |ui| {
@@ -141,16 +154,14 @@ pub(super) fn render_param(
                 Some(EffectParamValue::Str(s)) => s.clone(),
                 _ => String::new(),
             };
-            let mut new_val = None;
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(param_label(widget_type, param))
-                        .font(theme::body_sm())
-                        .color(theme::TEXT_MUT),
-                );
-                new_val =
-                    widgets::combo_picker(ui, &param.id, &sensors, &current, Some(&t!("lcd.none")));
-            });
+            param_heading(ui, param_label(param));
+            let new_val = widgets::combo_picker_full(
+                ui,
+                &param.id,
+                &sensors,
+                &current,
+                Some(&t!("lcd.none")),
+            );
             if let Some(new_val) = new_val {
                 if new_val != current {
                     values.insert(param.id.clone(), EffectParamValue::Str(new_val));
@@ -168,15 +179,8 @@ pub(super) fn render_param(
                 .iter()
                 .map(|o| (o.clone(), enum_option_label(&param.id, o)))
                 .collect();
-            let mut new_val = None;
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(param_label(widget_type, param))
-                        .font(theme::body_sm())
-                        .color(theme::TEXT_MUT),
-                );
-                new_val = widgets::combo_picker(ui, &param.id, &opts, &current, None);
-            });
+            param_heading(ui, param_label(param));
+            let new_val = widgets::combo_picker_full(ui, &param.id, &opts, &current, None);
             if let Some(new_val) = new_val {
                 if new_val != current {
                     values.insert(param.id.clone(), EffectParamValue::Str(new_val));
@@ -186,50 +190,8 @@ pub(super) fn render_param(
         }
 
         ParamKind::Image => {} // handled by the image grid
-        // No LCD template declares these.
-        ParamKind::Number { .. } | ParamKind::Steps => {}
+        // No LCD template declares threshold/color steps.
+        ParamKind::Steps => {}
     }
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_widget_param_and_enum_option_is_translated() {
-        use halod_shared::lcd_custom::{widget_schema, WidgetType};
-
-        for wt in [
-            WidgetType::Clock,
-            WidgetType::Date,
-            WidgetType::Sensor,
-            WidgetType::Text,
-            WidgetType::Image,
-            WidgetType::AudioSpectrum,
-            WidgetType::AudioLevel,
-            WidgetType::NowPlaying,
-            WidgetType::Logo,
-            WidgetType::Shape,
-        ] {
-            for param in widget_schema(wt) {
-                assert_ne!(
-                    param_label(wt, &param),
-                    format!("lcd.param_{}", param.id),
-                    "missing param label for {wt:?}/{}",
-                    param.id
-                );
-                if let ParamKind::Enum { options } = &param.kind {
-                    for option in options {
-                        assert_ne!(
-                            enum_option_label(&param.id, option),
-                            format!("lcd.enum_{}.{option}", param.id),
-                            "missing enum option translation for {wt:?}/{}/{option}",
-                            param.id
-                        );
-                    }
-                }
-            }
-        }
-    }
 }

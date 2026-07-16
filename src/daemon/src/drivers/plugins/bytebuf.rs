@@ -49,6 +49,10 @@ impl ByteBuf {
         &self.data
     }
 
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
     fn check(&self, index: usize, width: usize) -> mlua::Result<()> {
         let end = index.checked_add(width);
         match end {

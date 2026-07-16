@@ -355,6 +355,7 @@ impl App {
                             lcd_editor_render,
                             self.canvas_ui.led_colors(),
                             self.write_rate_history.get(&id),
+                            &plugin_assets,
                         );
                     }
                     Page::Cooling => {

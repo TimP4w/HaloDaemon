@@ -9,6 +9,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+fontdb     = "0.22"
 serde      = { workspace = true }
 serde_json = { workspace = true }
 

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::{ipc, lcd::engine::LcdEngine, state::AppState};
+use halod_shared::lcd_custom::{CustomTemplateDef, WIDGETS_JSON_PARAM};
 use halod_shared::types::{EffectParamValue, LcdHealth};
 
 pub async fn set_template(
@@ -17,6 +18,20 @@ pub async fn set_template(
 ) -> Result<()> {
     if !LcdEngine::template_exists(&template_id) {
         anyhow::bail!("unknown template: {template_id}");
+    }
+    if template_id == "custom" {
+        let raw = match params.get(WIDGETS_JSON_PARAM) {
+            Some(EffectParamValue::Str(raw)) => raw,
+            Some(_) => anyhow::bail!("widgets_json must be text"),
+            None => "",
+        };
+        let def = if raw.is_empty() {
+            CustomTemplateDef::default()
+        } else {
+            serde_json::from_str(raw)?
+        };
+        crate::lcd::usecases::templates::validate_template(&def)?;
+        crate::lcd::usecases::templates::validate_template_catalog(&def, &app.registry)?;
     }
 
     let device = require_device_owned_id(&device_id, &app).await?;

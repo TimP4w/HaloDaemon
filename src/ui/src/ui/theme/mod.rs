@@ -126,7 +126,7 @@ macro_rules! font {
     };
 }
 
-pub fn install_fonts(ctx: &Context) {
+fn font_definitions() -> FontDefinitions {
     let mut defs = FontDefinitions::default();
     font!(defs, "it400", "../../../../assets/fonts/InterTight-400.ttf");
     font!(defs, "it600", "../../../../assets/fonts/InterTight-600.ttf");
@@ -185,7 +185,41 @@ pub fn install_fonts(ctx: &Context) {
     fam(&mut defs, "lcd_mono", "jm400");
     fam(&mut defs, "lcd_inter", "it400");
 
+    defs
+}
+
+pub fn install_fonts(ctx: &Context) {
+    ctx.set_fonts(font_definitions());
+}
+
+pub fn install_fonts_with_system<'a>(
+    ctx: &Context,
+    families: impl IntoIterator<Item = &'a str>,
+) -> std::collections::HashSet<String> {
+    let mut defs = font_definitions();
+    let mut loaded = std::collections::HashSet::new();
+    let fallback = defs
+        .families
+        .get(&FontFamily::Monospace)
+        .cloned()
+        .unwrap_or_default();
+    for family_name in families {
+        let Some((bytes, index)) = halod_shared::system_fonts::data(family_name) else {
+            continue;
+        };
+        let key = format!("lcd_system_font:{family_name}");
+        let mut data = FontData::from_owned(bytes);
+        data.index = index;
+        defs.font_data
+            .insert(key.clone(), std::sync::Arc::new(data));
+        let mut family = vec![key];
+        family.extend(fallback.iter().cloned());
+        defs.families
+            .insert(FontFamily::Name(family_name.into()), family);
+        loaded.insert(family_name.to_owned());
+    }
     ctx.set_fonts(defs);
+    loaded
 }
 
 /// Main content background (`window` gradient bottom stop).

@@ -6,6 +6,7 @@
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::RgbColor;
+use std::hash::Hash;
 
 use crate::ui::theme;
 
@@ -35,7 +36,16 @@ pub const MINI_SWATCHES: [u32; 7] = [
     0xef5f63, 0xfbbf24, 0x34d399, 0x38bdf8, 0x8b6fd8, 0xf472b6, 0xffffff,
 ];
 
-pub fn color_swatch_row(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor> {
+pub fn color_swatch_row(
+    ui: &mut egui::Ui,
+    id_salt: impl Hash + std::fmt::Debug,
+    current: RgbColor,
+) -> Option<RgbColor> {
+    ui.push_id(id_salt, |ui| color_swatch_row_inner(ui, current))
+        .inner
+}
+
+fn color_swatch_row_inner(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor> {
     const D: f32 = 22.0;
     let mut out: Option<RgbColor> = None;
     ui.horizontal_wrapped(|ui| {

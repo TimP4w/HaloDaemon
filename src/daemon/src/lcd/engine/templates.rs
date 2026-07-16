@@ -1,45 +1,35 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::OnceLock;
 
-use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use image::{Rgba, RgbaImage};
-use imageproc::drawing::draw_text_mut;
 
 use halod_shared::types::{RgbColor, Sensor};
 
 static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/NotoSans-Regular.ttf");
-static FONT: OnceLock<FontRef<'static>> = OnceLock::new();
 static MONO_FONT_BYTES: &[u8] =
     include_bytes!("../../../../assets/fonts/JetBrainsMono-Regular.ttf");
-static MONO_FONT: OnceLock<FontRef<'static>> = OnceLock::new();
 static INTER_FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/InterTight-400.ttf");
-static INTER_FONT: OnceLock<FontRef<'static>> = OnceLock::new();
 
-pub(super) fn load_font() -> FontRef<'static> {
-    FONT.get_or_init(|| {
-        FontRef::try_from_slice(FONT_BYTES).expect("bundled font NotoSans-Regular.ttf is valid")
-    })
-    .clone()
+pub(super) fn load_font_arc() -> ab_glyph::FontArc {
+    ab_glyph::FontArc::try_from_slice(FONT_BYTES)
+        .expect("bundled font NotoSans-Regular.ttf is valid")
 }
 
-pub(super) fn load_mono_font() -> FontRef<'static> {
-    MONO_FONT
-        .get_or_init(|| {
-            FontRef::try_from_slice(MONO_FONT_BYTES)
-                .expect("bundled font JetBrainsMono-Regular.ttf is valid")
-        })
-        .clone()
+pub(super) fn load_mono_font_arc() -> ab_glyph::FontArc {
+    ab_glyph::FontArc::try_from_slice(MONO_FONT_BYTES)
+        .expect("bundled font JetBrainsMono-Regular.ttf is valid")
 }
 
-pub(super) fn load_inter_font() -> FontRef<'static> {
-    INTER_FONT
-        .get_or_init(|| {
-            FontRef::try_from_slice(INTER_FONT_BYTES)
-                .expect("bundled font InterTight-400.ttf is valid")
-        })
-        .clone()
+pub(super) fn load_inter_font_arc() -> ab_glyph::FontArc {
+    ab_glyph::FontArc::try_from_slice(INTER_FONT_BYTES)
+        .expect("bundled font InterTight-400.ttf is valid")
+}
+
+pub(super) fn load_system_font_arc(family: &str) -> Option<ab_glyph::FontArc> {
+    let (bytes, index) = halod_shared::system_fonts::data(family)?;
+    let font = ab_glyph::FontVec::try_from_vec_and_index(bytes, index).ok()?;
+    Some(ab_glyph::FontArc::new(font))
 }
 
 pub struct TemplateCtx<'a> {
@@ -47,8 +37,6 @@ pub struct TemplateCtx<'a> {
     pub height: u32,
     /// Seconds since the engine started.
     pub t: f64,
-    /// Monotonically increasing per-device frame counter.
-    pub frame: u64,
     /// Live sensor readings keyed by sensor id.
     pub sensors: &'a HashMap<String, Sensor>,
 }
@@ -239,41 +227,6 @@ pub(super) fn dim_color(c: RgbColor, factor: f32) -> RgbColor {
     }
 }
 
-/// Angle of `(dx, dy)` in degrees clockwise from 12 o'clock, in `[0, 360)` (screen-space `dy`).
-pub(super) fn angle_cw_from_top(dx: f32, dy: f32) -> f32 {
-    dx.atan2(-dy).to_degrees().rem_euclid(360.0)
-}
-
-/// Fakes a bold weight (the bundled font is Regular-only) by drawing `text`
-/// over a `weight`-px offset grid.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn draw_text_bold(
-    img: &mut RgbaImage,
-    color: Rgba<u8>,
-    x: i32,
-    y: i32,
-    scale: PxScale,
-    font: &FontRef,
-    text: &str,
-    weight: i32,
-) {
-    for ox in -weight..=weight {
-        for oy in -weight..=weight {
-            draw_text_mut(img, color, x + ox, y + oy, scale, font, text);
-        }
-    }
-}
-
-/// Text width and line height (ascent - descent) at `scale`.
-pub(super) fn text_extent(font: &FontRef, scale: PxScale, text: &str) -> (f32, f32) {
-    let scaled = font.as_scaled(scale);
-    let text_w: f32 = text
-        .chars()
-        .map(|c| scaled.h_advance(scaled.glyph_id(c)))
-        .sum();
-    (text_w, scaled.ascent() - scaled.descent())
-}
-
 /// Encode a frame as PNG into a reusable buffer for the UI preview broadcast.
 ///
 /// The device itself never sees this — it gets raw RGBA streamed by the LCD
@@ -392,14 +345,6 @@ mod tests {
         let img = RgbaImage::from_pixel(8, 8, Rgba([1, 2, 3, 255]));
         let png = encode_png(&img).expect("encode failed");
         assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
-    }
-
-    #[test]
-    fn angle_cw_from_top_cardinal_directions() {
-        assert!((angle_cw_from_top(0.0, -1.0) - 0.0).abs() < 1e-3); // up
-        assert!((angle_cw_from_top(1.0, 0.0) - 90.0).abs() < 1e-3); // right
-        assert!((angle_cw_from_top(0.0, 1.0) - 180.0).abs() < 1e-3); // down
-        assert!((angle_cw_from_top(-1.0, 0.0) - 270.0).abs() < 1e-3); // left
     }
 
     #[test]

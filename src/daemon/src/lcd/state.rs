@@ -29,6 +29,7 @@ pub struct LcdEngineState {
     /// invalidate `EditorSession`'s safe Rust invariants, so callers retain and
     /// repair the inner value rather than taking down the daemon.
     pub editor_session: Mutex<Option<EditorSession>>,
+    pub editor_rendering: std::sync::atomic::AtomicBool,
     engine: OnceLock<Engine>,
 }
 
@@ -37,6 +38,7 @@ impl LcdEngineState {
         Self {
             templates: RwLock::new(crate::lcd::usecases::templates::list_templates()),
             editor_session: Mutex::new(None),
+            editor_rendering: std::sync::atomic::AtomicBool::new(false),
             engine: OnceLock::new(),
         }
     }
@@ -83,11 +85,12 @@ impl LcdEngineState {
 
     pub async fn snapshot(
         &self,
+        registry: &crate::drivers::plugins::Registry,
         device_templates: HashMap<String, String>,
         device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
     ) -> halod_shared::types::LcdState {
         halod_shared::types::LcdState {
-            engine: LcdEngine::wire_state(device_templates, device_template_params),
+            engine: LcdEngine::wire_state(registry, device_templates, device_template_params),
             templates: self.templates.read().await.clone(),
             // Overwritten by the serializer from the persisted config.
             config: Default::default(),
@@ -107,7 +110,10 @@ mod tests {
         let mut device_templates = HashMap::new();
         device_templates.insert("dev1".to_string(), "tmpl_a".to_string());
 
-        let wire = state.snapshot(device_templates, HashMap::new()).await;
+        let registry = crate::drivers::plugins::Registry::default();
+        let wire = state
+            .snapshot(&registry, device_templates, HashMap::new())
+            .await;
 
         assert_eq!(wire.templates, vec!["saved_template".to_string()]);
         assert_eq!(

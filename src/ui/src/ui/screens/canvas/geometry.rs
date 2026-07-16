@@ -25,18 +25,6 @@ pub(super) fn letterbox(outer: Rect, aspect: f32) -> Rect {
     Rect::from_center_size(outer.center(), Vec2::new(w, h))
 }
 
-/// Perimeter points of a zone as a rounded rectangle in screen space,
-/// rotation-aware. Clockwise winding (TL→TR→BR→BL) for `convex_polygon`.
-#[cfg(test)]
-fn rounded_zone_outline(zone: &PlacedZone, canvas_rect: Rect, radius: f32) -> Vec<Pos2> {
-    // Built in normalized canvas space (rotation included) then mapped to screen,
-    // identical to `zone_corners`/LED placement so the box and LEDs stay locked
-    // together under rotation. The corner radius is expressed per-axis in
-    // normalized units so it reads as ~`radius` screen px after scaling.
-    let (sin, cos) = zone.rotation.to_radians().sin_cos();
-    rounded_zone_outline_sc(zone, canvas_rect, radius, sin, cos)
-}
-
 /// Pre-computed-sin/cos variant; call when sin/cos are already available to
 /// avoid recomputing the transcendentals.
 pub(super) fn rounded_zone_outline_sc(
@@ -338,7 +326,8 @@ mod tests {
     fn rounded_outline_centroid_matches_center() {
         let zone = z(0.2, 0.3, 0.4, 0.2);
         let rect = r();
-        let pts = rounded_zone_outline(&zone, rect, 7.0);
+        let (sin, cos) = zone.rotation.to_radians().sin_cos();
+        let pts = rounded_zone_outline_sc(&zone, rect, 7.0, sin, cos);
         assert!(!pts.is_empty());
         let cx: f32 = pts.iter().map(|p| p.x).sum::<f32>() / pts.len() as f32;
         let cy: f32 = pts.iter().map(|p| p.y).sum::<f32>() / pts.len() as f32;
@@ -558,20 +547,6 @@ mod tests {
         let (sin, cos) = zone.rotation.to_radians().sin_cos();
         let expected = zone_corners(&zone, rect);
         let got = zone_corners_sc(&zone, rect, sin, cos);
-        for (e, g) in expected.iter().zip(got.iter()) {
-            assert!((e.x - g.x).abs() < 1e-4, "x mismatch: {} vs {}", e.x, g.x);
-            assert!((e.y - g.y).abs() < 1e-4, "y mismatch: {} vs {}", e.y, g.y);
-        }
-    }
-
-    #[test]
-    fn rounded_outline_sc_matches_rounded_outline() {
-        let zone = z(0.1, 0.2, 0.4, 0.3);
-        let rect = r();
-        let (sin, cos) = zone.rotation.to_radians().sin_cos();
-        let expected = rounded_zone_outline(&zone, rect, 7.0);
-        let got = rounded_zone_outline_sc(&zone, rect, 7.0, sin, cos);
-        assert_eq!(expected.len(), got.len());
         for (e, g) in expected.iter().zip(got.iter()) {
             assert!((e.x - g.x).abs() < 1e-4, "x mismatch: {} vs {}", e.x, g.x);
             assert!((e.y - g.y).abs() < 1e-4, "y mismatch: {} vs {}", e.y, g.y);

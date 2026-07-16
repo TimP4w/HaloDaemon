@@ -1693,21 +1693,6 @@ pub(crate) fn consent_reason(p: &PluginInfo) -> ConsentReason {
     }
 }
 
-/// The permissions `p` declares that haven't been granted yet — the ones an
-/// update newly requires.
-#[cfg(test)]
-fn newly_required_permissions(p: &PluginInfo) -> Vec<halod_shared::types::Permission> {
-    p.declared_permissions
-        .iter()
-        .filter(|perm| {
-            !p.accepted_authority
-                .as_ref()
-                .is_some_and(|accepted| accepted.permissions.contains(perm))
-        })
-        .copied()
-        .collect()
-}
-
 /// True when the user's enable intent is consent-satisfied. Runtime `active`
 /// additionally depends on host requirements and is reported by the daemon.
 fn plugin_enabled_with_consent(p: &PluginInfo) -> bool {
@@ -2312,6 +2297,7 @@ fn plugin_type_label(kind: halod_shared::types::PluginKind) -> std::borrow::Cow<
         PluginKind::Device => t!("plugins.type_device"),
         PluginKind::Effect => t!("plugins.type_effect"),
         PluginKind::Integration => t!("plugins.type_integration"),
+        PluginKind::Lcd => std::borrow::Cow::Borrowed("LCD"),
     }
 }
 
@@ -2321,6 +2307,7 @@ fn plugin_type_color(kind: halod_shared::types::PluginKind) -> egui::Color32 {
         PluginKind::Device => theme::STAT_CYAN,
         PluginKind::Effect => theme::STAT_PURPLE,
         PluginKind::Integration => theme::STAT_GREEN,
+        PluginKind::Lcd => theme::STAT_CYAN,
     }
 }
 
@@ -3767,7 +3754,6 @@ mod tests {
             transport_scopes: vec![],
         });
         assert_eq!(consent_reason(&p), ConsentReason::AuthorityExpanded);
-        assert_eq!(newly_required_permissions(&p), vec![Permission::Os]);
 
         // Approved before, content changed, but no new permission.
         let mut p = info("a", false);
@@ -3778,7 +3764,6 @@ mod tests {
             transport_scopes: vec![],
         });
         assert_eq!(consent_reason(&p), ConsentReason::New);
-        assert!(newly_required_permissions(&p).is_empty());
     }
 
     #[test]

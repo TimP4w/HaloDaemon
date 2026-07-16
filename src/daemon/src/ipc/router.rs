@@ -628,6 +628,12 @@ async fn dispatch(
         DaemonCommand::GetPluginAsset { plugin_id, name } => {
             registry::usecases::plugins::get_asset(plugin_id, name, client, app).await
         }
+        DaemonCommand::GetLcdWidgetIcon { catalog_id } => {
+            registry::usecases::plugins::get_lcd_widget_icon(catalog_id, client, app).await
+        }
+        DaemonCommand::GetLcdPluginPreset { catalog_id } => {
+            registry::usecases::plugins::get_lcd_preset(catalog_id, client, app).await
+        }
 
         DaemonCommand::CanvasUpsertEffect { instance_id, def } => {
             lighting::usecases::canvas::upsert_effect(instance_id, def, app).await

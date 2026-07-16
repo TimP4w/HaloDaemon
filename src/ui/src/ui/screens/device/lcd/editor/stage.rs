@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use egui::{Color32, Rect, Sense, Stroke, Vec2};
-use halod_shared::lcd_custom::{param_str, BgKind, FontKind, WidgetDef, WidgetType};
-use halod_shared::lcd_geometry::{MAX_SCALE, TEXT_FONT};
+use halod_shared::lcd_custom::{param_str, BgKind, WidgetDef, FONT_INTER, FONT_MONO, FONT_SANS};
+use halod_shared::lcd_geometry::MAX_SCALE;
 use halod_shared::types::{EffectParamValue, LcdStatus, ScreenShape};
 
 use super::geometry::{rotate_about, rotated_corners, rotation_active, snap_rotation};
@@ -66,23 +66,26 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
         .def
         .widgets
         .iter()
-        .filter(|w| w.widget_type == WidgetType::Image)
-        .map(|w| param_str(w, "filename"))
+        .flat_map(|widget| {
+            let catalog_id = widget.widget.clone();
+            ctx.state
+                .lcd
+                .engine
+                .available_widgets
+                .iter()
+                .find(|descriptor| descriptor.id == catalog_id)
+                .into_iter()
+                .flat_map(move |descriptor| {
+                    descriptor
+                        .params
+                        .iter()
+                        .filter(|param| matches!(param.kind, halod_shared::types::ParamKind::Image))
+                        .map(move |param| param_str(widget, &param.id))
+                })
+        })
         .filter(|f| !f.is_empty())
         .collect();
     decode_next_thumb(ui, ctx, st, image_files.iter());
-    // Also decode the bundled logo if any Logo widget is present.
-    if st
-        .lcd
-        .editor
-        .def
-        .widgets
-        .iter()
-        .any(|w| w.widget_type == WidgetType::Logo)
-    {
-        let logo_file = halod_shared::lcd_custom::LOGO_IMAGE.to_string();
-        decode_next_thumb(ui, ctx, st, std::iter::once(&logo_file));
-    }
     paint_stage_background(
         ui.painter(),
         rect,
@@ -157,6 +160,8 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
     let mut rotated = false;
     let mut deleted = false;
     let mut edited = false;
+    let mut widget_clicked = false;
+    let mut widget_double_clicked = false;
     // Each widget's on-stage hit rect, collected for marquee intersection.
     let mut widget_rects: Vec<(String, Rect)> = Vec::new();
     let was_editing = st.lcd.editor.editing_text.is_some();
@@ -183,8 +188,8 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
         // selection; a multi-selection just highlights and group-moves.
         let is_primary = st.lcd.editor.primary().is_some_and(|p| p == wid);
         let editing = st.lcd.editor.editing_text.as_deref() == Some(wid.as_str())
-            && snapshot.widget_type == WidgetType::Text;
-        let default_font = st.lcd.editor.def.style.font;
+            && snapshot.params.contains_key("text");
+        let default_font = st.lcd.editor.def.style.font.clone();
         // Hit-test against the daemon sprite's on-stage rect, not the (much
         // larger) nominal box. `corners` is that content box rotated about
         // `pos`; its axis-aligned bounds (`hit`) is what egui interacts with.
@@ -221,7 +226,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             ui.id().with(("lcd_editor_widget", wid.as_str())),
             Sense::click_and_drag(),
         );
-        if resp.dragged() && !editing {
+        if resp.dragged() && !editing && !is_primary {
             let delta = resp.drag_delta();
             // Dragging a widget that's part of a multi-selection moves the whole
             // group by the same normalized delta; otherwise just this one. Only
@@ -241,17 +246,13 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             }
             moved = true;
         }
-        if resp.clicked() {
-            let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
-            widgets::click_select(&mut st.lcd.editor.selected, wid.clone(), additive);
-            if st.lcd.editor.editing_text.as_deref() != Some(wid.as_str()) {
-                st.lcd.editor.editing_text = None;
-            }
-        }
-        if resp.double_clicked() && snapshot.widget_type == WidgetType::Text {
+        if resp.double_clicked() && snapshot.params.contains_key("text") {
+            widget_double_clicked = true;
             st.lcd.editor.select_only(wid.clone());
             st.lcd.editor.editing_text = Some(wid.clone());
             st.lcd.editor.focus_editing = true;
+        } else if resp.clicked() {
+            widget_clicked = true;
         }
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
@@ -263,12 +264,17 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
 
         if editing {
             let mut buf = param_str(&snapshot, "text");
-            // Wide enough for ~20 characters at the current font size — the
-            // daemon renders text at whatever length, so the editor shouldn't
-            // artificially clip it.
-            let edit_w = (size * 3.0).max(180.0);
-            let edit_rect = Rect::from_center_size(pos, Vec2::new(edit_w, size * 0.45));
-            let font_id = resolved_font(&snapshot, default_font, size * TEXT_FONT);
+            let edit_h = halod_shared::lcd_geometry::widget_size(
+                halod_shared::lcd_custom::scale_y(&snapshot),
+                stage_min,
+            );
+            let edit_rect = Rect::from_center_size(pos, Vec2::new(size, edit_h));
+            let font_id = resolved_font(
+                &snapshot,
+                &default_font,
+                edit_h * 0.64 / FONT_CAL,
+                &st.lcd.editor.registered_fonts,
+            );
             let text_edit = egui::TextEdit::singleline(&mut buf)
                 .font(font_id)
                 .text_color(color)
@@ -291,9 +297,26 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                 st.lcd.editor.editing_text = None;
             }
             if edit_resp.changed() {
-                st.lcd.editor.def.widgets[idx]
+                let descriptor = ctx
+                    .state
+                    .lcd
+                    .engine
+                    .available_widgets
+                    .iter()
+                    .find(|descriptor| descriptor.id == snapshot.widget);
+                let widget = &mut st.lcd.editor.def.widgets[idx];
+                widget
                     .params
-                    .insert("text".to_string(), EffectParamValue::Str(buf));
+                    .insert("text".to_string(), EffectParamValue::Str(buf.clone()));
+                if let Some(descriptor) = descriptor
+                    .filter(|descriptor| descriptor.auto_width_param.as_deref() == Some("text"))
+                {
+                    let height = halod_shared::lcd_custom::scale_y(widget);
+                    let content_width = buf.chars().count() as f32 * height * 0.22;
+                    widget.scale = content_width
+                        .max(descriptor.default_scale)
+                        .clamp(descriptor.min_scale, MAX_SCALE);
+                }
                 edited = true;
             }
             if ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape)) {
@@ -335,13 +358,17 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                     rp.image(content, tex.id(), full_uv, Color32::WHITE);
                 }
                 None => {
-                    // Sprite not rendered yet: faint placeholder box so the
-                    // widget still reads as present while the render arrives.
-                    ui.painter().with_clip_rect(rect).rect_filled(
-                        content,
-                        theme::RADIUS_XS,
-                        theme::a(theme::TEXT_MUT, 0.10),
-                    );
+                    let painter = ui.painter().with_clip_rect(rect);
+                    painter.rect_filled(content, theme::RADIUS_XS, theme::a(theme::TEXT_MUT, 0.10));
+                    if st.lcd.editor.missing_widgets.contains(wid) {
+                        painter.rect_stroke(
+                            content,
+                            theme::RADIUS_XS,
+                            egui::Stroke::new(1.0, theme::OFFLINE),
+                            egui::StrokeKind::Inside,
+                        );
+                        paint_missing_icon(&painter, content.center());
+                    }
                 }
             }
         }
@@ -362,7 +389,16 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                 st.lcd.editor.resize_preview = Some(ResizePreview {
                     id: wid.clone(),
                     start_size: content.size(),
-                    start_scale: snapshot.scale.clamp(0.6, MAX_SCALE),
+                    start_scale: snapshot.scale.clamp(
+                        ctx.state
+                            .lcd
+                            .engine
+                            .available_widgets
+                            .iter()
+                            .find(|descriptor| descriptor.id == snapshot.widget)
+                            .map_or(0.6, |descriptor| descriptor.min_scale),
+                        MAX_SCALE,
+                    ),
                     start_scale_y: halod_shared::lcd_custom::scale_y(&snapshot),
                 });
             }
@@ -377,13 +413,25 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                     // pointer into the widget's own frame first.
                     let (s, c) = (-deg).to_radians().sin_cos();
                     let local = rotate_about(cur, pos, s, c) - pos;
-                    let box_widget = halod_shared::lcd_custom::is_box_widget(snapshot.widget_type);
+                    let catalog_id = snapshot.widget.clone();
+                    let descriptor = ctx
+                        .state
+                        .lcd
+                        .engine
+                        .available_widgets
+                        .iter()
+                        .find(|descriptor| descriptor.id == catalog_id);
+                    let box_widget = descriptor.is_some_and(|descriptor| {
+                        descriptor.resize == halod_shared::types::LcdWidgetResize::Box
+                    });
+                    let min_scale = descriptor.map_or(0.6, |descriptor| descriptor.min_scale);
                     let (sx, sy) = super::sprites::resize_scales(
                         local,
                         rp.start_size,
                         rp.start_scale,
                         rp.start_scale_y,
                         box_widget,
+                        min_scale,
                     );
                     let w = &mut st.lcd.editor.def.widgets[idx];
                     w.scale = sx;
@@ -465,6 +513,83 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                 st.lcd.editor.clear_selection();
                 st.lcd.editor.editing_text = None;
                 deleted = true;
+            }
+        }
+    }
+
+    // A sole selection gets a final, inset interaction surface. It is
+    // registered after every normal widget hit target, so a selected widget
+    // remains draggable even when a later (visually higher) widget covers it.
+    // Insets keep the edge handles authoritative.
+    if let Some(selected_id) = st.lcd.editor.primary().cloned() {
+        if st.lcd.editor.editing_text.as_deref() != Some(selected_id.as_str()) {
+            if let Some((_, selected_hit)) = widget_rects
+                .iter()
+                .find(|(widget_id, _)| widget_id == &selected_id)
+            {
+                let inset = (selected_hit.width().min(selected_hit.height()) * 0.2).min(9.0);
+                let drag_hit = selected_hit.shrink(inset);
+                let selected_resp = ui.interact(
+                    drag_hit,
+                    ui.id()
+                        .with(("lcd_editor_selected_overlay", selected_id.as_str())),
+                    Sense::click_and_drag(),
+                );
+                if selected_resp.dragged() {
+                    let delta = selected_resp.drag_delta();
+                    if let Some(widget) = st
+                        .lcd
+                        .editor
+                        .def
+                        .widgets
+                        .iter_mut()
+                        .find(|widget| widget.id == selected_id)
+                    {
+                        widget.x = (widget.x + delta.x / clamp_w).clamp(0.0, 1.0);
+                        widget.y = (widget.y + delta.y / clamp_h).clamp(0.0, 1.0);
+                        moved = true;
+                    }
+                }
+                let double_clicked = selected_resp.clicked()
+                    && ui.input(|input| {
+                        input
+                            .pointer
+                            .button_double_clicked(egui::PointerButton::Primary)
+                    })
+                    && st
+                        .lcd
+                        .editor
+                        .def
+                        .widgets
+                        .iter()
+                        .find(|widget| widget.id == selected_id)
+                        .is_some_and(|widget| widget.params.contains_key("text"));
+                if double_clicked {
+                    widget_double_clicked = true;
+                    st.lcd.editor.editing_text = Some(selected_id.clone());
+                    st.lcd.editor.focus_editing = true;
+                } else {
+                    widget_clicked |= selected_resp.clicked();
+                }
+                if selected_resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                }
+            }
+        }
+    }
+
+    // Repeated clicks at an overlap cycle from the visually top widget down
+    // through every widget under the pointer. Once selected, the interaction
+    // surface above makes that lower widget directly draggable.
+    if widget_clicked && !widget_double_clicked {
+        if let Some(pointer) = ui.input(|input| input.pointer.latest_pos()) {
+            let current = st.lcd.editor.primary().map(String::as_str);
+            if let Some(target) = cycle_widget_at(pointer, &widget_rects, current) {
+                let additive = ui.input(|input| input.modifiers.ctrl || input.modifiers.shift);
+                widgets::click_select(&mut st.lcd.editor.selected, target.clone(), additive);
+                if st.lcd.editor.editing_text.as_deref() != Some(target.as_str()) {
+                    st.lcd.editor.editing_text = None;
+                }
             }
         }
     }
@@ -608,6 +733,62 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
     }
 }
 
+fn cycle_widget_at(
+    point: egui::Pos2,
+    widget_rects: &[(String, Rect)],
+    current: Option<&str>,
+) -> Option<String> {
+    let hits: Vec<&str> = widget_rects
+        .iter()
+        .rev()
+        .filter(|(_, rect)| rect.contains(point))
+        .map(|(id, _)| id.as_str())
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    let next = current
+        .and_then(|current| hits.iter().position(|id| *id == current))
+        .map_or(0, |index| (index + 1) % hits.len());
+    Some(hits[next].to_owned())
+}
+
+/// Local, asset-independent "missing content" glyph. Missing plugin assets
+/// cannot be trusted to supply their own icon, so the editor always has this
+/// small broken-file mark available.
+fn paint_missing_icon(painter: &egui::Painter, center: egui::Pos2) {
+    let icon = Rect::from_center_size(center, Vec2::new(18.0, 22.0));
+    let fold = 5.0;
+    let stroke = Stroke::new(1.5, theme::OFFLINE);
+    painter.line_segment(
+        [icon.left_top(), egui::pos2(icon.right() - fold, icon.top())],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(icon.right() - fold, icon.top()),
+            egui::pos2(icon.right(), icon.top() + fold),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(icon.right(), icon.top() + fold),
+            icon.right_bottom(),
+        ],
+        stroke,
+    );
+    painter.line_segment([icon.right_bottom(), icon.left_bottom()], stroke);
+    painter.line_segment([icon.left_bottom(), icon.left_top()], stroke);
+    painter.line_segment(
+        [
+            egui::pos2(icon.left() + 4.0, icon.center().y + 4.0),
+            egui::pos2(icon.right() - 4.0, icon.center().y - 4.0),
+        ],
+        stroke,
+    );
+}
+
 /// Procedural, non-live approximation of the daemon's four background kinds.
 /// `Image` paints the cached first frame (`bg_tex`, from the shared library
 /// thumbnail cache — a GIF stays static here), falling back to a labeled
@@ -707,12 +888,20 @@ fn paint_stage_background(
     }
 }
 
-fn resolved_font(w: &WidgetDef, default_font: FontKind, sz: f32) -> egui::FontId {
+fn resolved_font(
+    w: &WidgetDef,
+    default_font: &str,
+    sz: f32,
+    registered_fonts: &std::collections::HashSet<String>,
+) -> egui::FontId {
     let cal = sz * FONT_CAL;
-    let family = match w.font.unwrap_or(default_font) {
-        FontKind::Sans => "lcd_sans",
-        FontKind::Mono => "lcd_mono",
-        FontKind::Inter => "lcd_inter",
+    let selected = w.font.as_deref().unwrap_or(default_font);
+    let family = match selected {
+        FONT_SANS => "lcd_sans",
+        FONT_MONO => "lcd_mono",
+        FONT_INTER => "lcd_inter",
+        other if registered_fonts.contains(other) => other,
+        _ => "lcd_sans",
     };
     egui::FontId::new(cal, egui::FontFamily::Name(family.into()))
 }
@@ -797,5 +986,33 @@ mod tests {
         let right = rotation_handle_pos(egui::pos2(100.0, 50.0), 90.0);
         assert!(right.x > 100.0 + ROTATE_DIST - 1e-3);
         assert!((right.y - 50.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn repeated_overlap_clicks_cycle_from_top_to_bottom() {
+        let shared = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(20.0, 20.0));
+        let widgets = vec![
+            ("bottom".to_owned(), shared),
+            ("middle".to_owned(), shared),
+            ("top".to_owned(), shared),
+        ];
+        let point = egui::pos2(10.0, 10.0);
+
+        assert_eq!(
+            cycle_widget_at(point, &widgets, None).as_deref(),
+            Some("top")
+        );
+        assert_eq!(
+            cycle_widget_at(point, &widgets, Some("top")).as_deref(),
+            Some("middle")
+        );
+        assert_eq!(
+            cycle_widget_at(point, &widgets, Some("middle")).as_deref(),
+            Some("bottom")
+        );
+        assert_eq!(
+            cycle_widget_at(point, &widgets, Some("bottom")).as_deref(),
+            Some("top")
+        );
     }
 }
