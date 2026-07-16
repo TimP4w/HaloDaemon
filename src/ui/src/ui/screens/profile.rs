@@ -346,15 +346,7 @@ pub fn title_button(
         &state.profiles.active
     };
 
-    // Measure the text components to size the pill.
-    let label_width = p
-        .layout_no_wrap(
-            t!("profile.profile_label").to_string(),
-            theme::body(9.0),
-            Color32::WHITE,
-        )
-        .size()
-        .x;
+    // Measure the name to size the pill.
     let name_width = p
         .layout_no_wrap(
             profile_name.to_string(),
@@ -363,8 +355,8 @@ pub fn title_button(
         )
         .size()
         .x;
-    // dot(6) + gap(9) + "PROFILE"(lw) + gap(9) + name(nw) + gap(8) + chevron(8) + padding(22)
-    let pill_w = 6.0 + 9.0 + label_width + 9.0 + name_width + 8.0 + 8.0 + 22.0;
+    // padding(12) + name(nw) + gap(8) + chevron(8) + padding(12)
+    let pill_w = 12.0 + name_width + 8.0 + 8.0 + 12.0;
     let pill_h = 28.0;
     let pill_rect = Rect::from_min_size(
         Pos2::new(right_x - pill_w, cy - pill_h / 2.0),
@@ -377,9 +369,9 @@ pub fn title_button(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let bg = if hovered || st.dropdown_open {
-        theme::hex(0x14192a)
+        theme::ROW_ACTIVE
     } else {
-        theme::hex(0x10141d)
+        theme::INNER_BG
     };
     p.rect_filled(pill_rect, 9.0, bg);
     p.rect_stroke(
@@ -389,19 +381,7 @@ pub fn title_button(
         egui::StrokeKind::Middle,
     );
 
-    let mut x = pill_rect.left() + 11.0;
-    let dot = Pos2::new(x + 3.0, cy);
-    theme::glow(p, dot, 5.0, theme::CYAN, 0.6);
-    p.circle_filled(dot, 3.0, theme::CYAN);
-    x += 6.0 + 9.0;
-    p.text(
-        Pos2::new(x, cy),
-        Align2::LEFT_CENTER,
-        t!("profile.profile_label"),
-        theme::body(9.0),
-        theme::TEXT_FAINT,
-    );
-    x += label_width + 9.0;
+    let mut x = pill_rect.left() + 12.0;
     p.text(
         Pos2::new(x, cy),
         Align2::LEFT_CENTER,
@@ -421,7 +401,7 @@ pub fn title_button(
             Pos2::new(x + 4.0, cy),
             Align2::CENTER_CENTER,
             if st.dropdown_open { "▴" } else { "▾" },
-            theme::body(8.0),
+            theme::body(16.0),
             theme::TEXT_FAINT,
         );
     }
@@ -571,7 +551,7 @@ pub fn title_dropdown(
                 gear_rect.center(),
                 Align2::CENTER_CENTER,
                 "⚙",
-                theme::body(13.0),
+                theme::body(16.0),
                 gear_col,
             );
             if gear_resp.clicked() {

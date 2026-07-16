@@ -10,7 +10,6 @@ capability:
   boolean: Interruttori
 
 profile:
-  profile_label: "PROFILO"
   new_profile_btn: "+ Nuovo profilo"
   profile_settings_btn: "Impostazioni profilo"
   new_profile_title: "Nuovo profilo"
