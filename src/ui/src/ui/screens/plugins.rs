@@ -119,6 +119,7 @@ pub struct PluginsUi {
     /// The open plugin-issue Details modal (title + detail), when the user
     /// clicked Details on a plugin's issue banner.
     issue_modal: Option<(String, String)>,
+    #[cfg(target_os = "linux")]
     next_udev_status_check: f64,
     udev_command_copied: bool,
     udev_info_open: bool,
