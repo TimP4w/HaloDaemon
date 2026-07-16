@@ -1384,15 +1384,6 @@ fn has_rgb_zones(d: &WireDevice) -> bool {
         .any(|c| matches!(c, DeviceCapability::Rgb(r) if !r.descriptor.zones.is_empty()))
 }
 
-/// Selected devices that are actually present — offline ids stay saved but
-/// don't count toward "applies to N devices".
-#[cfg(test)]
-fn effective_sel_count(state: &AppState, st: &LightingUi) -> usize {
-    rgb_devices(state)
-        .filter(|d| st.sel_ids.contains(&d.id))
-        .count()
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2015,20 +2006,5 @@ mod tests {
         // 24 equal pills in a narrow row → many rows, height grows with them
         // (the bug: fixed height clipped everything past the first row).
         assert!(wrapped_rows(&[80.0; 24], 300.0, 6.0) >= 7);
-    }
-
-    #[test]
-    fn effective_sel_count_ignores_offline_ids() {
-        let mut state = state_with_targets("default", &[]);
-        state.devices = vec![WireDevice {
-            id: "online".into(),
-            capabilities: vec![rgb_cap(vec![zone()])],
-            ..Default::default()
-        }];
-        let st = LightingUi {
-            sel_ids: vec!["online".into(), "unplugged".into()],
-            ..Default::default()
-        };
-        assert_eq!(effective_sel_count(&state, &st), 1);
     }
 }

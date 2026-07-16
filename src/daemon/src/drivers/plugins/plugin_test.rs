@@ -327,6 +327,10 @@ pub fn run(handle: tokio::runtime::Handle, package: &Path) -> Result<i32> {
     let manifest = parse_manifest_from_dir(package)
         .with_context(|| format!("parsing plugin package {}", package.display()))?;
 
+    if manifest.plugin_type == halod_shared::types::PluginKind::Lcd {
+        validate_lcd_widgets(&handle, &manifest)?;
+    }
+
     let test_path = package.join("test.lua");
     if !test_path.is_file() {
         println!("{}: no test.lua — skipping", manifest.plugin_id);
@@ -356,6 +360,60 @@ pub fn run(handle: tokio::runtime::Handle, package: &Path) -> Result<i32> {
         manifest.plugin_id, report.passed, report.failed
     );
     Ok(if report.failed == 0 { 0 } else { 1 })
+}
+
+fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManifest) -> Result<()> {
+    let ids: Vec<String> = manifest
+        .widgets
+        .iter()
+        .map(|widget| widget.id.clone())
+        .collect();
+    let worker = super::widget_worker::PluginWidgetHandle::spawn(
+        manifest.script_source.clone(),
+        manifest.module_sources.clone(),
+        ids,
+        manifest.permissions.clone(),
+        HashMap::new(),
+    );
+    let font = ab_glyph::FontArc::try_from_slice(include_bytes!(
+        "../../../../assets/fonts/NotoSans-Regular.ttf"
+    ))
+    .expect("bundled test font is valid");
+    for widget in &manifest.widgets {
+        let params = widget
+            .params
+            .iter()
+            .map(|param| (param.id.clone(), param.default.clone()))
+            .collect();
+        let pixels = runtime.block_on(worker.render(super::widget_worker::WidgetRenderInput {
+            widget_id: widget.id.clone(),
+            width: 128,
+            height: 128,
+            time: 0.0,
+            dt: 0.0,
+            params,
+            color: RgbColor {
+                r: 0,
+                g: 200,
+                b: 220,
+            },
+            font: font.clone(),
+            sensors: HashMap::new(),
+            audio_bands: vec![],
+            audio_level: None,
+            media: None,
+            images: HashMap::new(),
+            assets: HashMap::new(),
+            preview: true,
+        }))?;
+        anyhow::ensure!(
+            pixels.chunks_exact(4).any(|pixel| pixel[3] != 0),
+            "widget '{}' preview is completely transparent",
+            widget.id
+        );
+        println!("ok - widget '{}' still preview", widget.id);
+    }
+    Ok(())
 }
 
 /// Build the `h` table (`assert`/`assert_eq`/`open`) a package's `test.lua` receives.

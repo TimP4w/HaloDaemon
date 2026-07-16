@@ -27,25 +27,50 @@ pub fn combo_picker(
     current: &str,
     none_label: Option<&str>,
 ) -> Option<String> {
+    combo_picker_with_width(ui, id_salt, options, current, none_label, None)
+}
+
+/// A labeled-option combo box that fills the current column.
+pub fn combo_picker_full(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    options: &[(String, String)],
+    current: &str,
+    none_label: Option<&str>,
+) -> Option<String> {
+    let width = ui.available_width();
+    combo_picker_with_width(ui, id_salt, options, current, none_label, Some(width))
+}
+
+fn combo_picker_with_width(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    options: &[(String, String)],
+    current: &str,
+    none_label: Option<&str>,
+    width: Option<f32>,
+) -> Option<String> {
     let display = combo_display(options, current, none_label);
     let mut new_val = None;
-    egui::ComboBox::from_id_salt(id_salt)
-        .selected_text(display)
-        .show_ui(ui, |ui| {
-            if let Some(none_label) = none_label {
-                if ui
-                    .selectable_label(current.is_empty(), none_label)
-                    .clicked()
-                {
-                    new_val = Some(String::new());
-                }
+    let mut combo = egui::ComboBox::from_id_salt(id_salt).selected_text(display);
+    if let Some(width) = width {
+        combo = combo.width(width);
+    }
+    combo.show_ui(ui, |ui| {
+        if let Some(none_label) = none_label {
+            if ui
+                .selectable_label(current.is_empty(), none_label)
+                .clicked()
+            {
+                new_val = Some(String::new());
             }
-            for (id, name) in options {
-                if ui.selectable_label(id == current, name).clicked() {
-                    new_val = Some(id.clone());
-                }
+        }
+        for (id, name) in options {
+            if ui.selectable_label(id == current, name).clicked() {
+                new_val = Some(id.clone());
             }
-        });
+        }
+    });
     new_val
 }
 

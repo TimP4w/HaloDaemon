@@ -335,6 +335,7 @@ pub struct TabCtx<'a> {
     /// Rolling history of the device's effective write-rate throughput
     /// (bytes/sec). `None` until the first sample lands.
     pub write_rate_history: Option<&'a std::collections::VecDeque<f32>>,
+    pub plugin_assets: &'a std::collections::HashMap<String, Vec<u8>>,
 }
 
 /// Whether `terminal` is a one-shot upload result (`Done`/`Failed`) for
@@ -349,6 +350,13 @@ pub(super) fn is_terminal_upload_for(
         Some(p) if p.device_id == device_id
             && matches!(p.stage, LcdUploadStage::Done | LcdUploadStage::Failed)
     )
+}
+
+#[cfg(test)]
+pub(crate) fn empty_plugin_assets() -> &'static std::collections::HashMap<String, Vec<u8>> {
+    static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, Vec<u8>>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(Default::default)
 }
 
 /// Shared empty LED-color map for contexts without live canvas frames (tests).
@@ -385,6 +393,7 @@ pub fn show(
     lcd_editor_render: Option<crate::runtime::ipc::DecodedEditorRender>,
     led_colors: &crate::ui::screens::canvas::LedColorMap,
     write_rate_history: Option<&std::collections::VecDeque<f32>>,
+    plugin_assets: &std::collections::HashMap<String, Vec<u8>>,
 ) {
     let Some(dev) = state.devices.iter().find(|d| d.id == id) else {
         *page = Page::Home;
@@ -447,6 +456,7 @@ pub fn show(
                     lcd_editor_render,
                     led_colors,
                     write_rate_history,
+                    plugin_assets,
                 };
                 if let Some(tab) = tabs.get(ui_state.tab) {
                     match tab.kind {
@@ -601,6 +611,7 @@ mod tests {
                 None,
                 empty_led_colors(),
                 None,
+                empty_plugin_assets(),
             );
         });
 

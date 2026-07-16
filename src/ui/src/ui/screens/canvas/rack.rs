@@ -162,19 +162,6 @@ pub(super) fn instance_name<'a>(effects: &'a HashMap<String, EffectDef>, id: &'a
         .unwrap_or(id)
 }
 
-/// The first `max` labels plus a "+N more" overflow chip label.
-#[cfg(test)]
-fn chip_overflow(labels: &[String], max: usize) -> (&[String], Option<String>) {
-    if labels.len() > max {
-        (
-            &labels[..max],
-            Some(t!("canvas.overflow_more", n = labels.len() - max).to_string()),
-        )
-    } else {
-        (labels, None)
-    }
-}
-
 fn device_name<'a>(state: &'a AppState, device_id: &'a str) -> &'a str {
     state
         .devices
@@ -830,22 +817,6 @@ mod tests {
         ui.pending.effect = Some(("live".to_string(), DaemonCommand::CanvasStop, 0.0));
         prune_stale_instance_refs(&mut ui, &["live".to_string()]);
         assert!(ui.pending.effect.is_some());
-    }
-
-    #[test]
-    fn chip_overflow_caps_and_counts() {
-        let labels: Vec<String> = (0..9).map(|i| format!("z{i}")).collect();
-        let (shown, more) = chip_overflow(&labels, 7);
-        assert_eq!(shown.len(), 7);
-        assert_eq!(more.as_deref(), Some("+2 more"));
-
-        let (shown, more) = chip_overflow(&labels[..7], 7);
-        assert_eq!(shown.len(), 7);
-        assert_eq!(more, None);
-
-        let (shown, more) = chip_overflow(&[], 7);
-        assert!(shown.is_empty());
-        assert_eq!(more, None);
     }
 
     #[test]

@@ -21,6 +21,8 @@ runtime behavior.
   device.
 - **Effect plugins** provide reusable RGB effects that can be selected by
   compatible lighting zones.
+- **LCD plugins** contribute programmable widgets and declarative
+  layout presets to the custom-screen editor.
 
 Plugins are disabled until explicitly enabled. HaloDaemon shows the permissions
 and hardware or service access requested by a plugin before activation, then
@@ -34,10 +36,10 @@ development documentation:
 
 - [Plugin manifest reference](https://github.com/TimP4w/HaloDaemon-plugins/blob/main/docs/manifest-reference.md)
   — package metadata, plugin types, capabilities, permissions, device matching,
-  transports, configuration, and effects.
+  transports, configuration, effects, widgets, and presets.
 - [Lua API and test harness](https://github.com/TimP4w/HaloDaemon-plugins/blob/main/docs/lua-api.md)
-  — lifecycle callbacks, capability APIs, transports, sandbox behavior, and
-  plugin tests.
+  — lifecycle callbacks, capability APIs, transports, sandbox behavior,
+  effect/widget callbacks, and plugin tests.
 - [Official plugin catalog](https://github.com/TimP4w/HaloDaemon-plugins#plugin-catalog)
   — package examples and links to the protocol documentation maintained with
   each plugin.

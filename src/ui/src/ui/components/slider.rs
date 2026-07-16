@@ -73,8 +73,8 @@ pub fn slider_row(
         |ui| {
             ui.label(
                 egui::RichText::new(label)
-                    .font(theme::body_md())
-                    .color(theme::TEXT_DIM),
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_MUT),
             );
         },
         |ui| {
@@ -110,29 +110,20 @@ pub fn num_input_row(
     value: &mut f32,
     range: RangeInclusive<f32>,
 ) -> (bool, bool) {
-    let mut edited = false;
-    let mut committed = false;
-    egui::Sides::new().show(
-        ui,
-        |ui| {
-            ui.label(
-                egui::RichText::new(label)
-                    .font(theme::body_md())
-                    .color(theme::TEXT_DIM),
-            );
-        },
-        |ui| {
-            let resp = ui.add(
-                egui::DragValue::new(value)
-                    .range(range)
-                    .speed(1.0)
-                    .max_decimals(1),
-            );
-            edited = resp.changed();
-            committed = resp.drag_stopped() || resp.lost_focus();
-        },
+    ui.label(
+        egui::RichText::new(label)
+            .font(theme::body_sm())
+            .color(theme::TEXT_MUT),
     );
-    (edited, committed)
+    ui.add_space(theme::SPACE_3);
+    let resp = ui.add_sized(
+        egui::vec2(ui.available_width(), 32.0),
+        egui::DragValue::new(value)
+            .range(range)
+            .speed(1.0)
+            .max_decimals(1),
+    );
+    (resp.changed(), resp.drag_stopped() || resp.lost_focus())
 }
 
 /// A label + `−  value  +` stepper row. `value_text` is drawn between the

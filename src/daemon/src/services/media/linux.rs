@@ -205,17 +205,6 @@ fn resolve_vetted(host: &str, port: u16) -> std::io::Result<Vec<std::net::Socket
     Ok(addrs)
 }
 
-/// True if the URL's host resolves to at least one vetted (non loopback/private/
-/// link-local) address. The connection itself is vetted independently by the
-/// agent resolver, so this is only a fast pre-check.
-#[cfg(test)]
-fn host_is_vetted(url: &str) -> bool {
-    let Some((host, port)) = http_authority(url) else {
-        return false;
-    };
-    resolve_vetted(&host, port).is_ok()
-}
-
 /// Blocking http(s) GET with a 4 s timeout, address vetting, no redirects, and a
 /// 2 MB size cap (an over-cap body is rejected, not silently truncated).
 fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
@@ -629,13 +618,24 @@ mod tests {
     }
 
     #[test]
-    fn vetting_rejects_loopback_and_private_and_bad_scheme() {
-        assert!(!host_is_vetted("http://127.0.0.1/a.png"));
-        assert!(!host_is_vetted("http://localhost:8080/a.png"));
-        assert!(!host_is_vetted("https://169.254.169.254/latest"));
-        assert!(!host_is_vetted("https://[::1]/a.png"));
-        assert!(!host_is_vetted("ftp://example.com/a.png"));
-        assert!(!host_is_vetted("http://192.168.1.5/a.png"));
+    fn http_authority_parses_hosts_and_rejects_bad_scheme() {
+        assert_eq!(
+            http_authority("http://127.0.0.1/a.png"),
+            Some(("127.0.0.1".into(), 80))
+        );
+        assert_eq!(
+            http_authority("http://localhost:8080/a.png"),
+            Some(("localhost".into(), 8080))
+        );
+        assert_eq!(
+            http_authority("https://169.254.169.254/latest"),
+            Some(("169.254.169.254".into(), 443))
+        );
+        assert_eq!(
+            http_authority("https://[::1]/a.png"),
+            Some(("::1".into(), 443))
+        );
+        assert_eq!(http_authority("ftp://example.com/a.png"), None);
     }
 
     #[test]

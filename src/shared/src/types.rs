@@ -23,12 +23,110 @@ pub struct LcdEngineTemplateDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WireLcdEngineState {
     pub available_templates: Vec<LcdEngineTemplateDescriptor>,
+    #[serde(default)]
+    pub available_widgets: Vec<LcdWidgetDescriptor>,
+    #[serde(default)]
+    pub available_presets: Vec<LcdPresetDescriptor>,
     /// device_id → template_id
     pub device_templates: HashMap<String, String>,
     /// device_id → (param id → value) for the device's active template, so
     /// the editor can seed itself from a running custom template.
     #[serde(default)]
     pub device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LcdWidgetResize {
+    #[default]
+    Uniform,
+    Box,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcdWidgetUpdates {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u32>,
+    #[serde(default)]
+    pub sensors: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensors_when: Option<LcdParamVisibility>,
+    #[serde(default)]
+    pub audio: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_when: Option<LcdParamVisibility>,
+    #[serde(default)]
+    pub media: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LcdWidgetDescriptor {
+    /// Namespaced `<plugin_id>:<widget_id>` catalog id.
+    pub id: String,
+    pub plugin_id: String,
+    pub name: String,
+    /// Declared SVG asset, fetched through `GetLcdWidgetIcon`.
+    pub icon: String,
+    #[serde(default)]
+    pub params: Vec<EffectParamDescriptor>,
+    pub resize: LcdWidgetResize,
+    /// Initial horizontal scale and height/width ratio used by the editor.
+    #[serde(default = "default_widget_scale")]
+    pub default_scale: f32,
+    /// Smallest scale offered by the editor for this widget.
+    #[serde(default = "default_widget_min_scale")]
+    pub min_scale: f32,
+    #[serde(default = "default_widget_aspect")]
+    pub default_aspect: f32,
+    /// Text parameter whose content should grow the widget horizontally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_width_param: Option<String>,
+    /// Parameter visibility rules evaluated by the generic inspector.
+    #[serde(default)]
+    pub param_visibility: HashMap<String, LcdParamVisibility>,
+    #[serde(default)]
+    pub uses_color: bool,
+    #[serde(default)]
+    pub uses_font: bool,
+    /// Whether the generic font-family and text-style controls are editable.
+    #[serde(default = "default_true")]
+    pub font_controls: bool,
+    /// Font selected when the widget is first added. `None` inherits the
+    /// screen font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_font: Option<String>,
+    /// Host-enforced weight for fixed-style widgets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_text_weight: Option<String>,
+    #[serde(default)]
+    pub updates: LcdWidgetUpdates,
+}
+
+fn default_widget_scale() -> f32 {
+    1.0
+}
+
+fn default_widget_min_scale() -> f32 {
+    0.6
+}
+
+fn default_widget_aspect() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcdParamVisibility {
+    pub param: String,
+    pub equals: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcdPresetDescriptor {
+    /// Namespaced `<plugin_id>:<preset_id>` catalog id.
+    pub id: String,
+    pub plugin_id: String,
+    pub name: String,
+    pub file: String,
 }
 
 /// Progress of an in-flight LCD image upload, pushed to the uploading client
@@ -894,6 +992,8 @@ pub enum PluginKind {
     /// rather than a hardware discovery handle; its children are the
     /// individual things the remote service reports.
     Integration,
+    /// Contributes LCD widgets, fonts, sprite assets, and layout presets.
+    Lcd,
 }
 
 /// One effect's thumbnail; display-only, the GUI fetches the bytes via `GetPluginAsset`.

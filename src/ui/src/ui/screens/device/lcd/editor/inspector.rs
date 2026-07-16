@@ -4,9 +4,7 @@
 
 use egui::Rect;
 use halod_shared::commands::DaemonCommand;
-use halod_shared::lcd_custom::{
-    param_bool, param_variant, widget_schema, BgKind, FontKind, WidgetDef, WidgetType,
-};
+use halod_shared::lcd_custom::{BgKind, FONT_INTER, FONT_MONO, FONT_SANS};
 use halod_shared::lcd_geometry::MAX_SCALE;
 use halod_shared::types::LcdStatus;
 
@@ -32,72 +30,66 @@ pub(super) fn empty_selection_card(ui: &mut egui::Ui) {
 }
 
 /// "SELECTED · {type}" caption matching the design's per-variant labels.
-fn selected_type_label(w: &WidgetDef) -> std::borrow::Cow<'static, str> {
-    match w.widget_type {
-        WidgetType::Clock => t!("lcd.type_clock"),
-        WidgetType::Date => t!("lcd.type_date"),
-        WidgetType::Sensor if param_variant(w, "stat") == "ring" => t!("lcd.type_ring_gauge"),
-        WidgetType::Sensor if param_variant(w, "stat") == "bar" => t!("lcd.type_progress_bar"),
-        WidgetType::Sensor => t!("lcd.type_sensor_stat"),
-        WidgetType::Text => t!("lcd.type_text"),
-        WidgetType::Image => t!("lcd.type_image"),
-        WidgetType::Logo => t!("lcd.type_logo"),
-        WidgetType::Debug => t!("lcd.type_debug"),
-        WidgetType::AudioSpectrum => t!("lcd.type_spectrum"),
-        WidgetType::AudioLevel if param_variant(w, "ring") == "bar" => t!("lcd.type_vu_bar"),
-        WidgetType::AudioLevel => t!("lcd.type_vu_ring"),
-        WidgetType::NowPlaying => t!("lcd.type_now_playing"),
-        WidgetType::Shape => t!("lcd.type_shape"),
-        WidgetType::Unknown => t!("lcd.type_widget"),
-    }
-}
-
-/// Widget types whose only color is the widget-level `color` field (text
-/// glyphs). Others carry their own color params in [`widget_schema`].
-fn uses_widget_color(t: WidgetType) -> bool {
-    matches!(
-        t,
-        WidgetType::Text | WidgetType::Clock | WidgetType::Date | WidgetType::Debug
-    )
-}
-
-/// Widget types that draw text through the widget-level `font` field, so the
-/// inspector offers a per-widget font override (falling back to the screen font).
-fn uses_widget_font(t: WidgetType) -> bool {
-    matches!(
-        t,
-        WidgetType::Text
-            | WidgetType::Clock
-            | WidgetType::Date
-            | WidgetType::Debug
-            | WidgetType::Sensor
-            | WidgetType::NowPlaying
-    )
-}
-
-/// Font-picker pill row over every bundled typeface (by real name), resolving
-/// `None` to the screen default. Returns the chosen font when the user switches.
 fn font_picker(
     ui: &mut egui::Ui,
-    current: Option<FontKind>,
-    default: FontKind,
-) -> Option<FontKind> {
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    current: Option<&str>,
+    default: &str,
+    fonts: &[String],
+) -> Option<String> {
     let effective = current.unwrap_or(default);
-    let mut chosen = None;
     ui.label(
         egui::RichText::new(t!("lcd.font"))
             .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
-        for kind in FontKind::ALL {
-            if widgets::pill(ui, kind.label(), effective == kind) && effective != kind {
-                chosen = Some(kind);
-            }
-        }
-    });
-    chosen
+    ui.add_space(theme::SPACE_3);
+    let mut options = vec![
+        (FONT_SANS.to_owned(), "Noto Sans".to_owned()),
+        (FONT_MONO.to_owned(), "JetBrains Mono".to_owned()),
+        (FONT_INTER.to_owned(), "Inter Tight".to_owned()),
+    ];
+    options.extend(
+        fonts
+            .iter()
+            .filter(|font| !matches!(font.as_str(), FONT_SANS | FONT_MONO | FONT_INTER))
+            .map(|font| (font.clone(), font.clone())),
+    );
+    widgets::combo_picker_full(ui, id_salt, &options, effective, None)
+}
+
+fn sync_system_fonts(ui: &egui::Ui, st: &mut DeviceUi) {
+    let selected: Vec<String> = std::iter::once(st.lcd.editor.def.style.font.clone())
+        .chain(
+            st.lcd
+                .editor
+                .def
+                .widgets
+                .iter()
+                .filter_map(|widget| widget.font.clone()),
+        )
+        .collect();
+    if selected
+        .iter()
+        .any(|family| !st.lcd.editor.attempted_fonts.contains(family))
+    {
+        let requested: std::collections::HashSet<String> = st
+            .lcd
+            .editor
+            .registered_fonts
+            .iter()
+            .cloned()
+            .chain(selected)
+            .collect();
+        st.lcd
+            .editor
+            .attempted_fonts
+            .extend(requested.iter().cloned());
+        st.lcd.editor.registered_fonts = crate::ui::theme::install_fonts_with_system(
+            ui.ctx(),
+            requested.iter().map(String::as_str),
+        );
+    }
 }
 
 pub(super) fn selected_widget_card(
@@ -117,89 +109,88 @@ pub(super) fn selected_widget_card(
         crate::domain::tour::AnchorId::LcdEditorVariant,
         card_rect,
     );
-    ui.label(
+    ui.label({
+        let widget = &st.lcd.editor.def.widgets[idx];
+        let plugin_label = Some(widget.widget.clone()).and_then(|catalog_id| {
+            ctx.state
+                .lcd
+                .engine
+                .available_widgets
+                .iter()
+                .find(|descriptor| descriptor.id == catalog_id)
+                .map(|descriptor| descriptor.name.clone())
+        });
         egui::RichText::new(t!(
             "lcd.selected_caption",
-            kind = selected_type_label(&st.lcd.editor.def.widgets[idx])
+            kind = plugin_label
+                .map(std::borrow::Cow::Owned)
+                .unwrap_or_else(|| std::borrow::Cow::Borrowed("Missing widget"))
         ))
         .font(theme::caption())
-        .color(theme::TEXT_FAINT2),
-    );
+        .color(theme::TEXT_FAINT2)
+    });
     ui.add_space(theme::SPACE_7);
 
-    let widget_type = st.lcd.editor.def.widgets[idx].widget_type;
-    let schema = widget_schema(widget_type);
+    let plugin_descriptor =
+        Some(st.lcd.editor.def.widgets[idx].widget.clone()).and_then(|catalog_id| {
+            ctx.state
+                .lcd
+                .engine
+                .available_widgets
+                .iter()
+                .find(|descriptor| descriptor.id == catalog_id)
+        });
+    let mut schema = plugin_descriptor
+        .map(|descriptor| descriptor.params.clone())
+        .unwrap_or_default();
+    let min_scale = plugin_descriptor.map_or(0.6, |descriptor| descriptor.min_scale);
+    if let Some(descriptor) = plugin_descriptor {
+        let params = &st.lcd.editor.def.widgets[idx].params;
+        schema.retain(|param| {
+            descriptor
+                .param_visibility
+                .get(&param.id)
+                .is_none_or(|rule| {
+                    matches!(
+                        params.get(&rule.param),
+                        Some(halod_shared::types::EffectParamValue::Str(value))
+                            if value == &rule.equals
+                    )
+                })
+        });
+    }
+    if plugin_descriptor.is_some_and(|descriptor| descriptor.uses_font && descriptor.font_controls)
+    {
+        for style_param in halod_shared::lcd_custom::text_style_params() {
+            if !schema.iter().any(|param| param.id == style_param.id) {
+                schema.push(style_param);
+            }
+        }
+    }
+    schema.push(halod_shared::types::EffectParamDescriptor {
+        id: "opacity".to_owned(),
+        label: "Opacity".to_owned(),
+        kind: halod_shared::types::ParamKind::Range {
+            min: 0.0,
+            max: 100.0,
+            step: 5.0,
+        },
+        default: halod_shared::types::EffectParamValue::Float(100.0),
+    });
 
     let mut changed = false;
     {
         let widget = &mut st.lcd.editor.def.widgets[idx];
-        let variant = param_variant(widget, "stat");
-        let bar_variant = variant == "bar";
-        let gauge_variant = variant == "ring" || variant == "bar";
-        let is_vu_bar =
-            widget_type == WidgetType::AudioLevel && param_variant(widget, "ring") == "bar";
-        let is_vu_gauge =
-            widget_type == WidgetType::AudioLevel && param_variant(widget, "ring") != "bar";
-        let spectrum_gradient =
-            widget_type == WidgetType::AudioSpectrum && param_bool(widget, "gradient", false);
-
-        let mut last_group: Option<&str> = None;
         for p in &schema {
-            // Conditional visibility:
-            let show = match (widget_type, p.id.as_str()) {
-                // Sensor: gauge/bar-only params
-                (
-                    WidgetType::Sensor,
-                    "fill" | "track" | "gradient" | "gradient_high" | "min" | "max",
-                ) => gauge_variant,
-                // Sensor: bar-only params
-                (WidgetType::Sensor, "rounded" | "inverted" | "curve") => bar_variant,
-                // AudioLevel: gauge/bar params (both need fill/track)
-                (WidgetType::AudioLevel, "fill" | "track" | "gradient" | "gradient_high") => {
-                    is_vu_gauge || is_vu_bar
-                }
-                // AudioLevel: bar-only params
-                (WidgetType::AudioLevel, "rounded" | "inverted" | "curve") => is_vu_bar,
-                // AudioSpectrum: gradient_high only when gradient is on
-                (WidgetType::AudioSpectrum, "gradient_high") => spectrum_gradient,
-                _ => true,
-            };
-            if show {
-                // Group headings (hardcoded per param id for now).
-                let group: Option<&str> = match (widget_type, p.id.as_str()) {
-                    (
-                        WidgetType::Sensor | WidgetType::AudioLevel,
-                        "rounded" | "inverted" | "curve",
-                    ) => Some("lcd.group_shape"),
-                    (
-                        WidgetType::Sensor | WidgetType::AudioLevel,
-                        "fill" | "track" | "gradient" | "gradient_high",
-                    ) => Some("lcd.group_colors"),
-                    (WidgetType::Sensor, "min" | "max") => Some("lcd.group_range"),
-                    _ => None,
-                };
-                if group != last_group {
-                    if let Some(g) = group {
-                        ui.add_space(theme::SPACE_3);
-                        ui.label(
-                            egui::RichText::new(t!(g))
-                                .font(theme::semibold(10.5))
-                                .color(theme::TEXT_FAINT2),
-                        );
-                        ui.add_space(theme::SPACE_1);
-                    }
-                    last_group = group;
-                }
-                changed |= render_param(ui, ctx, widget_type, p, &mut widget.params);
-                ui.add_space(theme::SPACE_2);
-            }
+            changed |= render_param(ui, ctx, p, &mut widget.params);
+            ui.add_space(theme::SPACE_2);
         }
     }
 
     // Text-drawn widgets carry their single color in the widget-level `color`
     // field (glyphs), so expose a picker here; typed widgets with their own
     // color params (sensor/shape/audio) manage color through those instead.
-    if uses_widget_color(widget_type) {
+    if plugin_descriptor.is_some_and(|descriptor| descriptor.uses_color) {
         let cur = st.lcd.editor.def.widgets[idx]
             .color
             .unwrap_or(st.lcd.editor.def.style.accent);
@@ -209,7 +200,14 @@ pub(super) fn selected_widget_card(
                 .color(theme::TEXT_MUT),
         );
         ui.add_space(theme::SPACE_3);
-        if let Some(c) = widgets::color_swatch_row(ui, cur) {
+        if let Some(c) = widgets::color_swatch_row(
+            ui,
+            (
+                "lcd_widget_color",
+                st.lcd.editor.def.widgets[idx].id.as_str(),
+            ),
+            cur,
+        ) {
             st.lcd.editor.def.widgets[idx].color = Some(c);
             changed = true;
         }
@@ -217,10 +215,12 @@ pub(super) fn selected_widget_card(
     }
 
     // Per-widget font override for every text-drawing widget.
-    if uses_widget_font(widget_type) {
-        let default_font = st.lcd.editor.def.style.font;
-        let cur = st.lcd.editor.def.widgets[idx].font;
-        if let Some(f) = font_picker(ui, cur, default_font) {
+    if plugin_descriptor.is_some_and(|descriptor| descriptor.uses_font && descriptor.font_controls)
+    {
+        let fonts = halod_shared::system_fonts::families();
+        let default_font = st.lcd.editor.def.style.font.clone();
+        let cur = st.lcd.editor.def.widgets[idx].font.as_deref();
+        if let Some(f) = font_picker(ui, ("lcd_widget_font", id, sel), cur, &default_font, fonts) {
             st.lcd.editor.def.widgets[idx].font = Some(f);
             changed = true;
         }
@@ -229,7 +229,10 @@ pub(super) fn selected_widget_card(
 
     // The `filename` param is a `ParamKind::Image` no-op above — the image is
     // chosen here from the shared library picker (with file browse) instead.
-    if widget_type == WidgetType::Image {
+    if schema
+        .iter()
+        .any(|param| matches!(param.kind, halod_shared::types::ParamKind::Image))
+    {
         let current =
             halod_shared::lcd_custom::param_str(&st.lcd.editor.def.widgets[idx], "filename");
         if let Some(pick) = image_picker(ui, ctx, st, id, &current) {
@@ -245,13 +248,34 @@ pub(super) fn selected_widget_card(
     // Size.
     let mut scale = st.lcd.editor.def.widgets[idx].scale;
     let readout = format!("{}%", (scale * 100.0).round() as i32);
-    if widgets::slider_row(ui, &t!("lcd.size"), &mut scale, 0.6..=MAX_SCALE, &readout) {
+    if widgets::slider_row(
+        ui,
+        &t!("lcd.size"),
+        &mut scale,
+        min_scale..=MAX_SCALE,
+        &readout,
+    ) {
         st.lcd.editor.def.widgets[idx].scale = scale;
         changed = true;
     }
     ui.add_space(theme::SPACE_3);
 
     if changed {
+        if let Some(descriptor) = plugin_descriptor {
+            if let Some(param_id) = descriptor.auto_width_param.as_deref() {
+                let widget = &mut st.lcd.editor.def.widgets[idx];
+                if let Some(halod_shared::types::EffectParamValue::Str(text)) =
+                    widget.params.get(param_id)
+                {
+                    let width = text.chars().count() as f32
+                        * halod_shared::lcd_custom::scale_y(widget)
+                        * 0.22;
+                    widget.scale = width
+                        .max(descriptor.default_scale)
+                        .clamp(descriptor.min_scale, MAX_SCALE);
+                }
+            }
+        }
         send_def(ctx, st, id, false);
     }
 
@@ -335,8 +359,24 @@ pub(super) fn screen_style_card(
             .color(theme::TEXT_MUT),
     );
     ui.add_space(theme::SPACE_3);
-    if let Some(c) = widgets::color_swatch_row(ui, st.lcd.editor.def.style.accent) {
+    if let Some(c) =
+        widgets::color_swatch_row(ui, "lcd_screen_accent", st.lcd.editor.def.style.accent)
+    {
         st.lcd.editor.def.style.accent = c;
+        changed = true;
+    }
+    ui.add_space(theme::SPACE_6);
+
+    sync_system_fonts(ui, st);
+    let current_font = st.lcd.editor.def.style.font.clone();
+    if let Some(font) = font_picker(
+        ui,
+        "lcd_screen_font",
+        Some(&current_font),
+        FONT_SANS,
+        halod_shared::system_fonts::families(),
+    ) {
+        st.lcd.editor.def.style.font = font;
         changed = true;
     }
     ui.add_space(theme::SPACE_6);
@@ -428,72 +468,6 @@ fn background_image_picker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use halod_shared::types::EffectParamValue;
-    use std::collections::HashMap;
-
-    fn widget(id: &str, x: f32, y: f32) -> WidgetDef {
-        WidgetDef {
-            id: id.to_string(),
-            widget_type: WidgetType::Text,
-            x,
-            y,
-            scale: 1.0,
-            rotation: 0.0,
-            color: None,
-            font: None,
-            params: HashMap::new(),
-        }
-    }
-
-    fn sensor_widget(variant: &str) -> WidgetDef {
-        let mut w = widget("w1", 0.5, 0.5);
-        w.widget_type = WidgetType::Sensor;
-        w.params.insert(
-            "variant".to_string(),
-            EffectParamValue::Str(variant.to_string()),
-        );
-        w
-    }
-
-    #[test]
-    fn selected_type_label_distinguishes_sensor_and_text_variants() {
-        assert_eq!(selected_type_label(&sensor_widget("stat")), "Sensor stat");
-        assert_eq!(selected_type_label(&sensor_widget("ring")), "Ring gauge");
-        assert_eq!(selected_type_label(&sensor_widget("bar")), "Progress bar");
-
-        let text = widget("w1", 0.0, 0.0);
-        assert_eq!(selected_type_label(&text), "Text");
-    }
-
-    #[test]
-    fn selected_type_label_covers_logo() {
-        let mut w = widget("w1", 0.0, 0.0);
-        w.widget_type = WidgetType::Logo;
-        assert_eq!(selected_type_label(&w), "Logo");
-    }
-
-    #[test]
-    fn selected_type_label_distinguishes_audio_level_variants() {
-        let mut level = widget("w1", 0.0, 0.0);
-        level.widget_type = WidgetType::AudioLevel;
-        assert_eq!(selected_type_label(&level), "VU ring");
-        level.params.insert(
-            "variant".to_string(),
-            EffectParamValue::Str("bar".to_string()),
-        );
-        assert_eq!(selected_type_label(&level), "VU bar");
-
-        let mut spectrum = widget("w1", 0.0, 0.0);
-        spectrum.widget_type = WidgetType::AudioSpectrum;
-        assert_eq!(selected_type_label(&spectrum), "Spectrum");
-    }
-
-    #[test]
-    fn selected_type_label_covers_now_playing() {
-        let mut w = widget("w1", 0.0, 0.0);
-        w.widget_type = WidgetType::NowPlaying;
-        assert_eq!(selected_type_label(&w), "Now Playing");
-    }
 
     #[test]
     fn bg_kind_key_maps_every_variant() {

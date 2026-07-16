@@ -64,6 +64,15 @@ pub(super) fn ensure_sprite_textures(
     st: &mut DeviceUi,
     render: &crate::runtime::ipc::DecodedEditorRender,
 ) {
+    st.lcd.editor.missing_widgets = render
+        .widgets
+        .iter()
+        .filter(|widget| widget.status == halod_shared::lcd_custom::WidgetRenderStatus::Missing)
+        .map(|widget| widget.id.clone())
+        .collect();
+    for id in &st.lcd.editor.missing_widgets {
+        st.lcd.editor.sprite_tex.remove(id);
+    }
     for s in &render.sprites {
         let fresh = match st.lcd.editor.sprite_tex.get(&s.id) {
             Some((sig, _)) => *sig != s.signature,
@@ -86,7 +95,7 @@ pub(super) fn ensure_sprite_textures(
     st.lcd
         .editor
         .sprite_tex
-        .retain(|k, _| keep.contains(k.as_str()));
+        .retain(|k, _| keep.contains(k.as_str()) && !st.lcd.editor.missing_widgets.contains(k));
 }
 
 /// Map a daemon sprite (device px `w`x`h`, centered on the widget point) onto the
@@ -130,6 +139,7 @@ pub(super) fn resize_scales(
     start_scale: f32,
     start_scale_y: f32,
     box_widget: bool,
+    min_scale: f32,
 ) -> (f32, f32) {
     let factor = |half: f32, start: f32| {
         if start > 0.0 {
@@ -142,11 +152,11 @@ pub(super) fn resize_scales(
     let fy = factor(local.y, start_size.y);
     if box_widget {
         (
-            (start_scale * fx).clamp(0.6, MAX_SCALE),
-            (start_scale_y * fy).clamp(0.6, MAX_SCALE),
+            (start_scale * fx).clamp(min_scale, MAX_SCALE),
+            (start_scale_y * fy).clamp(min_scale, MAX_SCALE),
         )
     } else {
-        let s = (start_scale * (fx + fy) / 2.0).clamp(0.6, MAX_SCALE);
+        let s = (start_scale * (fx + fy) / 2.0).clamp(min_scale, MAX_SCALE);
         (s, s)
     }
 }
@@ -253,20 +263,22 @@ mod tests {
         let start = Vec2::new(80.0, 40.0);
         // Pointer at the exact start corner (half-extents 40×20) reproduces the
         // start scale — the box is unchanged.
-        let (sx, sy) = resize_scales(Vec2::new(40.0, 20.0), start, 1.0, 1.0, true);
+        let (sx, sy) = resize_scales(Vec2::new(40.0, 20.0), start, 1.0, 1.0, true, 0.6);
         assert!((sx - 1.0).abs() < 1e-3 && (sy - 1.0).abs() < 1e-3);
         // Dragging the corner twice as far doubles each axis's scale (box widget).
-        let (sx, sy) = resize_scales(Vec2::new(80.0, 40.0), start, 1.0, 1.0, true);
+        let (sx, sy) = resize_scales(Vec2::new(80.0, 40.0), start, 1.0, 1.0, true, 0.6);
         assert!((sx - 2.0).abs() < 1e-3 && (sy - 2.0).abs() < 1e-3);
         // Uniform widgets average the two axis factors and keep both equal.
-        let (sx, sy) = resize_scales(Vec2::new(80.0, 20.0), start, 1.0, 1.0, false);
+        let (sx, sy) = resize_scales(Vec2::new(80.0, 20.0), start, 1.0, 1.0, false, 0.6);
         assert_eq!(sx, sy);
         assert!((sx - 1.5).abs() < 1e-3); // (2.0 + 1.0) / 2
                                           // Extremes clamp into range and never invert.
         for local in [Vec2::new(-500.0, -500.0), Vec2::new(9999.0, 9999.0)] {
-            let (sx, sy) = resize_scales(local, start, 1.0, 1.0, true);
+            let (sx, sy) = resize_scales(local, start, 1.0, 1.0, true, 0.6);
             assert!((0.6..=MAX_SCALE).contains(&sx));
             assert!((0.6..=MAX_SCALE).contains(&sy));
         }
+        let (sx, sy) = resize_scales(Vec2::ZERO, start, 1.0, 1.0, true, 0.1);
+        assert_eq!((sx, sy), (0.1, 0.1));
     }
 }

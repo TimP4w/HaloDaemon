@@ -391,6 +391,14 @@ pub enum DaemonCommand {
         plugin_id: String,
         name: String,
     },
+    /// Fetch a declared LCD widget SVG after daemon-side validation and rasterization.
+    GetLcdWidgetIcon {
+        catalog_id: String,
+    },
+    /// Fetch and validate a declarative plugin layout preset.
+    GetLcdPluginPreset {
+        catalog_id: String,
+    },
 
     // Canvas
     CanvasUpsertEffect {

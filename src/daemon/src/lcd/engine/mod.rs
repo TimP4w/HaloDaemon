@@ -82,7 +82,7 @@ const EDITOR_SESSION_EVICT_INTERVAL: std::time::Duration = std::time::Duration::
 pub struct LcdEngine {
     app_state: Arc<AppState>,
     /// Per-device live template instances, keyed by device_id.
-    device_slots: Mutex<HashMap<String, DeviceSlot>>,
+    device_slots: Mutex<HashMap<String, Arc<Mutex<DeviceSlot>>>>,
     frame_tx: FrameTx,
     /// Wakes the render loop the instant a template becomes active, so an idle
     /// engine starts rendering without waiting for the next poll.
@@ -119,12 +119,16 @@ impl LcdEngine {
         params: &HashMap<String, EffectParamValue>,
     ) {
         if let Some(tmpl) = build_template(template_id, params) {
+            let existing = self.device_slots.lock().await.get(device_id).cloned();
+            let frame_id = match &existing {
+                Some(slot) => slot.lock().await.frame_id,
+                None => 0,
+            };
             let mut slots = self.device_slots.lock().await;
-            let existed = slots.contains_key(device_id);
-            let frame_id = slots.get(device_id).map(|s| s.frame_id).unwrap_or(0);
+            let existed = existing.is_some();
             slots.insert(
                 device_id.to_string(),
-                DeviceSlot {
+                Arc::new(Mutex::new(DeviceSlot {
                     template_id: template_id.to_string(),
                     params: params.clone(),
                     template: tmpl,
@@ -134,7 +138,7 @@ impl LcdEngine {
                     frame_buf: RgbaImage::new(0, 0),
                     png_buf: Vec::new(),
                     b64_buf: String::new(),
-                },
+                })),
             );
             drop(slots);
             if should_trim_on_swap(existed) {
@@ -210,11 +214,14 @@ impl LcdEngine {
     }
 
     pub fn wire_state(
+        registry: &crate::drivers::plugins::Registry,
         device_templates: HashMap<String, String>,
         device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
     ) -> WireLcdEngineState {
         WireLcdEngineState {
             available_templates: vec![CustomTemplate::descriptor()],
+            available_widgets: registry.widget_descriptors(),
+            available_presets: registry.preset_descriptors(),
             device_templates,
             device_template_params,
         }
@@ -293,20 +300,27 @@ impl LcdEngine {
         // Add missing slots; replace slots whose template_id or params changed.
         let mut swapped_slot = false;
         for (device_id, (template_id, params)) in &device_templates {
-            let needs_insert = match slots.get(device_id) {
-                Some(slot) => slot.template_id != *template_id || slot.params != *params,
-                None => true,
+            let current_handle = slots.get(device_id).cloned();
+            let (needs_insert, frame_id, existed) = match current_handle {
+                Some(handle) => {
+                    // A concurrent explicit template update owns the slot. It
+                    // will replace it itself, so leave this tick's map alone.
+                    let Ok(current) = handle.try_lock() else {
+                        continue;
+                    };
+                    (
+                        current.template_id != *template_id || current.params != *params,
+                        current.frame_id,
+                        true,
+                    )
+                }
+                None => (true, 0, false),
             };
             if needs_insert {
                 if let Some(tmpl) = build_template(template_id, params) {
-                    let existed = slots.contains_key(device_id.as_str());
-                    let frame_id = slots
-                        .get(device_id.as_str())
-                        .map(|s| s.frame_id)
-                        .unwrap_or(0);
                     slots.insert(
                         device_id.clone(),
-                        DeviceSlot {
+                        Arc::new(Mutex::new(DeviceSlot {
                             template_id: template_id.clone(),
                             params: params.clone(),
                             template: tmpl,
@@ -316,7 +330,7 @@ impl LcdEngine {
                             frame_buf: RgbaImage::new(0, 0),
                             png_buf: Vec::new(),
                             b64_buf: String::new(),
-                        },
+                        })),
                     );
                     swapped_slot |= should_trim_on_swap(existed);
                 }
@@ -337,8 +351,15 @@ impl LcdEngine {
             }
         }
 
-        for (device_id, slot) in slots.iter_mut() {
-            let Some(device) = devices.iter().find(|d| d.id() == *device_id) else {
+        let live_slots: Vec<(String, Arc<Mutex<DeviceSlot>>)> = slots
+            .iter()
+            .map(|(device_id, slot)| (device_id.clone(), Arc::clone(slot)))
+            .collect();
+        drop(slots);
+
+        for (device_id, slot_handle) in live_slots {
+            let mut slot = slot_handle.lock().await;
+            let Some(device) = devices.iter().find(|d| d.id() == device_id.as_str()) else {
                 log::debug!("LCD engine: device {device_id} not found, skipping");
                 continue;
             };
@@ -359,18 +380,28 @@ impl LcdEngine {
                 width: descriptor.width,
                 height: descriptor.height,
                 t,
-                frame: slot.frame_id,
                 sensors: &sensors,
             };
 
             let force = preview_just_subscribed || slot.last_sig.is_none() || slot.fail_streak > 0;
+            slot.template
+                .gather_plugin_sprites(&ctx, &self.app_state)
+                .await;
             let sig = slot.template.content_signature(&ctx);
             if !force && descriptor.latches_last_frame && sig.is_some() && sig == slot.last_sig {
                 continue;
             }
 
             let tr = std::time::Instant::now();
-            if let Err(e) = slot.template.render(&ctx, &mut slot.frame_buf) {
+            let render_result = {
+                let DeviceSlot {
+                    template,
+                    frame_buf,
+                    ..
+                } = &mut *slot;
+                template.render(&ctx, frame_buf)
+            };
+            if let Err(e) = render_result {
                 log::warn!("LCD engine: template render error for {device_id}: {e}");
                 continue;
             };
@@ -383,14 +414,36 @@ impl LcdEngine {
 
             slot.frame_id += 1;
 
+            // A template update may have replaced this slot while its plugin
+            // render was awaiting. Never stream the obsolete result.
+            let still_current = self
+                .device_slots
+                .lock()
+                .await
+                .get(&device_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &slot_handle));
+            if !still_current {
+                continue;
+            }
+
             // Broadcast the preview before the (blocking) device push, at render rate.
             if receiver_count > 0 {
-                if templates::encode_png_into(&slot.frame_buf, &mut slot.png_buf).is_ok() {
+                let encoded = {
+                    let DeviceSlot {
+                        frame_buf, png_buf, ..
+                    } = &mut *slot;
+                    templates::encode_png_into(frame_buf, png_buf)
+                };
+                if encoded.is_ok() {
                     use base64::Engine as _;
-                    slot.b64_buf.clear();
-                    base64::engine::general_purpose::STANDARD
-                        .encode_string(&slot.png_buf, &mut slot.b64_buf);
-                    if let Some(frame) = encode_wire_frame(device_id, slot.frame_id, &slot.b64_buf)
+                    {
+                        let DeviceSlot {
+                            png_buf, b64_buf, ..
+                        } = &mut *slot;
+                        b64_buf.clear();
+                        base64::engine::general_purpose::STANDARD.encode_string(png_buf, b64_buf);
+                    }
+                    if let Some(frame) = encode_wire_frame(&device_id, slot.frame_id, &slot.b64_buf)
                     {
                         let _ = self.frame_tx.send(frame);
                     }
@@ -472,20 +525,16 @@ mod tests {
             "slot must be inserted"
         );
 
-        engine
-            .device_slots
-            .lock()
-            .await
-            .get_mut("dev1")
-            .unwrap()
-            .frame_id = 7;
+        let slot = engine.device_slots.lock().await["dev1"].clone();
+        slot.lock().await.frame_id = 7;
 
         // Hot-swap with the same template — frame_id must be preserved.
         engine
             .set_template_active("dev1", "custom", &HashMap::new())
             .await;
+        let slot = engine.device_slots.lock().await["dev1"].clone();
         assert_eq!(
-            engine.device_slots.lock().await["dev1"].frame_id,
+            slot.lock().await.frame_id,
             7,
             "frame_id must survive hot-swap"
         );
@@ -517,8 +566,12 @@ mod tests {
         )]);
         engine.set_template_active("dev1", "custom", &params).await;
 
-        let slots = engine.device_slots.lock().await;
-        assert_eq!(slots["dev1"].params, params, "swap must install new params");
+        let slot = engine.device_slots.lock().await["dev1"].clone();
+        assert_eq!(
+            slot.lock().await.params,
+            params,
+            "swap must install new params"
+        );
     }
 
     /// Install every domain engine so usecases that go through them (e.g.
@@ -702,7 +755,8 @@ mod tests {
         // The first FAIL_BACKOFF_THRESHOLD ticks all attempt a render; the +1th tick
         // enters the backoff branch (fail_streak >= threshold && streak % BACKOFF_TICKS != 0)
         // and skips the render entirely.
-        let frame_id = engine.device_slots.lock().await["lcd2"].frame_id;
+        let slot = engine.device_slots.lock().await["lcd2"].clone();
+        let frame_id = slot.lock().await.frame_id;
         assert_eq!(
             frame_id, FAIL_BACKOFF_THRESHOLD as u64,
             "only FAIL_BACKOFF_THRESHOLD renders must fire before backoff kicks in"
@@ -755,9 +809,10 @@ mod tests {
 
         let engine = LcdEngine::new(app);
         engine.tick(0.0).await;
-        let after_first = engine.device_slots.lock().await["lcd3"].frame_id;
+        let slot = engine.device_slots.lock().await["lcd3"].clone();
+        let after_first = slot.lock().await.frame_id;
         engine.tick(1.0).await;
-        let after_second = engine.device_slots.lock().await["lcd3"].frame_id;
+        let after_second = slot.lock().await.frame_id;
 
         assert_eq!(
             after_first, after_second,
@@ -787,9 +842,10 @@ mod tests {
 
         let engine = LcdEngine::new(app);
         engine.tick(0.0).await;
-        let after_first = engine.device_slots.lock().await["lcd4"].frame_id;
+        let slot = engine.device_slots.lock().await["lcd4"].clone();
+        let after_first = slot.lock().await.frame_id;
         engine.tick(1.0).await;
-        let after_second = engine.device_slots.lock().await["lcd4"].frame_id;
+        let after_second = slot.lock().await.frame_id;
 
         assert_eq!(
             after_second,

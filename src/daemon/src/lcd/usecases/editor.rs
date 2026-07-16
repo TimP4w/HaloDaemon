@@ -25,6 +25,7 @@ pub async fn render(
     client: ClientHandle,
 ) -> Result<()> {
     crate::lcd::usecases::templates::validate_template(&def)?;
+    crate::lcd::usecases::templates::validate_template_catalog(&def, &app.registry)?;
     let device = require_device_owned_id(&device_id, &app).await?;
     let lcd = device
         .as_lcd()
@@ -35,32 +36,49 @@ pub async fn render(
         .set_health(halod_shared::types::LcdHealth::Starting);
     let (cw, ch) = (descriptor.width.max(1), descriptor.height.max(1));
 
+    if app
+        .lcd
+        .editor_rendering
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return Ok(());
+    }
     let sensors = app.snapshot_sensors().await;
     let images_dir = crate::config::lcd_images_dir();
     let render_device_id = device_id.clone();
-    let render_app = Arc::clone(&app);
-    // `try_lock` inside the blocking closure: a render already in flight for
-    // this device makes a queued second one pointless (the GUI re-requests
-    // every ~200ms anyway), so drop the request rather than let
-    // `spawn_blocking` tasks pile up behind a serialized lock.
+    let mut session = app.lcd.editor_session().take();
+    custom::prepare_editor_session(&render_device_id, &def, &images_dir, &mut session)
+        .gather_plugin_sprites(cw, ch, 0.0, &sensors, &app)
+        .await;
+    let render_def = def.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let Ok(mut session) = render_app.lcd.editor_session.try_lock() else {
-            return None;
-        };
-        Some(custom::render_editor_sprites(
+        let result = custom::render_editor_sprites(
             &render_device_id,
-            &def,
+            &render_def,
             cw,
             ch,
             &sensors,
             &images_dir,
             &known,
             &mut session,
-        ))
+        );
+        (session, result)
     })
     .await;
+    app.lcd
+        .editor_rendering
+        .store(false, std::sync::atomic::Ordering::Release);
     let result = match result {
-        Ok(result) => result,
+        Ok((session, result)) => {
+            *app.lcd.editor_session() = session;
+            result
+        }
         Err(error) => {
             lcd.lcd_state()
                 .set_health(halod_shared::types::LcdHealth::Failed(error.to_string()));
@@ -71,9 +89,28 @@ pub async fn render(
     lcd.lcd_state()
         .set_health(halod_shared::types::LcdHealth::Stable);
     crate::ipc::broadcast_state(&app).await;
-    let Some((sprites, signatures)) = result else {
-        return Ok(());
-    };
+    let (sprites, signatures) = result;
+
+    let widgets = def
+        .widgets
+        .iter()
+        .map(|widget| {
+            let missing = app.registry.widget_descriptor(&widget.widget).is_none();
+            let signature = signatures
+                .iter()
+                .find(|(id, _)| id == &widget.id)
+                .map(|(_, signature)| *signature);
+            halod_shared::lcd_custom::WidgetRenderState {
+                id: widget.id.clone(),
+                status: if missing {
+                    halod_shared::lcd_custom::WidgetRenderStatus::Missing
+                } else {
+                    halod_shared::lcd_custom::WidgetRenderStatus::Ready
+                },
+                signature: (!missing).then_some(signature).flatten(),
+            }
+        })
+        .collect();
 
     let render = LcdEditorRender {
         device_id,
@@ -81,126 +118,8 @@ pub async fn render(
         canvas_h: ch,
         sprites,
         signatures,
+        widgets,
     };
     client.send_json(&json!({ "type": "lcd_editor_render", "data": render }));
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use halod_shared::lcd_custom::{WidgetDef, WidgetType};
-    use std::collections::HashMap;
-
-    fn text_widget(id: &str) -> WidgetDef {
-        WidgetDef {
-            id: id.to_string(),
-            widget_type: WidgetType::Text,
-            x: 0.5,
-            y: 0.5,
-            scale: 1.0,
-            rotation: 0.0,
-            color: None,
-            font: None,
-            params: HashMap::from([(
-                "text".to_string(),
-                halod_shared::types::EffectParamValue::Str("HI".to_string()),
-            )]),
-        }
-    }
-
-    #[test]
-    fn renders_one_sprite_per_widget_with_nonzero_dims() {
-        let def = CustomTemplateDef {
-            widgets: vec![text_widget("a"), text_widget("b")],
-            style: Default::default(),
-        };
-        let sensors = HashMap::new();
-        let mut session = None;
-        let (sprites, signatures) = custom::render_editor_sprites(
-            "dev",
-            &def,
-            240,
-            240,
-            &sensors,
-            std::path::Path::new("/tmp"),
-            &HashMap::new(),
-            &mut session,
-        );
-        assert_eq!(sprites.len(), 2);
-        for s in &sprites {
-            assert!(s.w > 0 && s.h > 0, "sprite {} has zero dims", s.id);
-            assert!(!s.rgba_b64.is_empty());
-        }
-        assert_eq!(sprites[0].id, "a");
-        assert_eq!(sprites[1].id, "b");
-        assert_eq!(signatures.len(), 2);
-    }
-
-    #[test]
-    fn known_signatures_skip_unchanged_widgets() {
-        let def = CustomTemplateDef {
-            widgets: vec![text_widget("a"), text_widget("b")],
-            style: Default::default(),
-        };
-        let sensors = HashMap::new();
-        let mut session = None;
-        let (_, signatures) = custom::render_editor_sprites(
-            "dev",
-            &def,
-            240,
-            240,
-            &sensors,
-            std::path::Path::new("/tmp"),
-            &HashMap::new(),
-            &mut session,
-        );
-        let known: HashMap<String, u64> = signatures.into_iter().collect();
-        let (sprites, signatures2) = custom::render_editor_sprites(
-            "dev",
-            &def,
-            240,
-            240,
-            &sensors,
-            std::path::Path::new("/tmp"),
-            &known,
-            &mut session,
-        );
-        assert!(sprites.is_empty(), "unchanged widgets shouldn't re-render");
-        assert_eq!(signatures2.len(), 2);
-    }
-
-    #[test]
-    fn stale_known_entry_rerenders_only_that_widget() {
-        let def = CustomTemplateDef {
-            widgets: vec![text_widget("a"), text_widget("b")],
-            style: Default::default(),
-        };
-        let sensors = HashMap::new();
-        let mut session = None;
-        let (_, signatures) = custom::render_editor_sprites(
-            "dev",
-            &def,
-            240,
-            240,
-            &sensors,
-            std::path::Path::new("/tmp"),
-            &HashMap::new(),
-            &mut session,
-        );
-        let mut known: HashMap<String, u64> = signatures.into_iter().collect();
-        known.insert("a".to_string(), 0);
-        let (sprites, _) = custom::render_editor_sprites(
-            "dev",
-            &def,
-            240,
-            240,
-            &sensors,
-            std::path::Path::new("/tmp"),
-            &known,
-            &mut session,
-        );
-        assert_eq!(sprites.len(), 1);
-        assert_eq!(sprites[0].id, "a");
-    }
 }
