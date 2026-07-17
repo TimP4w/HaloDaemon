@@ -7,23 +7,7 @@ use halod_shared::types::{LedPosition, PlacedZone};
 
 use super::{DragState, Handle, MarqueeState};
 
-/// The largest rect of the given `aspect` (w/h) that fits inside `outer`,
-/// centred — i.e. an aspect-preserving letterbox.
-pub(super) fn letterbox(outer: Rect, aspect: f32) -> Rect {
-    if aspect <= 0.0 || !aspect.is_finite() {
-        return outer;
-    }
-    let (ow, oh) = (outer.width(), outer.height());
-    if oh <= 0.0 {
-        return outer;
-    }
-    let (w, h) = if ow / oh > aspect {
-        (oh * aspect, oh)
-    } else {
-        (ow, ow / aspect)
-    };
-    Rect::from_center_size(outer.center(), Vec2::new(w, h))
-}
+pub(super) use crate::ui::components::letterbox;
 
 /// Pre-computed-sin/cos variant; call when sin/cos are already available to
 /// avoid recomputing the transcendentals.

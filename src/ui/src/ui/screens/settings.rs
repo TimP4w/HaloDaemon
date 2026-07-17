@@ -310,6 +310,26 @@ fn start_on_boot_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
     }
 }
 
+/// The daemon replaces the whole UI config on `SetUiConfig`, so every toggle
+/// sends the current snapshot with only its own field overridden (`Some`).
+fn send_ui_config(
+    cmd: &CommandTx,
+    state: &AppState,
+    close_to_tray: Option<bool>,
+    suppress_dependency_warning: Option<bool>,
+    hide_window_controls: Option<bool>,
+) {
+    crate::runtime::ipc::send(
+        cmd,
+        halod_shared::commands::DaemonCommand::SetUiConfig {
+            close_to_tray: close_to_tray.unwrap_or(state.gui.close_to_tray),
+            suppress_dependency_warning: suppress_dependency_warning
+                .unwrap_or(state.gui.suppress_dependency_warning),
+            hide_window_controls: hide_window_controls.unwrap_or(state.gui.hide_window_controls),
+        },
+    );
+}
+
 fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(
@@ -320,14 +340,7 @@ fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     );
     let on = state.gui.close_to_tray;
     if row_toggle(ui, rect, on, "close_to_tray") {
-        crate::runtime::ipc::send(
-            cmd,
-            halod_shared::commands::DaemonCommand::SetUiConfig {
-                close_to_tray: !on,
-                suppress_dependency_warning: state.gui.suppress_dependency_warning,
-                hide_window_controls: state.gui.hide_window_controls,
-            },
-        );
+        send_ui_config(cmd, state, Some(!on), None, None);
     }
 }
 
@@ -358,14 +371,7 @@ fn window_controls_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     );
     let on = !state.gui.hide_window_controls;
     if row_toggle(ui, rect, on, "window_controls") {
-        crate::runtime::ipc::send(
-            cmd,
-            halod_shared::commands::DaemonCommand::SetUiConfig {
-                close_to_tray: state.gui.close_to_tray,
-                suppress_dependency_warning: state.gui.suppress_dependency_warning,
-                hide_window_controls: on,
-            },
-        );
+        send_ui_config(cmd, state, None, None, Some(on));
     }
 }
 
@@ -379,14 +385,7 @@ fn dependency_warning_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) 
     );
     let warn_on = !state.gui.suppress_dependency_warning;
     if row_toggle(ui, rect, warn_on, "dependency_warning") {
-        crate::runtime::ipc::send(
-            cmd,
-            halod_shared::commands::DaemonCommand::SetUiConfig {
-                close_to_tray: state.gui.close_to_tray,
-                suppress_dependency_warning: warn_on,
-                hide_window_controls: state.gui.hide_window_controls,
-            },
-        );
+        send_ui_config(cmd, state, None, Some(warn_on), None);
     }
 }
 

@@ -203,7 +203,7 @@ pub(super) fn instance_params(
                     _ => options.first().cloned().unwrap_or_default(),
                 };
                 ui.add_space(theme::SPACE_3);
-                ui.horizontal_wrapped(|ui| {
+                widgets::pill_strip(ui, |ui| {
                     for opt in options {
                         let label = effect_enum_option_label(&param.id, opt);
                         if widgets::pill(ui, &label, *opt == selected) {

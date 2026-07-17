@@ -1350,18 +1350,7 @@ pub(crate) fn decode_new_assets(
         if textures.contains_key(key) {
             continue;
         }
-        if let Some(img) = image::load_from_memory(bytes).ok().map(|i| i.into_rgba8()) {
-            let (w, h) = (img.width() as usize, img.height() as usize);
-            let pixels: Vec<egui::Color32> = img
-                .into_raw()
-                .chunks_exact(4)
-                .map(|c| egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
-                .collect();
-            let tex = ctx.load_texture(
-                key.clone(),
-                egui::ColorImage::new([w, h], pixels),
-                egui::TextureOptions::LINEAR,
-            );
+        if let Some(tex) = widgets::tex_from_bytes(ctx, bytes, key) {
             textures.insert(key.clone(), tex);
         }
     }
@@ -2022,7 +2011,7 @@ fn detail_body(
 
     if !p.license.is_empty() || !matches!(p.source, PluginSource::Local) {
         ui.add_space(theme::SPACE_5);
-        ui.horizontal_wrapped(|ui| {
+        widgets::pill_strip(ui, |ui| {
             if !p.license.is_empty() {
                 widgets::chip(ui, &format!("⚖ {}", p.license));
             }
@@ -2084,7 +2073,7 @@ fn detail_body(
         ui.add_space(theme::SPACE_8);
         widgets::caps_label(ui, &t!("plugins.capabilities"));
         ui.add_space(theme::SPACE_3);
-        ui.horizontal_wrapped(|ui| {
+        widgets::pill_strip(ui, |ui| {
             for c in &p.capabilities {
                 widgets::chip(ui, c);
             }
@@ -3249,13 +3238,7 @@ fn repo_detail_body(
 
     let mut clicked = None;
     for p in &repo_plugins {
-        let (rect, resp) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
-        if resp.hovered() {
-            ui.painter()
-                .rect_filled(rect, 8.0, theme::a(theme::ROW_ACTIVE, 0.55));
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
+        let (rect, resp) = widgets::hover_row(ui, 42.0, false);
         let tile_rect = Rect::from_min_size(
             Pos2::new(rect.left() + 6.0, rect.center().y - 12.0),
             Vec2::splat(24.0),

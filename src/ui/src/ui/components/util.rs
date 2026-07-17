@@ -14,6 +14,25 @@ pub fn snap_to_step(v: f32, min: f32, max: f32, step: f32) -> f32 {
     (min + ((clamped - min) / step).round() * step).clamp(min, max)
 }
 
+/// The largest rect of the given `aspect` (w/h) that fits inside `outer`,
+/// centred — i.e. an aspect-preserving letterbox. Shared by the effects
+/// canvas and the effect designer's preview rigs.
+pub fn letterbox(outer: egui::Rect, aspect: f32) -> egui::Rect {
+    if aspect <= 0.0 || !aspect.is_finite() {
+        return outer;
+    }
+    let (ow, oh) = (outer.width(), outer.height());
+    if oh <= 0.0 {
+        return outer;
+    }
+    let (w, h) = if ow / oh > aspect {
+        (oh * aspect, oh)
+    } else {
+        (ow, ow / aspect)
+    };
+    egui::Rect::from_center_size(outer.center(), egui::Vec2::new(w, h))
+}
+
 /// Fill the area under a polyline down to `baseline_y` with `color`, as a
 /// triangle-strip mesh. Shared by the sparkline, the curve editor and the
 /// read-only cooling curve preview.

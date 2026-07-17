@@ -46,15 +46,11 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
             }
             if !st.lcd.editor.widget_icon_tex.contains_key(&descriptor.id) {
                 if let Some(bytes) = ctx.plugin_assets.get(&asset_key) {
-                    if let Ok(image) = image::load_from_memory(bytes) {
-                        let image = image.to_rgba8();
-                        let size = [image.width() as usize, image.height() as usize];
-                        let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-                        let texture = ui.ctx().load_texture(
-                            format!("lcd_widget_icon_{}", descriptor.id),
-                            color,
-                            egui::TextureOptions::LINEAR,
-                        );
+                    if let Some(texture) = widgets::tex_from_bytes(
+                        ui.ctx(),
+                        bytes,
+                        &format!("lcd_widget_icon_{}", descriptor.id),
+                    ) {
                         st.lcd
                             .editor
                             .widget_icon_tex

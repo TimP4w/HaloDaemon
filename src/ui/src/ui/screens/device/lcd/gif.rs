@@ -5,41 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
-use egui::Color32;
-
 use crate::ui::screens::device::{DeviceUi, GifFrame, TabCtx};
 
 // ── Textures ──────────────────────────────────────────────────────────────────
 
-/// Build an egui texture from a raw RGBA8 buffer.
-pub(super) fn rgba_texture(
-    ctx: &egui::Context,
-    name: &str,
-    rgba: &[u8],
-    w: usize,
-    h: usize,
-) -> egui::TextureHandle {
-    let pixels: Vec<Color32> = rgba
-        .chunks_exact(4)
-        .map(|c| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
-        .collect();
-    ctx.load_texture(
-        name,
-        egui::ColorImage::new([w, h], pixels),
-        egui::TextureOptions::LINEAR,
-    )
-}
-
-/// Decode encoded image bytes (PNG/JPEG/first GIF frame) into a texture.
-fn load_tex_from_bytes(
-    ctx: &egui::Context,
-    bytes: &[u8],
-    name: &str,
-) -> Option<egui::TextureHandle> {
-    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
-    let (w, h) = (img.width() as usize, img.height() as usize);
-    Some(rgba_texture(ctx, name, &img.into_raw(), w, h))
-}
+pub(super) use crate::ui::components::rgba_texture;
+use crate::ui::components::tex_from_bytes as load_tex_from_bytes;
 
 // ── On-disk library ───────────────────────────────────────────────────────────
 

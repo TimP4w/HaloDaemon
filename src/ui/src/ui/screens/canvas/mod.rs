@@ -12,7 +12,7 @@ mod viewport;
 use std::collections::{HashMap, HashSet};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use egui::{Color32, Pos2, Rect, Vec2};
+use egui::{Pos2, Rect, Vec2};
 use halod_shared::types::{AppState, CanvasFrame, EffectParamValue, PlacedZone, RgbColor};
 
 pub(crate) use chrome::chrome;
@@ -328,12 +328,13 @@ pub fn ingest_frame(ctx: &egui::Context, ui: &mut CanvasUi, frame: &CanvasFrame)
     if w > 0 && h > 0 {
         ui.canvas_aspect = w as f32 / h as f32;
     }
-    let pixels: Vec<Color32> = bytes
-        .chunks_exact(4)
-        .map(|c| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
-        .collect();
-    let image = egui::ColorImage::new([w, h], pixels);
-    ui.texture = Some(ctx.load_texture("canvas_frame", image, egui::TextureOptions::LINEAR));
+    ui.texture = Some(crate::ui::components::rgba_texture(
+        ctx,
+        "canvas_frame",
+        &bytes,
+        w,
+        h,
+    ));
     ui.texture_frame_id = frame.frame_id;
 }
 

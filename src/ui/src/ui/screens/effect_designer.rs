@@ -753,14 +753,7 @@ fn parse_import(bytes: &[u8]) -> Result<(String, DesignerParams), String> {
 /// content (e.g. a ring) keeps its true proportions instead of stretching to
 /// fill whatever rect the layout happened to allocate.
 fn fit_aspect_rect(inner: Rect, aspect_w: f32, aspect_h: f32) -> Rect {
-    let target_ratio = aspect_w / aspect_h;
-    let inner_ratio = inner.width() / inner.height();
-    let size = if inner_ratio > target_ratio {
-        Vec2::new(inner.height() * target_ratio, inner.height())
-    } else {
-        Vec2::new(inner.width(), inner.width() / target_ratio)
-    };
-    Rect::from_center_size(inner.center(), size)
+    widgets::letterbox(inner, aspect_w / aspect_h)
 }
 
 /// Each rig returns `(p_zone, p_ring, nx, ny)`: `p_zone`/`p_ring` are the

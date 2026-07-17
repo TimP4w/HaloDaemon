@@ -319,26 +319,19 @@ fn default_effect_card(
         &t!("canvas.default_effect_title"),
         |_ui| {},
         |ui| {
-            let mut selected = current.clone();
-            let label = current
-                .as_deref()
-                .map(|id| instance_name(effects, id).to_string())
-                .unwrap_or_else(|| t!("canvas.off").to_string());
-            let w = ui.available_width();
-            egui::ComboBox::from_id_salt("canvas_default_effect")
-                .width(w)
-                .selected_text(label)
-                .show_ui(ui, |ui| {
-                    ui.set_max_width(w);
-                    ui.selectable_value(&mut selected, None, t!("canvas.off").to_string());
-                    for id in ids {
-                        ui.selectable_value(
-                            &mut selected,
-                            Some(id.clone()),
-                            instance_name(effects, id),
-                        );
-                    }
-                });
+            let opts: Vec<(String, String)> = ids
+                .iter()
+                .map(|id| (id.clone(), instance_name(effects, id).to_string()))
+                .collect();
+            let selected = widgets::combo_picker_full(
+                ui,
+                "canvas_default_effect",
+                &opts,
+                current.as_deref().unwrap_or(""),
+                Some(&t!("canvas.off")),
+            )
+            .map(|id| (!id.is_empty()).then_some(id))
+            .unwrap_or_else(|| current.clone());
             if selected != current {
                 crate::runtime::ipc::send(
                     cmd,
@@ -584,17 +577,15 @@ fn instance_row(
     widgets::caps_label(ui, &t!("canvas.effect_caps"));
     ui.add_space(theme::SPACE_3);
     {
-        let mut sel = def.effect_id.clone();
-        let w = ui.available_width();
-        egui::ComboBox::from_id_salt(("inst_effect", id))
-            .width(w)
-            .selected_text(eff_name.to_string())
-            .show_ui(ui, |ui| {
-                ui.set_max_width(w);
-                for e in &state.lighting.canvas.available_effects {
-                    ui.selectable_value(&mut sel, e.id.clone(), &e.name);
-                }
-            });
+        let opts: Vec<(String, String)> = state
+            .lighting
+            .canvas
+            .available_effects
+            .iter()
+            .map(|e| (e.id.clone(), e.name.clone()))
+            .collect();
+        let sel = widgets::combo_picker_full(ui, ("inst_effect", id), &opts, &def.effect_id, None)
+            .unwrap_or_else(|| def.effect_id.clone());
         if sel != def.effect_id {
             canvas_ui.param_edits.remove(id);
             let params = state
