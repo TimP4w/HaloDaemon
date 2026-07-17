@@ -310,6 +310,24 @@ pub fn editing(ui_state: &DeviceUi, time: f64) -> bool {
     time - ui_state.last_edit < 1.5
 }
 
+/// Per-frame daemon-facing bundle handed from the render root to the device
+/// page; [`TabCtx`] narrows it to one resolved device.
+pub struct FrameCtx<'a> {
+    pub state: &'a AppState,
+    pub cmd: &'a CommandTx,
+    pub time: f64,
+    pub debug: Option<&'a DebugInfo>,
+    pub lcd_images: &'a [String],
+    pub lcd_preview: Option<crate::runtime::ipc::DecodedFrame>,
+    pub lcd_upload: Option<halod_shared::types::LcdUploadProgress>,
+    pub lcd_upload_terminal: Option<halod_shared::types::LcdUploadProgress>,
+    pub lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
+    pub lcd_editor_render: Option<crate::runtime::ipc::DecodedEditorRender>,
+    pub led_colors: &'a crate::ui::screens::canvas::LedColorMap,
+    pub write_rate_history: &'a HashMap<String, std::collections::VecDeque<f32>>,
+    pub plugin_assets: &'a HashMap<String, Vec<u8>>,
+}
+
 /// Shared per-tab context to keep tab signatures small.
 pub struct TabCtx<'a> {
     pub state: &'a AppState,
@@ -375,26 +393,14 @@ pub fn request_cooling_tab(ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp(pending_tab_id(), true));
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
-    state: &AppState,
-    cmd: &CommandTx,
+    frame: FrameCtx,
     id: &str,
     ui_state: &mut DeviceUi,
     page: &mut Page,
-    time: f64,
-    debug: Option<&DebugInfo>,
-    lcd_images: &[String],
-    lcd_preview: Option<crate::runtime::ipc::DecodedFrame>,
-    lcd_upload: Option<halod_shared::types::LcdUploadProgress>,
-    lcd_upload_terminal: Option<halod_shared::types::LcdUploadProgress>,
-    lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
-    lcd_editor_render: Option<crate::runtime::ipc::DecodedEditorRender>,
-    led_colors: &crate::ui::screens::canvas::LedColorMap,
-    write_rate_history: Option<&std::collections::VecDeque<f32>>,
-    plugin_assets: &std::collections::HashMap<String, Vec<u8>>,
 ) {
+    let (state, cmd, time) = (frame.state, frame.cmd, frame.time);
     let Some(dev) = state.devices.iter().find(|d| d.id == id) else {
         *page = Page::Home;
         return;
@@ -447,16 +453,16 @@ pub fn show(
                     dev,
                     cmd,
                     time,
-                    debug,
-                    lcd_images,
-                    lcd_preview,
-                    lcd_upload,
-                    lcd_upload_terminal,
-                    lcd_template,
-                    lcd_editor_render,
-                    led_colors,
-                    write_rate_history,
-                    plugin_assets,
+                    debug: frame.debug,
+                    lcd_images: frame.lcd_images,
+                    lcd_preview: frame.lcd_preview,
+                    lcd_upload: frame.lcd_upload,
+                    lcd_upload_terminal: frame.lcd_upload_terminal,
+                    lcd_template: frame.lcd_template,
+                    lcd_editor_render: frame.lcd_editor_render,
+                    led_colors: frame.led_colors,
+                    write_rate_history: frame.write_rate_history.get(id),
+                    plugin_assets: frame.plugin_assets,
                 };
                 if let Some(tab) = tabs.get(ui_state.tab) {
                     match tab.kind {
@@ -593,25 +599,28 @@ mod tests {
             )),
             ..Default::default()
         };
+        let write_rate_history = HashMap::new();
         let _ = ctx.run_ui(input, |ui| {
             show(
                 ui,
-                &state,
-                &tx,
+                FrameCtx {
+                    state: &state,
+                    cmd: &tx,
+                    time: 0.0,
+                    debug: None,
+                    lcd_images: &[],
+                    lcd_preview: None,
+                    lcd_upload: None,
+                    lcd_upload_terminal: None,
+                    lcd_template: None,
+                    lcd_editor_render: None,
+                    led_colors: empty_led_colors(),
+                    write_rate_history: &write_rate_history,
+                    plugin_assets: empty_plugin_assets(),
+                },
                 &id,
                 &mut ui_state,
                 &mut page,
-                0.0,
-                None,
-                &[],
-                None,
-                None,
-                None,
-                None,
-                None,
-                empty_led_colors(),
-                None,
-                empty_plugin_assets(),
             );
         });
 

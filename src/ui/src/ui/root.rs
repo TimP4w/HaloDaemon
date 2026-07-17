@@ -384,24 +384,27 @@ impl App {
                     }
                     Page::Device(id) => {
                         let id = id.clone();
-                        crate::ui::screens::device::show(
-                            ui,
-                            &state,
-                            &self.cmd,
-                            &id,
-                            &mut self.device_ui,
-                            &mut self.page,
+                        let frame = crate::ui::screens::device::FrameCtx {
+                            state: &state,
+                            cmd: &self.cmd,
                             time,
-                            debug.as_ref(),
-                            &lcd_images,
+                            debug: debug.as_ref(),
+                            lcd_images: &lcd_images,
                             lcd_preview,
                             lcd_upload,
                             lcd_upload_terminal,
                             lcd_template,
                             lcd_editor_render,
-                            self.canvas_ui.led_colors(),
-                            self.write_rate_history.get(&id),
-                            &plugin_assets,
+                            led_colors: self.canvas_ui.led_colors(),
+                            write_rate_history: &self.write_rate_history,
+                            plugin_assets: &plugin_assets,
+                        };
+                        crate::ui::screens::device::show(
+                            ui,
+                            frame,
+                            &id,
+                            &mut self.device_ui,
+                            &mut self.page,
                         );
                     }
                     Page::Cooling => {
