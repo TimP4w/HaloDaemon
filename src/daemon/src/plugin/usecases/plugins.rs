@@ -732,20 +732,49 @@ mod tests {
         std::fs::write(dir.join("main.lua"), CONFIG_TEST_PLUGIN).unwrap();
     }
 
+    const CONFIG_TEST_REPO_SLUG: &str = "cfgtest-repo";
+
+    fn config_test_repo_record() -> crate::config::PluginRepoRecord {
+        crate::config::PluginRepoRecord {
+            url: "test://cfgtest".to_owned(),
+            slug: CONFIG_TEST_REPO_SLUG.to_owned(),
+            repository_id: None,
+            trusted_key: None,
+            source_kind: crate::config::PluginRepoSourceKind::Git,
+            branch: None,
+            locked_sha: "test".to_owned(),
+            active_revision: Some("test".to_owned()),
+            active_source: crate::config::PluginRevisionSource::Managed,
+            previous_verified_sha: None,
+            last_sync: None,
+        }
+    }
+
     /// Loads `CONFIG_TEST_PLUGIN` into `app`'s plugin registry for the duration
     /// of `f`, then restores the registry to just the built-ins.
     /// Requires `with_tmp_config`.
+    ///
+    /// The plugin is installed as an unsigned repo source rather than standalone
+    /// under `plugins_dir()`: production loads plugins only from configured
+    /// repos, and the registry reload that `set_config`/enable run internally
+    /// re-scans just those repos — a standalone plugin would silently vanish.
     async fn with_config_test_plugin<F, Fut>(app: &Arc<AppState>, f: F)
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        let dir = crate::config::plugins_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        write_config_test_plugin(&dir);
-        app.registry.load_all(&dir);
+        let record = config_test_repo_record();
+        write_config_test_plugin(&crate::plugin::repo::active_revision_dir(&record));
+        app.config.write().await.plugins.repos.push(record);
+        reload_registry(app).await;
         f().await;
-        app.registry.load_all(std::path::Path::new("/nonexistent"));
+        app.config
+            .write()
+            .await
+            .plugins
+            .repos
+            .retain(|r| r.slug != CONFIG_TEST_REPO_SLUG);
+        reload_registry(app).await;
     }
 
     #[tokio::test]
