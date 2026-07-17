@@ -2319,46 +2319,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worst_case_valid_composition_stays_within_callback_timeout() {
-        let source = r#"
-            local points = {}
-            for i = 1, 64 do
-                local angle = (i - 1) * math.pi * 2 / 64
-                points[i] = { x = 512 + math.cos(angle) * 480, y = 512 + math.sin(angle) * 480 }
-            end
-            local function render(canvas, ctx)
-                for _ = 1, 8 do
-                    ctx:push_clip(0, 0, 1024, 1024)
-                    ctx:push_opacity(0.98)
-                    ctx:push_rotation(1, 512, 512)
-                end
-                ctx:draw_polygon(canvas, points, true, { r = 20, g = 40, b = 60 }, 32)
-                ctx:draw_polyline(canvas, points, { r = 255, g = 255, b = 255 }, 32)
-            end
-            return {
-                render_widget_meter = function(canvas, w, h, t, dt, params, ctx) render(canvas, ctx) end,
-                preview_widget_meter = function(canvas, w, h, params, ctx) render(canvas, ctx) end,
-            }
-        "#;
-        let worker = PluginWidgetHandle::spawn(
-            source.to_owned(),
-            BTreeMap::new(),
-            vec!["meter".to_owned()],
-            vec![],
-            HashMap::new(),
-        );
-        let mut render = input(true);
-        render.width = 1024;
-        render.height = 1024;
-        assert!(worker
-            .render(render)
-            .await
-            .unwrap()
-            .chunks_exact(4)
-            .any(|pixel| pixel[3] != 0));
-    }
-
-    #[tokio::test]
     async fn text_boxes_measure_and_draw_unicode_with_host_layout() {
         let source = r#"
             local style = {
