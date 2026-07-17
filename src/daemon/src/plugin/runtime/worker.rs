@@ -494,6 +494,29 @@ fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
     anyhow!("plugin {context}: {e}")
 }
 
+/// Pace collection of native buffers created during live LCD callbacks.
+///
+/// `ByteBuf` payload capacity is allocated by Rust rather than Lua, so automatic
+/// collection cannot pace itself from those bytes. The callback result remains
+/// authoritative if collection also fails.
+fn finish_lcd_frame_callback(lua: &Lua, frame_bytes: usize, result: Result<()>) -> Result<()> {
+    // Account conservatively for the input, an optional rotated RGBA buffer and
+    // the encoded output, with headroom for codecs whose worst case exceeds one
+    // RGBA frame. `gc_step_kbytes` advances Lua's incremental collector as though
+    // these externally allocated bytes belonged to its own heap.
+    let external_kbytes = frame_bytes
+        .saturating_mul(4)
+        .div_ceil(1024)
+        .min(i32::MAX as usize) as i32;
+    if let Err(error) = lua.gc_step_kbytes(external_kbytes) {
+        if result.is_ok() {
+            return Err(lua_err("lcd_stream_frame garbage collection", error));
+        }
+        log::warn!("plugin lcd_stream_frame garbage collection failed: {error}");
+    }
+    result
+}
+
 /// Handle the `LuaDevice` holds. The inner [`LuaWorker`] is `Send + Sync`, so the
 /// device stays `Send + Sync`. Dropping it ends the worker (channel closes).
 #[derive(Clone)]
@@ -1145,12 +1168,24 @@ impl PluginHandle {
     ) -> Result<()> {
         self.run(move |ctx, dev, _| {
             let f = required(&ctx.manifest, "lcd_stream_frame")?;
+            let frame_bytes = rgba.len();
             let buf = ctx
                 .lua
                 .create_userdata(ByteBuf::from_bytes(rgba))
                 .map_err(|e| lua_err("lcd_stream_frame arg", e))?;
-            f.call::<()>((dev, buf, width, height, rotation, raw, brightness))
-                .map_err(|e| lua_err("lcd_stream_frame", e))
+            let result = f
+                .call::<()>((dev, buf, width, height, rotation, raw, brightness))
+                .map_err(|e| lua_err("lcd_stream_frame", e));
+
+            // ByteBuf owns a native Vec, whose capacity is invisible to Lua's
+            // allocator and therefore to the VM's memory limit/GC debt.  A live
+            // LCD callback creates several frame-sized ByteBuf userdata values
+            // (input, rotation and codec output).  They become unreachable when
+            // the callback returns, but automatic GC sees only the tiny userdata
+            // shells and can otherwise retain hundreds of MiB of native buffers.
+            // Charge those external bytes to Lua's incremental collector at the
+            // callback boundary. Preserve the callback error if both operations fail.
+            finish_lcd_frame_callback(&ctx.lua, frame_bytes, result)
         })
         .await
     }
@@ -1562,6 +1597,32 @@ mod tests {
     use super::*;
     use crate::drivers::transports::mock::test_transport::MockTransport;
     use crate::drivers::transports::{HidTransport, Transport, TransportEvent};
+
+    struct GcDropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl mlua::UserData for GcDropProbe {}
+
+    impl Drop for GcDropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn lcd_frame_callback_collects_unreachable_native_userdata() {
+        let lua = mlua::Lua::new();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let userdata = lua
+            .create_userdata(GcDropProbe(std::sync::Arc::clone(&dropped)))
+            .unwrap();
+        lua.globals().set("frame", userdata).unwrap();
+        lua.globals().set("frame", mlua::Value::Nil).unwrap();
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+
+        finish_lcd_frame_callback(&lua, 64 * 1024 * 1024, Ok(())).unwrap();
+
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     struct TestEventTransport {
         events: std::sync::Mutex<Vec<TransportEvent>>,
