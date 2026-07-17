@@ -955,6 +955,10 @@ pub struct PluginAuthority {
     pub permissions: Vec<Permission>,
     #[serde(default)]
     pub transport_scopes: Vec<String>,
+    /// Namespaced latest-value records this plugin may read. Exact keys are
+    /// used except for the host-managed `host.sensors.*` scope.
+    #[serde(default)]
+    pub data_reads: Vec<String>,
 }
 
 impl PluginAuthority {
@@ -963,6 +967,8 @@ impl PluginAuthority {
         self.permissions.dedup();
         self.transport_scopes.sort();
         self.transport_scopes.dedup();
+        self.data_reads.sort();
+        self.data_reads.dedup();
         self
     }
 
@@ -979,7 +985,19 @@ impl PluginAuthority {
                 .transport_scopes
                 .iter()
                 .all(|scope| accepted.transport_scopes.binary_search(scope).is_ok())
+            && requested
+                .data_reads
+                .iter()
+                .all(|scope| accepted.data_reads.binary_search(scope).is_ok())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginDataRecordStatus {
+    pub key: String,
+    pub status: String,
+    #[serde(default)]
+    pub updated_at: Option<u64>,
 }
 
 /// Which discovery path a plugin registers into.
@@ -1276,6 +1294,13 @@ pub struct PluginInfo {
     /// Complete authority snapshot rendered by the enable modal.
     #[serde(default)]
     pub authority: PluginAuthority,
+    /// Latest-value records this package declares as producer/consumer.
+    #[serde(default)]
+    pub provides: Vec<String>,
+    #[serde(default)]
+    pub consumes: Vec<String>,
+    #[serde(default)]
+    pub data_records: Vec<PluginDataRecordStatus>,
     /// The snapshot accepted during the last successful enable, if any.
     #[serde(default)]
     pub accepted_authority: Option<PluginAuthority>,

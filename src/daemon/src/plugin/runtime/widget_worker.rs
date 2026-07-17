@@ -111,12 +111,14 @@ struct WorkerCtx {
     live: HashMap<String, Function>,
     preview: HashMap<String, Function>,
     budget: Rc<Cell<u64>>,
+    data: super::data_api::DataRuntime,
 }
 
 #[derive(Clone)]
 pub struct PluginWidgetHandle(LuaWorker<WidgetCall>);
 
 impl PluginWidgetHandle {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn spawn(
         source: String,
         modules: BTreeMap<String, String>,
@@ -124,11 +126,38 @@ impl PluginWidgetHandle {
         granted: Vec<Permission>,
         config: crate::plugin::ResolvedConfig,
     ) -> Self {
+        Self::spawn_with_data(
+            source,
+            modules,
+            widget_ids,
+            granted,
+            config,
+            Default::default(),
+        )
+    }
+
+    pub fn spawn_with_data(
+        source: String,
+        modules: BTreeMap<String, String>,
+        widget_ids: Vec<String>,
+        granted: Vec<Permission>,
+        config: crate::plugin::ResolvedConfig,
+        data: super::data_api::DataRuntime,
+    ) -> Self {
         let worker = LuaWorker::spawn(
             "halod-lcd-widget",
             "LCD widget",
             CALL_TIMEOUT,
-            move || build_ctx(&source, &modules, &widget_ids, &granted, &config),
+            move || {
+                build_ctx(
+                    &source,
+                    &modules,
+                    &widget_ids,
+                    &granted,
+                    &config,
+                    data.clone(),
+                )
+            },
             |call, ctx: &WorkerCtx| {
                 ctx.budget.set(0);
                 sandbox::set_call_deadline(&ctx.lua, CALL_TIMEOUT);
@@ -164,6 +193,7 @@ fn build_ctx(
     widget_ids: &[String],
     granted: &[Permission],
     config: &crate::plugin::ResolvedConfig,
+    data: super::data_api::DataRuntime,
 ) -> Result<WorkerCtx> {
     let (lua, budget) = sandbox::bootstrap_vm(
         granted,
@@ -174,6 +204,8 @@ fn build_ctx(
     .map_err(|error| anyhow!("widget sandbox setup: {error}"))?;
     sandbox::install_package_modules(&lua, modules)
         .map_err(|error| anyhow!("widget package modules: {error}"))?;
+    super::data_api::register(&lua, data.clone())
+        .map_err(|error| anyhow!("widget data API: {error}"))?;
     let manifest: Table = lua
         .load(source)
         .eval()
@@ -195,6 +227,7 @@ fn build_ctx(
         live,
         preview,
         budget,
+        data,
     })
 }
 
@@ -248,6 +281,7 @@ fn render_one(ctx: &WorkerCtx, input: WidgetRenderInput) -> Result<Vec<u8>> {
         preview: input.preview,
         composition: RefCell::new(CompositionState::new(input.width, input.height)),
         render_work_pixels: Cell::new(0),
+        data: ctx.data.clone(),
     };
     let canvas = ctx
         .lua
@@ -327,6 +361,13 @@ struct RenderCtx {
     preview: bool,
     composition: RefCell<CompositionState>,
     render_work_pixels: Cell<usize>,
+    data: super::data_api::DataRuntime,
+}
+
+impl super::data_api::HasDataRuntime for RenderCtx {
+    fn data_runtime(&self) -> &super::data_api::DataRuntime {
+        &self.data
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -482,6 +523,7 @@ impl RenderCtx {
 
 impl UserData for RenderCtx {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        super::data_api::add_ctx_method(methods);
         methods.add_method(
             "push_clip",
             |_, this, (x, y, width, height): (f32, f32, f32, f32)| {

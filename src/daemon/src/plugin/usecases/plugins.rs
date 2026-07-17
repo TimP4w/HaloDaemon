@@ -34,6 +34,7 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
             .collect::<Vec<_>>()
     };
     app.registry.clear_operational_errors(&id, &device_ids);
+    app.data_bus.invalidate_owner(&id);
     reconcile_plugins(&app, std::slice::from_ref(&id)).await;
     Ok(())
 }

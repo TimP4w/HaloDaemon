@@ -292,7 +292,10 @@ pub fn udev_rules_from_bundle(bytes: &[u8]) -> anyhow::Result<String> {
 
 fn consent_satisfied_in(state: &PluginState, manifest: &PluginManifest) -> bool {
     let requested = authority_for_manifest(manifest);
-    if requested.permissions.is_empty() && requested.transport_scopes.is_empty() {
+    if requested.permissions.is_empty()
+        && requested.transport_scopes.is_empty()
+        && requested.data_reads.is_empty()
+    {
         return true;
     }
     state
@@ -332,6 +335,12 @@ fn authority_for_manifest(manifest: &PluginManifest) -> halod_shared::types::Plu
     halod_shared::types::PluginAuthority {
         permissions: manifest.permissions.clone(),
         transport_scopes: scopes,
+        data_reads: manifest
+            .consumes
+            .iter()
+            .filter(|key| !key.starts_with(&format!("{}.", manifest.plugin_id)))
+            .cloned()
+            .collect(),
     }
     .normalized()
 }
@@ -469,6 +478,7 @@ impl Registry {
     pub fn build_widget_handle(
         &self,
         secrets: &dyn crate::secrets::SecretStore,
+        data_bus: std::sync::Arc<crate::services::data_bus::DataBus>,
         catalog_id: &str,
     ) -> Option<PluginWidgetHandle> {
         let entry = self.widget_entry(catalog_id)?;
@@ -486,12 +496,24 @@ impl Registry {
             .collect();
         let granted = self.granted_for(&entry.plugin_id);
         let config = self.resolved_config_for(secrets, &entry.plugin_id, &granted);
-        Some(PluginWidgetHandle::spawn(
+        let state = self.snapshot();
+        let manifest = state
+            .manifests
+            .iter()
+            .find(|manifest| manifest.plugin_id == entry.plugin_id)?;
+        let data = runtime::data_api::DataRuntime::new(
+            data_bus,
+            entry.plugin_id.clone(),
+            &manifest.provides,
+            manifest.consumes.clone(),
+        );
+        Some(PluginWidgetHandle::spawn_with_data(
             entry.script_source,
             entry.module_sources,
             widget_ids,
             granted,
             config,
+            data,
         ))
     }
 
@@ -526,10 +548,11 @@ impl Registry {
     pub fn build_pixmap_effect(
         &self,
         secrets: &dyn crate::secrets::SecretStore,
+        data_bus: std::sync::Arc<crate::services::data_bus::DataBus>,
         catalog_id: &str,
         params: &HashMap<String, EffectParamValue>,
     ) -> Option<PluginEffectHandle> {
-        self.build_effect_handle(secrets, EffectKind::Pixmap, catalog_id, params)
+        self.build_effect_handle(secrets, data_bus, EffectKind::Pixmap, catalog_id, params)
     }
 
     /// Spawn a worker for a registered direct effect. `None` for an unknown,
@@ -537,15 +560,17 @@ impl Registry {
     pub fn build_direct_effect(
         &self,
         secrets: &dyn crate::secrets::SecretStore,
+        data_bus: std::sync::Arc<crate::services::data_bus::DataBus>,
         catalog_id: &str,
         params: &HashMap<String, EffectParamValue>,
     ) -> Option<PluginEffectHandle> {
-        self.build_effect_handle(secrets, EffectKind::Direct, catalog_id, params)
+        self.build_effect_handle(secrets, data_bus, EffectKind::Direct, catalog_id, params)
     }
 
     fn build_effect_handle(
         &self,
         secrets: &dyn crate::secrets::SecretStore,
+        data_bus: std::sync::Arc<crate::services::data_bus::DataBus>,
         kind: EffectKind,
         catalog_id: &str,
         params: &HashMap<String, EffectParamValue>,
@@ -559,13 +584,25 @@ impl Registry {
             .to_string();
         let granted = self.granted_for(&entry.plugin_id);
         let config = self.resolved_config_for(secrets, &entry.plugin_id, &granted);
-        Some(PluginEffectHandle::spawn(
+        let state = self.snapshot();
+        let manifest = state
+            .manifests
+            .iter()
+            .find(|manifest| manifest.plugin_id == entry.plugin_id)?;
+        let data = runtime::data_api::DataRuntime::new(
+            data_bus,
+            entry.plugin_id.clone(),
+            &manifest.provides,
+            manifest.consumes.clone(),
+        );
+        Some(PluginEffectHandle::spawn_with_data(
             entry.script_source,
             entry.module_sources,
             effect_id,
             params.clone(),
             granted,
             config,
+            data,
         ))
     }
 
@@ -1317,6 +1354,9 @@ impl Registry {
                 .unwrap_or(halod_shared::types::PluginProvenance::LocalUnsigned),
             declared_permissions: m.permissions.clone(),
             authority: authority_for_manifest(m),
+            provides: m.provides.iter().map(|item| item.key.clone()).collect(),
+            consumes: m.consumes.clone(),
+            data_records: vec![],
             accepted_authority: state.accepted_authorities.get(&m.plugin_id).cloned(),
             config_fields: m.config_fields().iter().map(Into::into).collect(),
             config_values: config_values_for(state, m),
@@ -1639,6 +1679,8 @@ fn record_invalid_plugin_dir(
                 transports: Default::default(),
                 requirements: vec![],
                 permissions: vec![],
+                provides: vec![],
+                consumes: vec![],
                 platforms: vec![],
                 capabilities: vec![],
                 config: None,
@@ -2011,6 +2053,12 @@ impl Registry {
                     handle: runtime,
                     granted,
                     config,
+                    data: runtime::data_api::DataRuntime::new(
+                        app.data_bus.clone(),
+                        manifest.plugin_id.clone(),
+                        &manifest.provides,
+                        manifest.consumes.clone(),
+                    ),
                 })),
             });
             dev.set_self_ref(weak.clone());

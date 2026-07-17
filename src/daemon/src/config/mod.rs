@@ -571,6 +571,7 @@ mod tests {
             PluginAuthority {
                 permissions: vec![halod_shared::types::Permission::Network],
                 transport_scopes: vec![],
+                data_reads: vec![],
             },
         );
         cfg.plugins.config.insert(

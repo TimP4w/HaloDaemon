@@ -191,6 +191,12 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
                 handle: runtime,
                 granted,
                 config,
+                data: super::runtime::data_api::DataRuntime::new(
+                    app.data_bus.clone(),
+                    manifest.plugin_id.clone(),
+                    &manifest.provides,
+                    manifest.consumes.clone(),
+                ),
             })),
         });
         dev.set_self_ref(weak.clone());

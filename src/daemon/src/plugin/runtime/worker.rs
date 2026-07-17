@@ -515,6 +515,7 @@ impl PluginHandle {
     /// config values (including decrypted secrets if `SecureStorage` is
     /// granted) — both snapshotted at spawn time.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn spawn(
         source: String,
         module_sources: std::collections::BTreeMap<String, String>,
@@ -525,6 +526,33 @@ impl PluginHandle {
         handle: Handle,
         zones: Vec<RgbZone>,
         audio_registry: super::audio_api::SinkRegistry,
+    ) -> Self {
+        Self::spawn_with_data(
+            source,
+            module_sources,
+            transport,
+            dev_match,
+            granted,
+            config,
+            handle,
+            zones,
+            audio_registry,
+            Default::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_data(
+        source: String,
+        module_sources: std::collections::BTreeMap<String, String>,
+        transport: PluginIo,
+        dev_match: DevMatch,
+        granted: Vec<Permission>,
+        config: crate::plugin::ResolvedConfig,
+        handle: Handle,
+        zones: Vec<RgbZone>,
+        audio_registry: super::audio_api::SinkRegistry,
+        data: super::data_api::DataRuntime,
     ) -> Self {
         let worker = LuaWorker::spawn(
             "halod-plugin",
@@ -544,6 +572,7 @@ impl PluginHandle {
                     handle,
                     &zones,
                     audio_registry,
+                    data,
                 )
             },
             |job: Job, ctx: &WorkerCtx| {
@@ -1314,6 +1343,7 @@ fn build_ctx(
     handle: Handle,
     zones: &[RgbZone],
     audio_registry: super::audio_api::SinkRegistry,
+    data: super::data_api::DataRuntime,
 ) -> Result<WorkerCtx> {
     debug_assert!(!super::contract::active().tables.is_empty());
     let controller_index = dev_match.index;
@@ -1326,6 +1356,7 @@ fn build_ctx(
     .map_err(|e| lua_err("sandbox setup", e))?;
     sandbox::install_package_modules(&lua, module_sources)
         .map_err(|e| lua_err("package modules", e))?;
+    super::data_api::register(&lua, data).map_err(|e| lua_err("data API", e))?;
 
     let manifest: Table = lua
         .load(source)

@@ -84,6 +84,7 @@ pub struct AppState {
     /// The device-plugin registry (loaded manifests, consent/config, notice
     /// dedup, load warnings).
     pub registry: crate::plugin::Registry,
+    pub data_bus: Arc<crate::services::data_bus::DataBus>,
     #[cfg(feature = "dev-plugin-repo")]
     /// Process-local development repository selected with `--dev-plugin-repo`.
     /// Registry rebuilds must retain this priority source rather than falling
@@ -120,6 +121,7 @@ impl AppState {
             repo_signature_status: Mutex::new(std::collections::HashMap::new()),
             repo_compatibility_status: Mutex::new(std::collections::HashMap::new()),
             registry: crate::plugin::Registry::default(),
+            data_bus: Arc::new(crate::services::data_bus::DataBus::default()),
             #[cfg(feature = "dev-plugin-repo")]
             development_plugin_repo: RwLock::new(None),
             secret_store: Arc::new(crate::secrets::FileKeyStore::new()),

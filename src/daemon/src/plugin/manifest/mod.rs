@@ -882,6 +882,8 @@ pub struct PluginManifest {
     pub requirements: Vec<RequirementDef>,
     /// Privileged capabilities this plugin needs, gated by user consent.
     pub permissions: Vec<Permission>,
+    pub provides: Vec<DataProvideDef>,
+    pub consumes: Vec<String>,
     /// Platforms on which this package may execute. An omitted list means all
     /// platforms, allowing catalog visibility without making platform support
     /// an implicit runtime failure.
@@ -922,6 +924,10 @@ pub struct PluginMeta {
     #[serde(default)]
     pub permissions: Vec<Permission>,
     #[serde(default)]
+    pub provides: Vec<DataProvideDef>,
+    #[serde(default)]
+    pub consumes: Vec<String>,
+    #[serde(default)]
     pub devices: Vec<DeviceSpec>,
     #[serde(default)]
     pub transports: TransportsConfig,
@@ -948,6 +954,58 @@ pub struct PluginMeta {
     /// a distinct key because `effects` is the actual effect declaration list.
     #[serde(default)]
     pub effect_assets: Vec<EffectAssetRef>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DataProvideDef {
+    pub key: String,
+    pub stale_after_ms: u64,
+    pub min_notify_interval_ms: u64,
+}
+
+impl<'de> Deserialize<'de> for DataProvideDef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Key(String),
+            Policy(Policy),
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Policy {
+            key: String,
+            #[serde(default = "default_data_stale_after_ms")]
+            stale_after_ms: u64,
+            #[serde(default = "default_data_notify_interval_ms")]
+            min_notify_interval_ms: u64,
+        }
+
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Key(key) => Self {
+                key,
+                stale_after_ms: default_data_stale_after_ms(),
+                min_notify_interval_ms: default_data_notify_interval_ms(),
+            },
+            Wire::Policy(policy) => Self {
+                key: policy.key,
+                stale_after_ms: policy.stale_after_ms,
+                min_notify_interval_ms: policy.min_notify_interval_ms,
+            },
+        })
+    }
+}
+
+const fn default_data_stale_after_ms() -> u64 {
+    60_000
+}
+
+const fn default_data_notify_interval_ms() -> u64 {
+    250
 }
 
 fn default_entry() -> String {
@@ -1251,6 +1309,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     validate_transports(manifest)?;
     validate_requirements(manifest)?;
     validate_controls(manifest)?;
+    validate_data_contract(manifest)?;
     match manifest.plugin_type {
         PluginKind::Device => {
             if manifest.devices.is_empty() {
@@ -1379,6 +1438,58 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         bail!("a usb transport requires the 'usb' permission to be declared");
     }
     validate_component("plugin id", &manifest.plugin_id)?;
+    Ok(())
+}
+
+fn validate_data_contract(manifest: &PluginManifest) -> Result<()> {
+    anyhow::ensure!(
+        manifest.provides.len() <= 32,
+        "plugin declares more than 32 data records"
+    );
+    anyhow::ensure!(
+        manifest.consumes.len() <= 64,
+        "plugin declares more than 64 data reads"
+    );
+    let prefix = format!("{}.", manifest.plugin_id);
+    let mut keys = HashSet::new();
+    for item in &manifest.provides {
+        validate_component("provided data key", &item.key)?;
+        anyhow::ensure!(
+            item.key.starts_with(&prefix),
+            "provided data key '{}' is outside plugin namespace '{}.*'",
+            item.key,
+            manifest.plugin_id
+        );
+        anyhow::ensure!(
+            (1_000..=604_800_000).contains(&item.stale_after_ms),
+            "provided data key '{}' stale_after_ms must be between 1000 and 604800000",
+            item.key
+        );
+        anyhow::ensure!(
+            (16..=60_000).contains(&item.min_notify_interval_ms),
+            "provided data key '{}' min_notify_interval_ms must be between 16 and 60000",
+            item.key
+        );
+        anyhow::ensure!(
+            keys.insert(item.key.as_str()),
+            "duplicate provided data key '{}'",
+            item.key
+        );
+    }
+    let mut reads = HashSet::new();
+    for key in &manifest.consumes {
+        if key != "host.sensors.*" {
+            validate_component("consumed data key", key)?;
+            anyhow::ensure!(
+                !key.contains('*'),
+                "only host.sensors.* may use a wildcard data read"
+            );
+        }
+        anyhow::ensure!(
+            reads.insert(key.as_str()),
+            "duplicate consumed data key '{key}'"
+        );
+    }
     Ok(())
 }
 
@@ -2468,6 +2579,8 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         transports: meta.transports,
         requirements: meta.requirements,
         permissions: meta.permissions,
+        provides: meta.provides,
+        consumes: meta.consumes,
         platforms: meta.platforms,
         capabilities: meta.capabilities,
         config: meta.config,
@@ -2514,6 +2627,32 @@ mod tests {
     fn write_widget_asset(dir: &Path, name: &str, contents: &str) {
         std::fs::create_dir_all(dir.join("assets")).unwrap();
         std::fs::write(dir.join("assets").join(name), contents).unwrap();
+    }
+
+    #[test]
+    fn data_contract_enforces_namespace_policy_and_sensor_wildcard() {
+        let tmp = tempfile::tempdir().unwrap();
+        let valid = write_plugin_dir(
+            tmp.path(),
+            "telemetry",
+            "permissions: [hid]\nprovides: [telemetry.current]\nconsumes: [host.sensors.*]\ndevices:\n  - vendor: Test\n    model: Telemetry\n    match: { hid: { vid: 1, pid: 2 } }\n",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&valid).unwrap();
+        assert_eq!(manifest.provides[0].key, "telemetry.current");
+        assert_eq!(manifest.provides[0].stale_after_ms, 60_000);
+        assert_eq!(manifest.consumes, ["host.sensors.*"]);
+
+        let foreign = write_plugin_dir(
+            tmp.path(),
+            "diagnostics",
+            "permissions: [hid]\nprovides:\n  - { key: telemetry.current, stale_after_ms: 60000, min_notify_interval_ms: 250 }\ndevices:\n  - vendor: Test\n    model: Diagnostics\n    match: { hid: { vid: 1, pid: 3 } }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&foreign)
+            .unwrap_err()
+            .to_string()
+            .contains("outside plugin namespace"));
     }
 
     #[test]

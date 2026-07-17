@@ -1659,7 +1659,10 @@ pub(crate) fn recommendation_toasts(
 /// the user grants them. Shared with the Integrations screen, whose
 /// integrations are plugins too.
 pub(crate) fn plugin_needs_permission(p: &PluginInfo) -> bool {
-    !p.declared_permissions.is_empty() && !p.consented
+    (!p.declared_permissions.is_empty()
+        || !p.authority.transport_scopes.is_empty()
+        || !p.authority.data_reads.is_empty())
+        && !p.consented
 }
 
 /// True when a previously approved plugin is inert until the user reviews its
@@ -2466,6 +2469,27 @@ pub(crate) fn authority_review_cards(ui: &mut egui::Ui, plugin: &PluginInfo) {
     let commands = command_scope_names(&plugin.authority);
     if !commands.is_empty() {
         command_authority_card(ui, &commands);
+        ui.add_space(theme::SPACE_4);
+    }
+    if !plugin.authority.data_reads.is_empty() {
+        egui::Frame::NONE
+            .fill(theme::INNER_BG)
+            .stroke(Stroke::new(1.0, theme::STAT_AMBER))
+            .corner_radius(theme::RADIUS_MD)
+            .inner_margin(egui::Margin::symmetric(14, 12))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("Can read shared data")
+                        .font(theme::body_md())
+                        .strong()
+                        .color(theme::STAT_AMBER),
+                );
+                ui.label(
+                    egui::RichText::new(plugin.authority.data_reads.join(", "))
+                        .font(theme::mono(12.0))
+                        .color(theme::TEXT),
+                );
+            });
         ui.add_space(theme::SPACE_4);
     }
 }
@@ -3389,6 +3413,7 @@ mod tests {
                 "command:nvidia-smi".into(),
                 "command:liquidctl".into(),
             ],
+            data_reads: vec![],
         };
         assert_eq!(
             command_scope_names(&authority),
@@ -3573,6 +3598,9 @@ mod tests {
             provenance: Default::default(),
             declared_permissions: vec![],
             authority: Default::default(),
+            provides: vec![],
+            consumes: vec![],
+            data_records: vec![],
             accepted_authority: None,
             config_fields: vec![],
             config_values: Default::default(),
@@ -3753,6 +3781,7 @@ mod tests {
         p.accepted_authority = Some(halod_shared::types::PluginAuthority {
             permissions: vec![Permission::Network],
             transport_scopes: vec![],
+            data_reads: vec![],
         });
         assert_eq!(consent_reason(&p), ConsentReason::AuthorityExpanded);
 
@@ -3763,6 +3792,7 @@ mod tests {
         p.accepted_authority = Some(halod_shared::types::PluginAuthority {
             permissions: vec![Permission::Network],
             transport_scopes: vec![],
+            data_reads: vec![],
         });
         assert_eq!(consent_reason(&p), ConsentReason::New);
     }
@@ -4046,6 +4076,7 @@ mod tests {
         updated.accepted_authority = Some(halod_shared::types::PluginAuthority {
             permissions: vec![halod_shared::types::Permission::Os],
             transport_scopes: vec![],
+            data_reads: vec![],
         });
         updated.consented = false;
         assert!(plugin_requires_regrant(&updated));
@@ -4059,6 +4090,7 @@ mod tests {
         added_permission.accepted_authority = Some(halod_shared::types::PluginAuthority {
             permissions: vec![halod_shared::types::Permission::Os],
             transport_scopes: vec![],
+            data_reads: vec![],
         });
         added_permission.consented = false;
         assert!(plugin_requires_regrant(&added_permission));

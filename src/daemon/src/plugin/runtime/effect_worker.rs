@@ -111,6 +111,7 @@ struct EffectCtx {
     seed: u32,
     /// Instruction counter for the runaway-guard hook; reset before each call.
     budget: Rc<Cell<u64>>,
+    data: super::data_api::DataRuntime,
 }
 
 /// Handle a live effect instance's engine passes hold. The inner [`LuaWorker`]
@@ -123,6 +124,7 @@ impl PluginEffectHandle {
     /// Spawn the worker thread for one live effect instance. `effect_id` is
     /// the plugin-local id (not the namespaced catalog id) — it drives the
     /// `render_effect_<id>` / `led_effect_<id>` callback lookup.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn spawn(
         script_source: String,
         module_sources: std::collections::BTreeMap<String, String>,
@@ -130,6 +132,26 @@ impl PluginEffectHandle {
         params: HashMap<String, EffectParamValue>,
         granted: Vec<Permission>,
         config: crate::plugin::ResolvedConfig,
+    ) -> Self {
+        Self::spawn_with_data(
+            script_source,
+            module_sources,
+            effect_id,
+            params,
+            granted,
+            config,
+            Default::default(),
+        )
+    }
+
+    pub fn spawn_with_data(
+        script_source: String,
+        module_sources: std::collections::BTreeMap<String, String>,
+        effect_id: String,
+        params: HashMap<String, EffectParamValue>,
+        granted: Vec<Permission>,
+        config: crate::plugin::ResolvedConfig,
+        data: super::data_api::DataRuntime,
     ) -> Self {
         let worker = LuaWorker::spawn(
             "halod-effect",
@@ -145,6 +167,7 @@ impl PluginEffectHandle {
                     &params,
                     &granted,
                     &config,
+                    data.clone(),
                 )
             },
             |call, ctx: &EffectCtx| {
@@ -158,6 +181,7 @@ impl PluginEffectHandle {
                             &frame,
                             &ctx.params_v,
                             ctx.seed,
+                            &ctx.data,
                         ));
                     }
                     EffectCall::LedColors {
@@ -174,6 +198,7 @@ impl PluginEffectHandle {
                             &zone,
                             &ctx.params_v,
                             ctx.seed,
+                            &ctx.data,
                         ));
                     }
                 }
@@ -371,6 +396,7 @@ fn effect_context_table(
     params: &mlua::Value,
     seed: u32,
     zone: &EffectZoneInput,
+    data: &super::data_api::DataRuntime,
 ) -> mlua::Result<Table> {
     finite_number(f64::from(frame.time), "time")?;
     finite_number(f64::from(frame.dt), "dt")?;
@@ -382,6 +408,20 @@ fn effect_context_table(
     context.set("seed", seed)?;
     context.set("zone", lua.to_value(zone)?)?;
     context.set("sensors", lua.to_value(frame.sensors.as_ref())?)?;
+    let data = data.clone();
+    context.set(
+        "data",
+        lua.create_function(move |lua, (_self, key): (Table, String)| {
+            if !data.consumes.iter().any(|scope| {
+                scope == &key || (scope == "host.sensors.*" && key.starts_with("host.sensors."))
+            }) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "data key '{key}' is not declared in consumes"
+                )));
+            }
+            crate::services::data_bus::snapshot_to_lua(lua, &data.bus.read(&key))
+        })?,
+    )?;
 
     let bands = lua.create_sequence_from(frame.audio.bands.iter().copied())?;
     let audio = lua.create_table()?;
@@ -505,6 +545,7 @@ fn build_ctx(
     params: &HashMap<String, EffectParamValue>,
     granted: &[Permission],
     config: &crate::plugin::ResolvedConfig,
+    data: super::data_api::DataRuntime,
 ) -> Result<EffectCtx> {
     let (lua, budget) = sandbox::bootstrap_vm(
         granted,
@@ -516,6 +557,7 @@ fn build_ctx(
     sandbox::install_package_modules(&lua, module_sources)
         .map_err(|e| lua_err("package modules", e))?;
     register_effect_helpers(&lua).map_err(|e| lua_err("effect helpers", e))?;
+    super::data_api::register(&lua, data.clone()).map_err(|e| lua_err("data API", e))?;
 
     let manifest: Table = lua
         .load(source)
@@ -535,6 +577,7 @@ fn build_ctx(
         params_v,
         seed: stable_effect_seed(effect_id, params),
         budget,
+        data,
     })
 }
 
@@ -544,13 +587,14 @@ fn run_render_pixmap(
     frame: &EffectFrameInput,
     params: &mlua::Value,
     seed: u32,
+    data: &super::data_api::DataRuntime,
 ) -> Result<Vec<u8>> {
     let f = f.ok_or_else(|| anyhow!("effect has no render_effect_<id>() callback"))?;
     let buf = ByteBuf::from_bytes(vec![0u8; (CANVAS_W * CANVAS_H * 4) as usize]);
     let ud = lua
         .create_userdata(buf)
         .map_err(|e| lua_err("pixmap buffer", e))?;
-    let context = effect_context_table(lua, frame, params, seed, &EffectZoneInput::canvas())
+    let context = effect_context_table(lua, frame, params, seed, &EffectZoneInput::canvas(), data)
         .map_err(|e| lua_err("context", e))?;
     f.call::<()>((ud.clone(), context))
         .map_err(|e| lua_err("render", e))?;
@@ -570,12 +614,13 @@ fn run_led_colors(
     zone: &EffectZoneInput,
     params: &mlua::Value,
     seed: u32,
+    data: &super::data_api::DataRuntime,
 ) -> Result<Vec<PluginLedColor>> {
     let f = f.ok_or_else(|| anyhow!("effect has no led_effect_<id>() callback"))?;
     let n = leds.len();
     let leds_v = lua.to_value(&leds).map_err(|e| lua_err("leds arg", e))?;
-    let context =
-        effect_context_table(lua, frame, params, seed, zone).map_err(|e| lua_err("context", e))?;
+    let context = effect_context_table(lua, frame, params, seed, zone, data)
+        .map_err(|e| lua_err("context", e))?;
     let value: mlua::Value = f
         .call((leds_v, context))
         .map_err(|e| lua_err("led effect", e))?;

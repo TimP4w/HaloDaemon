@@ -160,6 +160,71 @@ impl AppState {
                 map.insert(s.id.clone(), s);
             }
         }
+        let policy = crate::services::data_bus::host_policy(std::time::Duration::from_secs(3));
+        let mut catalog = Vec::with_capacity(map.len());
+        let expected: HashSet<String> = map
+            .values()
+            .map(|sensor| crate::services::data_bus::sensor_key(&sensor.id))
+            .collect();
+        for (key, snapshot) in self.data_bus.statuses_for_owner("host") {
+            if key.starts_with("host.sensors.")
+                && key != "host.sensors.catalog"
+                && !expected.contains(&key)
+                && snapshot.status != crate::services::data_bus::SnapshotStatus::Unavailable
+            {
+                let _ = self.data_bus.invalidate("host", &key, "sensor_removed");
+            }
+        }
+        for sensor in map.values() {
+            let key = crate::services::data_bus::sensor_key(&sensor.id);
+            let mut value = std::collections::BTreeMap::new();
+            value.insert(
+                "id".into(),
+                crate::services::data_bus::DataValue::String(sensor.id.clone()),
+            );
+            value.insert(
+                "label".into(),
+                crate::services::data_bus::DataValue::String(sensor.name.clone()),
+            );
+            value.insert(
+                "value".into(),
+                crate::services::data_bus::DataValue::Number(sensor.value),
+            );
+            value.insert(
+                "unit".into(),
+                crate::services::data_bus::DataValue::String(
+                    format!("{:?}", sensor.unit).to_lowercase(),
+                ),
+            );
+            value.insert(
+                "sensor_type".into(),
+                crate::services::data_bus::DataValue::String(
+                    format!("{:?}", sensor.sensor_type).to_lowercase(),
+                ),
+            );
+            let _ = self.data_bus.publish(
+                "host",
+                &key,
+                crate::services::data_bus::DataValue::Map(value),
+                policy,
+            );
+            let mut item = std::collections::BTreeMap::new();
+            item.insert(
+                "id".into(),
+                crate::services::data_bus::DataValue::String(sensor.id.clone()),
+            );
+            item.insert(
+                "key".into(),
+                crate::services::data_bus::DataValue::String(key),
+            );
+            catalog.push(crate::services::data_bus::DataValue::Map(item));
+        }
+        let _ = self.data_bus.publish(
+            "host",
+            "host.sensors.catalog",
+            crate::services::data_bus::DataValue::Array(catalog),
+            policy,
+        );
         map
     }
 

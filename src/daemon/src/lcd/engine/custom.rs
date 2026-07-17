@@ -304,10 +304,11 @@ impl CustomTemplate {
             let handle = match self.plugin_handles.get(&entry.plugin_id) {
                 Some(handle) => handle.clone(),
                 None => {
-                    let Some(handle) = app
-                        .registry
-                        .build_widget_handle(app.secret_store.as_ref(), &catalog_id)
-                    else {
+                    let Some(handle) = app.registry.build_widget_handle(
+                        app.secret_store.as_ref(),
+                        app.data_bus.clone(),
+                        &catalog_id,
+                    ) else {
                         continue;
                     };
                     self.plugin_handles

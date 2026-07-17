@@ -443,6 +443,7 @@ fn build_harness(
     report: Arc<Mutex<Report>>,
 ) -> Result<Table> {
     let h = lua.create_table().anyhow()?;
+    let data_bus = Arc::new(crate::services::data_bus::DataBus::default());
 
     let assert_report = report.clone();
     h.set(
@@ -489,20 +490,78 @@ fn build_harness(
 
     let open_manifest = manifest.clone();
     let open_handle = handle.clone();
+    let open_bus = data_bus.clone();
     h.set(
         "open",
         lua.create_function(move |lua, (_self, spec): (Table, Option<Table>)| {
-            open_device(lua, &open_manifest, open_handle.clone(), spec).map_err(mlua_err)
+            open_device(
+                lua,
+                &open_manifest,
+                open_handle.clone(),
+                open_bus.clone(),
+                spec,
+            )
+            .map_err(mlua_err)
         })
         .anyhow()?,
     )
     .anyhow()?;
 
     let integration_manifest = manifest.clone();
+    let integration_bus = data_bus.clone();
     h.set(
         "open_integration",
         lua.create_function(move |lua, (_self, spec): (Table, Option<Table>)| {
-            open_integration(lua, &integration_manifest, handle.clone(), spec).map_err(mlua_err)
+            open_integration(
+                lua,
+                &integration_manifest,
+                handle.clone(),
+                integration_bus.clone(),
+                spec,
+            )
+            .map_err(mlua_err)
+        })
+        .anyhow()?,
+    )
+    .anyhow()?;
+
+    let inject_bus = data_bus.clone();
+    h.set(
+        "inject_data",
+        lua.create_function(
+            move |_, (_self, key, value, stale_ms): (Table, String, Value, Option<u64>)| {
+                let value =
+                    crate::services::data_bus::DataValue::from_lua(value).map_err(mlua_err)?;
+                inject_bus
+                    .publish(
+                        "test-host",
+                        &key,
+                        value,
+                        crate::services::data_bus::host_policy(std::time::Duration::from_millis(
+                            stale_ms.unwrap_or(60_000),
+                        )),
+                    )
+                    .map_err(mlua_err)
+            },
+        )
+        .anyhow()?,
+    )
+    .anyhow()?;
+    let inspect_bus = data_bus.clone();
+    h.set(
+        "data_record",
+        lua.create_function(move |lua, (_self, key): (Table, String)| {
+            crate::services::data_bus::snapshot_to_lua(lua, &inspect_bus.read(&key))
+        })
+        .anyhow()?,
+    )
+    .anyhow()?;
+    h.set(
+        "invalidate_data",
+        lua.create_function(move |_, (_self, key): (Table, String)| {
+            data_bus
+                .invalidate("test-host", &key, "invalidated")
+                .map_err(mlua_err)
         })
         .anyhow()?,
     )
@@ -517,6 +576,7 @@ fn open_integration(
     lua: &Lua,
     manifest: &PluginManifest,
     handle: tokio::runtime::Handle,
+    data_bus: Arc<crate::services::data_bus::DataBus>,
     spec_table: Option<Table>,
 ) -> Result<Table> {
     if manifest.plugin_type != halod_shared::types::PluginKind::Integration {
@@ -561,7 +621,7 @@ fn open_integration(
         .transports
         .integration_transport_kind()
         .unwrap_or("tcp");
-    let worker = PluginHandle::spawn(
+    let worker = PluginHandle::spawn_with_data(
         manifest.script_source.clone(),
         manifest.module_sources.clone(),
         io,
@@ -574,6 +634,12 @@ fn open_integration(
         handle.clone(),
         Vec::new(),
         Arc::new(Mutex::new(Vec::new())),
+        super::runtime::data_api::DataRuntime::new(
+            data_bus,
+            manifest.plugin_id.clone(),
+            &manifest.provides,
+            manifest.consumes.clone(),
+        ),
     );
     let dev = lua.create_table().anyhow()?;
     {
@@ -854,6 +920,7 @@ fn open_device(
     lua: &Lua,
     manifest: &PluginManifest,
     handle: tokio::runtime::Handle,
+    data_bus: Arc<crate::services::data_bus::DataBus>,
     spec_table: Option<Table>,
 ) -> Result<Table> {
     let spec = manifest
@@ -934,6 +1001,12 @@ fn open_device(
             // open), uses no config, and has no `AppState` to notify.
             granted: manifest.permissions.clone(),
             config: std::collections::HashMap::new(),
+            data: super::runtime::data_api::DataRuntime::new(
+                data_bus,
+                manifest.plugin_id.clone(),
+                &manifest.provides,
+                manifest.consumes.clone(),
+            ),
         })),
     }));
 
@@ -1553,6 +1626,34 @@ mod tests {
             .unwrap();
         let handle = runtime.handle().clone();
         run(handle, &dir).unwrap()
+    }
+
+    #[test]
+    fn harness_injects_inspects_and_invalidates_shared_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: fixture\npermissions: [hid]\nprovides:\n  - { key: fixture.current, stale_after_ms: 60000, min_notify_interval_ms: 250 }\nconsumes: [host.sensors.*]\ndevices:\n  - vendor: x\n    model: y\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  hid: {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.lua"),
+            "return { initialize = function(_) halod.publish('fixture.current', { ok = true }); return true end }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("test.lua"),
+            "return function(h)\n  h:inject_data('host.sensors.aa', { value = 42 })\n  local dev = h:open(); h:assert(dev:initialize(), 'initialized')\n  h:assert_eq(h:data_record('fixture.current').value.ok, true, 'published record')\n  h:assert_eq(h:data_record('host.sensors.aa').value.value, 42, 'injected record')\n  h:invalidate_data('host.sensors.aa')\n  h:assert_eq(h:data_record('host.sensors.aa').status, 'unavailable', 'invalidated record')\nend",
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(run(runtime.handle().clone(), &dir).unwrap(), 0);
     }
 
     #[test]

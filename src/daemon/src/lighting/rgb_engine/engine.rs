@@ -115,7 +115,12 @@ fn build_pixmap_effect(app: &Arc<AppState>, def: Option<&EffectDef>) -> PixmapRu
         return PixmapRuntime::BuiltIn(fx);
     }
     app.registry
-        .build_pixmap_effect(app.secret_store.as_ref(), &d.effect_id, &d.params)
+        .build_pixmap_effect(
+            app.secret_store.as_ref(),
+            app.data_bus.clone(),
+            &d.effect_id,
+            &d.params,
+        )
         .map(PixmapRuntime::Plugin)
         .unwrap_or(PixmapRuntime::Off)
 }
@@ -526,6 +531,7 @@ impl RgbEngine {
                     Some(fx) => DirectRuntime::BuiltIn(fx),
                     None => match self.app_state.registry.build_direct_effect(
                         self.app_state.secret_store.as_ref(),
+                        self.app_state.data_bus.clone(),
                         id,
                         params,
                     ) {

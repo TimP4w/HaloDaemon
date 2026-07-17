@@ -185,10 +185,22 @@ fn consent_rejects_transport_scope_widening_under_old_acceptance() {
         halod_shared::types::PluginAuthority {
             permissions: vec![halod_shared::types::Permission::Command],
             transport_scopes: vec!["command:nvidia-smi".to_owned()],
+            data_reads: vec![],
         },
     );
 
     assert!(!super::consent_satisfied_in(&state, &manifest));
+}
+
+#[test]
+fn consent_rejects_new_cross_plugin_data_read() {
+    let accepted = halod_shared::types::PluginAuthority::default();
+    let requested = halod_shared::types::PluginAuthority {
+        data_reads: vec!["telemetry.current".into()],
+        ..Default::default()
+    };
+    assert!(!requested.is_subset_of(&accepted));
+    assert!(requested.is_subset_of(&requested));
 }
 
 #[test]
@@ -203,6 +215,7 @@ fn consent_accepts_authority_within_the_accepted_snapshot() {
                 "command:nvidia-smi".to_owned(),
                 "command:rocm-smi".to_owned(),
             ],
+            data_reads: vec![],
         },
     );
 

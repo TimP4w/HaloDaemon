@@ -586,6 +586,7 @@ pub(in crate::plugin) struct LuaDeviceSpawnParts {
     pub handle: tokio::runtime::Handle,
     pub granted: Vec<Permission>,
     pub config: crate::plugin::ResolvedConfig,
+    pub data: super::data_api::DataRuntime,
 }
 
 pub(in crate::plugin) struct LuaDeviceChildParts {
@@ -680,6 +681,7 @@ impl LuaDevice {
             handle,
             granted,
             config,
+            data,
         } = *spawn;
         let transport_kind = super::transport::descriptor_for(&dev_match.transport)
             .map(|descriptor| descriptor.kind)
@@ -703,7 +705,7 @@ impl LuaDevice {
         let zones = Vec::new();
         let audio_registry: super::audio_api::SinkRegistry =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let worker = PluginHandle::spawn(
+        let worker = PluginHandle::spawn_with_data(
             manifest.script_source.clone(),
             manifest.module_sources.clone(),
             transport,
@@ -713,6 +715,7 @@ impl LuaDevice {
             handle.clone(),
             zones,
             audio_registry.clone(),
+            data,
         );
         let poll_device_id = id.clone();
         let poll_notify = notify.clone();
@@ -2809,6 +2812,7 @@ mod tests {
                 handle: tokio::runtime::Handle::current(),
                 granted: Vec::new(),
                 config: HashMap::new(),
+                data: Default::default(),
             })),
         })
     }
@@ -3162,6 +3166,7 @@ mod tests {
                 handle: tokio::runtime::Handle::current(),
                 granted: Vec::new(),
                 config: HashMap::new(),
+                data: Default::default(),
             })),
         });
 
