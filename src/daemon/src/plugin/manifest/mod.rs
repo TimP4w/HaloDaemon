@@ -105,6 +105,97 @@ impl Default for TcpConfig {
     }
 }
 
+fn default_http_methods() -> Vec<String> {
+    vec!["GET".to_owned()]
+}
+fn default_http_request_bytes() -> usize {
+    64 * 1024
+}
+fn default_http_response_bytes() -> usize {
+    1024 * 1024
+}
+fn default_http_timeout_ms() -> u64 {
+    10_000
+}
+fn default_http_concurrency() -> usize {
+    4
+}
+fn default_tls_profile() -> String {
+    "default".to_owned()
+}
+
+/// A scoped HTTP client capability (`halod.http`). Unlike `tcp`, this is not a
+/// single root connection but an allowlist the plugin makes bounded requests
+/// against; every request's origin/method/size is checked against these limits
+/// before a socket opens. Credentials stay plugin-supplied from secure config —
+/// the declaration holds authority scope, never secrets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpConfig {
+    /// Exact `scheme://host[:port]` origins the plugin may reach. No wildcards.
+    /// A LAN device whose address isn't known at authoring time uses the literal
+    /// token `{host}` (e.g. `http://{host}`), resolved at runtime from the config
+    /// field named by `host_key`.
+    pub origins: Vec<String>,
+    /// Config field whose value substitutes for `{host}` in `origins` (the user-
+    /// or discovery-supplied device address, host or host:port).
+    #[serde(default)]
+    pub host_key: Option<String>,
+    #[serde(default = "default_http_methods")]
+    pub methods: Vec<String>,
+    #[serde(default = "default_http_request_bytes")]
+    pub max_request_bytes: usize,
+    #[serde(default = "default_http_response_bytes")]
+    pub max_response_bytes: usize,
+    #[serde(default = "default_http_timeout_ms")]
+    pub max_timeout_ms: u64,
+    #[serde(default = "default_http_concurrency")]
+    pub max_concurrency: usize,
+    /// Opt-in to reach loopback/private/link-local origins (LAN devices). Off by
+    /// default so a plugin can't be steered into an SSRF against localhost or the
+    /// cloud metadata endpoint. Requires `http` origins to also allow that host.
+    #[serde(default)]
+    pub allow_private: bool,
+    #[serde(default)]
+    pub tls: Option<HttpTls>,
+    /// Optional host-owned pairing exchange. The daemon performs this only on
+    /// an explicit UI request, then stores the selected response values in
+    /// declared secure config fields.
+    #[serde(default)]
+    pub pairing: Option<HttpPairingConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpPairingConfig {
+    pub path: String,
+    #[serde(default = "default_http_pairing_method")]
+    pub method: String,
+    #[serde(default)]
+    pub body: Option<serde_json::Value>,
+    /// Secure config key -> JSON Pointer in the pairing response.
+    pub response_fields: HashMap<String, String>,
+}
+
+fn default_http_pairing_method() -> String {
+    "POST".to_owned()
+}
+
+/// Selects a host-owned TLS trust profile. `default` is standard public-CA
+/// (webpki) verification. Named profiles are accepted only after their verifier
+/// is implemented in the host — a plugin can never supply its own CA or weaken
+/// verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpTls {
+    #[serde(default = "default_tls_profile")]
+    pub profile: String,
+    /// Identity the leaf certificate must bind to for an identity-bound profile
+    /// (e.g. a Hue bridge id). Ignored by the `default` profile.
+    #[serde(default)]
+    pub verify_identity: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsbTransferType {
@@ -243,6 +334,8 @@ pub struct TransportsConfig {
     pub amd_smn: Option<AmdSmnConfig>,
     #[serde(default)]
     pub lpcio: Option<LpcioConfig>,
+    #[serde(default)]
+    pub http: Option<HttpConfig>,
 }
 
 impl TransportsConfig {
@@ -254,6 +347,7 @@ impl TransportsConfig {
             && self.hwmon.is_none()
             && self.amd_smn.is_none()
             && self.lpcio.is_none()
+            && self.http.is_none()
     }
 
     pub fn integration_transport_kind(&self) -> Option<&'static str> {
@@ -265,6 +359,10 @@ impl TransportsConfig {
             (true, false, false) => Some("tcp"),
             (false, true, false) => Some("hwmon"),
             (false, false, true) => Some("command"),
+            // HTTP is capability-scoped rather than a persistent byte stream,
+            // but an HTTP-only integration still needs a headless root worker
+            // to run its lifecycle and enumerate controllers.
+            (false, false, false) if self.http.is_some() => Some("http"),
             _ => None,
         }
     }
@@ -1372,9 +1470,11 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
             if !manifest.devices.is_empty() {
                 bail!("integration plugin must not declare devices");
             }
-            if manifest.transports.integration_transport_kind().is_none() {
+            if manifest.transports.integration_transport_kind().is_none()
+                && manifest.transports.http.is_none()
+            {
                 bail!(
-                    "integration plugin must declare exactly one tcp, hwmon, or command transport"
+                    "integration plugin must declare a tcp, hwmon, or command transport, or an http capability"
                 );
             }
             if manifest.transports.hid.is_some()
@@ -1437,7 +1537,136 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     if manifest.transports.usb.is_some() && !manifest.permissions.contains(&Permission::Usb) {
         bail!("a usb transport requires the 'usb' permission to be declared");
     }
+    validate_http_transport(manifest)?;
     validate_component("plugin id", &manifest.plugin_id)?;
+    Ok(())
+}
+
+/// Known HTTP methods a scoped `http` transport may allowlist.
+const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
+/// Trust profiles with a live host implementation today. `default` is standard
+/// public-CA (webpki) verification. Additional profiles must not be accepted by
+/// manifest validation until the corresponding live verifier exists.
+const HTTP_TLS_PROFILES: &[&str] = &["default"];
+
+fn validate_http_transport(manifest: &PluginManifest) -> Result<()> {
+    let Some(http) = &manifest.transports.http else {
+        return Ok(());
+    };
+    if !manifest.permissions.contains(&Permission::Network) {
+        bail!("an http transport requires the 'network' permission to be declared");
+    }
+    if http.origins.is_empty() {
+        bail!("an http transport must declare at least one origin");
+    }
+    let mut uses_host_placeholder = false;
+    for origin in &http.origins {
+        if origin.contains("{host}") {
+            uses_host_placeholder = true;
+            let (scheme, authority) = origin.split_once("://").unwrap_or(("", origin));
+            if authority != "{host}" || scheme.is_empty() {
+                bail!("http origin '{origin}' may only use {{host}} as the whole authority (scheme://{{host}})");
+            }
+        }
+        validate_http_origin(origin, http.allow_private)?;
+    }
+    if uses_host_placeholder {
+        let key = http.host_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "an http origin using {{host}} requires host_key to name a config field"
+            )
+        })?;
+        if !manifest.config_fields().iter().any(|f| &f.key == key) {
+            bail!("http host_key '{key}' does not name a declared config field");
+        }
+    }
+    for method in &http.methods {
+        if !HTTP_METHODS.contains(&method.as_str()) {
+            bail!(
+                "http method '{method}' is not one of {}",
+                HTTP_METHODS.join(", ")
+            );
+        }
+    }
+    if http.max_request_bytes == 0 || http.max_response_bytes == 0 {
+        bail!("http max_request_bytes and max_response_bytes must be non-zero");
+    }
+    if http.max_timeout_ms == 0 || http.max_timeout_ms > 60_000 {
+        bail!("http max_timeout_ms must be between 1 and 60000");
+    }
+    if http.max_concurrency == 0 || http.max_concurrency > 16 {
+        bail!("http max_concurrency must be between 1 and 16");
+    }
+    if let Some(tls) = &http.tls {
+        if !HTTP_TLS_PROFILES.contains(&tls.profile.as_str()) {
+            bail!(
+                "http tls profile '{}' is not available (host profiles: {})",
+                tls.profile,
+                HTTP_TLS_PROFILES.join(", ")
+            );
+        }
+    }
+    if let Some(pairing) = &http.pairing {
+        if !matches!(pairing.method.as_str(), "POST" | "PUT") {
+            bail!("http pairing method must be POST or PUT");
+        }
+        if !http.methods.iter().any(|method| method == &pairing.method) {
+            bail!(
+                "http pairing method '{}' must also be declared in http methods",
+                pairing.method
+            );
+        }
+        if !pairing.path.starts_with('/') || pairing.path.contains("..") {
+            bail!("http pairing path must be an absolute API path");
+        }
+        if pairing.response_fields.is_empty() {
+            bail!("http pairing must declare at least one response field");
+        }
+        for (key, pointer) in &pairing.response_fields {
+            let field = manifest
+                .config_fields()
+                .iter()
+                .find(|field| field.key == *key);
+            if !field.is_some_and(|field| field.secure) {
+                bail!(
+                    "http pairing response field '{key}' must name a declared secure config field"
+                );
+            }
+            if !pointer.starts_with('/') {
+                bail!("http pairing response pointer for '{key}' must be a JSON Pointer");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An origin is an exact `scheme://host[:port]` — no path, query, credentials,
+/// or wildcards. `https` is always allowed; plain `http` only when the plugin
+/// opted into `allow_private` (LAN devices that speak cleartext).
+fn validate_http_origin(origin: &str, allow_private: bool) -> Result<()> {
+    let (scheme, authority) = origin
+        .split_once("://")
+        .ok_or_else(|| anyhow::anyhow!("http origin '{origin}' must be scheme://host[:port]"))?;
+    match scheme {
+        "https" => {}
+        "http" if allow_private => {}
+        "http" => bail!("http origin '{origin}' must use https unless allow_private is set"),
+        other => bail!("http origin '{origin}' has unsupported scheme '{other}'"),
+    }
+    if authority.is_empty()
+        || authority.contains(['/', '?', '#', '@', '*'])
+        || authority.starts_with(':')
+    {
+        bail!("http origin '{origin}' must be exactly scheme://host[:port]");
+    }
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.is_empty() {
+            bail!("http origin '{origin}' has an empty host");
+        }
+        if port.parse::<u16>().is_err() {
+            bail!("http origin '{origin}' has an invalid port");
+        }
+    }
     Ok(())
 }
 
@@ -2650,6 +2879,149 @@ mod tests {
     }
 
     #[test]
+    fn http_origin_requires_exact_scheme_host_port() {
+        assert!(validate_http_origin("https://api.example.com", false).is_ok());
+        assert!(validate_http_origin("https://api.example.com:8443", false).is_ok());
+        // Plain http only with allow_private.
+        assert!(validate_http_origin("http://192.168.1.9", false).is_err());
+        assert!(validate_http_origin("http://192.168.1.9", true).is_ok());
+        // No scheme, path/query/wildcard/credentials, or bad port.
+        for bad in [
+            "api.example.com",
+            "https://api.example.com/v1",
+            "https://api.example.com?x=1",
+            "https://*.example.com",
+            "https://user@example.com",
+            "https://api.example.com:notaport",
+            "ftp://example.com",
+        ] {
+            assert!(
+                validate_http_origin(bad, true).is_err(),
+                "{bad} must reject"
+            );
+        }
+    }
+
+    #[test]
+    fn http_transport_requires_network_permission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = write_plugin_dir(
+            tmp.path(),
+            "weather",
+            "type: integration\npermissions: [secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\n",
+            ENTRY_LUA,
+        );
+        let err = parse_manifest_from_dir(&missing).unwrap_err().to_string();
+        assert!(err.contains("network"), "{err}");
+
+        let ok = write_plugin_dir(
+            tmp.path(),
+            "weather2",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&ok).is_ok());
+    }
+
+    #[test]
+    fn http_host_placeholder_requires_a_declared_host_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A `{host}` origin backed by a declared config field and the live
+        // default trust profile are accepted.
+        let ok = write_plugin_dir(
+            tmp.path(),
+            "lan_light",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: host\n    origins: [\"https://{host}\"]\n    allow_private: true\n    tls: { profile: default }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: text }\n",
+            ENTRY_LUA,
+        );
+        assert!(
+            parse_manifest_from_dir(&ok).is_ok(),
+            "{:?}",
+            parse_manifest_from_dir(&ok).err()
+        );
+
+        // `{host}` with no host_key is rejected.
+        let no_key = write_plugin_dir(
+            tmp.path(),
+            "lan_nokey",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [\"https://{host}\"]\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&no_key)
+            .unwrap_err()
+            .to_string()
+            .contains("host_key"));
+
+        // host_key naming an undeclared field is rejected.
+        let bad_key = write_plugin_dir(
+            tmp.path(),
+            "lan_badkey",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: missing\n    origins: [\"https://{host}\"]\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&bad_key)
+            .unwrap_err()
+            .to_string()
+            .contains("does not name a declared config field"));
+
+        // An unknown tls profile is rejected.
+        let bad_tls = write_plugin_dir(
+            tmp.path(),
+            "bad_tls",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: trust-me }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&bad_tls)
+            .unwrap_err()
+            .to_string()
+            .contains("tls profile"));
+
+        // Profiles without a live verifier are rejected rather than producing
+        // a worker that silently lacks `halod.http`.
+        let unavailable_tls = write_plugin_dir(
+            tmp.path(),
+            "unavailable_tls",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: hue-bridge }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&unavailable_tls)
+            .unwrap_err()
+            .to_string()
+            .contains("tls profile"));
+    }
+
+    #[test]
+    fn http_pairing_method_must_be_in_declared_methods() {
+        let tmp = tempfile::tempdir().unwrap();
+        let common_config =
+            "config:\n  fields:\n    - { key: token, label: Token, secure: true }\n";
+        let missing = write_plugin_dir(
+            tmp.path(),
+            "pair_missing_method",
+            &format!(
+                "type: integration\npermissions: [network, secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    pairing:\n      path: /pair\n      response_fields: {{ token: /token }}\n{common_config}"
+            ),
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&missing).unwrap_err().to_string();
+        assert!(error.contains("must also be declared"), "{error}");
+
+        let declared = write_plugin_dir(
+            tmp.path(),
+            "pair_declared_method",
+            &format!(
+                "type: integration\npermissions: [network, secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    methods: [POST]\n    pairing:\n      path: /pair\n      response_fields: {{ token: /token }}\n{common_config}"
+            ),
+            ENTRY_LUA,
+        );
+        assert!(
+            parse_manifest_from_dir(&declared).is_ok(),
+            "{:?}",
+            parse_manifest_from_dir(&declared).err()
+        );
+    }
+
+    #[test]
     fn data_contract_enforces_namespace_policy_and_sensor_wildcard() {
         let tmp = tempfile::tempdir().unwrap();
         let valid = write_plugin_dir(
@@ -3127,6 +3499,22 @@ mod tests {
     }
 
     #[test]
+    fn http_only_integration_has_a_headless_root_transport() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "http_integration",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\n",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest.transports.integration_transport_kind(),
+            Some("http")
+        );
+    }
+
+    #[test]
     fn hwmon_integration_requires_permission_and_linux_platform() {
         let tmp = tempfile::tempdir().unwrap();
         let missing_permission = write_plugin_dir(
@@ -3190,7 +3578,7 @@ mod tests {
         assert!(parse_manifest_from_dir(&dir)
             .unwrap_err()
             .to_string()
-            .contains("exactly one"));
+            .contains("tcp, hwmon, or command"));
     }
 
     #[test]

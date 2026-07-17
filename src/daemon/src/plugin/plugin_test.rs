@@ -19,6 +19,7 @@ use crate::drivers::chain::ChainAdapter;
 use crate::drivers::transports::usb::{UsbCollection, UsbControlResult};
 use crate::drivers::transports::{HidTransport, Transport, TransportEvent};
 use crate::drivers::{Metered, RgbCapability};
+use crate::services::http::{HttpBackend, HttpPolicy, HttpRequest, HttpResponse, HttpRuntime};
 use std::collections::HashMap;
 
 use halod_shared::types::{EffectParamValue, RgbColor, RgbState, WriteRateLimit, WriteRateStatus};
@@ -310,6 +311,132 @@ impl UsbCollection for RecordingUsb {
     fn rate_status(&self) -> WriteRateStatus {
         self.rate.status()
     }
+}
+
+/// Records the `halod.http` requests a plugin makes and replays queued responses,
+/// so `test.lua` can drive an http integration without touching the network.
+#[derive(Default)]
+struct RecordingHttp {
+    requests: Mutex<Vec<HttpRequest>>,
+    responses: Mutex<std::collections::VecDeque<HttpResponse>>,
+}
+
+impl HttpBackend for RecordingHttp {
+    fn request(
+        &self,
+        req: &HttpRequest,
+        _max_response_bytes: usize,
+    ) -> anyhow::Result<HttpResponse> {
+        self.requests
+            .lock()
+            .expect("recording http poisoned")
+            .push(req.clone());
+        Ok(self
+            .responses
+            .lock()
+            .expect("recording http poisoned")
+            .pop_front()
+            .unwrap_or(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: Vec::new(),
+            }))
+    }
+}
+
+/// Build a `halod.http` runtime over the recording backend when the manifest
+/// declares an http transport, so the harness never opens a real socket.
+fn recording_http_runtime(
+    manifest: &PluginManifest,
+    config: &crate::plugin::ResolvedConfig,
+    recording: &Option<Arc<RecordingHttp>>,
+) -> Option<HttpRuntime> {
+    let http = manifest.transports.http.as_ref()?;
+    let recording = recording.clone()?;
+    let host = http.host_key.as_ref().and_then(|key| {
+        config
+            .get(key)
+            .map(crate::plugin::ResolvedConfigValue::to_config_string)
+    });
+    Some(HttpRuntime::new(
+        HttpPolicy::from_config(http, host.as_deref()),
+        recording,
+        http.max_concurrency,
+    ))
+}
+
+/// A resolved config for the harness worker: every declared non-secure field at
+/// its manifest default, so `halod.config` and `{host}` origins resolve without
+/// a running daemon.
+fn default_resolved_config(manifest: &PluginManifest) -> crate::plugin::ResolvedConfig {
+    manifest
+        .config_fields()
+        .iter()
+        .filter(|field| !field.secure)
+        .filter_map(|field| {
+            super::resolved_config_value(field.kind, &field.default)
+                .map(|value| (field.key.clone(), value))
+        })
+        .collect()
+}
+
+/// Attach `dev:queue_http_response{…}` and `dev:http_requests()` to a device the
+/// harness opened, when it has a recording http backend.
+fn attach_http_methods(
+    lua: &Lua,
+    dev: &Table,
+    recording: Option<Arc<RecordingHttp>>,
+) -> Result<()> {
+    let Some(recording) = recording else {
+        return Ok(());
+    };
+    let queue = recording.clone();
+    dev.set(
+        "queue_http_response",
+        lua.create_function(move |_, (_self, args): (Table, Table)| {
+            let status: u16 = args.get::<Option<u16>>("status")?.unwrap_or(200);
+            let body = match args.get::<Value>("body")? {
+                Value::Nil => Vec::new(),
+                Value::String(s) => s.as_bytes().to_vec(),
+                _ => {
+                    return Err(mlua::Error::RuntimeError(
+                        "queue_http_response 'body' must be a string".into(),
+                    ))
+                }
+            };
+            queue
+                .responses
+                .lock()
+                .expect("recording http poisoned")
+                .push_back(HttpResponse {
+                    status,
+                    headers: Vec::new(),
+                    body,
+                });
+            Ok(())
+        })
+        .anyhow()?,
+    )
+    .anyhow()?;
+    let inspect = recording;
+    dev.set(
+        "http_requests",
+        lua.create_function(move |lua, _self: Table| {
+            let requests = inspect.requests.lock().expect("recording http poisoned");
+            let out = lua.create_table()?;
+            for (i, req) in requests.iter().enumerate() {
+                let item = lua.create_table()?;
+                item.set("method", req.method.clone())?;
+                item.set("origin", req.origin.clone())?;
+                item.set("path", req.path.clone())?;
+                out.set(i + 1, item)?;
+            }
+            Ok(out)
+        })
+        .anyhow()?,
+    )
+    .anyhow()?;
+    Ok(())
 }
 
 /// Pass/fail counters a running `test.lua` accumulates into via `h:assert`/`h:assert_eq`.
@@ -619,6 +746,13 @@ fn open_integration(
         .transports
         .integration_transport_kind()
         .unwrap_or("tcp");
+    let http_recording = manifest
+        .transports
+        .http
+        .as_ref()
+        .map(|_| Arc::new(RecordingHttp::default()));
+    let resolved_config = default_resolved_config(manifest);
+    let http = recording_http_runtime(manifest, &resolved_config, &http_recording);
     let worker = PluginHandle::spawn_with_data(
         manifest.script_source.clone(),
         manifest.module_sources.clone(),
@@ -628,7 +762,7 @@ fn open_integration(
             ..Default::default()
         },
         manifest.permissions.clone(),
-        std::collections::HashMap::new(),
+        resolved_config,
         handle.clone(),
         Vec::new(),
         Arc::new(Mutex::new(Vec::new())),
@@ -638,8 +772,10 @@ fn open_integration(
             &manifest.provides,
             manifest.consumes.clone(),
         ),
+        http,
     );
     let dev = lua.create_table().anyhow()?;
+    attach_http_methods(lua, &dev, http_recording)?;
     {
         let worker = worker.clone();
         let handle = handle.clone();

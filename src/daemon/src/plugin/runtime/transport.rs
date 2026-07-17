@@ -30,6 +30,9 @@ use super::manifest::{DeviceSpec, PluginManifest};
 /// The live transport handed to a plugin's worker (and to a `pre_scan`).
 #[derive(Clone)]
 pub enum PluginIo {
+    /// A headless integration root. It has no byte-stream transport; its Lua
+    /// worker exposes only host-scoped capabilities such as `halod.http`.
+    None,
     Stream {
         transport: Arc<dyn Transport>,
         /// General USB endpoint collection attached to a composite HID worker.
@@ -56,6 +59,7 @@ impl PluginIo {
     /// same plugin instance. The first such failure latches for its lifetime.
     pub fn unrecoverable_error(&self) -> Option<String> {
         match self {
+            PluginIo::None => None,
             PluginIo::Register(bus) => bus.unrecoverable_error(),
             PluginIo::Command(command) => command.unrecoverable_error(),
             #[cfg(target_os = "linux")]
@@ -67,6 +71,7 @@ impl PluginIo {
     /// Live write-rate/throughput for the Info UI, regardless of backend.
     pub fn rate_status(&self) -> WriteRateStatus {
         match self {
+            PluginIo::None => WriteRateStatus::default(),
             PluginIo::Stream { transport, .. } => transport.rate_status(),
             PluginIo::Register(r) => r.rate_status(),
             PluginIo::Usb(c) => c.rate_status(),

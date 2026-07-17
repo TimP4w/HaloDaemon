@@ -10,6 +10,7 @@ pub(crate) mod data_api;
 pub(crate) mod device;
 pub(crate) mod effect_worker;
 mod ffi;
+pub(crate) mod http_api;
 mod image_api;
 mod lua_worker;
 mod sandbox;

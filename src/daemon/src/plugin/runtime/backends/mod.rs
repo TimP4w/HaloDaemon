@@ -8,6 +8,7 @@ mod command;
 mod hid;
 mod hwmon;
 mod lpcio;
+pub(crate) mod net_guard;
 mod smbus;
 pub(crate) mod tcp;
 pub(crate) mod usb;

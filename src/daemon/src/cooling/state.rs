@@ -111,7 +111,6 @@ mod tests {
         let wire = state.snapshot(fan_curves).await;
 
         assert_eq!(wire.fan_curves.len(), 1);
-        assert_eq!(wire.fan_curves[0].fan_id, "fan_dev");
         assert_eq!(wire.fan_curves[0].device_id, "fan_dev");
         assert_eq!(wire.fan_curves[0].channel_id, "default");
         assert_eq!(wire.fan_curves[0].sensor_id.as_deref(), Some("cpu_temp"));

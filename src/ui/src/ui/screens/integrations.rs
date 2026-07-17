@@ -16,7 +16,9 @@ use halod_shared::types::{AppState, PluginInfo, PluginIssue, PluginIssueKind, Pl
 use crate::domain::models::plugin_issues::plugin_issue_detail;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
-use crate::ui::screens::plugin_config::{config_section, seed_config_edit_if_needed};
+use crate::ui::screens::plugin_config::{
+    config_section, config_values_to_send, seed_config_edit_if_needed,
+};
 use crate::ui::screens::plugins::{
     decode_new_assets, draw_logo_fit, initials_tile_at, plugin_needs_permission,
 };
@@ -303,6 +305,21 @@ impl IntegrationsUi {
                         },
                     );
                 });
+                if p.has_http_pairing {
+                    ui.add_space(theme::SPACE_3);
+                    if widgets::button(ui, "Pair", ButtonKind::Ghost, egui::Vec2::new(100.0, 30.0))
+                        .clicked()
+                    {
+                        let values = config_values_to_send(edits, &p.config_fields);
+                        crate::runtime::ipc::send(
+                            cmd,
+                            halod_shared::commands::DaemonCommand::PairIntegration {
+                                id: p.id.clone(),
+                                values,
+                            },
+                        );
+                    }
+                }
             }
         });
 
@@ -448,6 +465,7 @@ mod tests {
             config_values: Default::default(),
             secret_set: Default::default(),
             integration_enabled,
+            has_http_pairing: false,
             consented: true,
             active: enabled,
             requirements: vec![],

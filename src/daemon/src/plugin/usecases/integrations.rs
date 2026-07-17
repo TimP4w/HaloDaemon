@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use anyhow::{bail, Context};
+use std::time::Duration;
 
 use crate::plugin::integration_scan;
 use crate::registry::usecases::registration::unregister_device_and_children;
@@ -82,6 +84,83 @@ pub async fn set_integration_config(
     enable_one(&app, &id).await;
     crate::ipc::broadcast_state(&app).await;
     Ok(())
+}
+
+/// Run the explicit, manifest-declared HTTP pairing exchange and persist only
+/// the response fields mapped to secure config keys. Pairing is never retried
+/// in the background: the user must first open the device's physical window.
+pub async fn pair_integration(
+    id: String,
+    values: HashMap<String, String>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let manifest = app
+        .registry
+        .pairable_integration_manifest(&id)
+        .context("unknown, disabled, or unconsented integration")?;
+    let http = manifest
+        .transports
+        .http
+        .as_ref()
+        .context("integration has no HTTP transport")?;
+    let pairing = http
+        .pairing
+        .as_ref()
+        .context("integration does not declare HTTP pairing")?;
+    let granted = app.registry.granted_for(&id);
+    if !granted.contains(&halod_shared::types::Permission::Network)
+        || !granted.contains(&halod_shared::types::Permission::SecureStorage)
+    {
+        bail!("integration requires network and secure_storage permissions to pair");
+    }
+    // Unlike Save, do not reconnect yet: the pairing request itself must use
+    // these edits first, and a successful response below performs one scoped
+    // reconnect with the newly stored credentials.
+    super::plugins::persist_config_values(&id, &values, &app).await?;
+    app.request_config_save();
+    let config = app
+        .registry
+        .resolved_config_for(app.secret_store.as_ref(), &id, &granted);
+    let runtime = crate::plugin::runtime::worker::http_runtime_for(&manifest, &granted, &config)
+        .context("HTTP client is unavailable for this integration")?;
+    let origin = runtime
+        .first_origin()
+        .context("pairing has no resolved HTTP origin")?
+        .to_owned();
+    let body = pairing.body.as_ref().map(serde_json::to_vec).transpose()?;
+    let method = pairing.method.clone();
+    let path = pairing.path.clone();
+    let endpoint = format!("{origin}{path}");
+    let response = tokio::task::spawn_blocking(move || {
+        runtime.request(crate::services::http::HttpRequest {
+            method,
+            origin,
+            path,
+            headers: body
+                .as_ref()
+                .map(|_| vec![("Content-Type".into(), "application/json".into())])
+                .unwrap_or_default(),
+            body: body.unwrap_or_default(),
+            timeout: Duration::ZERO,
+        })
+    })
+    .await
+    .context("pairing task panicked")?
+    .with_context(|| format!("pairing request to {endpoint}"))?;
+    if !(200..300).contains(&response.status) {
+        bail!("pairing request returned HTTP {}", response.status);
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&response.body).context("pairing response was not JSON")?;
+    let mut values = HashMap::new();
+    for (key, pointer) in &pairing.response_fields {
+        let value = json
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| format!("pairing response is missing string field '{pointer}'"))?;
+        values.insert(key.clone(), value.to_owned());
+    }
+    set_integration_config(id, values, app).await
 }
 
 #[cfg(test)]

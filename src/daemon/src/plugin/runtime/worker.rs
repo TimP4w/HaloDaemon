@@ -570,6 +570,7 @@ impl PluginHandle {
             zones,
             audio_registry,
             Default::default(),
+            None,
         )
     }
 
@@ -585,6 +586,7 @@ impl PluginHandle {
         zones: Vec<RgbZone>,
         audio_registry: super::audio_api::SinkRegistry,
         data: super::data_api::DataRuntime,
+        http: Option<crate::services::http::HttpRuntime>,
     ) -> Self {
         let worker = LuaWorker::spawn(
             "halod-plugin",
@@ -605,6 +607,7 @@ impl PluginHandle {
                     &zones,
                     audio_registry,
                     data,
+                    http,
                 )
             },
             |job: Job, ctx: &WorkerCtx| {
@@ -1365,6 +1368,36 @@ fn validate_runtime_controls(controls: &InitControls) -> Result<()> {
     Ok(())
 }
 
+/// Build the live `halod.http` runtime for a manifest that declares a scoped
+/// http transport and holds the network grant. Returns `None` (with a log) when
+/// the transport is absent, ungranted, or its policy fails to build, so a plugin
+/// simply lacks `halod.http` rather than failing to spawn.
+pub(in crate::plugin) fn http_runtime_for(
+    manifest: &crate::plugin::manifest::PluginManifest,
+    granted: &[Permission],
+    config: &crate::plugin::ResolvedConfig,
+) -> Option<crate::services::http::HttpRuntime> {
+    let http = manifest.transports.http.as_ref()?;
+    if !granted.contains(&Permission::Network) {
+        return None;
+    }
+    let host = http.host_key.as_ref().and_then(|key| {
+        config
+            .get(key)
+            .map(crate::plugin::ResolvedConfigValue::to_config_string)
+    });
+    match crate::services::http::HttpRuntime::from_config(http, host.as_deref()) {
+        Ok(runtime) => Some(runtime),
+        Err(e) => {
+            log::error!(
+                "plugin '{}': http transport unavailable: {e:#}",
+                manifest.plugin_id
+            );
+            None
+        }
+    }
+}
+
 /// Build the worker's VM context on the worker thread. Runs once at spawn; the
 /// [`LuaWorker`] loop then drives jobs against the returned [`WorkerCtx`].
 #[allow(clippy::too_many_arguments)]
@@ -1379,6 +1412,7 @@ fn build_ctx(
     zones: &[RgbZone],
     audio_registry: super::audio_api::SinkRegistry,
     data: super::data_api::DataRuntime,
+    http: Option<crate::services::http::HttpRuntime>,
 ) -> Result<WorkerCtx> {
     debug_assert!(!super::contract::active().tables.is_empty());
     let controller_index = dev_match.index;
@@ -1392,6 +1426,9 @@ fn build_ctx(
     sandbox::install_package_modules(&lua, module_sources)
         .map_err(|e| lua_err("package modules", e))?;
     super::data_api::register(&lua, data).map_err(|e| lua_err("data API", e))?;
+    if let Some(http) = http {
+        super::http_api::register(&lua, http).map_err(|e| lua_err("http API", e))?;
+    }
 
     let manifest: Table = lua
         .load(source)

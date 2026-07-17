@@ -87,6 +87,12 @@ pub(super) fn open_probe(
         .transports
         .integration_transport_kind()
         .ok_or_else(|| anyhow::anyhow!("integration plugin has no root transport"))?;
+    // HTTP is a scoped capability, not a persistent connection. Its live
+    // runtime is built while spawning the worker, so the integration root is
+    // deliberately headless here.
+    if kind == "http" {
+        return Ok(PluginIo::None);
+    }
     match super::runtime::transport::descriptor_for(kind) {
         Some(d) => (d.open)(manifest, &placeholder_handle(), config, granted, None),
         None => anyhow::bail!("integration plugin: no '{kind}' transport backend registered"),

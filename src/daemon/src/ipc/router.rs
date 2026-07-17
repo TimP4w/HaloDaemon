@@ -204,7 +204,7 @@ fn reply_error_with_handled(
     e: anyhow::Error,
     handled: bool,
 ) {
-    log::warn!("command '{cmd}' failed: {e}");
+    log::warn!("command '{cmd}' failed: {e:#}");
     let mut reply = json!({"type": "error", "message": e.to_string()});
     if e.is::<halod_plugin_signing::RepositorySignatureMismatch>() {
         reply["code"] = halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED.into();
@@ -427,6 +427,9 @@ async fn dispatch(
         }
         DaemonCommand::SetIntegrationConfig { id, values } => {
             plugin::usecases::integrations::set_integration_config(id, values, app).await
+        }
+        DaemonCommand::PairIntegration { id, values } => {
+            plugin::usecases::integrations::pair_integration(id, values, app).await
         }
         DaemonCommand::SetLogLevel { level } => {
             registry::usecases::settings::set_log_level(level, app).await

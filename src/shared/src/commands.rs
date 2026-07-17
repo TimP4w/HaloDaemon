@@ -195,6 +195,13 @@ pub enum DaemonCommand {
         id: String,
         values: HashMap<String, String>,
     },
+    /// Run an integration's manifest-declared, host-owned HTTP pairing exchange.
+    PairIntegration {
+        id: String,
+        /// Current edits are persisted before the request, so Pair never uses
+        /// a stale saved host while the user has an unsaved address in the UI.
+        values: HashMap<String, String>,
+    },
     SetLogLevel {
         level: String,
     },
@@ -1242,5 +1249,4 @@ mod tests {
         assert!(v["selection"].get("variant").is_none());
         assert!(v["selection"].get("language").is_none());
     }
-
 }

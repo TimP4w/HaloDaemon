@@ -1357,6 +1357,9 @@ pub struct PluginInfo {
     /// plugin, where the field is meaningless.
     #[serde(default = "default_true")]
     pub integration_enabled: bool,
+    /// Whether this integration declares a host-owned HTTP pairing exchange.
+    #[serde(default)]
+    pub has_http_pairing: bool,
     /// Whether the currently declared authority has been accepted and the
     /// package is eligible to run. Content hashes are update/dirty metadata,
     /// never a consent gate.
@@ -2985,7 +2988,9 @@ mod tests {
     #[test]
     fn find_cap_battery_non_matching() {
         let device = WireDevice {
-            capabilities: vec![DeviceCapability::Cooling(CoolingStatus { channels: vec![] })],
+            capabilities: vec![DeviceCapability::Cooling(CoolingStatus {
+                channels: vec![],
+            })],
             ..Default::default()
         };
         assert!(device.battery().is_none());

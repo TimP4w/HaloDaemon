@@ -3534,6 +3534,7 @@ mod tests {
             config_values: Default::default(),
             secret_set: Default::default(),
             integration_enabled: true,
+            has_http_pairing: false,
             consented: true,
             active: enabled,
             requirements: vec![],

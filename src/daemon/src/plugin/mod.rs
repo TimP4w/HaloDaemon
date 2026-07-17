@@ -1140,6 +1140,27 @@ impl Registry {
             .into_iter()
             .find(|m| m.plugin_id == plugin_id)
     }
+
+    /// Manifest eligible for an explicit pairing action. Unlike
+    /// [`integration_manifest`], this intentionally ignores the integration's
+    /// on/off switch: pairing credentials must be obtainable before the user
+    /// enables the integration. Generic plugin disable, platform, consent, and
+    /// requirement gates remain in force.
+    pub(crate) fn pairable_integration_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
+        let state = self.snapshot();
+        state
+            .manifests
+            .iter()
+            .find(|m| {
+                m.plugin_id == plugin_id
+                    && m.plugin_type == PluginKind::Integration
+                    && m.supports_current_platform()
+                    && !state.disabled.contains(plugin_id)
+                    && consent_satisfied_in(&state, m)
+                    && self.blocking_requirements_met(m)
+            })
+            .cloned()
+    }
 }
 
 /// Where `plugin_dir` came from: `Repo { slug }` under `plugin_repos_dir()`, else `Local`.
@@ -1370,6 +1391,12 @@ impl Registry {
             config_values: config_values_for(state, m),
             secret_set,
             integration_enabled,
+            has_http_pairing: m
+                .transports
+                .http
+                .as_ref()
+                .and_then(|http| http.pairing.as_ref())
+                .is_some(),
             consented,
             active,
             requirements,
