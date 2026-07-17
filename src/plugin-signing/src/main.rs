@@ -145,7 +145,7 @@ fn verify(args: &[String]) -> Result<()> {
         bail!("at least one --trusted-key is required");
     }
     let manifest = signing::read_repository_index(&repo)?;
-    signing::validate_compatibility(&manifest, env!("CARGO_PKG_VERSION"), 1)?;
+    signing::validate_compatibility(&manifest, env!("CARGO_PKG_VERSION"), signing::PLUGIN_API)?;
     signing::validate_repository(&repo, &manifest)?;
     let payload = std::fs::read(repo.join("repository.yaml"))?;
     let signature = std::fs::read(repo.join("repository.sig"))?;

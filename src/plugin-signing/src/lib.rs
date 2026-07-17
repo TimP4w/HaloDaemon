@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const REPOSITORY_SCHEMA: u32 = 1;
+/// Lua host/plugin ABI supported by HaloDaemon and its repository tooling.
+/// Keep this value here so the daemon and standalone release tool cannot drift.
+pub const PLUGIN_API: u32 = 2;
 pub const SIGNATURE_ALGORITHM: &str = "ed25519";
 pub const BUNDLE_METADATA_PATH: &str = ".halod-plugin-bundle.yaml";
 const BUNDLE_MAGIC: &[u8] = b"HALODPLUG1\n";

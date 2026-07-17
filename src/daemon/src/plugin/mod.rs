@@ -34,9 +34,9 @@ pub use runtime::worker::run_pre_scan;
 use manifest::{requirements, udev};
 use runtime::{command_resolve, device, transport, worker};
 
-/// Lua host/plugin ABI implemented by this daemon. Repository compatibility
-/// and [`manifest::contract::PLUGIN_API_CONTRACT`] deliberately share this one value.
-pub const PLUGIN_API: u32 = 2;
+/// Lua host/plugin ABI implemented by this daemon. Repository compatibility,
+/// release tooling, and [`manifest::contract::PLUGIN_API_CONTRACT`] share this value.
+pub const PLUGIN_API: u32 = halod_plugin_signing::PLUGIN_API;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
