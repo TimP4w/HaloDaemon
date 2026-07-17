@@ -83,7 +83,7 @@ pub struct AppState {
         Mutex<std::collections::HashMap<String, halod_shared::types::RepoCompatibilityStatus>>,
     /// The device-plugin registry (loaded manifests, consent/config, notice
     /// dedup, load warnings).
-    pub registry: crate::drivers::plugins::Registry,
+    pub registry: crate::plugin::Registry,
     #[cfg(feature = "dev-plugin-repo")]
     /// Process-local development repository selected with `--dev-plugin-repo`.
     /// Registry rebuilds must retain this priority source rather than falling
@@ -119,7 +119,7 @@ impl AppState {
             plugin_update_status: Mutex::new(Vec::new()),
             repo_signature_status: Mutex::new(std::collections::HashMap::new()),
             repo_compatibility_status: Mutex::new(std::collections::HashMap::new()),
-            registry: crate::drivers::plugins::Registry::default(),
+            registry: crate::plugin::Registry::default(),
             #[cfg(feature = "dev-plugin-repo")]
             development_plugin_repo: RwLock::new(None),
             secret_store: Arc::new(crate::secrets::FileKeyStore::new()),
@@ -473,12 +473,11 @@ mod tests {
         // Clean — every handle passes.
         assert!(app.handle_in_scope(&handle).await);
 
-        let mut spec: crate::drivers::plugins::DeviceSpec =
-            serde_json::from_value(serde_json::json!({
-            "vendor": "x", "model": "y",
-            "match": { "hid": { "vid": 9, "pid": 9 } }
-            }))
-            .unwrap();
+        let mut spec: crate::plugin::DeviceSpec = serde_json::from_value(serde_json::json!({
+        "vendor": "x", "model": "y",
+        "match": { "hid": { "vid": 9, "pid": 9 } }
+        }))
+        .unwrap();
         spec.transport = "hid".to_owned();
         spec.vid = Some(9);
         spec.pid = Some(9);

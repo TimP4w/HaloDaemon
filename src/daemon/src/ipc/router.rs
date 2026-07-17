@@ -11,6 +11,7 @@ use crate::input;
 use crate::ipc::{ClientHandle, LeaseState, SubscriptionTopic};
 use crate::lcd;
 use crate::lighting;
+use crate::plugin;
 use crate::profiles;
 use crate::registry;
 use crate::state::AppState;
@@ -158,7 +159,7 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
                 let _guard = lock.lock().await;
                 if let Err(e) = dispatch(typed, client.clone(), Arc::clone(&app)).await {
                     let plugin_handled = e
-                        .downcast_ref::<crate::drivers::plugins::SurfacedPluginError>()
+                        .downcast_ref::<crate::plugin::SurfacedPluginError>()
                         .is_some();
                     if writes_device && !plugin_handled {
                         let device = {
@@ -206,7 +207,7 @@ fn reply_error_with_handled(
     log::warn!("command '{cmd}' failed: {e}");
     let mut reply = json!({"type": "error", "message": e.to_string()});
     if handled
-        || e.downcast_ref::<crate::drivers::plugins::SurfacedPluginError>()
+        || e.downcast_ref::<crate::plugin::SurfacedPluginError>()
             .is_some()
     {
         reply["handled"] = true.into();
@@ -383,49 +384,49 @@ async fn dispatch(
         }
         DaemonCommand::Rediscover => registry::usecases::settings::rediscover(app).await,
         DaemonCommand::GetUdevRulesStatus => {
-            registry::usecases::plugins::get_udev_rules_status(client, app).await
+            plugin::usecases::plugins::get_udev_rules_status(client, app).await
         }
         DaemonCommand::SetPluginEnabled { id, enabled } => {
-            registry::usecases::plugins::set_enabled(id, enabled, app).await
+            plugin::usecases::plugins::set_enabled(id, enabled, app).await
         }
         DaemonCommand::ImportPlugin { source_dir } => {
-            registry::usecases::plugins::import(source_dir, app).await
+            plugin::usecases::plugins::import(source_dir, app).await
         }
-        DaemonCommand::DeletePlugin { id } => registry::usecases::plugins::delete(id, app).await,
+        DaemonCommand::DeletePlugin { id } => plugin::usecases::plugins::delete(id, app).await,
         DaemonCommand::ConfirmPluginEnable { id, authority } => {
-            registry::usecases::plugins::confirm_enable(id, authority, app).await
+            plugin::usecases::plugins::confirm_enable(id, authority, app).await
         }
         DaemonCommand::ConfirmPluginEnableBatch { plugins } => {
-            registry::usecases::plugins::confirm_enable_batch(plugins, app).await
+            plugin::usecases::plugins::confirm_enable_batch(plugins, app).await
         }
         DaemonCommand::SetPluginConfig { id, values } => {
-            registry::usecases::plugins::set_config(id, values, app).await
+            plugin::usecases::plugins::set_config(id, values, app).await
         }
         DaemonCommand::AddPluginRepo { url, branch } => {
-            registry::usecases::repos::add_repo(url, branch, app).await
+            plugin::usecases::repos::add_repo(url, branch, app).await
         }
         DaemonCommand::RemovePluginRepo { slug } => {
-            registry::usecases::repos::remove_repo(slug, app).await
+            plugin::usecases::repos::remove_repo(slug, app).await
         }
         DaemonCommand::ListRepoBranches { url } => {
-            registry::usecases::repos::list_branches(url, client).await
+            plugin::usecases::repos::list_branches(url, client).await
         }
         DaemonCommand::CheckPluginRepoUpdates => {
-            registry::usecases::repos::check_repo_updates(app, client).await
+            plugin::usecases::repos::check_repo_updates(app, client).await
         }
         DaemonCommand::UpdatePluginRepo { slug } => {
-            let result = registry::usecases::repos::update_repo(slug, app.clone()).await;
+            let result = plugin::usecases::repos::update_repo(slug, app.clone()).await;
             // Refresh per-plugin update flags so the banners clear once the pull
             // lands (a single update, unlike update-all, otherwise leaves them stale).
-            registry::usecases::repos::broadcast_plugin_updates(&app, None).await;
+            plugin::usecases::repos::broadcast_plugin_updates(&app, None).await;
             result
         }
-        DaemonCommand::UpdateAllPlugins => registry::usecases::repos::update_all_plugins(app).await,
+        DaemonCommand::UpdateAllPlugins => plugin::usecases::repos::update_all_plugins(app).await,
         DaemonCommand::SetIntegrationEnabled { id, enabled } => {
-            registry::usecases::integrations::set_integration_enabled(id, enabled, app).await
+            plugin::usecases::integrations::set_integration_enabled(id, enabled, app).await
         }
         DaemonCommand::SetIntegrationConfig { id, values } => {
-            registry::usecases::integrations::set_integration_config(id, values, app).await
+            plugin::usecases::integrations::set_integration_config(id, values, app).await
         }
         DaemonCommand::SetLogLevel { level } => {
             registry::usecases::settings::set_log_level(level, app).await
@@ -626,13 +627,13 @@ async fn dispatch(
             lcd::usecases::lcd::delete_lcd_image(filename, app).await
         }
         DaemonCommand::GetPluginAsset { plugin_id, name } => {
-            registry::usecases::plugins::get_asset(plugin_id, name, client, app).await
+            plugin::usecases::plugins::get_asset(plugin_id, name, client, app).await
         }
         DaemonCommand::GetLcdWidgetIcon { catalog_id } => {
-            registry::usecases::plugins::get_lcd_widget_icon(catalog_id, client, app).await
+            plugin::usecases::plugins::get_lcd_widget_icon(catalog_id, client, app).await
         }
         DaemonCommand::GetLcdPluginPreset { catalog_id } => {
-            registry::usecases::plugins::get_lcd_preset(catalog_id, client, app).await
+            plugin::usecases::plugins::get_lcd_preset(catalog_id, client, app).await
         }
 
         DaemonCommand::CanvasUpsertEffect { instance_id, def } => {

@@ -12,9 +12,9 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use anyhow::{bail, Context, Result};
 use halod_shared::types::Permission;
 
-use crate::drivers::plugins::manifest::PluginManifest;
-use crate::drivers::plugins::transport::{PluginIo, PluginTransportDescriptor};
 use crate::drivers::transports::tcp::TcpTransport;
+use crate::plugin::manifest::PluginManifest;
+use crate::plugin::runtime::transport::{PluginIo, PluginTransportDescriptor};
 use crate::registry::discovery::DiscoveryHandle;
 
 /// Resolve `host:port` **once** and return a single vetted [`SocketAddr`] to
@@ -149,7 +149,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();
-        crate::drivers::plugins::parse_manifest_from_dir(&dir).unwrap()
+        crate::plugin::parse_manifest_from_dir(&dir).unwrap()
     }
 
     const NET: &[Permission] = &[Permission::Network];

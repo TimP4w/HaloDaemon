@@ -231,7 +231,7 @@ enum Probe {
     ReadByte,
 }
 
-fn plugin_scan_jobs(registry: &crate::drivers::plugins::Registry) -> Vec<ScanJob> {
+fn plugin_scan_jobs(registry: &crate::plugin::Registry) -> Vec<ScanJob> {
     registry
         .plugin_smbus_scan_entries()
         .into_iter()
@@ -240,9 +240,9 @@ fn plugin_scan_jobs(registry: &crate::drivers::plugins::Registry) -> Vec<ScanJob
             addresses: e.addresses.clone(),
             write_rate_limit: e.write_rate_limit,
             probe: match e.probe {
-                crate::drivers::plugins::ProbeMode::Quick => Probe::Quick,
-                crate::drivers::plugins::ProbeMode::ReadByte => Probe::ReadByte,
-                crate::drivers::plugins::ProbeMode::None => Probe::Always,
+                crate::plugin::ProbeMode::Quick => Probe::Quick,
+                crate::plugin::ProbeMode::ReadByte => Probe::ReadByte,
+                crate::plugin::ProbeMode::None => Probe::Always,
             },
             pre_scan: if e.pre_scan {
                 PreScan::Plugin {
@@ -400,7 +400,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
 
 /// Run a job's Lua pre-scan against a freshly opened bus.
 async fn run_pre_scan(
-    registry: &crate::drivers::plugins::Registry,
+    registry: &crate::plugin::Registry,
     pre_scan: &PreScan,
     bus: &Arc<SmBusDevice>,
     bus_number: u8,
@@ -419,7 +419,7 @@ async fn run_pre_scan(
             let scope = scope.clone();
             let granted = registry.granted_for(plugin_id);
             tokio::task::spawn_blocking(move || {
-                crate::drivers::plugins::run_pre_scan(
+                crate::plugin::run_pre_scan(
                     &source,
                     &modules,
                     bus,
@@ -544,7 +544,7 @@ mod tests {
             }
         "#;
 
-        let err = crate::drivers::plugins::run_pre_scan(
+        let err = crate::plugin::run_pre_scan(
             source,
             &Default::default(),
             bus,

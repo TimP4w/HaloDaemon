@@ -6,11 +6,11 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
-use crate::drivers::plugins::manifest::{DeviceSpec, PluginManifest};
-use crate::drivers::plugins::transport::{
+use crate::drivers::transports::smbus::SmbusBusKind;
+use crate::plugin::manifest::{DeviceSpec, PluginManifest};
+use crate::plugin::runtime::transport::{
     AddrScope, PluginIo, PluginTransportDescriptor, RegisterBus,
 };
-use crate::drivers::transports::smbus::SmbusBusKind;
 use crate::registry::discovery::DiscoveryHandle;
 
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {

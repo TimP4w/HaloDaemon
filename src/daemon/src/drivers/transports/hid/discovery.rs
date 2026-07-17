@@ -187,7 +187,7 @@ impl From<&hidapi::DeviceInfo> for HidDeviceInfo {
 /// wins. Result order follows enumeration first-occurrence so device `idx`
 /// assignment stays stable.
 fn pick_hid_devices<'a>(
-    registry: &crate::drivers::plugins::Registry,
+    registry: &crate::plugin::Registry,
     entries: &'a [HidDeviceInfo],
 ) -> Vec<&'a HidDeviceInfo> {
     let make_probe = |e: &HidDeviceInfo| DiscoveryHandle::Hid {

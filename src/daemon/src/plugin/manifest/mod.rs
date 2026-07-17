@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Parsing a plugin's manifest into a [`PluginManifest`].
 
+pub mod contract;
+pub(crate) mod probes;
+pub(crate) mod requirements;
+pub(crate) mod udev;
+
 use anyhow::{anyhow, bail, Context, Result};
 use halod_shared::types::{
     Animation, CategoryLayout, ChoiceDisplay, ChoiceOption, DeviceType, EffectParamDescriptor,
@@ -12,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::transport::{descriptor_for, known_kinds};
+use super::runtime::transport::{descriptor_for, known_kinds};
 use crate::drivers::transports::smbus::{PciMatch, SmbusBusKind};
 use crate::drivers::vendors::generic::devices::common::ring_led_positions;
 use crate::registry::discovery::DiscoveryHandle;

@@ -148,7 +148,7 @@ it in `AppState`, restores its saved config, runs `discover_children()`, and cal
 ### Plugins — devices without recompiling
 
 Built-in host devices register at **compile time** via `inventory`. **Device plugins**
-([drivers/plugins/](../src/daemon/src/drivers/plugins/)) add a parallel **runtime**
+([plugin/](../src/daemon/src/plugin/)) add a parallel **runtime**
 registry: `load_all_with_repos()` reads directory packages (`plugin.yaml` + entry
 script) from the local plugins directory and every registered git-repo source, and
 `make_device()` consults `plugins::match_handle()` *before* built-in descriptors —

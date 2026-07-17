@@ -85,7 +85,7 @@ impl LcdEngineState {
 
     pub async fn snapshot(
         &self,
-        registry: &crate::drivers::plugins::Registry,
+        registry: &crate::plugin::Registry,
         device_templates: HashMap<String, String>,
         device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
     ) -> halod_shared::types::LcdState {
@@ -110,7 +110,7 @@ mod tests {
         let mut device_templates = HashMap::new();
         device_templates.insert("dev1".to_string(), "tmpl_a".to_string());
 
-        let registry = crate::drivers::plugins::Registry::default();
+        let registry = crate::plugin::Registry::default();
         let wire = state
             .snapshot(&registry, device_templates, HashMap::new())
             .await;

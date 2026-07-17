@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use serde_json::json;
 
 use crate::config::PluginRepoRecord;
-use crate::drivers::plugins::repo;
 use crate::ipc::ClientHandle;
+use crate::plugin::repo;
 use crate::state::AppState;
 
 use halod_shared::types::RepoUpdateStatus;
@@ -266,7 +266,7 @@ pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     // The Git worktree is object storage only.  Read the selected immutable
     // revision before removing it so a stale/mutated worktree cannot decide
     // which persisted plugin state is purged.
-    let plugin_ids = crate::drivers::plugins::repo_plugin_ids(&repo::active_revision_dir(&record));
+    let plugin_ids = crate::plugin::repo_plugin_ids(&repo::active_revision_dir(&record));
     for id in &plugin_ids {
         purge_plugin_state(id, &app).await;
     }
@@ -740,7 +740,7 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::usecases::plugins::reload_registry;
+    use crate::plugin::usecases::plugins::reload_registry;
 
     #[cfg(feature = "dev-plugin-repo")]
     #[tokio::test]
@@ -786,7 +786,7 @@ mod tests {
             .and_then(|bytes| serde_yaml::from_slice::<serde_yaml::Value>(&bytes).ok())
             .and_then(|value| value.get("version")?.as_str().map(str::to_owned))
             .unwrap_or_else(|| "1.0.0".to_owned());
-        let digest = crate::drivers::plugins::repo::package_hash(&package).unwrap();
+        let digest = crate::plugin::repo::package_hash(&package).unwrap();
         std::fs::write(
             root.join("repository.yaml"),
             format!(
@@ -888,13 +888,9 @@ mod tests {
             assert!(!plugin.unwrap().enabled);
 
             let authority = app.registry.authority_for(&slug).unwrap();
-            crate::registry::usecases::plugins::confirm_enable(
-                slug.clone(),
-                authority,
-                app.clone(),
-            )
-            .await
-            .unwrap();
+            crate::plugin::usecases::plugins::confirm_enable(slug.clone(), authority, app.clone())
+                .await
+                .unwrap();
             let plugins = app.registry.list(&*app.secret_store);
             assert!(plugins.iter().find(|p| p.id == slug).unwrap().enabled);
         })
@@ -1225,7 +1221,7 @@ mod tests {
 
             // Validation happened in staging, so the installed working tree was
             // never replaced with the invalid content.
-            let manifest = crate::drivers::plugins::parse_manifest_from_dir(
+            let manifest = crate::plugin::parse_manifest_from_dir(
                 &active.join("plugins").join(&slug),
             )
             .expect("the reverted checkout must parse again");

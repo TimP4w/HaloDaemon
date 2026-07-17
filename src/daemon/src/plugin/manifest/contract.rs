@@ -5,7 +5,7 @@
 //! crossing the host/plugin boundary. A shape names the Rust wire type where
 //! one exists; its serde definition is authoritative for individual fields.
 
-use super::PLUGIN_API;
+use crate::plugin::PLUGIN_API;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallbackUse {

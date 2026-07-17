@@ -422,7 +422,7 @@ impl Controls {
 
 /// Why a [`LuaDevice`] is [`RuntimeState::Degraded`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DegradeReason {
+pub(in crate::plugin) enum DegradeReason {
     /// A tracked capability call (`track`) returned `Err`.
     CallFailed,
     /// `resync_children` couldn't enumerate the remote's controllers.
@@ -438,7 +438,7 @@ pub(super) enum DegradeReason {
 /// `-> Closing -> Closed` (terminal — a call landing after close can't
 /// resurrect the device).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RuntimeState {
+pub(in crate::plugin) enum RuntimeState {
     OpeningTransport,
     Initializing,
     Online,
@@ -565,7 +565,7 @@ pub struct LuaDevice {
     notify: Weak<crate::state::AppState>,
 }
 
-pub(super) struct LuaDeviceParts<'a> {
+pub(in crate::plugin) struct LuaDeviceParts<'a> {
     pub id: String,
     pub manifest: &'a PluginManifest,
     pub spec: Option<&'a DeviceSpec>,
@@ -574,13 +574,13 @@ pub(super) struct LuaDeviceParts<'a> {
     pub worker: LuaDeviceWorker,
 }
 
-pub(super) enum LuaDeviceWorker {
+pub(in crate::plugin) enum LuaDeviceWorker {
     None,
     Spawn(Box<LuaDeviceSpawnParts>),
     Child(Box<LuaDeviceChildParts>),
 }
 
-pub(super) struct LuaDeviceSpawnParts {
+pub(in crate::plugin) struct LuaDeviceSpawnParts {
     pub dev_match: DevMatch,
     pub transport: PluginIo,
     pub handle: tokio::runtime::Handle,
@@ -588,7 +588,7 @@ pub(super) struct LuaDeviceSpawnParts {
     pub config: HashMap<String, String>,
 }
 
-pub(super) struct LuaDeviceChildParts {
+pub(in crate::plugin) struct LuaDeviceChildParts {
     pub dev_match: DevMatch,
     pub worker: PluginHandle,
     pub transport: PluginIo,
@@ -634,7 +634,7 @@ impl LuaDevice {
         }
     }
 
-    pub(super) fn new(parts: LuaDeviceParts<'_>) -> Self {
+    pub(in crate::plugin) fn new(parts: LuaDeviceParts<'_>) -> Self {
         let LuaDeviceParts {
             id,
             manifest,
@@ -1106,12 +1106,12 @@ impl LuaDevice {
 
     /// Set the weak self-reference (children need the parent as a `FanHub`).
     /// Called from `build_device` inside `Arc::new_cyclic`.
-    pub(super) fn set_self_ref(&mut self, weak: Weak<LuaDevice>) {
+    pub(in crate::plugin) fn set_self_ref(&mut self, weak: Weak<LuaDevice>) {
         self.self_ref = weak;
     }
 
     /// Install the chain host (built from `Arc<Self>` as the adapter).
-    pub(super) fn install_chain_host(&self, host: Arc<ChainHost>) {
+    pub(in crate::plugin) fn install_chain_host(&self, host: Arc<ChainHost>) {
         let _ = self.chain_host.set(host);
     }
 
@@ -1173,7 +1173,7 @@ impl LuaDevice {
                 app.registry
                     .report_runtime_error(&app, &self.plugin_id, &self.id, detail.clone())
                     .await;
-                Err(super::SurfacedPluginError {
+                Err(crate::plugin::SurfacedPluginError {
                     plugin: self.plugin_id.clone(),
                     detail,
                 }
@@ -1201,7 +1201,7 @@ impl LuaDevice {
     }
 
     #[cfg(feature = "plugin-test")]
-    pub(super) async fn poll_once(&self) -> Result<()> {
+    pub(in crate::plugin) async fn poll_once(&self) -> Result<()> {
         self.worker()?.poll().await?;
         self.refresh_status_cache().await;
         Ok(())
@@ -1211,7 +1211,7 @@ impl LuaDevice {
     /// per-target outcomes. Production drives this from the event watcher task;
     /// the plugin-test harness calls it directly.
     #[cfg(feature = "plugin-test")]
-    pub(super) async fn pump_events(&self) -> Result<Vec<super::worker::PollOutcome>> {
+    pub(in crate::plugin) async fn pump_events(&self) -> Result<Vec<super::worker::PollOutcome>> {
         self.worker()?.on_transport_events().await
     }
 
@@ -2775,7 +2775,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), script).unwrap();
-        let manifest = super::super::parse_manifest_from_dir(&dir).unwrap();
+        let manifest = crate::plugin::parse_manifest_from_dir(&dir).unwrap();
         (tmp, manifest)
     }
 
@@ -2818,7 +2818,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();
-        let manifest = super::super::parse_manifest_from_dir(&dir).unwrap();
+        let manifest = crate::plugin::parse_manifest_from_dir(&dir).unwrap();
 
         let device = LuaDevice::new(LuaDeviceParts {
             id: "layout_plug_0".into(),

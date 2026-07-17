@@ -58,7 +58,7 @@ struct LivePixmap {
 
 enum PixmapRuntime {
     BuiltIn(Box<dyn FrameSource>),
-    Plugin(crate::drivers::plugins::PluginEffectHandle),
+    Plugin(crate::plugin::PluginEffectHandle),
     Off,
 }
 
@@ -69,7 +69,7 @@ struct LiveDirect {
 
 enum DirectRuntime {
     BuiltIn(Box<dyn DirectLedEffect>),
-    Plugin(crate::drivers::plugins::PluginEffectHandle),
+    Plugin(crate::plugin::PluginEffectHandle),
     Off,
 }
 
@@ -233,9 +233,7 @@ impl RgbEngine {
     /// Built-in host effects plus plugin-declared pixmap effects. The built-in
     /// boundary is intentionally narrow; see `canvas::effects`. Not memoized
     /// because plugins can load/unload at runtime.
-    pub fn available_effect_descriptors(
-        registry: &crate::drivers::plugins::Registry,
-    ) -> Vec<Animation> {
+    pub fn available_effect_descriptors(registry: &crate::plugin::Registry) -> Vec<Animation> {
         let mut v = canvas::builtin_descriptors();
         v.extend(registry.pixmap_effect_descriptors());
         v
@@ -243,9 +241,7 @@ impl RgbEngine {
 
     /// Built-in host effects plus plugin-declared direct effects. See
     /// [`Self::available_effect_descriptors`] for why this isn't memoized.
-    pub fn direct_effect_descriptors(
-        registry: &crate::drivers::plugins::Registry,
-    ) -> Vec<Animation> {
+    pub fn direct_effect_descriptors(registry: &crate::plugin::Registry) -> Vec<Animation> {
         let mut v = direct::builtin_descriptors();
         v.extend(registry.direct_effect_descriptors());
         v
@@ -534,14 +530,9 @@ impl RgbEngine {
                 };
                 for rgb_zone in &rgb.descriptor().zones {
                     let coords = zone_led_coords(rgb_zone);
-                    let leds: Vec<crate::drivers::plugins::LedCoord> = coords
+                    let leds: Vec<crate::plugin::LedCoord> = coords
                         .iter()
-                        .map(|&(p, p_ring, nx, ny)| crate::drivers::plugins::LedCoord {
-                            p,
-                            p_ring,
-                            nx,
-                            ny,
-                        })
+                        .map(|&(p, p_ring, nx, ny)| crate::plugin::LedCoord { p, p_ring, nx, ny })
                         .collect();
                     let colors = match handle.led_colors(leds, t, dt, sensor_value).await {
                         Ok(out) if out.len() == coords.len() => out

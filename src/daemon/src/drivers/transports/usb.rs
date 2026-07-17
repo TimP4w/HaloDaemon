@@ -7,10 +7,10 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 use rusb::{Context, Device, Direction, TransferType, UsbContext};
 
-use crate::drivers::plugins::manifest::{
+use crate::drivers::Metered;
+use crate::plugin::manifest::{
     UsbControlConfig, UsbDeviceConfig, UsbEndpointConfig, UsbTransferType,
 };
-use crate::drivers::Metered;
 
 use super::UsbClaim;
 

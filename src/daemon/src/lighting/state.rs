@@ -72,7 +72,7 @@ impl LightingState {
 
     pub async fn snapshot(
         &self,
-        registry: &crate::drivers::plugins::Registry,
+        registry: &crate::plugin::Registry,
         cfg: &Config,
         placed_zones: Vec<PlacedZone>,
     ) -> WireLightingState {

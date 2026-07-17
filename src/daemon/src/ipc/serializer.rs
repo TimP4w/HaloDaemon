@@ -16,13 +16,13 @@ fn active_repo_signature_status(record: &crate::config::PluginRepoRecord) -> Rep
 
     let root = crate::config::plugin_repos_dir().join(&record.slug);
     let result = if !record.locked_sha.is_empty() && root.join(".git").is_dir() {
-        crate::drivers::plugins::repo::verify_official_repository_signature_at_commit(
+        crate::plugin::repo::verify_official_repository_signature_at_commit(
             &root,
             &record.locked_sha,
         )
     } else if record.active_revision.is_some() {
-        crate::drivers::plugins::repo::verify_official_repository_signature(
-            &crate::drivers::plugins::repo::active_revision_dir(record),
+        crate::plugin::repo::verify_official_repository_signature(
+            &crate::plugin::repo::active_revision_dir(record),
         )
     } else {
         return RepoSignatureStatus::Invalid {

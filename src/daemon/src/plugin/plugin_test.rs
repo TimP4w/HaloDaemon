@@ -23,10 +23,10 @@ use std::collections::HashMap;
 
 use halod_shared::types::{EffectParamValue, RgbColor, RgbState, WriteRateLimit, WriteRateStatus};
 
-use super::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
 use super::manifest::{parse_manifest_from_dir, PluginManifest, UsbConfig};
-use super::transport::PluginIo;
-use super::worker::{DevMatch, PluginHandle};
+use super::runtime::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
+use super::runtime::transport::PluginIo;
+use super::runtime::worker::{DevMatch, PluginHandle};
 
 /// `mlua::Error` isn't reliably `Send + Sync` (an `ExternalError` may box a
 /// non-Send/Sync inner error), so it can't flow through `anyhow::Result` via
@@ -368,7 +368,7 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
         .iter()
         .map(|widget| widget.id.clone())
         .collect();
-    let worker = super::widget_worker::PluginWidgetHandle::spawn(
+    let worker = super::runtime::widget_worker::PluginWidgetHandle::spawn(
         manifest.script_source.clone(),
         manifest.module_sources.clone(),
         ids,
@@ -376,7 +376,7 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
         HashMap::new(),
     );
     let font = ab_glyph::FontArc::try_from_slice(include_bytes!(
-        "../../../../assets/fonts/NotoSans-Regular.ttf"
+        "../../../assets/fonts/NotoSans-Regular.ttf"
     ))
     .expect("bundled test font is valid");
     for widget in &manifest.widgets {
@@ -385,27 +385,29 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
             .iter()
             .map(|param| (param.id.clone(), param.default.clone()))
             .collect();
-        let pixels = runtime.block_on(worker.render(super::widget_worker::WidgetRenderInput {
-            widget_id: widget.id.clone(),
-            width: 128,
-            height: 128,
-            time: 0.0,
-            dt: 0.0,
-            params,
-            color: RgbColor {
-                r: 0,
-                g: 200,
-                b: 220,
+        let pixels = runtime.block_on(worker.render(
+            super::runtime::widget_worker::WidgetRenderInput {
+                widget_id: widget.id.clone(),
+                width: 128,
+                height: 128,
+                time: 0.0,
+                dt: 0.0,
+                params,
+                color: RgbColor {
+                    r: 0,
+                    g: 200,
+                    b: 220,
+                },
+                font: font.clone(),
+                sensors: HashMap::new(),
+                audio_bands: vec![],
+                audio_level: None,
+                media: None,
+                images: HashMap::new(),
+                assets: HashMap::new(),
+                preview: true,
             },
-            font: font.clone(),
-            sensors: HashMap::new(),
-            audio_bands: vec![],
-            audio_level: None,
-            media: None,
-            images: HashMap::new(),
-            assets: HashMap::new(),
-            preview: true,
-        }))?;
+        ))?;
         anyhow::ensure!(
             pixels.chunks_exact(4).any(|pixel| pixel[3] != 0),
             "widget '{}' preview is completely transparent",
@@ -847,7 +849,7 @@ fn open_device(
         spec: Some(spec),
         notify: std::sync::Weak::new(),
         runtime: Some(Arc::new(std::sync::Mutex::new(
-            super::device::RuntimeState::OpeningTransport,
+            super::runtime::device::RuntimeState::OpeningTransport,
         ))),
         worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
             dev_match,

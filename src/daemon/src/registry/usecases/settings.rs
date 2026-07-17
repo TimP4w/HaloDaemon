@@ -150,7 +150,7 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
             return Ok(());
         }
         crate::registry::ensure_official_repo(&app).await;
-        super::plugins::reload_registry(&app).await;
+        crate::plugin::usecases::plugins::reload_registry(&app).await;
         let official_plugins = app
             .registry
             .list(&*app.secret_store)
@@ -164,7 +164,7 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
                 _ => None,
             })
             .collect();
-        super::plugins::apply_repo_plugins(app.clone(), official_plugins).await?;
+        crate::plugin::usecases::plugins::apply_repo_plugins(app.clone(), official_plugins).await?;
         crate::registry::start_update_check(app.clone()).await;
     }
     Ok(())
@@ -193,8 +193,8 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     // Re-read all sources so a freshly-dropped package is picked up by a
     // "Scan now" without restarting the daemon. This must use the shared
     // reload path to retain a process-local development repository.
-    super::plugins::reload_registry(&app).await;
-    crate::registry::usecases::plugins::reconcile_full(&app).await;
+    crate::plugin::usecases::plugins::reload_registry(&app).await;
+    crate::plugin::usecases::plugins::reconcile_full(&app).await;
 
     let controllers: Vec<std::sync::Arc<dyn crate::drivers::Device>> =
         app.devices.read().await.clone();

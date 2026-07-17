@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 
-use crate::drivers::plugins::manifest::{DeviceSpec, PluginManifest};
-use crate::drivers::plugins::transport::{PluginIo, PluginTransportDescriptor};
 use crate::drivers::transports::hid::HidTransport;
 use crate::drivers::transports::usb::UsbSelector;
+use crate::plugin::manifest::{DeviceSpec, PluginManifest};
+use crate::plugin::runtime::transport::{PluginIo, PluginTransportDescriptor};
 use crate::registry::discovery::DiscoveryHandle;
 
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {

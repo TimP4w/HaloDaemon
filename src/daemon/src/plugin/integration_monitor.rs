@@ -675,7 +675,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();
-        let manifest = crate::drivers::plugins::parse_manifest_from_dir(&dir).unwrap();
+        let manifest = crate::plugin::parse_manifest_from_dir(&dir).unwrap();
         app.registry
             .update(|s| s.manifests = vec![manifest.clone()]);
         let mut policy = crate::config::PluginPolicy::default();

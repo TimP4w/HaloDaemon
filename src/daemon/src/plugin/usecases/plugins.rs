@@ -211,7 +211,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
 /// in and re-parsed from its final location. Staged — see the module docs.
 pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
     let src = Path::new(&source_dir);
-    let parsed = crate::drivers::plugins::parse_manifest_from_dir(src)
+    let parsed = crate::plugin::parse_manifest_from_dir(src)
         .context("plugin package is not a valid manifest")?;
     let id = parsed.plugin_id.clone();
 
@@ -237,7 +237,7 @@ pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
     let _ = std::fs::remove_dir_all(&staging_parent);
     let manifest = (|| {
         copy_dir_all(src, &staging)?;
-        crate::drivers::plugins::parse_manifest_from_dir(&staging)
+        crate::plugin::parse_manifest_from_dir(&staging)
             .context("re-parsing imported plugin directory")
     })();
     let manifest = match manifest {
@@ -338,7 +338,7 @@ pub(crate) async fn reload_registry(app: &Arc<AppState>) {
         development_repo.as_deref(),
         #[cfg(not(feature = "dev-plugin-repo"))]
         development_repo,
-        &crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
+        &crate::plugin::repo_plugin_dirs(&cfg.plugins.repos),
     );
     app.registry.replace_policy(&cfg.plugins);
     drop(cfg);
@@ -366,7 +366,7 @@ pub(crate) async fn refresh_recommendations(app: &Arc<AppState>) {
     let hid_usb = tokio::task::spawn_blocking(|| {
         (
             crate::registry::usecases::debug::enumerate_hid(),
-            crate::drivers::plugins::recommend::enumerate_usb(),
+            crate::plugin::recommend::enumerate_usb(),
         )
     });
     let (_, gpu_smbus) =
@@ -541,7 +541,8 @@ async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
     // never comes back on re-enable.
     let mut torn_down: std::collections::HashSet<String> = std::collections::HashSet::new();
     for id in &owned_ids {
-        let removed = super::registration::unregister_device_and_children(app, id).await;
+        let removed =
+            crate::registry::usecases::registration::unregister_device_and_children(app, id).await;
         torn_down.extend(removed);
     }
     app.hid.untrack_devices(&torn_down).await;

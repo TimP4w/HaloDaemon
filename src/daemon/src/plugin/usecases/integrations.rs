@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::registration::unregister_device_and_children;
-use crate::drivers::plugins::integration_scan;
+use crate::plugin::integration_scan;
+use crate::registry::usecases::registration::unregister_device_and_children;
 use crate::state::AppState;
 
 /// Close and drop `id`'s integration root (and the children it exposes) from

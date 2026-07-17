@@ -4,7 +4,7 @@
 use halod_shared::types::DiscoveryPhase;
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::drivers::plugins::DeviceSpec;
+use crate::plugin::DeviceSpec;
 
 /// Pending rediscovery work. This is distinct from [`DiscoveryScope`], which
 /// describes the scanner currently running. `Full` dominates and plugin sets

@@ -208,7 +208,7 @@ fn insert(rules: &mut BTreeMap<RuleKey, BTreeSet<String>>, key: RuleKey, plugin:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::plugins::parse_manifest_from_dir;
+    use crate::plugin::parse_manifest_from_dir;
 
     fn plugin(root: &std::path::Path, id: &str, manifest: &str) -> PluginManifest {
         let dir = root.join(id);

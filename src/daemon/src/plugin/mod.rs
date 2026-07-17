@@ -11,45 +11,31 @@
 //! registry snapshot, and `make_device` consults `match_handle` before built-in
 //! host descriptors, so a plugin shadows a built-in device for the same hardware.
 
-mod audio_api;
-pub(crate) mod backends;
-mod bytebuf;
-mod chain_leaf;
-pub(crate) mod command_resolve;
-pub mod contract;
-mod device;
-mod effect_worker;
-mod ffi;
 mod host_scan;
-mod image_api;
 pub(crate) mod integration_monitor;
 pub(crate) mod integration_scan;
-mod lua_worker;
 pub(crate) mod manifest;
 #[cfg(feature = "plugin-test")]
 pub mod plugin_test;
-pub(crate) mod probes;
 pub(crate) mod recommend;
 pub mod repo;
-pub(crate) mod requirements;
-mod sandbox;
-mod transport;
-mod transport_api;
-mod udev;
-mod widget_worker;
-mod worker;
+pub(crate) mod runtime;
+pub mod usecases;
 
-pub use device::LuaDevice;
-use device::{LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
-pub use effect_worker::{LedCoord, PluginEffectHandle};
 pub use manifest::{parse_manifest_from_dir, DeviceSpec, EffectKind, PluginManifest, ProbeMode};
-pub use widget_worker::{
+pub use runtime::device::LuaDevice;
+use runtime::device::{LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
+pub use runtime::effect_worker::{LedCoord, PluginEffectHandle};
+pub use runtime::widget_worker::{
     PluginWidgetHandle, WidgetImageInput, WidgetMediaInput, WidgetRenderInput, WidgetSensorInput,
 };
-pub use worker::run_pre_scan;
+pub use runtime::worker::run_pre_scan;
+
+use manifest::{requirements, udev};
+use runtime::{command_resolve, device, transport, worker};
 
 /// Lua host/plugin ABI implemented by this daemon. Repository compatibility
-/// and [`contract::PLUGIN_API_CONTRACT`] deliberately share this one value.
+/// and [`manifest::contract::PLUGIN_API_CONTRACT`] deliberately share this one value.
 pub const PLUGIN_API: u32 = 1;
 
 use std::collections::{HashMap, HashSet};

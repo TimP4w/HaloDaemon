@@ -63,20 +63,20 @@ pub async fn initialize_app_state(
     let mut discovered_hashes = Vec::new();
     {
         let cfg = app.config.read().await;
-        let mut repo_dirs = crate::drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos);
+        let mut repo_dirs = crate::plugin::repo_plugin_dirs(&cfg.plugins.repos);
         if dev_plugin_repo.is_none() {
             let official_dir = cfg
                 .plugins
                 .repos
                 .iter()
                 .find(|repo| repo.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-                .map(crate::drivers::plugins::repo::active_revision_dir)
+                .map(crate::plugin::repo::active_revision_dir)
                 .unwrap_or_else(|| {
                     crate::config::plugin_repos_dir()
                         .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
                 });
             if official_dir.is_dir() {
-                match crate::drivers::plugins::repo::verify_official_repository(&official_dir) {
+                match crate::plugin::repo::verify_official_repository(&official_dir) {
                     Ok(manifest) => discovered_hashes.extend(
                         manifest
                             .packages
@@ -109,7 +109,7 @@ pub async fn initialize_app_state(
     // This is dirty-update metadata, not a consent or activation gate, and it
     // runs without network access.
     if dev_plugin_repo.is_none() {
-        usecases::repos::quarantine_changed_plugins(app.clone()).await;
+        crate::plugin::usecases::repos::quarantine_changed_plugins(app.clone()).await;
     }
     if dev_plugin_repo.is_none() {
         start_update_check(app.clone()).await;
@@ -135,7 +135,7 @@ pub(crate) async fn ensure_official_repo(app: &Arc<AppState>) {
 /// instead of the real `constants::OFFICIAL_PLUGIN_REPO_URL`.
 async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     use crate::config::PluginRepoRecord;
-    use crate::drivers::plugins::repo;
+    use crate::plugin::repo;
 
     {
         let mut cfg = app.config.write().await;
@@ -296,7 +296,7 @@ async fn install_embedded_official_bundle(app: &Arc<AppState>) {
         if revision.is_dir() {
             std::fs::remove_dir_all(&staging)?;
         } else {
-            crate::drivers::plugins::repo::verify_official_repository(&staging)?;
+            crate::plugin::repo::verify_official_repository(&staging)?;
             std::fs::create_dir_all(&root)?;
             std::fs::rename(&staging, &revision)?;
         }
@@ -343,7 +343,7 @@ pub(crate) async fn start_update_check(app: Arc<AppState>) {
     app.discovery.lock().await.checking_updates = true;
     crate::ipc::broadcast_state(&app).await;
     tokio::spawn(async move {
-        usecases::repos::check_updates_broadcast(app.clone()).await;
+        crate::plugin::usecases::repos::check_updates_broadcast(app.clone()).await;
         app.discovery.lock().await.checking_updates = false;
         crate::ipc::broadcast_state(&app).await;
     });

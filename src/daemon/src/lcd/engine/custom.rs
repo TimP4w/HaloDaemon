@@ -80,11 +80,11 @@ pub struct CustomTemplate {
     /// Acquired only when the layout has a `NowPlaying` widget — `None`
     /// renders the "no player" dimmed placeholder.
     media: Option<Arc<MediaHandle>>,
-    plugin_handles: HashMap<String, crate::drivers::plugins::PluginWidgetHandle>,
+    plugin_handles: HashMap<String, crate::plugin::PluginWidgetHandle>,
     plugin_sprites: HashMap<String, PluginSprite>,
     composite_cache: RefCell<HashMap<String, CachedComposite>>,
     system_fonts: HashMap<String, ab_glyph::FontArc>,
-    plugin_assets: HashMap<(String, u32), crate::drivers::plugins::WidgetImageInput>,
+    plugin_assets: HashMap<(String, u32), crate::plugin::WidgetImageInput>,
     plugin_revision: u64,
     last_plugin_render_t: Option<f64>,
 }
@@ -201,13 +201,13 @@ impl CustomTemplate {
             self.plugin_assets.clear();
             self.plugin_revision = revision;
         }
-        let sensors: HashMap<String, crate::drivers::plugins::WidgetSensorInput> = ctx
+        let sensors: HashMap<String, crate::plugin::WidgetSensorInput> = ctx
             .sensors
             .iter()
             .map(|(id, sensor)| {
                 (
                     id.clone(),
-                    crate::drivers::plugins::WidgetSensorInput {
+                    crate::plugin::WidgetSensorInput {
                         value: sensor.value,
                         label: sensor.name.clone(),
                         formatted: format_sensor_value(sensor),
@@ -346,7 +346,7 @@ impl CustomTemplate {
                     EffectParamValue::Str(weight.clone()),
                 );
             }
-            let input = crate::drivers::plugins::WidgetRenderInput {
+            let input = crate::plugin::WidgetRenderInput {
                 widget_id,
                 width,
                 height,
@@ -366,14 +366,12 @@ impl CustomTemplate {
                     .filter(|frame| frame.seq != 0)
                     .map(|frame| frame.level),
                 media: media_info.map(|info| {
-                    let art = info
-                        .art
-                        .map(|art| crate::drivers::plugins::WidgetImageInput {
-                            width: art.width(),
-                            height: art.height(),
-                            rgba: art.as_raw().clone(),
-                        });
-                    crate::drivers::plugins::WidgetMediaInput {
+                    let art = info.art.map(|art| crate::plugin::WidgetImageInput {
+                        width: art.width(),
+                        height: art.height(),
+                        rgba: art.as_raw().clone(),
+                    });
+                    crate::plugin::WidgetMediaInput {
                         title: info.title,
                         artist: info.artist,
                         status: match info.status {
@@ -398,7 +396,7 @@ impl CustomTemplate {
                         let frame = decoded.frames.get(index)?;
                         Some((
                             filename,
-                            crate::drivers::plugins::WidgetImageInput {
+                            crate::plugin::WidgetImageInput {
                                 width: frame.width(),
                                 height: frame.height(),
                                 rgba: frame.as_raw().clone(),

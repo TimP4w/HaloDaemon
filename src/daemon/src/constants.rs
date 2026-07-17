@@ -34,7 +34,7 @@ pub const OFFICIAL_PLUGIN_REPO_URL: &str = "https://github.com/TimP4w/HaloDaemon
 
 /// Fixed slug for the official plugin repo record — never derived from the
 /// URL, so a future URL change can't orphan the non-removable guard in
-/// `registry::usecases::repos::remove_repo`.
+/// `plugin::usecases::repos::remove_repo`.
 pub const OFFICIAL_PLUGIN_REPO_SLUG: &str = "official";
 
 /// Trusted release keys for the official plugin repository. Keys are indexed

@@ -9,7 +9,7 @@ use halod_shared::types::{
     PluginRequirement, PluginRequirementStatus, RequirementFailureReason, RequirementImpact,
 };
 
-use super::manifest::{PluginManifest, RequirementDef};
+use super::{PluginManifest, RequirementDef};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivedRequirement {
@@ -40,10 +40,10 @@ fn applies_to(platforms: &[String], os: &str) -> bool {
 
 fn explicit_requirement(def: &RequirementDef) -> DerivedRequirement {
     let requirement = match def.kind {
-        super::manifest::RequirementDefKind::Command => PluginRequirement::Command {
+        super::RequirementDefKind::Command => PluginRequirement::Command {
             executable: def.name.clone(),
         },
-        super::manifest::RequirementDefKind::KernelModule => PluginRequirement::KernelModule {
+        super::RequirementDefKind::KernelModule => PluginRequirement::KernelModule {
             name: def.name.clone(),
         },
     };
@@ -176,7 +176,7 @@ pub fn evaluate_with(
 
 pub fn evaluate(manifest: &PluginManifest) -> Vec<PluginRequirementStatus> {
     evaluate_with(manifest, std::env::consts::OS, &|executable| {
-        super::command_resolve::resolve(executable).is_some()
+        crate::plugin::runtime::command_resolve::resolve(executable).is_some()
     })
 }
 
@@ -196,7 +196,7 @@ mod tests {
     fn manifest(yaml_extra: &str) -> PluginManifest {
         let tmp = tempfile::tempdir().unwrap();
         let dir = write_plugin_dir(tmp.path(), "reqplug", yaml_extra);
-        super::super::manifest::parse_manifest_from_dir(&dir).unwrap()
+        super::super::parse_manifest_from_dir(&dir).unwrap()
     }
 
     fn write_plugin_dir(root: &Path, id: &str, yaml_extra: &str) -> PathBuf {

@@ -5,9 +5,9 @@ use anyhow::{bail, Result};
 use halod_shared::types::{Permission, WriteRateLimit};
 use std::{collections::HashMap, sync::Arc};
 
-use crate::drivers::plugins::manifest::{DeviceSpec, PluginManifest};
-use crate::drivers::plugins::transport::{PluginIo, PluginTransportDescriptor};
 use crate::drivers::transports::usb::{UsbDevices, UsbSelector};
+use crate::plugin::manifest::{DeviceSpec, PluginManifest};
+use crate::plugin::runtime::transport::{PluginIo, PluginTransportDescriptor};
 use crate::registry::discovery::DiscoveryHandle;
 
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {

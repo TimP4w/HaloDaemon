@@ -214,7 +214,7 @@ impl LcdEngine {
     }
 
     pub fn wire_state(
-        registry: &crate::drivers::plugins::Registry,
+        registry: &crate::plugin::Registry,
         device_templates: HashMap<String, String>,
         device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
     ) -> WireLcdEngineState {

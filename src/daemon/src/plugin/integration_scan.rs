@@ -17,9 +17,9 @@ use crate::registry::discovery::{DiscoveryHandle, TransportScanner};
 use crate::registry::usecases::registration::register_device_and_children;
 use crate::state::AppState;
 
-use super::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
 use super::manifest::PluginManifest;
-use super::transport::PluginIo;
+use super::runtime::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
+use super::runtime::transport::PluginIo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DiscoveryOutcome {
@@ -84,7 +84,7 @@ pub(super) fn open_probe(
         .transports
         .integration_transport_kind()
         .ok_or_else(|| anyhow::anyhow!("integration plugin has no root transport"))?;
-    match super::transport::descriptor_for(kind) {
+    match super::runtime::transport::descriptor_for(kind) {
         Some(d) => (d.open)(manifest, &placeholder_handle(), config, granted, None),
         None => anyhow::bail!("integration plugin: no '{kind}' transport backend registered"),
     }
@@ -120,7 +120,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
     // Created before the transport opens, so `OpeningTransport` is real — if
     // connect fails, this Arc is simply dropped unobserved.
     let runtime_state = Arc::new(std::sync::Mutex::new(
-        super::device::RuntimeState::OpeningTransport,
+        super::runtime::device::RuntimeState::OpeningTransport,
     ));
 
     // Drive every controller over the *one* root connection: a slot-shared
@@ -180,7 +180,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
             notify,
             runtime: Some(runtime_state),
             worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
-                dev_match: super::worker::DevMatch {
+                dev_match: super::runtime::worker::DevMatch {
                     transport: transport_kind.to_owned(),
                     ..Default::default()
                 },
