@@ -82,11 +82,11 @@ pkgs.rustPlatform.buildRustPackage {
   # fixed-output plugin source. No network is available or needed here.
   preBuild = ''
     export HALOD_REQUIRE_LICENSES=1
-    cargo build --release -p halod-plugin-signing
+    cargo build --release --manifest-path src/Cargo.toml -p halod-plugin-signing
     mkdir -p plugin-bundle
-    target/release/halod-plugin-signing verify ${officialPlugins} \
+    src/target/release/halod-plugin-signing verify ${officialPlugins} \
       --trusted-key halodaemon-official-2026=tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=
-    target/release/halod-plugin-signing bundle ${officialPlugins} \
+    src/target/release/halod-plugin-signing bundle ${officialPlugins} \
       --commit ${officialPluginsRev} \
       --output plugin-bundle/official-plugins.bundle
     if [ -f ${officialPlugins}/licenses.txt ]; then
@@ -97,16 +97,12 @@ pkgs.rustPlatform.buildRustPackage {
     export HALOD_OFFICIAL_PLUGIN_BUNDLE=$PWD/plugin-bundle/official-plugins.bundle
   '';
 
-  postBuild = ''
-    target/release/halod udev-rules --embedded \
-      > plugin-bundle/60-halod.rules
-  '';
-
   # Ship the udev rules so the NixOS module can install them via
-  # services.udev.packages.
+  # services.udev.packages. Generated from the installed binary so it matches the build.
   postInstall = ''
-    install -Dm444 plugin-bundle/60-halod.rules \
-      $out/lib/udev/rules.d/60-halod.rules
+    mkdir -p $out/lib/udev/rules.d
+    $out/bin/halod udev-rules --embedded \
+      > $out/lib/udev/rules.d/60-halod.rules
     install -Dm444 assets/dev.timp4w.Halod.desktop \
       $out/share/applications/dev.timp4w.Halod.desktop
     install -Dm444 assets/icon.svg \
