@@ -1520,11 +1520,13 @@ mod tests {
             return {
                 render_widget_meter = function(canvas, w, h, t, dt, params, ctx)
                     ctx:draw_image(canvas, "photo.png", 0, 0, w / 2, h, "fit", "rect")
-                    ctx:draw_asset(canvas, "logo.svg", w / 2, 0, w / 2, h, "fit")
+                    assert(ctx:draw_asset(canvas, "logo.svg", w / 2, 0, w / 2, h, "fit"))
+                    assert(not ctx:draw_asset(canvas, "undeclared.svg", 0, 0, w, h, "fit"))
                 end,
                 preview_widget_meter = function(canvas, w, h, params, ctx)
                     ctx:draw_image(canvas, "photo.png", 0, 0, w / 2, h, "fit", "rect")
-                    ctx:draw_asset(canvas, "logo.svg", w / 2, 0, w / 2, h, "fit")
+                    assert(ctx:draw_asset(canvas, "logo.svg", w / 2, 0, w / 2, h, "fit"))
+                    assert(not ctx:draw_asset(canvas, "undeclared.svg", 0, 0, w, h, "fit"))
                 end,
             }
         "#;

@@ -85,7 +85,7 @@ pub struct CustomTemplate {
     plugin_sprites: HashMap<String, PluginSprite>,
     composite_cache: RefCell<HashMap<String, CachedComposite>>,
     system_fonts: HashMap<String, ab_glyph::FontArc>,
-    plugin_assets: HashMap<(String, u32), crate::plugin::WidgetImageInput>,
+    plugin_assets: HashMap<(String, String, u32), crate::plugin::WidgetImageInput>,
     plugin_revision: u64,
     last_plugin_render_t: Option<f64>,
 }
@@ -414,26 +414,31 @@ impl CustomTemplate {
                 assets: {
                     // Bucket resize-time requests so SVGs stay sharp without
                     // retaining one raster allocation for every dragged pixel.
-                    let asset_edge = width.max(height).next_power_of_two().min(1024);
-                    match self.plugin_assets.get(&(catalog_id.clone(), asset_edge)) {
-                        Some(asset) => {
-                            HashMap::from([(entry.descriptor.icon.clone(), asset.clone())])
-                        }
-                        None => match app
-                            .registry
-                            .read_widget_icon_rgba_at(&catalog_id, asset_edge)
-                        {
-                            Ok(asset) => {
-                                self.plugin_assets
-                                    .insert((catalog_id.clone(), asset_edge), asset.clone());
-                                HashMap::from([(entry.descriptor.icon.clone(), asset)])
+                    let edge = widget_asset_edge(width, height);
+                    std::iter::once(&entry.descriptor.icon)
+                        .chain(&entry.descriptor.assets)
+                        .filter_map(|name| {
+                            let key = (catalog_id.clone(), name.clone(), edge);
+                            if let Some(asset) = self.plugin_assets.get(&key) {
+                                return Some((name.clone(), asset.clone()));
                             }
-                            Err(error) => {
-                                log::warn!("LCD widget '{catalog_id}' asset failed: {error:#}");
-                                HashMap::new()
+                            match app
+                                .registry
+                                .read_widget_asset_rgba_at(&catalog_id, name, edge)
+                            {
+                                Ok(asset) => {
+                                    self.plugin_assets.insert(key, asset.clone());
+                                    Some((name.clone(), asset))
+                                }
+                                Err(error) => {
+                                    log::warn!(
+                                        "LCD widget '{catalog_id}' asset '{name}' failed: {error:#}"
+                                    );
+                                    None
+                                }
                             }
-                        },
-                    }
+                        })
+                        .collect()
                 },
                 preview,
             };
@@ -1132,6 +1137,10 @@ fn screen_shape(value: &ScreenShape) -> &'static str {
     }
 }
 
+fn widget_asset_edge(width: u32, height: u32) -> u32 {
+    width.max(height).next_power_of_two().min(1024)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1153,6 +1162,15 @@ mod tests {
         assert_eq!(widget.beat, frame.beat);
         assert_eq!(widget.seq, frame.seq);
         assert_eq!(widget.bands, frame.bands);
+    }
+
+    #[test]
+    fn widget_asset_cache_uses_resize_buckets() {
+        assert_eq!(widget_asset_edge(257, 200), 512);
+        assert_eq!(widget_asset_edge(300, 511), 512);
+        assert_eq!(widget_asset_edge(512, 400), 512);
+        assert_eq!(widget_asset_edge(513, 400), 1024);
+        assert_eq!(widget_asset_edge(900, 900), 1024);
     }
 
     #[test]

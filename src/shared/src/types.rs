@@ -67,6 +67,9 @@ pub struct LcdWidgetDescriptor {
     pub name: String,
     /// Declared SVG asset, fetched through `GetLcdWidgetIcon`.
     pub icon: String,
+    /// Additional SVGs this widget may access through `ctx:draw_asset`.
+    #[serde(default)]
+    pub assets: Vec<String>,
     #[serde(default)]
     pub params: Vec<EffectParamDescriptor>,
     pub resize: LcdWidgetResize,

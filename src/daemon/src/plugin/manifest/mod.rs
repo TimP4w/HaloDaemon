@@ -435,6 +435,8 @@ pub struct WidgetManifest {
     /// Mandatory SVG used for the GUI catalog tile.
     pub icon: String,
     #[serde(default)]
+    pub assets: Vec<String>,
+    #[serde(default)]
     pub params: Vec<EffectParamDescriptor>,
     #[serde(default)]
     pub resize: LcdWidgetResize,
@@ -473,6 +475,7 @@ impl WidgetManifest {
             plugin_id: plugin_id.to_owned(),
             name: self.name.clone(),
             icon: self.icon.clone(),
+            assets: self.assets.clone(),
             params: self.params.clone(),
             resize: self.resize,
             default_scale: self.default_scale,
@@ -1064,6 +1067,10 @@ pub const MAX_PLUGIN_CONTROLLERS: usize = 256;
 const MAX_PLUGIN_DEVICES: usize = 256;
 const MAX_PLUGIN_EFFECTS: usize = 256;
 const MAX_PLUGIN_WIDGETS: usize = 256;
+const MAX_WIDGET_ASSETS: usize = 16;
+const MAX_PLUGIN_WIDGET_ASSETS: usize = 256;
+const MAX_WIDGET_ASSET_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PLUGIN_WIDGET_ASSET_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_PLUGIN_PRESETS: usize = 128;
 const MAX_EFFECT_PARAMS: usize = 64;
 const MAX_CONFIG_FIELDS: usize = 128;
@@ -1642,22 +1649,42 @@ fn validate_effects(effects: &[EffectManifest], what: &str) -> Result<()> {
 
 fn validate_lcd_content(manifest: &PluginManifest) -> Result<()> {
     let mut widget_ids = HashSet::new();
+    let mut package_assets = HashSet::new();
+    let mut package_asset_bytes = 0u64;
     for widget in &manifest.widgets {
         validate_component("widget id", &widget.id)?;
         validate_short_text("widget name", &widget.name)?;
         if !widget_ids.insert(&widget.id) {
             bail!("widget id '{}' is declared more than once", widget.id);
         }
-        validate_asset_name("widget icon", &widget.icon)?;
-        if Path::new(&widget.icon).extension().and_then(|v| v.to_str()) != Some("svg") {
-            bail!("widget icon '{}' must be an SVG", widget.icon);
-        }
-        if !manifest.plugin_dir.as_os_str().is_empty() {
-            let path = manifest.plugin_dir.join("assets").join(&widget.icon);
-            check_package_file(&path, halod_shared::types::MAX_PLUGIN_ASSET_BYTES)?;
-            let bytes = std::fs::read(&path)?;
-            resvg::usvg::Tree::from_data(&bytes, &resvg::usvg::Options::default())
-                .map_err(|error| anyhow!("widget '{}' icon is invalid: {error}", widget.id))?;
+        check_count(
+            &format!("widget '{}' assets", widget.id),
+            widget.assets.len(),
+            MAX_WIDGET_ASSETS,
+        )?;
+        let mut widget_assets = HashSet::new();
+        let mut widget_asset_bytes = 0u64;
+        for name in std::iter::once(&widget.icon).chain(&widget.assets) {
+            if !widget_assets.insert(name) {
+                bail!(
+                    "widget '{}' declares asset '{name}' more than once",
+                    widget.id
+                );
+            }
+            let bytes = validate_widget_svg(manifest, widget, name)?;
+            widget_asset_bytes = widget_asset_bytes.saturating_add(bytes);
+            if widget_asset_bytes > MAX_WIDGET_ASSET_BYTES {
+                bail!("widget '{}' assets exceed the total size limit", widget.id);
+            }
+            if package_assets.insert(name) {
+                if package_assets.len() > MAX_PLUGIN_WIDGET_ASSETS {
+                    bail!("plugin declares more than {MAX_PLUGIN_WIDGET_ASSETS} widget assets");
+                }
+                package_asset_bytes = package_asset_bytes.saturating_add(bytes);
+                if package_asset_bytes > MAX_PLUGIN_WIDGET_ASSET_BYTES {
+                    bail!("plugin widget assets exceed the total size limit");
+                }
+            }
         }
         validate_effect_params(&widget.params, &format!("widget '{}'", widget.id))?;
         if !widget.min_scale.is_finite() || !(0.1..=0.6).contains(&widget.min_scale) {
@@ -1801,6 +1828,26 @@ fn validate_lcd_content(manifest: &PluginManifest) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_widget_svg(
+    manifest: &PluginManifest,
+    widget: &WidgetManifest,
+    name: &str,
+) -> Result<u64> {
+    validate_asset_name("widget asset", name)?;
+    if Path::new(name).extension().and_then(|value| value.to_str()) != Some("svg") {
+        bail!("widget asset '{name}' must be an SVG");
+    }
+    if manifest.plugin_dir.as_os_str().is_empty() {
+        return Ok(0);
+    }
+    let path = manifest.plugin_dir.join("assets").join(name);
+    check_package_file(&path, halod_shared::types::MAX_PLUGIN_ASSET_BYTES)?;
+    let bytes = std::fs::read(&path)?;
+    resvg::usvg::Tree::from_data(&bytes, &resvg::usvg::Options::default())
+        .map_err(|error| anyhow!("widget '{}' asset '{name}' is invalid: {error}", widget.id))?;
+    Ok(bytes.len() as u64)
 }
 
 fn validate_effect_params(params: &[EffectParamDescriptor], owner: &str) -> Result<()> {
@@ -2463,6 +2510,80 @@ mod tests {
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16"/></svg>"#,
         )
         .unwrap();
+    }
+
+    fn write_widget_asset(dir: &Path, name: &str, contents: &str) {
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("assets").join(name), contents).unwrap();
+    }
+
+    #[test]
+    fn lcd_widget_assets_are_validated_and_preserved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "lcd_assets",
+            "type: lcd\nwidgets:\n  - id: weather\n    name: Weather\n    icon: widget.svg\n    assets: [sun.svg, cloud.svg]\n",
+            ENTRY_LUA,
+        );
+        write_widget_icon(&dir);
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="6"/></svg>"#;
+        write_widget_asset(&dir, "sun.svg", svg);
+        write_widget_asset(&dir, "cloud.svg", svg);
+
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(manifest.widgets[0].assets, ["sun.svg", "cloud.svg"]);
+        assert_eq!(
+            manifest.widgets[0].descriptor("lcd_assets").assets,
+            ["sun.svg", "cloud.svg"]
+        );
+    }
+
+    #[test]
+    fn lcd_widget_assets_reject_traversal_invalid_svg_and_excessive_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let traversal = write_plugin_dir(
+            tmp.path(),
+            "lcd_asset_traversal",
+            "type: lcd\nwidgets:\n  - id: weather\n    name: Weather\n    icon: widget.svg\n    assets: [../secret.svg]\n",
+            ENTRY_LUA,
+        );
+        write_widget_icon(&traversal);
+        assert!(
+            format!("{:#}", parse_manifest_from_dir(&traversal).unwrap_err())
+                .contains("bare filename")
+        );
+
+        let invalid = write_plugin_dir(
+            tmp.path(),
+            "lcd_asset_invalid",
+            "type: lcd\nwidgets:\n  - id: weather\n    name: Weather\n    icon: widget.svg\n    assets: [sun.svg]\n",
+            ENTRY_LUA,
+        );
+        write_widget_icon(&invalid);
+        write_widget_asset(&invalid, "sun.svg", "not svg");
+        assert!(
+            format!("{:#}", parse_manifest_from_dir(&invalid).unwrap_err())
+                .contains("sun.svg' is invalid")
+        );
+
+        let assets = (0..=MAX_WIDGET_ASSETS)
+            .map(|index| format!("asset_{index}.svg"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let excessive = write_plugin_dir(
+            tmp.path(),
+            "lcd_asset_count",
+            &format!(
+                "type: lcd\nwidgets:\n  - id: weather\n    name: Weather\n    icon: widget.svg\n    assets: [{assets}]\n"
+            ),
+            ENTRY_LUA,
+        );
+        write_widget_icon(&excessive);
+        assert!(
+            format!("{:#}", parse_manifest_from_dir(&excessive).unwrap_err())
+                .contains("exceeding the 16 limit")
+        );
     }
 
     #[test]

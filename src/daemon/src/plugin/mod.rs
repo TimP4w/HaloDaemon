@@ -1404,42 +1404,35 @@ impl Registry {
         catalog_id: &str,
         target_edge: u32,
     ) -> anyhow::Result<WidgetImageInput> {
-        use resvg::{tiny_skia, usvg};
-
         let entry = self
             .widget_entry(catalog_id)
             .ok_or_else(|| anyhow::anyhow!("unknown LCD widget '{catalog_id}'"))?;
+        self.read_widget_asset_rgba_at(catalog_id, &entry.descriptor.icon, target_edge)
+    }
+
+    /// Rasterize one SVG explicitly declared by the widget. The declaration
+    /// check is repeated here so no caller can use this path as package file
+    /// access, even if it bypasses the Lua `draw_asset` lookup.
+    pub fn read_widget_asset_rgba_at(
+        &self,
+        catalog_id: &str,
+        name: &str,
+        target_edge: u32,
+    ) -> anyhow::Result<WidgetImageInput> {
+        let entry = self
+            .widget_entry(catalog_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown LCD widget '{catalog_id}'"))?;
+        anyhow::ensure!(
+            name == entry.descriptor.icon
+                || entry.descriptor.assets.iter().any(|asset| asset == name),
+            "widget asset '{name}' is not declared"
+        );
         let data = Self::read_declared_file(
             &entry.plugin_dir,
-            &entry.descriptor.icon,
+            name,
             halod_shared::types::MAX_PLUGIN_ASSET_BYTES,
         )?;
-        let tree = usvg::Tree::from_data(&data, &usvg::Options::default())
-            .map_err(|error| anyhow::anyhow!("invalid widget SVG: {error}"))?;
-        let size = tree.size().to_int_size();
-        let source_edge = size.width().max(size.height()) as f32;
-        anyhow::ensure!(source_edge > 0.0, "widget SVG has no drawable size");
-        let target_edge = target_edge.clamp(1, 1024);
-        let mut pixmap = tiny_skia::Pixmap::new(target_edge, target_edge)
-            .ok_or_else(|| anyhow::anyhow!("allocating widget SVG raster"))?;
-        let scale = target_edge as f32 / source_edge;
-        let tx = (target_edge as f32 - size.width() as f32 * scale) / 2.0;
-        let ty = (target_edge as f32 - size.height() as f32 * scale) / 2.0;
-        resvg::render(
-            &tree,
-            tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, tx, ty),
-            &mut pixmap.as_mut(),
-        );
-        let mut rgba = Vec::with_capacity(target_edge as usize * target_edge as usize * 4);
-        for pixel in pixmap.pixels() {
-            let pixel = pixel.demultiply();
-            rgba.extend_from_slice(&[pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()]);
-        }
-        Ok(WidgetImageInput {
-            width: target_edge,
-            height: target_edge,
-            rgba,
-        })
+        rasterize_widget_svg(&data, target_edge)
     }
 
     pub fn read_lcd_preset(
@@ -1454,6 +1447,40 @@ impl Registry {
         halod_shared::lcd_custom::validate_widgets(&def).map_err(anyhow::Error::msg)?;
         Ok(def)
     }
+}
+
+pub(crate) fn rasterize_widget_svg(
+    data: &[u8],
+    target_edge: u32,
+) -> anyhow::Result<WidgetImageInput> {
+    use resvg::{tiny_skia, usvg};
+
+    let tree = usvg::Tree::from_data(data, &usvg::Options::default())
+        .map_err(|error| anyhow::anyhow!("invalid widget SVG: {error}"))?;
+    let size = tree.size().to_int_size();
+    let source_edge = size.width().max(size.height()) as f32;
+    anyhow::ensure!(source_edge > 0.0, "widget SVG has no drawable size");
+    let target_edge = target_edge.clamp(1, 1024);
+    let mut pixmap = tiny_skia::Pixmap::new(target_edge, target_edge)
+        .ok_or_else(|| anyhow::anyhow!("allocating widget SVG raster"))?;
+    let scale = target_edge as f32 / source_edge;
+    let tx = (target_edge as f32 - size.width() as f32 * scale) / 2.0;
+    let ty = (target_edge as f32 - size.height() as f32 * scale) / 2.0;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, tx, ty),
+        &mut pixmap.as_mut(),
+    );
+    let mut rgba = Vec::with_capacity(target_edge as usize * target_edge as usize * 4);
+    for pixel in pixmap.pixels() {
+        let pixel = pixel.demultiply();
+        rgba.extend_from_slice(&[pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()]);
+    }
+    Ok(WidgetImageInput {
+        width: target_edge,
+        height: target_edge,
+        rgba,
+    })
 }
 
 /// A rejected plugin load: an id collision (with an earlier source) or a bad manifest.

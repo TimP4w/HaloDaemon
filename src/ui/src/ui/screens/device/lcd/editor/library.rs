@@ -376,6 +376,7 @@ mod tests {
             plugin_id: "halo_lcd".to_owned(),
             name: "Text".to_owned(),
             icon: "text.svg".to_owned(),
+            assets: Vec::new(),
             params: Vec::new(),
             resize: halod_shared::types::LcdWidgetResize::Uniform,
             default_scale: 1.0,

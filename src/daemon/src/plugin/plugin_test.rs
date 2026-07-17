@@ -385,6 +385,16 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
             .iter()
             .map(|param| (param.id.clone(), param.default.clone()))
             .collect();
+        let assets = std::iter::once(&widget.icon)
+            .chain(&widget.assets)
+            .map(|name| {
+                let path = manifest.plugin_dir.join("assets").join(name);
+                let data = std::fs::read(&path)
+                    .with_context(|| format!("reading widget asset {}", path.display()))?;
+                let image = super::rasterize_widget_svg(&data, 128)?;
+                Ok((name.clone(), image))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
         let pixels = runtime.block_on(worker.render(
             super::runtime::widget_worker::WidgetRenderInput {
                 widget_id: widget.id.clone(),
@@ -411,7 +421,7 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
                     screen_height: 128,
                 },
                 images: HashMap::new(),
-                assets: HashMap::new(),
+                assets,
                 preview: true,
             },
         ))?;
