@@ -1939,7 +1939,10 @@ mod tests {
         let h = spawn("return {}", vec![]);
         let err = h.rgb_apply(static_state()).await.unwrap_err();
         assert!(
-            err.to_string().contains("plugin API 1 has no apply()"),
+            err.to_string().contains(&format!(
+                "plugin API {} has no apply()",
+                crate::plugin::PLUGIN_API
+            )),
             "unexpected error: {err}"
         );
     }

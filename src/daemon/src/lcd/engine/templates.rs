@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::collections::HashMap;
 use std::path::Path;
 
 use image::{Rgba, RgbaImage};
 
-use halod_shared::types::{RgbColor, ScreenShape, Sensor};
+use halod_shared::types::RgbColor;
 
 static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/NotoSans-Regular.ttf");
 static MONO_FONT_BYTES: &[u8] =
@@ -32,14 +31,11 @@ pub(super) fn load_system_font_arc(family: &str) -> Option<ab_glyph::FontArc> {
     Some(ab_glyph::FontArc::new(font))
 }
 
-pub struct TemplateCtx<'a> {
+pub struct TemplateCtx {
     pub width: u32,
     pub height: u32,
-    pub screen_shape: ScreenShape,
     /// Seconds since the engine started.
     pub t: f64,
-    /// Live sensor readings keyed by sensor id.
-    pub sensors: &'a HashMap<String, Sensor>,
 }
 
 // ── Background (shared optional image/gif backdrop) ─────────────────────────────

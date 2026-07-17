@@ -2,6 +2,7 @@
 //! Bounded, namespaced latest-value snapshots shared by plugin runtimes.
 
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -170,7 +171,7 @@ fn parse_table(table: Table, depth: usize, count: &mut usize) -> Result<(DataVal
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DataPolicy {
     pub stale_after: Duration,
     pub min_notify_interval: Duration,
@@ -235,6 +236,43 @@ impl Default for DataBus {
 }
 
 impl DataBus {
+    /// Stable render-cache signature and availability for an exact key or the
+    /// bounded `host.sensors.*` scope.
+    pub fn scope_state(&self, scope: &str) -> (u64, bool) {
+        let mut keys = {
+            let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            inner
+                .records
+                .keys()
+                .filter(|key| {
+                    key.as_str() == scope
+                        || (scope == "host.sensors.*" && key.starts_with("host.sensors."))
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        keys.sort_unstable();
+        let mut hasher = DefaultHasher::new();
+        let mut available = false;
+        for key in keys {
+            let snapshot = self.read(&key);
+            key.hash(&mut hasher);
+            snapshot.revision.hash(&mut hasher);
+            match snapshot.status {
+                SnapshotStatus::Fresh => {
+                    1u8.hash(&mut hasher);
+                    available = true;
+                }
+                SnapshotStatus::Stale => {
+                    2u8.hash(&mut hasher);
+                    available = true;
+                }
+                SnapshotStatus::Unavailable => 3u8.hash(&mut hasher),
+            }
+        }
+        (hasher.finish(), available)
+    }
+
     pub fn publish(
         &self,
         owner: &str,
@@ -266,6 +304,19 @@ impl DataBus {
             .is_some_and(|last| now.duration_since(last) < MIN_PUBLISH_INTERVAL)
         {
             bail!("data publication rate limit exceeded for '{key}'");
+        }
+        if let Some(record) = inner.records.get_mut(key) {
+            let still_fresh = record
+                .published_instant
+                .is_some_and(|published| now.duration_since(published) < record.policy.stale_after);
+            if still_fresh && record.value.as_ref() == Some(&value) {
+                record.published_at = Some(unix_seconds());
+                record.published_instant = Some(now);
+                record.policy = policy;
+                record.reason = None;
+                record.last_publish = Some(now);
+                return Ok(record.revision);
+            }
         }
         let bytes = value.accounted_bytes();
         let existing_bytes = inner.records.get(key).map_or(0, |record| record.bytes);

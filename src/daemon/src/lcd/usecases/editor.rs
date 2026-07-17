@@ -49,12 +49,12 @@ pub async fn render(
     {
         return Ok(());
     }
-    let sensors = app.snapshot_sensors().await;
+    app.snapshot_sensors().await;
     let images_dir = crate::config::lcd_images_dir();
     let render_device_id = device_id.clone();
     let mut session = app.lcd.editor_session().take();
     custom::prepare_editor_session(&render_device_id, &def, &images_dir, &mut session)
-        .gather_plugin_sprites(cw, ch, descriptor.shape.clone(), 0.0, &sensors, &app)
+        .gather_plugin_sprites(cw, ch, 0.0, &app)
         .await;
     let render_def = def.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -63,8 +63,6 @@ pub async fn render(
             &render_def,
             cw,
             ch,
-            descriptor.shape,
-            &sensors,
             &images_dir,
             &known,
             &mut session,

@@ -368,12 +368,19 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
         .iter()
         .map(|widget| widget.id.clone())
         .collect();
-    let worker = super::runtime::widget_worker::PluginWidgetHandle::spawn(
+    let _runtime_guard = runtime.enter();
+    let worker = super::runtime::widget_worker::PluginWidgetHandle::spawn_with_data(
         manifest.script_source.clone(),
         manifest.module_sources.clone(),
         ids,
         manifest.permissions.clone(),
         HashMap::new(),
+        super::runtime::data_api::DataRuntime::new(
+            Arc::new(crate::services::data_bus::DataBus::default()),
+            manifest.plugin_id.clone(),
+            &manifest.provides,
+            manifest.consumes.clone(),
+        ),
     );
     let font = ab_glyph::FontArc::try_from_slice(include_bytes!(
         "../../../assets/fonts/NotoSans-Regular.ttf"
@@ -409,17 +416,8 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
                     b: 220,
                 },
                 font: font.clone(),
-                sensors: HashMap::new(),
                 audio: None,
-                media: None,
-                environment: super::runtime::widget_worker::WidgetEnvironmentInput {
-                    locale: "en".to_owned(),
-                    timezone: "UTC".to_owned(),
-                    temperature_unit: "celsius".to_owned(),
-                    screen_shape: "square".to_owned(),
-                    screen_width: 128,
-                    screen_height: 128,
-                },
+                media_art: None,
                 images: HashMap::new(),
                 assets,
                 preview: true,

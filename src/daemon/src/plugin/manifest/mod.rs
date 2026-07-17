@@ -1881,11 +1881,20 @@ fn validate_lcd_content(manifest: &PluginManifest) -> Result<()> {
                 );
             }
         }
+        for key in &widget.updates.data {
+            if !manifest.consumes.contains(key) {
+                bail!(
+                    "widget '{}' data update '{}' is not declared in consumes",
+                    widget.id,
+                    key
+                );
+            }
+        }
         for (source, enabled, rule) in [
             (
-                "sensors",
-                widget.updates.sensors,
-                widget.updates.sensors_when.as_ref(),
+                "data",
+                !widget.updates.data.is_empty(),
+                widget.updates.data_when.as_ref(),
             ),
             (
                 "audio",

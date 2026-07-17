@@ -48,15 +48,13 @@ pub struct LcdWidgetUpdates {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u32>,
     #[serde(default)]
-    pub sensors: bool,
+    pub data: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sensors_when: Option<LcdParamVisibility>,
+    pub data_when: Option<LcdParamVisibility>,
     #[serde(default)]
     pub audio: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_when: Option<LcdParamVisibility>,
-    #[serde(default)]
-    pub media: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

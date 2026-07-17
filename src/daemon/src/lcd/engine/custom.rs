@@ -18,10 +18,7 @@ use crate::services::media::{self, MediaHandle};
 use halod_shared::lcd_custom::{
     param_f64, param_str, BgKind, CustomTemplateDef, WidgetDef, WidgetSprite, TEXT_WEIGHT_PARAM,
 };
-use halod_shared::types::{
-    EffectParamValue, LcdEngineTemplateDescriptor, RgbColor, ScreenShape, Sensor, SensorType,
-    SensorUnit,
-};
+use halod_shared::types::{EffectParamValue, LcdEngineTemplateDescriptor, RgbColor};
 
 use super::templates::{dim_color, rgba, Background, TemplateCtx};
 
@@ -185,7 +182,7 @@ impl CustomTemplate {
 
     pub(super) async fn gather_plugin_sprites(
         &mut self,
-        ctx: &TemplateCtx<'_>,
+        ctx: &TemplateCtx,
         app: &crate::state::AppState,
     ) {
         let dt = self
@@ -202,24 +199,6 @@ impl CustomTemplate {
             self.plugin_assets.clear();
             self.plugin_revision = revision;
         }
-        let locale = app.config.read().await.gui.language.clone();
-        let sensors: HashMap<String, crate::plugin::WidgetSensorInput> = ctx
-            .sensors
-            .iter()
-            .map(|(id, sensor)| {
-                (
-                    id.clone(),
-                    crate::plugin::WidgetSensorInput {
-                        value: sensor.value,
-                        label: sensor.name.clone(),
-                        formatted: format_sensor_value(sensor),
-                        unit: sensor_unit(&sensor.unit),
-                        sensor_type: sensor_type(&sensor.sensor_type).to_owned(),
-                        stale: false,
-                    },
-                )
-            })
-            .collect();
         let widgets: Vec<WidgetDef> = self.def.widgets.clone();
         let mut audio_active = false;
         let mut media_active = false;
@@ -230,9 +209,9 @@ impl CustomTemplate {
                 self.composite_cache.borrow_mut().remove(&widget.id);
                 continue;
             };
-            let sensor_updates = update_source_enabled(
-                entry.descriptor.updates.sensors,
-                entry.descriptor.updates.sensors_when.as_ref(),
+            let data_updates = update_source_enabled(
+                !entry.descriptor.updates.data.is_empty(),
+                entry.descriptor.updates.data_when.as_ref(),
                 &widget,
             );
             let audio_updates = update_source_enabled(
@@ -244,10 +223,17 @@ impl CustomTemplate {
                 self.audio = Some(audio::shared());
             }
             audio_active |= audio_updates;
-            if entry.descriptor.updates.media && self.media.is_none() {
-                self.media = Some(media::shared());
+            let media_updates = data_updates
+                && entry
+                    .descriptor
+                    .updates
+                    .data
+                    .iter()
+                    .any(|key| key == "host.media.playback");
+            if media_updates && self.media.is_none() {
+                self.media = Some(media::shared_with_bus(app.data_bus.clone()));
             }
-            media_active |= entry.descriptor.updates.media;
+            media_active |= media_updates;
             let (_, _, size) = widget_rect(widget.x, widget.y, widget.scale, ctx.width, ctx.height);
             let width = size.round().max(1.0) as u32;
             let height = (size * y_ratio(&widget)).round().max(1.0) as u32;
@@ -262,12 +248,13 @@ impl CustomTemplate {
             if let Some(interval) = entry.descriptor.updates.interval_ms {
                 ((ctx.t * 1000.0) as u64 / u64::from(interval)).hash(&mut hasher);
             }
-            if sensor_updates {
-                let mut values: Vec<_> = sensors.iter().collect();
-                values.sort_by_key(|(id, _)| *id);
-                for (id, sensor) in values {
-                    id.hash(&mut hasher);
-                    sensor.value.to_bits().hash(&mut hasher);
+            let mut data_available = true;
+            if data_updates {
+                for scope in &entry.descriptor.updates.data {
+                    let (signature, available) = app.data_bus.scope_state(scope);
+                    scope.hash(&mut hasher);
+                    signature.hash(&mut hasher);
+                    data_available &= available;
                 }
             }
             if audio_updates {
@@ -277,7 +264,7 @@ impl CustomTemplate {
                     .unwrap_or(0)
                     .hash(&mut hasher);
             }
-            if entry.descriptor.updates.media {
+            if media_updates {
                 self.media
                     .as_ref()
                     .and_then(|media| media.latest())
@@ -326,9 +313,8 @@ impl CustomTemplate {
                 .then(|| self.audio.as_ref().map(|audio| audio.latest()))
                 .flatten();
             let media_info = self.media.as_ref().and_then(|media| media.latest());
-            let preview = (sensor_updates && sensors.is_empty())
-                || (audio_updates && audio_frame.as_ref().is_none_or(|frame| frame.seq == 0))
-                || (entry.descriptor.updates.media && media_info.is_none());
+            let preview = (data_updates && !data_available)
+                || (audio_updates && audio_frame.as_ref().is_none_or(|frame| frame.seq == 0));
             let font = match selected_font.as_str() {
                 halod_shared::lcd_custom::FONT_MONO => super::templates::load_mono_font_arc(),
                 halod_shared::lcd_custom::FONT_INTER => super::templates::load_inter_font_arc(),
@@ -360,37 +346,17 @@ impl CustomTemplate {
                 params,
                 color: self.color_for(&widget),
                 font,
-                sensors: sensors.clone(),
                 audio: audio_frame
                     .as_ref()
                     .filter(|frame| frame.seq != 0)
                     .map(widget_audio),
-                media: media_info.map(|info| {
-                    let art = info.art.map(|art| crate::plugin::WidgetImageInput {
+                media_art: media_info.and_then(|info| {
+                    info.art.map(|art| crate::plugin::WidgetImageInput {
                         width: art.width(),
                         height: art.height(),
                         rgba: art.as_raw().clone(),
-                    });
-                    crate::plugin::WidgetMediaInput {
-                        title: info.title,
-                        artist: info.artist,
-                        status: match info.status {
-                            media::PlaybackStatus::Playing => "playing",
-                            media::PlaybackStatus::Paused => "paused",
-                            media::PlaybackStatus::Stopped => "stopped",
-                        }
-                        .to_owned(),
-                        art,
-                    }
+                    })
                 }),
-                environment: crate::plugin::WidgetEnvironmentInput {
-                    locale: locale.clone(),
-                    timezone: chrono::Local::now().offset().to_string(),
-                    temperature_unit: "celsius".to_owned(),
-                    screen_shape: screen_shape(&ctx.screen_shape).to_owned(),
-                    screen_width: ctx.width,
-                    screen_height: ctx.height,
-                },
                 images: entry
                     .descriptor
                     .params
@@ -685,22 +651,6 @@ const SIGNATURE_TIME_BUCKET_MS: f64 = 10.0;
 
 fn time_bucket(t: f64) -> u64 {
     (t * 1000.0 / SIGNATURE_TIME_BUCKET_MS) as u64
-}
-
-fn format_sensor_value(sensor: &Sensor) -> String {
-    format!("{:.0}{}", sensor.value, sensor_unit(&sensor.unit))
-}
-
-fn sensor_unit(unit: &SensorUnit) -> String {
-    match unit {
-        SensorUnit::Celsius => " °C",
-        SensorUnit::Fahrenheit => " °F",
-        SensorUnit::Percent => " %",
-        SensorUnit::Megahertz => " MHz",
-        SensorUnit::Hours => " h",
-        SensorUnit::Rpm => " RPM",
-    }
-    .to_owned()
 }
 
 fn hash_value<T: Hash>(value: T) -> u64 {
@@ -1021,17 +971,13 @@ impl EditorSession {
         &mut self,
         cw: u32,
         ch: u32,
-        screen_shape: ScreenShape,
         t: f64,
-        sensors: &HashMap<String, Sensor>,
         app: &crate::state::AppState,
     ) {
         let ctx = TemplateCtx {
             width: cw,
             height: ch,
-            screen_shape,
             t,
-            sensors,
         };
         self.tmpl.gather_plugin_sprites(&ctx, app).await;
     }
@@ -1079,7 +1025,7 @@ impl CustomTemplate {
 }
 
 /// Render the widgets of `def` that changed since `known` to [`WidgetSprite`]s
-/// against a `cw`×`ch` canvas, using `sensors` for live sensor readings.
+/// against a `cw`×`ch` canvas.
 /// Reuses `session` when it already belongs to `device_id` (rebuilding only
 /// what `update_def` decides needs it); otherwise starts a fresh one so the
 /// caller keeps it alive for the next request. Returns the changed sprites
@@ -1090,8 +1036,6 @@ pub(crate) fn render_editor_sprites(
     def: &CustomTemplateDef,
     cw: u32,
     ch: u32,
-    screen_shape: ScreenShape,
-    sensors: &HashMap<String, Sensor>,
     images_dir: &Path,
     known: &HashMap<String, u64>,
     session: &mut Option<EditorSession>,
@@ -1102,23 +1046,9 @@ pub(crate) fn render_editor_sprites(
     let ctx = TemplateCtx {
         width: cw,
         height: ch,
-        screen_shape,
         t: 0.0,
-        sensors,
     };
     s.tmpl.editor_sprites_delta(&ctx, known)
-}
-
-fn sensor_type(value: &SensorType) -> &'static str {
-    match value {
-        SensorType::Temperature => "temperature",
-        SensorType::Load => "load",
-        SensorType::Memory => "memory",
-        SensorType::Frequency => "frequency",
-        SensorType::Uptime => "uptime",
-        SensorType::FanSpeed => "fan_speed",
-        SensorType::FanDuty => "fan_duty",
-    }
 }
 
 fn widget_audio(frame: &audio::SpectrumFrame) -> crate::plugin::WidgetAudioInput {
@@ -1128,13 +1058,6 @@ fn widget_audio(frame: &audio::SpectrumFrame) -> crate::plugin::WidgetAudioInput
         beat: frame.beat,
         seq: frame.seq,
         bands: frame.bands.to_vec(),
-    }
-}
-
-fn screen_shape(value: &ScreenShape) -> &'static str {
-    match value {
-        ScreenShape::Circle => "circle",
-        ScreenShape::Square => "square",
     }
 }
 

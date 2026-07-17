@@ -27,8 +27,7 @@ pub use runtime::device::LuaDevice;
 use runtime::device::{LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
 pub use runtime::effect_worker::{EffectFrameInput, EffectZoneInput, LedCoord, PluginEffectHandle};
 pub use runtime::widget_worker::{
-    PluginWidgetHandle, WidgetAudioInput, WidgetEnvironmentInput, WidgetImageInput,
-    WidgetMediaInput, WidgetRenderInput, WidgetSensorInput,
+    PluginWidgetHandle, WidgetAudioInput, WidgetImageInput, WidgetRenderInput,
 };
 pub use runtime::worker::run_pre_scan;
 
@@ -37,7 +36,7 @@ use runtime::{command_resolve, device, transport, worker};
 
 /// Lua host/plugin ABI implemented by this daemon. Repository compatibility
 /// and [`manifest::contract::PLUGIN_API_CONTRACT`] deliberately share this one value.
-pub const PLUGIN_API: u32 = 1;
+pub const PLUGIN_API: u32 = 2;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

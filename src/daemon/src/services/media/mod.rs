@@ -125,28 +125,23 @@ impl MediaHandle {
 /// only a `Weak`, the platform watcher task holds a `Weak` too — when the last
 /// consumer `Arc` drops, the watcher's `upgrade()` fails and it exits. A later
 /// call starts a fresh watcher.
-pub fn shared() -> Arc<MediaHandle> {
+pub fn shared_with_bus(bus: Arc<crate::services::data_bus::DataBus>) -> Arc<MediaHandle> {
     static SLOT: OnceLock<Mutex<Weak<MediaHandle>>> = OnceLock::new();
     let slot = SLOT.get_or_init(|| Mutex::new(Weak::new()));
     let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = guard.upgrade() {
+        *existing
+            .data_bus
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(bus);
         return existing;
     }
     let handle = Arc::new(MediaHandle {
         latest: RwLock::new(None),
-        data_bus: RwLock::new(None),
+        data_bus: RwLock::new(Some(bus)),
     });
     start_platform(Arc::downgrade(&handle));
     *guard = Arc::downgrade(&handle);
-    handle
-}
-
-pub fn shared_with_bus(bus: Arc<crate::services::data_bus::DataBus>) -> Arc<MediaHandle> {
-    let handle = shared();
-    *handle
-        .data_bus
-        .write()
-        .unwrap_or_else(|error| error.into_inner()) = Some(bus);
     handle
 }
 
@@ -202,8 +197,9 @@ mod tests {
 
     #[tokio::test]
     async fn shared_returns_same_arc_while_held() {
-        let a = shared();
-        let b = shared();
+        let bus = Arc::new(crate::services::data_bus::DataBus::default());
+        let a = shared_with_bus(bus.clone());
+        let b = shared_with_bus(bus);
         assert!(Arc::ptr_eq(&a, &b));
     }
 

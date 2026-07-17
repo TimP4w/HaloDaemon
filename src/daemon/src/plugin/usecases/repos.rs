@@ -790,7 +790,7 @@ mod tests {
         std::fs::write(
             root.join("repository.yaml"),
             format!(
-                "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.0.0'\n  plugin_api: 1\npackages:\n  - id: {id}\n    path: plugins/{id}\n    version: {version}\n    sha256: {digest}\n"
+                "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.0.0'\n  plugin_api: 2\npackages:\n  - id: {id}\n    path: plugins/{id}\n    version: {version}\n    sha256: {digest}\n"
             ),
         )
         .unwrap();
@@ -833,7 +833,7 @@ mod tests {
         let current = std::fs::read_to_string(&path).unwrap();
         let current = current
             .replace("halod: '>=0.0.0'", &format!("halod: '{halod}'"))
-            .replace("plugin_api: 1", &format!("plugin_api: {plugin_api}"));
+            .replace("plugin_api: 2", &format!("plugin_api: {plugin_api}"));
         std::fs::write(path, current).unwrap();
         commit_tree(repo, message)
     }
@@ -1279,7 +1279,7 @@ mod tests {
                 &repo,
                 "requires future plugin API",
                 ">=0.0.0",
-                2,
+                crate::plugin::PLUGIN_API + 1,
             );
 
             let repo_statuses = compute_repo_updates(&app).await;
@@ -1318,7 +1318,7 @@ mod tests {
                 &source,
                 "requires future plugin API",
                 ">=0.0.0",
-                2,
+                crate::plugin::PLUGIN_API + 1,
             );
 
             add_repo(file_url(src.path()), None, app.clone())

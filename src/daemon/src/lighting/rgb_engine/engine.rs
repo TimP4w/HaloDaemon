@@ -332,12 +332,6 @@ impl RgbEngine {
             dt,
             frame: frame_id,
             audio: crate::services::audio::shared().latest(),
-            sensors: Arc::new(
-                sensor_snapshot
-                    .iter()
-                    .map(|(id, sensor)| (id.clone(), sensor.value))
-                    .collect(),
-            ),
         };
 
         let preview_srgb = self
@@ -1353,17 +1347,15 @@ mod tests {
     }
 
     /// Load a single-file plugin declaring one direct effect that echoes the
-    /// sensor context value into its red channel, so a test can assert
-    /// the engine actually threads a live sensor snapshot through to a
-    /// plugin-declared direct effect (mirrors `load_test_effect_plugin`
-    /// above but exercises the `ctx.sensors` wiring instead).
+    /// sensor-bus value into its red channel, so a test can assert the engine
+    /// exposes live host snapshots to a plugin-declared direct effect.
     fn load_test_sensor_plugin(app: &Arc<AppState>) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("engine_sensor_fx");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_sensor_fx\ntype: effect\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
+            "id: engine_sensor_fx\ntype: effect\nconsumes: [host.sensors.*]\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
         )
         .unwrap();
         std::fs::write(
@@ -1371,7 +1363,16 @@ mod tests {
             r#"
                 return {
                   led_effect_probe = function(leds, ctx)
-                    local sensor = ctx.sensors[ctx.params.sensor]
+                    local sensor = nil
+                    local catalog = ctx:data("host.sensors.catalog")
+                    if catalog.status ~= "unavailable" then
+                      for _, item in ipairs(catalog.value) do
+                        if item.id == ctx.params.sensor then
+                          local snapshot = ctx:data(item.key)
+                          if snapshot.status ~= "unavailable" then sensor = snapshot.value.value end
+                        end
+                      end
+                    end
                     local v = 0.0
                     if sensor ~= nil then v = sensor / 100.0 end
                     local out = {}
@@ -1387,6 +1388,16 @@ mod tests {
         app.registry.load_all(tmp.path());
         app.registry.replace_policy(&crate::config::PluginPolicy {
             enabled: vec!["engine_sensor_fx".into()],
+            accepted_authorities: [(
+                "engine_sensor_fx".into(),
+                halod_shared::types::PluginAuthority {
+                    permissions: vec![],
+                    transport_scopes: vec![],
+                    data_reads: vec!["host.sensors.*".into()],
+                },
+            )]
+            .into_iter()
+            .collect(),
             ..Default::default()
         });
         tmp

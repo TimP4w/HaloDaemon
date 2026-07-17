@@ -276,7 +276,7 @@ impl LcdEngine {
 
     async fn tick(&self, t: f64) {
         self.evict_idle_editor_session().await;
-        let sensors = self.app_state.snapshot_sensors().await;
+        self.app_state.snapshot_sensors().await;
 
         let receiver_count = self.frame_tx.receiver_count();
         let prev_receiver_count = self
@@ -379,9 +379,7 @@ impl LcdEngine {
             let ctx = TemplateCtx {
                 width: descriptor.width,
                 height: descriptor.height,
-                screen_shape: descriptor.shape.clone(),
                 t,
-                sensors: &sensors,
             };
 
             let force = preview_just_subscribed || slot.last_sig.is_none() || slot.fail_streak > 0;

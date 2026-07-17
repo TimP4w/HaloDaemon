@@ -9,7 +9,6 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use mlua::{Function, Lua, LuaSerdeExt, Table};
@@ -44,7 +43,6 @@ pub struct EffectFrameInput {
     pub dt: f32,
     pub frame: u64,
     pub audio: crate::services::audio::SpectrumFrame,
-    pub sensors: Arc<HashMap<String, f64>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -407,7 +405,6 @@ fn effect_context_table(
     context.set("frame", frame.frame)?;
     context.set("seed", seed)?;
     context.set("zone", lua.to_value(zone)?)?;
-    context.set("sensors", lua.to_value(frame.sensors.as_ref())?)?;
     let data = data.clone();
     context.set(
         "data",
@@ -653,7 +650,6 @@ mod tests {
                 seq: 9,
                 ..Default::default()
             },
-            sensors: Arc::new([("temp".to_owned(), 80.0)].into_iter().collect()),
         }
     }
 
@@ -939,7 +935,6 @@ mod tests {
                 assert(ctx.params.mode == "test" and ctx.frame >= 10)
                 assert(type(ctx.seed) == "number")
                 assert(math.abs(ctx.audio.level - 0.4) < 0.000001 and ctx.audio.seq == 9)
-                assert(ctx.sensors.temp == 80, tostring(ctx.sensors.temp))
                 assert(ctx.zone.id == "ring" and ctx.zone.topology == "linear")
                 assert(ctx.zone.led_count == 1 and ctx.zone.device_id == "device")
                 assert(leds[1].id == 100 and leds[1].zone_id == "ring")
