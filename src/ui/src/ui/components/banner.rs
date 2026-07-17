@@ -62,6 +62,7 @@ pub struct Banner<'a> {
     subtitle: Option<&'a str>,
     dot: Option<Color32>,
     action: Option<BannerAction<'a>>,
+    action_below: bool,
 }
 
 impl<'a> Banner<'a> {
@@ -84,6 +85,7 @@ impl<'a> Banner<'a> {
             subtitle: None,
             dot: None,
             action: None,
+            action_below: false,
         }
     }
 
@@ -107,6 +109,12 @@ impl<'a> Banner<'a> {
         self.action = Some(action);
         self
     }
+    /// Place the action on its own row under the text instead of inline right
+    /// of the title — for narrow columns where both don't fit side by side.
+    pub fn action_below(mut self) -> Self {
+        self.action_below = true;
+        self
+    }
 
     /// Render; returns `true` when a non-loading action was clicked.
     pub fn show(self, ui: &mut egui::Ui) -> bool {
@@ -128,9 +136,20 @@ impl<'a> Banner<'a> {
         let (accent, _, _) = banner_palette(&self.kind);
         let title_color = self.title_color.unwrap_or(accent);
         let title_font = self.title_font.clone().unwrap_or_else(theme::subhead);
+        let show_action = |ui: &mut egui::Ui, a: &BannerAction, clicked: &mut bool| {
+            if a.loading {
+                button_loading(ui, a.label, a.kind, a.size);
+            } else if button(ui, a.label, a.kind, a.size).clicked() {
+                *clicked = true;
+            }
+        };
         banner_frame(ui, &self.kind, |ui| {
             ui.set_width(ui.available_width());
-            let action_size = self.action.as_ref().map(|a| a.size);
+            let action_size = self
+                .action
+                .as_ref()
+                .filter(|_| !self.action_below)
+                .map(|a| a.size);
             let title_line_h = ui
                 .painter()
                 .layout_no_wrap(self.title.to_owned(), title_font.clone(), title_color)
@@ -152,12 +171,8 @@ impl<'a> Banner<'a> {
                     );
                 },
                 |ui| {
-                    if let Some(a) = &self.action {
-                        if a.loading {
-                            button_loading(ui, a.label, a.kind, a.size);
-                        } else if button(ui, a.label, a.kind, a.size).clicked() {
-                            clicked = true;
-                        }
+                    if let Some(a) = self.action.as_ref().filter(|_| !self.action_below) {
+                        show_action(ui, a, &mut clicked);
                     }
                 },
             );
@@ -169,7 +184,12 @@ impl<'a> Banner<'a> {
                         .color(theme::TEXT_DIM),
                 );
             }
-            (body(ui), clicked)
+            let out = body(ui);
+            if let Some(a) = self.action.as_ref().filter(|_| self.action_below) {
+                ui.add_space(theme::SPACE_5);
+                ui.horizontal(|ui| show_action(ui, a, &mut clicked));
+            }
+            (out, clicked)
         })
     }
 }

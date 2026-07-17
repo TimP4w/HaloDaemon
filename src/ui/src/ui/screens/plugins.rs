@@ -2495,6 +2495,7 @@ fn update_all_banner(ui: &mut egui::Ui, count: usize, updating: bool) -> bool {
             widgets::BannerAction::new(&label, ButtonKind::Warn, Vec2::new(130.0, 30.0))
                 .loading(updating),
         )
+        .action_below()
         .show(ui)
 }
 
