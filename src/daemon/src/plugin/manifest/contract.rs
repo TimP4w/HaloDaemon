@@ -161,15 +161,15 @@ pub const CALLBACKS_V1: &[CallbackContract] = &[
     callback!("reset_all_button_mappings", Capability, "dev", "nil"),
     callback!("key_remap_host_mode", Optional, "dev", "bool"),
     callback!(
-        "render_{id}",
+        "render_effect_{id}",
         EffectPattern,
-        "buffer, time, dt, params",
+        "buffer, EffectCtx",
         "nil"
     ),
     callback!(
-        "led_colors_{id}",
+        "led_effect_{id}",
         EffectPattern,
-        "leds, time, dt, params, sensor",
+        "leds, EffectCtx",
         "Color[]"
     ),
     callback!(
@@ -227,6 +227,10 @@ pub const TABLES_V1: &[TableContract] = &[
     TableContract {
         name: "DetectedAccessory",
         fields: "channel; accessory",
+    },
+    TableContract {
+        name: "EffectCtx",
+        fields: "time; dt; params; audio; sensors; frame; seed; zone { id, topology, led_count, device_id }; random(stream?); noise1d(x); noise2d(x, y); lerp_color(a, b, amount); gradient(stops, amount); srgb_to_linear(value); linear_to_srgb(value)",
     },
     TableContract {
         name: "WidgetRenderCtx",

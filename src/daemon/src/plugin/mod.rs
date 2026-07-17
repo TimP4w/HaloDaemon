@@ -25,7 +25,7 @@ pub mod usecases;
 pub use manifest::{parse_manifest_from_dir, DeviceSpec, EffectKind, PluginManifest, ProbeMode};
 pub use runtime::device::LuaDevice;
 use runtime::device::{LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
-pub use runtime::effect_worker::{LedCoord, PluginEffectHandle};
+pub use runtime::effect_worker::{EffectFrameInput, EffectZoneInput, LedCoord, PluginEffectHandle};
 pub use runtime::widget_worker::{
     PluginWidgetHandle, WidgetAudioInput, WidgetEnvironmentInput, WidgetImageInput,
     WidgetMediaInput, WidgetRenderInput, WidgetSensorInput,

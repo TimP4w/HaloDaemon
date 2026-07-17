@@ -401,8 +401,7 @@ pub enum EffectKind {
 /// One RGB effect a plugin contributes to the engine's catalog. Registered
 /// under a namespaced id (`<plugin_id>:<id>`) so it can never collide with a
 /// native effect or another plugin's. The render callback is a sibling
-/// function named `render_<id>` (pixmap) or `led_colors_<id>` (direct), or
-/// bare `render`/`led_colors` when the plugin declares exactly one effect.
+/// function named `render_effect_<id>` (pixmap) or `led_effect_<id>` (direct).
 #[derive(Debug, Clone, Deserialize)]
 pub struct EffectManifest {
     pub kind: EffectKind,
