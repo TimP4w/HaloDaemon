@@ -1157,8 +1157,7 @@ fn draw_repo_integrity(
 
 /// One selectable repo row in the list column. Returns whether it was clicked.
 fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
-    let (rect, resp) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+    let (rect, resp) = widgets::hover_row(ui, 44.0, selected);
     if row.official {
         crate::domain::tour::anchor(
             ui.ctx(),
@@ -1166,22 +1165,10 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
             rect,
         );
     }
-    if selected {
-        ui.painter().rect_filled(rect, 9.0, theme::ROW_ACTIVE);
-    } else if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, 9.0, theme::a(theme::ROW_ACTIVE, 0.55));
-    }
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
 
     // Match the plugin-row tile size (28 px); the fork glyph keeps its size, so
     // the extra room becomes padding inside the larger holder.
-    let icon_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 8.0, rect.center().y - 14.0),
-        Vec2::splat(28.0),
-    );
+    let icon_rect = widgets::row_tile_rect(rect);
     ui.painter()
         .rect_filled(icon_rect, 8.0, theme::hex(0x161320));
     ui.painter().rect_stroke(
@@ -1751,20 +1738,10 @@ fn list_row(
     // `Some(target)` while applying: toggle shown at `target`, dimmed, click-blocked.
     locked_target: Option<bool>,
 ) -> RowAction {
-    let (rect, resp) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::click());
-    if selected {
-        ui.painter().rect_filled(rect, 9.0, theme::ROW_ACTIVE);
-    } else if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, 9.0, theme::a(theme::ROW_ACTIVE, 0.55));
-    }
+    let (rect, resp) = widgets::hover_row(ui, 46.0, selected);
     let center_y = rect.center().y;
 
-    let tile_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 8.0, center_y - 14.0),
-        Vec2::splat(28.0),
-    );
+    let tile_rect = widgets::row_tile_rect(rect);
     match logo_tex {
         Some(tex) => draw_logo_fit(ui.painter(), tile_rect, tex),
         None => initials_tile_at(ui, tile_rect, &p.name, &p.id),

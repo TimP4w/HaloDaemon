@@ -202,6 +202,30 @@ pub fn show(
     outcome
 }
 
+/// Shared scaffold of the form-style steps: lead space, left indent, 520 px
+/// column, bold title + muted subtitle, then the step body.
+fn step_shell(ui: &mut egui::Ui, title: &str, sub: &str, body: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(26.0);
+    ui.horizontal(|ui| {
+        ui.add_space(theme::SPACE_12);
+        ui.vertical(|ui| {
+            ui.set_width(520.0);
+            ui.label(
+                RichText::new(title)
+                    .font(theme::bold(21.0))
+                    .color(theme::TEXT),
+            );
+            ui.add_space(theme::SPACE_3);
+            ui.label(
+                RichText::new(sub)
+                    .font(theme::body_lg())
+                    .color(theme::TEXT_MUT),
+            );
+            body(ui);
+        });
+    });
+}
+
 fn step_welcome(ui: &mut egui::Ui, time: f32) {
     ui.add_space(52.0);
     ui.allocate_ui_with_layout(
@@ -238,22 +262,11 @@ fn step_welcome(ui: &mut egui::Ui, time: f32) {
 }
 
 fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
-    ui.add_space(26.0);
-    ui.horizontal(|ui| {
-        ui.add_space(theme::SPACE_12);
-        ui.vertical(|ui| {
-            ui.set_width(520.0);
-            ui.label(
-                RichText::new(t!("onboarding.health_title"))
-                    .font(theme::bold(21.0))
-                    .color(theme::TEXT),
-            );
-            ui.add_space(theme::SPACE_3);
-            ui.label(
-                RichText::new(t!("onboarding.health_sub"))
-                    .font(theme::body_lg())
-                    .color(theme::TEXT_MUT),
-            );
+    step_shell(
+        ui,
+        &t!("onboarding.health_title"),
+        &t!("onboarding.health_sub"),
+        |ui| {
             ui.add_space(theme::SPACE_9);
             match debug {
                 None => {
@@ -299,8 +312,8 @@ fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
                     }
                 }
             }
-        });
-    });
+        },
+    );
 }
 
 fn centered_wrapped(ui: &mut egui::Ui, text: &str, max_w: f32, color: egui::Color32, size: f32) {
@@ -320,42 +333,16 @@ fn pref_card(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&m
         .corner_radius(theme::RADIUS_LG)
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui_with_layout(
-                    Vec2::new(ui.available_width() - 60.0, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.label(RichText::new(title).font(theme::title()).color(theme::TEXT));
-                        ui.add_space(theme::SPACE_2);
-                        ui.label(
-                            RichText::new(desc)
-                                .font(theme::body_md())
-                                .color(theme::TEXT_MUT),
-                        );
-                    },
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
-            });
+            widgets::setting_row(ui, title, desc, control);
         });
 }
 
 fn step_prefs(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
-    ui.add_space(30.0);
-    ui.horizontal(|ui| {
-        ui.add_space(theme::SPACE_12);
-        ui.vertical(|ui| {
-            ui.set_width(520.0);
-            ui.label(
-                RichText::new(t!("onboarding.prefs_title"))
-                    .font(theme::bold(21.0))
-                    .color(theme::TEXT),
-            );
-            ui.add_space(theme::SPACE_3);
-            ui.label(
-                RichText::new(t!("onboarding.prefs_sub"))
-                    .font(theme::body_lg())
-                    .color(theme::TEXT_MUT),
-            );
+    step_shell(
+        ui,
+        &t!("onboarding.prefs_title"),
+        &t!("onboarding.prefs_sub"),
+        |ui| {
             ui.add_space(22.0);
 
             pref_card(
@@ -396,8 +383,8 @@ fn step_prefs(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
                     }
                 },
             );
-        });
-    });
+        },
+    );
 }
 
 fn step_scanning(ui: &mut egui::Ui, time: f64) {
@@ -433,33 +420,9 @@ fn plugin_toggle_row(ui: &mut egui::Ui, plugin: &PluginInfo, on: bool) -> bool {
     let next = egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(4, 14))
         .show(ui, |ui| {
-            let next = ui
-                .horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(ui.available_width() - 58.0, 62.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.label(
-                                RichText::new(&plugin.name)
-                                    .font(theme::title())
-                                    .color(theme::TEXT),
-                            );
-                            ui.add_space(theme::SPACE_2);
-                            if !plugin.description.is_empty() {
-                                ui.label(
-                                    RichText::new(&plugin.description)
-                                        .font(theme::body_md())
-                                        .color(theme::TEXT_MUT),
-                                );
-                            }
-                        },
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        widgets::toggle(ui, on)
-                    })
-                    .inner
-                })
-                .inner;
+            let next = widgets::setting_row(ui, &plugin.name, &plugin.description, |ui| {
+                widgets::toggle(ui, on)
+            });
             if on && !plugin.enabled {
                 ui.add_space(theme::SPACE_4);
                 if plugin.declared_permissions.is_empty() {
@@ -493,22 +456,11 @@ fn step_plugins(
     if !candidates.is_empty() {
         st.official_retry_started = None;
     }
-    ui.add_space(theme::SPACE_10);
-    ui.horizontal(|ui| {
-        ui.add_space(theme::SPACE_12);
-        ui.vertical(|ui| {
-            ui.set_width(520.0);
-            ui.label(
-                RichText::new(t!("onboarding.plugins_page_title"))
-                    .font(theme::bold(21.0))
-                    .color(theme::TEXT),
-            );
-            ui.add_space(theme::SPACE_3);
-            ui.label(
-                RichText::new(t!("onboarding.plugins_page_sub"))
-                    .font(theme::body_lg())
-                    .color(theme::TEXT_MUT),
-            );
+    step_shell(
+        ui,
+        &t!("onboarding.plugins_page_title"),
+        &t!("onboarding.plugins_page_sub"),
+        |ui| {
             ui.add_space(theme::SPACE_8);
             if candidates.is_empty() && official_unavailable {
                 let retrying = st
@@ -594,8 +546,8 @@ fn step_plugins(
                         .color(theme::TEXT_MUT),
                 );
             }
-        });
-    });
+        },
+    );
 }
 
 fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &AppState, plugins: &[PluginInfo]) {

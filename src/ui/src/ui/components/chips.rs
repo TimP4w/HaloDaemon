@@ -16,6 +16,16 @@ pub fn pill(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
     pill_styled(ui, label, active, theme::CYAN, theme::INNER_BG)
 }
 
+/// Wrapping pill/chip strip with the standard 7 px wrap spacing — the layout
+/// every inline selector row shares; the body places its own pills.
+pub fn pill_strip<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+        body(ui)
+    })
+    .inner
+}
+
 /// Split a chip rect into its label zone and the trailing square "×" zone.
 fn chip_close_zones(rect: Rect) -> (Rect, Rect) {
     let close = Rect::from_min_max(Pos2::new(rect.max.x - rect.height(), rect.min.y), rect.max);

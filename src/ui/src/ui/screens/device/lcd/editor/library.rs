@@ -84,8 +84,7 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
             .color(theme::TEXT_FAINT),
     );
     ui.add_space(theme::SPACE_3);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+    widgets::pill_strip(ui, |ui| {
         for preset in &ctx.state.lcd.engine.available_presets {
             if widgets::pill(ui, &preset.name, false) {
                 crate::runtime::ipc::send(
@@ -112,11 +111,11 @@ pub(super) fn my_templates_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Dev
     );
     ui.add_space(theme::SPACE_3);
     ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut st.lcd.editor.template_name)
-                .hint_text(t!("lcd.template_name_hint").to_string())
-                .margin(egui::vec2(12.0, 11.0))
-                .desired_width(160.0),
+        widgets::text_field(
+            ui,
+            &mut st.lcd.editor.template_name,
+            &t!("lcd.template_name_hint"),
+            160.0,
         );
         let can_save = !st.lcd.editor.template_name.trim().is_empty();
         if widgets::button(
@@ -141,8 +140,7 @@ pub(super) fn my_templates_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Dev
         return;
     }
     ui.add_space(theme::SPACE_4);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+    widgets::pill_strip(ui, |ui| {
         for name in &ctx.state.lcd.templates {
             let (load, delete) = widgets::chip_closable(ui, name);
             if load {

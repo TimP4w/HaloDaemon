@@ -16,12 +16,7 @@ fn param_label(param: &EffectParamDescriptor) -> &str {
 }
 
 fn param_heading(ui: &mut egui::Ui, label: &str) {
-    ui.label(
-        egui::RichText::new(label)
-            .font(theme::body_sm())
-            .color(theme::TEXT_MUT),
-    );
-    ui.add_space(theme::SPACE_3);
+    widgets::field_label(ui, label);
 }
 
 /// Translated display text for one `ParamKind::Enum` option, keyed by the

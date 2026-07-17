@@ -10,6 +10,34 @@ pub fn card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     card_with_margin(ui, theme::PAD_CARD, body)
 }
 
+/// Allocate a full-width clickable list row and paint the shared
+/// selected/hover backgrounds plus the pointer cursor. The body paints into
+/// the returned rect.
+pub fn hover_row(ui: &mut egui::Ui, height: f32, selected: bool) -> (egui::Rect, egui::Response) {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::Vec2::new(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    if selected {
+        ui.painter().rect_filled(rect, 9.0, theme::ROW_ACTIVE);
+    } else if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 9.0, theme::a(theme::ROW_ACTIVE, 0.55));
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    (rect, resp)
+}
+
+/// The 28 px leading icon/logo tile every [`hover_row`] list row shares.
+pub fn row_tile_rect(rect: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::Pos2::new(rect.left() + 8.0, rect.center().y - 14.0),
+        egui::Vec2::splat(28.0),
+    )
+}
+
 /// A card surface with no inner margin, for bodies that lay out edge-to-edge
 /// (e.g. full-width header rows).
 pub fn card_frameless<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {

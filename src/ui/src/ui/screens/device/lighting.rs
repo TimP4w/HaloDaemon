@@ -724,25 +724,12 @@ fn led_canvas(
     let pts = led_layout(zone, inner);
     let n = pts.len().max(1);
 
-    let mut changed = false;
-    if painting && (resp.is_pointer_button_down_on() || resp.dragged() || resp.clicked()) {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            let color = st.lighting.paint_color.unwrap_or_default();
-            for (led, c, r) in &pts {
-                if c.distance(pos) <= r + 2.0 {
-                    st.lighting
-                        .paint_buf
-                        .entry(zone.id.clone())
-                        .or_default()
-                        .insert(*led, color);
-                    changed = true;
-                }
-            }
-        }
-    }
-    if painting && resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-    }
+    let changed = paint_gesture(ui, &resp, st, &zone.id, painting, |pos| {
+        pts.iter()
+            .filter(|(_, c, r)| c.distance(pos) <= r + 2.0)
+            .map(|(led, _, _)| *led)
+            .collect()
+    });
 
     let buf = st.lighting.paint_buf.get(&zone.id);
     let painter = ui.painter();
@@ -807,23 +794,12 @@ fn keyboard_canvas(
     let rects = kbv::key_rects(keys, inner, 3.0);
     let unit = kbv::unit_for(keys, inner);
 
-    let mut changed = false;
-    if painting && (resp.is_pointer_button_down_on() || resp.dragged() || resp.clicked()) {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            if let Some(i) = kbv::hit_key(keys, &rects, pos, unit) {
-                let color = st.lighting.paint_color.unwrap_or_default();
-                st.lighting
-                    .paint_buf
-                    .entry(zone.id.clone())
-                    .or_default()
-                    .insert(keys[i].led_id, color);
-                changed = true;
-            }
-        }
-    }
-    if painting && resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-    }
+    let changed = paint_gesture(ui, &resp, st, &zone.id, painting, |pos| {
+        kbv::hit_key(keys, &rects, pos, unit)
+            .map(|i| keys[i].led_id)
+            .into_iter()
+            .collect()
+    });
 
     let buf = st.lighting.paint_buf.get(&zone.id);
     let n = keys.len().max(1) as f32;
@@ -861,27 +837,14 @@ fn layout_selector(
             selection: sel,
         });
     };
-    // Render one combo box; return the newly picked index only when it changed.
-    let combo = |ui: &mut egui::Ui, salt: &str, labels: &[String], sel: usize| -> Option<usize> {
-        let mut idx = sel;
-        egui::ComboBox::from_id_salt((salt, &ctx.dev.id))
-            .selected_text(labels[idx].clone())
-            .show_ui(ui, |ui| {
-                for (i, label) in labels.iter().enumerate() {
-                    ui.selectable_value(&mut idx, i, label);
-                }
-            });
-        (idx != sel).then_some(idx)
-    };
-
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
         widgets::caps_label_inline(ui, &t!("lighting.layout_caps"));
 
         if opts.show_variant {
-            if let Some(idx) = combo(
+            if let Some(idx) = widgets::combo_indexed(
                 ui,
-                "kbd_variant",
+                ("kbd_variant", &ctx.dev.id),
                 &opts.variant_labels,
                 opts.variant_selected,
             ) {
@@ -891,9 +854,9 @@ fn layout_selector(
                 });
             }
         }
-        if let Some(idx) = combo(
+        if let Some(idx) = widgets::combo_indexed(
             ui,
-            "kbd_lang",
+            ("kbd_lang", &ctx.dev.id),
             &opts.language_labels,
             opts.language_selected,
         ) {
@@ -903,6 +866,38 @@ fn layout_selector(
             });
         }
     });
+}
+
+/// Apply a paint-mode gesture shared by the LED and keyboard canvases: on
+/// press/drag, write the active paint color to every LED `hit` yields for the
+/// pointer position, and show the crosshair cursor. Returns whether any LED
+/// changed.
+fn paint_gesture(
+    ui: &egui::Ui,
+    resp: &egui::Response,
+    st: &mut DeviceUi,
+    zone_id: &str,
+    painting: bool,
+    hit: impl Fn(Pos2) -> Vec<u32>,
+) -> bool {
+    let mut changed = false;
+    if painting && (resp.is_pointer_button_down_on() || resp.dragged() || resp.clicked()) {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let color = st.lighting.paint_color.unwrap_or_default();
+            for led in hit(pos) {
+                st.lighting
+                    .paint_buf
+                    .entry(zone_id.to_string())
+                    .or_default()
+                    .insert(led, color);
+                changed = true;
+            }
+        }
+    }
+    if painting && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+    changed
 }
 
 /// Screen positions + radius for each LED, per zone topology.
@@ -1127,16 +1122,25 @@ fn current_effect_params<'a>(
     }
 }
 
+fn current_param<'a>(
+    rgb: &'a RgbStatus,
+    kind: EffectKind,
+    eid: &str,
+    pid: &str,
+) -> Option<&'a EffectParamValue> {
+    current_effect_params(rgb, kind, eid)?.get(pid)
+}
+
 fn current_param_f32(rgb: &RgbStatus, kind: EffectKind, eid: &str, pid: &str) -> Option<f32> {
-    match current_effect_params(rgb, kind, eid)?.get(pid) {
-        Some(EffectParamValue::Float(f)) => Some(*f as f32),
+    match current_param(rgb, kind, eid, pid)? {
+        EffectParamValue::Float(f) => Some(*f as f32),
         _ => None,
     }
 }
 
 fn current_param_str(rgb: &RgbStatus, kind: EffectKind, eid: &str, pid: &str) -> Option<String> {
-    match current_effect_params(rgb, kind, eid)?.get(pid) {
-        Some(EffectParamValue::Str(s)) => Some(s.clone()),
+    match current_param(rgb, kind, eid, pid)? {
+        EffectParamValue::Str(s) => Some(s.clone()),
         _ => None,
     }
 }
@@ -1147,8 +1151,8 @@ fn current_param_steps(
     eid: &str,
     pid: &str,
 ) -> Option<Vec<ColorStep>> {
-    match current_effect_params(rgb, kind, eid)?.get(pid) {
-        Some(EffectParamValue::Steps(s)) if !s.is_empty() => Some(s.clone()),
+    match current_param(rgb, kind, eid, pid)? {
+        EffectParamValue::Steps(s) if !s.is_empty() => Some(s.clone()),
         _ => None,
     }
 }
@@ -1159,8 +1163,8 @@ fn current_param_color(
     eid: &str,
     pid: &str,
 ) -> Option<RgbColor> {
-    match current_effect_params(rgb, kind, eid)?.get(pid) {
-        Some(EffectParamValue::Color(c)) => Some(*c),
+    match current_param(rgb, kind, eid, pid)? {
+        EffectParamValue::Color(c) => Some(*c),
         _ => None,
     }
 }

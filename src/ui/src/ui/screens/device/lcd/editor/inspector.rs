@@ -38,12 +38,7 @@ fn font_picker(
     fonts: &[String],
 ) -> Option<String> {
     let effective = current.unwrap_or(default);
-    ui.label(
-        egui::RichText::new(t!("lcd.font"))
-            .font(theme::body_sm())
-            .color(theme::TEXT_MUT),
-    );
-    ui.add_space(theme::SPACE_3);
+    widgets::field_label(ui, &t!("lcd.font"));
     let mut options = vec![
         (FONT_SANS.to_owned(), "Noto Sans".to_owned()),
         (FONT_MONO.to_owned(), "JetBrains Mono".to_owned()),
@@ -194,12 +189,7 @@ pub(super) fn selected_widget_card(
         let cur = st.lcd.editor.def.widgets[idx]
             .color
             .unwrap_or(st.lcd.editor.def.style.accent);
-        ui.label(
-            egui::RichText::new(t!("lcd.color"))
-                .font(theme::body_sm())
-                .color(theme::TEXT_MUT),
-        );
-        ui.add_space(theme::SPACE_3);
+        widgets::field_label(ui, &t!("lcd.color"));
         if let Some(c) = widgets::color_swatch_row(
             ui,
             (
@@ -353,12 +343,7 @@ pub(super) fn screen_style_card(
 
     let mut changed = false;
 
-    ui.label(
-        egui::RichText::new(t!("lcd.accent"))
-            .font(theme::body_sm())
-            .color(theme::TEXT_MUT),
-    );
-    ui.add_space(theme::SPACE_3);
+    widgets::field_label(ui, &t!("lcd.accent"));
     if let Some(c) =
         widgets::color_swatch_row(ui, "lcd_screen_accent", st.lcd.editor.def.style.accent)
     {
@@ -386,8 +371,7 @@ pub(super) fn screen_style_card(
             .font(theme::body_sm())
             .color(theme::TEXT_MUT),
     );
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+    widgets::pill_strip(ui, |ui| {
         let current = bg_kind_key(&st.lcd.editor.def.style.background);
         for &key in BG_KINDS {
             if widgets::pill(ui, &bg_label(key), current == key) && current != key {

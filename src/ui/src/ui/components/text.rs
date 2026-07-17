@@ -77,6 +77,51 @@ pub fn truncate_to_width(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) 
 /// A label/value table row with a bottom hairline (Info rows, cooling readings).
 /// Long values are truncated with an ellipsis so they never overflow the card,
 /// and the full value is shown on hover.
+/// Muted field label above a control, with the standard small gap.
+pub fn field_label(ui: &mut egui::Ui, label: &str) {
+    ui.label(
+        egui::RichText::new(label)
+            .font(theme::body_sm())
+            .color(theme::TEXT_MUT),
+    );
+    ui.add_space(theme::SPACE_3);
+}
+
+/// "Title + muted description on the left, control on the right" — the
+/// standard setting-row shape shared by preference and toggle rows. Returns
+/// the control closure's result.
+pub fn setting_row<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    desc: &str,
+    control: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width() - 60.0, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.label(
+                    egui::RichText::new(title)
+                        .font(theme::title())
+                        .color(theme::TEXT),
+                );
+                ui.add_space(theme::SPACE_2);
+                if !desc.is_empty() {
+                    ui.label(
+                        egui::RichText::new(desc)
+                            .font(theme::body_md())
+                            .color(theme::TEXT_MUT),
+                    );
+                }
+            },
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control)
+            .inner
+    })
+    .inner
+}
+
 pub fn value_row(ui: &mut egui::Ui, label: &str, value: &str, value_color: Color32) {
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());

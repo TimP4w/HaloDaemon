@@ -68,23 +68,10 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
 
 fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
     widgets::card(ui, |ui| {
-        egui::Sides::new().show(
+        widgets::setting_row(
             ui,
-            |ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(t!("devtabs.host_mode"))
-                            .font(theme::heading())
-                            .color(theme::TEXT),
-                    );
-                    ui.add_space(theme::SPACE_1);
-                    ui.label(
-                        egui::RichText::new(t!("devtabs.host_mode_desc"))
-                            .font(theme::body_sm())
-                            .color(theme::TEXT_MUT),
-                    );
-                });
-            },
+            &t!("devtabs.host_mode"),
+            &t!("devtabs.host_mode_desc"),
             |ui| {
                 if !b.read_only && widgets::toggle(ui, b.value) != b.value {
                     crate::runtime::ipc::send(

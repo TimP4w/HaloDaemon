@@ -509,8 +509,7 @@ fn action_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, 
             );
         }
     }
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+    widgets::pill_strip(ui, |ui| {
         for proto in action_categories() {
             if !layer.allows(proto) {
                 continue;
@@ -612,8 +611,7 @@ fn direction_pills(
 ) {
     widgets::caps_label(ui, &t!("device.keys_direction"));
     ui.add_space(theme::SPACE_4);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+    widgets::pill_strip(ui, |ui| {
         for (label, dir) in [
             (t!("device.keys_dir_up"), CycleDir::Up),
             (t!("device.keys_dir_down"), CycleDir::Down),
@@ -655,13 +653,23 @@ fn params_editor(
         }
     };
     let tag = layer.tag();
+    // Apply an edited action: seed the layer buffer, then send now (`apply`)
+    // or debounce under a per-field key (`queue`).
+    let apply = |st: &mut DeviceUi, a: ButtonAction| {
+        layer.set(st, a.clone());
+        st.last_edit = ctx.time;
+        crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
+    };
+    let queue = |st: &mut DeviceUi, field: &str, a: ButtonAction| {
+        layer.set(st, a.clone());
+        st.queue(&format!("btn:{field}:{cid}:{tag}"), make_cmd(a), ctx.time);
+    };
 
     match action {
         ButtonAction::MouseButton { btn } => {
             widgets::caps_label(ui, &t!("device.keys_mouse_button"));
             ui.add_space(theme::SPACE_4);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+            widgets::pill_strip(ui, |ui| {
                 for (label, mbtn) in [
                     (t!("device.keys_mouse_left"), MouseBtn::Left),
                     (t!("device.keys_mouse_right"), MouseBtn::Right),
@@ -671,10 +679,7 @@ fn params_editor(
                 ] {
                     let active = btn == mbtn;
                     if widgets::pill(ui, &label, active) && !active {
-                        let a = ButtonAction::MouseButton { btn: mbtn };
-                        layer.set(st, a.clone());
-                        st.last_edit = ctx.time;
-                        crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
+                        apply(st, ButtonAction::MouseButton { btn: mbtn });
                     }
                 }
             });
@@ -718,22 +723,16 @@ fn params_editor(
                 new_dpi = Some((dpi_f as u16).clamp(100, 26000));
             }
             if let Some(new_dpi) = new_dpi {
-                let a = ButtonAction::MomentaryDpi { dpi: new_dpi };
-                layer.set(st, a.clone());
-                st.queue(&format!("btn:dpi:{cid}:{tag}"), make_cmd(a), ctx.time);
+                queue(st, "dpi", ButtonAction::MomentaryDpi { dpi: new_dpi });
             }
             ui.add_space(theme::SPACE_6);
             widgets::caps_label(ui, &t!("device.keys_presets"));
             ui.add_space(theme::SPACE_4);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+            widgets::pill_strip(ui, |ui| {
                 for preset in [400u16, 800, 1600, 3200, 6400] {
                     let active = dpi == preset;
                     if widgets::pill(ui, &preset.to_string(), active) && !active {
-                        let a = ButtonAction::MomentaryDpi { dpi: preset };
-                        layer.set(st, a.clone());
-                        st.last_edit = ctx.time;
-                        crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
+                        apply(st, ButtonAction::MomentaryDpi { dpi: preset });
                     }
                 }
             });
@@ -741,8 +740,7 @@ fn params_editor(
         ButtonAction::MediaKey { key } => {
             widgets::caps_label(ui, &t!("device.keys_media_key"));
             ui.add_space(theme::SPACE_4);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+            widgets::pill_strip(ui, |ui| {
                 for (label, mkey) in [
                     (t!("device.keys_media_play"), MediaAction::Play),
                     (t!("device.keys_media_next"), MediaAction::Next),
@@ -751,10 +749,7 @@ fn params_editor(
                 ] {
                     let active = key == mkey;
                     if widgets::pill(ui, &label, active) && !active {
-                        let a = ButtonAction::MediaKey { key: mkey };
-                        layer.set(st, a.clone());
-                        st.last_edit = ctx.time;
-                        crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
+                        apply(st, ButtonAction::MediaKey { key: mkey });
                     }
                 }
             });
@@ -762,21 +757,20 @@ fn params_editor(
         ButtonAction::Scroll { axis, clicks } => {
             widgets::caps_label(ui, &t!("device.keys_axis"));
             ui.add_space(theme::SPACE_4);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+            widgets::pill_strip(ui, |ui| {
                 for (label, saxis) in [
                     (t!("device.keys_axis_vertical"), ScrollAxis::Vertical),
                     (t!("device.keys_axis_horizontal"), ScrollAxis::Horizontal),
                 ] {
                     let active = axis == saxis;
                     if widgets::pill(ui, &label, active) && !active {
-                        let a = ButtonAction::Scroll {
-                            axis: saxis,
-                            clicks,
-                        };
-                        layer.set(st, a.clone());
-                        st.last_edit = ctx.time;
-                        crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
+                        apply(
+                            st,
+                            ButtonAction::Scroll {
+                                axis: saxis,
+                                clicks,
+                            },
+                        );
                     }
                 }
             });
@@ -788,9 +782,7 @@ fn params_editor(
                 .add(egui::DragValue::new(&mut v).speed(1).range(-10..=10))
                 .changed()
             {
-                let a = ButtonAction::Scroll { axis, clicks: v };
-                layer.set(st, a.clone());
-                st.queue(&format!("btn:scroll:{cid}:{tag}"), make_cmd(a), ctx.time);
+                queue(st, "scroll", ButtonAction::Scroll { axis, clicks: v });
             }
         }
         ButtonAction::OpenApp { ref path } => {
@@ -812,23 +804,20 @@ fn params_editor(
                     if let ButtonAction::OpenApp { path } = &a {
                         buf = path.clone();
                     }
-                    layer.set(st, a.clone());
-                    st.queue(&format!("btn:app:{cid}:{tag}"), make_cmd(a), ctx.time);
+                    queue(st, "app", a);
                 }
             }
 
             ui.horizontal(|ui| {
-                let resp = ui.add_sized(
-                    Vec2::new(ui.available_width() - 92.0, 34.0),
-                    egui::TextEdit::singleline(&mut buf)
-                        .hint_text(t!("device.keys_app_hint").to_string())
-                        .margin(egui::vec2(10.0, 8.0))
-                        .id(egui::Id::new(("openapp", cid, tag))),
+                let resp = action_text_field(
+                    ui,
+                    ui.available_width() - 92.0,
+                    &mut buf,
+                    &t!("device.keys_app_hint"),
+                    ("openapp", cid, tag),
                 );
                 if resp.changed() {
-                    let a = ButtonAction::OpenApp { path: buf.clone() };
-                    layer.set(st, a.clone());
-                    st.queue(&format!("btn:app:{cid}:{tag}"), make_cmd(a), ctx.time);
+                    queue(st, "app", ButtonAction::OpenApp { path: buf.clone() });
                 }
                 if widgets::pill(ui, &t!("device.keys_browse"), false) {
                     let (tx, rx) = std::sync::mpsc::channel();
@@ -845,20 +834,22 @@ fn params_editor(
             widgets::caps_label(ui, &t!("device.keys_command"));
             ui.add_space(theme::SPACE_4);
             let mut buf = cmd.clone();
-            let resp = ui.add_sized(
-                Vec2::new(ui.available_width(), 34.0),
-                egui::TextEdit::singleline(&mut buf)
-                    .hint_text(t!("device.keys_command_hint").to_string())
-                    .margin(egui::vec2(10.0, 8.0))
-                    .id(egui::Id::new(("cmd", cid, tag))),
+            let resp = action_text_field(
+                ui,
+                ui.available_width(),
+                &mut buf,
+                &t!("device.keys_command_hint"),
+                ("cmd", cid, tag),
             );
             if resp.changed() {
-                let a = ButtonAction::Command {
-                    cmd: buf,
-                    args: args.clone(),
-                };
-                layer.set(st, a.clone());
-                st.queue(&format!("btn:cmd:{cid}:{tag}"), make_cmd(a), ctx.time);
+                queue(
+                    st,
+                    "cmd",
+                    ButtonAction::Command {
+                        cmd: buf,
+                        args: args.clone(),
+                    },
+                );
             }
         }
         ButtonAction::Macro { steps } => {
@@ -879,6 +870,24 @@ fn params_editor(
             );
         }
     }
+}
+
+/// The 34 px free-text field both text-y actions (OpenApp, Command) share; a
+/// stable id keeps focus across frames while the buffer is re-seeded.
+fn action_text_field(
+    ui: &mut egui::Ui,
+    width: f32,
+    buf: &mut String,
+    hint: &str,
+    id: impl std::hash::Hash + std::fmt::Debug,
+) -> egui::Response {
+    ui.add_sized(
+        Vec2::new(width, 34.0),
+        egui::TextEdit::singleline(buf)
+            .hint_text(hint.to_string())
+            .margin(egui::vec2(10.0, 8.0))
+            .id(egui::Id::new(id)),
+    )
 }
 
 // ── Action chip widget (colored active state) ────────────────────────────────

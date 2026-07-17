@@ -74,6 +74,25 @@ fn combo_picker_with_width(
     new_val
 }
 
+/// Index-choice combo box (for enum/positional options, where [`combo_picker`]
+/// wants string ids). Returns the newly picked index only when it changed.
+pub fn combo_indexed(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    labels: &[String],
+    selected: usize,
+) -> Option<usize> {
+    let mut idx = selected;
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(labels.get(idx).cloned().unwrap_or_default())
+        .show_ui(ui, |ui| {
+            for (i, label) in labels.iter().enumerate() {
+                ui.selectable_value(&mut idx, i, label);
+            }
+        });
+    (idx != selected).then_some(idx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

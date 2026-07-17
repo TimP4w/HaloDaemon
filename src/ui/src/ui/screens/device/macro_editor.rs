@@ -475,8 +475,7 @@ fn header_row(
         .macro_rec
         .as_ref()
         .is_some_and(|r| r.cid == cid && r.shifted == shifted);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+    widgets::pill_strip(ui, |ui| {
         let rec_label = if recording {
             t!("misc.macro_stop")
         } else {
@@ -797,8 +796,7 @@ fn palette_row(
         .filter(|c| c.cid == cid && c.shifted == shifted)
         .map(|c| c.up);
     let mut picked: Option<MouseBtn> = None;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+    widgets::pill_strip(ui, |ui| {
         for up in [false, true] {
             let armed = capture == Some(up);
             let label = match (armed, up) {
@@ -838,8 +836,7 @@ fn palette_row(
 
     if let Some(up) = menu {
         ui.add_space(theme::SPACE_3);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+        widgets::pill_strip(ui, |ui| {
             for (label, btn) in [
                 (t!("misc.macro_mouse_left"), MouseBtn::Left),
                 (t!("misc.macro_mouse_right"), MouseBtn::Right),

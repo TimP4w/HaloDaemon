@@ -256,8 +256,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                             .color(theme::TEXT_DIM),
                     );
                     ui.add_space(theme::SPACE_3);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(7.0, 7.0);
+                    widgets::pill_strip(ui, |ui| {
                         for (i, opt) in c.options.iter().enumerate() {
                             if widgets::pill(ui, &opt.label, i == c.selected) && i != c.selected {
                                 crate::runtime::ipc::send(

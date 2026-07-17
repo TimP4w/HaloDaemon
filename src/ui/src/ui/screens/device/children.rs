@@ -22,51 +22,57 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, page: &mut Page) {
         .unwrap_or_default();
 
     let card = ui.scope(|ui| {
-        egui::Frame::NONE
-            .fill(theme::CARD_BG)
-            .stroke(Stroke::new(1.0, theme::BORDER))
-            .corner_radius(theme::RADIUS_XL)
-            .show(ui, |ui| {
-                let (title_rect, _) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), Sense::hover());
+        titled_list_card(ui, &t!("device.children_connected_devices"), |ui| {
+            if children.is_empty() {
+                let (row, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::hover());
                 ui.painter().text(
-                    Pos2::new(title_rect.left() + 18.0, title_rect.center().y),
+                    Pos2::new(row.left() + 18.0, row.center().y),
                     Align2::LEFT_CENTER,
-                    t!("device.children_connected_devices"),
-                    theme::heading(),
-                    theme::TEXT,
+                    t!("device.children_no_child_devices"),
+                    theme::body_md(),
+                    theme::TEXT_FAINT,
                 );
-                ui.painter().line_segment(
-                    [title_rect.left_bottom(), title_rect.right_bottom()],
-                    Stroke::new(1.0, theme::BORDER_SOFT),
-                );
-
-                ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 0.0);
-
-                if children.is_empty() {
-                    let (row, _) = ui
-                        .allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::hover());
-                    ui.painter().text(
-                        Pos2::new(row.left() + 18.0, row.center().y),
-                        Align2::LEFT_CENTER,
-                        t!("device.children_no_child_devices"),
-                        theme::body_md(),
-                        theme::TEXT_FAINT,
-                    );
-                    return;
+                return;
+            }
+            for child in &children {
+                if child_row(ui, child) {
+                    *page = Page::Device(child.id.clone());
                 }
-                for child in &children {
-                    if child_row(ui, child) {
-                        *page = Page::Device(child.id.clone());
-                    }
-                }
-            });
+            }
+        });
     });
     crate::domain::tour::anchor(
         ui.ctx(),
         crate::domain::tour::AnchorId::TabChildrenList,
         card.response.rect,
     );
+}
+
+/// The shared card shell of the child-device and pairing-slot lists: `CARD_BG`
+/// surface, 48 px title row over a soft divider, then zero-spaced list rows.
+fn titled_list_card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::NONE
+        .fill(theme::CARD_BG)
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(theme::RADIUS_XL)
+        .show(ui, |ui| {
+            let (title_rect, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), Sense::hover());
+            ui.painter().text(
+                Pos2::new(title_rect.left() + 18.0, title_rect.center().y),
+                Align2::LEFT_CENTER,
+                title,
+                theme::heading(),
+                theme::TEXT,
+            );
+            ui.painter().line_segment(
+                [title_rect.left_bottom(), title_rect.right_bottom()],
+                Stroke::new(1.0, theme::BORDER_SOFT),
+            );
+            ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 0.0);
+            body(ui);
+        });
 }
 
 fn child_row(ui: &mut egui::Ui, d: &WireDevice) -> bool {
@@ -279,36 +285,15 @@ fn dashed_circle(p: &egui::Painter, center: Pos2, r: f32, stroke_w: f32, color: 
 }
 
 fn slots_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus) {
-    egui::Frame::NONE
-        .fill(theme::CARD_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(theme::RADIUS_XL)
-        .show(ui, |ui| {
-            // Title row
-            let (title_rect, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), Sense::hover());
-            ui.painter().text(
-                Pos2::new(title_rect.left() + 18.0, title_rect.center().y),
-                Align2::LEFT_CENTER,
-                t!("device.children_paired_slots"),
-                theme::heading(),
-                theme::TEXT,
-            );
-            ui.painter().line_segment(
-                [title_rect.left_bottom(), title_rect.right_bottom()],
-                Stroke::new(1.0, theme::BORDER_SOFT),
-            );
-
-            ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 0.0);
-
-            let max = ps
-                .max_slots
-                .max(ps.slots.iter().map(|s| s.slot).max().unwrap_or(0));
-            for i in 1..=max {
-                let slot = ps.slots.iter().find(|s| s.slot == i);
-                pair_slot_row(ui, id, ctx, i, slot);
-            }
-        });
+    titled_list_card(ui, &t!("device.children_paired_slots"), |ui| {
+        let max = ps
+            .max_slots
+            .max(ps.slots.iter().map(|s| s.slot).max().unwrap_or(0));
+        for i in 1..=max {
+            let slot = ps.slots.iter().find(|s| s.slot == i);
+            pair_slot_row(ui, id, ctx, i, slot);
+        }
+    });
 }
 
 fn pair_slot_row(

@@ -652,14 +652,18 @@ fn add_link_panel(
                             .color(theme::TEXT_MUT),
                     );
                     ui.add_space(theme::SPACE_4);
-                    let current = topology_label(&topology_from_idx(topo_idx));
-                    egui::ComboBox::from_id_salt(("ch_topo_cb", dev_id, &channel.channel_id))
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (i, (ctor, _)) in TOPOLOGY_CHOICES.iter().enumerate() {
-                                ui.selectable_value(&mut topo_idx, i, topology_label(&ctor()));
-                            }
-                        });
+                    let labels: Vec<String> = TOPOLOGY_CHOICES
+                        .iter()
+                        .map(|(ctor, _)| topology_label(&ctor()))
+                        .collect();
+                    if let Some(i) = widgets::combo_indexed(
+                        ui,
+                        ("ch_topo_cb", dev_id, &channel.channel_id),
+                        &labels,
+                        topo_idx,
+                    ) {
+                        topo_idx = i;
+                    }
                 });
 
                 // Snap LED count when topology divisor changed

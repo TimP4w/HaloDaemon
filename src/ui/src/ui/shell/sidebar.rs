@@ -330,15 +330,7 @@ fn nav_row(
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
     let hovered = resp.hovered();
     if active {
-        ui.painter().rect_filled(rect, 9.0, theme::ROW_ACTIVE);
-        // Subtle cyan accent bar on the left edge.
-        let bar_h = 14.0;
-        let bar = Rect::from_min_size(
-            Pos2::new(rect.left(), rect.center().y - bar_h / 2.0),
-            Vec2::new(2.5, bar_h),
-        );
-        ui.painter().rect_filled(bar, 1.5, theme::CYAN);
-        theme::glow(ui.painter(), bar.center(), 5.0, theme::CYAN, 0.3);
+        active_row_bg(ui, rect);
     } else if hovered {
         ui.painter().rect_filled(rect, 9.0, a(Color32::WHITE, 0.03));
     }
@@ -376,6 +368,19 @@ fn nav_row(
     resp.clicked()
 }
 
+/// Active-row background shared by nav and device rows: `ROW_ACTIVE` fill with
+/// the glowing cyan accent bar on the left edge.
+fn active_row_bg(ui: &egui::Ui, rect: Rect) {
+    ui.painter().rect_filled(rect, 9.0, theme::ROW_ACTIVE);
+    let bar_h = 14.0;
+    let bar = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.center().y - bar_h / 2.0),
+        Vec2::new(2.5, bar_h),
+    );
+    ui.painter().rect_filled(bar, 1.5, theme::CYAN);
+    theme::glow(ui.painter(), bar.center(), 5.0, theme::CYAN, 0.3);
+}
+
 /// Count pill on the right edge of a nav row, colored for its highest severity.
 fn draw_nav_badge(ui: &mut egui::Ui, row: Rect, count: usize, color: Color32) {
     let label = if count > 9 {
@@ -407,14 +412,7 @@ fn device_row(ui: &mut egui::Ui, d: &halod_shared::types::WireDevice, active: bo
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
     let hovered = resp.hovered();
     if active {
-        ui.painter().rect_filled(rect, 8.0, theme::ROW_ACTIVE);
-        let bar_h = 12.0;
-        let bar = Rect::from_min_size(
-            Pos2::new(rect.left(), rect.center().y - bar_h / 2.0),
-            Vec2::new(2.5, bar_h),
-        );
-        ui.painter().rect_filled(bar, 1.5, theme::CYAN);
-        theme::glow(ui.painter(), bar.center(), 5.0, theme::CYAN, 0.28);
+        active_row_bg(ui, rect);
     } else if hovered {
         ui.painter().rect_filled(rect, 8.0, a(Color32::WHITE, 0.05));
         let bar_h = 10.0;
