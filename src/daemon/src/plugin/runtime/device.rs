@@ -4,7 +4,7 @@
 //! Lua worker. The manifest defines the maximum capability set; `initialize`
 //! may narrow it to the subset supported by one physical device.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
@@ -13,21 +13,21 @@ use async_trait::async_trait;
 use halod_shared::keyboard::{KeyId, KeyVariant, KeyboardLayoutStatus, VisualKey};
 use halod_shared::types::{
     Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, CategoryLayout,
-    Choice, ConnectionStatus, DeviceCapability, DeviceType, DpiMode, DpiStatus, Equalizer,
-    KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, NativeEffect, Permission,
-    PluginKind, Range, RgbColor, RgbDescriptor, RgbState, RgbZone, ScreenRotation, ScreenShape,
-    Sensor, WriteRateStatus,
+    Choice, ConnectionStatus, CoolingChannel, DeviceCapability, DeviceType, DpiMode, DpiStatus,
+    Equalizer, KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, NativeEffect,
+    Permission, PluginKind, Range, RgbColor, RgbDescriptor, RgbState, RgbZone, ScreenRotation,
+    ScreenShape, Sensor, WriteRateStatus,
 };
 use halod_shared::zone_transform::build_permutation;
 
 use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor};
 use crate::drivers::{
     ActionCapability, BatteryCapability, BoolStateCache, BooleanCapability, CapabilityRef,
-    ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, Device, DpiCapability,
-    EqualizerCapability, FanCapability, FanHub, FanStateSlot, KeyRemapCapability,
-    KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
-    OnboardProfilesCapability, PairingCapability, RangeCapability, RangeStateCache, RgbCapability,
-    RgbStateSlot, SensorCapability, VisibilitySlot,
+    ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, CoolingCapability,
+    CoolingStateSlot, Device, DpiCapability, EqualizerCapability, FanCapability, FanHub,
+    FanStateSlot, KeyRemapCapability, KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability,
+    LcdStateSlot, OnboardProfilesCapability, PairingCapability, RangeCapability, RangeStateCache,
+    RgbCapability, RgbStateSlot, SensorCapability, VisibilitySlot,
 };
 
 use super::chain_leaf::ChainLeaf;
@@ -90,6 +90,7 @@ use halod_shared::types::ZoneTopology;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cap {
     Rgb,
+    Cooling,
     Fan,
     Sensor,
     Lcd,
@@ -111,6 +112,7 @@ enum Cap {
 const CONTROL_CAPS: &[Cap] = &[Cap::Choice, Cap::Range, Cap::Boolean, Cap::Action];
 const CAPABILITY_NAMES: &[&str] = &[
     "rgb",
+    "cooling",
     "fan",
     "sensors",
     "lcd",
@@ -129,6 +131,7 @@ const CAPABILITY_NAMES: &[&str] = &[
 fn cap_for(name: &str) -> &'static [Cap] {
     match name {
         "rgb" => &[Cap::Rgb],
+        "cooling" => &[Cap::Cooling],
         "fan" => &[Cap::Fan],
         "sensors" => &[Cap::Sensor],
         "lcd" => &[Cap::Lcd],
@@ -193,6 +196,7 @@ struct FanSample {
 #[derive(Clone, Copy, Default)]
 struct StatusPollCaps {
     sensor: bool,
+    cooling: bool,
     fan: bool,
     boolean: bool,
     battery: bool,
@@ -205,6 +209,7 @@ impl StatusPollCaps {
     fn from_caps(caps: &[Cap]) -> Self {
         Self {
             sensor: caps.contains(&Cap::Sensor),
+            cooling: caps.contains(&Cap::Cooling),
             fan: caps.contains(&Cap::Fan),
             boolean: caps.contains(&Cap::Boolean),
             battery: caps.contains(&Cap::Battery),
@@ -218,6 +223,7 @@ impl StatusPollCaps {
 
     fn any(self) -> bool {
         self.sensor
+            || self.cooling
             || self.fan
             || self.boolean
             || self.battery
@@ -525,7 +531,8 @@ pub struct LuaDevice {
     dynamic_rgb_iso_descriptor: OnceLock<RgbDescriptor>,
     rgb_slot: RgbStateSlot,
     fan_slot: FanStateSlot,
-    fan_channel: AtomicU8,
+    cooling_slot: CoolingStateSlot,
+    cooling_channels: OnceLock<Vec<CoolingChannel>>,
 
     /// Last sensor/fan telemetry sampled by the status poll.
     sensor_cache: Arc<Mutex<Vec<Sensor>>>,
@@ -1086,7 +1093,8 @@ impl LuaDevice {
             dynamic_rgb_iso_descriptor: OnceLock::new(),
             rgb_slot: RgbStateSlot::default(),
             fan_slot: FanStateSlot::default(),
-            fan_channel: AtomicU8::new(0),
+            cooling_slot: CoolingStateSlot::default(),
+            cooling_channels: OnceLock::new(),
             sensor_cache: Arc::new(Mutex::new(Vec::new())),
             fan_cache: Arc::new(Mutex::new(FanSample::default())),
             poll_task: None,
@@ -1633,8 +1641,21 @@ impl Device for LuaDevice {
             };
             *self.dpi_state.lock_recover() = dpi_state_from_runtime(&dpi);
         }
-        if let Some(fan) = outcome.fan {
-            self.fan_channel.store(fan.channel, Ordering::Relaxed);
+        if let Some(cooling) = outcome.cooling {
+            let _ = self.cooling_channels.set(
+                cooling
+                    .channels
+                    .into_iter()
+                    .map(|c| CoolingChannel {
+                        id: c.id,
+                        name: c.name,
+                        kind: c.kind,
+                        controllable: c.controllable,
+                        rpm: None,
+                        duty: None,
+                    })
+                    .collect(),
+            );
         }
         if let Some(key_remap) = outcome.key_remap {
             let defaults = key_remap.default_mappings.clone();
@@ -1770,6 +1791,7 @@ impl Device for LuaDevice {
         for cap in &active {
             match cap {
                 Cap::Rgb => caps.push(CapabilityRef::Rgb(self)),
+                Cap::Cooling => caps.push(CapabilityRef::Cooling(self)),
                 Cap::Fan => caps.push(CapabilityRef::Fan(self)),
                 Cap::Sensor => caps.push(CapabilityRef::Sensor(self)),
                 Cap::Lcd => caps.push(CapabilityRef::Lcd(self)),
@@ -1903,6 +1925,27 @@ fn apply_per_led_transforms(
 }
 
 #[async_trait]
+impl CoolingCapability for LuaDevice {
+    fn cooling_channels(&self) -> Vec<CoolingChannel> {
+        self.cooling_channels.get().cloned().unwrap_or_default()
+    }
+
+    async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel> {
+        self.track(self.worker()?.cooling_status(channel_id).await)
+            .await
+    }
+
+    async fn set_cooling_duty(&self, channel_id: &str, duty: u8) -> Result<()> {
+        self.track(self.worker()?.cooling_set_duty(channel_id, duty).await)
+            .await
+    }
+
+    fn cooling_state(&self) -> &CoolingStateSlot {
+        &self.cooling_slot
+    }
+}
+
+#[async_trait]
 impl FanCapability for LuaDevice {
     async fn get_duty(&self) -> Result<u8> {
         self.fan_cache
@@ -1924,10 +1967,6 @@ impl FanCapability for LuaDevice {
 
     fn fan_state(&self) -> &FanStateSlot {
         &self.fan_slot
-    }
-
-    fn fan_channel_id(&self) -> u8 {
-        self.fan_channel.load(Ordering::Relaxed)
     }
 }
 
@@ -2765,7 +2804,7 @@ mod tests {
     use super::*;
     use crate::drivers::transports::mock::test_transport::MockTransport;
     use crate::drivers::transports::Transport;
-    use crate::drivers::{FanCapability, RgbCapability};
+    use crate::drivers::RgbCapability;
 
     fn test_manifest(
         id: &str,
@@ -3044,7 +3083,6 @@ mod tests {
         assert!(!caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Sensor(_))));
-        assert_eq!(dev.fan_channel_id(), 3);
         assert_eq!(RgbCapability::descriptor(&dev).zones[0].leds[0].id, 7);
         dev.close().await;
     }

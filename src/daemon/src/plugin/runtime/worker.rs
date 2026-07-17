@@ -259,12 +259,21 @@ pub struct InitDpi {
     pub current: Option<u16>,
 }
 
-/// Runtime fan descriptor. The physical channel is device-specific and is
-/// therefore supplied by initialize rather than the catalog.
+/// Runtime multi-channel cooling descriptor returned by `initialize`.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct InitFan {
+pub struct InitCooling {
     #[serde(default)]
-    pub channel: u8,
+    pub channels: Vec<InitCoolingChannel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InitCoolingChannel {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub kind: halod_shared::types::CoolingChannelKind,
+    #[serde(default)]
+    pub controllable: bool,
 }
 
 /// Runtime key-remap descriptor. Button CIDs and host-mode policy are reported
@@ -353,7 +362,7 @@ pub struct InitOutcome {
     pub accessories: Option<Vec<AccessoryManifest>>,
     pub controls: Option<InitControls>,
     pub dpi: Option<InitDpi>,
-    pub fan: Option<InitFan>,
+    pub cooling: Option<InitCooling>,
     pub key_remap: Option<InitKeyRemap>,
     pub keyboard: Option<InitKeyboard>,
     /// Current range-control values keyed by control key, seeding the host's
@@ -387,7 +396,7 @@ struct InitTable {
     #[serde(default)]
     dpi: Option<InitDpi>,
     #[serde(default)]
-    fan: Option<InitFan>,
+    cooling: Option<InitCooling>,
     #[serde(default)]
     key_remap: Option<InitKeyRemap>,
     #[serde(default)]
@@ -791,7 +800,7 @@ impl PluginHandle {
                         accessories: t.accessories,
                         controls: t.controls,
                         dpi: t.dpi,
-                        fan: t.fan,
+                        cooling: t.cooling,
                         key_remap: t.key_remap,
                         keyboard: t.keyboard,
                         ranges: t.ranges,
@@ -956,6 +965,21 @@ impl PluginHandle {
                 .map_err(|e| lua_err("get_rpm", e))
         })
         .await
+    }
+
+    /// Read one channel through the unified cooling callback. The returned
+    /// table mirrors the channel descriptor and may omit telemetry fields.
+    pub async fn cooling_status(
+        &self,
+        channel_id: &str,
+    ) -> Result<halod_shared::types::CoolingChannel> {
+        self.call_ret("get_cooling_status", channel_id.to_string())
+            .await
+    }
+
+    pub async fn cooling_set_duty(&self, channel_id: &str, duty: u8) -> Result<()> {
+        self.call("set_cooling_duty", (channel_id.to_string(), duty))
+            .await
     }
 
     pub async fn get_sensors(&self) -> Result<Vec<Sensor>> {

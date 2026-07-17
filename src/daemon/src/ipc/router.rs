@@ -300,6 +300,9 @@ fn command_target(cmd: &DaemonCommand) -> Option<&str> {
         SetFanCurvePoints { fan_id, .. }
         | SetFanCurvePreset { fan_id, .. }
         | RemoveFanCurve { fan_id } => Some(fan_id),
+        SetCoolingCurvePoints { device_id, .. }
+        | SetCoolingCurvePreset { device_id, .. }
+        | RemoveCoolingCurve { device_id, .. } => Some(device_id),
         SetDeviceVisibility { device_id, .. }
         | SetDeviceName { device_id, .. }
         | CanvasPlaceZone { device_id, .. }
@@ -527,6 +530,32 @@ async fn dispatch(
         DaemonCommand::RemoveFanCurve { fan_id } => {
             cooling::usecases::fan_curve::remove_fan_curve(fan_id, app).await
         }
+        DaemonCommand::SetCoolingCurvePoints {
+            device_id,
+            channel_id,
+            points,
+            sensor_id,
+        } => {
+            cooling::usecases::fan_curve::set_cooling_curve_points(
+                device_id, channel_id, points, sensor_id, app,
+            )
+            .await
+        }
+        DaemonCommand::SetCoolingCurvePreset {
+            device_id,
+            channel_id,
+            preset,
+            sensor_id,
+        } => {
+            cooling::usecases::fan_curve::set_cooling_curve_preset(
+                device_id, channel_id, preset, sensor_id, app,
+            )
+            .await
+        }
+        DaemonCommand::RemoveCoolingCurve {
+            device_id,
+            channel_id,
+        } => cooling::usecases::fan_curve::remove_cooling_curve(device_id, channel_id, app).await,
 
         DaemonCommand::RgbApply { id, state } => {
             lighting::usecases::rgb::rgb_apply(id, state, app).await

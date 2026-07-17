@@ -8,18 +8,97 @@ use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::state::AppState;
 
-/// Look up a controllable fan by id, run `f` against its capability, then persist.
 async fn with_fan<F>(fan_id: &str, app: &Arc<AppState>, f: F) -> Result<()>
 where
     F: FnOnce(&dyn crate::drivers::FanCapability),
 {
     let device = require_device_owned_id(fan_id, app).await?;
-    let fan = device.as_fan().ok_or_else(|| {
-        log::warn!("[fan_curve] {fan_id} has no engine slot (not controllable)");
-        anyhow!("device does not support fan curve: {fan_id}")
-    })?;
+    let fan = device
+        .as_fan()
+        .ok_or_else(|| anyhow!("device does not support fan curve: {fan_id}"))?;
     f(fan);
     persist_device_state(app, device.as_ref()).await;
+    Ok(())
+}
+
+pub async fn set_cooling_curve_points(
+    device_id: String,
+    channel_id: String,
+    points: Vec<[f32; 2]>,
+    sensor_id: Option<String>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let points = points.into_iter().map(|p| (p[0], p[1])).collect();
+    let record = FanCurveRecord { sensor_id, points };
+    record.validate()?;
+    require_temperature_sensor(&record.sensor_id, &app).await?;
+    let device = require_device_owned_id(&device_id, &app).await?;
+    if let Some(cooling) = device.as_cooling() {
+        if !cooling
+            .cooling_channels()
+            .iter()
+            .any(|channel| channel.id == channel_id)
+        {
+            anyhow::bail!("unknown cooling channel '{channel_id}' on device '{device_id}'");
+        }
+        cooling.set_curve(channel_id, record);
+        persist_device_state(&app, device.as_ref()).await;
+        Ok(())
+    } else if channel_id == "default" {
+        let fan = device
+            .as_fan()
+            .ok_or_else(|| anyhow!("device does not support cooling: {device_id}"))?;
+        fan.set_fan_curve(record);
+        persist_device_state(&app, device.as_ref()).await;
+        Ok(())
+    } else {
+        anyhow::bail!("legacy cooling device '{device_id}' only has the default channel")
+    }
+}
+
+pub async fn set_cooling_curve_preset(
+    device_id: String,
+    channel_id: String,
+    preset: String,
+    sensor_id: Option<String>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let points = preset_curves()
+        .iter()
+        .find(|p| p.id == preset)
+        .ok_or_else(|| anyhow!("unknown preset: {preset}"))?
+        .points
+        .to_vec();
+    let record = FanCurveRecord { sensor_id, points };
+    record.validate()?;
+    require_temperature_sensor(&record.sensor_id, &app).await?;
+    set_cooling_curve_points(
+        device_id,
+        channel_id,
+        record.points.iter().map(|&(t, d)| [t, d]).collect(),
+        record.sensor_id,
+        app,
+    )
+    .await
+}
+
+pub async fn remove_cooling_curve(
+    device_id: String,
+    channel_id: String,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let device = require_device_owned_id(&device_id, &app).await?;
+    if let Some(cooling) = device.as_cooling() {
+        cooling.clear_curve(&channel_id);
+    } else if channel_id == "default" {
+        device
+            .as_fan()
+            .ok_or_else(|| anyhow!("device does not support cooling: {device_id}"))?
+            .clear_fan_curve();
+    } else {
+        anyhow::bail!("legacy cooling device '{device_id}' only has the default channel")
+    }
+    persist_device_state(&app, device.as_ref()).await;
     Ok(())
 }
 

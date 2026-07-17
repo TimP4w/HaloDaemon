@@ -52,17 +52,18 @@ impl CoolingEngineState {
     /// Join device-collected fan curve records with the engine's live statuses.
     pub async fn snapshot(
         &self,
-        fan_curves: Vec<(String, crate::cooling::config::FanCurveRecord)>,
+        fan_curves: Vec<(String, String, crate::cooling::config::FanCurveRecord)>,
     ) -> halod_shared::types::CoolingState {
         let statuses = self.statuses.lock().await;
         let fan_curves = fan_curves
             .into_iter()
-            .map(|(fan_id, record)| {
+            .map(|(device_id, channel_id, record)| {
+                let key = curve_key(&device_id, &channel_id);
                 let status = statuses
-                    .get(&fan_id)
+                    .get(&key)
                     .cloned()
                     .unwrap_or(FanCurveStatus::NoSensor);
-                record.serialize(fan_id, status)
+                record.serialize(device_id, channel_id, status)
             })
             .collect();
         drop(statuses);
@@ -79,6 +80,12 @@ impl CoolingEngineState {
     }
 }
 
+/// Collision-free key for the internal status map. Device and channel IDs are
+/// external strings, so a visible delimiter is not safe here.
+pub fn curve_key(device_id: &str, channel_id: &str) -> String {
+    format!("{}:{device_id}{channel_id}", device_id.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,9 +98,10 @@ mod tests {
             .statuses
             .lock()
             .await
-            .insert("fan_dev".to_string(), FanCurveStatus::NoSensor);
+            .insert(curve_key("fan_dev", "default"), FanCurveStatus::NoSensor);
         let fan_curves = vec![(
             "fan_dev".to_string(),
+            "default".to_string(),
             FanCurveRecord {
                 sensor_id: Some("cpu_temp".to_string()),
                 points: vec![(0.0, 30.0), (80.0, 90.0), (100.0, 100.0)],
@@ -104,6 +112,8 @@ mod tests {
 
         assert_eq!(wire.fan_curves.len(), 1);
         assert_eq!(wire.fan_curves[0].fan_id, "fan_dev");
+        assert_eq!(wire.fan_curves[0].device_id, "fan_dev");
+        assert_eq!(wire.fan_curves[0].channel_id, "default");
         assert_eq!(wire.fan_curves[0].sensor_id.as_deref(), Some("cpu_temp"));
     }
 }

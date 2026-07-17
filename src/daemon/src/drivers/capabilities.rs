@@ -10,10 +10,10 @@ use halod_shared::keyboard::{
     is_iso_language, KeyVariant, KeyboardLayoutSelection, KeyboardLayoutStatus,
 };
 use halod_shared::types::{
-    Battery, Boolean, ButtonMapping, ConnectionStatus, DeviceCapability, DpiStatus,
-    EffectParamValue, Equalizer, FanStatus, KeyRemapStatus, KeyboardLayout, LcdDescriptor,
-    LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType, SensorUnit,
-    VisibilityState, ZoneTopology,
+    Battery, Boolean, ButtonMapping, ConnectionStatus, CoolingChannel, CoolingChannelKind,
+    CoolingStatus, DeviceCapability, DpiStatus, EffectParamValue, Equalizer, KeyRemapStatus,
+    KeyboardLayout, LcdDescriptor, LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor,
+    SensorType, SensorUnit, VisibilityState, ZoneTopology,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 use std::collections::HashMap;
@@ -79,6 +79,53 @@ pub trait FanHub: Send + Sync + 'static {
     async fn get_fan_duty(&self, channel: u8) -> Result<u8>;
     async fn get_fan_controllable(&self, channel: u8) -> Result<bool>;
     async fn set_fan_duty(&self, channel: u8, duty: u8) -> Result<()>;
+}
+
+/// Multi-output cooling surface. New drivers should implement this instead of
+/// `FanCapability`; the latter remains only as a compatibility adapter for
+/// existing one-output drivers.
+#[async_trait]
+pub trait CoolingCapability: Send + Sync {
+    fn cooling_channels(&self) -> Vec<CoolingChannel>;
+    async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel>;
+    async fn set_cooling_duty(&self, channel_id: &str, duty: u8) -> Result<()>;
+    fn cooling_state(&self) -> &CoolingStateSlot;
+
+    fn curves(&self) -> HashMap<String, crate::cooling::config::FanCurveRecord> {
+        self.cooling_state().curves()
+    }
+    fn curve(&self, channel_id: &str) -> Option<crate::cooling::config::FanCurveRecord> {
+        self.cooling_state().curve(channel_id)
+    }
+    fn set_curve(&self, channel_id: String, curve: crate::cooling::config::FanCurveRecord) {
+        self.cooling_state().set_curve(channel_id, curve);
+    }
+    fn clear_curve(&self, channel_id: &str) {
+        self.cooling_state().clear_curve(channel_id);
+    }
+    fn clear_curves(&self) {
+        self.cooling_state().clear_curves();
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        let mut channels = self.cooling_channels();
+        for channel in &mut channels {
+            if let Ok(status) = self.get_cooling_status(&channel.id).await {
+                *channel = status;
+            }
+        }
+        Some(DeviceCapability::Cooling(CoolingStatus { channels }))
+    }
+
+    fn state_key(&self) -> &'static str {
+        halod_shared::capability::FAN_CURVE
+    }
+    fn save_state(&self) -> serde_json::Value {
+        self.cooling_state().save()
+    }
+    async fn restore_state(&self, v: &serde_json::Value) {
+        self.cooling_state().load_legacy(v);
+    }
 }
 
 #[async_trait]
@@ -393,20 +440,23 @@ pub trait FanCapability: Send + Sync {
         self.fan_state().clear_fan_curve();
     }
 
-    fn fan_channel_id(&self) -> u8 {
-        0
-    }
-
     async fn fan_controllable(&self) -> bool {
         true
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
-        Some(DeviceCapability::Fan(FanStatus {
-            channel: self.fan_channel_id(),
-            rpm: self.get_rpm().await.unwrap_or(0),
-            duty: self.get_duty().await.unwrap_or(0),
-            controllable: self.fan_controllable().await,
+        // Old one-output drivers serialize through the unified wire shape.
+        // Their persisted state and control calls are adapted by the daemon as
+        // channel `default` until the driver is updated natively.
+        Some(DeviceCapability::Cooling(CoolingStatus {
+            channels: vec![CoolingChannel {
+                id: "default".to_string(),
+                name: "Fan".to_string(),
+                kind: CoolingChannelKind::Fan,
+                controllable: self.fan_controllable().await,
+                rpm: self.get_rpm().await,
+                duty: self.get_duty().await.ok(),
+            }],
         }))
     }
 
@@ -456,6 +506,36 @@ pub fn fan_rpm_sensor_id(device_id: &str) -> String {
 /// so fan-driven effects (and the sensor dashboard) can select them like any
 /// other sensor. Returns an empty `Vec` for devices without `FanCapability`.
 pub async fn fan_sensors(device: &dyn Device) -> Vec<Sensor> {
+    if let Some(cooling) = device.as_cooling() {
+        let mut out = Vec::new();
+        for channel in cooling.cooling_channels() {
+            let Ok(status) = cooling.get_cooling_status(&channel.id).await else {
+                continue;
+            };
+            let prefix = format!("cooling_{}_{}", device.id(), channel.id);
+            if let Some(duty) = status.duty {
+                out.push(Sensor {
+                    id: format!("{prefix}_duty"),
+                    name: format!("{} {} Duty", device.name(), status.name),
+                    value: duty as f64,
+                    unit: SensorUnit::Percent,
+                    sensor_type: SensorType::FanDuty,
+                    visibility: VisibilityState::Visible,
+                });
+            }
+            if let Some(rpm) = status.rpm {
+                out.push(Sensor {
+                    id: format!("{prefix}_rpm"),
+                    name: format!("{} {} RPM", device.name(), status.name),
+                    value: rpm as f64,
+                    unit: SensorUnit::Rpm,
+                    sensor_type: SensorType::FanSpeed,
+                    visibility: VisibilityState::Visible,
+                });
+            }
+        }
+        return out;
+    }
     let Some(fan) = device.as_fan() else {
         return Vec::new();
     };

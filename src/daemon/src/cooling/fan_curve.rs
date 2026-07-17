@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::cooling::config::FanCurveRecord;
+use crate::cooling::state::curve_key;
 use crate::state::{AppState, EngineRunConfig};
 use halod_shared::types::FanCurveStatus;
 use tokio::sync::watch;
@@ -115,6 +116,12 @@ pub struct FanCurveEngine {
     control_temp: std::sync::Mutex<HashMap<String, f32>>,
     /// Per-fan flag: true once the current failsafe write-error episode has been logged.
     failsafe_error_logged: std::sync::Mutex<HashMap<String, bool>>,
+}
+
+#[derive(Clone)]
+struct CurveTarget {
+    device_id: String,
+    channel_id: String,
 }
 
 // Non-async lock helpers — MutexGuard must not cross .await.
@@ -228,18 +235,31 @@ impl FanCurveEngine {
     }
 
     async fn tick(&self, failsafe_duty: u8) {
-        let curves: HashMap<String, crate::cooling::config::FanCurveRecord> = {
-            let fan_devices: Vec<_> = self
-                .app_state
-                .get_active_devices()
-                .await
-                .into_iter()
-                .filter(|d| d.as_fan().is_some())
-                .collect();
-
+        let curves: HashMap<String, (CurveTarget, FanCurveRecord)> = {
+            let devices = self.app_state.get_active_devices().await;
             let mut map = HashMap::new();
-            for device in &fan_devices {
-                if let Some(fan) = device.as_fan() {
+            for device in devices {
+                if let Some(cooling) = device.as_cooling() {
+                    for channel in cooling.cooling_channels() {
+                        if !channel.controllable {
+                            continue;
+                        }
+                        let curve = cooling.curve(&channel.id).unwrap_or_else(|| {
+                            let default = default_curve();
+                            cooling.set_curve(channel.id.clone(), default.clone());
+                            self.app_state.persistence.notify.notify_one();
+                            default
+                        });
+                        let target = CurveTarget {
+                            device_id: device.id().to_owned(),
+                            channel_id: channel.id,
+                        };
+                        map.insert(
+                            curve_key(&target.device_id, &target.channel_id),
+                            (target, curve),
+                        );
+                    }
+                } else if let Some(fan) = device.as_fan() {
                     let curve = if let Some(c) = fan.fan_curve() {
                         c
                     } else {
@@ -248,7 +268,14 @@ impl FanCurveEngine {
                         self.app_state.persistence.notify.notify_one();
                         default
                     };
-                    map.insert(device.id().to_owned(), curve);
+                    let target = CurveTarget {
+                        device_id: device.id().to_owned(),
+                        channel_id: "default".to_string(),
+                    };
+                    map.insert(
+                        curve_key(&target.device_id, &target.channel_id),
+                        (target, curve),
+                    );
                 }
             }
             map
@@ -256,16 +283,85 @@ impl FanCurveEngine {
 
         let sensors = self.app_state.data_bus.sensors();
         let mut new_statuses = HashMap::with_capacity(curves.len());
-        for (fan_id, record) in &curves {
+        for (key, (target, record)) in &curves {
             let status = self
-                .process_fan(fan_id, record, &sensors, failsafe_duty)
+                .process_curve(key, target, record, &sensors, failsafe_duty)
                 .await;
-            new_statuses.insert(fan_id.clone(), status);
+            new_statuses.insert(key.clone(), status);
         }
 
         *self.app_state.cooling.statuses.lock().await = new_statuses;
     }
 
+    async fn process_curve(
+        &self,
+        key: &str,
+        curve_target: &CurveTarget,
+        record: &FanCurveRecord,
+        sensors: &HashMap<String, halod_shared::types::Sensor>,
+        failsafe_duty: u8,
+    ) -> FanCurveStatus {
+        if let Err(e) = record.validate() {
+            log::warn!(
+                "[FanCurve] Invalid curve for {}:{}: {e:#}",
+                curve_target.device_id,
+                curve_target.channel_id
+            );
+            self.apply_failsafe(key, curve_target, failsafe_duty).await;
+            return FanCurveStatus::WriteError(format!("invalid fan curve configuration: {e}"));
+        }
+        let Some(sensor_id) = &record.sensor_id else {
+            self.apply_failsafe(key, curve_target, failsafe_duty).await;
+            return FanCurveStatus::NoSensor;
+        };
+
+        let Some(sensor) = sensors.get(sensor_id) else {
+            log::debug!("[FanCurve] Sensor not found: {sensor_id}");
+            self.apply_failsafe(key, curve_target, failsafe_duty).await;
+            return FanCurveStatus::NoSensor;
+        };
+        if sensor.sensor_type != halod_shared::types::SensorType::Temperature {
+            log::warn!("[FanCurve] Sensor {sensor_id} is not a temperature sensor");
+            self.apply_failsafe(key, curve_target, failsafe_duty).await;
+            return FanCurveStatus::NoSensor;
+        }
+        let temp = self.update_control_temp(key, sensor.value as f32);
+        let target = interpolate(&record.points, temp);
+        let fan_device = self
+            .app_state
+            .find_device_by_id(&curve_target.device_id)
+            .await;
+        if let Some(device) = &fan_device {
+            // Offline but present — treat as missing so we stop writing to a dead socket.
+            if !device.is_live() {
+                self.record_missing_device(key);
+                return FanCurveStatus::NoDevice;
+            }
+            self.clear_missing_device(key);
+            let current = current_duty(device, &curve_target.channel_id).await;
+            if (current - target).abs() > 1.0 {
+                let duty = target.round().clamp(0.0, 100.0) as u8;
+                if let Err(e) = apply_duty(device, &curve_target.channel_id, duty).await {
+                    log::warn!(
+                        "[FanCurve] Failed to set duty for {}:{}: {e}",
+                        curve_target.device_id,
+                        curve_target.channel_id
+                    );
+                    return FanCurveStatus::WriteError(e.to_string());
+                }
+            }
+            return self
+                .check_stall_channel(key, device, &curve_target.channel_id, target)
+                .await;
+        } else {
+            self.record_missing_device(key);
+        }
+
+        FanCurveStatus::NoDevice
+    }
+
+    // Single-output shim over `process_curve`, used only by tests.
+    #[cfg(test)]
     async fn process_fan(
         &self,
         fan_id: &str,
@@ -273,64 +369,32 @@ impl FanCurveEngine {
         sensors: &HashMap<String, halod_shared::types::Sensor>,
         failsafe_duty: u8,
     ) -> FanCurveStatus {
-        if let Err(e) = record.validate() {
-            log::warn!("[FanCurve] Invalid curve for {fan_id}: {e:#}");
-            self.apply_failsafe(fan_id, failsafe_duty).await;
-            return FanCurveStatus::WriteError(format!("invalid fan curve configuration: {e}"));
-        }
-        let Some(sensor_id) = &record.sensor_id else {
-            self.apply_failsafe(fan_id, failsafe_duty).await;
-            return FanCurveStatus::NoSensor;
-        };
-
-        let Some(sensor) = sensors.get(sensor_id) else {
-            log::debug!("[FanCurve] Sensor not found: {sensor_id}");
-            self.apply_failsafe(fan_id, failsafe_duty).await;
-            return FanCurveStatus::NoSensor;
-        };
-        if sensor.sensor_type != halod_shared::types::SensorType::Temperature {
-            log::warn!("[FanCurve] Sensor {sensor_id} is not a temperature sensor");
-            self.apply_failsafe(fan_id, failsafe_duty).await;
-            return FanCurveStatus::NoSensor;
-        }
-        let temp = self.update_control_temp(fan_id, sensor.value as f32);
-        let target = interpolate(&record.points, temp);
-        let fan_device = self.app_state.find_device_by_id(fan_id).await;
-        if let Some(device) = &fan_device {
-            // Offline but present — treat as missing so we stop writing to a dead socket.
-            if !device.is_live() {
-                self.record_missing_device(fan_id);
-                return FanCurveStatus::NoDevice;
-            }
-            self.clear_missing_device(fan_id);
-            let current = current_duty(device).await;
-            if (current - target).abs() > 1.0 {
-                let duty = target.round().clamp(0.0, 100.0) as u8;
-                if let Err(e) = apply_duty(device, duty).await {
-                    log::warn!("[FanCurve] Failed to set duty for {fan_id}: {e}");
-                    return FanCurveStatus::WriteError(e.to_string());
-                }
-            }
-            return self.check_stall(fan_id, device, target).await;
-        } else {
-            self.record_missing_device(fan_id);
-        }
-
-        FanCurveStatus::NoDevice
+        self.process_curve(
+            &curve_key(fan_id, "default"),
+            &CurveTarget {
+                device_id: fan_id.to_string(),
+                channel_id: "default".to_string(),
+            },
+            record,
+            sensors,
+            failsafe_duty,
+        )
+        .await
     }
 
     /// Stalled (0 RPM at >20% target duty) for more than 10s fires a one-shot
     /// warning and returns `FanStalled`; pumps (no RPM) always return `Ok`.
-    async fn check_stall(
+    async fn check_stall_channel(
         &self,
-        fan_id: &str,
+        key: &str,
         device: &Arc<dyn crate::drivers::Device>,
+        channel_id: &str,
         target: f32,
     ) -> FanCurveStatus {
         const STALL_SECS: u64 = 10;
         const DUTY_THRESHOLD: f32 = 20.0;
 
-        let rpm = match current_rpm(device).await {
+        let rpm = match current_rpm(device, channel_id).await {
             Some(r) => r,
             None => return FanCurveStatus::Ok,
         };
@@ -338,13 +402,13 @@ impl FanCurveEngine {
         let stalled = rpm == 0 && target > DUTY_THRESHOLD;
 
         if stalled {
-            let (should_notify, elapsed) = self.record_stall(fan_id);
+            let (should_notify, elapsed) = self.record_stall(key);
 
             if should_notify {
                 crate::platform::notify::send(
                     &self.app_state,
                     halod_shared::types::NotificationCode::FanStalled {
-                        fan: fan_id.to_string(),
+                        fan: key.to_string(),
                     },
                 )
                 .await;
@@ -356,21 +420,37 @@ impl FanCurveEngine {
                 FanCurveStatus::Ok
             }
         } else {
-            self.clear_stall(fan_id);
+            self.clear_stall(key);
             FanCurveStatus::Ok
         }
     }
 
-    async fn apply_failsafe(&self, fan_id: &str, duty: u8) {
-        let fan_device = self.app_state.find_device_by_id(fan_id).await;
+    // Single-output shim over `check_stall_channel`, used only by tests.
+    #[cfg(test)]
+    async fn check_stall(
+        &self,
+        fan_id: &str,
+        device: &Arc<dyn crate::drivers::Device>,
+        target: f32,
+    ) -> FanCurveStatus {
+        self.check_stall_channel(fan_id, device, "default", target)
+            .await
+    }
+
+    async fn apply_failsafe(&self, key: &str, target: &CurveTarget, duty: u8) {
+        let fan_device = self.app_state.find_device_by_id(&target.device_id).await;
         if let Some(device) = &fan_device {
-            match apply_duty(device, duty).await {
+            match apply_duty(device, &target.channel_id, duty).await {
                 Ok(()) => {
-                    self.clear_failsafe_error(fan_id);
+                    self.clear_failsafe_error(key);
                 }
                 Err(e) => {
-                    if self.mark_failsafe_error(fan_id) {
-                        log::warn!("[FanCurve] Failsafe set_duty failed for {fan_id}: {e}");
+                    if self.mark_failsafe_error(key) {
+                        log::warn!(
+                            "[FanCurve] Failsafe set_duty failed for {}:{}: {e}",
+                            target.device_id,
+                            target.channel_id
+                        );
                     }
                 }
             }
@@ -378,21 +458,40 @@ impl FanCurveEngine {
     }
 }
 
-async fn current_duty(device: &Arc<dyn crate::drivers::Device>) -> f32 {
-    if let Some(fan) = device.as_fan() {
+async fn current_duty(device: &Arc<dyn crate::drivers::Device>, channel_id: &str) -> f32 {
+    if let Some(cooling) = device.as_cooling() {
+        cooling
+            .get_cooling_status(channel_id)
+            .await
+            .ok()
+            .and_then(|s| s.duty)
+            .unwrap_or(0) as f32
+    } else if let Some(fan) = device.as_fan() {
         fan.get_duty().await.unwrap_or(0) as f32
     } else {
         0.0
     }
 }
 
-async fn current_rpm(device: &Arc<dyn crate::drivers::Device>) -> Option<u32> {
-    let fan = device.as_fan()?;
-    fan.get_rpm().await
+async fn current_rpm(device: &Arc<dyn crate::drivers::Device>, channel_id: &str) -> Option<u32> {
+    if let Some(cooling) = device.as_cooling() {
+        return cooling
+            .get_cooling_status(channel_id)
+            .await
+            .ok()
+            .and_then(|s| s.rpm);
+    }
+    device.as_fan()?.get_rpm().await
 }
 
-async fn apply_duty(device: &Arc<dyn crate::drivers::Device>, duty: u8) -> anyhow::Result<()> {
-    if let Some(fan) = device.as_fan() {
+async fn apply_duty(
+    device: &Arc<dyn crate::drivers::Device>,
+    channel_id: &str,
+    duty: u8,
+) -> anyhow::Result<()> {
+    if let Some(cooling) = device.as_cooling() {
+        cooling.set_cooling_duty(channel_id, duty).await
+    } else if let Some(fan) = device.as_fan() {
         fan.set_duty(duty).await
     } else {
         Err(anyhow::anyhow!("device has no duty capability"))
@@ -790,7 +889,10 @@ mod tests {
         engine.tick(75).await;
         assert_eq!(fan.last_duty(), 75);
         let statuses = app.cooling.statuses.lock().await;
-        assert_eq!(statuses["fan_0"], FanCurveStatus::NoSensor);
+        assert_eq!(
+            statuses[&curve_key("fan_0", "default")],
+            FanCurveStatus::NoSensor
+        );
     }
 
     #[tokio::test]
@@ -819,7 +921,10 @@ mod tests {
         // Seeded curve has sensor_id: None → NoSensor failsafe
         assert_eq!(fan.last_duty(), 75);
         let statuses = app.cooling.statuses.lock().await;
-        assert_eq!(statuses["fan_0"], FanCurveStatus::NoSensor);
+        assert_eq!(
+            statuses[&curve_key("fan_0", "default")],
+            FanCurveStatus::NoSensor
+        );
     }
 
     #[tokio::test]

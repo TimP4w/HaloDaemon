@@ -113,10 +113,19 @@ async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
             if *duty > 100 {
                 anyhow::bail!("fan duty must be 0–100 (got {duty})");
             }
-            dev.as_fan()
-                .context("device does not support fan control")?
-                .set_duty(*duty)
-                .await?;
+            if let Some(fan) = dev.as_fan() {
+                fan.set_duty(*duty).await?;
+            } else if let Some(cooling) = dev.as_cooling() {
+                let channel = cooling
+                    .cooling_channels()
+                    .into_iter()
+                    .find(|c| c.controllable)
+                    .map(|c| c.id)
+                    .context("device has no controllable cooling channel")?;
+                cooling.set_cooling_duty(&channel, *duty).await?;
+            } else {
+                anyhow::bail!("device does not support fan control");
+            }
             Ok(Effects {
                 persist: true,
                 broadcast: false,
@@ -160,10 +169,12 @@ async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::drivers::{CapabilityRef, FanCapability, FanStateSlot};
+    use crate::drivers::{
+        CapabilityRef, CoolingCapability, CoolingStateSlot, FanCapability, FanStateSlot,
+    };
     use crate::test_support::MockDevice;
     use async_trait::async_trait;
-    use halod_shared::types::{Boolean, EqBand, Equalizer};
+    use halod_shared::types::{Boolean, CoolingChannel, CoolingChannelKind, EqBand, Equalizer};
     use std::sync::Mutex;
 
     fn make_app(devices: Vec<Arc<dyn Device>>) -> Arc<AppState> {
@@ -506,6 +517,94 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("0–100"));
         assert_eq!(fan.last_duty(), None);
+    }
+
+    struct CoolingDevice {
+        last: Mutex<Option<(String, u8)>>,
+        cooling: CoolingStateSlot,
+    }
+
+    impl CoolingDevice {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                last: Mutex::new(None),
+                cooling: CoolingStateSlot::default(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Device for CoolingDevice {
+        fn id(&self) -> &str {
+            "cool_dev"
+        }
+        fn name(&self) -> &str {
+            "cool_dev"
+        }
+        fn vendor(&self) -> &str {
+            "test"
+        }
+        fn model(&self) -> &str {
+            "test"
+        }
+        async fn initialize(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn close(&self) {}
+        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
+            vec![CapabilityRef::Cooling(self)]
+        }
+    }
+
+    #[async_trait]
+    impl CoolingCapability for CoolingDevice {
+        fn cooling_channels(&self) -> Vec<CoolingChannel> {
+            vec![
+                CoolingChannel {
+                    id: "pump".into(),
+                    name: "Pump".into(),
+                    kind: CoolingChannelKind::Pump,
+                    controllable: false,
+                    rpm: None,
+                    duty: None,
+                },
+                CoolingChannel {
+                    id: "fan1".into(),
+                    name: "Fan".into(),
+                    kind: CoolingChannelKind::Fan,
+                    controllable: true,
+                    rpm: None,
+                    duty: None,
+                },
+            ]
+        }
+        async fn get_cooling_status(&self, channel_id: &str) -> anyhow::Result<CoolingChannel> {
+            self.cooling_channels()
+                .into_iter()
+                .find(|c| c.id == channel_id)
+                .context("unknown channel")
+        }
+        async fn set_cooling_duty(&self, channel_id: &str, duty: u8) -> anyhow::Result<()> {
+            *self.last.lock().unwrap() = Some((channel_id.to_string(), duty));
+            Ok(())
+        }
+        fn cooling_state(&self) -> &CoolingStateSlot {
+            &self.cooling
+        }
+    }
+
+    #[tokio::test]
+    async fn set_fan_speed_drives_first_controllable_cooling_channel() {
+        let dev = CoolingDevice::new();
+        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        set_capability_param(
+            "cool_dev".into(),
+            CapabilityParam::FanDuty { duty: 60 },
+            app,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*dev.last.lock().unwrap(), Some(("fan1".to_string(), 60)));
     }
 
     // ── Equalizer ────────────────────────────────────────────────────────

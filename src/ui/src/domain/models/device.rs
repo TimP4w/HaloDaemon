@@ -220,6 +220,16 @@ pub fn metrics(d: &WireDevice) -> Vec<Metric> {
             break;
         }
         match cap {
+            DeviceCapability::Cooling(cooling) => {
+                if let Some(channel) = cooling.channels.first() {
+                    if let Some(rpm) = channel.rpm {
+                        out.push(Metric {
+                            label: t!("model.metric_speed").into(),
+                            value: format!("{rpm} RPM"),
+                        });
+                    }
+                }
+            }
             DeviceCapability::Fan(f) => out.push(Metric {
                 label: t!("model.metric_speed").into(),
                 value: format!("{} RPM", f.rpm),

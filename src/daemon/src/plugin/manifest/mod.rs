@@ -1616,6 +1616,7 @@ fn validate_device_identifiers(manifest: &PluginManifest) -> Result<()> {
 /// Capability identifiers accepted by the canonical package contract.
 pub(in crate::plugin) const SUPPORTED_CAPABILITIES: &[&str] = &[
     "rgb",
+    "cooling",
     "fan",
     "sensors",
     "battery",

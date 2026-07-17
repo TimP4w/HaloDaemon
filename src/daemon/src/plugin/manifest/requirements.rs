@@ -119,7 +119,7 @@ pub fn derive_for(manifest: &PluginManifest, os: &str) -> Vec<DerivedRequirement
         if manifest
             .capabilities
             .iter()
-            .any(|capability| capability == "fan")
+            .any(|capability| capability == "fan" || capability == "cooling")
         {
             out.push(DerivedRequirement {
                 requirement: PluginRequirement::LinuxHwmon {

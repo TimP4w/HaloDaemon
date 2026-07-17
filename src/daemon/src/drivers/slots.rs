@@ -165,6 +165,52 @@ impl FanStateSlot {
     }
 }
 
+/// Persisted curves keyed by device-local cooling channel. The custom loader
+/// deliberately accepts the previous single-record shape so upgrades preserve
+/// existing fan/pump curves as the `default` channel.
+#[derive(Default)]
+pub struct CoolingStateSlot(Slot<HashMap<String, crate::cooling::config::FanCurveRecord>>);
+
+impl CoolingStateSlot {
+    pub fn curve(&self, channel_id: &str) -> Option<crate::cooling::config::FanCurveRecord> {
+        self.0.with(|curves| curves.get(channel_id).cloned())
+    }
+    pub fn set_curve(&self, channel_id: String, mut curve: crate::cooling::config::FanCurveRecord) {
+        curve.sanitize();
+        self.0.update(|curves| {
+            curves.insert(channel_id, curve);
+        });
+    }
+    pub fn clear_curve(&self, channel_id: &str) {
+        self.0.update(|curves| {
+            curves.remove(channel_id);
+        });
+    }
+    pub fn clear_curves(&self) {
+        self.0.set(HashMap::new());
+    }
+    pub fn curves(&self) -> HashMap<String, crate::cooling::config::FanCurveRecord> {
+        self.0.get()
+    }
+    pub fn save(&self) -> serde_json::Value {
+        serde_json::to_value(self.curves()).unwrap_or(serde_json::Value::Null)
+    }
+    pub fn load_legacy(&self, value: &serde_json::Value) {
+        if let Ok(curves) = serde_json::from_value::<
+            HashMap<String, crate::cooling::config::FanCurveRecord>,
+        >(value.clone())
+        {
+            self.0.set(curves);
+            return;
+        }
+        if let Ok(Some(curve)) =
+            serde_json::from_value::<Option<crate::cooling::config::FanCurveRecord>>(value.clone())
+        {
+            self.set_curve("default".to_string(), curve);
+        }
+    }
+}
+
 /// The single authoritative content an LCD panel shows; `mode` derives from this so it can't disagree with the active path/id.
 #[derive(Debug, Clone, Default, PartialEq)]
 enum LcdActiveContent {

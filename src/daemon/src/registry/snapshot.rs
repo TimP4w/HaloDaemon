@@ -14,7 +14,7 @@ use halod_shared::types::{DeviceCapability, EffectParamValue, VisibilityState, W
 /// lighting, and LCD snapshots need.
 pub struct DevicesSnapshot {
     pub devices: Vec<WireDevice>,
-    pub fan_curves: Vec<(String, FanCurveRecord)>,
+    pub fan_curves: Vec<(String, String, FanCurveRecord)>,
     pub placed_zones: Vec<PlacedZone>,
     pub lcd_templates: HashMap<String, String>,
     pub lcd_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
@@ -29,13 +29,21 @@ impl AppState {
         }
 
         // Collect per-device engine state from device_list (already owned — no extra locks).
-        let fan_curves: Vec<(String, FanCurveRecord)> = device_list
-            .iter()
-            .filter_map(|d| {
-                let fan = d.as_fan()?;
-                Some((d.id().to_owned(), fan.fan_curve()?))
-            })
-            .collect();
+        let mut fan_curves = Vec::new();
+        for device in &device_list {
+            if let Some(cooling) = device.as_cooling() {
+                fan_curves.extend(
+                    cooling
+                        .curves()
+                        .into_iter()
+                        .map(|(channel_id, curve)| (device.id().to_owned(), channel_id, curve)),
+                );
+            } else if let Some(fan) = device.as_fan() {
+                if let Some(curve) = fan.fan_curve() {
+                    fan_curves.push((device.id().to_owned(), "default".to_string(), curve));
+                }
+            }
+        }
 
         let placed_zones: Vec<PlacedZone> = device_list
             .iter()

@@ -37,6 +37,52 @@ pub(crate) fn matching_preset<'a>(
     })
 }
 
+fn curve_points_command(
+    device_id: String,
+    channel_id: String,
+    is_cooling: bool,
+    points: Vec<[f32; 2]>,
+    sensor_id: Option<String>,
+) -> halod_shared::commands::DaemonCommand {
+    if is_cooling {
+        halod_shared::commands::DaemonCommand::SetCoolingCurvePoints {
+            device_id,
+            channel_id,
+            points,
+            sensor_id,
+        }
+    } else {
+        halod_shared::commands::DaemonCommand::SetFanCurvePoints {
+            fan_id: device_id,
+            points,
+            sensor_id,
+        }
+    }
+}
+
+fn curve_preset_command(
+    device_id: String,
+    channel_id: String,
+    is_cooling: bool,
+    preset: String,
+    sensor_id: Option<String>,
+) -> halod_shared::commands::DaemonCommand {
+    if is_cooling {
+        halod_shared::commands::DaemonCommand::SetCoolingCurvePreset {
+            device_id,
+            channel_id,
+            preset,
+            sensor_id,
+        }
+    } else {
+        halod_shared::commands::DaemonCommand::SetFanCurvePreset {
+            fan_id: device_id,
+            preset,
+            sensor_id,
+        }
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -52,11 +98,21 @@ pub fn show(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             widgets::page_frame(ui, |ui| {
-                let coolers: Vec<&WireDevice> = state
-                    .devices
-                    .iter()
-                    .filter(|d| has_fan(d) && !model::is_hidden(d))
-                    .collect();
+                let coolers: Vec<(&WireDevice, Option<&halod_shared::types::CoolingChannel>)> =
+                    state
+                        .devices
+                        .iter()
+                        .filter(|d| !model::is_hidden(d))
+                        .flat_map(|device| match device.cooling() {
+                            Some(cooling) => cooling
+                                .channels
+                                .iter()
+                                .map(|channel| (device, Some(channel)))
+                                .collect::<Vec<_>>(),
+                            None if has_fan(device) => vec![(device, None)],
+                            None => Vec::new(),
+                        })
+                        .collect();
 
                 widgets::page_header(
                     ui,
@@ -80,7 +136,7 @@ fn cooler_grid(
     ui: &mut egui::Ui,
     state: &AppState,
     cmd: &CommandTx,
-    coolers: &[&WireDevice],
+    coolers: &[(&WireDevice, Option<&halod_shared::types::CoolingChannel>)],
     time: f64,
     page: &mut Page,
 ) {
@@ -100,7 +156,7 @@ fn cooler_grid(
         }
         ui.columns(2, |cols| {
             for (i, dev) in pair.iter().enumerate() {
-                cooler_card(&mut cols[i], dev, state, cmd, &sensors, time, page);
+                cooler_card(&mut cols[i], dev.0, dev.1, state, cmd, &sensors, time, page);
             }
         });
     }
@@ -109,15 +165,33 @@ fn cooler_grid(
 fn cooler_card(
     ui: &mut egui::Ui,
     dev: &WireDevice,
+    channel: Option<&halod_shared::types::CoolingChannel>,
     state: &AppState,
     cmd: &CommandTx,
     sensors: &[(String, Sensor)],
     time: f64,
     page: &mut Page,
 ) {
-    let rpm = rpm_for(dev);
+    let rpm = channel
+        .and_then(|channel| channel.rpm)
+        .unwrap_or_else(|| rpm_for(dev));
     let dev_color = theme::device_color(dev);
-    let curve = state.cooling.fan_curves.iter().find(|c| c.fan_id == dev.id);
+    let channel_id = channel
+        .map(|channel| channel.id.as_str())
+        .unwrap_or("default");
+    let is_cooling = channel.is_some();
+    let curve = state
+        .cooling
+        .fan_curves
+        .iter()
+        .find(|c| c.device_id == dev.id && c.channel_id == channel_id)
+        .or_else(|| {
+            state
+                .cooling
+                .fan_curves
+                .iter()
+                .find(|c| c.fan_id == dev.id && channel_id == "default")
+        });
     let sensor_id = curve.and_then(|c| c.sensor_id.clone());
     let live = sensor_id
         .as_deref()
@@ -126,6 +200,9 @@ fn cooler_card(
     let sensor_name = live
         .map(|(_, s)| s.name.clone())
         .unwrap_or_else(|| "-".into());
+    let cooler_name = channel
+        .map(|channel| format!("{} · {}", dev.name, channel.name))
+        .unwrap_or_else(|| dev.name.clone());
 
     widgets::card(ui, |ui| {
         // ── Header: rotating fan + name/type + RPM ────────────────────────────
@@ -141,7 +218,7 @@ fn cooler_card(
                     ui,
                     |ui| {
                         ui.label(
-                            egui::RichText::new(&dev.name)
+                            egui::RichText::new(&cooler_name)
                                 .font(theme::title())
                                 .color(theme::TEXT),
                         );
@@ -196,11 +273,13 @@ fn cooler_card(
                     ) {
                         crate::runtime::ipc::send(
                             cmd,
-                            halod_shared::commands::DaemonCommand::SetFanCurvePreset {
-                                fan_id: dev.id.clone(),
-                                preset: preset.id.clone(),
-                                sensor_id: sensor_id.clone(),
-                            },
+                            curve_preset_command(
+                                dev.id.clone(),
+                                channel_id.to_string(),
+                                is_cooling,
+                                preset.id.clone(),
+                                sensor_id.clone(),
+                            ),
                         );
                     }
                 }
@@ -237,13 +316,15 @@ fn cooler_card(
             if let Some(sel) = pick {
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::SetFanCurvePoints {
-                        fan_id: dev.id.clone(),
-                        points: curve
+                    curve_points_command(
+                        dev.id.clone(),
+                        channel_id.to_string(),
+                        is_cooling,
+                        curve
                             .map(|c| c.points.clone())
                             .unwrap_or_else(default_curve),
-                        sensor_id: sel,
-                    },
+                        sel,
+                    ),
                 );
             }
         });
@@ -402,15 +483,19 @@ fn fan_icon(p: &egui::Painter, center: Pos2, r: f32, time: f64, rpm: u32, color:
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn has_fan(dev: &WireDevice) -> bool {
-    dev.capabilities
-        .iter()
-        .any(|c| matches!(c, DeviceCapability::Fan(_)))
+    dev.capabilities.iter().any(|c| {
+        matches!(c, DeviceCapability::Cooling(c) if !c.channels.is_empty())
+            || matches!(c, DeviceCapability::Fan(_))
+    })
 }
 
 fn rpm_for(dev: &WireDevice) -> u32 {
     dev.capabilities
         .iter()
         .find_map(|c| match c {
+            DeviceCapability::Cooling(cooling) => {
+                cooling.channels.first().and_then(|channel| channel.rpm)
+            }
             DeviceCapability::Fan(f) => Some(f.rpm),
             _ => None,
         })

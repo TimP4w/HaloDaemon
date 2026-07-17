@@ -96,11 +96,17 @@ impl FanCurveRecord {
 
     pub fn serialize(
         &self,
-        fan_id: String,
+        device_id: String,
+        channel_id: String,
         status: halod_shared::types::FanCurveStatus,
     ) -> halod_shared::types::WireFanCurve {
         halod_shared::types::WireFanCurve {
-            fan_id,
+            // `fan_id` was the pre-channel wire identity. Keep it populated
+            // with the owning device until all clients have moved to the two
+            // explicit fields.
+            fan_id: device_id.clone(),
+            device_id,
+            channel_id,
             sensor_id: self.sensor_id.clone(),
             points: self.points.iter().map(|&(t, d)| [t, d]).collect(),
             status,

@@ -23,6 +23,7 @@ pub use rate_limit::*;
 
 /// Capability types a Device can expose.
 pub enum CapabilityRef<'a> {
+    Cooling(&'a dyn CoolingCapability),
     Fan(&'a dyn FanCapability),
     Rgb(&'a dyn RgbCapability),
     Sensor(&'a dyn SensorCapability),
@@ -81,7 +82,7 @@ macro_rules! capability_dispatch {
 }
 
 capability_dispatch!(
-    persisting: [Fan, Rgb, Range, Choice, Boolean, Equalizer, Dpi, Lcd, KeyRemap, OnboardProfiles],
+    persisting: [Cooling, Fan, Rgb, Range, Choice, Boolean, Equalizer, Dpi, Lcd, KeyRemap, OnboardProfiles],
     wire_only:  [Sensor, Action, Battery, Connection, KeyboardLayout, Controller, Pairing],
 );
 
@@ -227,6 +228,7 @@ pub trait Device: Send + Sync {
         None
     }
 
+    as_capability!(as_cooling, Cooling, CoolingCapability);
     as_capability!(as_fan, Fan, FanCapability);
     as_capability!(as_rgb, Rgb, RgbCapability);
     as_capability!(as_sensor_capability, Sensor, SensorCapability);

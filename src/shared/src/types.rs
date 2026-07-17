@@ -1704,6 +1704,7 @@ pub enum DeviceCapability {
     Connection(ConnectionStatus),
     Equalizer(Equalizer),
     Sensors(Vec<Sensor>),
+    Cooling(CoolingStatus),
     Fan(FanStatus),
     Rgb(RgbStatus),
     Dpi(DpiStatus),
@@ -2243,6 +2244,37 @@ pub struct FanStatus {
     pub controllable: bool,
 }
 
+/// One independently addressable cooling output. A device may expose a pump
+/// and several fans without pretending they are separate devices.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CoolingChannelKind {
+    #[default]
+    Fan,
+    Pump,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CoolingChannel {
+    /// Stable, device-local identifier used by control and persisted curves.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub kind: CoolingChannelKind,
+    #[serde(default)]
+    pub controllable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CoolingStatus {
+    #[serde(default)]
+    pub channels: Vec<CoolingChannel>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FanCurveStatus {
@@ -2263,11 +2295,21 @@ pub enum FanCurveStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireFanCurve {
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default = "default_cooling_channel_id")]
+    pub channel_id: String,
+    /// Compatibility alias for pre-channel IPC clients.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fan_id: String,
     pub sensor_id: Option<String>,
     /// Points as [temp_celsius, duty_percent] pairs.
     pub points: Vec<[f32; 2]>,
     pub status: FanCurveStatus,
+}
+
+fn default_cooling_channel_id() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2433,6 +2475,7 @@ macro_rules! find_cap {
 impl WireDevice {
     find_cap!(battery, Battery, Vec<Battery>);
     find_cap!(fan, Fan, FanStatus);
+    find_cap!(cooling, Cooling, CoolingStatus);
     find_cap!(rgb, Rgb, RgbStatus);
     find_cap!(sensors, Sensors, Vec<Sensor>);
     find_cap!(dpi, Dpi, DpiStatus);
@@ -2960,6 +3003,38 @@ mod tests {
             ..Default::default()
         };
         assert!(device.battery().is_none());
+    }
+
+    #[test]
+    fn cooling_capability_round_trips_multiple_channels() {
+        let cap = DeviceCapability::Cooling(CoolingStatus {
+            channels: vec![
+                CoolingChannel {
+                    id: "pump".into(),
+                    name: "Pump".into(),
+                    kind: CoolingChannelKind::Pump,
+                    controllable: true,
+                    rpm: Some(2600),
+                    duty: Some(70),
+                },
+                CoolingChannel {
+                    id: "fan1".into(),
+                    name: "Radiator fan".into(),
+                    kind: CoolingChannelKind::Fan,
+                    controllable: true,
+                    rpm: Some(1200),
+                    duty: Some(45),
+                },
+            ],
+        });
+        let back: DeviceCapability =
+            serde_json::from_value(serde_json::to_value(&cap).unwrap()).unwrap();
+        let DeviceCapability::Cooling(cooling) = back else {
+            panic!("wrong capability")
+        };
+        assert_eq!(cooling.channels.len(), 2);
+        assert_eq!(cooling.channels[0].id, "pump");
+        assert_eq!(cooling.channels[1].kind, CoolingChannelKind::Fan);
     }
 
     #[test]
