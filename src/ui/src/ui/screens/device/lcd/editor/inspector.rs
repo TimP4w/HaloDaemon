@@ -168,7 +168,7 @@ pub(super) fn selected_widget_card(
         }
     }
     schema.push(halod_shared::types::EffectParamDescriptor {
-        id: "opacity".to_owned(),
+        id: halod_shared::lcd_custom::OPACITY_PARAM.to_owned(),
         label: "Opacity".to_owned(),
         kind: halod_shared::types::ParamKind::Range {
             min: 0.0,

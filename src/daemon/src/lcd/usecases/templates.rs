@@ -10,8 +10,8 @@ use serde_json::json;
 use crate::ipc::ClientHandle;
 use crate::state::AppState;
 use halod_shared::lcd_custom::{
-    CustomTemplateDef, TEXT_ITALIC_PARAM, TEXT_STRIKETHROUGH_PARAM, TEXT_UNDERLINE_PARAM,
-    TEXT_WEIGHT_PARAM,
+    CustomTemplateDef, OPACITY_PARAM, SCALE_Y_PARAM, TEXT_ITALIC_PARAM, TEXT_STRIKETHROUGH_PARAM,
+    TEXT_UNDERLINE_PARAM, TEXT_WEIGHT_PARAM,
 };
 use halod_shared::types::{EffectParamValue, LcdWidgetResize, ParamKind};
 
@@ -83,11 +83,11 @@ pub fn validate_template_catalog(
             continue;
         };
         for (id, value) in &widget.params {
-            if id == "opacity" {
+            if id == OPACITY_PARAM {
                 validate_number(value, 0.0, 100.0, &widget.id, id)?;
                 continue;
             }
-            if id == "scale_y" {
+            if id == SCALE_Y_PARAM {
                 anyhow::ensure!(
                     descriptor.resize == LcdWidgetResize::Box,
                     "widget '{}' does not support independent height",

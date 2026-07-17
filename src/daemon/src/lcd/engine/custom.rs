@@ -16,7 +16,8 @@ use image::{Pixel as _, Rgba, RgbaImage};
 use crate::services::audio::{self, AudioHandle};
 use crate::services::media::{self, MediaHandle};
 use halod_shared::lcd_custom::{
-    param_f64, param_str, BgKind, CustomTemplateDef, WidgetDef, WidgetSprite, TEXT_WEIGHT_PARAM,
+    param_f64, param_str, BgKind, CustomTemplateDef, WidgetDef, WidgetSprite, OPACITY_PARAM,
+    TEXT_WEIGHT_PARAM,
 };
 use halod_shared::types::{EffectParamValue, LcdEngineTemplateDescriptor, RgbColor};
 
@@ -490,7 +491,7 @@ impl CustomTemplate {
     fn editor_sprite(&self, widget: &WidgetDef, ctx: &TemplateCtx, signature: u64) -> WidgetSprite {
         let (cw, ch) = (ctx.width, ctx.height);
         let (cx, cy, size) = widget_rect(widget.x, widget.y, widget.scale, cw, ch);
-        let opacity = (param_f64(widget, "opacity", 100.0) / 100.0).clamp(0.0, 1.0) as f32;
+        let opacity = (param_f64(widget, OPACITY_PARAM, 100.0) / 100.0).clamp(0.0, 1.0) as f32;
 
         // Draw the widget onto a canvas-sized transparent buffer at its true
         // center — pixel-identical to the device's `render_widget_into` — then
@@ -567,7 +568,7 @@ impl CustomTemplate {
     fn render_widget(&self, img: &mut RgbaImage, widget: &WidgetDef, ctx: &TemplateCtx) {
         let (w, h) = (ctx.width, ctx.height);
         let (cx, cy, size) = widget_rect(widget.x, widget.y, widget.scale, w, h);
-        let opacity = (param_f64(widget, "opacity", 100.0) / 100.0).clamp(0.0, 1.0) as f32;
+        let opacity = (param_f64(widget, OPACITY_PARAM, 100.0) / 100.0).clamp(0.0, 1.0) as f32;
         let theta = rotation_theta(widget.rotation);
         // Fast path: no rotation, fully opaque → draw straight onto the frame.
         if theta.is_none() && opacity >= 0.999 {

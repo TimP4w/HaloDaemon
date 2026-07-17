@@ -18,6 +18,11 @@ pub const TEXT_WEIGHT_PARAM: &str = "text_weight";
 pub const TEXT_ITALIC_PARAM: &str = "text_italic";
 pub const TEXT_UNDERLINE_PARAM: &str = "text_underline";
 pub const TEXT_STRIKETHROUGH_PARAM: &str = "text_strikethrough";
+pub const OPACITY_PARAM: &str = "opacity";
+pub const SCALE_Y_PARAM: &str = "scale_y";
+
+/// Param ids the host owns for every widget.
+pub const RESERVED_WIDGET_PARAMS: [&str; 2] = [OPACITY_PARAM, SCALE_Y_PARAM];
 
 pub fn text_style_params() -> [EffectParamDescriptor; 4] {
     [
@@ -195,7 +200,7 @@ pub fn param_variant(widget: &WidgetDef, default: &str) -> String {
 }
 
 pub fn scale_y(widget: &WidgetDef) -> f32 {
-    param_f64(widget, "scale_y", f64::from(widget.scale)) as f32
+    param_f64(widget, SCALE_Y_PARAM, f64::from(widget.scale)) as f32
 }
 
 pub fn validate_widgets(def: &CustomTemplateDef) -> Result<(), String> {

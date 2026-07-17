@@ -1796,6 +1796,15 @@ fn validate_lcd_content(manifest: &PluginManifest) -> Result<()> {
                 }
             }
         }
+        for param in &widget.params {
+            if halod_shared::lcd_custom::RESERVED_WIDGET_PARAMS.contains(&param.id.as_str()) {
+                bail!(
+                    "widget '{}' parameter '{}' is reserved by the host",
+                    widget.id,
+                    param.id
+                );
+            }
+        }
         validate_effect_params(&widget.params, &format!("widget '{}'", widget.id))?;
         if !widget.min_scale.is_finite() || !(0.1..=0.6).contains(&widget.min_scale) {
             bail!(
@@ -2731,6 +2740,26 @@ mod tests {
             format!("{:#}", parse_manifest_from_dir(&excessive).unwrap_err())
                 .contains("exceeding the 16 limit")
         );
+    }
+
+    /// The host stores these ids in its own units (`opacity` is 0-100), so a
+    /// widget declaring one would be handed a value outside its declared range.
+    #[test]
+    fn lcd_widget_params_reject_host_reserved_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        for id in halod_shared::lcd_custom::RESERVED_WIDGET_PARAMS {
+            let dir = write_plugin_dir(
+                tmp.path(),
+                &format!("lcd_reserved_{id}"),
+                &format!(
+                    "type: lcd\nwidgets:\n  - id: shape\n    name: Shape\n    icon: widget.svg\n    params:\n      - id: {id}\n        label: Reserved\n        default: 1.0\n        kind: {{ kind: range, min: 0.0, max: 1.0, step: 0.05 }}\n"
+                ),
+                ENTRY_LUA,
+            );
+            write_widget_icon(&dir);
+            let error = parse_manifest_from_dir(&dir).unwrap_err();
+            assert!(format!("{error:#}").contains("is reserved by the host"));
+        }
     }
 
     #[test]

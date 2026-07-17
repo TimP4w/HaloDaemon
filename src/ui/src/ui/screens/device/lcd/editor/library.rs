@@ -326,10 +326,13 @@ pub(super) fn spawn_plugin_widget(
         .iter()
         .map(|param| (param.id.clone(), param.default.clone()))
         .collect();
-    params.insert("opacity".to_owned(), EffectParamValue::Float(100.0));
+    params.insert(
+        halod_shared::lcd_custom::OPACITY_PARAM.to_owned(),
+        EffectParamValue::Float(100.0),
+    );
     if descriptor.resize == halod_shared::types::LcdWidgetResize::Box {
         params.insert(
-            "scale_y".to_owned(),
+            halod_shared::lcd_custom::SCALE_Y_PARAM.to_owned(),
             EffectParamValue::Float(f64::from(
                 descriptor.default_scale * descriptor.default_aspect,
             )),
