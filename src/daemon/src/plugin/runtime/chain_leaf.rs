@@ -2,20 +2,22 @@
 //! Generic chain-leaf child device — the de-vendored `NZXTFFan`. A plugin's
 //! parent produces these from `discover_children`; each delegates RGB to the
 //! parent's `ChainHub` (composited into one channel frame) and, if it has a
-//! fan, delegates fan speed/duty to the parent's `FanHub`. It holds no transport
+//! fan, delegates cooling to the parent's `CoolingHub`. It holds no transport
 //! of its own — every call routes back to the parent.
 
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use halod_shared::types::{DeviceType, RgbColor, RgbDescriptor, RgbState};
+use halod_shared::types::{
+    CoolingChannel, CoolingChannelKind, DeviceType, RgbColor, RgbDescriptor, RgbState,
+};
 
 use crate::drivers::chain::ChainHub;
 use crate::drivers::vendors::generic::devices::common::transformed_zone_frame;
 use crate::drivers::{
-    CapabilityRef, Device, FanCapability, FanHub, FanStateSlot, RgbCapability, RgbStateSlot,
-    VisibilitySlot,
+    CapabilityRef, CoolingCapability, CoolingHub, CoolingStateSlot, Device, RgbCapability,
+    RgbStateSlot, VisibilitySlot,
 };
 
 use super::manifest::AccessoryManifest;
@@ -26,15 +28,15 @@ pub struct ChainLeaf {
     vendor: String,
     /// Chain channel this leaf sits on (string id used with the `ChainHub`).
     channel_id: String,
-    /// Numeric channel used for `FanHub` lookups.
+    /// Numeric parent cooling channel.
     fan_channel: u8,
     has_fan: bool,
     rgb_descriptor: RgbDescriptor,
     rgb: RgbStateSlot,
-    fan: FanStateSlot,
+    cooling: CoolingStateSlot,
     visibility: VisibilitySlot,
     chain_hub: Arc<dyn ChainHub>,
-    fan_hub: Arc<dyn FanHub>,
+    cooling_hub: Arc<dyn CoolingHub>,
 }
 
 impl ChainLeaf {
@@ -45,7 +47,7 @@ impl ChainLeaf {
         fan_channel: u8,
         accessory: &AccessoryManifest,
         chain_hub: Arc<dyn ChainHub>,
-        fan_hub: Arc<dyn FanHub>,
+        cooling_hub: Arc<dyn CoolingHub>,
     ) -> Self {
         Self {
             id,
@@ -56,10 +58,10 @@ impl ChainLeaf {
             has_fan: accessory.fan,
             rgb_descriptor: accessory.rgb_descriptor(),
             rgb: RgbStateSlot::default(),
-            fan: FanStateSlot::default(),
+            cooling: CoolingStateSlot::default(),
             visibility: VisibilitySlot::default(),
             chain_hub,
-            fan_hub,
+            cooling_hub,
         }
     }
 
@@ -121,7 +123,7 @@ impl Device for ChainLeaf {
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
         let mut caps = vec![CapabilityRef::Rgb(self)];
         if self.has_fan {
-            caps.push(CapabilityRef::Fan(self));
+            caps.push(CapabilityRef::Cooling(self));
         }
         caps
     }
@@ -157,26 +159,39 @@ impl RgbCapability for ChainLeaf {
 }
 
 #[async_trait]
-impl FanCapability for ChainLeaf {
-    fn fan_channel_id(&self) -> u8 {
-        self.fan_channel
+impl CoolingCapability for ChainLeaf {
+    fn cooling_channels(&self) -> Vec<CoolingChannel> {
+        vec![CoolingChannel {
+            id: "fan".to_string(),
+            name: self.name.clone(),
+            kind: CoolingChannelKind::Fan,
+            controllable: true,
+            rpm: None,
+            duty: None,
+        }]
     }
-    async fn fan_controllable(&self) -> bool {
-        self.fan_hub
-            .get_fan_controllable(self.fan_channel)
+    async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel> {
+        anyhow::ensure!(channel_id == "fan", "unknown cooling channel: {channel_id}");
+        let status = self
+            .cooling_hub
+            .get_cooling_status(self.fan_channel)
+            .await?;
+        Ok(CoolingChannel {
+            id: "fan".to_string(),
+            name: self.name.clone(),
+            kind: CoolingChannelKind::Fan,
+            controllable: status.controllable,
+            rpm: status.rpm,
+            duty: status.duty,
+        })
+    }
+    async fn set_cooling_duty(&self, channel_id: &str, duty: u8) -> Result<()> {
+        anyhow::ensure!(channel_id == "fan", "unknown cooling channel: {channel_id}");
+        self.cooling_hub
+            .set_cooling_duty(self.fan_channel, duty)
             .await
-            .unwrap_or(false)
     }
-    async fn get_duty(&self) -> Result<u8> {
-        self.fan_hub.get_fan_duty(self.fan_channel).await
-    }
-    async fn set_duty(&self, duty: u8) -> Result<()> {
-        self.fan_hub.set_fan_duty(self.fan_channel, duty).await
-    }
-    async fn get_rpm(&self) -> Option<u32> {
-        self.fan_hub.get_fan_rpm(self.fan_channel).await.ok()
-    }
-    fn fan_state(&self) -> &FanStateSlot {
-        &self.fan
+    fn cooling_state(&self) -> &CoolingStateSlot {
+        &self.cooling
     }
 }

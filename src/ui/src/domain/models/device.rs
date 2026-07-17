@@ -220,10 +220,16 @@ pub fn metrics(d: &WireDevice) -> Vec<Metric> {
             break;
         }
         match cap {
-            DeviceCapability::Fan(f) => out.push(Metric {
-                label: t!("model.metric_speed").into(),
-                value: format!("{} RPM", f.rpm),
-            }),
+            DeviceCapability::Cooling(cooling) => {
+                if let Some(channel) = cooling.channels.first() {
+                    if let Some(rpm) = channel.rpm {
+                        out.push(Metric {
+                            label: t!("model.metric_speed").into(),
+                            value: format!("{rpm} RPM"),
+                        });
+                    }
+                }
+            }
             DeviceCapability::Sensors(ss) => {
                 if let Some(s) = ss.iter().find(|s| s.sensor_type == SensorType::Temperature) {
                     out.push(Metric {
@@ -304,7 +310,9 @@ fn transport_display(t: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use halod_shared::types::{Battery, DpiMode, DpiStatus, FanStatus, Sensor};
+    use halod_shared::types::{
+        Battery, CoolingChannel, CoolingChannelKind, CoolingStatus, DpiMode, DpiStatus, Sensor,
+    };
 
     fn dev(ty: DeviceType, caps: Vec<DeviceCapability>) -> WireDevice {
         WireDevice {
@@ -392,11 +400,15 @@ mod tests {
         let d = dev(
             DeviceType::Hub,
             vec![
-                DeviceCapability::Fan(FanStatus {
-                    channel: 0,
-                    rpm: 1000,
-                    duty: 50,
-                    controllable: true,
+                DeviceCapability::Cooling(CoolingStatus {
+                    channels: vec![CoolingChannel {
+                        id: "fan0".into(),
+                        name: "Fan".into(),
+                        kind: CoolingChannelKind::Fan,
+                        controllable: true,
+                        rpm: Some(1000),
+                        duty: Some(50),
+                    }],
                 }),
                 DeviceCapability::Sensors(vec![Sensor {
                     id: "s".into(),
@@ -406,11 +418,15 @@ mod tests {
                     sensor_type: SensorType::Temperature,
                     visibility: VisibilityState::Visible,
                 }]),
-                DeviceCapability::Fan(FanStatus {
-                    channel: 1,
-                    rpm: 1200,
-                    duty: 60,
-                    controllable: true,
+                DeviceCapability::Cooling(CoolingStatus {
+                    channels: vec![CoolingChannel {
+                        id: "fan1".into(),
+                        name: "Fan".into(),
+                        kind: CoolingChannelKind::Fan,
+                        controllable: true,
+                        rpm: Some(1200),
+                        duty: Some(60),
+                    }],
                 }),
             ],
         );

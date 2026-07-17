@@ -335,8 +335,11 @@ mod tests {
 
         app.refresh_sensor_bus().await;
         let snapshot = app.data_bus.sensors();
-        assert_eq!(snapshot.get("fan_fan0_rpm").map(|s| s.value), Some(900.0));
-        assert!(snapshot.contains_key("fan_fan0_duty"));
+        assert_eq!(
+            snapshot.get("cooling_fan0_default_rpm").map(|s| s.value),
+            Some(900.0)
+        );
+        assert!(snapshot.contains_key("cooling_fan0_default_duty"));
     }
 
     #[tokio::test]

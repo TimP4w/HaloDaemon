@@ -8,37 +8,36 @@ use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::state::AppState;
 
-/// Look up a controllable fan by id, run `f` against its capability, then persist.
-async fn with_fan<F>(fan_id: &str, app: &Arc<AppState>, f: F) -> Result<()>
-where
-    F: FnOnce(&dyn crate::drivers::FanCapability),
-{
-    let device = require_device_owned_id(fan_id, app).await?;
-    let fan = device.as_fan().ok_or_else(|| {
-        log::warn!("[fan_curve] {fan_id} has no engine slot (not controllable)");
-        anyhow!("device does not support fan curve: {fan_id}")
-    })?;
-    f(fan);
-    persist_device_state(app, device.as_ref()).await;
-    Ok(())
-}
-
-pub async fn set_fan_curve_points(
-    fan_id: String,
+pub async fn set_cooling_curve_points(
+    device_id: String,
+    channel_id: String,
     points: Vec<[f32; 2]>,
     sensor_id: Option<String>,
     app: Arc<AppState>,
 ) -> Result<()> {
-    let points: Vec<(f32, f32)> = points.iter().map(|p| (p[0], p[1])).collect();
+    let points = points.into_iter().map(|p| (p[0], p[1])).collect();
     let record = FanCurveRecord { sensor_id, points };
     record.validate()?;
     require_temperature_sensor(&record.sensor_id, &app).await?;
-
-    with_fan(&fan_id, &app, |fan| fan.set_fan_curve(record)).await
+    let device = require_device_owned_id(&device_id, &app).await?;
+    let cooling = device
+        .as_cooling()
+        .ok_or_else(|| anyhow!("device does not support cooling: {device_id}"))?;
+    if !cooling
+        .cooling_channels()
+        .iter()
+        .any(|channel| channel.id == channel_id)
+    {
+        anyhow::bail!("unknown cooling channel '{channel_id}' on device '{device_id}'");
+    }
+    cooling.set_curve(channel_id, record);
+    persist_device_state(&app, device.as_ref()).await;
+    Ok(())
 }
 
-pub async fn set_fan_curve_preset(
-    fan_id: String,
+pub async fn set_cooling_curve_preset(
+    device_id: String,
+    channel_id: String,
     preset: String,
     sensor_id: Option<String>,
     app: Arc<AppState>,
@@ -52,7 +51,28 @@ pub async fn set_fan_curve_preset(
     let record = FanCurveRecord { sensor_id, points };
     record.validate()?;
     require_temperature_sensor(&record.sensor_id, &app).await?;
-    with_fan(&fan_id, &app, |fan| fan.set_fan_curve(record)).await
+    set_cooling_curve_points(
+        device_id,
+        channel_id,
+        record.points.iter().map(|&(t, d)| [t, d]).collect(),
+        record.sensor_id,
+        app,
+    )
+    .await
+}
+
+pub async fn remove_cooling_curve(
+    device_id: String,
+    channel_id: String,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let device = require_device_owned_id(&device_id, &app).await?;
+    let cooling = device
+        .as_cooling()
+        .ok_or_else(|| anyhow!("device does not support cooling: {device_id}"))?;
+    cooling.clear_curve(&channel_id);
+    persist_device_state(&app, device.as_ref()).await;
+    Ok(())
 }
 
 /// `Ok` unless `sensor_id` is `Some` and names something other than a
@@ -67,10 +87,6 @@ async fn require_temperature_sensor(sensor_id: &Option<String>, app: &Arc<AppSta
         Some(_) => Err(anyhow!("sensor '{id}' is not a temperature source")),
         None => Err(anyhow!("unknown sensor '{id}'")),
     }
-}
-
-pub async fn remove_fan_curve(fan_id: String, app: Arc<AppState>) -> Result<()> {
-    with_fan(&fan_id, &app, |fan| fan.clear_fan_curve()).await
 }
 
 /// Test-only convenience wrapper for exercising the same record validation as
@@ -94,7 +110,7 @@ mod tests {
     use std::sync::Arc;
 
     fn fan_curve(device: &MockDevice) -> Option<crate::cooling::config::FanCurveRecord> {
-        device.fan.as_ref().unwrap().fan_curve()
+        device.fan.as_ref().unwrap().curve("default")
     }
 
     fn make_app_with_fan(id: &str) -> (Arc<AppState>, Arc<MockDevice>) {
@@ -144,8 +160,9 @@ mod tests {
     async fn set_fan_curve_preset_stores_points() {
         let (app, device) = make_app_with_fan_and_sensor("fan_0", "sensor_0");
         let preset = preset_curves().iter().find(|p| p.id == "balanced").unwrap();
-        set_fan_curve_preset(
+        set_cooling_curve_preset(
             "fan_0".into(),
+            "default".into(),
             "balanced".into(),
             Some("sensor_0".into()),
             app,
@@ -160,8 +177,9 @@ mod tests {
     #[tokio::test]
     async fn set_fan_curve_points_stores_custom_points() {
         let (app, device) = make_app_with_fan("fan_0");
-        set_fan_curve_points(
+        set_cooling_curve_points(
             "fan_0".into(),
+            "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             None,
             app,
@@ -198,8 +216,9 @@ mod tests {
     #[tokio::test]
     async fn set_fan_curve_points_accepts_owned_temperature_sensor() {
         let (app, device) = make_app_with_fan_and_sensor("fan_0", "cpu_temp");
-        set_fan_curve_points(
+        set_cooling_curve_points(
             "fan_0".into(),
+            "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             Some("cpu_temp".into()),
             app,
@@ -215,8 +234,9 @@ mod tests {
     #[tokio::test]
     async fn set_fan_curve_points_rejects_unknown_sensor() {
         let (app, _device) = make_app_with_fan("fan_0");
-        let err = set_fan_curve_points(
+        let err = set_cooling_curve_points(
             "fan_0".into(),
+            "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             Some("ghost_sensor".into()),
             app,
@@ -240,8 +260,9 @@ mod tests {
             devices.push(device.clone() as Arc<dyn crate::drivers::Device>);
         }
         app.refresh_sensor_bus().await;
-        let err = set_fan_curve_points(
+        let err = set_cooling_curve_points(
             "fan_0".into(),
+            "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             Some("load0".into()),
             app,
@@ -254,8 +275,9 @@ mod tests {
     #[tokio::test]
     async fn remove_fan_curve_removes_entry() {
         let (app, device) = make_app_with_fan("fan_0");
-        set_fan_curve_points(
+        set_cooling_curve_points(
             "fan_0".into(),
+            "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             None,
             app.clone(),
@@ -264,7 +286,9 @@ mod tests {
         .unwrap();
         assert!(fan_curve(&device).is_some());
 
-        remove_fan_curve("fan_0".into(), app).await.unwrap();
+        remove_cooling_curve("fan_0".into(), "default".into(), app)
+            .await
+            .unwrap();
         assert!(fan_curve(&device).is_none());
     }
 
@@ -272,7 +296,7 @@ mod tests {
     async fn remove_fan_curve_errors_on_missing_device() {
         let cfg = Config::default();
         let app = Arc::new(AppState::new(cfg));
-        let err = remove_fan_curve("nonexistent".into(), app)
+        let err = remove_cooling_curve("nonexistent".into(), "default".into(), app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
@@ -282,8 +306,9 @@ mod tests {
     async fn set_fan_curve_points_errors_on_missing_device() {
         let cfg = Config::default();
         let app = Arc::new(AppState::new(cfg));
-        let err = set_fan_curve_points(
+        let err = set_cooling_curve_points(
             "ghost".into(),
+            "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             None,
             app,
@@ -297,9 +322,15 @@ mod tests {
     async fn set_fan_curve_preset_errors_on_missing_device() {
         let cfg = Config::default();
         let app = Arc::new(AppState::new(cfg));
-        let err = set_fan_curve_preset("ghost".into(), "balanced".into(), None, app)
-            .await
-            .unwrap_err();
+        let err = set_cooling_curve_preset(
+            "ghost".into(),
+            "default".into(),
+            "balanced".into(),
+            None,
+            app,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("ghost"));
     }
 

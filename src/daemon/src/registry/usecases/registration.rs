@@ -46,8 +46,8 @@ pub(super) fn clear_engine_slots(device: &Arc<dyn Device>) {
     if let Some(s) = device.as_rgb() {
         s.set_canvas_zones(vec![]);
     }
-    if let Some(s) = device.as_fan() {
-        s.clear_fan_curve();
+    if let Some(s) = device.as_cooling() {
+        s.clear_curves();
     }
     if let Some(s) = device.as_lcd() {
         s.set_lcd_template_id(None);
@@ -546,13 +546,13 @@ mod tests {
     #[test]
     fn clear_engine_slots_empties_all_capability_slots() {
         let mock = MockDevice::new("dev-1").with_fan().with_rgb().with_lcd();
-        mock.fan
-            .as_ref()
-            .unwrap()
-            .set_fan_curve(crate::cooling::config::FanCurveRecord {
+        mock.fan.as_ref().unwrap().set_curve(
+            "default".to_string(),
+            crate::cooling::config::FanCurveRecord {
                 sensor_id: None,
                 points: vec![(20.0, 25.0), (80.0, 100.0)],
-            });
+            },
+        );
         mock.rgb
             .as_ref()
             .unwrap()
@@ -575,7 +575,7 @@ mod tests {
 
         clear_engine_slots(&device);
 
-        assert!(device.as_fan().unwrap().fan_curve().is_none());
+        assert!(device.as_cooling().unwrap().curve("default").is_none());
         assert!(device.as_rgb().unwrap().canvas_zones().is_empty());
         assert!(device.as_lcd().unwrap().lcd_template_id().is_none());
     }
@@ -844,7 +844,7 @@ mod tests {
 
         assert!(result, "disabled device should register");
         assert!(
-            device.fan.as_ref().unwrap().fan_curve().is_none(),
+            device.fan.as_ref().unwrap().curve("default").is_none(),
             "fan_curve must be cleared after registering a disabled device, \
              so the fan engine and serializer treat it as non-participating"
         );

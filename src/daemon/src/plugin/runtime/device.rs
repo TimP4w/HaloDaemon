@@ -4,7 +4,7 @@
 //! Lua worker. The manifest defines the maximum capability set; `initialize`
 //! may narrow it to the subset supported by one physical device.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
@@ -13,18 +13,18 @@ use async_trait::async_trait;
 use halod_shared::keyboard::{KeyId, KeyVariant, KeyboardLayoutStatus, VisualKey};
 use halod_shared::types::{
     Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, CategoryLayout,
-    Choice, ConnectionStatus, DeviceCapability, DeviceType, DpiMode, DpiStatus, Equalizer,
-    KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, NativeEffect, Permission,
-    PluginKind, Range, RgbColor, RgbDescriptor, RgbState, RgbZone, ScreenRotation, ScreenShape,
-    Sensor, WriteRateStatus,
+    Choice, ConnectionStatus, CoolingChannel, DeviceCapability, DeviceType, DpiMode, DpiStatus,
+    Equalizer, KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, NativeEffect,
+    Permission, PluginKind, Range, RgbColor, RgbDescriptor, RgbState, RgbZone, ScreenRotation,
+    ScreenShape, Sensor, WriteRateStatus,
 };
 use halod_shared::zone_transform::build_permutation;
 
 use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor};
 use crate::drivers::{
     ActionCapability, BatteryCapability, BoolStateCache, BooleanCapability, CapabilityRef,
-    ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, Device, DpiCapability,
-    EqualizerCapability, FanCapability, FanHub, FanStateSlot, KeyRemapCapability,
+    ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, CoolingCapability,
+    CoolingHub, CoolingStateSlot, Device, DpiCapability, EqualizerCapability, KeyRemapCapability,
     KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
     OnboardProfilesCapability, PairingCapability, RangeCapability, RangeStateCache, RgbCapability,
     RgbStateSlot, SensorCapability, VisibilitySlot,
@@ -90,6 +90,7 @@ use halod_shared::types::ZoneTopology;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cap {
     Rgb,
+    Cooling,
     Fan,
     Sensor,
     Lcd,
@@ -111,6 +112,7 @@ enum Cap {
 const CONTROL_CAPS: &[Cap] = &[Cap::Choice, Cap::Range, Cap::Boolean, Cap::Action];
 const CAPABILITY_NAMES: &[&str] = &[
     "rgb",
+    "cooling",
     "fan",
     "sensors",
     "lcd",
@@ -129,6 +131,7 @@ const CAPABILITY_NAMES: &[&str] = &[
 fn cap_for(name: &str) -> &'static [Cap] {
     match name {
         "rgb" => &[Cap::Rgb],
+        "cooling" => &[Cap::Cooling],
         "fan" => &[Cap::Fan],
         "sensors" => &[Cap::Sensor],
         "lcd" => &[Cap::Lcd],
@@ -184,16 +187,10 @@ fn needs_status_poll(caps: &[Cap]) -> bool {
     StatusPollCaps::from_caps(caps).any()
 }
 
-#[derive(Default, Clone)]
-struct FanSample {
-    duty: Option<u8>,
-    rpm: Option<u32>,
-}
-
 #[derive(Clone, Copy, Default)]
 struct StatusPollCaps {
     sensor: bool,
-    fan: bool,
+    cooling: bool,
     boolean: bool,
     battery: bool,
     connection: bool,
@@ -205,7 +202,7 @@ impl StatusPollCaps {
     fn from_caps(caps: &[Cap]) -> Self {
         Self {
             sensor: caps.contains(&Cap::Sensor),
-            fan: caps.contains(&Cap::Fan),
+            cooling: caps.contains(&Cap::Cooling) || caps.contains(&Cap::Fan),
             boolean: caps.contains(&Cap::Boolean),
             battery: caps.contains(&Cap::Battery),
             connection: caps.contains(&Cap::Connection),
@@ -218,7 +215,7 @@ impl StatusPollCaps {
 
     fn any(self) -> bool {
         self.sensor
-            || self.fan
+            || self.cooling
             || self.boolean
             || self.battery
             || self.connection
@@ -234,7 +231,6 @@ async fn sample_status(
     worker: &PluginHandle,
     caps: StatusPollCaps,
     sensor_cache: &Mutex<Vec<Sensor>>,
-    fan_cache: &Mutex<FanSample>,
     boolean_cache: &Mutex<Vec<Boolean>>,
     battery_cache: &Mutex<Vec<Battery>>,
     connection_cache: &Mutex<Option<ConnectionStatus>>,
@@ -243,14 +239,6 @@ async fn sample_status(
     if caps.sensor {
         if let Ok(sensors) = worker.get_sensors().await {
             *sensor_cache.lock_recover() = sensors;
-        }
-    }
-    if caps.fan {
-        if let Ok(duty) = worker.fan_get_duty().await {
-            fan_cache.lock_recover().duty = Some(duty);
-        }
-        if let Ok(rpm) = worker.fan_get_rpm().await {
-            fan_cache.lock_recover().rpm = rpm;
         }
     }
     if caps.boolean {
@@ -524,12 +512,11 @@ pub struct LuaDevice {
     /// descriptor is selected from the shared layout slot on every snapshot.
     dynamic_rgb_iso_descriptor: OnceLock<RgbDescriptor>,
     rgb_slot: RgbStateSlot,
-    fan_slot: FanStateSlot,
-    fan_channel: AtomicU8,
+    cooling_slot: CoolingStateSlot,
+    cooling_channels: OnceLock<Vec<CoolingChannel>>,
 
-    /// Last sensor/fan telemetry sampled by the status poll.
+    /// Last sensor telemetry sampled by the status poll.
     sensor_cache: Arc<Mutex<Vec<Sensor>>>,
-    fan_cache: Arc<Mutex<FanSample>>,
 
     /// Host-run status poll: aborted on drop. `poll_paused` lets a future LCD
     /// path silence polling during a bulk transfer without tearing it down.
@@ -848,7 +835,6 @@ impl LuaDevice {
             let paused = dev.poll_paused.clone();
             let poll_caps = StatusPollCaps::from_caps(&dev.caps.read().unwrap());
             let sensor_cache = dev.sensor_cache.clone();
-            let fan_cache = dev.fan_cache.clone();
             let boolean_cache = dev.boolean_cache.clone();
             let battery_cache = dev.battery_cache.clone();
             let connection_cache = dev.connection_cache.clone();
@@ -985,7 +971,6 @@ impl LuaDevice {
                         &worker,
                         poll_caps,
                         &sensor_cache,
-                        &fan_cache,
                         &boolean_cache,
                         &battery_cache,
                         &connection_cache,
@@ -1085,10 +1070,9 @@ impl LuaDevice {
             dynamic_rgb_descriptor: OnceLock::new(),
             dynamic_rgb_iso_descriptor: OnceLock::new(),
             rgb_slot: RgbStateSlot::default(),
-            fan_slot: FanStateSlot::default(),
-            fan_channel: AtomicU8::new(0),
+            cooling_slot: CoolingStateSlot::default(),
+            cooling_channels: OnceLock::new(),
             sensor_cache: Arc::new(Mutex::new(Vec::new())),
-            fan_cache: Arc::new(Mutex::new(FanSample::default())),
             poll_task: None,
             poll_paused: Arc::new(AtomicBool::new(false)),
             event_task: None,
@@ -1194,7 +1178,6 @@ impl LuaDevice {
             worker,
             caps,
             &self.sensor_cache,
-            &self.fan_cache,
             &self.boolean_cache,
             &self.battery_cache,
             &self.connection_cache,
@@ -1633,8 +1616,21 @@ impl Device for LuaDevice {
             };
             *self.dpi_state.lock_recover() = dpi_state_from_runtime(&dpi);
         }
-        if let Some(fan) = outcome.fan {
-            self.fan_channel.store(fan.channel, Ordering::Relaxed);
+        if let Some(cooling) = outcome.cooling {
+            let _ = self.cooling_channels.set(
+                cooling
+                    .channels
+                    .into_iter()
+                    .map(|c| CoolingChannel {
+                        id: c.id,
+                        name: c.name,
+                        kind: c.kind,
+                        controllable: c.controllable,
+                        rpm: None,
+                        duty: None,
+                    })
+                    .collect(),
+            );
         }
         if let Some(key_remap) = outcome.key_remap {
             let defaults = key_remap.default_mappings.clone();
@@ -1770,7 +1766,8 @@ impl Device for LuaDevice {
         for cap in &active {
             match cap {
                 Cap::Rgb => caps.push(CapabilityRef::Rgb(self)),
-                Cap::Fan => caps.push(CapabilityRef::Fan(self)),
+                Cap::Cooling => caps.push(CapabilityRef::Cooling(self)),
+                Cap::Fan => caps.push(CapabilityRef::Cooling(self)),
                 Cap::Sensor => caps.push(CapabilityRef::Sensor(self)),
                 Cap::Lcd => caps.push(CapabilityRef::Lcd(self)),
                 Cap::Dpi => caps.push(CapabilityRef::Dpi(self)),
@@ -1903,31 +1900,23 @@ fn apply_per_led_transforms(
 }
 
 #[async_trait]
-impl FanCapability for LuaDevice {
-    async fn get_duty(&self) -> Result<u8> {
-        self.fan_cache
-            .lock_recover()
-            .duty
-            .ok_or_else(|| anyhow::anyhow!("fan duty not sampled yet"))
+impl CoolingCapability for LuaDevice {
+    fn cooling_channels(&self) -> Vec<CoolingChannel> {
+        self.cooling_channels.get().cloned().unwrap_or_default()
     }
 
-    async fn set_duty(&self, duty: u8) -> Result<()> {
-        let r = self.worker()?.fan_set_duty(duty).await;
-        self.track(r).await?;
-        self.fan_cache.lock_recover().duty = Some(duty);
-        Ok(())
+    async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel> {
+        self.track(self.worker()?.cooling_status(channel_id).await)
+            .await
     }
 
-    async fn get_rpm(&self) -> Option<u32> {
-        self.fan_cache.lock_recover().rpm
+    async fn set_cooling_duty(&self, channel_id: &str, duty: u8) -> Result<()> {
+        self.track(self.worker()?.cooling_set_duty(channel_id, duty).await)
+            .await
     }
 
-    fn fan_state(&self) -> &FanStateSlot {
-        &self.fan_slot
-    }
-
-    fn fan_channel_id(&self) -> u8 {
-        self.fan_channel.load(Ordering::Relaxed)
+    fn cooling_state(&self) -> &CoolingStateSlot {
+        &self.cooling_slot
     }
 }
 
@@ -2040,7 +2029,7 @@ impl LuaDevice {
         let Some(parent) = self.self_ref.upgrade() else {
             return Vec::new();
         };
-        let fan_hub: Arc<dyn FanHub> = parent;
+        let cooling_hub: Arc<dyn CoolingHub> = parent;
         let chain_hub: Arc<dyn ChainHub> = host.clone();
 
         let mut out = Vec::new();
@@ -2067,7 +2056,7 @@ impl LuaDevice {
                 d.channel,
                 accessory,
                 chain_hub.clone(),
-                fan_hub.clone(),
+                cooling_hub.clone(),
             ));
             if let Err(e) = leaf.initialize().await {
                 log::warn!("plugin '{}' child init failed: {e:#}", self.plugin_id);
@@ -2745,18 +2734,12 @@ impl ChainAdapter for LuaDevice {
 }
 
 #[async_trait]
-impl FanHub for LuaDevice {
-    async fn get_fan_rpm(&self, channel: u8) -> Result<u32> {
-        self.worker()?.hub_fan_rpm(channel).await
+impl CoolingHub for LuaDevice {
+    async fn get_cooling_status(&self, channel: u8) -> Result<CoolingChannel> {
+        self.worker()?.hub_cooling_status(channel).await
     }
-    async fn get_fan_duty(&self, channel: u8) -> Result<u8> {
-        self.worker()?.hub_fan_duty(channel).await
-    }
-    async fn get_fan_controllable(&self, channel: u8) -> Result<bool> {
-        self.worker()?.hub_fan_controllable(channel).await
-    }
-    async fn set_fan_duty(&self, channel: u8, duty: u8) -> Result<()> {
-        self.worker()?.hub_set_fan_duty(channel, duty).await
+    async fn set_cooling_duty(&self, channel: u8, duty: u8) -> Result<()> {
+        self.worker()?.hub_set_cooling_duty(channel, duty).await
     }
 }
 
@@ -2765,7 +2748,7 @@ mod tests {
     use super::*;
     use crate::drivers::transports::mock::test_transport::MockTransport;
     use crate::drivers::transports::Transport;
-    use crate::drivers::{FanCapability, RgbCapability};
+    use crate::drivers::RgbCapability;
 
     fn test_manifest(
         id: &str,
@@ -3040,11 +3023,12 @@ mod tests {
         assert!(dev.initialize().await.unwrap());
         let caps = dev.capabilities();
         assert!(caps.iter().any(|cap| matches!(cap, CapabilityRef::Rgb(_))));
-        assert!(caps.iter().any(|cap| matches!(cap, CapabilityRef::Fan(_))));
+        assert!(caps
+            .iter()
+            .any(|cap| matches!(cap, CapabilityRef::Cooling(_))));
         assert!(!caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Sensor(_))));
-        assert_eq!(dev.fan_channel_id(), 3);
         assert_eq!(RgbCapability::descriptor(&dev).zones[0].leds[0].id, 7);
         dev.close().await;
     }
@@ -3193,30 +3177,6 @@ mod tests {
             RuntimeState::Degraded(DegradeReason::CallFailed)
         );
         assert!(!dev.is_live());
-        dev.close().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn transient_rpm_error_keeps_the_last_sample() {
-        let script = r#"
-            local rpm_reads = 0
-            return {
-              initialize = function() return true end,
-              get_duty = function() return 40 end,
-              get_rpm = function()
-                rpm_reads = rpm_reads + 1
-                if rpm_reads == 1 then return 1200 end
-                error("transient")
-              end,
-            }
-        "#;
-        let (_tmp, manifest) = test_manifest("fan_sample", &["fan"], script);
-        let dev = hid_device("fan_sample-0", &manifest, Arc::new(MockTransport::empty()));
-        assert!(dev.initialize().await.unwrap());
-        assert_eq!(dev.fan_cache.lock_recover().rpm, Some(1200));
-
-        dev.refresh_status_cache().await;
-        assert_eq!(dev.fan_cache.lock_recover().rpm, Some(1200));
         dev.close().await;
     }
 

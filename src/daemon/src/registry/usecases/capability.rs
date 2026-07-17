@@ -18,7 +18,6 @@ pub enum CapabilityParam {
     Choice { key: String, selected: usize },
     Action { key: String },
     DpiSteps { steps: Vec<u32> },
-    FanDuty { duty: u8 },
     EqPreset { preset_index: usize },
     EqBands { values: Vec<f32> },
 }
@@ -109,19 +108,6 @@ async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
                 broadcast: false,
             })
         }
-        CapabilityParam::FanDuty { duty } => {
-            if *duty > 100 {
-                anyhow::bail!("fan duty must be 0–100 (got {duty})");
-            }
-            dev.as_fan()
-                .context("device does not support fan control")?
-                .set_duty(*duty)
-                .await?;
-            Ok(Effects {
-                persist: true,
-                broadcast: false,
-            })
-        }
         CapabilityParam::EqPreset { preset_index } => {
             dev.as_equalizer()
                 .context("device does not support equalizer control")?
@@ -160,11 +146,8 @@ async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::drivers::{CapabilityRef, FanCapability, FanStateSlot};
     use crate::test_support::MockDevice;
-    use async_trait::async_trait;
     use halod_shared::types::{Boolean, EqBand, Equalizer};
-    use std::sync::Mutex;
 
     fn make_app(devices: Vec<Arc<dyn Device>>) -> Arc<AppState> {
         let app = Arc::new(AppState::new(Config::default()));
@@ -378,134 +361,6 @@ mod tests {
 
         let cfg = app.config.read().await;
         assert!(!cfg.active_profile_data().device_states.contains_key("dev1"));
-    }
-
-    // ── FanDuty ──────────────────────────────────────────────────────────
-
-    struct NoFanDevice;
-
-    #[async_trait]
-    impl Device for NoFanDevice {
-        fn id(&self) -> &str {
-            "no_fan"
-        }
-        fn name(&self) -> &str {
-            "no_fan"
-        }
-        fn vendor(&self) -> &str {
-            "test"
-        }
-        fn model(&self) -> &str {
-            "test"
-        }
-        async fn initialize(&self) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![]
-        }
-    }
-
-    struct FanDevice {
-        last_duty: Mutex<Option<u8>>,
-        fan: FanStateSlot,
-    }
-
-    impl FanDevice {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                last_duty: Mutex::new(None),
-                fan: FanStateSlot::default(),
-            })
-        }
-        fn last_duty(&self) -> Option<u8> {
-            *self.last_duty.lock().unwrap()
-        }
-    }
-
-    #[async_trait]
-    impl Device for FanDevice {
-        fn id(&self) -> &str {
-            "fan_dev"
-        }
-        fn name(&self) -> &str {
-            "fan_dev"
-        }
-        fn vendor(&self) -> &str {
-            "test"
-        }
-        fn model(&self) -> &str {
-            "test"
-        }
-        async fn initialize(&self) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![CapabilityRef::Fan(self)]
-        }
-    }
-
-    #[async_trait]
-    impl FanCapability for FanDevice {
-        async fn get_duty(&self) -> anyhow::Result<u8> {
-            Ok(0)
-        }
-        async fn set_duty(&self, duty: u8) -> anyhow::Result<()> {
-            *self.last_duty.lock().unwrap() = Some(duty);
-            Ok(())
-        }
-        async fn get_rpm(&self) -> Option<u32> {
-            Some(0)
-        }
-        fn fan_state(&self) -> &FanStateSlot {
-            &self.fan
-        }
-    }
-
-    #[tokio::test]
-    async fn set_fan_speed_calls_set_duty() {
-        let fan = FanDevice::new();
-        let app = make_app(vec![fan.clone() as Arc<dyn Device>]);
-        set_capability_param("fan_dev".into(), CapabilityParam::FanDuty { duty: 75 }, app)
-            .await
-            .unwrap();
-        assert_eq!(fan.last_duty(), Some(75));
-    }
-
-    #[tokio::test]
-    async fn set_fan_speed_errors_when_device_not_found() {
-        let app = make_app(vec![]);
-        assert!(
-            set_capability_param("ghost".into(), CapabilityParam::FanDuty { duty: 50 }, app,)
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn set_fan_speed_errors_when_device_has_no_fan_capability() {
-        let app = make_app(vec![Arc::new(NoFanDevice) as Arc<dyn Device>]);
-        let err = set_capability_param("no_fan".into(), CapabilityParam::FanDuty { duty: 50 }, app)
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("fan control"));
-    }
-
-    #[tokio::test]
-    async fn set_fan_speed_rejects_duty_over_100() {
-        let fan = FanDevice::new();
-        let app = make_app(vec![fan.clone() as Arc<dyn Device>]);
-        let err = set_capability_param(
-            "fan_dev".into(),
-            CapabilityParam::FanDuty { duty: 150 },
-            app,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("0–100"));
-        assert_eq!(fan.last_duty(), None);
     }
 
     // ── Equalizer ────────────────────────────────────────────────────────

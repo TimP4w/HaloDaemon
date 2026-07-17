@@ -88,9 +88,18 @@ pub const CALLBACKS_V1: &[CallbackContract] = &[
         "dev, channel_id, colors",
         "nil"
     ),
-    callback!("get_duty", Capability, "dev", "integer"),
-    callback!("set_duty", Capability, "dev, duty", "nil"),
-    callback!("get_rpm", Optional, "dev", "integer | nil"),
+    callback!(
+        "get_cooling_status",
+        Capability,
+        "dev, channel_id",
+        "CoolingChannel"
+    ),
+    callback!(
+        "set_cooling_duty",
+        Capability,
+        "dev, channel_id, duty",
+        "nil"
+    ),
     callback!("get_sensors", Capability, "dev", "Sensor[]"),
     callback!("fan_rpm", Capability, "dev, channel", "integer"),
     callback!("fan_duty", Capability, "dev, channel", "integer"),
@@ -214,7 +223,7 @@ pub const TABLES_V1: &[TableContract] = &[
     },
     TableContract {
         name: "InitTable",
-        fields: "ok?; model?; capabilities?; zones?; native_effects?; lcd?; chain?; accessories?; controls?; dpi?; fan?; key_remap?; keyboard?; ranges?; choices?",
+        fields: "ok?; model?; capabilities?; zones?; native_effects?; lcd?; chain?; accessories?; controls?; dpi?; cooling={channels={{id; name; kind='fan'|'pump'; controllable}, ...}}?; fan?; key_remap?; keyboard?; ranges?; choices?",
     },
     TableContract {
         name: "DetectedController",

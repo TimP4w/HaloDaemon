@@ -128,11 +128,14 @@ mod tests {
     async fn set_device_visibility_to_hidden_clears_engine_slots() {
         let app = make_app();
         let device = Arc::new(MockDevice::new("dev1").with_rgb().with_fan());
-        if let Some(fan) = (device.as_ref() as &dyn crate::drivers::Device).as_fan() {
-            fan.set_fan_curve(crate::cooling::config::FanCurveRecord {
-                sensor_id: None,
-                points: vec![(30.0, 50.0), (80.0, 100.0)],
-            });
+        if let Some(cooling) = (device.as_ref() as &dyn crate::drivers::Device).as_cooling() {
+            cooling.set_curve(
+                "default".to_string(),
+                crate::cooling::config::FanCurveRecord {
+                    sensor_id: None,
+                    points: vec![(30.0, 50.0), (80.0, 100.0)],
+                },
+            );
         }
         push_device(&app, device.clone());
 
@@ -140,7 +143,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(device.fan.as_ref().unwrap().fan_curve().is_none());
+        assert!(device.fan.as_ref().unwrap().curve("default").is_none());
     }
 
     #[tokio::test]
@@ -151,14 +154,13 @@ mod tests {
         // on the device must not panic, and re-registering it must work.
         let app = make_app();
         let device = Arc::new(MockDevice::new("dev1").with_rgb().with_fan());
-        device
-            .fan
-            .as_ref()
-            .unwrap()
-            .set_fan_curve(crate::cooling::config::FanCurveRecord {
+        device.fan.as_ref().unwrap().set_curve(
+            "default".to_string(),
+            crate::cooling::config::FanCurveRecord {
                 sensor_id: None,
                 points: vec![(30.0, 50.0), (80.0, 100.0)],
-            });
+            },
+        );
         push_device(&app, device.clone());
         crate::registry::usecases::registration::clear_engine_slots(
             &(device.clone() as Arc<dyn crate::drivers::Device>),
@@ -173,7 +175,7 @@ mod tests {
             },
         );
 
-        assert!(device.fan.as_ref().unwrap().fan_curve().is_none());
+        assert!(device.fan.as_ref().unwrap().curve("default").is_none());
 
         set_device_visibility("dev1".into(), VisibilityState::Hidden, app.clone())
             .await
@@ -205,13 +207,17 @@ mod tests {
         push_device(&app, device.clone());
         app.refresh_sensor_bus().await;
 
-        set_sensor_visibility("fan_fan0_duty".into(), VisibilityState::Hidden, app.clone())
-            .await
-            .unwrap();
+        set_sensor_visibility(
+            "cooling_fan0_default_duty".into(),
+            VisibilityState::Hidden,
+            app.clone(),
+        )
+        .await
+        .unwrap();
 
         let cfg = app.config.read().await;
         assert_eq!(
-            cfg.sensor_visibility.get("fan_fan0_duty"),
+            cfg.sensor_visibility.get("cooling_fan0_default_duty"),
             Some(&VisibilityState::Hidden)
         );
     }

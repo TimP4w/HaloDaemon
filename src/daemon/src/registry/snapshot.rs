@@ -14,7 +14,7 @@ use halod_shared::types::{DeviceCapability, EffectParamValue, VisibilityState, W
 /// lighting, and LCD snapshots need.
 pub struct DevicesSnapshot {
     pub devices: Vec<WireDevice>,
-    pub fan_curves: Vec<(String, FanCurveRecord)>,
+    pub fan_curves: Vec<(String, String, FanCurveRecord)>,
     pub placed_zones: Vec<PlacedZone>,
     pub lcd_templates: HashMap<String, String>,
     pub lcd_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
@@ -29,13 +29,17 @@ impl AppState {
         }
 
         // Collect per-device engine state from device_list (already owned — no extra locks).
-        let fan_curves: Vec<(String, FanCurveRecord)> = device_list
-            .iter()
-            .filter_map(|d| {
-                let fan = d.as_fan()?;
-                Some((d.id().to_owned(), fan.fan_curve()?))
-            })
-            .collect();
+        let mut fan_curves = Vec::new();
+        for device in &device_list {
+            if let Some(cooling) = device.as_cooling() {
+                fan_curves.extend(
+                    cooling
+                        .curves()
+                        .into_iter()
+                        .map(|(channel_id, curve)| (device.id().to_owned(), channel_id, curve)),
+                );
+            }
+        }
 
         let placed_zones: Vec<PlacedZone> = device_list
             .iter()
@@ -203,17 +207,19 @@ mod tests {
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("fan sensors present");
-        assert!(sensors.iter().any(|s| s.id == "fan_test_device_duty"));
         assert!(sensors
             .iter()
-            .any(|s| s.id == "fan_test_device_rpm" && s.value == 1500.0));
+            .any(|s| s.id == "cooling_test_device_default_duty"));
+        assert!(sensors
+            .iter()
+            .any(|s| s.id == "cooling_test_device_default_rpm" && s.value == 1500.0));
     }
 
     #[tokio::test]
     async fn serialize_applies_saved_visibility_to_fan_sensors() {
         let mut cfg = Config::default();
         cfg.sensor_visibility.insert(
-            "fan_test_device_duty".to_string(),
+            "cooling_test_device_default_duty".to_string(),
             halod_shared::types::VisibilityState::Hidden,
         );
         let app = Arc::new(AppState::new(cfg));
@@ -225,7 +231,7 @@ mod tests {
         let sensors = snap.devices[0].sensors().expect("fan sensors present");
         let duty = sensors
             .iter()
-            .find(|s| s.id == "fan_test_device_duty")
+            .find(|s| s.id == "cooling_test_device_default_duty")
             .unwrap();
         assert_eq!(
             duty.visibility,

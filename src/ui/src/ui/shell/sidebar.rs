@@ -89,7 +89,7 @@ pub fn cooling_needing_action(state: &AppState) -> usize {
             if state
                 .devices
                 .iter()
-                .find(|device| device.id == curve.fan_id)
+                .find(|device| device.id == curve.device_id)
                 .is_some_and(model::is_hidden)
             {
                 return false;
@@ -666,18 +666,24 @@ mod tests {
         let mut state = AppState::default();
         state.cooling.fan_curves = vec![
             halod_shared::types::WireFanCurve {
+                device_id: "ok".into(),
+                channel_id: "default".into(),
                 fan_id: "ok".into(),
                 sensor_id: Some("temp".into()),
                 points: vec![],
                 status: FanCurveStatus::Ok,
             },
             halod_shared::types::WireFanCurve {
+                device_id: "missing-sensor".into(),
+                channel_id: "default".into(),
                 fan_id: "missing-sensor".into(),
                 sensor_id: None,
                 points: vec![],
                 status: FanCurveStatus::NoSensor,
             },
             halod_shared::types::WireFanCurve {
+                device_id: "disabled".into(),
+                channel_id: "default".into(),
                 fan_id: "disabled".into(),
                 sensor_id: None,
                 points: vec![],

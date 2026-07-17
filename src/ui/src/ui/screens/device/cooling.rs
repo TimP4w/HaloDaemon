@@ -5,7 +5,7 @@
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Vec2};
 use halod_shared::commands::DaemonCommand;
-use halod_shared::types::{DeviceCapability, FanCurveStatus, FanStatus, Sensor};
+use halod_shared::types::{CoolingChannel, DeviceCapability, FanCurveStatus, Sensor};
 
 use super::{editing, DeviceUi, TabCtx};
 use crate::ui::screens::cooling::preset_display_name;
@@ -17,7 +17,22 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         crate::domain::tour::AnchorId::TabCooling,
         ui.max_rect(),
     );
-    let fan = find_fan(ctx.dev);
+    let channels = cooling_channels(ctx.dev);
+    let default_channel = channels
+        .first()
+        .map(|c| c.id.clone())
+        .unwrap_or_else(|| "default".into());
+    let selected = st.cooling.channel_id.get_or_insert(default_channel).clone();
+    let selected = if channels.iter().any(|c| c.id == selected) {
+        selected
+    } else {
+        channels
+            .first()
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| "default".into())
+    };
+    st.cooling.channel_id = Some(selected.clone());
+    let fan = find_fan(ctx.dev, &selected);
     let fan_id = ctx.dev.id.clone();
 
     // The persisted curve for this fan (if any).
@@ -26,7 +41,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         .cooling
         .fan_curves
         .iter()
-        .find(|c| c.fan_id == fan_id);
+        .find(|c| c.device_id == fan_id && c.channel_id == selected);
     if !st.cooling.curve_seeded {
         st.cooling.curve = curve
             .map(|c| c.points.clone())
@@ -51,7 +66,28 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         .and_then(|sid| sensors.iter().find(|(_, s)| &s.id == sid))
         .map(|(_, s)| s.value as f32);
 
-    top_row(ui, ctx, st, &fan, &sensors, sensor_temp);
+    if channels.len() > 1 {
+        let label = channels
+            .iter()
+            .find(|c| c.id == selected)
+            .map(|c| c.name.as_str())
+            .unwrap_or("Cooling");
+        egui::ComboBox::from_id_salt("cooling_channel")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                for channel in &channels {
+                    if ui
+                        .selectable_label(selected == channel.id, &channel.name)
+                        .clicked()
+                    {
+                        st.cooling.channel_id = Some(channel.id.clone());
+                        st.cooling.curve_seeded = false;
+                    }
+                }
+            });
+        ui.add_space(theme::SPACE_6);
+    }
+    top_row(ui, ctx, st, &fan, &sensors, sensor_temp, &selected);
     ui.add_space(theme::SPACE_8);
 
     let curve_title = t!("cooling.fan_curve");
@@ -60,6 +96,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         ctx,
         st,
         &fan_id,
+        &selected,
         curve.map(|c| c.status.clone()),
         sensor_temp,
         &curve_title,
@@ -70,9 +107,10 @@ fn top_row(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    fan: &Option<FanStatus>,
+    fan: &Option<CoolingChannel>,
     sensors: &[(String, Sensor)],
     sensor_temp: Option<f32>,
+    channel_id: &str,
 ) {
     ui.columns(2, |cols| {
         // Curve sensor selector + live temp.
@@ -120,11 +158,12 @@ fn top_row(
                 st.last_edit = ctx.time;
                 crate::runtime::ipc::send(
                     ctx.cmd,
-                    halod_shared::commands::DaemonCommand::SetFanCurvePoints {
-                        fan_id: ctx.dev.id.clone(),
-                        points: st.cooling.curve.clone(),
-                        sensor_id: st.cooling.curve_sensor.clone(),
-                    },
+                    curve_points_command(
+                        ctx.dev.id.clone(),
+                        channel_id.to_string(),
+                        st.cooling.curve.clone(),
+                        st.cooling.curve_sensor.clone(),
+                    ),
                 );
             }
             ui.add_space(theme::SPACE_6);
@@ -151,13 +190,13 @@ fn top_row(
                 widgets::value_row(
                     ui,
                     &t!("cooling.fan_speed"),
-                    &t!("cooling.rpm", v = f.rpm),
+                    &t!("cooling.rpm", v = f.rpm.unwrap_or_default()),
                     theme::TEXT_BRIGHT,
                 );
                 widgets::value_row(
                     ui,
                     &t!("cooling.fan_duty"),
-                    &t!("cooling.percent", v = f.duty),
+                    &t!("cooling.percent", v = f.duty.unwrap_or_default()),
                     theme::TEXT_BRIGHT,
                 );
             }
@@ -170,6 +209,7 @@ fn curve_card(
     ctx: &TabCtx,
     st: &mut DeviceUi,
     fan_id: &str,
+    channel_id: &str,
     status: Option<FanCurveStatus>,
     sensor_temp: Option<f32>,
     title: &str,
@@ -219,11 +259,12 @@ fn curve_card(
                         st.last_edit = ctx.time;
                         st.queue(
                             "curve",
-                            DaemonCommand::SetFanCurvePreset {
-                                fan_id: fan_id.to_string(),
-                                preset: p.id.clone(),
-                                sensor_id: st.cooling.curve_sensor.clone(),
-                            },
+                            curve_preset_command(
+                                fan_id.to_string(),
+                                channel_id.to_string(),
+                                p.id.clone(),
+                                st.cooling.curve_sensor.clone(),
+                            ),
                             ctx.time,
                         );
                     }
@@ -290,19 +331,58 @@ fn curve_card(
             theme::CYAN,
             op,
         ) {
-            let cmd = DaemonCommand::SetFanCurvePoints {
-                fan_id: fan_id.to_string(),
-                points: st.cooling.curve.clone(),
-                sensor_id: st.cooling.curve_sensor.clone(),
-            };
+            let cmd = curve_points_command(
+                fan_id.to_string(),
+                channel_id.to_string(),
+                st.cooling.curve.clone(),
+                st.cooling.curve_sensor.clone(),
+            );
             st.queue("curve", cmd, ctx.time);
         }
     });
 }
 
-fn find_fan(dev: &halod_shared::types::WireDevice) -> Option<FanStatus> {
+fn curve_points_command(
+    device_id: String,
+    channel_id: String,
+    points: Vec<[f32; 2]>,
+    sensor_id: Option<String>,
+) -> DaemonCommand {
+    DaemonCommand::SetCoolingCurvePoints {
+        device_id,
+        channel_id,
+        points,
+        sensor_id,
+    }
+}
+
+fn curve_preset_command(
+    device_id: String,
+    channel_id: String,
+    preset: String,
+    sensor_id: Option<String>,
+) -> DaemonCommand {
+    DaemonCommand::SetCoolingCurvePreset {
+        device_id,
+        channel_id,
+        preset,
+        sensor_id,
+    }
+}
+
+fn cooling_channels(dev: &halod_shared::types::WireDevice) -> Vec<CoolingChannel> {
+    dev.cooling()
+        .map(|cooling| cooling.channels.clone())
+        .unwrap_or_default()
+}
+
+fn find_fan(dev: &halod_shared::types::WireDevice, channel_id: &str) -> Option<CoolingChannel> {
     dev.capabilities.iter().find_map(|c| match c {
-        DeviceCapability::Fan(f) => Some(f.clone()),
+        DeviceCapability::Cooling(cooling) => cooling
+            .channels
+            .iter()
+            .find(|c| c.id == channel_id)
+            .cloned(),
         _ => None,
     })
 }

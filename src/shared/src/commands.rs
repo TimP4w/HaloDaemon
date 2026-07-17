@@ -257,27 +257,24 @@ pub enum DaemonCommand {
         selection: crate::keyboard::KeyboardLayoutSelection,
     },
 
-    // Fan speed / curves
-    SetFanSpeed {
-        id: String,
-        duty: u8,
-    },
-    SetFanCurvePoints {
-        fan_id: String,
-        /// Points as [temp_celsius, duty_percent] pairs. Uses `f32` to match
-        /// the wire type in `WireFanCurve`, avoiding a runtime cast.
+    /// Channel-addressed curve commands for devices that expose `cooling`.
+    SetCoolingCurvePoints {
+        device_id: String,
+        channel_id: String,
         points: Vec<[f32; 2]>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sensor_id: Option<String>,
     },
-    SetFanCurvePreset {
-        fan_id: String,
+    SetCoolingCurvePreset {
+        device_id: String,
+        channel_id: String,
         preset: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sensor_id: Option<String>,
     },
-    RemoveFanCurve {
-        fan_id: String,
+    RemoveCoolingCurve {
+        device_id: String,
+        channel_id: String,
     },
 
     // RGB
@@ -967,15 +964,19 @@ mod tests {
     }
 
     #[test]
-    fn set_fan_curve_points_omits_absent_sensor_id() {
-        let v = roundtrip(&DaemonCommand::SetFanCurvePoints {
-            fan_id: "f".into(),
+    fn set_cooling_curve_points_carries_device_and_channel() {
+        let v = roundtrip(&DaemonCommand::SetCoolingCurvePoints {
+            device_id: "kraken".into(),
+            channel_id: "pump".into(),
             points: vec![[30.0, 20.0], [80.0, 100.0]],
             sensor_id: None,
         });
         assert_eq!(
             v,
-            json!({"type": "set_fan_curve_points", "fan_id": "f", "points": [[30.0, 20.0], [80.0, 100.0]]})
+            json!({
+                "type": "set_cooling_curve_points", "device_id": "kraken", "channel_id": "pump",
+                "points": [[30.0, 20.0], [80.0, 100.0]]
+            })
         );
     }
 
@@ -1242,13 +1243,4 @@ mod tests {
         assert!(v["selection"].get("language").is_none());
     }
 
-    #[test]
-    fn set_fan_speed_serializes_correct_type_discriminator() {
-        let v = roundtrip(&DaemonCommand::SetFanSpeed {
-            id: "pump1".into(),
-            duty: 80,
-        });
-        assert_eq!(v["type"], "set_fan_speed");
-        assert_eq!(v["duty"], 80);
-    }
 }

@@ -10,10 +10,10 @@ use halod_shared::keyboard::{
     is_iso_language, KeyVariant, KeyboardLayoutSelection, KeyboardLayoutStatus,
 };
 use halod_shared::types::{
-    Battery, Boolean, ButtonMapping, ConnectionStatus, DeviceCapability, DpiStatus,
-    EffectParamValue, Equalizer, FanStatus, KeyRemapStatus, KeyboardLayout, LcdDescriptor,
-    LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType, SensorUnit,
-    VisibilityState, ZoneTopology,
+    Battery, Boolean, ButtonMapping, ConnectionStatus, CoolingChannel, CoolingStatus,
+    DeviceCapability, DpiStatus, EffectParamValue, Equalizer, KeyRemapStatus, KeyboardLayout,
+    LcdDescriptor, LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType,
+    SensorUnit, VisibilityState, ZoneTopology,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 use std::collections::HashMap;
@@ -71,14 +71,58 @@ pub struct ChainLinkSpec {
     pub led_count: u32,
 }
 
-/// Fan status/speed surface for chain accessory drivers with fan hardware
-/// alongside their ARGB channels; chain writes go through [`chain::ChainHub`] instead.
+/// Cooling surface for chain accessories. Chain RGB writes remain the concern
+/// of [`chain::ChainHub`]; this trait routes a child's cooling channel back to
+/// its parent controller.
 #[async_trait]
-pub trait FanHub: Send + Sync + 'static {
-    async fn get_fan_rpm(&self, channel: u8) -> Result<u32>;
-    async fn get_fan_duty(&self, channel: u8) -> Result<u8>;
-    async fn get_fan_controllable(&self, channel: u8) -> Result<bool>;
-    async fn set_fan_duty(&self, channel: u8, duty: u8) -> Result<()>;
+pub trait CoolingHub: Send + Sync + 'static {
+    async fn get_cooling_status(&self, channel: u8) -> Result<CoolingChannel>;
+    async fn set_cooling_duty(&self, channel: u8, duty: u8) -> Result<()>;
+}
+
+/// Unified cooling surface for one or more independently addressable outputs.
+#[async_trait]
+pub trait CoolingCapability: Send + Sync {
+    fn cooling_channels(&self) -> Vec<CoolingChannel>;
+    async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel>;
+    async fn set_cooling_duty(&self, channel_id: &str, duty: u8) -> Result<()>;
+    fn cooling_state(&self) -> &CoolingStateSlot;
+
+    fn curves(&self) -> HashMap<String, crate::cooling::config::FanCurveRecord> {
+        self.cooling_state().curves()
+    }
+    fn curve(&self, channel_id: &str) -> Option<crate::cooling::config::FanCurveRecord> {
+        self.cooling_state().curve(channel_id)
+    }
+    fn set_curve(&self, channel_id: String, curve: crate::cooling::config::FanCurveRecord) {
+        self.cooling_state().set_curve(channel_id, curve);
+    }
+    fn clear_curve(&self, channel_id: &str) {
+        self.cooling_state().clear_curve(channel_id);
+    }
+    fn clear_curves(&self) {
+        self.cooling_state().clear_curves();
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        let mut channels = self.cooling_channels();
+        for channel in &mut channels {
+            if let Ok(status) = self.get_cooling_status(&channel.id).await {
+                *channel = status;
+            }
+        }
+        Some(DeviceCapability::Cooling(CoolingStatus { channels }))
+    }
+
+    fn state_key(&self) -> &'static str {
+        halod_shared::capability::FAN_CURVE
+    }
+    fn save_state(&self) -> serde_json::Value {
+        self.cooling_state().save()
+    }
+    async fn restore_state(&self, v: &serde_json::Value) {
+        self.cooling_state().load_legacy(v);
+    }
 }
 
 #[async_trait]
@@ -371,64 +415,6 @@ pub trait EqualizerCapability: Send + Sync {
 }
 
 #[async_trait]
-pub trait FanCapability: Send + Sync {
-    async fn get_duty(&self) -> Result<u8>;
-
-    async fn set_duty(&self, duty: u8) -> Result<()>;
-
-    /// Returns current fan speed in RPM. Returns `None` for devices (e.g. pumps) that
-    /// report duty but not RPM.
-    async fn get_rpm(&self) -> Option<u32>;
-
-    /// Backing slot — required so all state sub-operations have defaults.
-    fn fan_state(&self) -> &FanStateSlot;
-
-    fn fan_curve(&self) -> Option<crate::cooling::config::FanCurveRecord> {
-        self.fan_state().fan_curve()
-    }
-    fn set_fan_curve(&self, curve: crate::cooling::config::FanCurveRecord) {
-        self.fan_state().set_fan_curve(curve);
-    }
-    fn clear_fan_curve(&self) {
-        self.fan_state().clear_fan_curve();
-    }
-
-    fn fan_channel_id(&self) -> u8 {
-        0
-    }
-
-    async fn fan_controllable(&self) -> bool {
-        true
-    }
-
-    async fn to_wire(&self) -> Option<DeviceCapability> {
-        Some(DeviceCapability::Fan(FanStatus {
-            channel: self.fan_channel_id(),
-            rpm: self.get_rpm().await.unwrap_or(0),
-            duty: self.get_duty().await.unwrap_or(0),
-            controllable: self.fan_controllable().await,
-        }))
-    }
-
-    fn state_key(&self) -> &'static str {
-        halod_shared::capability::FAN_CURVE
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::to_value(self.fan_curve()).unwrap_or(serde_json::Value::Null)
-    }
-    async fn restore_state(&self, v: &serde_json::Value) {
-        match serde_json::from_value::<Option<crate::cooling::config::FanCurveRecord>>(v.clone()) {
-            Ok(Some(c)) => match c.validate() {
-                Ok(()) => self.set_fan_curve(c),
-                Err(e) => log::warn!("[fan restore_state] dropping invalid curve: {e:#}"),
-            },
-            Ok(None) => self.clear_fan_curve(),
-            Err(e) => log::warn!("[fan restore_state] invalid curve payload: {e}"),
-        }
-    }
-}
-
-#[async_trait]
 pub trait SensorCapability: Send + Sync {
     async fn get_sensors(&self) -> Result<Vec<Sensor>>;
 
@@ -442,45 +428,39 @@ pub trait SensorCapability: Send + Sync {
     }
 }
 
-/// Deterministic id for a fan's synthesized duty-percent sensor reading.
-pub fn fan_duty_sensor_id(device_id: &str) -> String {
-    format!("fan_{device_id}_duty")
-}
-
-/// Deterministic id for a fan's synthesized RPM sensor reading, when it reports one.
-pub fn fan_rpm_sensor_id(device_id: &str) -> String {
-    format!("fan_{device_id}_rpm")
-}
-
-/// Synthesizes duty/RPM sensor readings for any device with a `FanCapability`,
-/// so fan-driven effects (and the sensor dashboard) can select them like any
-/// other sensor. Returns an empty `Vec` for devices without `FanCapability`.
+/// Synthesizes duty/RPM sensor readings for cooling channels.
 pub async fn fan_sensors(device: &dyn Device) -> Vec<Sensor> {
-    let Some(fan) = device.as_fan() else {
-        return Vec::new();
-    };
-    let mut out = vec![Sensor {
-        id: fan_duty_sensor_id(device.id()),
-        name: format!("{} Duty", device.name()),
-        value: fan.get_duty().await.unwrap_or_else(|e| {
-            log::trace!("[fan_sensors] get_duty: {e}");
-            0
-        }) as f64,
-        unit: SensorUnit::Percent,
-        sensor_type: SensorType::FanDuty,
-        visibility: VisibilityState::Visible,
-    }];
-    if let Some(rpm) = fan.get_rpm().await {
-        out.push(Sensor {
-            id: fan_rpm_sensor_id(device.id()),
-            name: format!("{} RPM", device.name()),
-            value: rpm as f64,
-            unit: SensorUnit::Rpm,
-            sensor_type: SensorType::FanSpeed,
-            visibility: VisibilityState::Visible,
-        });
+    if let Some(cooling) = device.as_cooling() {
+        let mut out = Vec::new();
+        for channel in cooling.cooling_channels() {
+            let Ok(status) = cooling.get_cooling_status(&channel.id).await else {
+                continue;
+            };
+            let prefix = format!("cooling_{}_{}", device.id(), channel.id);
+            if let Some(duty) = status.duty {
+                out.push(Sensor {
+                    id: format!("{prefix}_duty"),
+                    name: format!("{} {} Duty", device.name(), status.name),
+                    value: duty as f64,
+                    unit: SensorUnit::Percent,
+                    sensor_type: SensorType::FanDuty,
+                    visibility: VisibilityState::Visible,
+                });
+            }
+            if let Some(rpm) = status.rpm {
+                out.push(Sensor {
+                    id: format!("{prefix}_rpm"),
+                    name: format!("{} {} RPM", device.name(), status.name),
+                    value: rpm as f64,
+                    unit: SensorUnit::Rpm,
+                    sensor_type: SensorType::FanSpeed,
+                    visibility: VisibilityState::Visible,
+                });
+            }
+        }
+        return out;
     }
-    out
+    Vec::new()
 }
 
 /// Unified DPI control for pointing devices. Covers both onboard-profile DPI
@@ -894,10 +874,10 @@ mod fan_sensor_tests {
         assert_eq!(sensors.len(), 2);
         assert!(sensors
             .iter()
-            .any(|s| s.id == "fan_fan0_duty" && s.sensor_type == SensorType::FanDuty));
-        assert!(sensors
-            .iter()
-            .any(|s| s.id == "fan_fan0_rpm" && s.value == 1234.0 && s.unit == SensorUnit::Rpm));
+            .any(|s| s.id == "cooling_fan0_default_duty" && s.sensor_type == SensorType::FanDuty));
+        assert!(sensors.iter().any(|s| s.id == "cooling_fan0_default_rpm"
+            && s.value == 1234.0
+            && s.unit == SensorUnit::Rpm));
     }
 
     #[tokio::test]
@@ -905,33 +885,12 @@ mod fan_sensor_tests {
         let dev = MockDevice::new("fan0").with_fan();
         let sensors = fan_sensors(&dev).await;
         assert_eq!(sensors.len(), 1);
-        assert_eq!(sensors[0].id, "fan_fan0_duty");
+        assert_eq!(sensors[0].id, "cooling_fan0_default_duty");
     }
 
     #[tokio::test]
     async fn fan_sensors_empty_for_non_fan_device() {
         let dev = MockDevice::new("rgb0").with_rgb();
         assert!(fan_sensors(&dev).await.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod fan_sensor_id_prop_tests {
-    use super::{fan_duty_sensor_id, fan_rpm_sensor_id};
-    use proptest::prelude::*;
-
-    proptest! {
-        /// Duty and RPM ids never collide with each other or across devices.
-        #[test]
-        fn fan_sensor_ids_are_distinct(
-            id_a in "[a-zA-Z0-9_]{1,16}",
-            id_b in "[a-zA-Z0-9_]{1,16}",
-        ) {
-            prop_assert_ne!(fan_duty_sensor_id(&id_a), fan_rpm_sensor_id(&id_a));
-            if id_a != id_b {
-                prop_assert_ne!(fan_duty_sensor_id(&id_a), fan_duty_sensor_id(&id_b));
-                prop_assert_ne!(fan_rpm_sensor_id(&id_a), fan_rpm_sensor_id(&id_b));
-            }
-        }
     }
 }

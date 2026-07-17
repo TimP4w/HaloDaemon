@@ -3,16 +3,18 @@
 //! Shared mock device + builders for unit tests. Test-only.
 
 use crate::drivers::{
-    ActionCapability, BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache, Device,
-    DpiCapability, EqualizerCapability, FanCapability, FanStateSlot, KeyRemapCapability,
-    KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot, RangeCapability,
-    RangeStateCache, RgbCapability, RgbStateSlot, SensorCapability, VisibilitySlot,
+    ActionCapability, BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache,
+    CoolingCapability, CoolingStateSlot, Device, DpiCapability, EqualizerCapability,
+    KeyRemapCapability, KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
+    RangeCapability, RangeStateCache, RgbCapability, RgbStateSlot, SensorCapability,
+    VisibilitySlot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{
-    Boolean, ButtonDescriptor, ButtonMapping, DpiMode, DpiStatus, EqBand, Equalizer,
-    KeyRemapStatus, LcdDescriptor, RgbColor, RgbDescriptor, RgbState, ScreenShape, Sensor,
+    Boolean, ButtonDescriptor, ButtonMapping, CoolingChannel, CoolingChannelKind, DpiMode,
+    DpiStatus, EqBand, Equalizer, KeyRemapStatus, LcdDescriptor, RgbColor, RgbDescriptor, RgbState,
+    ScreenShape, Sensor,
 };
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -105,8 +107,8 @@ pub struct MockDevice {
     /// `None` for a normal built-in host device.
     pub owning_plugin_id: Option<String>,
     // Capability slots — `None` means the capability is absent.
-    pub fan: Option<FanStateSlot>,
-    /// RPM returned by `get_rpm()`; `None` (the default) means "no tachometer".
+    pub fan: Option<CoolingStateSlot>,
+    /// RPM reported by the cooling channel; `None` (the default) means "no tachometer".
     pub fan_rpm: Option<u32>,
     pub rgb: Option<RgbStateSlot>,
     /// Number of `RgbCapability::apply` calls, for tests asserting a specific
@@ -234,11 +236,11 @@ impl MockDevice {
     }
 
     pub fn with_fan(mut self) -> Self {
-        self.fan = Some(FanStateSlot::default());
+        self.fan = Some(CoolingStateSlot::default());
         self
     }
 
-    /// Make `get_rpm()` report a tachometer reading. Implies `with_fan()`.
+    /// Make the cooling channel report a tachometer reading. Implies `with_fan()`.
     pub fn with_fan_rpm(mut self, rpm: u32) -> Self {
         self = self.with_fan();
         self.fan_rpm = Some(rpm);
@@ -394,7 +396,7 @@ impl Device for MockDevice {
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
         let mut caps: Vec<CapabilityRef<'_>> = Vec::new();
         if self.fan.is_some() {
-            caps.push(CapabilityRef::Fan(self));
+            caps.push(CapabilityRef::Cooling(self));
         }
         if self.rgb.is_some() {
             caps.push(CapabilityRef::Rgb(self));
@@ -463,20 +465,30 @@ impl KeyboardLayoutCapability for MockDevice {
 }
 
 #[async_trait]
-impl FanCapability for MockDevice {
-    async fn get_duty(&self) -> Result<u8> {
-        Ok(0)
+impl CoolingCapability for MockDevice {
+    fn cooling_channels(&self) -> Vec<CoolingChannel> {
+        vec![CoolingChannel {
+            id: "default".into(),
+            name: "Fan".into(),
+            kind: CoolingChannelKind::Fan,
+            controllable: true,
+            rpm: self.fan_rpm,
+            duty: Some(0),
+        }]
     }
-    async fn set_duty(&self, _: u8) -> Result<()> {
+    async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel> {
+        self.cooling_channels()
+            .into_iter()
+            .find(|channel| channel.id == channel_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown cooling channel '{channel_id}'"))
+    }
+    async fn set_cooling_duty(&self, _channel_id: &str, _duty: u8) -> Result<()> {
         Ok(())
     }
-    async fn get_rpm(&self) -> Option<u32> {
-        self.fan_rpm
-    }
-    fn fan_state(&self) -> &FanStateSlot {
+    fn cooling_state(&self) -> &CoolingStateSlot {
         self.fan
             .as_ref()
-            .expect("MockDevice: FanStateSlot not present — call .with_fan()")
+            .expect("MockDevice: CoolingStateSlot not present — call .with_fan()")
     }
 }
 

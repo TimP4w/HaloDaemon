@@ -95,6 +95,8 @@ pub struct CoolingTab {
     pub curve: Vec<[f32; 2]>,
     pub curve_seeded: bool,
     pub curve_sensor: Option<String>,
+    /// Selected device-local channel for multi-output coolers.
+    pub channel_id: Option<String>,
 }
 
 /// Per-tab edit state for the Performance tab.

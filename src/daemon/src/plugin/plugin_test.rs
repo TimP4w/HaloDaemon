@@ -785,9 +785,12 @@ fn integration_child_table(
         let child = child.clone();
         let handle = handle.clone();
         table.set(
-            "get_duty",
-            lua.create_function(move |_, _self: Table| {
-                handle.block_on(child.fan_get_duty()).map_err(mlua_err)
+            "get_cooling_status",
+            lua.create_function(move |lua, (_self, channel_id): (Table, String)| {
+                let status = handle
+                    .block_on(child.cooling_status(&channel_id))
+                    .map_err(mlua_err)?;
+                lua.to_value(&status)
             })?,
         )?;
     }
@@ -795,18 +798,11 @@ fn integration_child_table(
         let child = child.clone();
         let handle = handle.clone();
         table.set(
-            "get_rpm",
-            lua.create_function(move |_, _self: Table| {
-                handle.block_on(child.fan_get_rpm()).map_err(mlua_err)
-            })?,
-        )?;
-    }
-    {
-        let handle = handle.clone();
-        table.set(
-            "set_duty",
-            lua.create_function(move |_, (_self, duty): (Table, u8)| {
-                handle.block_on(child.fan_set_duty(duty)).map_err(mlua_err)
+            "set_cooling_duty",
+            lua.create_function(move |_, (_self, channel_id, duty): (Table, String, u8)| {
+                handle
+                    .block_on(child.cooling_set_duty(&channel_id, duty))
+                    .map_err(mlua_err)
             })?,
         )?;
     }

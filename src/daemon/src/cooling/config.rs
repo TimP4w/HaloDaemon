@@ -96,11 +96,13 @@ impl FanCurveRecord {
 
     pub fn serialize(
         &self,
-        fan_id: String,
+        device_id: String,
+        channel_id: String,
         status: halod_shared::types::FanCurveStatus,
     ) -> halod_shared::types::WireFanCurve {
         halod_shared::types::WireFanCurve {
-            fan_id,
+            device_id,
+            channel_id,
             sensor_id: self.sensor_id.clone(),
             points: self.points.iter().map(|&(t, d)| [t, d]).collect(),
             status,

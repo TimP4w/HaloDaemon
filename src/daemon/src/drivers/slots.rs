@@ -149,19 +149,55 @@ impl RgbStateSlot {
     }
 }
 
+/// Persisted curves keyed by device-local cooling channel. The custom loader
+/// deliberately accepts the previous single-record shape so upgrades preserve
+/// existing fan/pump curves as the `default` channel.
 #[derive(Default)]
-pub struct FanStateSlot(Slot<Option<crate::cooling::config::FanCurveRecord>>);
+pub struct CoolingStateSlot(Slot<HashMap<String, crate::cooling::config::FanCurveRecord>>);
 
-impl FanStateSlot {
-    pub fn fan_curve(&self) -> Option<crate::cooling::config::FanCurveRecord> {
+impl CoolingStateSlot {
+    pub fn curve(&self, channel_id: &str) -> Option<crate::cooling::config::FanCurveRecord> {
+        self.0.with(|curves| curves.get(channel_id).cloned())
+    }
+    pub fn set_curve(&self, channel_id: String, mut curve: crate::cooling::config::FanCurveRecord) {
+        curve.sanitize();
+        self.0.update(|curves| {
+            curves.insert(channel_id, curve);
+        });
+    }
+    pub fn clear_curve(&self, channel_id: &str) {
+        self.0.update(|curves| {
+            curves.remove(channel_id);
+        });
+    }
+    pub fn clear_curves(&self) {
+        self.0.set(HashMap::new());
+    }
+    pub fn curves(&self) -> HashMap<String, crate::cooling::config::FanCurveRecord> {
         self.0.get()
     }
-    pub fn set_fan_curve(&self, mut c: crate::cooling::config::FanCurveRecord) {
-        c.sanitize();
-        self.0.set(Some(c));
+    pub fn save(&self) -> serde_json::Value {
+        let curves = self.curves();
+        if curves.is_empty() {
+            // Null (not `{}`) for an empty slot, matching every other state slot
+            // so an unconfigured device contributes no persisted capability state.
+            return serde_json::Value::Null;
+        }
+        serde_json::to_value(curves).unwrap_or(serde_json::Value::Null)
     }
-    pub fn clear_fan_curve(&self) {
-        self.0.set(None);
+    pub fn load_legacy(&self, value: &serde_json::Value) {
+        if let Ok(curves) = serde_json::from_value::<
+            HashMap<String, crate::cooling::config::FanCurveRecord>,
+        >(value.clone())
+        {
+            self.0.set(curves);
+            return;
+        }
+        if let Ok(Some(curve)) =
+            serde_json::from_value::<Option<crate::cooling::config::FanCurveRecord>>(value.clone())
+        {
+            self.set_curve("default".to_string(), curve);
+        }
     }
 }
 

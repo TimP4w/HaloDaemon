@@ -59,7 +59,7 @@ pub fn tabs_for(dev: &WireDevice) -> Vec<Tab> {
     ) {
         push(TabKind::Chains);
     }
-    if has(dev, |c| matches!(c, DeviceCapability::Fan(_))) {
+    if has(dev, |c| matches!(c, DeviceCapability::Cooling(_))) {
         push(TabKind::Cooling);
     }
     if has(dev, |c| matches!(c, DeviceCapability::Lcd(_))) {
@@ -266,7 +266,7 @@ mod tests {
         // A device with both Lighting (first) and Cooling tabs.
         let d = dev(
             DeviceType::Other,
-            vec![rgb_cap(), DeviceCapability::Fan(Default::default())],
+            vec![rgb_cap(), DeviceCapability::Cooling(Default::default())],
         );
         let tabs = tabs_for(&d);
         // Fresh state defaults to index 0 (Lighting); remembering Cooling wins.

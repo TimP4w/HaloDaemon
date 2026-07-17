@@ -259,12 +259,21 @@ pub struct InitDpi {
     pub current: Option<u16>,
 }
 
-/// Runtime fan descriptor. The physical channel is device-specific and is
-/// therefore supplied by initialize rather than the catalog.
+/// Runtime multi-channel cooling descriptor returned by `initialize`.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct InitFan {
+pub struct InitCooling {
     #[serde(default)]
-    pub channel: u8,
+    pub channels: Vec<InitCoolingChannel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InitCoolingChannel {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub kind: halod_shared::types::CoolingChannelKind,
+    #[serde(default)]
+    pub controllable: bool,
 }
 
 /// Runtime key-remap descriptor. Button CIDs and host-mode policy are reported
@@ -353,7 +362,7 @@ pub struct InitOutcome {
     pub accessories: Option<Vec<AccessoryManifest>>,
     pub controls: Option<InitControls>,
     pub dpi: Option<InitDpi>,
-    pub fan: Option<InitFan>,
+    pub cooling: Option<InitCooling>,
     pub key_remap: Option<InitKeyRemap>,
     pub keyboard: Option<InitKeyboard>,
     /// Current range-control values keyed by control key, seeding the host's
@@ -387,7 +396,7 @@ struct InitTable {
     #[serde(default)]
     dpi: Option<InitDpi>,
     #[serde(default)]
-    fan: Option<InitFan>,
+    cooling: Option<InitCooling>,
     #[serde(default)]
     key_remap: Option<InitKeyRemap>,
     #[serde(default)]
@@ -791,7 +800,7 @@ impl PluginHandle {
                         accessories: t.accessories,
                         controls: t.controls,
                         dpi: t.dpi,
-                        fan: t.fan,
+                        cooling: t.cooling,
                         key_remap: t.key_remap,
                         keyboard: t.keyboard,
                         ranges: t.ranges,
@@ -939,23 +948,19 @@ impl PluginHandle {
         .await
     }
 
-    pub async fn fan_get_duty(&self) -> Result<u8> {
-        self.call("get_duty", ()).await
+    /// Read one channel through the unified cooling callback. The returned
+    /// table mirrors the channel descriptor and may omit telemetry fields.
+    pub async fn cooling_status(
+        &self,
+        channel_id: &str,
+    ) -> Result<halod_shared::types::CoolingChannel> {
+        self.call_ret("get_cooling_status", channel_id.to_string())
+            .await
     }
 
-    pub async fn fan_set_duty(&self, duty: u8) -> Result<()> {
-        self.call("set_duty", duty).await
-    }
-
-    pub async fn fan_get_rpm(&self) -> Result<Option<u32>> {
-        self.run(|ctx, dev, _| {
-            let Some(f) = func(&ctx.manifest, "get_rpm") else {
-                return Ok(None);
-            };
-            f.call::<Option<u32>>(dev)
-                .map_err(|e| lua_err("get_rpm", e))
-        })
-        .await
+    pub async fn cooling_set_duty(&self, channel_id: &str, duty: u8) -> Result<()> {
+        self.call("set_cooling_duty", (channel_id.to_string(), duty))
+            .await
     }
 
     pub async fn get_sensors(&self) -> Result<Vec<Sensor>> {
@@ -1141,20 +1146,15 @@ impl PluginHandle {
         Ok(controllers)
     }
 
-    pub async fn hub_fan_rpm(&self, channel: u8) -> Result<u32> {
-        self.call("fan_rpm", channel).await
+    pub async fn hub_cooling_status(
+        &self,
+        channel: u8,
+    ) -> Result<halod_shared::types::CoolingChannel> {
+        self.cooling_status(&channel.to_string()).await
     }
 
-    pub async fn hub_fan_duty(&self, channel: u8) -> Result<u8> {
-        self.call("fan_duty", channel).await
-    }
-
-    pub async fn hub_fan_controllable(&self, channel: u8) -> Result<bool> {
-        self.call("fan_controllable", channel).await
-    }
-
-    pub async fn hub_set_fan_duty(&self, channel: u8, duty: u8) -> Result<()> {
-        self.call("set_fan_duty", (channel, duty)).await
+    pub async fn hub_set_cooling_duty(&self, channel: u8, duty: u8) -> Result<()> {
+        self.cooling_set_duty(&channel.to_string(), duty).await
     }
 
     pub async fn lcd_stream_frame(
@@ -1766,8 +1766,8 @@ mod tests {
                         dev.local_count = (dev.local_count or 0) + 1
                         return { ok = true, model = tostring(initialized) }
                     end,
-                    get_duty = function(dev)
-                        return dev.local_count + dev.match.index
+                    get_cooling_status = function(dev, channel_id)
+                        return { id = channel_id, name = "fan", duty = dev.local_count + dev.match.index }
                     end,
                 }
             "#,
@@ -1795,10 +1795,10 @@ mod tests {
             child_two.initialize().await.unwrap().model.as_deref(),
             Some("3")
         );
-        assert_eq!(child_one.fan_get_duty().await.unwrap(), 2);
-        assert_eq!(child_two.fan_get_duty().await.unwrap(), 3);
+        assert_eq!(child_one.cooling_status("c").await.unwrap().duty, Some(2));
+        assert_eq!(child_two.cooling_status("c").await.unwrap().duty, Some(3));
         child_one.close().await.unwrap();
-        assert_eq!(child_two.fan_get_duty().await.unwrap(), 3);
+        assert_eq!(child_two.cooling_status("c").await.unwrap().duty, Some(3));
         root.close().await.unwrap();
     }
 

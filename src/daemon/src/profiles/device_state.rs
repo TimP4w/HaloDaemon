@@ -187,13 +187,13 @@ mod override_diff_tests {
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_choice().with_fan());
         dev.choice.as_ref().unwrap().record("mode", 1);
-        dev.fan
-            .as_ref()
-            .unwrap()
-            .set_fan_curve(crate::cooling::config::FanCurveRecord {
+        dev.fan.as_ref().unwrap().set_curve(
+            "default".to_string(),
+            crate::cooling::config::FanCurveRecord {
                 sensor_id: None,
                 points: vec![(20.0, 25.0), (80.0, 100.0)],
-            });
+            },
+        );
         app.devices
             .write()
             .await
@@ -209,19 +209,19 @@ mod override_diff_tests {
                 .insert("Gaming".into(), crate::profiles::config::Profile::default());
             cfg.active_profile = "Gaming".into();
         }
-        dev.fan
-            .as_ref()
-            .unwrap()
-            .set_fan_curve(crate::cooling::config::FanCurveRecord {
+        dev.fan.as_ref().unwrap().set_curve(
+            "default".to_string(),
+            crate::cooling::config::FanCurveRecord {
                 sensor_id: None,
                 points: vec![(30.0, 50.0)],
-            });
+            },
+        );
         super::persist_device_state(&app, dev.as_ref()).await;
 
         let cfg = app.config.read().await;
         let effective = cfg.effective_device_state("dev1");
         assert_eq!(
-            effective["fan_curve"]["points"][0][1], 50.0,
+            effective["fan_curve"]["default"]["points"][0][1], 50.0,
             "gaming override must win for the changed capability"
         );
         assert_eq!(
