@@ -4,7 +4,7 @@ use std::path::Path;
 
 use image::{Rgba, RgbaImage};
 
-use halod_shared::types::{RgbColor, Sensor};
+use halod_shared::types::{RgbColor, ScreenShape, Sensor};
 
 static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/NotoSans-Regular.ttf");
 static MONO_FONT_BYTES: &[u8] =
@@ -35,6 +35,7 @@ pub(super) fn load_system_font_arc(family: &str) -> Option<ab_glyph::FontArc> {
 pub struct TemplateCtx<'a> {
     pub width: u32,
     pub height: u32,
+    pub screen_shape: ScreenShape,
     /// Seconds since the engine started.
     pub t: f64,
     /// Live sensor readings keyed by sensor id.

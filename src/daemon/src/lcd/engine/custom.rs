@@ -19,7 +19,8 @@ use halod_shared::lcd_custom::{
     param_f64, param_str, BgKind, CustomTemplateDef, WidgetDef, WidgetSprite, TEXT_WEIGHT_PARAM,
 };
 use halod_shared::types::{
-    EffectParamValue, LcdEngineTemplateDescriptor, RgbColor, Sensor, SensorUnit,
+    EffectParamValue, LcdEngineTemplateDescriptor, RgbColor, ScreenShape, Sensor, SensorType,
+    SensorUnit,
 };
 
 use super::templates::{dim_color, rgba, Background, TemplateCtx};
@@ -201,6 +202,7 @@ impl CustomTemplate {
             self.plugin_assets.clear();
             self.plugin_revision = revision;
         }
+        let locale = app.config.read().await.gui.language.clone();
         let sensors: HashMap<String, crate::plugin::WidgetSensorInput> = ctx
             .sensors
             .iter()
@@ -212,6 +214,8 @@ impl CustomTemplate {
                         label: sensor.name.clone(),
                         formatted: format_sensor_value(sensor),
                         unit: sensor_unit(&sensor.unit),
+                        sensor_type: sensor_type(&sensor.sensor_type).to_owned(),
+                        stale: false,
                     },
                 )
             })
@@ -356,15 +360,10 @@ impl CustomTemplate {
                 color: self.color_for(&widget),
                 font,
                 sensors: sensors.clone(),
-                audio_bands: audio_frame
+                audio: audio_frame
                     .as_ref()
                     .filter(|frame| frame.seq != 0)
-                    .map(|frame| frame.bands.to_vec())
-                    .unwrap_or_default(),
-                audio_level: audio_frame
-                    .as_ref()
-                    .filter(|frame| frame.seq != 0)
-                    .map(|frame| frame.level),
+                    .map(widget_audio),
                 media: media_info.map(|info| {
                     let art = info.art.map(|art| crate::plugin::WidgetImageInput {
                         width: art.width(),
@@ -383,6 +382,14 @@ impl CustomTemplate {
                         art,
                     }
                 }),
+                environment: crate::plugin::WidgetEnvironmentInput {
+                    locale: locale.clone(),
+                    timezone: chrono::Local::now().offset().to_string(),
+                    temperature_unit: "celsius".to_owned(),
+                    screen_shape: screen_shape(&ctx.screen_shape).to_owned(),
+                    screen_width: ctx.width,
+                    screen_height: ctx.height,
+                },
                 images: entry
                     .descriptor
                     .params
@@ -1008,6 +1015,7 @@ impl EditorSession {
         &mut self,
         cw: u32,
         ch: u32,
+        screen_shape: ScreenShape,
         t: f64,
         sensors: &HashMap<String, Sensor>,
         app: &crate::state::AppState,
@@ -1015,6 +1023,7 @@ impl EditorSession {
         let ctx = TemplateCtx {
             width: cw,
             height: ch,
+            screen_shape,
             t,
             sensors,
         };
@@ -1075,6 +1084,7 @@ pub(crate) fn render_editor_sprites(
     def: &CustomTemplateDef,
     cw: u32,
     ch: u32,
+    screen_shape: ScreenShape,
     sensors: &HashMap<String, Sensor>,
     images_dir: &Path,
     known: &HashMap<String, u64>,
@@ -1086,15 +1096,64 @@ pub(crate) fn render_editor_sprites(
     let ctx = TemplateCtx {
         width: cw,
         height: ch,
+        screen_shape,
         t: 0.0,
         sensors,
     };
     s.tmpl.editor_sprites_delta(&ctx, known)
 }
 
+fn sensor_type(value: &SensorType) -> &'static str {
+    match value {
+        SensorType::Temperature => "temperature",
+        SensorType::Load => "load",
+        SensorType::Memory => "memory",
+        SensorType::Frequency => "frequency",
+        SensorType::Uptime => "uptime",
+        SensorType::FanSpeed => "fan_speed",
+        SensorType::FanDuty => "fan_duty",
+    }
+}
+
+fn widget_audio(frame: &audio::SpectrumFrame) -> crate::plugin::WidgetAudioInput {
+    crate::plugin::WidgetAudioInput {
+        level: frame.level,
+        flux: frame.flux,
+        beat: frame.beat,
+        seq: frame.seq,
+        bands: frame.bands.to_vec(),
+    }
+}
+
+fn screen_shape(value: &ScreenShape) -> &'static str {
+    match value {
+        ScreenShape::Circle => "circle",
+        ScreenShape::Square => "square",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn widget_audio_preserves_the_effect_spectrum_frame() {
+        let mut bands = [0.0; crate::services::audio::BANDS];
+        bands[3] = 0.75;
+        let frame = audio::SpectrumFrame {
+            bands,
+            level: 0.4,
+            flux: 0.7,
+            beat: true,
+            seq: 91,
+        };
+        let widget = widget_audio(&frame);
+        assert_eq!(widget.level, frame.level);
+        assert_eq!(widget.flux, frame.flux);
+        assert_eq!(widget.beat, frame.beat);
+        assert_eq!(widget.seq, frame.seq);
+        assert_eq!(widget.bands, frame.bands);
+    }
 
     #[test]
     fn editor_session_is_send() {

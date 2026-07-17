@@ -27,7 +27,8 @@ pub use runtime::device::LuaDevice;
 use runtime::device::{LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
 pub use runtime::effect_worker::{LedCoord, PluginEffectHandle};
 pub use runtime::widget_worker::{
-    PluginWidgetHandle, WidgetImageInput, WidgetMediaInput, WidgetRenderInput, WidgetSensorInput,
+    PluginWidgetHandle, WidgetAudioInput, WidgetEnvironmentInput, WidgetImageInput,
+    WidgetMediaInput, WidgetRenderInput, WidgetSensorInput,
 };
 pub use runtime::worker::run_pre_scan;
 

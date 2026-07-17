@@ -379,6 +379,7 @@ impl LcdEngine {
             let ctx = TemplateCtx {
                 width: descriptor.width,
                 height: descriptor.height,
+                screen_shape: descriptor.shape.clone(),
                 t,
                 sensors: &sensors,
             };

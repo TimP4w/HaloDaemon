@@ -43,12 +43,21 @@ pub struct WidgetRenderInput {
     pub color: RgbColor,
     pub font: FontArc,
     pub sensors: HashMap<String, WidgetSensorInput>,
-    pub audio_bands: Vec<f32>,
-    pub audio_level: Option<f32>,
+    pub audio: Option<WidgetAudioInput>,
     pub media: Option<WidgetMediaInput>,
+    pub environment: WidgetEnvironmentInput,
     pub images: HashMap<String, WidgetImageInput>,
     pub assets: HashMap<String, WidgetImageInput>,
     pub preview: bool,
+}
+
+#[derive(Clone)]
+pub struct WidgetAudioInput {
+    pub level: f32,
+    pub flux: f32,
+    pub beat: bool,
+    pub seq: u64,
+    pub bands: Vec<f32>,
 }
 
 #[derive(Clone)]
@@ -72,6 +81,18 @@ pub struct WidgetSensorInput {
     pub label: String,
     pub formatted: String,
     pub unit: String,
+    pub sensor_type: String,
+    pub stale: bool,
+}
+
+#[derive(Clone)]
+pub struct WidgetEnvironmentInput {
+    pub locale: String,
+    pub timezone: String,
+    pub temperature_unit: String,
+    pub screen_shape: String,
+    pub screen_width: u32,
+    pub screen_height: u32,
 }
 
 enum WidgetCall {
@@ -204,9 +225,20 @@ fn render_one(ctx: &WorkerCtx, input: WidgetRenderInput) -> Result<Vec<u8>> {
         font: input.font,
         text_style,
         sensors: input.sensors,
-        audio_bands: input.audio_bands,
-        audio_level: input.audio_level,
-        media: input.media,
+        audio: input.audio.or_else(|| input.preview.then(preview_audio)),
+        media: input.media.or_else(|| input.preview.then(preview_media)),
+        environment: if input.preview {
+            WidgetEnvironmentInput {
+                locale: "en".to_owned(),
+                timezone: "UTC".to_owned(),
+                temperature_unit: "celsius".to_owned(),
+                screen_shape: input.environment.screen_shape,
+                screen_width: input.environment.screen_width,
+                screen_height: input.environment.screen_height,
+            }
+        } else {
+            input.environment
+        },
         images: input.images,
         assets: input.assets,
         preview: input.preview,
@@ -253,6 +285,27 @@ fn render_one(ctx: &WorkerCtx, input: WidgetRenderInput) -> Result<Vec<u8>> {
         .to_vec())
 }
 
+fn preview_audio() -> WidgetAudioInput {
+    WidgetAudioInput {
+        level: 0.62,
+        flux: 0.18,
+        beat: false,
+        seq: 1,
+        bands: (0..32)
+            .map(|index| 0.22 + 0.58 * (index as f32 * 0.71).sin().abs())
+            .collect(),
+    }
+}
+
+fn preview_media() -> WidgetMediaInput {
+    WidgetMediaInput {
+        title: "Now Playing".to_owned(),
+        artist: "HaloDaemon".to_owned(),
+        status: "playing".to_owned(),
+        art: None,
+    }
+}
+
 struct RenderCtx {
     width: u32,
     height: u32,
@@ -260,9 +313,9 @@ struct RenderCtx {
     font: FontArc,
     text_style: WidgetTextStyle,
     sensors: HashMap<String, WidgetSensorInput>,
-    audio_bands: Vec<f32>,
-    audio_level: Option<f32>,
+    audio: Option<WidgetAudioInput>,
     media: Option<WidgetMediaInput>,
+    environment: WidgetEnvironmentInput,
     images: HashMap<String, WidgetImageInput>,
     assets: HashMap<String, WidgetImageInput>,
     preview: bool,
@@ -272,31 +325,70 @@ impl UserData for RenderCtx {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("is_preview", |_, this, ()| Ok(this.preview));
         methods.add_method("color", |lua, this, ()| lua.to_value(&this.color));
-        methods.add_method("sensor", |_, this, id: String| {
-            Ok(this.sensors.get(&id).map(|sensor| sensor.value))
+        methods.add_method("sensor_info", |lua, this, id: String| {
+            let preview;
+            let sensor = match this.sensors.get(&id) {
+                Some(sensor) => sensor,
+                None if this.preview => {
+                    preview = WidgetSensorInput {
+                        value: 42.0,
+                        label: "Sensor".to_owned(),
+                        formatted: "42".to_owned(),
+                        unit: "°C".to_owned(),
+                        sensor_type: "temperature".to_owned(),
+                        stale: false,
+                    };
+                    &preview
+                }
+                None => return Ok(None),
+            };
+            let table = lua.create_table()?;
+            table.set("value", sensor.value)?;
+            table.set("label", sensor.label.clone())?;
+            table.set("formatted", sensor.formatted.clone())?;
+            table.set("unit", sensor.unit.clone())?;
+            table.set("sensor_type", sensor.sensor_type.clone())?;
+            table.set("stale", sensor.stale)?;
+            Ok(Some(table))
         });
-        methods.add_method("sensor_label", |_, this, id: String| {
-            Ok(this.sensors.get(&id).map(|sensor| sensor.label.clone()))
+        methods.add_method("audio", |lua, this, ()| {
+            let Some(audio) = &this.audio else {
+                return Ok(None);
+            };
+            let table = lua.create_table()?;
+            table.set("level", audio.level)?;
+            table.set("flux", audio.flux)?;
+            table.set("beat", audio.beat)?;
+            table.set("seq", audio.seq)?;
+            table.set(
+                "bands",
+                lua.create_sequence_from(audio.bands.iter().copied())?,
+            )?;
+            Ok(Some(table))
         });
-        methods.add_method("sensor_text", |_, this, id: String| {
-            Ok(this.sensors.get(&id).map(|sensor| sensor.formatted.clone()))
+        methods.add_method("media", |lua, this, ()| {
+            let Some(media) = &this.media else {
+                return Ok(None);
+            };
+            let table = lua.create_table()?;
+            table.set("title", media.title.clone())?;
+            table.set("artist", media.artist.clone())?;
+            table.set("status", media.status.clone())?;
+            table.set("art_available", media.art.is_some())?;
+            Ok(Some(table))
         });
-        methods.add_method("sensor_unit", |_, this, id: String| {
-            Ok(this.sensors.get(&id).map(|sensor| sensor.unit.clone()))
-        });
-        methods.add_method("audio_level", |_, this, ()| Ok(this.audio_level));
-        methods.add_method("audio_band", |_, this, index: usize| {
-            Ok(this.audio_bands.get(index).copied())
-        });
-        methods.add_method("audio_band_count", |_, this, ()| Ok(this.audio_bands.len()));
-        methods.add_method("media_title", |_, this, ()| {
-            Ok(this.media.as_ref().map(|media| media.title.clone()))
-        });
-        methods.add_method("media_artist", |_, this, ()| {
-            Ok(this.media.as_ref().map(|media| media.artist.clone()))
-        });
-        methods.add_method("media_status", |_, this, ()| {
-            Ok(this.media.as_ref().map(|media| media.status.clone()))
+        methods.add_method("environment", |lua, this, ()| {
+            let table = lua.create_table()?;
+            table.set("locale", this.environment.locale.clone())?;
+            table.set("timezone", this.environment.timezone.clone())?;
+            table.set(
+                "temperature_unit",
+                this.environment.temperature_unit.clone(),
+            )?;
+            table.set("screen_shape", this.environment.screen_shape.clone())?;
+            table.set("screen_width", this.environment.screen_width)?;
+            table.set("screen_height", this.environment.screen_height)?;
+            Ok(table)
         });
         methods.add_method(
             "draw_media_art",
@@ -1128,9 +1220,16 @@ mod tests {
             color: RgbColor { r: 7, g: 8, b: 9 },
             font: font(),
             sensors: HashMap::new(),
-            audio_bands: vec![],
-            audio_level: None,
+            audio: None,
             media: None,
+            environment: WidgetEnvironmentInput {
+                locale: "de-CH".to_owned(),
+                timezone: "+02:00".to_owned(),
+                temperature_unit: "celsius".to_owned(),
+                screen_shape: "circle".to_owned(),
+                screen_width: 320,
+                screen_height: 320,
+            },
             images: HashMap::new(),
             assets: HashMap::new(),
             preview,
@@ -1169,6 +1268,115 @@ mod tests {
             HashMap::new(),
         );
         assert!(missing.render(input(true)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn preview_context_records_are_complete_and_deterministic() {
+        let source = r#"
+            local function check(canvas, ctx)
+                local audio = assert(ctx:audio())
+                assert(math.abs(audio.level - 0.62) < 0.0001)
+                assert(math.abs(audio.flux - 0.18) < 0.0001)
+                assert(audio.beat == false and audio.seq == 1 and #audio.bands == 32)
+                local media = assert(ctx:media())
+                assert(media.title == "Now Playing" and media.artist == "HaloDaemon")
+                assert(media.status == "playing" and media.art_available == false)
+                local sensor = assert(ctx:sensor_info("missing"))
+                assert(sensor.value == 42 and sensor.label == "Sensor")
+                assert(sensor.formatted == "42" and sensor.unit == "°C")
+                assert(sensor.sensor_type == "temperature" and sensor.stale == false)
+                local env = ctx:environment()
+                assert(env.locale == "en" and env.timezone == "UTC")
+                assert(env.temperature_unit == "celsius" and env.screen_shape == "circle")
+                assert(env.screen_width == 320 and env.screen_height == 320)
+                canvas:set_u8(0, math.floor(audio.bands[1] * 255))
+                canvas:set_u8(3, 255)
+            end
+            return {
+                render_widget_meter = function(canvas, w, h, t, dt, params, ctx) check(canvas, ctx) end,
+                preview_widget_meter = function(canvas, w, h, params, ctx) check(canvas, ctx) end,
+            }
+        "#;
+        let worker = PluginWidgetHandle::spawn(
+            source.to_owned(),
+            BTreeMap::new(),
+            vec!["meter".to_owned()],
+            vec![],
+            HashMap::new(),
+        );
+        let first = worker.render(input(true)).await.unwrap();
+        let second = worker.render(input(true)).await.unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn live_context_returns_complete_records_or_nil() {
+        let source = r#"
+            return {
+                render_widget_meter = function(canvas, w, h, t, dt, params, ctx)
+                    local audio = assert(ctx:audio())
+                    assert(math.abs(audio.level - 0.4) < 0.0001)
+                    assert(math.abs(audio.flux - 0.7) < 0.0001)
+                    assert(audio.beat == true and audio.seq == 91)
+                    assert(#audio.bands == 3 and math.abs(audio.bands[2] - 0.2) < 0.0001)
+                    local sensor = assert(ctx:sensor_info("cpu"))
+                    assert(sensor.value == 53.5 and sensor.label == "CPU")
+                    assert(sensor.formatted == "54 °C" and sensor.unit == " °C")
+                    assert(sensor.sensor_type == "temperature" and sensor.stale == false)
+                    assert(ctx:sensor_info("missing") == nil)
+                    assert(ctx:media() == nil)
+                    local env = ctx:environment()
+                    assert(env.locale == "de-CH" and env.timezone == "+02:00")
+                    canvas:set_u8(3, 255)
+                end,
+                preview_widget_meter = function() end,
+            }
+        "#;
+        let worker = PluginWidgetHandle::spawn(
+            source.to_owned(),
+            BTreeMap::new(),
+            vec!["meter".to_owned()],
+            vec![],
+            HashMap::new(),
+        );
+        let mut live = input(false);
+        live.audio = Some(WidgetAudioInput {
+            level: 0.4,
+            flux: 0.7,
+            beat: true,
+            seq: 91,
+            bands: vec![0.1, 0.2, 0.3],
+        });
+        live.sensors.insert(
+            "cpu".to_owned(),
+            WidgetSensorInput {
+                value: 53.5,
+                label: "CPU".to_owned(),
+                formatted: "54 °C".to_owned(),
+                unit: " °C".to_owned(),
+                sensor_type: "temperature".to_owned(),
+                stale: false,
+            },
+        );
+        worker.render(live).await.unwrap();
+
+        let missing_source = r#"
+            return {
+                render_widget_meter = function(canvas, w, h, t, dt, params, ctx)
+                    assert(ctx:audio() == nil and ctx:media() == nil)
+                    assert(ctx:sensor_info("cpu") == nil)
+                end,
+                preview_widget_meter = function() end,
+            }
+        "#;
+        let missing = PluginWidgetHandle::spawn(
+            missing_source.to_owned(),
+            BTreeMap::new(),
+            vec!["meter".to_owned()],
+            vec![],
+            HashMap::new(),
+        );
+        missing.render(input(false)).await.unwrap();
     }
 
     #[tokio::test]
