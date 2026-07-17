@@ -74,7 +74,6 @@ pub async fn set_sensor_visibility(
     state: VisibilityState,
     app: Arc<AppState>,
 ) -> Result<()> {
-    app.refresh_sensor_bus().await;
     app.data_bus
         .sensor_owner(&sensor_id)
         .ok_or_else(|| anyhow!("sensor not found: {sensor_id}"))?;
@@ -204,6 +203,7 @@ mod tests {
         let app = make_app();
         let device = Arc::new(MockDevice::new("fan0").with_fan());
         push_device(&app, device.clone());
+        app.refresh_sensor_bus().await;
 
         set_sensor_visibility("fan_fan0_duty".into(), VisibilityState::Hidden, app.clone())
             .await
@@ -239,6 +239,7 @@ mod tests {
             },
         ]));
         push_device(&app, device);
+        app.refresh_sensor_bus().await;
 
         set_sensor_visibility("temp1".into(), VisibilityState::Hidden, app.clone())
             .await
@@ -265,6 +266,7 @@ mod tests {
             },
         ]));
         push_device(&app, device);
+        app.refresh_sensor_bus().await;
 
         set_sensor_visibility("temp1".into(), VisibilityState::Hidden, app.clone())
             .await

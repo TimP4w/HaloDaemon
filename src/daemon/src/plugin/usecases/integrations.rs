@@ -17,6 +17,10 @@ use crate::state::AppState;
 /// Close and drop `id`'s integration root (and the children it exposes) from
 /// `app.devices`, if currently registered. No-op otherwise.
 async fn disable_one(app: &Arc<AppState>, id: &str) -> Option<String> {
+    // Integration enablement is an independent lifecycle gate. Tear down its
+    // shared snapshots at the same boundary as its devices so consumers never
+    // observe a still-fresh value from a stopped producer.
+    app.data_bus.invalidate_owner(id);
     let root_id = {
         let devices = app.devices.read().await;
         devices
@@ -125,6 +129,17 @@ mod tests {
                 devices.push(child.clone());
                 devices.push(unrelated.clone());
             }
+            app.data_bus
+                .publish(
+                    "openrgb",
+                    "openrgb.status",
+                    crate::services::data_bus::DataValue::Bool(true),
+                    crate::services::data_bus::DataPolicy {
+                        stale_after: std::time::Duration::from_secs(60),
+                        min_notify_interval: std::time::Duration::from_millis(16),
+                    },
+                )
+                .unwrap();
 
             set_integration_enabled("openrgb".into(), false, app.clone())
                 .await
@@ -149,6 +164,11 @@ mod tests {
             assert!(root.closed.load(Ordering::SeqCst));
             assert!(child.closed.load(Ordering::SeqCst));
             assert!(!unrelated.closed.load(Ordering::SeqCst));
+            assert_eq!(
+                app.data_bus.read("openrgb.status").status,
+                crate::services::data_bus::SnapshotStatus::Unavailable
+            );
+            assert!(app.data_bus.statuses_for_owner("openrgb").is_empty());
         })
         .await;
     }

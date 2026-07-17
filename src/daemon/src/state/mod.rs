@@ -278,6 +278,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sensor_bus_invalidates_a_failed_producer() {
+        use std::sync::atomic::Ordering;
+
+        let app = make_test_app();
+        let device = std::sync::Arc::new(
+            crate::test_support::MockDevice::new("sensor_dev").with_sensor(vec![
+                halod_shared::types::Sensor {
+                    id: "temp1".into(),
+                    name: "CPU Temp".into(),
+                    value: 45.5,
+                    unit: halod_shared::types::SensorUnit::Celsius,
+                    sensor_type: halod_shared::types::SensorType::Temperature,
+                    visibility: halod_shared::types::VisibilityState::Visible,
+                },
+            ]),
+        );
+        app.devices.write().await.push(device.clone());
+        app.refresh_sensor_bus().await;
+        assert!(app.data_bus.sensors().contains_key("temp1"));
+
+        device.live.store(false, Ordering::SeqCst);
+        app.refresh_sensor_bus().await;
+        assert!(app.data_bus.sensors().is_empty());
+        assert_eq!(
+            app.data_bus
+                .read(&crate::services::data_bus::sensor_key("temp1"))
+                .status,
+            crate::services::data_bus::SnapshotStatus::Unavailable
+        );
+    }
+
+    #[tokio::test]
     async fn sensor_bus_skips_devices_without_sensor_capability() {
         let app = make_test_app();
         let dev = std::sync::Arc::new(crate::test_support::MockDevice::new("no_sensor").with_rgb());

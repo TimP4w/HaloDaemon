@@ -323,6 +323,21 @@ async fn run_daemon(
         || {},
     );
 
+    let sensor_app = Arc::clone(&app);
+    supervisor.register(
+        "Sensor data producer",
+        "Host sensor snapshots stopped updating unexpectedly.",
+        move || {
+            let app = Arc::clone(&sensor_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(registry::state::sensor_data_producer(
+                    app,
+                )))
+            })
+        },
+        || {},
+    );
+
     let (cooling_cfg, rgb_cfg, lcd_cfg) = {
         let cfg = app.config.read().await;
         (cfg.cooling.clone(), cfg.rgb.clone(), cfg.lcd.clone())

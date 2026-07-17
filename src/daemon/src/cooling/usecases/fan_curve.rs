@@ -61,7 +61,6 @@ async fn require_temperature_sensor(sensor_id: &Option<String>, app: &Arc<AppSta
     let Some(id) = sensor_id else {
         return Ok(());
     };
-    app.refresh_sensor_bus().await;
     let sensors = app.data_bus.sensors();
     match sensors.get(id) {
         Some(s) if s.sensor_type == halod_shared::types::SensorType::Temperature => Ok(()),
@@ -126,14 +125,18 @@ mod tests {
     ) -> (Arc<AppState>, Arc<MockDevice>) {
         let cfg = Config::default();
         let app = Arc::new(AppState::new(cfg));
-        let device = Arc::new(MockDevice::new(fan_id).with_fan().with_sensor(vec![sensor(
-            sensor_id,
-            halod_shared::types::SensorType::Temperature,
-        )]));
+        let reading = sensor(sensor_id, halod_shared::types::SensorType::Temperature);
+        let device = Arc::new(
+            MockDevice::new(fan_id)
+                .with_fan()
+                .with_sensor(vec![reading.clone()]),
+        );
         {
             let mut devices = app.devices.try_write().unwrap();
             devices.push(device.clone() as Arc<dyn crate::drivers::Device>);
         }
+        app.data_bus
+            .replace_host_sensors(vec![(fan_id.to_owned(), reading)]);
         (app, device)
     }
 
@@ -236,6 +239,7 @@ mod tests {
             let mut devices = app.devices.try_write().unwrap();
             devices.push(device.clone() as Arc<dyn crate::drivers::Device>);
         }
+        app.refresh_sensor_bus().await;
         let err = set_fan_curve_points(
             "fan_0".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],

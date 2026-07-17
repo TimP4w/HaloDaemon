@@ -276,8 +276,6 @@ impl LcdEngine {
 
     async fn tick(&self, t: f64) {
         self.evict_idle_editor_session().await;
-        self.app_state.refresh_sensor_bus().await;
-
         let receiver_count = self.frame_tx.receiver_count();
         let prev_receiver_count = self
             .prev_receiver_count

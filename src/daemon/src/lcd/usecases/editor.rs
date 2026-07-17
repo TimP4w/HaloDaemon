@@ -49,7 +49,6 @@ pub async fn render(
     {
         return Ok(());
     }
-    app.refresh_sensor_bus().await;
     let images_dir = crate::config::lcd_images_dir();
     let render_device_id = device_id.clone();
     let mut session = app.lcd.editor_session().take();

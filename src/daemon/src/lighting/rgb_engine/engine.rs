@@ -326,7 +326,6 @@ impl RgbEngine {
 
         let mut pending: PendingWrites = HashMap::new();
         let mut led_colors: Vec<LedFrameEntry> = Vec::new();
-        self.app_state.refresh_sensor_bus().await;
         let sensor_snapshot = self.app_state.data_bus.sensors();
         let effect_frame = crate::plugin::EffectFrameInput {
             time: t,
@@ -1436,6 +1435,7 @@ mod tests {
             .await
             .push(dev.clone() as Arc<dyn Device>);
 
+        app.refresh_sensor_bus().await;
         let engine = RgbEngine::new(app).await;
         engine.tick(0.1, 1.0, 0).await;
         engine.drain_writes().await;

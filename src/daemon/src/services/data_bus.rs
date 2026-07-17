@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Result};
@@ -13,6 +13,7 @@ use halod_shared::types::{Sensor, SensorType, SensorUnit, VisibilityState};
 
 pub const MAX_PLUGIN_RECORD_BYTES: usize = 32 * 1024;
 const MAX_GLOBAL_BYTES: usize = 8 * 1024 * 1024;
+const MAX_GLOBAL_RECORDS: usize = 4096;
 const MAX_PLUGIN_BYTES: usize = 256 * 1024;
 const MAX_DEPTH: usize = 6;
 const MAX_MAP_FIELDS: usize = 64;
@@ -20,6 +21,7 @@ const MAX_ARRAY_ITEMS: usize = 256;
 const MAX_VALUES: usize = 512;
 const MAX_STRING_BYTES: usize = 4096;
 const MAX_MAP_KEY_BYTES: usize = 64;
+const MAX_RECORD_KEY_BYTES: usize = 256;
 const MIN_PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,18 +68,69 @@ impl DataValue {
         }
     }
 
-    fn accounted_bytes(&self) -> usize {
-        match self {
-            Self::Bool(_) => 1,
-            Self::Integer(_) | Self::Number(_) => 8,
-            Self::String(value) => value.len(),
-            Self::Array(values) => {
-                values.iter().map(Self::accounted_bytes).sum::<usize>() + values.len() * 2
+    fn validate(&self) -> Result<usize> {
+        let mut count = 0;
+        let bytes = validate_value(self, 0, &mut count)?;
+        ensure!(
+            bytes <= MAX_PLUGIN_RECORD_BYTES,
+            "data record exceeds {MAX_PLUGIN_RECORD_BYTES} bytes"
+        );
+        Ok(bytes)
+    }
+}
+
+fn validate_value(value: &DataValue, depth: usize, count: &mut usize) -> Result<usize> {
+    ensure!(
+        depth <= MAX_DEPTH,
+        "data record exceeds maximum depth {MAX_DEPTH}"
+    );
+    *count += 1;
+    ensure!(
+        *count <= MAX_VALUES,
+        "data record exceeds {MAX_VALUES} values"
+    );
+    match value {
+        DataValue::Bool(_) => Ok(1),
+        DataValue::Integer(_) => Ok(8),
+        DataValue::Number(value) => {
+            ensure!(
+                value.is_finite(),
+                "data record contains a non-finite number"
+            );
+            Ok(8)
+        }
+        DataValue::String(value) => {
+            ensure!(
+                value.len() <= MAX_STRING_BYTES,
+                "data string exceeds {MAX_STRING_BYTES} bytes"
+            );
+            Ok(value.len())
+        }
+        DataValue::Array(values) => {
+            ensure!(
+                values.len() <= MAX_ARRAY_ITEMS,
+                "data array exceeds {MAX_ARRAY_ITEMS} items"
+            );
+            let mut bytes = values.len() * 2;
+            for value in values {
+                bytes += validate_value(value, depth + 1, count)?;
             }
-            Self::Map(values) => values
-                .iter()
-                .map(|(key, value)| key.len() + value.accounted_bytes() + 2)
-                .sum(),
+            Ok(bytes)
+        }
+        DataValue::Map(values) => {
+            ensure!(
+                values.len() <= MAX_MAP_FIELDS,
+                "data map exceeds {MAX_MAP_FIELDS} fields"
+            );
+            let mut bytes = 0;
+            for (key, value) in values {
+                ensure!(
+                    !key.is_empty() && key.len() <= MAX_MAP_KEY_BYTES,
+                    "data map key is empty or too long"
+                );
+                bytes += key.len() + 2 + validate_value(value, depth + 1, count)?;
+            }
+            Ok(bytes)
         }
     }
 }
@@ -207,6 +260,8 @@ struct Record {
     reason: Option<String>,
     last_publish: Option<Instant>,
     last_notification: Option<Instant>,
+    pending_notification: bool,
+    stale_task: Option<tokio::task::AbortHandle>,
 }
 
 #[derive(Default)]
@@ -216,7 +271,7 @@ struct Inner {
 }
 
 pub struct DataBus {
-    inner: Mutex<Inner>,
+    inner: Arc<Mutex<Inner>>,
     changes: tokio::sync::broadcast::Sender<DataChange>,
 }
 
@@ -231,7 +286,7 @@ impl Default for DataBus {
     fn default() -> Self {
         let (changes, _) = tokio::sync::broadcast::channel(256);
         Self {
-            inner: Mutex::new(Inner::default()),
+            inner: Arc::new(Mutex::new(Inner::default())),
             changes,
         }
     }
@@ -249,13 +304,12 @@ impl DataBus {
             .iter()
             .map(|(_, sensor)| sensor_key(&sensor.id))
             .collect();
-        for (key, snapshot) in self.statuses_for_owner("host") {
+        for (key, _) in self.statuses_for_owner("host") {
             if key.starts_with("host.sensors.")
                 && key != "host.sensors.catalog"
                 && !expected.contains(&key)
-                && snapshot.status != SnapshotStatus::Unavailable
             {
-                let _ = self.invalidate("host", &key, "sensor_removed");
+                self.remove("host", &key);
             }
         }
 
@@ -395,6 +449,11 @@ impl DataBus {
         value: DataValue,
         policy: DataPolicy,
     ) -> Result<u64> {
+        ensure!(
+            !key.is_empty() && key.len() <= MAX_RECORD_KEY_BYTES,
+            "data record key is empty or exceeds {MAX_RECORD_KEY_BYTES} bytes"
+        );
+        let value_bytes = value.validate()?;
         let now = Instant::now();
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(record) = inner.records.get(key) {
@@ -412,6 +471,10 @@ impl DataBus {
             owner == "host" || inner.records.contains_key(key) || owner_records < 32,
             "plugin declares more than 32 retained data records"
         );
+        ensure!(
+            inner.records.contains_key(key) || inner.records.len() < MAX_GLOBAL_RECORDS,
+            "host data bus exceeds {MAX_GLOBAL_RECORDS} retained records"
+        );
         if owner != "host"
             && inner
                 .records
@@ -426,15 +489,22 @@ impl DataBus {
                 .published_instant
                 .is_some_and(|published| now.duration_since(published) < record.policy.stale_after);
             if still_fresh && record.value.as_ref() == Some(&value) {
+                if let Some(task) = record.stale_task.take() {
+                    task.abort();
+                }
                 record.published_at = Some(unix_seconds());
                 record.published_instant = Some(now);
                 record.policy = policy;
                 record.reason = None;
                 record.last_publish = Some(now);
-                return Ok(record.revision);
+                let revision = record.revision;
+                let stale_after = policy.stale_after;
+                drop(inner);
+                self.install_stale_notification(key.to_owned(), revision, now, stale_after);
+                return Ok(revision);
             }
         }
-        let bytes = value.accounted_bytes();
+        let bytes = retained_bytes(key, owner, value_bytes, 0);
         let existing_bytes = inner.records.get(key).map_or(0, |record| record.bytes);
         let plugin_bytes: usize = inner
             .records
@@ -453,11 +523,28 @@ impl DataBus {
         );
         inner.revision = inner.revision.wrapping_add(1).max(1);
         let revision = inner.revision;
-        let notify = inner
+        let previous_notification = inner
             .records
             .get(key)
-            .and_then(|record| record.last_notification)
+            .and_then(|record| record.last_notification);
+        let notify = previous_notification
             .is_none_or(|last| now.duration_since(last) >= policy.min_notify_interval);
+        let already_pending = inner
+            .records
+            .get(key)
+            .is_some_and(|record| record.pending_notification);
+        let schedule_after = (!notify && !already_pending).then(|| {
+            policy.min_notify_interval.saturating_sub(
+                previous_notification.map_or(Duration::ZERO, |last| now.duration_since(last)),
+            )
+        });
+        if let Some(task) = inner
+            .records
+            .get_mut(key)
+            .and_then(|record| record.stale_task.take())
+        {
+            task.abort();
+        }
         inner.records.insert(
             key.to_owned(),
             Record {
@@ -470,19 +557,33 @@ impl DataBus {
                 revision,
                 reason: None,
                 last_publish: Some(now),
-                last_notification: notify.then_some(now),
+                last_notification: if notify {
+                    Some(now)
+                } else {
+                    previous_notification
+                },
+                pending_notification: !notify,
+                stale_task: None,
             },
         );
+        drop(inner);
         if notify {
             let _ = self.changes.send(DataChange {
                 key: key.to_owned(),
                 revision,
             });
+        } else if let Some(delay) = schedule_after {
+            self.schedule_coalesced_notification(key.to_owned(), delay);
         }
+        self.install_stale_notification(key.to_owned(), revision, now, policy.stale_after);
         Ok(revision)
     }
 
     pub fn invalidate(&self, owner: &str, key: &str, reason: &str) -> Result<u64> {
+        ensure!(
+            !key.is_empty() && key.len() <= MAX_RECORD_KEY_BYTES,
+            "data record key is empty or exceeds {MAX_RECORD_KEY_BYTES} bytes"
+        );
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(record) = inner.records.get(key) {
             ensure!(
@@ -490,6 +591,10 @@ impl DataBus {
                 "data record '{key}' is owned by another producer"
             );
         }
+        ensure!(
+            inner.records.contains_key(key) || inner.records.len() < MAX_GLOBAL_RECORDS,
+            "host data bus exceeds {MAX_GLOBAL_RECORDS} retained records"
+        );
         inner.revision = inner.revision.wrapping_add(1).max(1);
         let revision = inner.revision;
         let policy = inner.records.get(key).map_or(
@@ -499,12 +604,19 @@ impl DataBus {
             },
             |record| record.policy,
         );
+        if let Some(task) = inner
+            .records
+            .get_mut(key)
+            .and_then(|record| record.stale_task.take())
+        {
+            task.abort();
+        }
         inner.records.insert(
             key.to_owned(),
             Record {
                 owner: owner.to_owned(),
                 value: None,
-                bytes: 0,
+                bytes: retained_bytes(key, owner, 0, reason.len()),
                 published_at: None,
                 published_instant: None,
                 policy,
@@ -512,8 +624,11 @@ impl DataBus {
                 reason: Some(reason.to_owned()),
                 last_publish: None,
                 last_notification: Some(Instant::now()),
+                pending_notification: false,
+                stale_task: None,
             },
         );
+        drop(inner);
         let _ = self.changes.send(DataChange {
             key: key.to_owned(),
             revision,
@@ -532,8 +647,107 @@ impl DataBus {
             .map(|(key, _)| key.clone())
             .collect();
         for key in keys {
-            let _ = self.invalidate(owner, &key, "producer_stopped");
+            self.remove(owner, &key);
         }
+    }
+
+    fn remove(&self, owner: &str, key: &str) {
+        let revision = {
+            let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            if inner
+                .records
+                .get(key)
+                .is_none_or(|record| record.owner != owner)
+            {
+                return;
+            }
+            if let Some(record) = inner.records.remove(key) {
+                if let Some(task) = record.stale_task {
+                    task.abort();
+                }
+            }
+            inner.revision = inner.revision.wrapping_add(1).max(1);
+            inner.revision
+        };
+        let _ = self.changes.send(DataChange {
+            key: key.to_owned(),
+            revision,
+        });
+    }
+
+    fn schedule_coalesced_notification(&self, key: String, delay: Duration) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let inner = Arc::clone(&self.inner);
+        let changes = self.changes.clone();
+        runtime.spawn(async move {
+            tokio::time::sleep(delay).await;
+            let revision = {
+                let mut inner = inner.lock().unwrap_or_else(|error| error.into_inner());
+                let Some(record) = inner.records.get_mut(&key) else {
+                    return;
+                };
+                if !record.pending_notification {
+                    return;
+                }
+                record.pending_notification = false;
+                record.last_notification = Some(Instant::now());
+                record.revision
+            };
+            let _ = changes.send(DataChange { key, revision });
+        });
+    }
+
+    fn install_stale_notification(
+        &self,
+        key: String,
+        revision: u64,
+        published: Instant,
+        delay: Duration,
+    ) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let inner = Arc::clone(&self.inner);
+        let changes = self.changes.clone();
+        let task_key = key.clone();
+        let task = runtime.spawn(async move {
+            tokio::time::sleep(delay).await;
+            let stale_revision = {
+                let mut inner = inner.lock().unwrap_or_else(|error| error.into_inner());
+                let should_notify = inner.records.get(&task_key).is_some_and(|record| {
+                    record.revision == revision
+                        && record.value.is_some()
+                        && record.published_instant.is_some_and(|published| {
+                            published.elapsed() >= record.policy.stale_after
+                        })
+                });
+                if !should_notify {
+                    return;
+                }
+                inner.revision = inner.revision.wrapping_add(1).max(1);
+                let stale_revision = inner.revision;
+                if let Some(record) = inner.records.get_mut(&task_key) {
+                    record.revision = stale_revision;
+                    record.stale_task = None;
+                }
+                stale_revision
+            };
+            let _ = changes.send(DataChange {
+                key: task_key,
+                revision: stale_revision,
+            });
+        });
+        let abort = task.abort_handle();
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(record) = inner.records.get_mut(&key) {
+            if record.revision == revision && record.published_instant == Some(published) {
+                record.stale_task = Some(abort);
+                return;
+            }
+        }
+        abort.abort();
     }
 
     pub fn read(&self, key: &str) -> DataSnapshot {
@@ -598,6 +812,14 @@ fn unix_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn retained_bytes(key: &str, owner: &str, value_bytes: usize, reason_bytes: usize) -> usize {
+    key.len()
+        .saturating_add(owner.len())
+        .saturating_add(value_bytes)
+        .saturating_add(reason_bytes)
+        .saturating_add(std::mem::size_of::<Record>())
 }
 
 pub fn snapshot_to_lua(lua: &Lua, snapshot: &DataSnapshot) -> mlua::Result<Table> {
@@ -784,5 +1006,142 @@ mod tests {
         assert!(DataValue::from_lua(sparse).is_err());
         let nan: Value = lua.load("return 0/0").eval().unwrap();
         assert!(DataValue::from_lua(nan).is_err());
+    }
+
+    #[test]
+    fn common_publish_boundary_rejects_invalid_host_values() {
+        let bus = DataBus::default();
+        assert!(bus
+            .publish(
+                "host",
+                "host.invalid.number",
+                DataValue::Number(f64::NAN),
+                policy(1000),
+            )
+            .is_err());
+        assert!(bus
+            .publish(
+                "host",
+                "host.invalid.string",
+                DataValue::String("x".repeat(MAX_STRING_BYTES + 1)),
+                policy(1000),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn owner_shutdown_reclaims_records_for_a_changed_manifest() {
+        let bus = DataBus::default();
+        for index in 0..32 {
+            bus.publish(
+                "telemetry",
+                &format!("telemetry.old_{index}"),
+                DataValue::Integer(index),
+                policy(1000),
+            )
+            .unwrap();
+        }
+        bus.invalidate_owner("telemetry");
+        assert!(bus.statuses_for_owner("telemetry").is_empty());
+        for index in 0..32 {
+            bus.publish(
+                "telemetry",
+                &format!("telemetry.new_{index}"),
+                DataValue::Integer(index),
+                policy(1000),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn removed_host_sensor_records_are_reclaimed() {
+        let bus = DataBus::default();
+        let sensor = Sensor {
+            id: "temporary".into(),
+            name: "Temporary".into(),
+            value: 42.0,
+            unit: SensorUnit::Celsius,
+            sensor_type: SensorType::Temperature,
+            visibility: VisibilityState::Visible,
+        };
+        let key = sensor_key(&sensor.id);
+        bus.replace_host_sensors(vec![("device".into(), sensor)]);
+        assert_eq!(bus.read(&key).status, SnapshotStatus::Fresh);
+        bus.replace_host_sensors(Vec::new());
+        assert_eq!(bus.read(&key).status, SnapshotStatus::Unavailable);
+        assert_eq!(bus.statuses_for_owner("host").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn notifications_are_coalesced_without_resetting_the_throttle() {
+        let bus = DataBus::default();
+        let mut changes = bus.subscribe();
+        let policy = DataPolicy {
+            stale_after: Duration::from_secs(1),
+            min_notify_interval: Duration::from_millis(80),
+        };
+        bus.publish(
+            "telemetry",
+            "telemetry.current",
+            DataValue::Integer(1),
+            policy,
+        )
+        .unwrap();
+        changes.recv().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        bus.publish(
+            "telemetry",
+            "telemetry.current",
+            DataValue::Integer(2),
+            policy,
+        )
+        .unwrap();
+        assert!(matches!(
+            changes.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let final_revision = bus
+            .publish(
+                "telemetry",
+                "telemetry.current",
+                DataValue::Integer(3),
+                policy,
+            )
+            .unwrap();
+        assert!(matches!(
+            changes.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        let change = tokio::time::timeout(Duration::from_millis(100), changes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(change.revision, final_revision);
+    }
+
+    #[tokio::test]
+    async fn becoming_stale_emits_a_new_revision() {
+        let bus = DataBus::default();
+        let mut changes = bus.subscribe();
+        let initial_revision = bus
+            .publish(
+                "telemetry",
+                "telemetry.current",
+                DataValue::Integer(1),
+                DataPolicy {
+                    stale_after: Duration::from_millis(30),
+                    min_notify_interval: Duration::from_millis(16),
+                },
+            )
+            .unwrap();
+        changes.recv().await.unwrap();
+        let change = tokio::time::timeout(Duration::from_millis(100), changes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(change.revision > initial_revision);
+        assert_eq!(bus.read("telemetry.current").status, SnapshotStatus::Stale);
     }
 }

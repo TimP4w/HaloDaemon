@@ -254,7 +254,6 @@ impl FanCurveEngine {
             map
         };
 
-        self.app_state.refresh_sensor_bus().await;
         let sensors = self.app_state.data_bus.sensors();
         let mut new_statuses = HashMap::with_capacity(curves.len());
         for (fan_id, record) in &curves {
@@ -723,6 +722,7 @@ mod tests {
         let fan = MockFan::new_with_curve("fan_0", record);
         let sensor = MockSensor::new("sensor_0", 70.0);
         let app = make_app(fan.clone(), Some(sensor));
+        app.refresh_sensor_bus().await;
         let engine = FanCurveEngine::new(app);
         engine.tick(75).await;
         assert_ne!(fan.last_duty(), 20, "duty should have been updated from 20");
@@ -739,6 +739,7 @@ mod tests {
         let fan = MockFan::new_with_curve("fan_0", record);
         let sensor = MockSensor::new("sensor_0", 50.0);
         let app = make_app(fan.clone(), Some(sensor));
+        app.refresh_sensor_bus().await;
         let engine = FanCurveEngine::new(app);
         engine.tick(75).await;
         assert_eq!(
@@ -1207,6 +1208,7 @@ mod tests {
         let sensor = MockSensor::new("sensor_0", 50.0);
         *app.devices.try_write().unwrap() =
             vec![pump.clone() as Arc<dyn Device>, sensor as Arc<dyn Device>];
+        app.refresh_sensor_bus().await;
         let engine = FanCurveEngine::new(app);
         engine.tick(75).await;
         assert_ne!(pump.last_duty(), 50, "pump duty should have been updated");

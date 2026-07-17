@@ -60,36 +60,6 @@ impl AppState {
             })
             .collect();
 
-        // Device serialization is one of the hardware producer passes. Feed
-        // its native readings plus synthesized fan readings into the bus, then
-        // rebuild the UI-facing sensor capabilities from that cache below.
-        let mut sensor_records = Vec::new();
-        for (device, wire) in device_list.iter().zip(&devices) {
-            let disabled = cfg
-                .known_devices
-                .get(device.id())
-                .is_some_and(|record| record.active_state == VisibilityState::Disabled);
-            if disabled {
-                continue;
-            }
-            let mut sensors = wire
-                .capabilities
-                .iter()
-                .find_map(|capability| match capability {
-                    DeviceCapability::Sensors(sensors) => Some(sensors.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            sensors.extend(crate::drivers::fan_sensors(device.as_ref()).await);
-            for mut sensor in sensors {
-                if let Some(state) = cfg.sensor_visibility.get(&sensor.id) {
-                    sensor.visibility = state.clone();
-                }
-                sensor_records.push((device.id().to_owned(), sensor));
-            }
-        }
-        self.data_bus.replace_host_sensors(sensor_records);
-
         // Overlay pass: record name/state, LCD-engine mode, and per-zone RGB
         // transforms onto each device's wire struct.
         let hid_tracked = self.hid.tracked_ids().await;
@@ -120,11 +90,16 @@ impl AppState {
 
             wire.capabilities
                 .retain(|capability| !matches!(capability, DeviceCapability::Sensors(_)));
-            let sensors = if wire.active_state == VisibilityState::Disabled {
+            let mut sensors = if wire.active_state == VisibilityState::Disabled {
                 Vec::new()
             } else {
                 self.data_bus.sensors_for_device(device.id())
             };
+            for sensor in &mut sensors {
+                if let Some(state) = cfg.sensor_visibility.get(&sensor.id) {
+                    sensor.visibility = state.clone();
+                }
+            }
             if !sensors.is_empty() {
                 wire.capabilities.push(DeviceCapability::Sensors(sensors));
             }
@@ -224,6 +199,7 @@ mod tests {
                 .with_fan_rpm(1500),
         );
         app.devices.write().await.push(dev);
+        app.refresh_sensor_bus().await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("fan sensors present");
@@ -243,6 +219,7 @@ mod tests {
         let app = Arc::new(AppState::new(cfg));
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("test_device").with_fan());
         app.devices.write().await.push(dev);
+        app.refresh_sensor_bus().await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("fan sensors present");
@@ -274,6 +251,7 @@ mod tests {
             visibility: VisibilityState::Visible,
         }]));
         app.devices.write().await.push(dev);
+        app.refresh_sensor_bus().await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("sensors present");

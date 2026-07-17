@@ -140,23 +140,30 @@ impl AppState {
     /// records. Consumers read the resulting typed view from `data_bus`.
     pub async fn refresh_sensor_bus(&self) {
         let known = self.config.read().await.known_devices.clone();
+        let visibility = self.config.read().await.sensor_visibility.clone();
         let devices = self.devices.read().await.clone();
         let mut sensors = Vec::new();
         for device in &devices {
             let disabled = known
                 .get(device.id())
                 .is_some_and(|r| r.active_state == halod_shared::types::VisibilityState::Disabled);
-            if disabled {
+            if disabled || !device.is_live() {
                 continue;
             }
             if let Some(cap) = device.as_sensor_capability() {
                 if let Ok(readings) = cap.get_sensors().await {
-                    for sensor in readings {
+                    for mut sensor in readings {
+                        if let Some(state) = visibility.get(&sensor.id) {
+                            sensor.visibility = state.clone();
+                        }
                         sensors.push((device.id().to_owned(), sensor));
                     }
                 }
             }
-            for sensor in crate::drivers::fan_sensors(device.as_ref()).await {
+            for mut sensor in crate::drivers::fan_sensors(device.as_ref()).await {
+                if let Some(state) = visibility.get(&sensor.id) {
+                    sensor.visibility = state.clone();
+                }
                 sensors.push((device.id().to_owned(), sensor));
             }
         }
@@ -177,5 +184,17 @@ impl AppState {
             })
             .cloned()
             .collect()
+    }
+}
+
+/// The sole continuous producer for `host.sensors.*`. Device implementations
+/// already cache hardware samples; this task snapshots those caches at a
+/// bounded cadence independently of RGB, LCD, fan-curve, and IPC rendering.
+pub async fn sensor_data_producer(app: Arc<AppState>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        app.refresh_sensor_bus().await;
     }
 }
