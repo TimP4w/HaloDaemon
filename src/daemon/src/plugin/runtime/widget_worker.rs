@@ -15,8 +15,9 @@ use imageproc::drawing::{
 };
 use imageproc::point::Point;
 use imageproc::rect::Rect;
-use mlua::{AnyUserData, Function, Lua, LuaSerdeExt, Table, UserData, UserDataMethods};
+use mlua::{AnyUserData, Function, Lua, LuaSerdeExt, Table, UserData, UserDataMethods, Value};
 use tokio::sync::oneshot;
+use unicode_segmentation::UnicodeSegmentation;
 
 use halod_shared::lcd_custom::{
     TEXT_ITALIC_PARAM, TEXT_STRIKETHROUGH_PARAM, TEXT_UNDERLINE_PARAM, TEXT_WEIGHT_PARAM,
@@ -716,6 +717,21 @@ impl UserData for RenderCtx {
             Ok(styled_text_size(&this.font, &text, size, this.text_style))
         });
         methods.add_method(
+            "measure_text_box",
+            |_, this, (text, width, style): (String, f32, Table)| {
+                let style = TextBoxStyle::from_lua(&style, this.height)?;
+                let width = checked_text_box_dimension(width, MAX_WIDGET_SIDE, "width")?;
+                let layout = layout_text_box(
+                    &this.font,
+                    &bounded_text(text),
+                    width,
+                    style,
+                    this.text_style,
+                );
+                Ok((layout.width, layout.height))
+            },
+        );
+        methods.add_method(
             "ellipsize_text",
             |_, this, (text, size, max_width): (String, f32, f32)| {
                 Ok(ellipsize_text(
@@ -752,6 +768,48 @@ impl UserData for RenderCtx {
                     bounded_dimension(size, this.height) as f32,
                     &this.font,
                     &text,
+                    this.text_style,
+                );
+                Ok(())
+            },
+        );
+        methods.add_method(
+            "draw_text_box",
+            |lua,
+             this,
+             (canvas, text, x, y, width, height, style, color): (
+                AnyUserData,
+                String,
+                f32,
+                f32,
+                f32,
+                f32,
+                Table,
+                Option<Value>,
+            )| {
+                let style = TextBoxStyle::from_lua(&style, this.height)?;
+                let width = checked_text_box_dimension(width, MAX_WIDGET_SIDE, "width")?;
+                let height = checked_text_box_dimension(height, MAX_WIDGET_SIDE, "height")?;
+                let layout = layout_text_box(
+                    &this.font,
+                    &bounded_text(text),
+                    width,
+                    style,
+                    this.text_style,
+                );
+                let color = lua_color(lua, color, this.color)?;
+                let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
+                let mut image = canvas_image(this, &mut canvas)?;
+                draw_text_box_mut(
+                    &mut image,
+                    color,
+                    bounded_coord(x, this.width),
+                    bounded_coord(y, this.height),
+                    width.ceil() as u32,
+                    height.ceil() as u32,
+                    &this.font,
+                    &layout,
+                    style,
                     this.text_style,
                 );
                 Ok(())
@@ -809,16 +867,375 @@ impl WidgetTextStyle {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+enum TextHorizontalAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone, Copy, Default)]
+enum TextVerticalAlign {
+    #[default]
+    Top,
+    Middle,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum TextBoxWrap {
+    #[default]
+    None,
+    Word,
+    Character,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum TextBoxOverflow {
+    #[default]
+    Clip,
+    Ellipsis,
+}
+
+#[derive(Clone, Copy)]
+struct TextBoxStyle {
+    size: f32,
+    horizontal: TextHorizontalAlign,
+    vertical: TextVerticalAlign,
+    wrap: TextBoxWrap,
+    max_lines: usize,
+    overflow: TextBoxOverflow,
+}
+
+impl TextBoxStyle {
+    fn from_lua(table: &Table, canvas_height: u32) -> mlua::Result<Self> {
+        for pair in table.clone().pairs::<String, Value>() {
+            let (key, _) = pair?;
+            if !matches!(
+                key.as_str(),
+                "size" | "horizontal" | "vertical" | "wrap" | "max_lines" | "overflow"
+            ) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "unsupported text box style field `{key}`"
+                )));
+            }
+        }
+
+        let size = table.get::<Option<f32>>("size")?.ok_or_else(|| {
+            mlua::Error::RuntimeError("text box style requires a numeric `size`".into())
+        })?;
+        if !size.is_finite() || size <= 0.0 || size > canvas_height.max(1) as f32 {
+            return Err(mlua::Error::RuntimeError(format!(
+                "text box style size must be between 0 and {}",
+                canvas_height.max(1)
+            )));
+        }
+
+        let horizontal = match table
+            .get::<Option<String>>("horizontal")?
+            .as_deref()
+            .unwrap_or("left")
+        {
+            "left" => TextHorizontalAlign::Left,
+            "center" => TextHorizontalAlign::Center,
+            "right" => TextHorizontalAlign::Right,
+            value => return Err(invalid_text_box_style("horizontal", value)),
+        };
+        let vertical = match table
+            .get::<Option<String>>("vertical")?
+            .as_deref()
+            .unwrap_or("top")
+        {
+            "top" => TextVerticalAlign::Top,
+            "middle" => TextVerticalAlign::Middle,
+            "bottom" => TextVerticalAlign::Bottom,
+            value => return Err(invalid_text_box_style("vertical", value)),
+        };
+        let wrap = match table
+            .get::<Option<String>>("wrap")?
+            .as_deref()
+            .unwrap_or("none")
+        {
+            "none" => TextBoxWrap::None,
+            "word" => TextBoxWrap::Word,
+            "character" => TextBoxWrap::Character,
+            value => return Err(invalid_text_box_style("wrap", value)),
+        };
+        let overflow = match table
+            .get::<Option<String>>("overflow")?
+            .as_deref()
+            .unwrap_or("clip")
+        {
+            "clip" => TextBoxOverflow::Clip,
+            "ellipsis" => TextBoxOverflow::Ellipsis,
+            value => return Err(invalid_text_box_style("overflow", value)),
+        };
+        let max_lines = table.get::<Option<usize>>("max_lines")?.unwrap_or(64);
+        if !(1..=64).contains(&max_lines) {
+            return Err(mlua::Error::RuntimeError(
+                "text box style max_lines must be between 1 and 64".into(),
+            ));
+        }
+
+        Ok(Self {
+            size,
+            horizontal,
+            vertical,
+            wrap,
+            max_lines,
+            overflow,
+        })
+    }
+}
+
+fn invalid_text_box_style(field: &str, value: &str) -> mlua::Error {
+    mlua::Error::RuntimeError(format!("invalid text box {field} `{value}`"))
+}
+
+#[derive(Clone)]
+struct TextBoxLine {
+    text: String,
+    width: f32,
+}
+
+struct TextBoxLayout {
+    lines: Vec<TextBoxLine>,
+    width: f32,
+    height: f32,
+    line_height: f32,
+}
+
+fn checked_text_box_dimension(value: f32, limit: u32, name: &str) -> mlua::Result<f32> {
+    if !value.is_finite() || value <= 0.0 || value > limit as f32 {
+        return Err(mlua::Error::RuntimeError(format!(
+            "text box {name} must be between 0 and {limit}"
+        )));
+    }
+    Ok(value)
+}
+
+fn text_width(font: &FontArc, text: &str, size: f32, style: WidgetTextStyle) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let scaled = font.as_scaled(PxScale::from(size));
+    let mut width = 0.0;
+    let mut previous = None;
+    for character in text.chars() {
+        let glyph = scaled.glyph_id(character);
+        if let Some(previous) = previous {
+            width += scaled.kern(previous, glyph);
+        }
+        width += scaled.h_advance(glyph);
+        previous = Some(glyph);
+    }
+    width + style.italic_reach(size) + style.embolden(size) as f32
+}
+
 fn styled_text_size(font: &FontArc, text: &str, size: f32, style: WidgetTextStyle) -> (f32, f32) {
     let scaled = font.as_scaled(PxScale::from(size));
-    let width: f32 = text
-        .chars()
-        .map(|character| scaled.h_advance(scaled.glyph_id(character)))
-        .sum();
     (
-        width + style.italic_reach(size) + style.embolden(size) as f32,
+        text_width(font, text, size, style),
         scaled.ascent() - scaled.descent() + style.embolden(size).div_ceil(2) as f32,
     )
+}
+
+fn character_wrapped_lines(
+    font: &FontArc,
+    text: &str,
+    width: f32,
+    size: f32,
+    style: WidgetTextStyle,
+) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for grapheme in text.graphemes(true) {
+        let mut candidate = current.clone();
+        candidate.push_str(grapheme);
+        if !current.is_empty() && text_width(font, &candidate, size, style) > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        current.push_str(grapheme);
+    }
+    lines.push(current);
+    lines
+}
+
+fn word_wrapped_lines(
+    font: &FontArc,
+    text: &str,
+    width: f32,
+    size: f32,
+    style: WidgetTextStyle,
+) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for token in text.split_word_bounds() {
+        let token = if current.is_empty() {
+            token.trim_start_matches(char::is_whitespace)
+        } else {
+            token
+        };
+        if token.is_empty() {
+            continue;
+        }
+        let mut candidate = current.clone();
+        candidate.push_str(token);
+        if !current.is_empty() && text_width(font, &candidate, size, style) > width {
+            lines.push(current.trim_end_matches(char::is_whitespace).to_owned());
+            current = String::new();
+        }
+        let token = token.trim_start_matches(char::is_whitespace);
+        if text_width(font, token, size, style) > width {
+            let mut chunks = character_wrapped_lines(font, token, width, size, style);
+            if let Some(last) = chunks.pop() {
+                lines.extend(chunks);
+                current = last;
+            }
+        } else {
+            current.push_str(token);
+        }
+    }
+    lines.push(current.trim_end_matches(char::is_whitespace).to_owned());
+    lines
+}
+
+fn ellipsize_graphemes(
+    font: &FontArc,
+    text: &str,
+    width: f32,
+    size: f32,
+    style: WidgetTextStyle,
+    force: bool,
+) -> String {
+    if !force && text_width(font, text, size, style) <= width {
+        return text.to_owned();
+    }
+    let ellipsis = "…";
+    if text_width(font, ellipsis, size, style) > width {
+        return String::new();
+    }
+    let mut result = String::new();
+    for grapheme in text.graphemes(true) {
+        let mut candidate = result.clone();
+        candidate.push_str(grapheme);
+        candidate.push_str(ellipsis);
+        if text_width(font, &candidate, size, style) > width {
+            break;
+        }
+        result.push_str(grapheme);
+    }
+    result.push_str(ellipsis);
+    result
+}
+
+fn layout_text_box(
+    font: &FontArc,
+    text: &str,
+    width: f32,
+    style: TextBoxStyle,
+    font_style: WidgetTextStyle,
+) -> TextBoxLayout {
+    if text.is_empty() {
+        return TextBoxLayout {
+            lines: Vec::new(),
+            width: 0.0,
+            height: 0.0,
+            line_height: styled_text_size(font, "M", style.size, font_style).1,
+        };
+    }
+
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let paragraph_lines = match style.wrap {
+            TextBoxWrap::None => vec![paragraph.to_owned()],
+            TextBoxWrap::Word => word_wrapped_lines(font, paragraph, width, style.size, font_style),
+            TextBoxWrap::Character => {
+                character_wrapped_lines(font, paragraph, width, style.size, font_style)
+            }
+        };
+        lines.extend(paragraph_lines);
+    }
+
+    let truncated = lines.len() > style.max_lines;
+    lines.truncate(style.max_lines);
+    if style.overflow == TextBoxOverflow::Ellipsis {
+        let last_index = lines.len().saturating_sub(1);
+        for (index, line) in lines.iter_mut().enumerate() {
+            *line = ellipsize_graphemes(
+                font,
+                line,
+                width,
+                style.size,
+                font_style,
+                truncated && index == last_index,
+            );
+        }
+    }
+
+    let line_height = styled_text_size(font, "M", style.size, font_style).1;
+    let lines: Vec<_> = lines
+        .into_iter()
+        .map(|text| TextBoxLine {
+            width: text_width(font, &text, style.size, font_style),
+            text,
+        })
+        .collect();
+    TextBoxLayout {
+        width: lines
+            .iter()
+            .map(|line| line.width.min(width))
+            .fold(0.0, f32::max),
+        height: line_height * lines.len() as f32,
+        line_height,
+        lines,
+    }
+}
+
+fn draw_text_box_mut(
+    image: &mut ImageBuffer<Rgba<u8>, &mut [u8]>,
+    color: Rgba<u8>,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    font: &FontArc,
+    layout: &TextBoxLayout,
+    style: TextBoxStyle,
+    font_style: WidgetTextStyle,
+) {
+    let mut bytes = vec![0; width as usize * height as usize * 4];
+    let mut box_image = ImageBuffer::from_raw(width, height, bytes.as_mut_slice()).unwrap();
+    let content_y = match style.vertical {
+        TextVerticalAlign::Top => 0.0,
+        TextVerticalAlign::Middle => (height as f32 - layout.height) / 2.0,
+        TextVerticalAlign::Bottom => height as f32 - layout.height,
+    };
+    for (line_index, line) in layout.lines.iter().enumerate() {
+        let line_x = match style.horizontal {
+            TextHorizontalAlign::Left => 0.0,
+            TextHorizontalAlign::Center => (width as f32 - line.width) / 2.0,
+            TextHorizontalAlign::Right => width as f32 - line.width,
+        };
+        draw_styled_text_mut(
+            &mut box_image,
+            color,
+            line_x.round() as i32,
+            (content_y + line_index as f32 * layout.line_height).round() as i32,
+            style.size,
+            font,
+            &line.text,
+            font_style,
+        );
+    }
+    image::imageops::overlay(image, &box_image, i64::from(x), i64::from(y));
 }
 
 fn draw_styled_text_mut(
@@ -1400,6 +1817,111 @@ mod tests {
         );
         let pixels = worker.render(input(true)).await.unwrap();
         assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
+    }
+
+    #[tokio::test]
+    async fn text_boxes_measure_and_draw_unicode_with_host_layout() {
+        let source = r#"
+            local style = {
+                size = 10,
+                horizontal = "center",
+                vertical = "middle",
+                wrap = "character",
+                max_lines = 2,
+                overflow = "ellipsis",
+            }
+            local function render(canvas, ctx)
+                local width, height = ctx:measure_text_box("Cafe\u{0301} 世界-long-unbroken", 12, style)
+                assert(width > 0 and width <= 12 and height > 10)
+                ctx:draw_text_box(canvas, "Cafe\u{0301} 世界-long-unbroken", 4, 2, 12, 20, style, nil)
+            end
+            return {
+                render_widget_meter = function(canvas, w, h, t, dt, params, ctx) render(canvas, ctx) end,
+                preview_widget_meter = function(canvas, w, h, params, ctx) render(canvas, ctx) end,
+            }
+        "#;
+        let worker = PluginWidgetHandle::spawn(
+            source.to_owned(),
+            BTreeMap::new(),
+            vec!["meter".to_owned()],
+            vec![],
+            HashMap::new(),
+        );
+        let pixels = worker.render(input(true)).await.unwrap();
+        let visible: Vec<_> = pixels
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(_, pixel)| pixel[3] != 0)
+            .map(|(index, _)| (index % 32, index / 32))
+            .collect();
+        assert!(!visible.is_empty());
+        assert!(visible
+            .iter()
+            .all(|&(x, y)| (4..16).contains(&x) && (2..22).contains(&y)));
+    }
+
+    #[tokio::test]
+    async fn text_boxes_reject_invalid_sizes_and_styles() {
+        let source = r#"
+            local function render(canvas, ctx)
+                local style = { size = 10 }
+                assert(not pcall(function() ctx:measure_text_box("x", 0, style) end))
+                assert(not pcall(function() ctx:measure_text_box("x", -1, style) end))
+                assert(not pcall(function() ctx:measure_text_box("x", 0 / 0, style) end))
+                assert(not pcall(function() ctx:measure_text_box("x", 10, { size = 0 }) end))
+                assert(not pcall(function() ctx:measure_text_box("x", 10, { size = 10, wrap = "line" }) end))
+                assert(not pcall(function() ctx:measure_text_box("x", 10, { size = 10, font = "other" }) end))
+                assert(not pcall(function()
+                    ctx:draw_text_box(canvas, "x", 0, 0, 10, 0, style, nil)
+                end))
+                canvas:set_u8(3, 255)
+            end
+            return {
+                render_widget_meter = function(canvas, w, h, t, dt, params, ctx) render(canvas, ctx) end,
+                preview_widget_meter = function(canvas, w, h, params, ctx) render(canvas, ctx) end,
+            }
+        "#;
+        let worker = PluginWidgetHandle::spawn(
+            source.to_owned(),
+            BTreeMap::new(),
+            vec!["meter".to_owned()],
+            vec![],
+            HashMap::new(),
+        );
+        assert_eq!(worker.render(input(true)).await.unwrap()[3], 255);
+    }
+
+    #[test]
+    fn text_box_layout_handles_newlines_empty_text_and_long_words() {
+        let font = font();
+        let style = TextBoxStyle {
+            size: 10.0,
+            horizontal: TextHorizontalAlign::Left,
+            vertical: TextVerticalAlign::Top,
+            wrap: TextBoxWrap::Word,
+            max_lines: 3,
+            overflow: TextBoxOverflow::Ellipsis,
+        };
+        let font_style = WidgetTextStyle::default();
+
+        let empty = layout_text_box(&font, "", 20.0, style, font_style);
+        assert!(empty.lines.is_empty());
+        assert_eq!((empty.width, empty.height), (0.0, 0.0));
+
+        let newline = layout_text_box(&font, "first\n\nthird", 100.0, style, font_style);
+        assert_eq!(newline.lines.len(), 3);
+        assert_eq!(newline.lines[1].text, "");
+
+        let long = layout_text_box(
+            &font,
+            "supercalifragilisticexpialidocious",
+            18.0,
+            style,
+            font_style,
+        );
+        assert_eq!(long.lines.len(), 3);
+        assert!(long.lines.last().unwrap().text.ends_with('…'));
+        assert!(long.lines.iter().all(|line| line.width <= 18.0));
     }
 
     #[tokio::test]
