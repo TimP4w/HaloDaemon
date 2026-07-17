@@ -88,28 +88,20 @@ impl AppState {
 
             let transforms = device.as_rgb().map(|r| r.zone_transforms());
 
-            // A disabled device is closed — its readings are gone, so it must not
-            // advertise sensors at all (dashboard, cooling and LCD sensor pickers).
-            if wire.active_state == VisibilityState::Disabled {
-                wire.capabilities
-                    .retain(|c| !matches!(c, DeviceCapability::Sensors(_)));
-            }
-
-            let fan_sensors = if wire.active_state == VisibilityState::Disabled {
+            wire.capabilities
+                .retain(|capability| !matches!(capability, DeviceCapability::Sensors(_)));
+            let mut sensors = if wire.active_state == VisibilityState::Disabled {
                 Vec::new()
             } else {
-                crate::drivers::fan_sensors(device.as_ref()).await
+                self.data_bus.sensors_for_device(device.id())
             };
-            if !fan_sensors.is_empty() {
-                match wire.capabilities.iter_mut().find_map(|c| match c {
-                    DeviceCapability::Sensors(v) => Some(v),
-                    _ => None,
-                }) {
-                    Some(existing) => existing.extend(fan_sensors),
-                    None => wire
-                        .capabilities
-                        .push(DeviceCapability::Sensors(fan_sensors)),
+            for sensor in &mut sensors {
+                if let Some(state) = cfg.sensor_visibility.get(&sensor.id) {
+                    sensor.visibility = state.clone();
                 }
+            }
+            if !sensors.is_empty() {
+                wire.capabilities.push(DeviceCapability::Sensors(sensors));
             }
 
             for cap in &mut wire.capabilities {
@@ -122,16 +114,7 @@ impl AppState {
                             }
                         }
                     }
-                    // Visibility is authoritative in config, not on the device:
-                    // overlay it here so every sensor source (device-native,
-                    // synthesized fan and plugin-owned hardware hide uniformly.
-                    DeviceCapability::Sensors(sensors) => {
-                        for s in sensors {
-                            if let Some(state) = cfg.sensor_visibility.get(&s.id) {
-                                s.visibility = state.clone();
-                            }
-                        }
-                    }
+                    DeviceCapability::Sensors(_) => {}
                     _ => {}
                 }
             }
@@ -216,6 +199,7 @@ mod tests {
                 .with_fan_rpm(1500),
         );
         app.devices.write().await.push(dev);
+        app.refresh_sensor_bus().await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("fan sensors present");
@@ -235,6 +219,7 @@ mod tests {
         let app = Arc::new(AppState::new(cfg));
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("test_device").with_fan());
         app.devices.write().await.push(dev);
+        app.refresh_sensor_bus().await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("fan sensors present");
@@ -266,6 +251,7 @@ mod tests {
             visibility: VisibilityState::Visible,
         }]));
         app.devices.write().await.push(dev);
+        app.refresh_sensor_bus().await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("sensors present");

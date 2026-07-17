@@ -512,6 +512,9 @@ mod tests {
             provenance: Default::default(),
             declared_permissions: vec![],
             authority: Default::default(),
+            provides: vec![],
+            consumes: vec![],
+            data_records: vec![],
             accepted_authority: None,
             config_fields: vec![],
             config_values: Default::default(),
@@ -596,6 +599,7 @@ mod tests {
         p.accepted_authority = Some(halod_shared::types::PluginAuthority {
             permissions: vec![halod_shared::types::Permission::Os],
             transport_scopes: vec![],
+            data_reads: vec![],
         });
         p.declared_permissions = vec![
             halod_shared::types::Permission::Os,

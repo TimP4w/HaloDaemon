@@ -50,6 +50,7 @@ gif        = "0.14"
 q565       = { git = "https://github.com/seritools/q565", rev = "aeb432dc7d73757b20cd45b71755e8573a978541" }
 imageproc  = { version = "0.25", default-features = false }
 ab_glyph   = "0.2"
+unicode-segmentation = "1.13"
 tiny-skia = "0.11"
 resvg      = { version = "0.44", default-features = false }
 chrono     = { version = "0.4", default-features = false, features = ["clock"] }
@@ -60,12 +61,12 @@ keyring = "4.1.4"
 # Fully vendored (libgit2/libssh2/openssl via `cc`), matching mlua's `vendored` Lua.
 git2 = { version = "0.19", default-features = false, features = ["ssh", "https", "vendored-libgit2", "vendored-openssl"] }
 futures-util = "0.3"
+url      = "2"
 
 [dev-dependencies]
 tempfile = "3"
 tokio    = { version = "1", features = ["test-util"] }
 proptest = "1"
-url      = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netlink-sys = { version = "0.8", features = ["tokio_socket"] }

@@ -18,9 +18,7 @@ use crate::services::media::{self, MediaHandle};
 use halod_shared::lcd_custom::{
     param_f64, param_str, BgKind, CustomTemplateDef, WidgetDef, WidgetSprite, TEXT_WEIGHT_PARAM,
 };
-use halod_shared::types::{
-    EffectParamValue, LcdEngineTemplateDescriptor, RgbColor, Sensor, SensorUnit,
-};
+use halod_shared::types::{EffectParamValue, LcdEngineTemplateDescriptor, RgbColor};
 
 use super::templates::{dim_color, rgba, Background, TemplateCtx};
 
@@ -80,11 +78,11 @@ pub struct CustomTemplate {
     /// Acquired only when the layout has a `NowPlaying` widget — `None`
     /// renders the "no player" dimmed placeholder.
     media: Option<Arc<MediaHandle>>,
-    plugin_handles: HashMap<String, crate::drivers::plugins::PluginWidgetHandle>,
+    plugin_handles: HashMap<String, crate::plugin::PluginWidgetHandle>,
     plugin_sprites: HashMap<String, PluginSprite>,
     composite_cache: RefCell<HashMap<String, CachedComposite>>,
     system_fonts: HashMap<String, ab_glyph::FontArc>,
-    plugin_assets: HashMap<(String, u32), crate::drivers::plugins::WidgetImageInput>,
+    plugin_assets: HashMap<(String, String, u32), crate::plugin::WidgetImageInput>,
     plugin_revision: u64,
     last_plugin_render_t: Option<f64>,
 }
@@ -184,7 +182,7 @@ impl CustomTemplate {
 
     pub(super) async fn gather_plugin_sprites(
         &mut self,
-        ctx: &TemplateCtx<'_>,
+        ctx: &TemplateCtx,
         app: &crate::state::AppState,
     ) {
         let dt = self
@@ -201,21 +199,6 @@ impl CustomTemplate {
             self.plugin_assets.clear();
             self.plugin_revision = revision;
         }
-        let sensors: HashMap<String, crate::drivers::plugins::WidgetSensorInput> = ctx
-            .sensors
-            .iter()
-            .map(|(id, sensor)| {
-                (
-                    id.clone(),
-                    crate::drivers::plugins::WidgetSensorInput {
-                        value: sensor.value,
-                        label: sensor.name.clone(),
-                        formatted: format_sensor_value(sensor),
-                        unit: sensor_unit(&sensor.unit),
-                    },
-                )
-            })
-            .collect();
         let widgets: Vec<WidgetDef> = self.def.widgets.clone();
         let mut audio_active = false;
         let mut media_active = false;
@@ -226,9 +209,9 @@ impl CustomTemplate {
                 self.composite_cache.borrow_mut().remove(&widget.id);
                 continue;
             };
-            let sensor_updates = update_source_enabled(
-                entry.descriptor.updates.sensors,
-                entry.descriptor.updates.sensors_when.as_ref(),
+            let data_updates = update_source_enabled(
+                !entry.descriptor.updates.data.is_empty(),
+                entry.descriptor.updates.data_when.as_ref(),
                 &widget,
             );
             let audio_updates = update_source_enabled(
@@ -240,10 +223,17 @@ impl CustomTemplate {
                 self.audio = Some(audio::shared());
             }
             audio_active |= audio_updates;
-            if entry.descriptor.updates.media && self.media.is_none() {
-                self.media = Some(media::shared());
+            let media_updates = data_updates
+                && entry
+                    .descriptor
+                    .updates
+                    .data
+                    .iter()
+                    .any(|key| key == "host.media.playback");
+            if media_updates && self.media.is_none() {
+                self.media = Some(media::shared_with_bus(app.data_bus.clone()));
             }
-            media_active |= entry.descriptor.updates.media;
+            media_active |= media_updates;
             let (_, _, size) = widget_rect(widget.x, widget.y, widget.scale, ctx.width, ctx.height);
             let width = size.round().max(1.0) as u32;
             let height = (size * y_ratio(&widget)).round().max(1.0) as u32;
@@ -258,12 +248,13 @@ impl CustomTemplate {
             if let Some(interval) = entry.descriptor.updates.interval_ms {
                 ((ctx.t * 1000.0) as u64 / u64::from(interval)).hash(&mut hasher);
             }
-            if sensor_updates {
-                let mut values: Vec<_> = sensors.iter().collect();
-                values.sort_by_key(|(id, _)| *id);
-                for (id, sensor) in values {
-                    id.hash(&mut hasher);
-                    sensor.value.to_bits().hash(&mut hasher);
+            let mut data_available = true;
+            if data_updates {
+                for scope in &entry.descriptor.updates.data {
+                    let (signature, available) = app.data_bus.scope_state(scope);
+                    scope.hash(&mut hasher);
+                    signature.hash(&mut hasher);
+                    data_available &= available;
                 }
             }
             if audio_updates {
@@ -273,7 +264,7 @@ impl CustomTemplate {
                     .unwrap_or(0)
                     .hash(&mut hasher);
             }
-            if entry.descriptor.updates.media {
+            if media_updates {
                 self.media
                     .as_ref()
                     .and_then(|media| media.latest())
@@ -300,10 +291,11 @@ impl CustomTemplate {
             let handle = match self.plugin_handles.get(&entry.plugin_id) {
                 Some(handle) => handle.clone(),
                 None => {
-                    let Some(handle) = app
-                        .registry
-                        .build_widget_handle(app.secret_store.as_ref(), &catalog_id)
-                    else {
+                    let Some(handle) = app.registry.build_widget_handle(
+                        app.secret_store.as_ref(),
+                        app.data_bus.clone(),
+                        &catalog_id,
+                    ) else {
                         continue;
                     };
                     self.plugin_handles
@@ -321,9 +313,8 @@ impl CustomTemplate {
                 .then(|| self.audio.as_ref().map(|audio| audio.latest()))
                 .flatten();
             let media_info = self.media.as_ref().and_then(|media| media.latest());
-            let preview = (sensor_updates && sensors.is_empty())
-                || (audio_updates && audio_frame.as_ref().is_none_or(|frame| frame.seq == 0))
-                || (entry.descriptor.updates.media && media_info.is_none());
+            let preview = (data_updates && !data_available)
+                || (audio_updates && audio_frame.as_ref().is_none_or(|frame| frame.seq == 0));
             let font = match selected_font.as_str() {
                 halod_shared::lcd_custom::FONT_MONO => super::templates::load_mono_font_arc(),
                 halod_shared::lcd_custom::FONT_INTER => super::templates::load_inter_font_arc(),
@@ -346,7 +337,7 @@ impl CustomTemplate {
                     EffectParamValue::Str(weight.clone()),
                 );
             }
-            let input = crate::drivers::plugins::WidgetRenderInput {
+            let input = crate::plugin::WidgetRenderInput {
                 widget_id,
                 width,
                 height,
@@ -355,35 +346,16 @@ impl CustomTemplate {
                 params,
                 color: self.color_for(&widget),
                 font,
-                sensors: sensors.clone(),
-                audio_bands: audio_frame
+                audio: audio_frame
                     .as_ref()
                     .filter(|frame| frame.seq != 0)
-                    .map(|frame| frame.bands.to_vec())
-                    .unwrap_or_default(),
-                audio_level: audio_frame
-                    .as_ref()
-                    .filter(|frame| frame.seq != 0)
-                    .map(|frame| frame.level),
-                media: media_info.map(|info| {
-                    let art = info
-                        .art
-                        .map(|art| crate::drivers::plugins::WidgetImageInput {
-                            width: art.width(),
-                            height: art.height(),
-                            rgba: art.as_raw().clone(),
-                        });
-                    crate::drivers::plugins::WidgetMediaInput {
-                        title: info.title,
-                        artist: info.artist,
-                        status: match info.status {
-                            media::PlaybackStatus::Playing => "playing",
-                            media::PlaybackStatus::Paused => "paused",
-                            media::PlaybackStatus::Stopped => "stopped",
-                        }
-                        .to_owned(),
-                        art,
-                    }
+                    .map(widget_audio),
+                media_art: media_info.and_then(|info| {
+                    info.art.map(|art| crate::plugin::WidgetImageInput {
+                        width: art.width(),
+                        height: art.height(),
+                        rgba: art.as_raw().clone(),
+                    })
                 }),
                 images: entry
                     .descriptor
@@ -398,7 +370,7 @@ impl CustomTemplate {
                         let frame = decoded.frames.get(index)?;
                         Some((
                             filename,
-                            crate::drivers::plugins::WidgetImageInput {
+                            crate::plugin::WidgetImageInput {
                                 width: frame.width(),
                                 height: frame.height(),
                                 rgba: frame.as_raw().clone(),
@@ -409,26 +381,31 @@ impl CustomTemplate {
                 assets: {
                     // Bucket resize-time requests so SVGs stay sharp without
                     // retaining one raster allocation for every dragged pixel.
-                    let asset_edge = width.max(height).next_power_of_two().min(1024);
-                    match self.plugin_assets.get(&(catalog_id.clone(), asset_edge)) {
-                        Some(asset) => {
-                            HashMap::from([(entry.descriptor.icon.clone(), asset.clone())])
-                        }
-                        None => match app
-                            .registry
-                            .read_widget_icon_rgba_at(&catalog_id, asset_edge)
-                        {
-                            Ok(asset) => {
-                                self.plugin_assets
-                                    .insert((catalog_id.clone(), asset_edge), asset.clone());
-                                HashMap::from([(entry.descriptor.icon.clone(), asset)])
+                    let edge = widget_asset_edge(width, height);
+                    std::iter::once(&entry.descriptor.icon)
+                        .chain(&entry.descriptor.assets)
+                        .filter_map(|name| {
+                            let key = (catalog_id.clone(), name.clone(), edge);
+                            if let Some(asset) = self.plugin_assets.get(&key) {
+                                return Some((name.clone(), asset.clone()));
                             }
-                            Err(error) => {
-                                log::warn!("LCD widget '{catalog_id}' asset failed: {error:#}");
-                                HashMap::new()
+                            match app
+                                .registry
+                                .read_widget_asset_rgba_at(&catalog_id, name, edge)
+                            {
+                                Ok(asset) => {
+                                    self.plugin_assets.insert(key, asset.clone());
+                                    Some((name.clone(), asset))
+                                }
+                                Err(error) => {
+                                    log::warn!(
+                                        "LCD widget '{catalog_id}' asset '{name}' failed: {error:#}"
+                                    );
+                                    None
+                                }
                             }
-                        },
-                    }
+                        })
+                        .collect()
                 },
                 preview,
             };
@@ -674,22 +651,6 @@ const SIGNATURE_TIME_BUCKET_MS: f64 = 10.0;
 
 fn time_bucket(t: f64) -> u64 {
     (t * 1000.0 / SIGNATURE_TIME_BUCKET_MS) as u64
-}
-
-fn format_sensor_value(sensor: &Sensor) -> String {
-    format!("{:.0}{}", sensor.value, sensor_unit(&sensor.unit))
-}
-
-fn sensor_unit(unit: &SensorUnit) -> String {
-    match unit {
-        SensorUnit::Celsius => " °C",
-        SensorUnit::Fahrenheit => " °F",
-        SensorUnit::Percent => " %",
-        SensorUnit::Megahertz => " MHz",
-        SensorUnit::Hours => " h",
-        SensorUnit::Rpm => " RPM",
-    }
-    .to_owned()
 }
 
 fn hash_value<T: Hash>(value: T) -> u64 {
@@ -1011,14 +972,12 @@ impl EditorSession {
         cw: u32,
         ch: u32,
         t: f64,
-        sensors: &HashMap<String, Sensor>,
         app: &crate::state::AppState,
     ) {
         let ctx = TemplateCtx {
             width: cw,
             height: ch,
             t,
-            sensors,
         };
         self.tmpl.gather_plugin_sprites(&ctx, app).await;
     }
@@ -1066,7 +1025,7 @@ impl CustomTemplate {
 }
 
 /// Render the widgets of `def` that changed since `known` to [`WidgetSprite`]s
-/// against a `cw`×`ch` canvas, using `sensors` for live sensor readings.
+/// against a `cw`×`ch` canvas.
 /// Reuses `session` when it already belongs to `device_id` (rebuilding only
 /// what `update_def` decides needs it); otherwise starts a fresh one so the
 /// caller keeps it alive for the next request. Returns the changed sprites
@@ -1077,7 +1036,6 @@ pub(crate) fn render_editor_sprites(
     def: &CustomTemplateDef,
     cw: u32,
     ch: u32,
-    sensors: &HashMap<String, Sensor>,
     images_dir: &Path,
     known: &HashMap<String, u64>,
     session: &mut Option<EditorSession>,
@@ -1089,14 +1047,55 @@ pub(crate) fn render_editor_sprites(
         width: cw,
         height: ch,
         t: 0.0,
-        sensors,
     };
     s.tmpl.editor_sprites_delta(&ctx, known)
+}
+
+fn widget_audio(frame: &audio::SpectrumFrame) -> crate::plugin::WidgetAudioInput {
+    crate::plugin::WidgetAudioInput {
+        level: frame.level,
+        flux: frame.flux,
+        beat: frame.beat,
+        seq: frame.seq,
+        bands: frame.bands.to_vec(),
+    }
+}
+
+fn widget_asset_edge(width: u32, height: u32) -> u32 {
+    width.max(height).next_power_of_two().min(1024)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn widget_audio_preserves_the_effect_spectrum_frame() {
+        let mut bands = [0.0; crate::services::audio::BANDS];
+        bands[3] = 0.75;
+        let frame = audio::SpectrumFrame {
+            bands,
+            level: 0.4,
+            flux: 0.7,
+            beat: true,
+            seq: 91,
+        };
+        let widget = widget_audio(&frame);
+        assert_eq!(widget.level, frame.level);
+        assert_eq!(widget.flux, frame.flux);
+        assert_eq!(widget.beat, frame.beat);
+        assert_eq!(widget.seq, frame.seq);
+        assert_eq!(widget.bands, frame.bands);
+    }
+
+    #[test]
+    fn widget_asset_cache_uses_resize_buckets() {
+        assert_eq!(widget_asset_edge(257, 200), 512);
+        assert_eq!(widget_asset_edge(300, 511), 512);
+        assert_eq!(widget_asset_edge(512, 400), 512);
+        assert_eq!(widget_asset_edge(513, 400), 1024);
+        assert_eq!(widget_asset_edge(900, 900), 1024);
+    }
 
     #[test]
     fn editor_session_is_send() {

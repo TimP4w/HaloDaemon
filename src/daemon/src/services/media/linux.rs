@@ -194,7 +194,7 @@ fn resolve_vetted(host: &str, port: u16) -> std::io::Result<Vec<std::net::Socket
     use std::net::ToSocketAddrs;
     let addrs: Vec<_> = (host, port)
         .to_socket_addrs()?
-        .filter(|sa| !crate::drivers::plugins::backends::tcp::is_blocked_ip(&sa.ip()))
+        .filter(|sa| !crate::plugin::runtime::backends::tcp::is_blocked_ip(&sa.ip()))
         .collect();
     if addrs.is_empty() {
         return Err(std::io::Error::new(

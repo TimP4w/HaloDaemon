@@ -16,13 +16,13 @@ fn active_repo_signature_status(record: &crate::config::PluginRepoRecord) -> Rep
 
     let root = crate::config::plugin_repos_dir().join(&record.slug);
     let result = if !record.locked_sha.is_empty() && root.join(".git").is_dir() {
-        crate::drivers::plugins::repo::verify_official_repository_signature_at_commit(
+        crate::plugin::repo::verify_official_repository_signature_at_commit(
             &root,
             &record.locked_sha,
         )
     } else if record.active_revision.is_some() {
-        crate::drivers::plugins::repo::verify_official_repository_signature(
-            &crate::drivers::plugins::repo::active_revision_dir(record),
+        crate::plugin::repo::verify_official_repository_signature(
+            &crate::plugin::repo::active_revision_dir(record),
         )
     } else {
         return RepoSignatureStatus::Invalid {
@@ -63,6 +63,26 @@ pub async fn serialize_state(
     let observed_repo_signatures = app.repo_signature_status.lock().await.clone();
     let repo_compatibility = app.repo_compatibility_status.lock().await.clone();
 
+    let mut plugin_list = app.registry.list(app.secret_store.as_ref());
+    for plugin in &mut plugin_list {
+        plugin.data_records = app
+            .data_bus
+            .statuses_for_owner(&plugin.id)
+            .into_iter()
+            .map(
+                |(key, snapshot)| halod_shared::types::PluginDataRecordStatus {
+                    key,
+                    status: match snapshot.status {
+                        crate::services::data_bus::SnapshotStatus::Fresh => "fresh",
+                        crate::services::data_bus::SnapshotStatus::Stale => "stale",
+                        crate::services::data_bus::SnapshotStatus::Unavailable => "unavailable",
+                    }
+                    .to_owned(),
+                    updated_at: snapshot.published_at,
+                },
+            )
+            .collect();
+    }
     let wire = WireAppState {
         discovery: disc,
         devices: snap.devices,
@@ -83,7 +103,7 @@ pub async fn serialize_state(
         },
         process_icons,
         plugins: PluginsState {
-            plugins: app.registry.list(app.secret_store.as_ref()),
+            plugins: plugin_list,
             repos: cfg
                 .plugins
                 .repos

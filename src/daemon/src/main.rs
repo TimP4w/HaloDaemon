@@ -13,6 +13,7 @@ mod lifecycle;
 mod lighting;
 mod logger;
 mod platform;
+mod plugin;
 mod profiles;
 mod registry;
 mod run_loop;
@@ -41,7 +42,7 @@ use crate::state::EngineRunConfig;
 ///
 /// `plugin-test <package-dir>` (behind the `plugin-test` cargo feature) is a
 /// separate mode entirely: it drives one plugin package's `test.lua` against
-/// a recording mock transport (see `drivers::plugins::plugin_test`) and never
+/// a recording mock transport (see `plugin::plugin_test`) and never
 /// touches config, device discovery, or the engines — the official plugin
 /// repo's CI runs it once per package, not the daemon proper.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,7 +141,7 @@ fn main() -> Result<()> {
             .enable_all()
             .build()?;
         let handle = runtime.handle().clone();
-        let exit_code = drivers::plugins::plugin_test::run(handle, package)?;
+        let exit_code = plugin::plugin_test::run(handle, package)?;
         std::process::exit(exit_code);
     }
 
@@ -148,14 +149,14 @@ fn main() -> Result<()> {
         let rules = if embedded {
             let bytes = embedded_plugins::BUNDLE
                 .ok_or_else(|| anyhow::anyhow!("this build has no embedded plugin bundle"))?;
-            drivers::plugins::udev_rules_from_bundle(bytes)?
+            plugin::udev_rules_from_bundle(bytes)?
         } else {
             let cfg = config::load()?;
-            let registry = drivers::plugins::Registry::default();
+            let registry = plugin::Registry::default();
             registry.load_all_with_priority_repo(
                 &config::plugins_dir(),
                 None,
-                &drivers::plugins::repo_plugin_dirs(&cfg.plugins.repos),
+                &plugin::repo_plugin_dirs(&cfg.plugins.repos),
             );
             registry.udev_rules()
         };
@@ -271,11 +272,11 @@ async fn run_daemon(
 
     // Prime the requirement cache so the first UI poll doesn't trigger a probe
     // per plugin; refreshed thereafter only at reconcile (no continuous polling).
-    crate::registry::usecases::plugins::refresh_requirements(&app).await?;
+    crate::plugin::usecases::plugins::refresh_requirements(&app).await?;
 
     // Compute passive HID/USB/SMBus recommendations once at startup. The same
     // snapshot is refreshed when repository manifests change.
-    crate::registry::usecases::plugins::refresh_recommendations(&app).await;
+    crate::plugin::usecases::plugins::refresh_recommendations(&app).await;
 
     // Started only once startup is done — the grace clock must not elapse
     // before a client has had any chance to connect.
@@ -315,8 +316,23 @@ async fn run_daemon(
             let app = Arc::clone(&integration_app);
             Box::pin(async move {
                 task_supervisor::TaskHandle(tokio::spawn(
-                    drivers::plugins::integration_monitor::integration_monitor(app),
+                    plugin::integration_monitor::integration_monitor(app),
                 ))
+            })
+        },
+        || {},
+    );
+
+    let sensor_app = Arc::clone(&app);
+    supervisor.register(
+        "Sensor data producer",
+        "Host sensor snapshots stopped updating unexpectedly.",
+        move || {
+            let app = Arc::clone(&sensor_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(registry::state::sensor_data_producer(
+                    app,
+                )))
             })
         },
         || {},

@@ -58,7 +58,7 @@ struct LivePixmap {
 
 enum PixmapRuntime {
     BuiltIn(Box<dyn FrameSource>),
-    Plugin(crate::drivers::plugins::PluginEffectHandle),
+    Plugin(crate::plugin::PluginEffectHandle),
     Off,
 }
 
@@ -69,7 +69,7 @@ struct LiveDirect {
 
 enum DirectRuntime {
     BuiltIn(Box<dyn DirectLedEffect>),
-    Plugin(crate::drivers::plugins::PluginEffectHandle),
+    Plugin(crate::plugin::PluginEffectHandle),
     Off,
 }
 
@@ -115,7 +115,12 @@ fn build_pixmap_effect(app: &Arc<AppState>, def: Option<&EffectDef>) -> PixmapRu
         return PixmapRuntime::BuiltIn(fx);
     }
     app.registry
-        .build_pixmap_effect(app.secret_store.as_ref(), &d.effect_id, &d.params)
+        .build_pixmap_effect(
+            app.secret_store.as_ref(),
+            app.data_bus.clone(),
+            &d.effect_id,
+            &d.params,
+        )
         .map(PixmapRuntime::Plugin)
         .unwrap_or(PixmapRuntime::Off)
 }
@@ -159,6 +164,16 @@ fn zone_led_coords(zone: &RgbZone) -> Vec<(f32, f32, f32, f32)> {
             (p, p_ring, led.x, led.y)
         })
         .collect()
+}
+
+fn zone_topology_name(topology: &ZoneTopology) -> &'static str {
+    match topology {
+        ZoneTopology::Ring => "ring",
+        ZoneTopology::Rings { .. } => "rings",
+        ZoneTopology::Linear => "linear",
+        ZoneTopology::Grid => "grid",
+        ZoneTopology::Keyboard { .. } => "keyboard",
+    }
 }
 
 fn direct_zone_colors(effect: &dyn DirectLedEffect, zone: &RgbZone, t: f32) -> Vec<RgbColor> {
@@ -233,9 +248,7 @@ impl RgbEngine {
     /// Built-in host effects plus plugin-declared pixmap effects. The built-in
     /// boundary is intentionally narrow; see `canvas::effects`. Not memoized
     /// because plugins can load/unload at runtime.
-    pub fn available_effect_descriptors(
-        registry: &crate::drivers::plugins::Registry,
-    ) -> Vec<Animation> {
+    pub fn available_effect_descriptors(registry: &crate::plugin::Registry) -> Vec<Animation> {
         let mut v = canvas::builtin_descriptors();
         v.extend(registry.pixmap_effect_descriptors());
         v
@@ -243,9 +256,7 @@ impl RgbEngine {
 
     /// Built-in host effects plus plugin-declared direct effects. See
     /// [`Self::available_effect_descriptors`] for why this isn't memoized.
-    pub fn direct_effect_descriptors(
-        registry: &crate::drivers::plugins::Registry,
-    ) -> Vec<Animation> {
+    pub fn direct_effect_descriptors(registry: &crate::plugin::Registry) -> Vec<Animation> {
         let mut v = direct::builtin_descriptors();
         v.extend(registry.direct_effect_descriptors());
         v
@@ -315,6 +326,13 @@ impl RgbEngine {
 
         let mut pending: PendingWrites = HashMap::new();
         let mut led_colors: Vec<LedFrameEntry> = Vec::new();
+        let sensor_snapshot = self.app_state.data_bus.sensors();
+        let effect_frame = crate::plugin::EffectFrameInput {
+            time: t,
+            dt,
+            frame: frame_id,
+            audio: crate::services::audio::shared().latest(),
+        };
 
         let preview_srgb = self
             .canvas_pass(
@@ -323,12 +341,19 @@ impl RgbEngine {
                 &sampler,
                 t,
                 dt,
+                &effect_frame,
                 &mut pending,
                 &mut led_colors,
             )
             .await;
-        self.direct_pass(&direct_devices, t, dt, &mut pending, &mut led_colors)
-            .await;
+        self.direct_pass(
+            &direct_devices,
+            &effect_frame,
+            &sensor_snapshot,
+            &mut pending,
+            &mut led_colors,
+        )
+        .await;
 
         self.dispatch_writes(pending);
 
@@ -357,6 +382,7 @@ impl RgbEngine {
         sampler: &Sampler,
         t: f32,
         dt: f32,
+        effect_frame: &crate::plugin::EffectFrameInput,
         pending: &mut PendingWrites,
         led_colors: &mut Vec<LedFrameEntry>,
     ) -> Option<Vec<u8>> {
@@ -404,26 +430,28 @@ impl RgbEngine {
         for key in &built {
             let lp = live.get_mut(key).expect("instance built above");
             let disable = match &mut lp.runtime {
-                PixmapRuntime::Plugin(handle) => match handle.render_pixmap(t, dt).await {
-                    Ok(bytes) if bytes.len() == lp.pixmap.data().len() => {
-                        lp.pixmap.data_mut().copy_from_slice(&bytes);
-                        false
-                    }
-                    Ok(bytes) => {
-                        log::warn!(
+                PixmapRuntime::Plugin(handle) => {
+                    match handle.render_pixmap(effect_frame.clone()).await {
+                        Ok(bytes) if bytes.len() == lp.pixmap.data().len() => {
+                            lp.pixmap.data_mut().copy_from_slice(&bytes);
+                            false
+                        }
+                        Ok(bytes) => {
+                            log::warn!(
                             "plugin pixmap effect '{key}' returned {} bytes, expected {}; disabling for this session",
                             bytes.len(),
                             lp.pixmap.data().len()
                         );
-                        true
-                    }
-                    Err(e) => {
-                        log::warn!(
+                            true
+                        }
+                        Err(e) => {
+                            log::warn!(
                             "plugin pixmap effect '{key}' render failed: {e:#}; disabling for this session"
                         );
-                        true
+                            true
+                        }
                     }
-                },
+                }
                 PixmapRuntime::BuiltIn(effect) => {
                     effect.render(&mut lp.pixmap, t, dt);
                     false
@@ -480,18 +508,14 @@ impl RgbEngine {
     async fn direct_pass(
         &self,
         direct_devices: &[DirectDevice],
-        t: f32,
-        dt: f32,
+        effect_frame: &crate::plugin::EffectFrameInput,
+        sensor_snapshot: &HashMap<String, halod_shared::types::Sensor>,
         pending: &mut PendingWrites,
         led_colors: &mut Vec<LedFrameEntry>,
     ) {
         let mut live = self.live_direct.lock().await;
         let active: HashSet<&str> = direct_devices.iter().map(|(d, _, _)| d.id()).collect();
         live.retain(|k, _| active.contains(k.as_str()));
-
-        // Snapshotted lazily: most direct effects don't consume a sensor, and a
-        // snapshot walks every device's `SensorCapability`/`FanCapability`.
-        let mut sensors: Option<HashMap<String, halod_shared::types::Sensor>> = None;
 
         for (dev, id, params) in direct_devices {
             let want = format!("{id}|{}", params_key(params));
@@ -501,6 +525,7 @@ impl RgbEngine {
                     Some(fx) => DirectRuntime::BuiltIn(fx),
                     None => match self.app_state.registry.build_direct_effect(
                         self.app_state.secret_store.as_ref(),
+                        self.app_state.data_bus.clone(),
                         id,
                         params,
                     ) {
@@ -518,32 +543,27 @@ impl RgbEngine {
 
             if let DirectRuntime::Plugin(handle) = &ld.runtime {
                 let handle = handle.clone();
-                let sensor_value = match params.get("sensor") {
-                    Some(halod_shared::types::EffectParamValue::Str(sensor_id))
-                        if !sensor_id.is_empty() =>
-                    {
-                        if sensors.is_none() {
-                            sensors = Some(self.app_state.snapshot_sensors().await);
-                        }
-                        sensors
-                            .as_ref()
-                            .and_then(|m| m.get(sensor_id))
-                            .map(|s| s.value)
-                    }
-                    _ => None,
-                };
                 for rgb_zone in &rgb.descriptor().zones {
                     let coords = zone_led_coords(rgb_zone);
-                    let leds: Vec<crate::drivers::plugins::LedCoord> = coords
+                    let leds: Vec<crate::plugin::LedCoord> = coords
                         .iter()
-                        .map(|&(p, p_ring, nx, ny)| crate::drivers::plugins::LedCoord {
+                        .zip(&rgb_zone.leds)
+                        .map(|(&(p, p_ring, nx, ny), led)| crate::plugin::LedCoord {
+                            id: led.id,
+                            zone_id: rgb_zone.id.clone(),
                             p,
                             p_ring,
                             nx,
                             ny,
                         })
                         .collect();
-                    let colors = match handle.led_colors(leds, t, dt, sensor_value).await {
+                    let zone = crate::plugin::EffectZoneInput {
+                        id: rgb_zone.id.clone(),
+                        topology: zone_topology_name(&rgb_zone.topology).into(),
+                        led_count: rgb_zone.leds.len(),
+                        device_id: dev.id().to_string(),
+                    };
+                    let colors = match handle.led_colors(leds, effect_frame.clone(), zone).await {
                         Ok(out) if out.len() == coords.len() => out
                             .into_iter()
                             .map(|c| RgbColor {
@@ -598,18 +618,12 @@ impl RgbEngine {
                 continue;
             };
             if let Some(sensor_id) = effect.sensor_id().map(|s| s.to_string()) {
-                if sensors.is_none() {
-                    sensors = Some(self.app_state.snapshot_sensors().await);
-                }
-                let value = sensors
-                    .as_ref()
-                    .and_then(|m| m.get(&sensor_id))
-                    .map(|s| s.value);
+                let value = sensor_snapshot.get(&sensor_id).map(|s| s.value);
                 effect.set_sensor_value(value);
             }
-            effect.tick(t, dt);
+            effect.tick(effect_frame.time, effect_frame.dt);
             for rgb_zone in &rgb.descriptor().zones {
-                let colors = direct_zone_colors(effect.as_ref(), rgb_zone, t);
+                let colors = direct_zone_colors(effect.as_ref(), rgb_zone, effect_frame.time);
                 if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
                     led_colors.extend(entries);
                     pending
@@ -1333,24 +1347,32 @@ mod tests {
     }
 
     /// Load a single-file plugin declaring one direct effect that echoes the
-    /// live `sensor` callback arg into its red channel, so a test can assert
-    /// the engine actually threads a live sensor reading through to a
-    /// plugin-declared direct effect (mirrors `load_test_effect_plugin`
-    /// above but exercises the `sensor` param/arg wiring instead).
+    /// sensor-bus value into its red channel, so a test can assert the engine
+    /// exposes live host snapshots to a plugin-declared direct effect.
     fn load_test_sensor_plugin(app: &Arc<AppState>) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("engine_sensor_fx");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_sensor_fx\ntype: effect\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
+            "id: engine_sensor_fx\ntype: effect\nconsumes: [host.sensors.*]\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
         )
         .unwrap();
         std::fs::write(
             plugin_dir.join("main.lua"),
             r#"
                 return {
-                  led_colors_probe = function(leds, t, dt, params, sensor)
+                  led_effect_probe = function(leds, ctx)
+                    local sensor = nil
+                    local catalog = ctx:data("host.sensors.catalog")
+                    if catalog.status ~= "unavailable" then
+                      for _, item in ipairs(catalog.value) do
+                        if item.id == ctx.params.sensor then
+                          local snapshot = ctx:data(item.key)
+                          if snapshot.status ~= "unavailable" then sensor = snapshot.value.value end
+                        end
+                      end
+                    end
                     local v = 0.0
                     if sensor ~= nil then v = sensor / 100.0 end
                     local out = {}
@@ -1366,6 +1388,16 @@ mod tests {
         app.registry.load_all(tmp.path());
         app.registry.replace_policy(&crate::config::PluginPolicy {
             enabled: vec!["engine_sensor_fx".into()],
+            accepted_authorities: [(
+                "engine_sensor_fx".into(),
+                halod_shared::types::PluginAuthority {
+                    permissions: vec![],
+                    transport_scopes: vec![],
+                    data_reads: vec!["host.sensors.*".into()],
+                },
+            )]
+            .into_iter()
+            .collect(),
             ..Default::default()
         });
         tmp
@@ -1403,6 +1435,7 @@ mod tests {
             .await
             .push(dev.clone() as Arc<dyn Device>);
 
+        app.refresh_sensor_bus().await;
         let engine = RgbEngine::new(app).await;
         engine.tick(0.1, 1.0, 0).await;
         engine.drain_writes().await;
@@ -1715,7 +1748,7 @@ mod tests {
             plugin_dir.join("main.lua"),
             r#"
                 return {
-                  render_solid = function(buf, t, dt, params)
+                  render_effect_solid = function(buf, ctx)
                     for i = 0, #buf - 1, 4 do
                       buf:set_u8(i, 9)
                       buf:set_u8(i + 1, 8)
@@ -1723,7 +1756,7 @@ mod tests {
                       buf:set_u8(i + 3, 255)
                     end
                   end,
-                  led_colors_ramp = function(leds, t, dt, params)
+                  led_effect_ramp = function(leds, ctx)
                     local out = {}
                     for i, led in ipairs(leds) do
                       out[i] = { r = led.p, g = 0, b = 0 }
@@ -1813,7 +1846,7 @@ mod tests {
 
         let colors = dev.last_colors.lock().unwrap().clone().unwrap();
         assert_eq!(colors.len(), 3);
-        // led_colors_ramp returns r=p (chain fraction), gamma-encoded on the way out.
+        // led_effect_ramp returns r=p (chain fraction), gamma-encoded on the way out.
         assert_eq!(colors[0].r, 0);
         assert!(
             colors[2].r > colors[0].r,

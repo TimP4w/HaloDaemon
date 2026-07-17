@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Cooling tab — fan/pump readings, a fixed-speed mode, and a drag-editable
+//! Cooling tab — fan readings, a fixed-speed mode, and a drag-editable
 //! temp→duty curve (reused [`widgets::curve_editor`]).
 
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Vec2};
 use halod_shared::commands::DaemonCommand;
-use halod_shared::types::{DeviceCapability, FanCurveStatus, FanStatus, PumpStatus, Sensor};
+use halod_shared::types::{DeviceCapability, FanCurveStatus, FanStatus, Sensor};
 
 use super::{editing, DeviceUi, TabCtx};
 use crate::ui::screens::cooling::preset_display_name;
@@ -18,7 +18,6 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         ui.max_rect(),
     );
     let fan = find_fan(ctx.dev);
-    let pump = find_pump(ctx.dev);
     let fan_id = ctx.dev.id.clone();
 
     // The persisted curve for this fan (if any).
@@ -52,14 +51,10 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         .and_then(|sid| sensors.iter().find(|(_, s)| &s.id == sid))
         .map(|(_, s)| s.value as f32);
 
-    top_row(ui, ctx, st, &fan, &pump, &sensors, sensor_temp);
+    top_row(ui, ctx, st, &fan, &sensors, sensor_temp);
     ui.add_space(theme::SPACE_8);
 
-    let curve_title = match (&fan, &pump) {
-        (Some(_), None) => t!("cooling.fan_curve"),
-        (None, Some(_)) => t!("cooling.pump_curve"),
-        _ => t!("cooling.fan_and_pump_curve"),
-    };
+    let curve_title = t!("cooling.fan_curve");
     curve_card(
         ui,
         ctx,
@@ -76,7 +71,6 @@ fn top_row(
     ctx: &TabCtx,
     st: &mut DeviceUi,
     fan: &Option<FanStatus>,
-    pump: &Option<PumpStatus>,
     sensors: &[(String, Sensor)],
     sensor_temp: Option<f32>,
 ) {
@@ -164,20 +158,6 @@ fn top_row(
                     ui,
                     &t!("cooling.fan_duty"),
                     &t!("cooling.percent", v = f.duty),
-                    theme::TEXT_BRIGHT,
-                );
-            }
-            if let Some(p) = pump {
-                widgets::value_row(
-                    ui,
-                    &t!("cooling.pump_speed"),
-                    &t!("cooling.rpm", v = p.rpm),
-                    theme::TEXT_BRIGHT,
-                );
-                widgets::value_row(
-                    ui,
-                    &t!("cooling.pump_duty"),
-                    &t!("cooling.percent", v = p.duty),
                     theme::TEXT_BRIGHT,
                 );
             }
@@ -323,13 +303,6 @@ fn curve_card(
 fn find_fan(dev: &halod_shared::types::WireDevice) -> Option<FanStatus> {
     dev.capabilities.iter().find_map(|c| match c {
         DeviceCapability::Fan(f) => Some(f.clone()),
-        _ => None,
-    })
-}
-
-fn find_pump(dev: &halod_shared::types::WireDevice) -> Option<PumpStatus> {
-    dev.capabilities.iter().find_map(|c| match c {
-        DeviceCapability::Pump(p) => Some(p.clone()),
         _ => None,
     })
 }

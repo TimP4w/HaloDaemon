@@ -76,7 +76,7 @@ pub fn validate_template(def: &CustomTemplateDef) -> Result<()> {
 /// deliberately accepted so saved layouts can retain their placeholder.
 pub fn validate_template_catalog(
     def: &CustomTemplateDef,
-    registry: &crate::drivers::plugins::Registry,
+    registry: &crate::plugin::Registry,
 ) -> Result<()> {
     for widget in &def.widgets {
         let Some(descriptor) = registry.widget_descriptor(&widget.widget) else {

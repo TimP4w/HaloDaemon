@@ -51,7 +51,6 @@ devtabs:
   cap_equalizer: Equalizzatore
   cap_sensors: Sensori
   cap_fan: Ventola
-  cap_pump: Pompa
   cap_rgb: RGB
   cap_dpi: DPI
   cap_onboard: Memoria onboard

@@ -34,7 +34,6 @@ device_code:
 
 model:
   metric_speed: Velocità
-  metric_pump: Pompa
   metric_temp: Temp
   metric_link: Link
   wired: Cablato

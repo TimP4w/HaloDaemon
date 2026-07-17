@@ -83,7 +83,8 @@ pub struct AppState {
         Mutex<std::collections::HashMap<String, halod_shared::types::RepoCompatibilityStatus>>,
     /// The device-plugin registry (loaded manifests, consent/config, notice
     /// dedup, load warnings).
-    pub registry: crate::drivers::plugins::Registry,
+    pub registry: crate::plugin::Registry,
+    pub data_bus: Arc<crate::services::data_bus::DataBus>,
     #[cfg(feature = "dev-plugin-repo")]
     /// Process-local development repository selected with `--dev-plugin-repo`.
     /// Registry rebuilds must retain this priority source rather than falling
@@ -119,7 +120,8 @@ impl AppState {
             plugin_update_status: Mutex::new(Vec::new()),
             repo_signature_status: Mutex::new(std::collections::HashMap::new()),
             repo_compatibility_status: Mutex::new(std::collections::HashMap::new()),
-            registry: crate::drivers::plugins::Registry::default(),
+            registry: crate::plugin::Registry::default(),
+            data_bus: Arc::new(crate::services::data_bus::DataBus::default()),
             #[cfg(feature = "dev-plugin-repo")]
             development_plugin_repo: RwLock::new(None),
             secret_store: Arc::new(crate::secrets::FileKeyStore::new()),
@@ -198,7 +200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_sensors_collects_sensors_from_all_devices() {
+    async fn sensor_bus_collects_sensors_from_all_devices() {
         let app = make_test_app();
         let dev1 = std::sync::Arc::new(
             crate::test_support::MockDevice::new("sensor_dev_1").with_sensor(vec![
@@ -233,14 +235,15 @@ mod tests {
             .await
             .push(dev2 as std::sync::Arc<dyn crate::drivers::Device>);
 
-        let snapshot = app.snapshot_sensors().await;
+        app.refresh_sensor_bus().await;
+        let snapshot = app.data_bus.sensors();
         assert_eq!(snapshot.len(), 2);
         assert_eq!(snapshot.get("temp1").unwrap().value, 45.5);
         assert_eq!(snapshot.get("temp2").unwrap().value, 62.0);
     }
 
     #[tokio::test]
-    async fn snapshot_sensors_excludes_disabled_devices() {
+    async fn sensor_bus_excludes_disabled_devices() {
         let mut cfg = Config::default();
         cfg.known_devices.insert(
             "disabled_dev".into(),
@@ -269,12 +272,45 @@ mod tests {
             .await
             .push(dev as std::sync::Arc<dyn crate::drivers::Device>);
 
-        let snapshot = app.snapshot_sensors().await;
+        app.refresh_sensor_bus().await;
+        let snapshot = app.data_bus.sensors();
         assert!(snapshot.is_empty());
     }
 
     #[tokio::test]
-    async fn snapshot_sensors_skips_devices_without_sensor_capability() {
+    async fn sensor_bus_invalidates_a_failed_producer() {
+        use std::sync::atomic::Ordering;
+
+        let app = make_test_app();
+        let device = std::sync::Arc::new(
+            crate::test_support::MockDevice::new("sensor_dev").with_sensor(vec![
+                halod_shared::types::Sensor {
+                    id: "temp1".into(),
+                    name: "CPU Temp".into(),
+                    value: 45.5,
+                    unit: halod_shared::types::SensorUnit::Celsius,
+                    sensor_type: halod_shared::types::SensorType::Temperature,
+                    visibility: halod_shared::types::VisibilityState::Visible,
+                },
+            ]),
+        );
+        app.devices.write().await.push(device.clone());
+        app.refresh_sensor_bus().await;
+        assert!(app.data_bus.sensors().contains_key("temp1"));
+
+        device.live.store(false, Ordering::SeqCst);
+        app.refresh_sensor_bus().await;
+        assert!(app.data_bus.sensors().is_empty());
+        assert_eq!(
+            app.data_bus
+                .read(&crate::services::data_bus::sensor_key("temp1"))
+                .status,
+            crate::services::data_bus::SnapshotStatus::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn sensor_bus_skips_devices_without_sensor_capability() {
         let app = make_test_app();
         let dev = std::sync::Arc::new(crate::test_support::MockDevice::new("no_sensor").with_rgb());
         app.devices
@@ -282,12 +318,13 @@ mod tests {
             .await
             .push(dev as std::sync::Arc<dyn crate::drivers::Device>);
 
-        let snapshot = app.snapshot_sensors().await;
+        app.refresh_sensor_bus().await;
+        let snapshot = app.data_bus.sensors();
         assert!(snapshot.is_empty());
     }
 
     #[tokio::test]
-    async fn snapshot_sensors_includes_synthesized_fan_readings() {
+    async fn sensor_bus_includes_synthesized_fan_readings() {
         let app = make_test_app();
         let dev =
             std::sync::Arc::new(crate::test_support::MockDevice::new("fan0").with_fan_rpm(900));
@@ -296,7 +333,8 @@ mod tests {
             .await
             .push(dev as std::sync::Arc<dyn crate::drivers::Device>);
 
-        let snapshot = app.snapshot_sensors().await;
+        app.refresh_sensor_bus().await;
+        let snapshot = app.data_bus.sensors();
         assert_eq!(snapshot.get("fan_fan0_rpm").map(|s| s.value), Some(900.0));
         assert!(snapshot.contains_key("fan_fan0_duty"));
     }
@@ -473,12 +511,11 @@ mod tests {
         // Clean — every handle passes.
         assert!(app.handle_in_scope(&handle).await);
 
-        let mut spec: crate::drivers::plugins::DeviceSpec =
-            serde_json::from_value(serde_json::json!({
-            "vendor": "x", "model": "y",
-            "match": { "hid": { "vid": 9, "pid": 9 } }
-            }))
-            .unwrap();
+        let mut spec: crate::plugin::DeviceSpec = serde_json::from_value(serde_json::json!({
+        "vendor": "x", "model": "y",
+        "match": { "hid": { "vid": 9, "pid": 9 } }
+        }))
+        .unwrap();
         spec.transport = "hid".to_owned();
         spec.vid = Some(9);
         spec.pid = Some(9);

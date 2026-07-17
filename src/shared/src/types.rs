@@ -48,15 +48,13 @@ pub struct LcdWidgetUpdates {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u32>,
     #[serde(default)]
-    pub sensors: bool,
+    pub data: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sensors_when: Option<LcdParamVisibility>,
+    pub data_when: Option<LcdParamVisibility>,
     #[serde(default)]
     pub audio: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_when: Option<LcdParamVisibility>,
-    #[serde(default)]
-    pub media: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +65,9 @@ pub struct LcdWidgetDescriptor {
     pub name: String,
     /// Declared SVG asset, fetched through `GetLcdWidgetIcon`.
     pub icon: String,
+    /// Additional SVGs this widget may access through `ctx:draw_asset`.
+    #[serde(default)]
+    pub assets: Vec<String>,
     #[serde(default)]
     pub params: Vec<EffectParamDescriptor>,
     pub resize: LcdWidgetResize,
@@ -952,6 +953,10 @@ pub struct PluginAuthority {
     pub permissions: Vec<Permission>,
     #[serde(default)]
     pub transport_scopes: Vec<String>,
+    /// Namespaced latest-value records this plugin may read. Exact keys are
+    /// used except for the host-managed `host.sensors.*` scope.
+    #[serde(default)]
+    pub data_reads: Vec<String>,
 }
 
 impl PluginAuthority {
@@ -960,6 +965,8 @@ impl PluginAuthority {
         self.permissions.dedup();
         self.transport_scopes.sort();
         self.transport_scopes.dedup();
+        self.data_reads.sort();
+        self.data_reads.dedup();
         self
     }
 
@@ -976,7 +983,19 @@ impl PluginAuthority {
                 .transport_scopes
                 .iter()
                 .all(|scope| accepted.transport_scopes.binary_search(scope).is_ok())
+            && requested
+                .data_reads
+                .iter()
+                .all(|scope| accepted.data_reads.binary_search(scope).is_ok())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginDataRecordStatus {
+    pub key: String,
+    pub status: String,
+    #[serde(default)]
+    pub updated_at: Option<u64>,
 }
 
 /// Which discovery path a plugin registers into.
@@ -1273,6 +1292,13 @@ pub struct PluginInfo {
     /// Complete authority snapshot rendered by the enable modal.
     #[serde(default)]
     pub authority: PluginAuthority,
+    /// Latest-value records this package declares as producer/consumer.
+    #[serde(default)]
+    pub provides: Vec<String>,
+    #[serde(default)]
+    pub consumes: Vec<String>,
+    #[serde(default)]
+    pub data_records: Vec<PluginDataRecordStatus>,
     /// The snapshot accepted during the last successful enable, if any.
     #[serde(default)]
     pub accepted_authority: Option<PluginAuthority>,
@@ -1339,6 +1365,19 @@ pub enum PluginConfigFieldKind {
     #[default]
     Text,
     Number,
+    Boolean,
+    Enum,
+    Host,
+    Port,
+    Url,
+    DurationMs,
+}
+
+/// Shows a config field only when a sibling field equals the declared value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginConfigVisibility {
+    pub field: String,
+    pub equals: String,
 }
 
 /// One user-editable setting a plugin declares (mirrors the manifest's
@@ -1354,10 +1393,19 @@ pub struct PluginConfigField {
     pub category: String,
     #[serde(default)]
     pub secure: bool,
+    /// Allowed values for an `Enum` field.
+    #[serde(default)]
+    pub options: Vec<String>,
     #[serde(default)]
     pub min: Option<f64>,
     #[serde(default)]
     pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_when: Option<PluginConfigVisibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1620,7 +1668,6 @@ pub enum DeviceCapability {
     Equalizer(Equalizer),
     Sensors(Vec<Sensor>),
     Fan(FanStatus),
-    Pump(PumpStatus),
     Rgb(RgbStatus),
     Dpi(DpiStatus),
     OnboardProfiles(OnboardProfiles),
@@ -2159,13 +2206,6 @@ pub struct FanStatus {
     pub controllable: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PumpStatus {
-    pub rpm: u32,
-    pub duty: u8,
-    pub controllable: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FanCurveStatus {
@@ -2356,7 +2396,6 @@ macro_rules! find_cap {
 impl WireDevice {
     find_cap!(battery, Battery, Vec<Battery>);
     find_cap!(fan, Fan, FanStatus);
-    find_cap!(pump, Pump, PumpStatus);
     find_cap!(rgb, Rgb, RgbStatus);
     find_cap!(sensors, Sensors, Vec<Sensor>);
     find_cap!(dpi, Dpi, DpiStatus);
@@ -2452,6 +2491,16 @@ mod app_rule_tests {
         );
         assert_eq!(c.hide_window_controls, DEFAULT_HIDE_WINDOW_CONTROLS);
         assert_eq!(c.log_level, DEFAULT_LOG_LEVEL);
+    }
+
+    #[test]
+    fn plugin_config_field_new_metadata_has_backward_compatible_defaults() {
+        let field: PluginConfigField =
+            serde_json::from_str(r#"{"key":"host","label":"Host","kind":"host"}"#).unwrap();
+        assert!(field.options.is_empty());
+        assert!(field.visible_when.is_none());
+        assert!(field.help.is_none());
+        assert!(field.placeholder.is_none());
     }
 
     /// An empty AppState JSON must materialize the manual config defaults through

@@ -55,7 +55,7 @@ pub fn show(
                 let coolers: Vec<&WireDevice> = state
                     .devices
                     .iter()
-                    .filter(|d| has_fan_or_pump(d) && !model::is_hidden(d))
+                    .filter(|d| has_fan(d) && !model::is_hidden(d))
                     .collect();
 
                 let title_resp = ui.label(
@@ -412,10 +412,10 @@ fn fan_icon(p: &egui::Painter, center: Pos2, r: f32, time: f64, rpm: u32, color:
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn has_fan_or_pump(dev: &WireDevice) -> bool {
+fn has_fan(dev: &WireDevice) -> bool {
     dev.capabilities
         .iter()
-        .any(|c| matches!(c, DeviceCapability::Fan(_) | DeviceCapability::Pump(_)))
+        .any(|c| matches!(c, DeviceCapability::Fan(_)))
 }
 
 fn rpm_for(dev: &WireDevice) -> u32 {
@@ -423,7 +423,6 @@ fn rpm_for(dev: &WireDevice) -> u32 {
         .iter()
         .find_map(|c| match c {
             DeviceCapability::Fan(f) => Some(f.rpm),
-            DeviceCapability::Pump(p) => Some(p.rpm),
             _ => None,
         })
         .unwrap_or(0)

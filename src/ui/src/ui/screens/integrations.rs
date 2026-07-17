@@ -406,6 +406,26 @@ fn status_row(ui: &mut egui::Ui, p: &PluginInfo, status: &IntegrationStatus) {
             );
         }
     });
+    for record in &p.data_records {
+        let color = match record.status.as_str() {
+            "fresh" => theme::ONLINE_TEXT,
+            "stale" => theme::STAT_AMBER,
+            _ => theme::TEXT_FAINT,
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            ui.label(
+                egui::RichText::new(&record.key)
+                    .font(theme::mono(10.5))
+                    .color(theme::TEXT_FAINT),
+            );
+            ui.label(
+                egui::RichText::new(&record.status)
+                    .font(theme::body_sm())
+                    .color(color),
+            );
+        });
+    }
 }
 
 #[cfg(test)]
@@ -436,6 +456,9 @@ mod tests {
             provenance: Default::default(),
             declared_permissions: vec![],
             authority: Default::default(),
+            provides: vec![],
+            consumes: vec![],
+            data_records: vec![],
             accepted_authority: None,
             config_fields: vec![],
             config_values: Default::default(),

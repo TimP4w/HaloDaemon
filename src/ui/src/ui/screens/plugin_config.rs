@@ -12,6 +12,39 @@ use halod_shared::types::{PluginConfigField, PluginConfigFieldKind, PluginInfo};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::theme;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigEditor {
+    Text,
+    Number,
+    Boolean,
+    Enum,
+    Host,
+    Port,
+    Url,
+    DurationMs,
+}
+
+fn config_editor(kind: PluginConfigFieldKind) -> ConfigEditor {
+    match kind {
+        PluginConfigFieldKind::Text => ConfigEditor::Text,
+        PluginConfigFieldKind::Number => ConfigEditor::Number,
+        PluginConfigFieldKind::Boolean => ConfigEditor::Boolean,
+        PluginConfigFieldKind::Enum => ConfigEditor::Enum,
+        PluginConfigFieldKind::Host => ConfigEditor::Host,
+        PluginConfigFieldKind::Port => ConfigEditor::Port,
+        PluginConfigFieldKind::Url => ConfigEditor::Url,
+        PluginConfigFieldKind::DurationMs => ConfigEditor::DurationMs,
+    }
+}
+
+fn config_field_visible(field: &PluginConfigField, edits: &HashMap<String, String>) -> bool {
+    field.visible_when.as_ref().is_none_or(|rule| {
+        edits
+            .get(&rule.field)
+            .is_some_and(|value| value == &rule.equals)
+    })
+}
+
 /// Reset the edit buffer when the selection moves to a different plugin, so
 /// stale text from a previous plugin's fields never leaks into another's. A
 /// secure field's buffer always starts blank — never seeded from
@@ -77,6 +110,14 @@ pub fn config_section(
         .show(ui, |ui| {
             let mut first = true;
             for (category, fields) in &groups {
+                let visible: Vec<_> = fields
+                    .iter()
+                    .copied()
+                    .filter(|field| config_field_visible(field, edits))
+                    .collect();
+                if visible.is_empty() {
+                    continue;
+                }
                 if !category.is_empty() {
                     if !first {
                         field_separator(ui);
@@ -84,7 +125,7 @@ pub fn config_section(
                     ui.add_space(theme::SPACE_4);
                     widgets::caps_label(ui, category);
                 }
-                for f in fields {
+                for f in visible {
                     if !first {
                         field_separator(ui);
                     }
@@ -121,19 +162,31 @@ fn config_field_row(
     edits: &mut HashMap<String, String>,
 ) {
     let secret_set = f.secure && p.secret_set.get(&f.key).copied().unwrap_or(false);
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::hover());
+    let height = if f.help.is_some() { 52.0 } else { 40.0 };
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
 
     let mut left = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    left.label(
-        egui::RichText::new(&f.label)
-            .font(theme::body_md())
-            .color(theme::TEXT),
-    );
+    left.vertical(|ui| {
+        ui.label(
+            egui::RichText::new(&f.label)
+                .font(theme::body_md())
+                .color(theme::TEXT),
+        );
+        if let Some(help) = &f.help {
+            ui.label(
+                egui::RichText::new(help)
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_FAINT),
+            );
+        }
+    });
 
     let mut right = ui.new_child(
         egui::UiBuilder::new()
@@ -141,6 +194,29 @@ fn config_field_row(
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
     let buf = edits.entry(f.key.clone()).or_default();
+    if !f.secure {
+        match config_editor(f.kind) {
+            ConfigEditor::Boolean => {
+                let mut checked = buf == "true";
+                if right.checkbox(&mut checked, "").changed() {
+                    *buf = checked.to_string();
+                }
+                return;
+            }
+            ConfigEditor::Enum => {
+                egui::ComboBox::from_id_salt(("plugin_config", &f.key))
+                    .selected_text(buf.as_str())
+                    .width(200.0)
+                    .show_ui(&mut right, |ui| {
+                        for option in &f.options {
+                            ui.selectable_value(buf, option.clone(), option);
+                        }
+                    });
+                return;
+            }
+            _ => {}
+        }
+    }
     let mut edit = egui::TextEdit::singleline(buf)
         .desired_width(200.0)
         .margin(egui::Margin::symmetric(9, 6))
@@ -152,11 +228,20 @@ fn config_field_row(
         // A secure field always starts blank; the hint tells the user a secret
         // is already stored so an untouched field leaves it be.
         edit = edit.hint_text(t!("plugins.secret_set_hint"));
-    } else if matches!(f.kind, PluginConfigFieldKind::Number) {
-        // Numeric fields are still stored/sent as strings (the plugin/Lua side
-        // interprets them); this only nudges the on-screen keyboard/validation,
-        // it doesn't change the type.
-        edit = edit.hint_text("0");
+    } else if let Some(placeholder) = &f.placeholder {
+        edit = edit.hint_text(placeholder);
+    } else {
+        let hint = match config_editor(f.kind) {
+            ConfigEditor::Number => Some("0"),
+            ConfigEditor::Host => Some("example.com"),
+            ConfigEditor::Port => Some("1–65535"),
+            ConfigEditor::Url => Some("https://example.com"),
+            ConfigEditor::DurationMs => Some("milliseconds"),
+            ConfigEditor::Text | ConfigEditor::Boolean | ConfigEditor::Enum => None,
+        };
+        if let Some(hint) = hint {
+            edit = edit.hint_text(hint);
+        }
     }
     right.add(edit);
 }
@@ -183,9 +268,48 @@ mod tests {
             kind: PluginConfigFieldKind::Text,
             category: String::new(),
             secure,
+            options: vec![],
             min: None,
             max: None,
+            visible_when: None,
+            help: None,
+            placeholder: None,
         }
+    }
+
+    #[test]
+    fn every_config_field_kind_has_a_distinct_editor() {
+        let cases = [
+            (PluginConfigFieldKind::Text, ConfigEditor::Text),
+            (PluginConfigFieldKind::Number, ConfigEditor::Number),
+            (PluginConfigFieldKind::Boolean, ConfigEditor::Boolean),
+            (PluginConfigFieldKind::Enum, ConfigEditor::Enum),
+            (PluginConfigFieldKind::Host, ConfigEditor::Host),
+            (PluginConfigFieldKind::Port, ConfigEditor::Port),
+            (PluginConfigFieldKind::Url, ConfigEditor::Url),
+            (PluginConfigFieldKind::DurationMs, ConfigEditor::DurationMs),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(config_editor(kind), expected);
+        }
+    }
+
+    #[test]
+    fn conditional_visibility_uses_sibling_string_equality() {
+        let mut dependent = field("token", false);
+        dependent.visible_when = Some(halod_shared::types::PluginConfigVisibility {
+            field: "mode".into(),
+            equals: "remote".into(),
+        });
+        assert!(!config_field_visible(&dependent, &HashMap::new()));
+        assert!(config_field_visible(
+            &dependent,
+            &HashMap::from([("mode".into(), "remote".into())])
+        ));
+        assert!(!config_field_visible(
+            &dependent,
+            &HashMap::from([("mode".into(), "local".into())])
+        ));
     }
 
     #[test]

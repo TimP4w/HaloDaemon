@@ -61,7 +61,7 @@ pub async fn set_device_visibility(
         new_state == VisibilityState::Visible && prev_state == Some(VisibilityState::Disabled);
     if enabling_from_disabled {
         app.devices.write().await.retain(|d| d.id() != device_id);
-        crate::registry::usecases::plugins::reconcile_full(&app).await;
+        crate::plugin::usecases::plugins::reconcile_full(&app).await;
         return Ok(());
     }
 
@@ -74,38 +74,9 @@ pub async fn set_sensor_visibility(
     state: VisibilityState,
     app: Arc<AppState>,
 ) -> Result<()> {
-    let devices = app.devices.read().await.clone();
-    let owning_device = {
-        let mut found: Option<Arc<dyn crate::drivers::Device>> = None;
-        for device in &devices {
-            if let Some(cap) = device.as_sensor_capability() {
-                if let Ok(sensors) = cap.get_sensors().await {
-                    if sensors.iter().any(|s| s.id == sensor_id) {
-                        found = Some(device.clone());
-                        break;
-                    }
-                }
-            }
-        }
-        found
-    };
-
-    // Fan RPM/duty are synthesized (not backed by `SensorCapability`), so the
-    // scan above never finds them — match their deterministic id instead.
-    let owning_device = owning_device.or_else(|| {
-        devices
-            .iter()
-            .find(|d| {
-                d.as_fan().is_some()
-                    && (sensor_id == crate::drivers::fan_duty_sensor_id(d.id())
-                        || sensor_id == crate::drivers::fan_rpm_sensor_id(d.id()))
-            })
-            .cloned()
-    });
-
-    // Validate the sensor exists; visibility itself is overlaid from config at
-    // snapshot time (see `snapshot_devices`), so no per-device write is needed.
-    owning_device.ok_or_else(|| anyhow!("sensor not found: {sensor_id}"))?;
+    app.data_bus
+        .sensor_owner(&sensor_id)
+        .ok_or_else(|| anyhow!("sensor not found: {sensor_id}"))?;
 
     {
         let mut cfg = app.config.write().await;
@@ -232,6 +203,7 @@ mod tests {
         let app = make_app();
         let device = Arc::new(MockDevice::new("fan0").with_fan());
         push_device(&app, device.clone());
+        app.refresh_sensor_bus().await;
 
         set_sensor_visibility("fan_fan0_duty".into(), VisibilityState::Hidden, app.clone())
             .await
@@ -267,6 +239,7 @@ mod tests {
             },
         ]));
         push_device(&app, device);
+        app.refresh_sensor_bus().await;
 
         set_sensor_visibility("temp1".into(), VisibilityState::Hidden, app.clone())
             .await
@@ -293,6 +266,7 @@ mod tests {
             },
         ]));
         push_device(&app, device);
+        app.refresh_sensor_bus().await;
 
         set_sensor_visibility("temp1".into(), VisibilityState::Hidden, app.clone())
             .await

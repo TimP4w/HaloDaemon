@@ -64,6 +64,7 @@ impl ArtCache {
 
 pub struct MediaHandle {
     latest: RwLock<Option<MediaInfo>>,
+    data_bus: RwLock<Option<Arc<crate::services::data_bus::DataBus>>>,
 }
 
 impl MediaHandle {
@@ -75,6 +76,47 @@ impl MediaHandle {
     }
 
     fn publish(&self, info: Option<MediaInfo>) {
+        if let Some(bus) = self
+            .data_bus
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            if let Some(current) = &info {
+                let mut value = std::collections::BTreeMap::new();
+                value.insert(
+                    "title".into(),
+                    crate::services::data_bus::DataValue::String(current.title.clone()),
+                );
+                value.insert(
+                    "artist".into(),
+                    crate::services::data_bus::DataValue::String(current.artist.clone()),
+                );
+                value.insert(
+                    "status".into(),
+                    crate::services::data_bus::DataValue::String(
+                        match current.status {
+                            PlaybackStatus::Playing => "playing",
+                            PlaybackStatus::Paused => "paused",
+                            PlaybackStatus::Stopped => "stopped",
+                        }
+                        .into(),
+                    ),
+                );
+                value.insert(
+                    "art_available".into(),
+                    crate::services::data_bus::DataValue::Bool(current.art.is_some()),
+                );
+                let _ = bus.publish(
+                    "host",
+                    "host.media.playback",
+                    crate::services::data_bus::DataValue::Map(value),
+                    crate::services::data_bus::host_policy(std::time::Duration::from_secs(30)),
+                );
+            } else {
+                let _ = bus.invalidate("host", "host.media.playback", "unavailable");
+            }
+        }
         *self.latest.write().unwrap_or_else(|e| e.into_inner()) = info;
     }
 }
@@ -83,15 +125,20 @@ impl MediaHandle {
 /// only a `Weak`, the platform watcher task holds a `Weak` too — when the last
 /// consumer `Arc` drops, the watcher's `upgrade()` fails and it exits. A later
 /// call starts a fresh watcher.
-pub fn shared() -> Arc<MediaHandle> {
+pub fn shared_with_bus(bus: Arc<crate::services::data_bus::DataBus>) -> Arc<MediaHandle> {
     static SLOT: OnceLock<Mutex<Weak<MediaHandle>>> = OnceLock::new();
     let slot = SLOT.get_or_init(|| Mutex::new(Weak::new()));
     let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = guard.upgrade() {
+        *existing
+            .data_bus
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(bus);
         return existing;
     }
     let handle = Arc::new(MediaHandle {
         latest: RwLock::new(None),
+        data_bus: RwLock::new(Some(bus)),
     });
     start_platform(Arc::downgrade(&handle));
     *guard = Arc::downgrade(&handle);
@@ -136,6 +183,7 @@ mod tests {
     fn publish_then_latest_round_trips() {
         let handle = MediaHandle {
             latest: RwLock::new(None),
+            data_bus: RwLock::new(None),
         };
         assert!(handle.latest().is_none());
         let m = info();
@@ -149,8 +197,9 @@ mod tests {
 
     #[tokio::test]
     async fn shared_returns_same_arc_while_held() {
-        let a = shared();
-        let b = shared();
+        let bus = Arc::new(crate::services::data_bus::DataBus::default());
+        let a = shared_with_bus(bus.clone());
+        let b = shared_with_bus(bus);
         assert!(Arc::ptr_eq(&a, &b));
     }
 

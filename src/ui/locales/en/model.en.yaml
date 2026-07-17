@@ -34,7 +34,6 @@ device_code:
 
 model:
   metric_speed: Speed
-  metric_pump: Pump
   metric_temp: Temp
   metric_link: Link
   wired: Wired

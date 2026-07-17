@@ -214,7 +214,7 @@ impl LcdEngine {
     }
 
     pub fn wire_state(
-        registry: &crate::drivers::plugins::Registry,
+        registry: &crate::plugin::Registry,
         device_templates: HashMap<String, String>,
         device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
     ) -> WireLcdEngineState {
@@ -276,8 +276,6 @@ impl LcdEngine {
 
     async fn tick(&self, t: f64) {
         self.evict_idle_editor_session().await;
-        let sensors = self.app_state.snapshot_sensors().await;
-
         let receiver_count = self.frame_tx.receiver_count();
         let prev_receiver_count = self
             .prev_receiver_count
@@ -380,7 +378,6 @@ impl LcdEngine {
                 width: descriptor.width,
                 height: descriptor.height,
                 t,
-                sensors: &sensors,
             };
 
             let force = preview_just_subscribed || slot.last_sig.is_none() || slot.fail_streak > 0;
