@@ -24,10 +24,10 @@ use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor
 use crate::drivers::{
     ActionCapability, BatteryCapability, BoolStateCache, BooleanCapability, CapabilityRef,
     ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, CoolingCapability,
-    CoolingStateSlot, Device, DpiCapability, EqualizerCapability, FanCapability, FanHub,
-    FanStateSlot, KeyRemapCapability, KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability,
-    LcdStateSlot, OnboardProfilesCapability, PairingCapability, RangeCapability, RangeStateCache,
-    RgbCapability, RgbStateSlot, SensorCapability, VisibilitySlot,
+    CoolingHub, CoolingStateSlot, Device, DpiCapability, EqualizerCapability, KeyRemapCapability,
+    KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
+    OnboardProfilesCapability, PairingCapability, RangeCapability, RangeStateCache, RgbCapability,
+    RgbStateSlot, SensorCapability, VisibilitySlot,
 };
 
 use super::chain_leaf::ChainLeaf;
@@ -530,7 +530,6 @@ pub struct LuaDevice {
     /// descriptor is selected from the shared layout slot on every snapshot.
     dynamic_rgb_iso_descriptor: OnceLock<RgbDescriptor>,
     rgb_slot: RgbStateSlot,
-    fan_slot: FanStateSlot,
     cooling_slot: CoolingStateSlot,
     cooling_channels: OnceLock<Vec<CoolingChannel>>,
 
@@ -1092,7 +1091,6 @@ impl LuaDevice {
             dynamic_rgb_descriptor: OnceLock::new(),
             dynamic_rgb_iso_descriptor: OnceLock::new(),
             rgb_slot: RgbStateSlot::default(),
-            fan_slot: FanStateSlot::default(),
             cooling_slot: CoolingStateSlot::default(),
             cooling_channels: OnceLock::new(),
             sensor_cache: Arc::new(Mutex::new(Vec::new())),
@@ -1792,7 +1790,7 @@ impl Device for LuaDevice {
             match cap {
                 Cap::Rgb => caps.push(CapabilityRef::Rgb(self)),
                 Cap::Cooling => caps.push(CapabilityRef::Cooling(self)),
-                Cap::Fan => caps.push(CapabilityRef::Fan(self)),
+                Cap::Fan => caps.push(CapabilityRef::Cooling(self)),
                 Cap::Sensor => caps.push(CapabilityRef::Sensor(self)),
                 Cap::Lcd => caps.push(CapabilityRef::Lcd(self)),
                 Cap::Dpi => caps.push(CapabilityRef::Dpi(self)),
@@ -1946,31 +1944,6 @@ impl CoolingCapability for LuaDevice {
 }
 
 #[async_trait]
-impl FanCapability for LuaDevice {
-    async fn get_duty(&self) -> Result<u8> {
-        self.fan_cache
-            .lock_recover()
-            .duty
-            .ok_or_else(|| anyhow::anyhow!("fan duty not sampled yet"))
-    }
-
-    async fn set_duty(&self, duty: u8) -> Result<()> {
-        let r = self.worker()?.fan_set_duty(duty).await;
-        self.track(r).await?;
-        self.fan_cache.lock_recover().duty = Some(duty);
-        Ok(())
-    }
-
-    async fn get_rpm(&self) -> Option<u32> {
-        self.fan_cache.lock_recover().rpm
-    }
-
-    fn fan_state(&self) -> &FanStateSlot {
-        &self.fan_slot
-    }
-}
-
-#[async_trait]
 impl SensorCapability for LuaDevice {
     async fn get_sensors(&self) -> Result<Vec<Sensor>> {
         Ok(self.sensor_cache.lock_recover().clone())
@@ -2079,7 +2052,7 @@ impl LuaDevice {
         let Some(parent) = self.self_ref.upgrade() else {
             return Vec::new();
         };
-        let fan_hub: Arc<dyn FanHub> = parent;
+        let cooling_hub: Arc<dyn CoolingHub> = parent;
         let chain_hub: Arc<dyn ChainHub> = host.clone();
 
         let mut out = Vec::new();
@@ -2106,7 +2079,7 @@ impl LuaDevice {
                 d.channel,
                 accessory,
                 chain_hub.clone(),
-                fan_hub.clone(),
+                cooling_hub.clone(),
             ));
             if let Err(e) = leaf.initialize().await {
                 log::warn!("plugin '{}' child init failed: {e:#}", self.plugin_id);
@@ -2784,18 +2757,12 @@ impl ChainAdapter for LuaDevice {
 }
 
 #[async_trait]
-impl FanHub for LuaDevice {
-    async fn get_fan_rpm(&self, channel: u8) -> Result<u32> {
-        self.worker()?.hub_fan_rpm(channel).await
+impl CoolingHub for LuaDevice {
+    async fn get_cooling_status(&self, channel: u8) -> Result<CoolingChannel> {
+        self.worker()?.hub_cooling_status(channel).await
     }
-    async fn get_fan_duty(&self, channel: u8) -> Result<u8> {
-        self.worker()?.hub_fan_duty(channel).await
-    }
-    async fn get_fan_controllable(&self, channel: u8) -> Result<bool> {
-        self.worker()?.hub_fan_controllable(channel).await
-    }
-    async fn set_fan_duty(&self, channel: u8, duty: u8) -> Result<()> {
-        self.worker()?.hub_set_fan_duty(channel, duty).await
+    async fn set_cooling_duty(&self, channel: u8, duty: u8) -> Result<()> {
+        self.worker()?.hub_set_cooling_duty(channel, duty).await
     }
 }
 

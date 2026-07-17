@@ -5,7 +5,7 @@
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Vec2};
 use halod_shared::commands::DaemonCommand;
-use halod_shared::types::{CoolingChannel, DeviceCapability, FanCurveStatus, FanStatus, Sensor};
+use halod_shared::types::{CoolingChannel, DeviceCapability, FanCurveStatus, Sensor};
 
 use super::{editing, DeviceUi, TabCtx};
 use crate::ui::screens::cooling::preset_display_name;
@@ -18,7 +18,6 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         ui.max_rect(),
     );
     let channels = cooling_channels(ctx.dev);
-    let is_cooling = ctx.dev.cooling().is_some();
     let default_channel = channels
         .first()
         .map(|c| c.id.clone())
@@ -42,15 +41,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         .cooling
         .fan_curves
         .iter()
-        .find(|c| c.device_id == fan_id && c.channel_id == selected)
-        // Pre-channel snapshots remain readable while a daemon/client pair is upgraded.
-        .or_else(|| {
-            ctx.state
-                .cooling
-                .fan_curves
-                .iter()
-                .find(|c| c.fan_id == fan_id && selected == "default")
-        });
+        .find(|c| c.device_id == fan_id && c.channel_id == selected);
     if !st.cooling.curve_seeded {
         st.cooling.curve = curve
             .map(|c| c.points.clone())
@@ -96,16 +87,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
             });
         ui.add_space(theme::SPACE_6);
     }
-    top_row(
-        ui,
-        ctx,
-        st,
-        &fan,
-        &sensors,
-        sensor_temp,
-        &selected,
-        is_cooling,
-    );
+    top_row(ui, ctx, st, &fan, &sensors, sensor_temp, &selected);
     ui.add_space(theme::SPACE_8);
 
     let curve_title = t!("cooling.fan_curve");
@@ -115,7 +97,6 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         st,
         &fan_id,
         &selected,
-        is_cooling,
         curve.map(|c| c.status.clone()),
         sensor_temp,
         &curve_title,
@@ -126,11 +107,10 @@ fn top_row(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    fan: &Option<FanStatus>,
+    fan: &Option<CoolingChannel>,
     sensors: &[(String, Sensor)],
     sensor_temp: Option<f32>,
     channel_id: &str,
-    is_cooling: bool,
 ) {
     ui.columns(2, |cols| {
         // Curve sensor selector + live temp.
@@ -181,7 +161,6 @@ fn top_row(
                     curve_points_command(
                         ctx.dev.id.clone(),
                         channel_id.to_string(),
-                        is_cooling,
                         st.cooling.curve.clone(),
                         st.cooling.curve_sensor.clone(),
                     ),
@@ -211,13 +190,13 @@ fn top_row(
                 widgets::value_row(
                     ui,
                     &t!("cooling.fan_speed"),
-                    &t!("cooling.rpm", v = f.rpm),
+                    &t!("cooling.rpm", v = f.rpm.unwrap_or_default()),
                     theme::TEXT_BRIGHT,
                 );
                 widgets::value_row(
                     ui,
                     &t!("cooling.fan_duty"),
-                    &t!("cooling.percent", v = f.duty),
+                    &t!("cooling.percent", v = f.duty.unwrap_or_default()),
                     theme::TEXT_BRIGHT,
                 );
             }
@@ -231,7 +210,6 @@ fn curve_card(
     st: &mut DeviceUi,
     fan_id: &str,
     channel_id: &str,
-    is_cooling: bool,
     status: Option<FanCurveStatus>,
     sensor_temp: Option<f32>,
     title: &str,
@@ -284,7 +262,6 @@ fn curve_card(
                             curve_preset_command(
                                 fan_id.to_string(),
                                 channel_id.to_string(),
-                                is_cooling,
                                 p.id.clone(),
                                 st.cooling.curve_sensor.clone(),
                             ),
@@ -357,7 +334,6 @@ fn curve_card(
             let cmd = curve_points_command(
                 fan_id.to_string(),
                 channel_id.to_string(),
-                is_cooling,
                 st.cooling.curve.clone(),
                 st.cooling.curve_sensor.clone(),
             );
@@ -369,74 +345,44 @@ fn curve_card(
 fn curve_points_command(
     device_id: String,
     channel_id: String,
-    is_cooling: bool,
     points: Vec<[f32; 2]>,
     sensor_id: Option<String>,
 ) -> DaemonCommand {
-    if is_cooling {
-        DaemonCommand::SetCoolingCurvePoints {
-            device_id,
-            channel_id,
-            points,
-            sensor_id,
-        }
-    } else {
-        DaemonCommand::SetFanCurvePoints {
-            fan_id: device_id,
-            points,
-            sensor_id,
-        }
+    DaemonCommand::SetCoolingCurvePoints {
+        device_id,
+        channel_id,
+        points,
+        sensor_id,
     }
 }
 
 fn curve_preset_command(
     device_id: String,
     channel_id: String,
-    is_cooling: bool,
     preset: String,
     sensor_id: Option<String>,
 ) -> DaemonCommand {
-    if is_cooling {
-        DaemonCommand::SetCoolingCurvePreset {
-            device_id,
-            channel_id,
-            preset,
-            sensor_id,
-        }
-    } else {
-        DaemonCommand::SetFanCurvePreset {
-            fan_id: device_id,
-            preset,
-            sensor_id,
-        }
+    DaemonCommand::SetCoolingCurvePreset {
+        device_id,
+        channel_id,
+        preset,
+        sensor_id,
     }
 }
 
 fn cooling_channels(dev: &halod_shared::types::WireDevice) -> Vec<CoolingChannel> {
     dev.cooling()
         .map(|cooling| cooling.channels.clone())
-        .unwrap_or_else(|| {
-            vec![CoolingChannel {
-                id: "default".into(),
-                name: "Fan".into(),
-                ..Default::default()
-            }]
-        })
+        .unwrap_or_default()
 }
 
-fn find_fan(dev: &halod_shared::types::WireDevice, channel_id: &str) -> Option<FanStatus> {
+fn find_fan(dev: &halod_shared::types::WireDevice, channel_id: &str) -> Option<CoolingChannel> {
     dev.capabilities.iter().find_map(|c| match c {
         DeviceCapability::Cooling(cooling) => cooling
             .channels
             .iter()
             .find(|c| c.id == channel_id)
-            .map(|channel| FanStatus {
-                channel: 0,
-                rpm: channel.rpm.unwrap_or_default(),
-                duty: channel.duty.unwrap_or_default(),
-                controllable: channel.controllable,
-            }),
-        DeviceCapability::Fan(f) => Some(f.clone()),
+            .cloned(),
         _ => None,
     })
 }

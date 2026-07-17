@@ -17,6 +17,7 @@
 //! a deliberate follow-up.
 
 use std::ops::ControlFlow;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -55,6 +56,9 @@ pub(super) enum WorkerState {
     Starting,
     Healthy,
     Wedged(WedgeReason),
+    /// A command panicked on the worker thread.  Panics must not be reported
+    /// as an unexplained dropped oneshot reply to the caller.
+    Panicked(String),
     Closing,
     Closed,
 }
@@ -144,8 +148,15 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
                         *thread_state.lock().unwrap() = WorkerState::Healthy;
                         let mut rx = rx;
                         while let Some(cmd) = rx.blocking_recv() {
-                            if handle(cmd, &ctx).is_break() {
-                                break;
+                            match panic::catch_unwind(AssertUnwindSafe(|| handle(cmd, &ctx))) {
+                                Ok(ControlFlow::Continue(())) => {}
+                                Ok(ControlFlow::Break(())) => break,
+                                Err(payload) => {
+                                    let message = panic_message(payload);
+                                    log::error!("{label} worker panicked while handling a request: {message}");
+                                    *thread_state.lock().unwrap() = WorkerState::Panicked(message);
+                                    return;
+                                }
                             }
                         }
                         *thread_state.lock().unwrap() = WorkerState::Closing;
@@ -212,6 +223,9 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
                     reason.describe()
                 ));
             }
+            WorkerState::Panicked(message) => {
+                return Err(anyhow!("{} worker panicked: {message}", self.label));
+            }
             WorkerState::Closing | WorkerState::Closed => {
                 return Err(anyhow!("{} worker is gone", self.label));
             }
@@ -226,9 +240,7 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
             }
         })?;
         match tokio::time::timeout(self.call_timeout, rx).await {
-            Ok(res) => {
-                res.map_err(|_| anyhow!("{} worker dropped the reply (req {req_id})", self.label))
-            }
+            Ok(res) => res.map_err(|_| self.dropped_reply_error(req_id)),
             Err(_) => {
                 *self.state.lock().unwrap() = WorkerState::Wedged(WedgeReason::Timeout);
                 Err(anyhow!(
@@ -256,6 +268,9 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
                     reason.describe()
                 ));
             }
+            WorkerState::Panicked(message) => {
+                return Err(anyhow!("{} worker panicked: {message}", self.label));
+            }
             WorkerState::Closing | WorkerState::Closed => {
                 return Err(anyhow!("{} worker is gone", self.label));
             }
@@ -268,8 +283,7 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
                 *self.state.lock().unwrap() = WorkerState::Closed;
                 anyhow!("{} worker is gone", self.label)
             })?;
-            rx.await
-                .map_err(|_| anyhow!("{} worker dropped the reply (req {req_id})", self.label))
+            rx.await.map_err(|_| self.dropped_reply_error(req_id))
         })
         .await;
         match result {
@@ -283,6 +297,27 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
                 ))
             }
         }
+    }
+}
+
+impl<Cmd> LuaWorker<Cmd> {
+    fn dropped_reply_error(&self, req_id: u64) -> anyhow::Error {
+        match &*self.state.lock().unwrap() {
+            WorkerState::Panicked(message) => {
+                anyhow!("{} worker panicked while handling req {req_id}: {message}", self.label)
+            }
+            _ => anyhow!("{} worker dropped the reply (req {req_id})", self.label),
+        }
+    }
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_owned()
     }
 }
 
@@ -498,6 +533,20 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("dropped the reply"));
+    }
+
+    #[tokio::test]
+    async fn a_panicking_job_reports_the_panic_instead_of_a_dropped_reply() {
+        let worker = spawn_counter(0);
+        let err = worker
+            .request(|_reply: oneshot::Sender<()>| {
+                Box::new(|_: &i32| panic!("intentional worker panic")) as Job
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("panicked while handling req 0"), "{err}");
+        assert!(err.to_string().contains("intentional worker panic"), "{err}");
+        assert!(matches!(worker.state(), WorkerState::Panicked(_)));
     }
 
     #[tokio::test]

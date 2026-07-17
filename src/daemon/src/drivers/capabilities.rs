@@ -10,10 +10,10 @@ use halod_shared::keyboard::{
     is_iso_language, KeyVariant, KeyboardLayoutSelection, KeyboardLayoutStatus,
 };
 use halod_shared::types::{
-    Battery, Boolean, ButtonMapping, ConnectionStatus, CoolingChannel, CoolingChannelKind,
-    CoolingStatus, DeviceCapability, DpiStatus, EffectParamValue, Equalizer, KeyRemapStatus,
-    KeyboardLayout, LcdDescriptor, LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor,
-    SensorType, SensorUnit, VisibilityState, ZoneTopology,
+    Battery, Boolean, ButtonMapping, ConnectionStatus, CoolingChannel, CoolingStatus,
+    DeviceCapability, DpiStatus, EffectParamValue, Equalizer, KeyRemapStatus, KeyboardLayout,
+    LcdDescriptor, LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType,
+    SensorUnit, VisibilityState, ZoneTopology,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 use std::collections::HashMap;
@@ -71,19 +71,16 @@ pub struct ChainLinkSpec {
     pub led_count: u32,
 }
 
-/// Fan status/speed surface for chain accessory drivers with fan hardware
-/// alongside their ARGB channels; chain writes go through [`chain::ChainHub`] instead.
+/// Cooling surface for chain accessories. Chain RGB writes remain the concern
+/// of [`chain::ChainHub`]; this trait routes a child's cooling channel back to
+/// its parent controller.
 #[async_trait]
-pub trait FanHub: Send + Sync + 'static {
-    async fn get_fan_rpm(&self, channel: u8) -> Result<u32>;
-    async fn get_fan_duty(&self, channel: u8) -> Result<u8>;
-    async fn get_fan_controllable(&self, channel: u8) -> Result<bool>;
-    async fn set_fan_duty(&self, channel: u8, duty: u8) -> Result<()>;
+pub trait CoolingHub: Send + Sync + 'static {
+    async fn get_cooling_status(&self, channel: u8) -> Result<CoolingChannel>;
+    async fn set_cooling_duty(&self, channel: u8, duty: u8) -> Result<()>;
 }
 
-/// Multi-output cooling surface. New drivers should implement this instead of
-/// `FanCapability`; the latter remains only as a compatibility adapter for
-/// existing one-output drivers.
+/// Unified cooling surface for one or more independently addressable outputs.
 #[async_trait]
 pub trait CoolingCapability: Send + Sync {
     fn cooling_channels(&self) -> Vec<CoolingChannel>;
@@ -418,67 +415,6 @@ pub trait EqualizerCapability: Send + Sync {
 }
 
 #[async_trait]
-pub trait FanCapability: Send + Sync {
-    async fn get_duty(&self) -> Result<u8>;
-
-    async fn set_duty(&self, duty: u8) -> Result<()>;
-
-    /// Returns current fan speed in RPM. Returns `None` for devices (e.g. pumps) that
-    /// report duty but not RPM.
-    async fn get_rpm(&self) -> Option<u32>;
-
-    /// Backing slot — required so all state sub-operations have defaults.
-    fn fan_state(&self) -> &FanStateSlot;
-
-    fn fan_curve(&self) -> Option<crate::cooling::config::FanCurveRecord> {
-        self.fan_state().fan_curve()
-    }
-    fn set_fan_curve(&self, curve: crate::cooling::config::FanCurveRecord) {
-        self.fan_state().set_fan_curve(curve);
-    }
-    fn clear_fan_curve(&self) {
-        self.fan_state().clear_fan_curve();
-    }
-
-    async fn fan_controllable(&self) -> bool {
-        true
-    }
-
-    async fn to_wire(&self) -> Option<DeviceCapability> {
-        // Old one-output drivers serialize through the unified wire shape.
-        // Their persisted state and control calls are adapted by the daemon as
-        // channel `default` until the driver is updated natively.
-        Some(DeviceCapability::Cooling(CoolingStatus {
-            channels: vec![CoolingChannel {
-                id: "default".to_string(),
-                name: "Fan".to_string(),
-                kind: CoolingChannelKind::Fan,
-                controllable: self.fan_controllable().await,
-                rpm: self.get_rpm().await,
-                duty: self.get_duty().await.ok(),
-            }],
-        }))
-    }
-
-    fn state_key(&self) -> &'static str {
-        halod_shared::capability::FAN_CURVE
-    }
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::to_value(self.fan_curve()).unwrap_or(serde_json::Value::Null)
-    }
-    async fn restore_state(&self, v: &serde_json::Value) {
-        match serde_json::from_value::<Option<crate::cooling::config::FanCurveRecord>>(v.clone()) {
-            Ok(Some(c)) => match c.validate() {
-                Ok(()) => self.set_fan_curve(c),
-                Err(e) => log::warn!("[fan restore_state] dropping invalid curve: {e:#}"),
-            },
-            Ok(None) => self.clear_fan_curve(),
-            Err(e) => log::warn!("[fan restore_state] invalid curve payload: {e}"),
-        }
-    }
-}
-
-#[async_trait]
 pub trait SensorCapability: Send + Sync {
     async fn get_sensors(&self) -> Result<Vec<Sensor>>;
 
@@ -492,19 +428,7 @@ pub trait SensorCapability: Send + Sync {
     }
 }
 
-/// Deterministic id for a fan's synthesized duty-percent sensor reading.
-pub fn fan_duty_sensor_id(device_id: &str) -> String {
-    format!("fan_{device_id}_duty")
-}
-
-/// Deterministic id for a fan's synthesized RPM sensor reading, when it reports one.
-pub fn fan_rpm_sensor_id(device_id: &str) -> String {
-    format!("fan_{device_id}_rpm")
-}
-
-/// Synthesizes duty/RPM sensor readings for any device with a `FanCapability`,
-/// so fan-driven effects (and the sensor dashboard) can select them like any
-/// other sensor. Returns an empty `Vec` for devices without `FanCapability`.
+/// Synthesizes duty/RPM sensor readings for cooling channels.
 pub async fn fan_sensors(device: &dyn Device) -> Vec<Sensor> {
     if let Some(cooling) = device.as_cooling() {
         let mut out = Vec::new();
@@ -536,31 +460,7 @@ pub async fn fan_sensors(device: &dyn Device) -> Vec<Sensor> {
         }
         return out;
     }
-    let Some(fan) = device.as_fan() else {
-        return Vec::new();
-    };
-    let mut out = vec![Sensor {
-        id: fan_duty_sensor_id(device.id()),
-        name: format!("{} Duty", device.name()),
-        value: fan.get_duty().await.unwrap_or_else(|e| {
-            log::trace!("[fan_sensors] get_duty: {e}");
-            0
-        }) as f64,
-        unit: SensorUnit::Percent,
-        sensor_type: SensorType::FanDuty,
-        visibility: VisibilityState::Visible,
-    }];
-    if let Some(rpm) = fan.get_rpm().await {
-        out.push(Sensor {
-            id: fan_rpm_sensor_id(device.id()),
-            name: format!("{} RPM", device.name()),
-            value: rpm as f64,
-            unit: SensorUnit::Rpm,
-            sensor_type: SensorType::FanSpeed,
-            visibility: VisibilityState::Visible,
-        });
-    }
-    out
+    Vec::new()
 }
 
 /// Unified DPI control for pointing devices. Covers both onboard-profile DPI

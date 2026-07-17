@@ -257,28 +257,6 @@ pub enum DaemonCommand {
         selection: crate::keyboard::KeyboardLayoutSelection,
     },
 
-    // Fan speed / curves
-    SetFanSpeed {
-        id: String,
-        duty: u8,
-    },
-    SetFanCurvePoints {
-        fan_id: String,
-        /// Points as [temp_celsius, duty_percent] pairs. Uses `f32` to match
-        /// the wire type in `WireFanCurve`, avoiding a runtime cast.
-        points: Vec<[f32; 2]>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sensor_id: Option<String>,
-    },
-    SetFanCurvePreset {
-        fan_id: String,
-        preset: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sensor_id: Option<String>,
-    },
-    RemoveFanCurve {
-        fan_id: String,
-    },
     /// Channel-addressed curve commands for devices that expose `cooling`.
     SetCoolingCurvePoints {
         device_id: String,

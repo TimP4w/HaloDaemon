@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Fan curve engine: a control loop that, per assigned fan, interpolates a
 //! target duty from the curve against its sensor and writes it via
-//! `FanCapability::set_duty`. Each fan's `FanCurveStatus` is published to
+//! `CoolingCapability::set_cooling_duty`. Each channel's `FanCurveStatus` is published to
 //! `AppState::fan_curve_statuses` for broadcast to UI clients. Any condition
 //! preventing safe closed-loop control drives the fan to the failsafe duty.
 
@@ -259,23 +259,6 @@ impl FanCurveEngine {
                             (target, curve),
                         );
                     }
-                } else if let Some(fan) = device.as_fan() {
-                    let curve = if let Some(c) = fan.fan_curve() {
-                        c
-                    } else {
-                        let default = default_curve();
-                        fan.set_fan_curve(default.clone());
-                        self.app_state.persistence.notify.notify_one();
-                        default
-                    };
-                    let target = CurveTarget {
-                        device_id: device.id().to_owned(),
-                        channel_id: "default".to_string(),
-                    };
-                    map.insert(
-                        curve_key(&target.device_id, &target.channel_id),
-                        (target, curve),
-                    );
                 }
             }
             map
@@ -466,8 +449,6 @@ async fn current_duty(device: &Arc<dyn crate::drivers::Device>, channel_id: &str
             .ok()
             .and_then(|s| s.duty)
             .unwrap_or(0) as f32
-    } else if let Some(fan) = device.as_fan() {
-        fan.get_duty().await.unwrap_or(0) as f32
     } else {
         0.0
     }
@@ -481,7 +462,7 @@ async fn current_rpm(device: &Arc<dyn crate::drivers::Device>, channel_id: &str)
             .ok()
             .and_then(|s| s.rpm);
     }
-    device.as_fan()?.get_rpm().await
+    None
 }
 
 async fn apply_duty(
@@ -491,8 +472,6 @@ async fn apply_duty(
 ) -> anyhow::Result<()> {
     if let Some(cooling) = device.as_cooling() {
         cooling.set_cooling_duty(channel_id, duty).await
-    } else if let Some(fan) = device.as_fan() {
-        fan.set_duty(duty).await
     } else {
         Err(anyhow::anyhow!("device has no duty capability"))
     }

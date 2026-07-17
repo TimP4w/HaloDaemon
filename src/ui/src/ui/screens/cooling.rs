@@ -40,46 +40,28 @@ pub(crate) fn matching_preset<'a>(
 fn curve_points_command(
     device_id: String,
     channel_id: String,
-    is_cooling: bool,
     points: Vec<[f32; 2]>,
     sensor_id: Option<String>,
 ) -> halod_shared::commands::DaemonCommand {
-    if is_cooling {
-        halod_shared::commands::DaemonCommand::SetCoolingCurvePoints {
-            device_id,
-            channel_id,
-            points,
-            sensor_id,
-        }
-    } else {
-        halod_shared::commands::DaemonCommand::SetFanCurvePoints {
-            fan_id: device_id,
-            points,
-            sensor_id,
-        }
+    halod_shared::commands::DaemonCommand::SetCoolingCurvePoints {
+        device_id,
+        channel_id,
+        points,
+        sensor_id,
     }
 }
 
 fn curve_preset_command(
     device_id: String,
     channel_id: String,
-    is_cooling: bool,
     preset: String,
     sensor_id: Option<String>,
 ) -> halod_shared::commands::DaemonCommand {
-    if is_cooling {
-        halod_shared::commands::DaemonCommand::SetCoolingCurvePreset {
-            device_id,
-            channel_id,
-            preset,
-            sensor_id,
-        }
-    } else {
-        halod_shared::commands::DaemonCommand::SetFanCurvePreset {
-            fan_id: device_id,
-            preset,
-            sensor_id,
-        }
+    halod_shared::commands::DaemonCommand::SetCoolingCurvePreset {
+        device_id,
+        channel_id,
+        preset,
+        sensor_id,
     }
 }
 
@@ -109,7 +91,6 @@ pub fn show(
                                 .iter()
                                 .map(|channel| (device, Some(channel)))
                                 .collect::<Vec<_>>(),
-                            None if has_fan(device) => vec![(device, None)],
                             None => Vec::new(),
                         })
                         .collect();
@@ -179,19 +160,11 @@ fn cooler_card(
     let channel_id = channel
         .map(|channel| channel.id.as_str())
         .unwrap_or("default");
-    let is_cooling = channel.is_some();
     let curve = state
         .cooling
         .fan_curves
         .iter()
-        .find(|c| c.device_id == dev.id && c.channel_id == channel_id)
-        .or_else(|| {
-            state
-                .cooling
-                .fan_curves
-                .iter()
-                .find(|c| c.fan_id == dev.id && channel_id == "default")
-        });
+        .find(|c| c.device_id == dev.id && c.channel_id == channel_id);
     let sensor_id = curve.and_then(|c| c.sensor_id.clone());
     let live = sensor_id
         .as_deref()
@@ -200,8 +173,16 @@ fn cooler_card(
     let sensor_name = live
         .map(|(_, s)| s.name.clone())
         .unwrap_or_else(|| "-".into());
+    // Chain accessories use their hardware name for both the child device and
+    // their sole cooling channel.
     let cooler_name = channel
-        .map(|channel| format!("{} · {}", dev.name, channel.name))
+        .map(|channel| {
+            if channel.name.trim() == dev.name.trim() {
+                dev.name.clone()
+            } else {
+                format!("{} · {}", dev.name, channel.name)
+            }
+        })
         .unwrap_or_else(|| dev.name.clone());
 
     widgets::card(ui, |ui| {
@@ -276,7 +257,6 @@ fn cooler_card(
                             curve_preset_command(
                                 dev.id.clone(),
                                 channel_id.to_string(),
-                                is_cooling,
                                 preset.id.clone(),
                                 sensor_id.clone(),
                             ),
@@ -295,7 +275,10 @@ fn cooler_card(
                 .map(|(d, s)| format!("{d} · {} ({:.0}°C)", s.name, s.value))
                 .unwrap_or_else(|| t!("cooling.no_sensor").to_string());
             let mut pick: Option<Option<String>> = None;
-            egui::ComboBox::from_id_salt(format!("cool_sensor_{}", dev.id))
+            // A device can expose multiple cooling channels. Include the
+            // channel in the persistent widget ID so their selectors do not
+            // alias each other's egui state.
+            egui::ComboBox::from_id_salt(format!("cool_sensor_{}_{}", dev.id, channel_id))
                 .selected_text(current)
                 .width(ui.available_width())
                 .show_ui(ui, |ui| {
@@ -319,7 +302,6 @@ fn cooler_card(
                     curve_points_command(
                         dev.id.clone(),
                         channel_id.to_string(),
-                        is_cooling,
                         curve
                             .map(|c| c.points.clone())
                             .unwrap_or_else(default_curve),
@@ -482,13 +464,6 @@ fn fan_icon(p: &egui::Painter, center: Pos2, r: f32, time: f64, rpm: u32, color:
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn has_fan(dev: &WireDevice) -> bool {
-    dev.capabilities.iter().any(|c| {
-        matches!(c, DeviceCapability::Cooling(c) if !c.channels.is_empty())
-            || matches!(c, DeviceCapability::Fan(_))
-    })
-}
-
 fn rpm_for(dev: &WireDevice) -> u32 {
     dev.capabilities
         .iter()
@@ -496,7 +471,6 @@ fn rpm_for(dev: &WireDevice) -> u32 {
             DeviceCapability::Cooling(cooling) => {
                 cooling.channels.first().and_then(|channel| channel.rpm)
             }
-            DeviceCapability::Fan(f) => Some(f.rpm),
             _ => None,
         })
         .unwrap_or(0)

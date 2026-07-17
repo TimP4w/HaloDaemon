@@ -89,7 +89,7 @@ pub fn cooling_needing_action(state: &AppState) -> usize {
             if state
                 .devices
                 .iter()
-                .find(|device| device.id == curve.fan_id)
+                .find(|device| device.id == curve.device_id)
                 .is_some_and(model::is_hidden)
             {
                 return false;

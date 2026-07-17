@@ -230,10 +230,6 @@ pub fn metrics(d: &WireDevice) -> Vec<Metric> {
                     }
                 }
             }
-            DeviceCapability::Fan(f) => out.push(Metric {
-                label: t!("model.metric_speed").into(),
-                value: format!("{} RPM", f.rpm),
-            }),
             DeviceCapability::Sensors(ss) => {
                 if let Some(s) = ss.iter().find(|s| s.sensor_type == SensorType::Temperature) {
                     out.push(Metric {

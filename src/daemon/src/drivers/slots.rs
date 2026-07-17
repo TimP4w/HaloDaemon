@@ -149,22 +149,6 @@ impl RgbStateSlot {
     }
 }
 
-#[derive(Default)]
-pub struct FanStateSlot(Slot<Option<crate::cooling::config::FanCurveRecord>>);
-
-impl FanStateSlot {
-    pub fn fan_curve(&self) -> Option<crate::cooling::config::FanCurveRecord> {
-        self.0.get()
-    }
-    pub fn set_fan_curve(&self, mut c: crate::cooling::config::FanCurveRecord) {
-        c.sanitize();
-        self.0.set(Some(c));
-    }
-    pub fn clear_fan_curve(&self) {
-        self.0.set(None);
-    }
-}
-
 /// Persisted curves keyed by device-local cooling channel. The custom loader
 /// deliberately accepts the previous single-record shape so upgrades preserve
 /// existing fan/pump curves as the `default` channel.

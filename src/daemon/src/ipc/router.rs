@@ -237,7 +237,6 @@ fn command_writes_device(cmd: &DaemonCommand) -> bool {
             | SetEqPreset { .. }
             | SetEqBands { .. }
             | SetDpiSteps { .. }
-            | SetFanSpeed { .. }
             | RgbApply { .. }
             | RgbChainDetectChannel { .. }
             | SetButtonMapping { .. }
@@ -274,7 +273,6 @@ fn command_target(cmd: &DaemonCommand) -> Option<&str> {
         | SetEqPreset { id, .. }
         | SetEqBands { id, .. }
         | SetDpiSteps { id, .. }
-        | SetFanSpeed { id, .. }
         | RgbApply { id, .. }
         | RgbSetZoneTransform { id, .. }
         | RgbChainAddLink { id, .. }
@@ -297,9 +295,6 @@ fn command_target(cmd: &DaemonCommand) -> Option<&str> {
         | ReceiverStopPairing { id, .. }
         | ReceiverUnpair { id, .. }
         | SetKeyboardLayout { id, .. } => Some(id),
-        SetFanCurvePoints { fan_id, .. }
-        | SetFanCurvePreset { fan_id, .. }
-        | RemoveFanCurve { fan_id } => Some(fan_id),
         SetCoolingCurvePoints { device_id, .. }
         | SetCoolingCurvePreset { device_id, .. }
         | RemoveCoolingCurve { device_id, .. } => Some(device_id),
@@ -505,31 +500,6 @@ async fn dispatch(
             registry::usecases::rename::set_device_name(device_id, name, app).await
         }
 
-        DaemonCommand::SetFanSpeed { id, duty } => {
-            registry::usecases::capability::set_capability_param(
-                id,
-                registry::usecases::capability::CapabilityParam::FanDuty { duty },
-                app,
-            )
-            .await
-        }
-        DaemonCommand::SetFanCurvePoints {
-            fan_id,
-            points,
-            sensor_id,
-        } => {
-            cooling::usecases::fan_curve::set_fan_curve_points(fan_id, points, sensor_id, app).await
-        }
-        DaemonCommand::SetFanCurvePreset {
-            fan_id,
-            preset,
-            sensor_id,
-        } => {
-            cooling::usecases::fan_curve::set_fan_curve_preset(fan_id, preset, sensor_id, app).await
-        }
-        DaemonCommand::RemoveFanCurve { fan_id } => {
-            cooling::usecases::fan_curve::remove_fan_curve(fan_id, app).await
-        }
         DaemonCommand::SetCoolingCurvePoints {
             device_id,
             channel_id,

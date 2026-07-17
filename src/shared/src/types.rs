@@ -1705,7 +1705,6 @@ pub enum DeviceCapability {
     Equalizer(Equalizer),
     Sensors(Vec<Sensor>),
     Cooling(CoolingStatus),
-    Fan(FanStatus),
     Rgb(RgbStatus),
     Dpi(DpiStatus),
     OnboardProfiles(OnboardProfiles),
@@ -2474,7 +2473,6 @@ macro_rules! find_cap {
 
 impl WireDevice {
     find_cap!(battery, Battery, Vec<Battery>);
-    find_cap!(fan, Fan, FanStatus);
     find_cap!(cooling, Cooling, CoolingStatus);
     find_cap!(rgb, Rgb, RgbStatus);
     find_cap!(sensors, Sensors, Vec<Sensor>);

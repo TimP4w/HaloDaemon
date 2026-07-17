@@ -48,8 +48,6 @@ pub(super) fn clear_engine_slots(device: &Arc<dyn Device>) {
     }
     if let Some(s) = device.as_cooling() {
         s.clear_curves();
-    } else if let Some(s) = device.as_fan() {
-        s.clear_fan_curve();
     }
     if let Some(s) = device.as_lcd() {
         s.set_lcd_template_id(None);

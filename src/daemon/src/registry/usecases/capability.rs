@@ -18,7 +18,6 @@ pub enum CapabilityParam {
     Choice { key: String, selected: usize },
     Action { key: String },
     DpiSteps { steps: Vec<u32> },
-    FanDuty { duty: u8 },
     EqPreset { preset_index: usize },
     EqBands { values: Vec<f32> },
 }
@@ -106,28 +105,6 @@ async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
                 .await?;
             Ok(Effects {
                 persist: false,
-                broadcast: false,
-            })
-        }
-        CapabilityParam::FanDuty { duty } => {
-            if *duty > 100 {
-                anyhow::bail!("fan duty must be 0–100 (got {duty})");
-            }
-            if let Some(fan) = dev.as_fan() {
-                fan.set_duty(*duty).await?;
-            } else if let Some(cooling) = dev.as_cooling() {
-                let channel = cooling
-                    .cooling_channels()
-                    .into_iter()
-                    .find(|c| c.controllable)
-                    .map(|c| c.id)
-                    .context("device has no controllable cooling channel")?;
-                cooling.set_cooling_duty(&channel, *duty).await?;
-            } else {
-                anyhow::bail!("device does not support fan control");
-            }
-            Ok(Effects {
-                persist: true,
                 broadcast: false,
             })
         }

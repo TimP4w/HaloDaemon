@@ -952,10 +952,6 @@ impl PluginHandle {
         self.call("get_duty", ()).await
     }
 
-    pub async fn fan_set_duty(&self, duty: u8) -> Result<()> {
-        self.call("set_duty", duty).await
-    }
-
     pub async fn fan_get_rpm(&self) -> Result<Option<u32>> {
         self.run(|ctx, dev, _| {
             let Some(f) = func(&ctx.manifest, "get_rpm") else {
@@ -1165,20 +1161,15 @@ impl PluginHandle {
         Ok(controllers)
     }
 
-    pub async fn hub_fan_rpm(&self, channel: u8) -> Result<u32> {
-        self.call("fan_rpm", channel).await
+    pub async fn hub_cooling_status(
+        &self,
+        channel: u8,
+    ) -> Result<halod_shared::types::CoolingChannel> {
+        self.cooling_status(&channel.to_string()).await
     }
 
-    pub async fn hub_fan_duty(&self, channel: u8) -> Result<u8> {
-        self.call("fan_duty", channel).await
-    }
-
-    pub async fn hub_fan_controllable(&self, channel: u8) -> Result<bool> {
-        self.call("fan_controllable", channel).await
-    }
-
-    pub async fn hub_set_fan_duty(&self, channel: u8, duty: u8) -> Result<()> {
-        self.call("set_fan_duty", (channel, duty)).await
+    pub async fn hub_set_cooling_duty(&self, channel: u8, duty: u8) -> Result<()> {
+        self.cooling_set_duty(&channel.to_string(), duty).await
     }
 
     pub async fn lcd_stream_frame(

@@ -38,10 +38,6 @@ impl AppState {
                         .into_iter()
                         .map(|(channel_id, curve)| (device.id().to_owned(), channel_id, curve)),
                 );
-            } else if let Some(fan) = device.as_fan() {
-                if let Some(curve) = fan.fan_curve() {
-                    fan_curves.push((device.id().to_owned(), "default".to_string(), curve));
-                }
             }
         }
 
