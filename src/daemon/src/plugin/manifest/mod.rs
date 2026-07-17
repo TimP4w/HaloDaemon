@@ -1469,14 +1469,13 @@ fn validate_device_identifiers(manifest: &PluginManifest) -> Result<()> {
 }
 
 /// Capability identifiers accepted by the canonical package contract.
-const SUPPORTED_CAPABILITIES: &[&str] = &[
+pub(in crate::plugin) const SUPPORTED_CAPABILITIES: &[&str] = &[
     "rgb",
     "fan",
     "sensors",
     "battery",
     "connection",
     "dpi",
-    "report_rate",
     "key_remap",
     "keyboard_layout",
     "onboard_profiles",

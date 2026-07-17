@@ -224,10 +224,6 @@ pub fn metrics(d: &WireDevice) -> Vec<Metric> {
                 label: t!("model.metric_speed").into(),
                 value: format!("{} RPM", f.rpm),
             }),
-            DeviceCapability::Pump(p) => out.push(Metric {
-                label: t!("model.metric_pump").into(),
-                value: format!("{} RPM", p.rpm),
-            }),
             DeviceCapability::Sensors(ss) => {
                 if let Some(s) = ss.iter().find(|s| s.sensor_type == SensorType::Temperature) {
                     out.push(Metric {
@@ -308,7 +304,7 @@ fn transport_display(t: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use halod_shared::types::{Battery, DpiMode, DpiStatus, FanStatus, PumpStatus, Sensor};
+    use halod_shared::types::{Battery, DpiMode, DpiStatus, FanStatus, Sensor};
 
     fn dev(ty: DeviceType, caps: Vec<DeviceCapability>) -> WireDevice {
         WireDevice {
@@ -535,22 +531,6 @@ mod tests {
         assert!(is_hidden(&d));
         d.active_state = VisibilityState::Disabled;
         assert!(is_hidden(&d));
-    }
-
-    #[test]
-    fn metrics_pump_arm() {
-        let d = dev(
-            DeviceType::AIO,
-            vec![DeviceCapability::Pump(PumpStatus {
-                rpm: 2400,
-                duty: 70,
-                controllable: true,
-            })],
-        );
-        let m = metrics(&d);
-        assert_eq!(m.len(), 1);
-        assert_eq!(m[0].label, "Pump");
-        assert_eq!(m[0].value, "2400 RPM");
     }
 
     #[test]

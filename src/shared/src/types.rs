@@ -1620,7 +1620,6 @@ pub enum DeviceCapability {
     Equalizer(Equalizer),
     Sensors(Vec<Sensor>),
     Fan(FanStatus),
-    Pump(PumpStatus),
     Rgb(RgbStatus),
     Dpi(DpiStatus),
     OnboardProfiles(OnboardProfiles),
@@ -2159,13 +2158,6 @@ pub struct FanStatus {
     pub controllable: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PumpStatus {
-    pub rpm: u32,
-    pub duty: u8,
-    pub controllable: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FanCurveStatus {
@@ -2356,7 +2348,6 @@ macro_rules! find_cap {
 impl WireDevice {
     find_cap!(battery, Battery, Vec<Battery>);
     find_cap!(fan, Fan, FanStatus);
-    find_cap!(pump, Pump, PumpStatus);
     find_cap!(rgb, Rgb, RgbStatus);
     find_cap!(sensors, Sensors, Vec<Sensor>);
     find_cap!(dpi, Dpi, DpiStatus);

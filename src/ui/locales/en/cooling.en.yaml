@@ -9,13 +9,9 @@ cooling:
   rpm_vs: "RPM vs %{sensor}"
   open_device: Open device
   fan_curve: Fan curve
-  pump_curve: Pump curve
-  fan_and_pump_curve: Fan & pump curve
   celsius_now: "°C now"
   fan_speed: Fan speed
   fan_duty: Fan duty
-  pump_speed: Pump speed
-  pump_duty: Pump duty
   rpm: "%{v} RPM"
   percent: "%{v}%"
   preset: "Preset…"

@@ -59,9 +59,7 @@ pub fn tabs_for(dev: &WireDevice) -> Vec<Tab> {
     ) {
         push(TabKind::Chains);
     }
-    if has(dev, |c| {
-        matches!(c, DeviceCapability::Fan(_) | DeviceCapability::Pump(_))
-    }) {
+    if has(dev, |c| matches!(c, DeviceCapability::Fan(_))) {
         push(TabKind::Cooling);
     }
     if has(dev, |c| matches!(c, DeviceCapability::Lcd(_))) {

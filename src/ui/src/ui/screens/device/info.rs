@@ -234,7 +234,6 @@ fn cap_label_tr(c: &DeviceCapability) -> std::borrow::Cow<'static, str> {
         DeviceCapability::Equalizer(_) => t!("devtabs.cap_equalizer"),
         DeviceCapability::Sensors(_) => t!("devtabs.cap_sensors"),
         DeviceCapability::Fan(_) => t!("devtabs.cap_fan"),
-        DeviceCapability::Pump(_) => t!("devtabs.cap_pump"),
         DeviceCapability::Rgb(_) => t!("devtabs.cap_rgb"),
         DeviceCapability::Dpi(_) => t!("devtabs.cap_dpi"),
         DeviceCapability::OnboardProfiles(_) => t!("devtabs.cap_onboard"),

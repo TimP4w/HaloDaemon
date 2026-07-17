@@ -2890,6 +2890,26 @@ mod tests {
     }
 
     #[test]
+    fn every_manifest_capability_maps_to_a_runtime_capability() {
+        for name in crate::plugin::manifest::SUPPORTED_CAPABILITIES {
+            assert!(
+                !cap_for(name).is_empty(),
+                "manifest capability '{name}' has no runtime mapping"
+            );
+        }
+    }
+
+    #[test]
+    fn every_runtime_capability_name_is_in_the_manifest_vocabulary() {
+        for name in CAPABILITY_NAMES {
+            assert!(
+                crate::plugin::manifest::SUPPORTED_CAPABILITIES.contains(name),
+                "runtime capability '{name}' is not accepted by manifests"
+            );
+        }
+    }
+
+    #[test]
     fn integration_id_names_only_the_root_not_child_controllers() {
         // The root (non-child worker) is hidden under Integrations; the
         // controllers it exposes as children stay listable and conflict-eligible.
