@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_sensors_collects_sensors_from_all_devices() {
+    async fn sensor_bus_collects_sensors_from_all_devices() {
         let app = make_test_app();
         let dev1 = std::sync::Arc::new(
             crate::test_support::MockDevice::new("sensor_dev_1").with_sensor(vec![
@@ -235,14 +235,15 @@ mod tests {
             .await
             .push(dev2 as std::sync::Arc<dyn crate::drivers::Device>);
 
-        let snapshot = app.snapshot_sensors().await;
+        app.refresh_sensor_bus().await;
+        let snapshot = app.data_bus.sensors();
         assert_eq!(snapshot.len(), 2);
         assert_eq!(snapshot.get("temp1").unwrap().value, 45.5);
         assert_eq!(snapshot.get("temp2").unwrap().value, 62.0);
     }
 
     #[tokio::test]
-    async fn snapshot_sensors_excludes_disabled_devices() {
+    async fn sensor_bus_excludes_disabled_devices() {
         let mut cfg = Config::default();
         cfg.known_devices.insert(
             "disabled_dev".into(),
@@ -271,12 +272,13 @@ mod tests {
             .await
             .push(dev as std::sync::Arc<dyn crate::drivers::Device>);
 
-        let snapshot = app.snapshot_sensors().await;
+        app.refresh_sensor_bus().await;
+        let snapshot = app.data_bus.sensors();
         assert!(snapshot.is_empty());
     }
 
     #[tokio::test]
-    async fn snapshot_sensors_skips_devices_without_sensor_capability() {
+    async fn sensor_bus_skips_devices_without_sensor_capability() {
         let app = make_test_app();
         let dev = std::sync::Arc::new(crate::test_support::MockDevice::new("no_sensor").with_rgb());
         app.devices
@@ -284,12 +286,13 @@ mod tests {
             .await
             .push(dev as std::sync::Arc<dyn crate::drivers::Device>);
 
-        let snapshot = app.snapshot_sensors().await;
+        app.refresh_sensor_bus().await;
+        let snapshot = app.data_bus.sensors();
         assert!(snapshot.is_empty());
     }
 
     #[tokio::test]
-    async fn snapshot_sensors_includes_synthesized_fan_readings() {
+    async fn sensor_bus_includes_synthesized_fan_readings() {
         let app = make_test_app();
         let dev =
             std::sync::Arc::new(crate::test_support::MockDevice::new("fan0").with_fan_rpm(900));
@@ -298,7 +301,8 @@ mod tests {
             .await
             .push(dev as std::sync::Arc<dyn crate::drivers::Device>);
 
-        let snapshot = app.snapshot_sensors().await;
+        app.refresh_sensor_bus().await;
+        let snapshot = app.data_bus.sensors();
         assert_eq!(snapshot.get("fan_fan0_rpm").map(|s| s.value), Some(900.0));
         assert!(snapshot.contains_key("fan_fan0_duty"));
     }

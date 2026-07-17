@@ -9,6 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, ensure, Result};
 use mlua::{Lua, Table, Value};
 
+use halod_shared::types::{Sensor, SensorType, SensorUnit, VisibilityState};
+
 pub const MAX_PLUGIN_RECORD_BYTES: usize = 32 * 1024;
 const MAX_GLOBAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PLUGIN_BYTES: usize = 256 * 1024;
@@ -236,6 +238,119 @@ impl Default for DataBus {
 }
 
 impl DataBus {
+    pub fn replace_host_sensors(&self, mut sensors: Vec<(String, Sensor)>) {
+        sensors.sort_by(|(left_owner, left), (right_owner, right)| {
+            left.id
+                .cmp(&right.id)
+                .then_with(|| left_owner.cmp(right_owner))
+        });
+        let policy = host_policy(Duration::from_secs(3));
+        let expected: std::collections::HashSet<String> = sensors
+            .iter()
+            .map(|(_, sensor)| sensor_key(&sensor.id))
+            .collect();
+        for (key, snapshot) in self.statuses_for_owner("host") {
+            if key.starts_with("host.sensors.")
+                && key != "host.sensors.catalog"
+                && !expected.contains(&key)
+                && snapshot.status != SnapshotStatus::Unavailable
+            {
+                let _ = self.invalidate("host", &key, "sensor_removed");
+            }
+        }
+
+        let mut catalog = Vec::with_capacity(sensors.len());
+        for (device_id, sensor) in sensors {
+            let key = sensor_key(&sensor.id);
+            let mut value = BTreeMap::new();
+            value.insert("device_id".into(), DataValue::String(device_id.clone()));
+            value.insert("id".into(), DataValue::String(sensor.id.clone()));
+            value.insert("label".into(), DataValue::String(sensor.name.clone()));
+            value.insert("value".into(), DataValue::Number(sensor.value));
+            value.insert(
+                "unit".into(),
+                DataValue::String(sensor_unit_name(&sensor.unit).into()),
+            );
+            value.insert(
+                "sensor_type".into(),
+                DataValue::String(sensor_type_name(&sensor.sensor_type).into()),
+            );
+            value.insert(
+                "visibility".into(),
+                DataValue::String(visibility_name(&sensor.visibility).into()),
+            );
+            let _ = self.publish("host", &key, DataValue::Map(value), policy);
+
+            let mut item = BTreeMap::new();
+            item.insert("device_id".into(), DataValue::String(device_id));
+            item.insert("id".into(), DataValue::String(sensor.id));
+            item.insert("key".into(), DataValue::String(key));
+            catalog.push(DataValue::Map(item));
+        }
+        let _ = self.publish(
+            "host",
+            "host.sensors.catalog",
+            DataValue::Array(catalog),
+            policy,
+        );
+    }
+
+    pub fn sensors(&self) -> HashMap<String, Sensor> {
+        self.sensor_entries()
+            .into_iter()
+            .map(|(_, sensor)| (sensor.id.clone(), sensor))
+            .collect()
+    }
+
+    pub fn sensors_for_device(&self, device_id: &str) -> Vec<Sensor> {
+        self.sensor_entries()
+            .into_iter()
+            .filter_map(|(owner, sensor)| (owner == device_id).then_some(sensor))
+            .collect()
+    }
+
+    pub fn sensor_owner(&self, sensor_id: &str) -> Option<String> {
+        self.sensor_entries()
+            .into_iter()
+            .find_map(|(owner, sensor)| (sensor.id == sensor_id).then_some(owner))
+    }
+
+    fn sensor_entries(&self) -> Vec<(String, Sensor)> {
+        let catalog = self.read("host.sensors.catalog");
+        if catalog.status != SnapshotStatus::Fresh {
+            return Vec::new();
+        }
+        let Some(DataValue::Array(items)) = catalog.value else {
+            return Vec::new();
+        };
+        items
+            .into_iter()
+            .filter_map(|item| {
+                let DataValue::Map(item) = item else {
+                    return None;
+                };
+                let key = data_string(&item, "key")?;
+                let snapshot = self.read(key);
+                if snapshot.status != SnapshotStatus::Fresh {
+                    return None;
+                }
+                let DataValue::Map(value) = snapshot.value? else {
+                    return None;
+                };
+                let device_id = data_string(&value, "device_id")?.to_owned();
+                let sensor = Sensor {
+                    id: data_string(&value, "id")?.to_owned(),
+                    name: data_string(&value, "label")?.to_owned(),
+                    value: data_number(&value, "value")?,
+                    unit: parse_sensor_unit(data_string(&value, "unit")?)?,
+                    sensor_type: parse_sensor_type(data_string(&value, "sensor_type")?)?,
+                    visibility: parse_visibility(data_string(&value, "visibility")?)?,
+                };
+                Some((device_id, sensor))
+            })
+            .collect()
+    }
+
     /// Stable render-cache signature and availability for an exact key or the
     /// bounded `host.sensors.*` scope.
     pub fn scope_state(&self, scope: &str) -> (u64, bool) {
@@ -297,11 +412,12 @@ impl DataBus {
             owner == "host" || inner.records.contains_key(key) || owner_records < 32,
             "plugin declares more than 32 retained data records"
         );
-        if inner
-            .records
-            .get(key)
-            .and_then(|record| record.last_publish)
-            .is_some_and(|last| now.duration_since(last) < MIN_PUBLISH_INTERVAL)
+        if owner != "host"
+            && inner
+                .records
+                .get(key)
+                .and_then(|record| record.last_publish)
+                .is_some_and(|last| now.duration_since(last) < MIN_PUBLISH_INTERVAL)
         {
             bail!("data publication rate limit exceeded for '{key}'");
         }
@@ -521,6 +637,86 @@ pub fn sensor_key(id: &str) -> String {
         let _ = write!(encoded, "{byte:02x}");
     }
     format!("host.sensors.{encoded}")
+}
+
+fn data_string<'a>(value: &'a BTreeMap<String, DataValue>, key: &str) -> Option<&'a str> {
+    match value.get(key)? {
+        DataValue::String(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn data_number(value: &BTreeMap<String, DataValue>, key: &str) -> Option<f64> {
+    match value.get(key)? {
+        DataValue::Number(value) => Some(*value),
+        DataValue::Integer(value) => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn parse_sensor_unit(value: &str) -> Option<SensorUnit> {
+    match value {
+        "celsius" => Some(SensorUnit::Celsius),
+        "fahrenheit" => Some(SensorUnit::Fahrenheit),
+        "percent" => Some(SensorUnit::Percent),
+        "megahertz" => Some(SensorUnit::Megahertz),
+        "hours" => Some(SensorUnit::Hours),
+        "rpm" => Some(SensorUnit::Rpm),
+        _ => None,
+    }
+}
+
+fn sensor_unit_name(value: &SensorUnit) -> &'static str {
+    match value {
+        SensorUnit::Celsius => "celsius",
+        SensorUnit::Fahrenheit => "fahrenheit",
+        SensorUnit::Percent => "percent",
+        SensorUnit::Megahertz => "megahertz",
+        SensorUnit::Hours => "hours",
+        SensorUnit::Rpm => "rpm",
+    }
+}
+
+fn parse_sensor_type(value: &str) -> Option<SensorType> {
+    match value {
+        "temperature" => Some(SensorType::Temperature),
+        "load" => Some(SensorType::Load),
+        "memory" => Some(SensorType::Memory),
+        "frequency" => Some(SensorType::Frequency),
+        "uptime" => Some(SensorType::Uptime),
+        "fan_speed" => Some(SensorType::FanSpeed),
+        "fan_duty" => Some(SensorType::FanDuty),
+        _ => None,
+    }
+}
+
+fn sensor_type_name(value: &SensorType) -> &'static str {
+    match value {
+        SensorType::Temperature => "temperature",
+        SensorType::Load => "load",
+        SensorType::Memory => "memory",
+        SensorType::Frequency => "frequency",
+        SensorType::Uptime => "uptime",
+        SensorType::FanSpeed => "fan_speed",
+        SensorType::FanDuty => "fan_duty",
+    }
+}
+
+fn parse_visibility(value: &str) -> Option<VisibilityState> {
+    match value {
+        "visible" => Some(VisibilityState::Visible),
+        "hidden" => Some(VisibilityState::Hidden),
+        "disabled" => Some(VisibilityState::Disabled),
+        _ => None,
+    }
+}
+
+fn visibility_name(value: &VisibilityState) -> &'static str {
+    match value {
+        VisibilityState::Visible => "visible",
+        VisibilityState::Hidden => "hidden",
+        VisibilityState::Disabled => "disabled",
+    }
 }
 
 pub fn host_policy(stale_after: Duration) -> DataPolicy {

@@ -254,7 +254,8 @@ impl FanCurveEngine {
             map
         };
 
-        let sensors = self.app_state.snapshot_sensors().await;
+        self.app_state.refresh_sensor_bus().await;
+        let sensors = self.app_state.data_bus.sensors();
         let mut new_statuses = HashMap::with_capacity(curves.len());
         for (fan_id, record) in &curves {
             let status = self
@@ -702,11 +703,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_sensors_indexes_all_sensors_by_id() {
+    async fn sensor_bus_indexes_all_sensors_by_id() {
         let fan = MockFan::new("fan_0");
         let sensor = MockSensor::new("sensor_0", 42.0);
         let app = make_app(fan, Some(sensor));
-        let sensors = app.snapshot_sensors().await;
+        app.refresh_sensor_bus().await;
+        let sensors = app.data_bus.sensors();
         assert_eq!(sensors.get("sensor_0").map(|s| s.value), Some(42.0));
     }
 
@@ -917,7 +919,8 @@ mod tests {
         let app = Arc::new(AppState::new(Config::default()));
         *app.devices.try_write().unwrap() = vec![sensor as Arc<dyn Device>];
         let engine = FanCurveEngine::new(app.clone());
-        let sensors = app.snapshot_sensors().await;
+        app.refresh_sensor_bus().await;
+        let sensors = app.data_bus.sensors();
         let record = FanCurveRecord {
             sensor_id: Some("s".to_string()),
             points: vec![(0.0, 50.0), (100.0, 100.0)],
@@ -940,7 +943,8 @@ mod tests {
         let app = make_app(fan.clone(), Some(sensor));
         let initial_duty = fan.last_duty();
         let engine = FanCurveEngine::new(app.clone());
-        let sensors = app.snapshot_sensors().await;
+        app.refresh_sensor_bus().await;
+        let sensors = app.data_bus.sensors();
 
         let status = engine.process_fan("fan_0", &record, &sensors, 75).await;
 

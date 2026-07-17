@@ -60,6 +60,36 @@ impl AppState {
             })
             .collect();
 
+        // Device serialization is one of the hardware producer passes. Feed
+        // its native readings plus synthesized fan readings into the bus, then
+        // rebuild the UI-facing sensor capabilities from that cache below.
+        let mut sensor_records = Vec::new();
+        for (device, wire) in device_list.iter().zip(&devices) {
+            let disabled = cfg
+                .known_devices
+                .get(device.id())
+                .is_some_and(|record| record.active_state == VisibilityState::Disabled);
+            if disabled {
+                continue;
+            }
+            let mut sensors = wire
+                .capabilities
+                .iter()
+                .find_map(|capability| match capability {
+                    DeviceCapability::Sensors(sensors) => Some(sensors.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            sensors.extend(crate::drivers::fan_sensors(device.as_ref()).await);
+            for mut sensor in sensors {
+                if let Some(state) = cfg.sensor_visibility.get(&sensor.id) {
+                    sensor.visibility = state.clone();
+                }
+                sensor_records.push((device.id().to_owned(), sensor));
+            }
+        }
+        self.data_bus.replace_host_sensors(sensor_records);
+
         // Overlay pass: record name/state, LCD-engine mode, and per-zone RGB
         // transforms onto each device's wire struct.
         let hid_tracked = self.hid.tracked_ids().await;
@@ -88,28 +118,15 @@ impl AppState {
 
             let transforms = device.as_rgb().map(|r| r.zone_transforms());
 
-            // A disabled device is closed — its readings are gone, so it must not
-            // advertise sensors at all (dashboard, cooling and LCD sensor pickers).
-            if wire.active_state == VisibilityState::Disabled {
-                wire.capabilities
-                    .retain(|c| !matches!(c, DeviceCapability::Sensors(_)));
-            }
-
-            let fan_sensors = if wire.active_state == VisibilityState::Disabled {
+            wire.capabilities
+                .retain(|capability| !matches!(capability, DeviceCapability::Sensors(_)));
+            let sensors = if wire.active_state == VisibilityState::Disabled {
                 Vec::new()
             } else {
-                crate::drivers::fan_sensors(device.as_ref()).await
+                self.data_bus.sensors_for_device(device.id())
             };
-            if !fan_sensors.is_empty() {
-                match wire.capabilities.iter_mut().find_map(|c| match c {
-                    DeviceCapability::Sensors(v) => Some(v),
-                    _ => None,
-                }) {
-                    Some(existing) => existing.extend(fan_sensors),
-                    None => wire
-                        .capabilities
-                        .push(DeviceCapability::Sensors(fan_sensors)),
-                }
+            if !sensors.is_empty() {
+                wire.capabilities.push(DeviceCapability::Sensors(sensors));
             }
 
             for cap in &mut wire.capabilities {
@@ -122,16 +139,7 @@ impl AppState {
                             }
                         }
                     }
-                    // Visibility is authoritative in config, not on the device:
-                    // overlay it here so every sensor source (device-native,
-                    // synthesized fan and plugin-owned hardware hide uniformly.
-                    DeviceCapability::Sensors(sensors) => {
-                        for s in sensors {
-                            if let Some(state) = cfg.sensor_visibility.get(&s.id) {
-                                s.visibility = state.clone();
-                            }
-                        }
-                    }
+                    DeviceCapability::Sensors(_) => {}
                     _ => {}
                 }
             }

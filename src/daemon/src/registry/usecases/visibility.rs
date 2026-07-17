@@ -74,38 +74,10 @@ pub async fn set_sensor_visibility(
     state: VisibilityState,
     app: Arc<AppState>,
 ) -> Result<()> {
-    let devices = app.devices.read().await.clone();
-    let owning_device = {
-        let mut found: Option<Arc<dyn crate::drivers::Device>> = None;
-        for device in &devices {
-            if let Some(cap) = device.as_sensor_capability() {
-                if let Ok(sensors) = cap.get_sensors().await {
-                    if sensors.iter().any(|s| s.id == sensor_id) {
-                        found = Some(device.clone());
-                        break;
-                    }
-                }
-            }
-        }
-        found
-    };
-
-    // Fan RPM/duty are synthesized (not backed by `SensorCapability`), so the
-    // scan above never finds them — match their deterministic id instead.
-    let owning_device = owning_device.or_else(|| {
-        devices
-            .iter()
-            .find(|d| {
-                d.as_fan().is_some()
-                    && (sensor_id == crate::drivers::fan_duty_sensor_id(d.id())
-                        || sensor_id == crate::drivers::fan_rpm_sensor_id(d.id()))
-            })
-            .cloned()
-    });
-
-    // Validate the sensor exists; visibility itself is overlaid from config at
-    // snapshot time (see `snapshot_devices`), so no per-device write is needed.
-    owning_device.ok_or_else(|| anyhow!("sensor not found: {sensor_id}"))?;
+    app.refresh_sensor_bus().await;
+    app.data_bus
+        .sensor_owner(&sensor_id)
+        .ok_or_else(|| anyhow!("sensor not found: {sensor_id}"))?;
 
     {
         let mut cfg = app.config.write().await;

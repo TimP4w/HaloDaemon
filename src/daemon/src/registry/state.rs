@@ -136,12 +136,12 @@ impl AppState {
             .cloned()
     }
 
-    /// Snapshot every sensor across all devices into a `sensor_id -> Sensor` map,
-    /// built once per engine tick so per-fan lookups are O(1).
-    pub async fn snapshot_sensors(&self) -> HashMap<String, halod_shared::types::Sensor> {
+    /// Poll hardware producers and atomically refresh the host-owned sensor
+    /// records. Consumers read the resulting typed view from `data_bus`.
+    pub async fn refresh_sensor_bus(&self) {
         let known = self.config.read().await.known_devices.clone();
         let devices = self.devices.read().await.clone();
-        let mut map = HashMap::new();
+        let mut sensors = Vec::new();
         for device in &devices {
             let disabled = known
                 .get(device.id())
@@ -150,82 +150,17 @@ impl AppState {
                 continue;
             }
             if let Some(cap) = device.as_sensor_capability() {
-                if let Ok(sensors) = cap.get_sensors().await {
-                    for s in sensors {
-                        map.insert(s.id.clone(), s);
+                if let Ok(readings) = cap.get_sensors().await {
+                    for sensor in readings {
+                        sensors.push((device.id().to_owned(), sensor));
                     }
                 }
             }
-            for s in crate::drivers::fan_sensors(device.as_ref()).await {
-                map.insert(s.id.clone(), s);
+            for sensor in crate::drivers::fan_sensors(device.as_ref()).await {
+                sensors.push((device.id().to_owned(), sensor));
             }
         }
-        let policy = crate::services::data_bus::host_policy(std::time::Duration::from_secs(3));
-        let mut catalog = Vec::with_capacity(map.len());
-        let expected: HashSet<String> = map
-            .values()
-            .map(|sensor| crate::services::data_bus::sensor_key(&sensor.id))
-            .collect();
-        for (key, snapshot) in self.data_bus.statuses_for_owner("host") {
-            if key.starts_with("host.sensors.")
-                && key != "host.sensors.catalog"
-                && !expected.contains(&key)
-                && snapshot.status != crate::services::data_bus::SnapshotStatus::Unavailable
-            {
-                let _ = self.data_bus.invalidate("host", &key, "sensor_removed");
-            }
-        }
-        for sensor in map.values() {
-            let key = crate::services::data_bus::sensor_key(&sensor.id);
-            let mut value = std::collections::BTreeMap::new();
-            value.insert(
-                "id".into(),
-                crate::services::data_bus::DataValue::String(sensor.id.clone()),
-            );
-            value.insert(
-                "label".into(),
-                crate::services::data_bus::DataValue::String(sensor.name.clone()),
-            );
-            value.insert(
-                "value".into(),
-                crate::services::data_bus::DataValue::Number(sensor.value),
-            );
-            value.insert(
-                "unit".into(),
-                crate::services::data_bus::DataValue::String(
-                    format!("{:?}", sensor.unit).to_lowercase(),
-                ),
-            );
-            value.insert(
-                "sensor_type".into(),
-                crate::services::data_bus::DataValue::String(
-                    format!("{:?}", sensor.sensor_type).to_lowercase(),
-                ),
-            );
-            let _ = self.data_bus.publish(
-                "host",
-                &key,
-                crate::services::data_bus::DataValue::Map(value),
-                policy,
-            );
-            let mut item = std::collections::BTreeMap::new();
-            item.insert(
-                "id".into(),
-                crate::services::data_bus::DataValue::String(sensor.id.clone()),
-            );
-            item.insert(
-                "key".into(),
-                crate::services::data_bus::DataValue::String(key),
-            );
-            catalog.push(crate::services::data_bus::DataValue::Map(item));
-        }
-        let _ = self.data_bus.publish(
-            "host",
-            "host.sensors.catalog",
-            crate::services::data_bus::DataValue::Array(catalog),
-            policy,
-        );
-        map
+        self.data_bus.replace_host_sensors(sensors);
     }
 
     pub async fn get_active_devices(&self) -> Vec<Arc<dyn Device>> {

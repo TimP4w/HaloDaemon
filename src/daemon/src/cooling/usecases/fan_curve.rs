@@ -61,7 +61,8 @@ async fn require_temperature_sensor(sensor_id: &Option<String>, app: &Arc<AppSta
     let Some(id) = sensor_id else {
         return Ok(());
     };
-    let sensors = app.snapshot_sensors().await;
+    app.refresh_sensor_bus().await;
+    let sensors = app.data_bus.sensors();
     match sensors.get(id) {
         Some(s) if s.sensor_type == halod_shared::types::SensorType::Temperature => Ok(()),
         Some(_) => Err(anyhow!("sensor '{id}' is not a temperature source")),
