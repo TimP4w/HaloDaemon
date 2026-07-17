@@ -6,14 +6,14 @@ use crate::drivers::{
     ActionCapability, BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache,
     CoolingCapability, CoolingStateSlot, Device, DpiCapability, EqualizerCapability,
     KeyRemapCapability, KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
-    RangeCapability, RangeStateCache, RgbCapability, RgbStateSlot, SensorCapability,
+    LightingCapability, LightingStateSlot, RangeCapability, RangeStateCache, SensorCapability,
     VisibilitySlot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{
     Boolean, ButtonDescriptor, ButtonMapping, CoolingChannel, CoolingChannelKind, DpiMode,
-    DpiStatus, EqBand, Equalizer, KeyRemapStatus, LcdDescriptor, RgbColor, RgbDescriptor, RgbState,
+    DpiStatus, EqBand, Equalizer, KeyRemapStatus, LcdDescriptor, LightingDescriptor, LightingState,
     ScreenShape, Sensor,
 };
 use std::sync::{
@@ -110,8 +110,8 @@ pub struct MockDevice {
     pub fan: Option<CoolingStateSlot>,
     /// RPM reported by the cooling channel; `None` (the default) means "no tachometer".
     pub fan_rpm: Option<u32>,
-    pub rgb: Option<RgbStateSlot>,
-    /// Number of `RgbCapability::apply` calls, for tests asserting a specific
+    pub rgb: Option<LightingStateSlot>,
+    /// Number of `LightingCapability::apply` calls, for tests asserting a specific
     /// call count (e.g. the leaving-engine-mode drain re-apply).
     pub rgb_apply_count: Arc<AtomicUsize>,
     pub lcd: Option<LcdStateSlot>,
@@ -248,7 +248,7 @@ impl MockDevice {
     }
 
     pub fn with_rgb(mut self) -> Self {
-        self.rgb = Some(RgbStateSlot::default());
+        self.rgb = Some(LightingStateSlot::default());
         self
     }
 
@@ -399,7 +399,7 @@ impl Device for MockDevice {
             caps.push(CapabilityRef::Cooling(self));
         }
         if self.rgb.is_some() {
-            caps.push(CapabilityRef::Rgb(self));
+            caps.push(CapabilityRef::Lighting(self));
         }
         if self.lcd.is_some() {
             caps.push(CapabilityRef::Lcd(self));
@@ -492,20 +492,22 @@ impl CoolingCapability for MockDevice {
     }
 }
 
-static MOCK_RGB_DESC: std::sync::OnceLock<RgbDescriptor> = std::sync::OnceLock::new();
+static MOCK_RGB_DESC: std::sync::OnceLock<LightingDescriptor> = std::sync::OnceLock::new();
 
 #[async_trait]
-impl RgbCapability for MockDevice {
-    fn descriptor(&self) -> &RgbDescriptor {
+impl LightingCapability for MockDevice {
+    fn descriptor(&self) -> &LightingDescriptor {
         MOCK_RGB_DESC.get_or_init(|| {
-            let zone = |id: &str, topology| halod_shared::types::RgbZone {
+            let zone = |id: &str, topology| halod_shared::types::LightingChannel {
                 id: id.to_string(),
                 name: id.to_string(),
                 topology,
                 leds: vec![],
+                color_order: Default::default(),
+                division: Default::default(),
             };
-            RgbDescriptor {
-                zones: vec![
+            LightingDescriptor {
+                channels: vec![
                     zone("ring", halod_shared::types::ZoneTopology::Ring),
                     zone("strip", halod_shared::types::ZoneTopology::Linear),
                 ],
@@ -513,18 +515,18 @@ impl RgbCapability for MockDevice {
             }
         })
     }
-    async fn apply(&self, state: RgbState) -> Result<()> {
+    async fn apply(&self, state: LightingState) -> Result<()> {
         self.rgb_apply_count.fetch_add(1, Ordering::SeqCst);
-        self.rgb_state().set_state(Some(state));
+        self.lighting_state().set_state(Some(state));
         Ok(())
     }
-    async fn write_frame(&self, _: &str, _: &[RgbColor]) -> Result<()> {
+    async fn write_frame(&self, _: &str, _: &[u8]) -> Result<()> {
         Ok(())
     }
-    fn rgb_state(&self) -> &RgbStateSlot {
+    fn lighting_state(&self) -> &LightingStateSlot {
         self.rgb
             .as_ref()
-            .expect("MockDevice: RgbStateSlot not present — call .with_rgb()")
+            .expect("MockDevice: LightingStateSlot not present — call .with_rgb()")
     }
 }
 

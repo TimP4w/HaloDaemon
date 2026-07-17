@@ -7,7 +7,7 @@
 //! - **Direct Effects** (this module): apply one color or effect to every
 //!   device at once — a master color card (shown only for Static or effects
 //!   with a `Color` param), an effect grid, brightness/saturation sliders, and
-//!   a target devices & zones picker.
+//!   a target devices & channels picker.
 
 use crate::ui::components as widgets;
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ use halod_shared::commands::DaemonCommand;
 use halod_shared::effect_designer::DESIGNER_EFFECT_ID;
 use halod_shared::types::{
     Animation, AppState, CanvasFrame, ColorStep, DeviceCapability, EffectDef,
-    EffectParamDescriptor, EffectParamValue, ParamKind, RgbColor, RgbState, WireDevice,
+    EffectParamDescriptor, EffectParamValue, LightingState, ParamKind, RgbColor, WireDevice,
 };
 
 use crate::domain::models::device as model;
@@ -53,7 +53,7 @@ pub struct LightingUi {
     /// (Direct Effects).
     pub tab: usize,
     pub color: RgbColor,
-    /// Active effect id. Empty string = Static (RgbState::Static).
+    /// Active effect id. Empty string = Static (LightingState::Static).
     pub effect: String,
     pub brightness: f32,
     pub saturation: f32,
@@ -221,7 +221,7 @@ fn direct_effects(
 fn seed_if_profile_changed(st: &mut LightingUi, state: &AppState) {
     if st.seeded_for.as_deref() != Some(state.profiles.active.as_str()) {
         st.sel_ids = state.lighting.targets.device_ids.clone();
-        st.zone_sel = state.lighting.targets.zones.clone();
+        st.zone_sel = state.lighting.targets.channels.clone();
         st.seeded_for = Some(state.profiles.active.clone());
     }
 }
@@ -718,7 +718,7 @@ fn sliders_card(ui: &mut egui::Ui, st: &mut LightingUi) -> bool {
     changed
 }
 
-// ── Target devices & zones card ───────────────────────────────────────────────
+// ── Target devices & channels card ───────────────────────────────────────────────
 
 fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut LightingUi) -> bool {
     let mut apply = false;
@@ -834,7 +834,7 @@ fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut L
             cmd,
             halod_shared::commands::DaemonCommand::SetLightingTargets {
                 device_ids: st.sel_ids.clone(),
-                zones: st.zone_sel.clone(),
+                channels: st.zone_sel.clone(),
             },
         );
     }
@@ -876,9 +876,9 @@ fn rgb_zone_pairs(dev: &WireDevice) -> Vec<(String, String)> {
     dev.capabilities
         .iter()
         .find_map(|c| match c {
-            DeviceCapability::Rgb(r) => Some(
+            DeviceCapability::Lighting(r) => Some(
                 r.descriptor
-                    .zones
+                    .channels
                     .iter()
                     .map(|z| (z.id.clone(), z.name.clone()))
                     .collect(),
@@ -915,7 +915,7 @@ fn wrapped_rows(pill_widths: &[f32], avail_w: f32, gap: f32) -> usize {
 }
 
 /// Extra height an expanded device card needs to hold its zone pills, sized to
-/// however many rows they wrap into. `0.0` for a device with no zones.
+/// however many rows they wrap into. `0.0` for a device with no channels.
 fn expanded_zone_height(ui: &egui::Ui, dev: &WireDevice, card_w: f32) -> f32 {
     let pairs = rgb_zone_pairs(dev);
     if pairs.is_empty() {
@@ -1098,19 +1098,19 @@ fn device_card(
                 .layout(egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true)),
         );
         child.spacing_mut().item_spacing = egui::vec2(ZONE_PILL_GAP, ZONE_PILL_GAP);
-        for (zone_id, zone_name) in &zone_pairs {
-            let active = sel_zones.contains(zone_id);
+        for (channel_id, zone_name) in &zone_pairs {
+            let active = sel_zones.contains(channel_id);
             if widgets::pill(&mut child, zone_name, active) {
                 let zv = st
                     .zone_sel
                     .entry(dev.id.clone())
                     .or_insert_with(|| all_zone_ids.clone());
-                if let Some(pos) = zv.iter().position(|z| z == zone_id) {
+                if let Some(pos) = zv.iter().position(|z| z == channel_id) {
                     if zv.len() > 1 {
                         zv.remove(pos);
                     }
                 } else {
-                    zv.push(zone_id.clone());
+                    zv.push(channel_id.clone());
                 }
                 result.zone_changed = true;
             }
@@ -1137,9 +1137,9 @@ fn apply_direct_params(
         }
         crate::runtime::ipc::send(
             cmd,
-            DaemonCommand::RgbApply {
+            DaemonCommand::LightingApply {
                 id: dev.id.clone(),
-                state: RgbState::DirectEffect {
+                state: LightingState::DirectEffect {
                     id: DESIGNER_EFFECT_ID.to_string(),
                     params: params.clone(),
                 },
@@ -1152,9 +1152,9 @@ fn apply_direct_params(
 fn release_device(cmd: &CommandTx, id: &str) {
     crate::runtime::ipc::send(
         cmd,
-        DaemonCommand::RgbApply {
+        DaemonCommand::LightingApply {
             id: id.to_string(),
-            state: RgbState::Static {
+            state: LightingState::Static {
                 color: RgbColor { r: 0, g: 0, b: 0 },
             },
         },
@@ -1167,13 +1167,13 @@ fn send_to_selected(state: &AppState, cmd: &CommandTx, st: &LightingUi) {
             continue;
         }
         let Some(rgb) = dev.capabilities.iter().find_map(|c| match c {
-            DeviceCapability::Rgb(r) => Some(r),
+            DeviceCapability::Lighting(r) => Some(r),
             _ => None,
         }) else {
             continue;
         };
 
-        let static_state = || RgbState::Static {
+        let static_state = || LightingState::Static {
             color: adjusted(st.color, st.brightness, st.saturation),
         };
         let rgb_state = if st.effect.is_empty() {
@@ -1185,7 +1185,7 @@ fn send_to_selected(state: &AppState, cmd: &CommandTx, st: &LightingUi) {
             .iter()
             .find(|a| a.id == st.effect)
         {
-            RgbState::DirectEffect {
+            LightingState::DirectEffect {
                 id: anim.id.clone(),
                 params: direct_params(
                     anim,
@@ -1198,7 +1198,7 @@ fn send_to_selected(state: &AppState, cmd: &CommandTx, st: &LightingUi) {
             }
         } else if let Some(def) = selected_custom(st, &state.lighting.canvas.custom_direct_effects)
         {
-            RgbState::DirectEffect {
+            LightingState::DirectEffect {
                 id: DESIGNER_EFFECT_ID.to_string(),
                 params: def.params.clone(),
             }
@@ -1209,7 +1209,7 @@ fn send_to_selected(state: &AppState, cmd: &CommandTx, st: &LightingUi) {
                 .iter()
                 .find(|e| e.id == st.effect)
             {
-                Some(e) => RgbState::NativeEffect {
+                Some(e) => LightingState::NativeEffect {
                     id: e.id.clone(),
                     params: Default::default(),
                 },
@@ -1219,7 +1219,7 @@ fn send_to_selected(state: &AppState, cmd: &CommandTx, st: &LightingUi) {
 
         crate::runtime::ipc::send(
             cmd,
-            DaemonCommand::RgbApply {
+            DaemonCommand::LightingApply {
                 id: dev.id.clone(),
                 state: rgb_state,
             },
@@ -1344,12 +1344,12 @@ fn rgb_devices(state: &AppState) -> impl Iterator<Item = &WireDevice> {
         .filter(|d| model::listable(d) && !model::is_hidden(d) && has_rgb_zones(d))
 }
 
-/// A device is an RGB target only if it exposes real zones. Chain hosts get a
+/// A device is an RGB target only if it exposes real channels. Chain hosts get a
 /// zone-less `Rgb` carrier synthesized by the daemon and must not appear here.
 fn has_rgb_zones(d: &WireDevice) -> bool {
     d.capabilities
         .iter()
-        .any(|c| matches!(c, DeviceCapability::Rgb(r) if !r.descriptor.zones.is_empty()))
+        .any(|c| matches!(c, DeviceCapability::Lighting(r) if !r.descriptor.channels.is_empty()))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1361,7 +1361,7 @@ mod tests {
     #[test]
     fn checkbox_click_only_toggles_never_expands() {
         // Regression: a checkbox hit must never open the zone picker, even on a
-        // selected device with zones — otherwise one click both toggles and
+        // selected device with channels — otherwise one click both toggles and
         // expands.
         assert_eq!(card_click(true, true, true), CardClick::Toggle);
         assert_eq!(card_click(true, false, true), CardClick::Toggle);
@@ -1370,7 +1370,7 @@ mod tests {
     #[test]
     fn row_expands_only_when_selected_with_zones() {
         assert_eq!(card_click(false, true, true), CardClick::Expand);
-        // Not selected → row click selects; no zones → nothing to expand.
+        // Not selected → row click selects; no channels → nothing to expand.
         assert_eq!(card_click(false, false, true), CardClick::Toggle);
         assert_eq!(card_click(false, true, false), CardClick::Toggle);
     }
@@ -1838,31 +1838,32 @@ mod tests {
         assert_eq!(params["mode"], EffectParamValue::Str("meter".into()));
     }
 
-    fn rgb_cap(zones: Vec<halod_shared::types::RgbZone>) -> DeviceCapability {
-        DeviceCapability::Rgb(halod_shared::types::RgbStatus {
-            descriptor: halod_shared::types::RgbDescriptor {
-                zones,
+    fn rgb_cap(channels: Vec<halod_shared::types::LightingChannel>) -> DeviceCapability {
+        DeviceCapability::Lighting(halod_shared::types::LightingStatus {
+            descriptor: halod_shared::types::LightingDescriptor {
+                channels,
                 native_effects: vec![],
             },
             state: None,
-            zone_transforms: Default::default(),
-            chainable_channels: vec![],
+            channel_transforms: Default::default(),
         })
     }
 
-    fn zone() -> halod_shared::types::RgbZone {
-        halod_shared::types::RgbZone {
+    fn zone() -> halod_shared::types::LightingChannel {
+        halod_shared::types::LightingChannel {
             id: "z0".into(),
             name: "Zone".into(),
             topology: halod_shared::types::ZoneTopology::Linear,
             leds: vec![],
+            color_order: Default::default(),
+            division: Default::default(),
         }
     }
 
     #[test]
     fn zoneless_rgb_carrier_is_not_a_target() {
         // Chain hosts get a synthesized zone-less `Rgb` carrier; it must not be
-        // offered as an RGB target (else the daemon rejects the RgbApply).
+        // offered as an RGB target (else the daemon rejects the LightingApply).
         let d = WireDevice {
             capabilities: vec![rgb_cap(vec![])],
             ..Default::default()
@@ -1885,10 +1886,10 @@ mod tests {
                 active: profile.into(),
                 ..Default::default()
             },
-            lighting: halod_shared::types::LightingState {
+            lighting: halod_shared::types::LightingOverviewState {
                 targets: halod_shared::types::LightingTargets {
                     device_ids: ids.iter().map(|s| s.to_string()).collect(),
-                    zones: HashMap::new(),
+                    channels: HashMap::new(),
                 },
                 ..Default::default()
             },
@@ -1933,9 +1934,9 @@ mod tests {
         let cmd = rx.try_recv().expect("expected a queued command");
         assert!(matches!(
             cmd,
-            DaemonCommand::RgbApply {
+            DaemonCommand::LightingApply {
                 id,
-                state: RgbState::Static {
+                state: LightingState::Static {
                     color: RgbColor { r: 0, g: 0, b: 0 }
                 }
             } if id == "dev1"

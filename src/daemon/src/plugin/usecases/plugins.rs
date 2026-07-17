@@ -521,7 +521,7 @@ mod tests {
             std::fs::create_dir_all(&package).unwrap();
             std::fs::write(
                 package.join("plugin.yaml"),
-                "id: devplug\nname: Development Plugin\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Example\n    model: Device\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678 }\n",
+                "id: devplug\nname: Development Plugin\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Example\n    model: Device\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678 }\n",
             )
             .unwrap();
             std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
@@ -723,7 +723,7 @@ mod tests {
 
     /// Every declaration lives in YAML; the Lua entry contains callbacks only.
     const CONFIG_TEST_PLUGIN_YAML: &str =
-        "id: cfgtest\npermissions: [network, hid, secure_storage]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
+        "id: cfgtest\npermissions: [network, hid, secure_storage]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
 
     fn write_config_test_plugin(root: &std::path::Path) {
         let dir = root.join("cfgtest");
@@ -860,7 +860,7 @@ mod tests {
             };
             std::fs::write(
                 dir.join("winonly").join("plugin.yaml"),
-                format!("id: winonly\nplatforms: [{foreign}]\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"),
+                format!("id: winonly\nplatforms: [{foreign}]\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"),
             )
             .unwrap();
             std::fs::write(dir.join("winonly").join("main.lua"), CONFIG_TEST_PLUGIN).unwrap();
@@ -907,7 +907,7 @@ mod tests {
         std::fs::create_dir_all(plugin_dir.join("assets")).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: assetplug\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
+            "id: assetplug\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
              logo: logo.png\n",
         )
         .unwrap();
@@ -1023,7 +1023,7 @@ mod tests {
             std::fs::create_dir_all(&pdir).unwrap();
             std::fs::write(
                 pdir.join("plugin.yaml"),
-                "id: numcfg\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: hz, label: Hz, kind: number, default: 50, min: 1, max: 100 }\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, default: auto, options: [auto, manual] }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 8080 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 1000, min: 10, max: 5000 }\n",
+                "id: numcfg\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: hz, label: Hz, kind: number, default: 50, min: 1, max: 100 }\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, default: auto, options: [auto, manual] }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 8080 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 1000, min: 10, max: 5000 }\n",
             )
             .unwrap();
             std::fs::write(

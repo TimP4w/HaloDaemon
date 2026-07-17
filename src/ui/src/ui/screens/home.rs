@@ -604,11 +604,16 @@ fn conflict_source_label(source: &ConflictDeviceSource) -> String {
 fn chain_parent(devices: &[WireDevice], child_id: &str) -> Option<(String, String)> {
     devices.iter().find_map(|p| {
         p.capabilities.iter().find_map(|c| match c {
-            DeviceCapability::Rgb(r) => r.chainable_channels.iter().find_map(|ch| {
-                ch.links
+            DeviceCapability::Lighting(r) => r.descriptor.channels.iter().find_map(|channel| {
+                let halod_shared::types::LightingDivision::Divisible { segments, .. } =
+                    &channel.division
+                else {
+                    return None;
+                };
+                segments
                     .iter()
-                    .any(|l| l.child_device_id == child_id && !l.locked)
-                    .then(|| (p.id.clone(), ch.channel_id.clone()))
+                    .any(|segment| segment.device_id == child_id && !segment.locked)
+                    .then(|| (p.id.clone(), channel.id.clone()))
             }),
             _ => None,
         })
@@ -635,10 +640,10 @@ fn remove_confirm_modal(
     ) {
         crate::runtime::ipc::send(
             cmd,
-            halod_shared::commands::DaemonCommand::RgbChainRemoveLink {
+            halod_shared::commands::DaemonCommand::LightingRemoveSegment {
                 id: target.parent_id,
                 channel_id: target.channel_id,
-                child_device_id: target.child_id,
+                device_id: target.child_id,
             },
         );
     }
@@ -1571,7 +1576,7 @@ fn empty(ui: &mut egui::Ui, filtered: bool) {
 mod tests {
     use super::*;
 
-    fn hub_with_links(links: Vec<halod_shared::types::ChainLinkInfo>) -> WireDevice {
+    fn hub_with_links(links: Vec<halod_shared::types::LightingSegmentInfo>) -> WireDevice {
         use halod_shared::types::*;
         WireDevice {
             id: "hub1".into(),
@@ -1580,19 +1585,23 @@ mod tests {
             model: "m".into(),
             device_type: DeviceType::Other,
             connected: true,
-            capabilities: vec![DeviceCapability::Rgb(RgbStatus {
-                descriptor: RgbDescriptor {
-                    zones: vec![],
+            capabilities: vec![DeviceCapability::Lighting(LightingStatus {
+                descriptor: LightingDescriptor {
+                    channels: vec![LightingChannel {
+                        id: "h1".into(),
+                        name: "Header 1".into(),
+                        topology: ZoneTopology::Linear,
+                        leds: vec![],
+                        color_order: Default::default(),
+                        division: LightingDivision::Divisible {
+                            max_leds: 120,
+                            segments: links,
+                        },
+                    }],
                     native_effects: vec![],
                 },
                 state: None,
-                zone_transforms: Default::default(),
-                chainable_channels: vec![ChainableChannelInfo {
-                    channel_id: "h1".into(),
-                    name: "Header 1".into(),
-                    max_leds: 120,
-                    links,
-                }],
+                channel_transforms: Default::default(),
             })],
             active_state: Default::default(),
             connection_type: None,
@@ -1605,13 +1614,15 @@ mod tests {
         }
     }
 
-    fn link(child: &str, locked: bool) -> halod_shared::types::ChainLinkInfo {
+    fn link(child: &str, locked: bool) -> halod_shared::types::LightingSegmentInfo {
         use halod_shared::types::*;
-        ChainLinkInfo {
-            child_device_id: child.into(),
+        LightingSegmentInfo {
+            device_id: child.into(),
+            channel_id: "lighting".into(),
             name: "Strip".into(),
             topology: ZoneTopology::Linear,
             led_count: 30,
+            color_order: None,
             locked,
         }
     }

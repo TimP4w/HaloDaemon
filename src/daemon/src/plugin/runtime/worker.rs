@@ -22,8 +22,8 @@ use super::lua_worker::LuaWorker;
 use halod_shared::keyboard::{KeyId, StandardLayout};
 use halod_shared::types::{
     Battery, Boolean, ButtonDescriptor, ButtonMapping, ConnectionStatus, DeviceType, Equalizer,
-    KeyboardFormFactor, KeyboardLayout, LedPosition, NativeEffect, OnboardProfiles, PairingStatus,
-    Permission, RgbColor, RgbState, RgbZone, Sensor,
+    KeyboardFormFactor, KeyboardLayout, LedPosition, LightingChannel, LightingState, NativeEffect,
+    OnboardProfiles, PairingStatus, Permission, Sensor,
 };
 
 use super::bytebuf::ByteBuf;
@@ -116,7 +116,7 @@ pub struct DetectedController {
     /// RGB topology used by the plugin-test harness to validate enumerated
     /// controller output. Runtime descriptors come from `initialize`.
     #[serde(default)]
-    pub zones: Vec<DetectedControllerZone>,
+    pub channels: Vec<DetectedControllerZone>,
 }
 
 /// Identifying context injected into the plugin's `dev.match` table, so a
@@ -147,7 +147,7 @@ pub struct DevMatch {
 
 /// One RGB zone a plugin's `initialize` reports for dynamic LED counts.
 #[derive(Debug, Clone, Deserialize)]
-pub struct InitZone {
+pub struct InitLightingChannel {
     pub id: String,
     pub name: String,
     #[serde(default = "default_zone_topology")]
@@ -218,6 +218,8 @@ pub struct InitChainChannel {
     pub id: String,
     pub name: String,
     pub max_leds: u32,
+    #[serde(default)]
+    pub color_order: halod_shared::types::ColorOrder,
 }
 
 /// Runtime control descriptors. They replace the removed static manifest
@@ -341,7 +343,7 @@ fn unknown_keyboard_layout() -> KeyboardLayout {
 }
 
 /// What `initialize` returns: a bare bool, or a table with dynamic device info
-/// discovered from the hardware (firmware/model, RGB zones, LCD panel, and the
+/// discovered from the hardware (firmware/model, RGB channels, LCD panel, and the
 /// live range/choice values read back from the device to seed the host caches).
 #[derive(Debug, Default)]
 pub struct InitOutcome {
@@ -350,7 +352,7 @@ pub struct InitOutcome {
     /// Device-specific subset of the package's advertised capability union.
     /// `None` preserves the advertised set for older plugins.
     pub capabilities: Option<Vec<String>>,
-    pub zones: Option<Vec<InitZone>>,
+    pub channels: Option<Vec<InitLightingChannel>>,
     /// Device-native RGB effect metadata. This is runtime information because
     /// supported effects may differ by firmware and controller revision.
     pub native_effects: Option<Vec<NativeEffect>>,
@@ -358,7 +360,7 @@ pub struct InitOutcome {
     /// Chainable channels discovered at runtime (e.g. ARGB headers whose capacity
     /// is read from the device's config table), for a plugin that declares a
     /// `chain` capability but reports its channels dynamically rather than statically.
-    pub chain: Option<Vec<InitChainChannel>>,
+    pub division: Option<Vec<InitChainChannel>>,
     pub accessories: Option<Vec<AccessoryManifest>>,
     pub controls: Option<InitControls>,
     pub dpi: Option<InitDpi>,
@@ -382,13 +384,13 @@ struct InitTable {
     #[serde(default)]
     capabilities: Option<Vec<String>>,
     #[serde(default)]
-    zones: Option<Vec<InitZone>>,
+    channels: Option<Vec<InitLightingChannel>>,
     #[serde(default)]
     native_effects: Option<Vec<NativeEffect>>,
     #[serde(default)]
     lcd: Option<InitLcd>,
     #[serde(default)]
-    chain: Option<Vec<InitChainChannel>>,
+    division: Option<Vec<InitChainChannel>>,
     #[serde(default)]
     accessories: Option<Vec<AccessoryManifest>>,
     #[serde(default)]
@@ -556,7 +558,7 @@ impl PluginHandle {
         granted: Vec<Permission>,
         config: crate::plugin::ResolvedConfig,
         handle: Handle,
-        zones: Vec<RgbZone>,
+        channels: Vec<LightingChannel>,
         audio_registry: super::audio_api::SinkRegistry,
     ) -> Self {
         Self::spawn_with_data(
@@ -567,7 +569,7 @@ impl PluginHandle {
             granted,
             config,
             handle,
-            zones,
+            channels,
             audio_registry,
             Default::default(),
             None,
@@ -583,7 +585,7 @@ impl PluginHandle {
         granted: Vec<Permission>,
         config: crate::plugin::ResolvedConfig,
         handle: Handle,
-        zones: Vec<RgbZone>,
+        channels: Vec<LightingChannel>,
         audio_registry: super::audio_api::SinkRegistry,
         data: super::data_api::DataRuntime,
         http: Option<crate::services::http::HttpRuntime>,
@@ -604,7 +606,7 @@ impl PluginHandle {
                     &granted,
                     &config,
                     handle,
-                    &zones,
+                    &channels,
                     audio_registry,
                     data,
                     http,
@@ -718,7 +720,7 @@ impl PluginHandle {
     }
 
     /// Run `initialize`, accepting either a bare bool or a table with dynamic
-    /// device info (`{ ok, model, zones, lcd }`). A missing callback means
+    /// device info (`{ ok, model, channels, lcd }`). A missing callback means
     /// "present, no info".
     pub async fn initialize(&self) -> Result<InitOutcome> {
         self.run(|ctx, dev, _| {
@@ -743,9 +745,9 @@ impl PluginHandle {
                         .lua
                         .from_value(other)
                         .map_err(|e| lua_err("initialize result", e))?;
-                    if let Some(zones) = &t.zones {
-                        check_zone_count(zones.len())?;
-                        for z in zones {
+                    if let Some(channels) = &t.channels {
+                        check_zone_count(channels.len())?;
+                        for z in channels {
                             let count = if !z.leds.is_empty() {
                                 u32::try_from(z.leds.len()).unwrap_or(u32::MAX)
                             } else if !z.led_ids.is_empty() {
@@ -759,7 +761,7 @@ impl PluginHandle {
                     if let Some(lcd) = &t.lcd {
                         check_lcd_dims(lcd.width, lcd.height)?;
                     }
-                    if let Some(chain) = &t.chain {
+                    if let Some(chain) = &t.division {
                         check_zone_count(chain.len())?;
                         for c in chain {
                             check_led_count(&c.id, c.max_leds)?;
@@ -796,10 +798,10 @@ impl PluginHandle {
                         ok: t.ok,
                         model: t.model,
                         capabilities: t.capabilities,
-                        zones: t.zones,
+                        channels: t.channels,
                         native_effects: t.native_effects,
                         lcd: t.lcd,
-                        chain: t.chain,
+                        division: t.division,
                         accessories: t.accessories,
                         controls: t.controls,
                         dpi: t.dpi,
@@ -851,7 +853,7 @@ impl PluginHandle {
         }
     }
 
-    pub async fn rgb_apply(&self, state: RgbState) -> Result<()> {
+    pub async fn rgb_apply(&self, state: LightingState) -> Result<()> {
         self.run(move |ctx, dev, _| {
             let f = required(&ctx.manifest, "apply")?;
             let state_v = ctx
@@ -864,89 +866,13 @@ impl PluginHandle {
         .await
     }
 
-    pub async fn rgb_write_frame(
-        &self,
-        zone: &str,
-        colors: &[RgbColor],
-        led_ids: &[u32],
-    ) -> Result<()> {
-        let zone = zone.to_owned();
-        let colors = colors.to_vec();
-        let led_ids = led_ids.to_vec();
+    pub async fn write_lighting_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()> {
+        let channel_id = channel_id.to_owned();
+        let bytes = bytes.to_vec();
         self.run(move |ctx, dev, _| {
             let f = required(&ctx.manifest, "write_frame")?;
-            let colors_v = ctx
-                .lua
-                .to_value(&colors)
-                .map_err(|e| lua_err("write_frame arg", e))?;
-            let led_ids_v = ctx
-                .lua
-                .to_value(&led_ids)
-                .map_err(|e| lua_err("write_frame arg", e))?;
-            f.call::<()>((dev, zone, colors_v, led_ids_v))
+            f.call::<()>((dev, channel_id, bytes))
                 .map_err(|e| lua_err("write_frame", e))
-        })
-        .await
-    }
-
-    pub async fn rgb_write_frame_batch(
-        &self,
-        zones: &[(String, Vec<RgbColor>, Vec<u32>)],
-    ) -> Result<()> {
-        let zones = zones.to_vec();
-        self.run(move |ctx, dev, _| {
-            if let Some(f) = func(&ctx.manifest, "write_frame_batch") {
-                let frames = ctx
-                    .lua
-                    .create_table()
-                    .map_err(|e| lua_err("write_frame_batch arg", e))?;
-                for (i, (zone_id, colors, led_ids)) in zones.iter().enumerate() {
-                    let frame = ctx
-                        .lua
-                        .create_table()
-                        .map_err(|e| lua_err("write_frame_batch arg", e))?;
-                    frame
-                        .set("zone_id", zone_id.as_str())
-                        .map_err(|e| lua_err("write_frame_batch arg", e))?;
-                    frame
-                        .set(
-                            "colors",
-                            ctx.lua
-                                .to_value(colors)
-                                .map_err(|e| lua_err("write_frame_batch arg", e))?,
-                        )
-                        .map_err(|e| lua_err("write_frame_batch arg", e))?;
-                    frame
-                        .set(
-                            "led_ids",
-                            ctx.lua
-                                .to_value(led_ids)
-                                .map_err(|e| lua_err("write_frame_batch arg", e))?,
-                        )
-                        .map_err(|e| lua_err("write_frame_batch arg", e))?;
-                    frames
-                        .set(i + 1, frame)
-                        .map_err(|e| lua_err("write_frame_batch arg", e))?;
-                }
-                return f
-                    .call::<()>((dev.clone(), frames))
-                    .map_err(|e| lua_err("write_frame_batch", e));
-            }
-
-            let f = required(&ctx.manifest, "write_frame")?;
-            for (zone, colors, led_ids) in &zones {
-                let colors_v = ctx
-                    .lua
-                    .to_value(colors)
-                    .map_err(|e| lua_err("write_frame arg", e))?;
-                let led_ids_v = ctx
-                    .lua
-                    .to_value(led_ids)
-                    .map_err(|e| lua_err("write_frame arg", e))?;
-                f.call::<()>((dev.clone(), zone.as_str(), colors_v, led_ids_v))
-                    .map_err(|e| lua_err("write_frame", e))?;
-            }
-            Ok(())
         })
         .await
     }
@@ -1114,21 +1040,6 @@ impl PluginHandle {
         self.call_opt("detect_accessories").await
     }
 
-    pub async fn write_ext_frame(&self, channel: &str, colors: &[RgbColor]) -> Result<()> {
-        let channel = channel.to_owned();
-        let colors = colors.to_vec();
-        self.run(move |ctx, dev, _| {
-            let f = required(&ctx.manifest, "write_ext_frame")?;
-            let colors_v = ctx
-                .lua
-                .to_value(&colors)
-                .map_err(|e| lua_err("write_ext_frame arg", e))?;
-            f.call::<()>((dev, channel, colors_v))
-                .map_err(|e| lua_err("write_ext_frame", e))
-        })
-        .await
-    }
-
     pub async fn enumerate_controllers(&self) -> Result<Vec<DetectedController>> {
         let controllers: Vec<DetectedController> = self.call_opt("enumerate_controllers").await?;
         if controllers.len() > super::manifest::MAX_PLUGIN_CONTROLLERS {
@@ -1139,8 +1050,8 @@ impl PluginHandle {
             ));
         }
         for c in &controllers {
-            check_zone_count(c.zones.len())?;
-            for z in &c.zones {
+            check_zone_count(c.channels.len())?;
+            for z in &c.channels {
                 validate_component("controller zone id", &z.id)?;
                 validate_short_text("controller zone name", &z.name)?;
                 check_led_count(&z.id, z.led_count)?;
@@ -1409,7 +1320,7 @@ fn build_ctx(
     granted: &[Permission],
     config: &crate::plugin::ResolvedConfig,
     handle: Handle,
-    zones: &[RgbZone],
+    channels: &[LightingChannel],
     audio_registry: super::audio_api::SinkRegistry,
     data: super::data_api::DataRuntime,
     http: Option<crate::services::http::HttpRuntime>,
@@ -1468,10 +1379,12 @@ fn build_ctx(
         dev.set("audio", audio_ud)
             .map_err(|e| lua_err("dev.audio", e))?;
     }
-    if !zones.is_empty() {
-        let zones_v = lua.to_value(zones).map_err(|e| lua_err("dev.zones", e))?;
-        dev.set("zones", zones_v)
-            .map_err(|e| lua_err("dev.zones", e))?;
+    if !channels.is_empty() {
+        let zones_v = lua
+            .to_value(channels)
+            .map_err(|e| lua_err("dev.channels", e))?;
+        dev.set("channels", zones_v)
+            .map_err(|e| lua_err("dev.channels", e))?;
     }
 
     Ok(WorkerCtx {
@@ -1634,6 +1547,7 @@ mod tests {
     use super::*;
     use crate::drivers::transports::mock::test_transport::MockTransport;
     use crate::drivers::transports::{HidTransport, Transport, TransportEvent};
+    use halod_shared::types::RgbColor;
 
     struct GcDropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
@@ -1786,8 +1700,8 @@ mod tests {
         )
     }
 
-    fn static_state() -> RgbState {
-        RgbState::Static {
+    fn static_state() -> LightingState {
+        LightingState::Static {
             color: RgbColor { r: 1, g: 2, b: 3 },
         }
     }
@@ -2046,86 +1960,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routed_child_uses_standard_rgb_callbacks_and_match_index() {
+    async fn routed_child_receives_encoded_lighting_bytes() {
         let source = r#"return {
             apply = function(dev, state)
                 assert(dev.match.index == 7)
             end,
-            write_frame = function(dev, zone, colors, led_ids)
+            write_frame = function(dev, channel, bytes)
                 assert(dev.match.index == 7)
-                assert(zone == "zone-1")
-                assert(#colors == 1)
-                assert(led_ids[1] == 42)
+                assert(channel == "channel-1")
+                assert(#bytes == 3)
+                assert(bytes[1] == 1 and bytes[2] == 2 and bytes[3] == 3)
             end,
         }"#;
         let h = spawn_controller(source, 7);
 
         h.rgb_apply(static_state()).await.unwrap();
-        h.rgb_write_frame("zone-1", &[RgbColor { r: 1, g: 2, b: 3 }], &[42])
+        h.write_lighting_frame("channel-1", &[1, 2, 3])
             .await
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn integration_controller_batches_all_zones_in_one_callback() {
-        let source = r#"return {
-            write_frame_batch = function(dev, frames)
-                assert(dev.match.index == 7)
-                assert(#frames == 2)
-                assert(frames[1].zone_id == "zone-1")
-                assert(#frames[1].colors == 1)
-                assert(frames[1].colors[1].r == 1)
-                assert(frames[1].led_ids[1] == 42)
-                assert(frames[2].zone_id == "zone-2")
-                assert(frames[2].colors[1].b == 6)
-                assert(frames[2].led_ids[1] == 84)
-            end,
-        }"#;
-        let h = spawn_controller(source, 7);
-
-        h.rgb_write_frame_batch(&[
-            (
-                "zone-1".into(),
-                vec![RgbColor { r: 1, g: 2, b: 3 }],
-                vec![42],
-            ),
-            (
-                "zone-2".into(),
-                vec![RgbColor { r: 4, g: 5, b: 6 }],
-                vec![84],
-            ),
-        ])
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn frame_batch_falls_back_to_per_zone_callback() {
-        let source = r#"local calls = 0
-        return {
-            write_frame = function(dev, zone, colors, led_ids)
-                calls = calls + 1
-                assert(dev.match.index == 7)
-                assert(zone == "zone-" .. calls)
-                assert(led_ids[1] == calls * 42)
-            end,
-        }"#;
-        let h = spawn_controller(source, 7);
-
-        h.rgb_write_frame_batch(&[
-            (
-                "zone-1".into(),
-                vec![RgbColor { r: 1, g: 2, b: 3 }],
-                vec![42],
-            ),
-            (
-                "zone-2".into(),
-                vec![RgbColor { r: 4, g: 5, b: 6 }],
-                vec![84],
-            ),
-        ])
-        .await
-        .unwrap();
     }
 
     #[tokio::test]

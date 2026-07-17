@@ -54,7 +54,7 @@ pub(super) fn rounded_zone_outline_sc(
 pub(super) fn led_screen_pos(lx: f32, ly: f32, zone: &PlacedZone, canvas_rect: Rect) -> Pos2 {
     // Inset the LED toward the zone centre by a fixed screen margin so dots keep
     // a consistent gap from the box border regardless of zone size (a fractional
-    // inset pushes LEDs far from the edge on large zones).
+    // inset pushes LEDs far from the edge on large channels).
     let lx = inset_axis(lx, zone.w * canvas_rect.width());
     let ly = inset_axis(ly, zone.h * canvas_rect.height());
     let (nx, ny) = halod_shared::zone_transform::led_canvas_norm(
@@ -70,7 +70,7 @@ pub(super) fn led_screen_pos(lx: f32, ly: f32, zone: &PlacedZone, canvas_rect: R
 }
 
 /// Bounding box `(min_x, max_x, min_y, max_y)` of a zone's LED cloud in the
-/// descriptor's own coordinate space. Empty zones report a centred degenerate box.
+/// descriptor's own coordinate space. Empty channels report a centred degenerate box.
 pub(super) fn led_bounds(leds: &[LedPosition]) -> (f32, f32, f32, f32) {
     leds.iter().fold(
         (
@@ -101,7 +101,7 @@ pub(super) fn fill_coords(
 
 /// Screen-pixel margin reserved between edge LEDs and the box border. Kept in
 /// absolute px (not a fraction of the zone) so the gap reads the same on small
-/// and large zones and edge LEDs can sit close to the border.
+/// and large channels and edge LEDs can sit close to the border.
 const LED_PAD_PX: f32 = 4.0;
 
 /// Map an in-zone coord `[0,1]` into `[pad, 1-pad]` (`pad` = `LED_PAD_PX` as a
@@ -117,7 +117,7 @@ fn inset_axis(t: f32, span_px: f32) -> f32 {
 
 /// Zones whose rotation-aware screen bounding box intersects the marquee rect.
 pub(super) fn zones_in_marquee(
-    zones: &[PlacedZone],
+    channels: &[PlacedZone],
     mq: &MarqueeState,
     canvas_rect: Rect,
 ) -> std::collections::HashSet<(String, String)> {
@@ -126,11 +126,11 @@ pub(super) fn zones_in_marquee(
         norm_to_screen(mq.cur_norm, canvas_rect),
     );
     let mut out = std::collections::HashSet::new();
-    for z in zones {
+    for z in channels {
         let corners = zone_corners(z, canvas_rect);
         let zb = Rect::from_points(&corners);
         if m.intersects(zb) {
-            out.insert((z.device_id.clone(), z.zone_id.clone()));
+            out.insert((z.device_id.clone(), z.channel_id.clone()));
         }
     }
     out
@@ -173,7 +173,7 @@ pub(super) fn apply_drag(
 }
 
 /// Translate a zone by `delta` (normalized-canvas units), clamping so it stays
-/// on-canvas. `max()` guards oversized zones, where `1.0 - w` goes negative.
+/// on-canvas. `max()` guards oversized channels, where `1.0 - w` goes negative.
 pub(super) fn body_move(orig: &PlacedZone, delta: Vec2) -> PlacedZone {
     PlacedZone {
         x: (orig.x + delta.x).clamp(0.0, (1.0 - orig.w).max(0.0)),
@@ -234,8 +234,8 @@ fn resize_from_corner(orig: &PlacedZone, c: usize, delta: Vec2) -> PlacedZone {
 }
 
 // ── Coordinate mapping ────────────────────────────────────────────────────────
-pub(super) fn zone_key(device_id: &str, zone_id: &str) -> String {
-    format!("{device_id}:{zone_id}")
+pub(super) fn zone_key(device_id: &str, channel_id: &str) -> String {
+    format!("{device_id}:{channel_id}")
 }
 
 pub(super) fn norm_to_screen(norm: Pos2, canvas_rect: Rect) -> Pos2 {
@@ -408,7 +408,7 @@ mod tests {
         let wide = inset_axis(1.0, 640.0);
         assert!((narrow - (1.0 - LED_PAD_PX / 320.0)).abs() < 1e-6);
         assert!((wide - (1.0 - LED_PAD_PX / 640.0)).abs() < 1e-6);
-        // Pad clamps to half so tiny zones don't invert.
+        // Pad clamps to half so tiny channels don't invert.
         assert_eq!(inset_axis(1.0, 4.0), 0.5);
     }
 
@@ -486,7 +486,7 @@ mod tests {
         // relative offset is preserved.
         let a = z(0.1, 0.1, 0.2, 0.2);
         let mut b = z(0.5, 0.4, 0.2, 0.2);
-        b.zone_id = "z2".into();
+        b.channel_id = "z2".into();
         let d = Vec2::new(0.1, 0.05);
         let (ma, mb) = (body_move(&a, d), body_move(&b, d));
         assert!((ma.x - 0.2).abs() < 1e-5 && (ma.y - 0.15).abs() < 1e-5);

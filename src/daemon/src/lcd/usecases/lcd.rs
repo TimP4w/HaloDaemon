@@ -11,7 +11,7 @@ use crate::registry::require_device_owned_id;
 use crate::state::AppState;
 use crate::util::image::compress_for_storage;
 use halod_shared::types::{
-    validate_image_filename, LcdHealth, LcdUploadProgress, LcdUploadStage, RgbState,
+    validate_image_filename, LcdHealth, LcdUploadProgress, LcdUploadStage, LightingState,
 };
 
 fn transition_failed(lcd: &dyn crate::drivers::LcdCapability, error: &anyhow::Error) {
@@ -89,9 +89,9 @@ async fn restore_rgb(device: &dyn crate::drivers::Device, lcd: &dyn crate::drive
     if !lcd.needs_rgb_restore_after_upload() {
         return;
     }
-    if let Some(rgb) = device.as_rgb() {
+    if let Some(rgb) = device.as_lighting() {
         if let Some(state) = rgb.current_state() {
-            if !matches!(state, RgbState::Engine) {
+            if !matches!(state, LightingState::Engine) {
                 if let Err(e) = rgb.apply(state).await {
                     log::warn!("[LCD] RGB restore failed after image upload: {e}");
                 }

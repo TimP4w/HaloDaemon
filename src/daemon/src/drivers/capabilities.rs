@@ -12,8 +12,8 @@ use halod_shared::keyboard::{
 use halod_shared::types::{
     Battery, Boolean, ButtonMapping, ConnectionStatus, CoolingChannel, CoolingStatus,
     DeviceCapability, DpiStatus, EffectParamValue, Equalizer, KeyRemapStatus, KeyboardLayout,
-    LcdDescriptor, LcdStatus, RgbColor, RgbDescriptor, RgbState, RgbStatus, Sensor, SensorType,
-    SensorUnit, VisibilityState, ZoneTopology,
+    LcdDescriptor, LcdStatus, LightingDescriptor, LightingState, LightingStatus, Sensor,
+    SensorType, SensorUnit, VisibilityState, ZoneTopology,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 use std::collections::HashMap;
@@ -72,7 +72,7 @@ pub struct ChainLinkSpec {
 }
 
 /// Cooling surface for chain accessories. Chain RGB writes remain the concern
-/// of [`chain::ChainHub`]; this trait routes a child's cooling channel back to
+/// of [`chain::LightingDivisionHub`]; this trait routes a child's cooling channel back to
 /// its parent controller.
 #[async_trait]
 pub trait CoolingHub: Send + Sync + 'static {
@@ -126,88 +126,87 @@ pub trait CoolingCapability: Send + Sync {
 }
 
 #[async_trait]
-pub trait RgbCapability: Send + Sync {
-    /// Describe zones and native effects supported by the device.
-    fn descriptor(&self) -> &RgbDescriptor;
+pub trait LightingCapability: Send + Sync {
+    fn descriptor(&self) -> &LightingDescriptor;
 
     /// Apply a new RGB state to the device, e.g. set static color, start an effect, etc.
-    async fn apply(&self, state: RgbState) -> Result<()>;
+    async fn apply(&self, state: LightingState) -> Result<()>;
 
     /// Writes a raw color frame, bypassing state management. Only for driving the
     /// LEDs in "engine" mode — never call it to set persisted state.
-    async fn write_frame(&self, zone_id: &str, colors: &[RgbColor]) -> Result<()>;
+    async fn write_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()>;
 
-    /// Write all zones belonging to one device frame. Drivers that can commit a
+    /// Write all channels belonging to one device frame. Drivers that can commit a
     /// controller atomically should override this; the safe default preserves
     /// the existing per-zone behavior.
-    async fn write_frame_batch(&self, zones: &[(String, Vec<RgbColor>)]) -> Result<()> {
-        for (zone_id, colors) in zones {
-            self.write_frame(zone_id, colors).await?;
+    async fn write_frame_batch(&self, channels: &[(String, Vec<u8>)]) -> Result<()> {
+        for (channel_id, bytes) in channels {
+            self.write_frame(channel_id, bytes).await?;
         }
         Ok(())
     }
 
     /// Backing slot — required so all state sub-operations have defaults.
-    fn rgb_state(&self) -> &RgbStateSlot;
+    fn lighting_state(&self) -> &LightingStateSlot;
 
-    fn current_state(&self) -> Option<RgbState> {
-        self.rgb_state().current_state()
-    }
-
-    fn canvas_zones(&self) -> Vec<crate::config::PlacedZone> {
-        self.rgb_state().canvas_zones()
-    }
-    fn set_canvas_zones(&self, zones: Vec<crate::config::PlacedZone>) {
-        self.rgb_state().set_canvas_zones(zones);
+    fn current_state(&self) -> Option<LightingState> {
+        self.lighting_state().current_state()
     }
 
-    fn zone_transforms(&self) -> HashMap<String, ZoneContentTransform> {
-        self.rgb_state().zone_transforms()
+    fn placed_channels(&self) -> Vec<crate::config::PlacedZone> {
+        self.lighting_state().placed_channels()
     }
-    fn transform_for(&self, zone_id: &str) -> ZoneContentTransform {
-        self.rgb_state().transform_for(zone_id)
+    fn set_canvas_zones(&self, channels: Vec<crate::config::PlacedZone>) {
+        self.lighting_state().set_canvas_zones(channels);
     }
-    fn set_zone_transform(&self, zone_id: String, transform: ZoneContentTransform) {
-        self.rgb_state().set_zone_transform(zone_id, transform);
+
+    fn channel_transforms(&self) -> HashMap<String, ZoneContentTransform> {
+        self.lighting_state().channel_transforms()
+    }
+    fn transform_for(&self, channel_id: &str) -> ZoneContentTransform {
+        self.lighting_state().transform_for(channel_id)
+    }
+    fn set_channel_transform(&self, channel_id: String, transform: ZoneContentTransform) {
+        self.lighting_state()
+            .set_zone_transform(channel_id, transform);
     }
     fn set_zone_transforms(&self, transforms: HashMap<String, ZoneContentTransform>) {
-        self.rgb_state().set_zone_transforms(transforms);
+        self.lighting_state().set_zone_transforms(transforms);
     }
 
     /// Produces the wire snapshot for the IPC serializer.
-    fn serialize_rgb(&self) -> RgbStatus {
-        RgbStatus {
+    fn serialize_lighting(&self) -> LightingStatus {
+        LightingStatus {
             descriptor: self.descriptor().clone(),
             state: self.current_state(),
-            zone_transforms: self.zone_transforms(),
-            chainable_channels: Vec::new(),
+            channel_transforms: self.channel_transforms(),
         }
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
-        Some(DeviceCapability::Rgb(self.serialize_rgb()))
+        Some(DeviceCapability::Lighting(self.serialize_lighting()))
     }
 
     fn state_key(&self) -> &'static str {
         halod_shared::capability::RGB
     }
     fn save_state(&self) -> serde_json::Value {
-        let slot = self.rgb_state();
-        let canvas = slot.canvas_zones();
-        let transforms = self.zone_transforms();
+        let slot = self.lighting_state();
+        let canvas = slot.placed_channels();
+        let transforms = self.channel_transforms();
         let mut obj = serde_json::Map::new();
         if let Some(s) = slot.current_state() {
             obj.insert("state".into(), serde_json::to_value(s).unwrap_or_default());
         }
         if !canvas.is_empty() {
             obj.insert(
-                "canvas_zones".into(),
+                "placed_channels".into(),
                 serde_json::to_value(canvas).unwrap_or_default(),
             );
         }
         if !transforms.is_empty() {
             obj.insert(
-                "zone_transforms".into(),
+                "channel_transforms".into(),
                 serde_json::to_value(transforms).unwrap_or_default(),
             );
         }
@@ -218,14 +217,14 @@ pub trait RgbCapability: Send + Sync {
         }
     }
     async fn restore_state(&self, v: &serde_json::Value) {
-        if let Some(z) = v.get("canvas_zones") {
-            if let Ok(zones) = serde_json::from_value(z.clone()) {
-                self.rgb_state().set_canvas_zones(zones);
+        if let Some(z) = v.get("placed_channels") {
+            if let Ok(channels) = serde_json::from_value(z.clone()) {
+                self.lighting_state().set_canvas_zones(channels);
             }
         }
-        if let Some(t) = v.get("zone_transforms") {
+        if let Some(t) = v.get("channel_transforms") {
             if let Ok(transforms) = serde_json::from_value(t.clone()) {
-                self.rgb_state().set_zone_transforms(transforms);
+                self.lighting_state().set_zone_transforms(transforms);
             }
         }
         if let Some(s) = v.get("state") {

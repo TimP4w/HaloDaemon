@@ -7,7 +7,7 @@ use crate::registry::require_device_owned_id;
 use crate::{config, ipc, state::AppState};
 use halod_shared::commands::EngineKind;
 use halod_shared::types::{
-    EffectDef, EffectParamValue, PlacedZone, RgbColor, RgbState, SamplingMode, ZoneTopology,
+    EffectDef, EffectParamValue, LightingState, PlacedZone, RgbColor, SamplingMode, ZoneTopology,
 };
 
 const MAX_CANVAS_ID_LEN: usize = 64;
@@ -68,7 +68,7 @@ fn validate_placed_zone(
     effects: &std::collections::HashMap<String, EffectDef>,
 ) -> Result<()> {
     validate_canvas_id("device id", &zone.device_id)?;
-    validate_canvas_id("zone id", &zone.zone_id)?;
+    validate_canvas_id("zone id", &zone.channel_id)?;
     anyhow::ensure!(
         zone.x.is_finite()
             && zone.y.is_finite()
@@ -102,18 +102,22 @@ fn default_zone_size(topology: Option<ZoneTopology>) -> (f64, f64) {
 }
 
 /// Topology of a device's RGB zone, erroring if the device/zone is unknown so a
-/// bogus `zone_id` is never persisted.
-async fn require_zone(device_id: &str, zone_id: &str, app: &Arc<AppState>) -> Result<ZoneTopology> {
+/// bogus `channel_id` is never persisted.
+async fn require_zone(
+    device_id: &str,
+    channel_id: &str,
+    app: &Arc<AppState>,
+) -> Result<ZoneTopology> {
     let device = require_device_owned_id(device_id, app).await?;
     let rgb = device
-        .as_rgb()
+        .as_lighting()
         .ok_or_else(|| anyhow::anyhow!("device does not support canvas engine: {device_id}"))?;
     rgb.descriptor()
-        .zones
+        .channels
         .iter()
-        .find(|z| z.id == zone_id)
+        .find(|z| z.id == channel_id)
         .map(|z| z.topology.clone())
-        .ok_or_else(|| anyhow::anyhow!("zone '{zone_id}' not found on device '{device_id}'"))
+        .ok_or_else(|| anyhow::anyhow!("zone '{channel_id}' not found on device '{device_id}'"))
 }
 
 pub async fn upsert_effect(
@@ -189,27 +193,27 @@ async fn modify_canvas_zones(
 ) -> Result<Arc<dyn crate::drivers::Device>> {
     let device = require_device_owned_id(device_id, app).await?;
     let rgb = device
-        .as_rgb()
+        .as_lighting()
         .ok_or_else(|| anyhow::anyhow!("device does not support canvas engine: {device_id}"))?;
 
-    let mut zones = rgb.canvas_zones();
-    mutate(&mut zones);
+    let mut channels = rgb.placed_channels();
+    mutate(&mut channels);
     anyhow::ensure!(
-        zones.len() <= halod_shared::types::MAX_PLACED_ZONES,
-        "too many canvas zones"
+        channels.len() <= halod_shared::types::MAX_PLACED_ZONES,
+        "too many canvas channels"
     );
     let effects = app.config.read().await.effective_canvas_state().effects;
-    for z in &zones {
+    for z in &channels {
         validate_placed_zone(z, &effects)?;
     }
-    let mut placement_ids = std::collections::HashSet::with_capacity(zones.len());
-    for z in &zones {
+    let mut placement_ids = std::collections::HashSet::with_capacity(channels.len());
+    for z in &channels {
         anyhow::ensure!(
-            placement_ids.insert((&z.device_id, &z.zone_id)),
+            placement_ids.insert((&z.device_id, &z.channel_id)),
             "canvas contains a duplicate device-zone placement"
         );
     }
-    rgb.set_canvas_zones(zones);
+    rgb.set_canvas_zones(channels);
 
     persist_device_state(app, device.as_ref()).await;
     Ok(device)
@@ -219,7 +223,7 @@ async fn modify_canvas_zones(
 #[allow(clippy::too_many_arguments)]
 pub async fn place_zone(
     device_id: String,
-    zone_id: String,
+    channel_id: String,
     x: Option<f64>,
     y: Option<f64>,
     w: Option<f64>,
@@ -231,7 +235,8 @@ pub async fn place_zone(
 ) -> Result<()> {
     // Default placement size depends on the zone's topology: a linear strip is
     // a thin line, so a square box leaves it floating in empty space.
-    let (def_w, def_h) = default_zone_size(Some(require_zone(&device_id, &zone_id, &app).await?));
+    let (def_w, def_h) =
+        default_zone_size(Some(require_zone(&device_id, &channel_id, &app).await?));
     let x = x.unwrap_or(0.0) as f32;
     let y = y.unwrap_or(0.0) as f32;
     let w = w.unwrap_or(def_w) as f32;
@@ -245,11 +250,11 @@ pub async fn place_zone(
             "unknown canvas effect instance '{effect_id}'"
         );
     }
-    let device = modify_canvas_zones(&device_id, &app, |zones| {
-        zones.retain(|z| !(z.device_id == device_id && z.zone_id == zone_id));
-        zones.push(config::PlacedZone {
+    let device = modify_canvas_zones(&device_id, &app, |channels| {
+        channels.retain(|z| !(z.device_id == device_id && z.channel_id == channel_id));
+        channels.push(config::PlacedZone {
             device_id: device_id.clone(),
-            zone_id,
+            channel_id,
             x,
             y,
             w,
@@ -261,8 +266,8 @@ pub async fn place_zone(
     })
     .await?;
 
-    if let Some(rgb) = device.as_rgb() {
-        let _ = rgb.apply(RgbState::Engine).await;
+    if let Some(rgb) = device.as_lighting() {
+        let _ = rgb.apply(LightingState::Engine).await;
     }
 
     crate::registry::usecases::settings::set_engine_config(
@@ -280,9 +285,9 @@ pub async fn place_zone(
 }
 
 /// Remove a zone from the canvas.
-pub async fn remove_zone(device_id: String, zone_id: String, app: Arc<AppState>) -> Result<()> {
-    let _ = modify_canvas_zones(&device_id, &app, |zones| {
-        zones.retain(|z| !(z.device_id == device_id && z.zone_id == zone_id));
+pub async fn remove_zone(device_id: String, channel_id: String, app: Arc<AppState>) -> Result<()> {
+    let _ = modify_canvas_zones(&device_id, &app, |channels| {
+        channels.retain(|z| !(z.device_id == device_id && z.channel_id == channel_id));
     })
     .await;
 
@@ -295,7 +300,7 @@ pub async fn remove_zone(device_id: String, zone_id: String, app: Arc<AppState>)
 #[allow(clippy::too_many_arguments)]
 pub async fn move_zone(
     device_id: String,
-    zone_id: String,
+    channel_id: String,
     x: f64,
     y: f64,
     w: Option<f64>,
@@ -318,10 +323,10 @@ pub async fn move_zone(
         );
     }
 
-    let _ = modify_canvas_zones(&device_id, &app, |zones| {
-        if let Some(z) = zones
+    let _ = modify_canvas_zones(&device_id, &app, |channels| {
+        if let Some(z) = channels
             .iter_mut()
-            .find(|z| z.device_id == device_id && z.zone_id == zone_id)
+            .find(|z| z.device_id == device_id && z.channel_id == channel_id)
         {
             z.x = x;
             z.y = y;
@@ -354,8 +359,8 @@ mod tests {
     use crate::state::AppState;
     use crate::test_support::MockDevice;
 
-    fn canvas_zones(dev: &MockDevice) -> Vec<config::PlacedZone> {
-        dev.rgb.as_ref().unwrap().canvas_zones()
+    fn placed_channels(dev: &MockDevice) -> Vec<config::PlacedZone> {
+        dev.rgb.as_ref().unwrap().placed_channels()
     }
 
     fn make_app(device: Arc<MockDevice>) -> Arc<AppState> {
@@ -372,7 +377,7 @@ mod tests {
         let default_size = default_zone_size(None);
         let linear_size = default_zone_size(Some(ZoneTopology::Linear));
 
-        // Linear zones are shorter (in the cross-axis) than every other
+        // Linear channels are shorter (in the cross-axis) than every other
         // topology, which all get the same square default.
         assert!(linear_size.1 < default_size.1);
         for topology in [ZoneTopology::Ring, ZoneTopology::Grid] {
@@ -440,12 +445,12 @@ mod tests {
         )
         .await
         .unwrap();
-        let zones = canvas_zones(&dev);
-        assert_eq!(zones.len(), 1);
-        assert_eq!(zones[0].zone_id, "ring");
-        assert!((zones[0].x - 0.1).abs() < 1e-5);
-        assert!((zones[0].y - 0.2).abs() < 1e-5);
-        assert_eq!(zones[0].effect.as_deref(), Some("bars"));
+        let channels = placed_channels(&dev);
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].channel_id, "ring");
+        assert!((channels[0].x - 0.1).abs() < 1e-5);
+        assert!((channels[0].y - 0.2).abs() < 1e-5);
+        assert_eq!(channels[0].effect.as_deref(), Some("bars"));
         assert!(
             app.config.read().await.rgb.canvas_enabled,
             "placing a zone must enable the canvas engine so it animates"
@@ -484,13 +489,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let zones = canvas_zones(&dev);
+        let channels = placed_channels(&dev);
         assert_eq!(
-            zones.len(),
+            channels.len(),
             1,
             "duplicate zone should be replaced not appended"
         );
-        assert!((zones[0].x - 0.9).abs() < 1e-5);
+        assert!((channels[0].x - 0.9).abs() < 1e-5);
     }
 
     #[tokio::test]
@@ -531,11 +536,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(canvas_zones(&dev).len(), 1);
+        assert_eq!(placed_channels(&dev).len(), 1);
         remove_zone("dev0".into(), "ring".into(), app)
             .await
             .unwrap();
-        assert!(canvas_zones(&dev).is_empty());
+        assert!(placed_channels(&dev).is_empty());
     }
 
     #[tokio::test]
@@ -573,10 +578,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let zones = canvas_zones(&dev);
-        assert!((zones[0].x - 0.5).abs() < 1e-5);
-        assert!((zones[0].y - 0.6).abs() < 1e-5);
-        assert_eq!(zones[0].effect.as_deref(), Some("bars"));
+        let channels = placed_channels(&dev);
+        assert!((channels[0].x - 0.5).abs() < 1e-5);
+        assert!((channels[0].y - 0.6).abs() < 1e-5);
+        assert_eq!(channels[0].effect.as_deref(), Some("bars"));
     }
 
     #[tokio::test]
@@ -627,7 +632,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             dev.rgb.as_ref().unwrap().current_state(),
-            Some(RgbState::Engine)
+            Some(LightingState::Engine)
         ));
 
         stop(app.clone()).await.unwrap();
@@ -635,7 +640,7 @@ mod tests {
         assert!(!app.config.read().await.rgb.canvas_enabled);
         assert!(matches!(
             dev.rgb.as_ref().unwrap().current_state(),
-            Some(RgbState::Static {
+            Some(LightingState::Static {
                 color: RgbColor { r: 0, g: 0, b: 0 }
             })
         ));
@@ -643,11 +648,11 @@ mod tests {
 
     #[tokio::test]
     async fn stop_blanks_direct_effect_device() {
-        use crate::drivers::RgbCapability;
+        use crate::drivers::LightingCapability;
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
         let app = make_app(dev.clone());
         // A direct (software) effect is also engine-driven, so stop must blank it.
-        dev.apply(RgbState::DirectEffect {
+        dev.apply(LightingState::DirectEffect {
             id: "breathing".into(),
             params: Default::default(),
         })
@@ -658,7 +663,7 @@ mod tests {
 
         assert!(matches!(
             dev.rgb.as_ref().unwrap().current_state(),
-            Some(RgbState::Static {
+            Some(LightingState::Static {
                 color: RgbColor { r: 0, g: 0, b: 0 }
             })
         ));
@@ -843,16 +848,16 @@ pub async fn stop(app: Arc<AppState>) -> Result<()> {
     // before blanking so the revert is the last write the LEDs receive.
     tokio::time::sleep(std::time::Duration::from_millis(STOP_DRAIN_MS)).await;
 
-    let black = RgbState::Static {
+    let black = LightingState::Static {
         color: RgbColor { r: 0, g: 0, b: 0 },
     };
     let devices = app.devices.read().await.clone();
     for device in devices {
-        if let Some(rgb) = device.as_rgb() {
+        if let Some(rgb) = device.as_lighting() {
             // `DirectEffect` is engine-driven too, so blank it alongside `Engine`.
             if matches!(
                 rgb.current_state(),
-                Some(RgbState::Engine | RgbState::DirectEffect { .. })
+                Some(LightingState::Engine | LightingState::DirectEffect { .. })
             ) {
                 let _ = rgb.apply(black.clone()).await;
                 persist_device_state(&app, device.as_ref()).await;

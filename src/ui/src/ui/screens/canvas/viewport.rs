@@ -94,23 +94,25 @@ pub(super) fn canvas_view(
         if let Some(norm) = ptr_norm {
             let target = hit_test(norm, &state.lighting.canvas.placed_zones, canvas_rect);
             match target {
-                Some((dev_id, zone_id, handle)) => {
+                Some((dev_id, channel_id, handle)) => {
                     // Dragging a zone that's already part of a multi-selection
                     // keeps the group (so a plain drag moves them all); pressing
                     // an unselected zone selects only it, unless a modifier adds.
                     let already = canvas_ui
                         .selected
-                        .contains(&(dev_id.clone(), zone_id.clone()));
+                        .contains(&(dev_id.clone(), channel_id.clone()));
                     if !multi && !already {
                         canvas_ui.selected.clear();
                     }
-                    canvas_ui.selected.insert((dev_id.clone(), zone_id.clone()));
+                    canvas_ui
+                        .selected
+                        .insert((dev_id.clone(), channel_id.clone()));
                     let orig = state
                         .lighting
                         .canvas
                         .placed_zones
                         .iter()
-                        .find(|z| z.device_id == dev_id && z.zone_id == zone_id)
+                        .find(|z| z.device_id == dev_id && z.channel_id == channel_id)
                         .cloned()
                         .unwrap_or_default();
                     // Group move applies only to a Body drag; resize/rotate act
@@ -124,7 +126,7 @@ pub(super) fn canvas_view(
                             .filter(|z| {
                                 canvas_ui
                                     .selected
-                                    .contains(&(z.device_id.clone(), z.zone_id.clone()))
+                                    .contains(&(z.device_id.clone(), z.channel_id.clone()))
                             })
                             .cloned()
                             .collect()
@@ -179,7 +181,7 @@ pub(super) fn canvas_view(
                 for u in updated {
                     canvas_ui
                         .drag_zones
-                        .insert(zone_key(&u.device_id, &u.zone_id), u.clone());
+                        .insert(zone_key(&u.device_id, &u.channel_id), u.clone());
                     canvas_ui.pending.queue_move(&u, time + DEBOUNCE);
                 }
             }
@@ -214,7 +216,7 @@ pub(super) fn canvas_view(
                     cmd,
                     halod_shared::commands::DaemonCommand::CanvasRemoveZone {
                         device_id: d,
-                        zone_id: z,
+                        channel_id: z,
                     },
                 );
                 canvas_ui.selected.clear();
@@ -255,13 +257,13 @@ pub(super) fn canvas_view(
     draw_zones(ui.painter(), state, canvas_ui, canvas_rect);
 
     // Context menu popup for right-clicked ring zone.
-    if let Some((ref dev_id, ref zone_id)) = canvas_ui.context_menu_target {
+    if let Some((ref dev_id, ref channel_id)) = canvas_ui.context_menu_target {
         let placed = state
             .lighting
             .canvas
             .placed_zones
             .iter()
-            .find(|p| &p.device_id == dev_id && &p.zone_id == zone_id);
+            .find(|p| &p.device_id == dev_id && &p.channel_id == channel_id);
         if let Some(z) = placed {
             egui::Area::new("canvas_zone_context_menu".into())
                 .order(egui::Order::Foreground)
@@ -376,11 +378,11 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
     let idx_map = instance_indices(state);
 
     for zone in &state.lighting.canvas.placed_zones {
-        let key = zone_key(&zone.device_id, &zone.zone_id);
+        let key = zone_key(&zone.device_id, &zone.channel_id);
         let display = canvas_ui.drag_zones.get(&key).unwrap_or(zone);
         let selected = canvas_ui
             .selected
-            .contains(&(zone.device_id.clone(), zone.zone_id.clone()));
+            .contains(&(zone.device_id.clone(), zone.channel_id.clone()));
         let angle = display.rotation.to_radians();
         let (sin, cos) = angle.sin_cos();
         let corners = zone_corners_sc(display, canvas_rect, sin, cos);
@@ -404,11 +406,16 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
 
         let device = state.devices.iter().find(|d| d.id == zone.device_id);
         if let Some(dev) = device {
-            let led_key = (zone.device_id.clone(), zone.zone_id.clone());
+            let led_key = (zone.device_id.clone(), zone.channel_id.clone());
             let zone_leds = canvas_ui.led_colors.get(&led_key);
             for cap in &dev.capabilities {
-                if let DeviceCapability::Rgb(rgb) = cap {
-                    if let Some(rz) = rgb.descriptor.zones.iter().find(|z| z.id == zone.zone_id) {
+                if let DeviceCapability::Lighting(rgb) = cap {
+                    if let Some(rz) = rgb
+                        .descriptor
+                        .channels
+                        .iter()
+                        .find(|z| z.id == zone.channel_id)
+                    {
                         let unrolled = display.sampling_mode == SamplingMode::Unrolled
                             && matches!(
                                 rz.topology,
@@ -450,7 +457,7 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
             corners[0].y + 5.0 * sin + 4.0 * cos,
         );
         let galley = p.layout_no_wrap(
-            format!("{dev_name} / {}", zone.zone_id),
+            format!("{dev_name} / {}", zone.channel_id),
             theme::mono_semibold(8.5),
             theme::TEXT_DIM,
         );
@@ -492,7 +499,7 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
 
         if single_sel
             .as_ref()
-            .is_some_and(|(d, z)| *d == zone.device_id && *z == zone.zone_id)
+            .is_some_and(|(d, z)| *d == zone.device_id && *z == zone.channel_id)
         {
             // Same affordances as the LCD editor: one bottom-right resize handle,
             // a top-right remove badge, and the rotation nub above the top edge.
@@ -520,11 +527,11 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
 // ── Hit testing ───────────────────────────────────────────────────────────────
 fn hit_test(
     norm: Pos2,
-    zones: &[PlacedZone],
+    channels: &[PlacedZone],
     canvas_rect: Rect,
 ) -> Option<(String, String, Handle)> {
     let norm_screen = norm_to_screen(norm, canvas_rect);
-    for zone in zones.iter().rev() {
+    for zone in channels.iter().rev() {
         let corners = zone_corners(zone, canvas_rect);
         let top_mid = Pos2::new(
             (corners[0].x + corners[1].x) / 2.0,
@@ -534,7 +541,7 @@ fn hit_test(
         if (norm_screen - rot_h).length() < HANDLE_HIT_R {
             return Some((
                 zone.device_id.clone(),
-                zone.zone_id.clone(),
+                zone.channel_id.clone(),
                 Handle::Rotation,
             ));
         }
@@ -542,12 +549,16 @@ fn hit_test(
         if (norm_screen - corners[2]).length() < HANDLE_HIT_R {
             return Some((
                 zone.device_id.clone(),
-                zone.zone_id.clone(),
+                zone.channel_id.clone(),
                 Handle::Corner(2),
             ));
         }
         if point_in_zone(norm, zone) {
-            return Some((zone.device_id.clone(), zone.zone_id.clone(), Handle::Body));
+            return Some((
+                zone.device_id.clone(),
+                zone.channel_id.clone(),
+                Handle::Body,
+            ));
         }
     }
     None
@@ -570,7 +581,7 @@ fn badge_hit(
         .canvas
         .placed_zones
         .iter()
-        .find(|p| &p.device_id == d && &p.zone_id == z)?;
+        .find(|p| &p.device_id == d && &p.channel_id == z)?;
     let corners = zone_corners(zone, canvas_rect);
     let screen = norm_to_screen(norm, canvas_rect);
     widgets::remove_badge_rect(&corners)

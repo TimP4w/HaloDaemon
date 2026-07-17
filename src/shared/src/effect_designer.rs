@@ -109,7 +109,7 @@ impl ColorMode {
     }
 }
 
-/// How multi-ring zones are treated for motion: as one chain or independent rings.
+/// How multi-ring channels are treated for motion: as one chain or independent rings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RingScope {
     /// Motion sweeps once across the whole zone, nose-to-tail through every ring.

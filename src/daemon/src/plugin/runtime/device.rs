@@ -14,20 +14,22 @@ use halod_shared::keyboard::{KeyId, KeyVariant, KeyboardLayoutStatus, VisualKey}
 use halod_shared::types::{
     Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, CategoryLayout,
     Choice, ConnectionStatus, CoolingChannel, DeviceCapability, DeviceType, DpiMode, DpiStatus,
-    Equalizer, KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, NativeEffect,
-    Permission, PluginKind, Range, RgbColor, RgbDescriptor, RgbState, RgbZone, ScreenRotation,
+    Equalizer, KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, LightingChannel,
+    LightingDescriptor, LightingState, NativeEffect, Permission, PluginKind, Range, ScreenRotation,
     ScreenShape, Sensor, WriteRateStatus,
 };
 use halod_shared::zone_transform::build_permutation;
 
-use crate::drivers::chain::{ChainAdapter, ChainHost, ChainHub, ChannelDescriptor};
+use crate::drivers::chain::{
+    ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost, LightingDivisionHub,
+};
 use crate::drivers::{
     ActionCapability, BatteryCapability, BoolStateCache, BooleanCapability, CapabilityRef,
     ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, CoolingCapability,
     CoolingHub, CoolingStateSlot, Device, DpiCapability, EqualizerCapability, KeyRemapCapability,
-    KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
-    OnboardProfilesCapability, PairingCapability, RangeCapability, RangeStateCache, RgbCapability,
-    RgbStateSlot, SensorCapability, VisibilitySlot,
+    KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot, LightingCapability,
+    LightingStateSlot, OnboardProfilesCapability, PairingCapability, RangeCapability,
+    RangeStateCache, SensorCapability, VisibilitySlot,
 };
 
 use super::chain_leaf::ChainLeaf;
@@ -38,7 +40,7 @@ use super::manifest::{
 use super::transport::PluginIo;
 use super::worker::{
     DetectedController, DevMatch, InitControls, InitDpi, InitKeyboard, InitKeyboardVariant,
-    InitLcd, InitZone, PluginHandle,
+    InitLcd, InitLightingChannel, PluginHandle,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -76,7 +78,9 @@ struct KeyRemapDescriptor {
     requires_host_mode: bool,
     default_mappings: Vec<ButtonMapping>,
 }
-use crate::drivers::vendors::generic::devices::common::{linear_rgb_zone, ring_led_positions};
+use crate::drivers::vendors::generic::devices::common::{
+    linear_lighting_channel, ring_led_positions,
+};
 use halod_shared::types::ZoneTopology;
 
 /// Yields the transport one integration child drives its worker over. The `u32`
@@ -89,7 +93,7 @@ use halod_shared::types::ZoneTopology;
 /// kind; the mapping to `CapabilityRef` lives in `capabilities()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cap {
-    Rgb,
+    Lighting,
     Cooling,
     Fan,
     Sensor,
@@ -106,12 +110,12 @@ enum Cap {
     OnboardProfiles,
     KeyRemap,
     KeyboardLayout,
-    Chain,
+    LightingDivision,
 }
 
 const CONTROL_CAPS: &[Cap] = &[Cap::Choice, Cap::Range, Cap::Boolean, Cap::Action];
 const CAPABILITY_NAMES: &[&str] = &[
-    "rgb",
+    "lighting",
     "cooling",
     "fan",
     "sensors",
@@ -125,12 +129,12 @@ const CAPABILITY_NAMES: &[&str] = &[
     "onboard_profiles",
     "key_remap",
     "keyboard_layout",
-    "chain",
+    "lighting_division",
 ];
 
 fn cap_for(name: &str) -> &'static [Cap] {
     match name {
-        "rgb" => &[Cap::Rgb],
+        "lighting" => &[Cap::Lighting],
         "cooling" => &[Cap::Cooling],
         "fan" => &[Cap::Fan],
         "sensors" => &[Cap::Sensor],
@@ -144,7 +148,7 @@ fn cap_for(name: &str) -> &'static [Cap] {
         "onboard_profiles" => &[Cap::OnboardProfiles],
         "key_remap" => &[Cap::KeyRemap],
         "keyboard_layout" => &[Cap::KeyboardLayout],
-        "chain" => &[Cap::Chain],
+        "lighting_division" => &[Cap::LightingDivision],
         _ => &[],
     }
 }
@@ -209,7 +213,7 @@ impl StatusPollCaps {
             equalizer: caps.contains(&Cap::Equalizer),
             always: caps
                 .iter()
-                .any(|cap| matches!(cap, Cap::KeyRemap | Cap::Chain)),
+                .any(|cap| matches!(cap, Cap::KeyRemap | Cap::LightingDivision)),
         }
     }
 
@@ -269,7 +273,7 @@ mod status_poll_tests {
 
     #[test]
     fn chain_root_polls_for_child_fan_telemetry() {
-        assert!(needs_status_poll(&[Cap::Chain]));
+        assert!(needs_status_poll(&[Cap::LightingDivision]));
     }
 }
 
@@ -504,14 +508,14 @@ pub struct LuaDevice {
     /// Re-apply RGB after an LCD image upload (some panels reset their LEDs).
     lcd_needs_rgb_restore: AtomicBool,
 
-    rgb_descriptor: RgbDescriptor,
-    /// RGB zones discovered at `initialize()` (dynamic LED counts). Overrides
+    rgb_descriptor: LightingDescriptor,
+    /// RGB channels discovered at `initialize()` (dynamic LED counts). Overrides
     /// `rgb_descriptor` when set.
-    dynamic_rgb_descriptor: OnceLock<RgbDescriptor>,
+    dynamic_rgb_descriptor: OnceLock<LightingDescriptor>,
     /// ISO keyboard geometry for runtime-described keyboards. The active
     /// descriptor is selected from the shared layout slot on every snapshot.
-    dynamic_rgb_iso_descriptor: OnceLock<RgbDescriptor>,
-    rgb_slot: RgbStateSlot,
+    dynamic_rgb_iso_descriptor: OnceLock<LightingDescriptor>,
+    rgb_slot: LightingStateSlot,
     cooling_slot: CoolingStateSlot,
     cooling_channels: OnceLock<Vec<CoolingChannel>>,
 
@@ -536,7 +540,7 @@ pub struct LuaDevice {
 
     // ── chain / children (reported by initialize) ─────────────────────────
     /// Set after construction (needs the `Arc<Self>`); `None` for non-chain devices.
-    chain_host: OnceLock<Arc<ChainHost>>,
+    chain_host: OnceLock<Arc<LightingDivisionHost>>,
     /// Weak back-reference so `discover_children` can hand children a `FanHub`.
     self_ref: Weak<LuaDevice>,
     chain_channels: Vec<ChannelDescriptor>,
@@ -687,9 +691,9 @@ impl LuaDevice {
             }
             _ => None,
         };
-        // Canonical packages report physical zones from initialize. Do not
+        // Canonical packages report physical channels from initialize. Do not
         // seed the worker from the removed static RGB catalog section.
-        let zones = Vec::new();
+        let channels = Vec::new();
         let audio_registry: super::audio_api::SinkRegistry =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let http = super::worker::http_runtime_for(manifest, &granted, &config);
@@ -701,7 +705,7 @@ impl LuaDevice {
             granted,
             config,
             handle.clone(),
-            zones,
+            channels,
             audio_registry.clone(),
             data,
             http,
@@ -1065,13 +1069,13 @@ impl LuaDevice {
             key_remap_mappings: Mutex::new(HashMap::new()),
             keyboard_layout: KeyboardLayoutSlot::default(),
             keyboard_descriptor: OnceLock::new(),
-            rgb_descriptor: RgbDescriptor {
-                zones: Vec::new(),
+            rgb_descriptor: LightingDescriptor {
+                channels: Vec::new(),
                 native_effects: Vec::new(),
             },
             dynamic_rgb_descriptor: OnceLock::new(),
             dynamic_rgb_iso_descriptor: OnceLock::new(),
-            rgb_slot: RgbStateSlot::default(),
+            rgb_slot: LightingStateSlot::default(),
             cooling_slot: CoolingStateSlot::default(),
             cooling_channels: OnceLock::new(),
             sensor_cache: Arc::new(Mutex::new(Vec::new())),
@@ -1100,7 +1104,7 @@ impl LuaDevice {
     }
 
     /// Install the chain host (built from `Arc<Self>` as the adapter).
-    pub(in crate::plugin) fn install_chain_host(&self, host: Arc<ChainHost>) {
+    pub(in crate::plugin) fn install_chain_host(&self, host: Arc<LightingDivisionHost>) {
         let _ = self.chain_host.set(host);
     }
 
@@ -1219,8 +1223,8 @@ impl LuaDevice {
     }
 }
 
-/// Build an `RgbDescriptor` from `initialize`-reported zones, computing LED
-/// positions from the declared topology + count (as static accessory zones do).
+/// Build an `LightingDescriptor` from `initialize`-reported channels, computing LED
+/// positions from the declared topology + count (as static accessory channels do).
 fn visual_keys(variant: &InitKeyboardVariant) -> Vec<VisualKey> {
     let cells = variant.base.cells();
     let mut keys = Vec::new();
@@ -1311,11 +1315,11 @@ fn selected_visual_keys(descriptor: &InitKeyboard, slot: &KeyboardLayoutSlot) ->
 }
 
 fn build_dynamic_descriptor(
-    zones: Vec<InitZone>,
+    channels: Vec<InitLightingChannel>,
     native_effects: Vec<NativeEffect>,
     keyboard_keys: Option<&[VisualKey]>,
-) -> RgbDescriptor {
-    let zones = zones
+) -> LightingDescriptor {
+    let channels = channels
         .into_iter()
         .map(|z| {
             let topology = if z.topology == "keyboard" {
@@ -1331,23 +1335,27 @@ fn build_dynamic_descriptor(
             } else {
                 z.led_ids.len() as u32
             };
-            // `ring_led_positions` only lays out ring topologies; linear zones use
+            // `ring_led_positions` only lays out ring topologies; linear channels use
             // the evenly-spaced strip layout (as the former built-in drivers did).
             if !z.leds.is_empty() {
-                RgbZone {
+                LightingChannel {
                     leds: z.leds,
                     id: z.id,
                     name: z.name,
                     topology,
+                    color_order: Default::default(),
+                    division: Default::default(),
                 }
             } else if matches!(topology, ZoneTopology::Keyboard { .. })
                 && keyboard_keys.is_some_and(|keys| !keys.is_empty())
             {
-                RgbZone {
+                LightingChannel {
                     leds: keyboard_led_positions(keyboard_keys.unwrap(), &z.led_ids),
                     id: z.id,
                     name: z.name,
                     topology,
+                    color_order: Default::default(),
+                    division: Default::default(),
                 }
             } else if !z.led_ids.is_empty() {
                 let columns = if matches!(topology, ZoneTopology::Keyboard { .. }) {
@@ -1356,7 +1364,7 @@ fn build_dynamic_descriptor(
                     z.led_ids.len().max(1)
                 };
                 let rows = z.led_ids.len().div_ceil(columns).max(1);
-                RgbZone {
+                LightingChannel {
                     leds: z
                         .led_ids
                         .iter()
@@ -1378,21 +1386,25 @@ fn build_dynamic_descriptor(
                     id: z.id,
                     name: z.name,
                     topology,
+                    color_order: Default::default(),
+                    division: Default::default(),
                 }
             } else if matches!(topology, ZoneTopology::Linear) {
-                linear_rgb_zone(&z.id, &z.name, led_count as usize)
+                linear_lighting_channel(&z.id, &z.name, led_count as usize)
             } else {
-                RgbZone {
+                LightingChannel {
                     leds: ring_led_positions(&topology, led_count),
                     id: z.id,
                     name: z.name,
                     topology,
+                    color_order: Default::default(),
+                    division: Default::default(),
                 }
             }
         })
         .collect();
-    RgbDescriptor {
-        zones,
+    LightingDescriptor {
+        channels,
         native_effects,
     }
 }
@@ -1417,7 +1429,7 @@ mod dynamic_rgb_descriptor_tests {
             },
         ];
         let descriptor = build_dynamic_descriptor(
-            vec![InitZone {
+            vec![InitLightingChannel {
                 id: "ambiglow".into(),
                 name: "Ambiglow".into(),
                 topology: "grid".into(),
@@ -1432,7 +1444,7 @@ mod dynamic_rgb_descriptor_tests {
             None,
         );
 
-        let zone = &descriptor.zones[0];
+        let zone = &descriptor.channels[0];
         assert!(matches!(zone.topology, ZoneTopology::Grid));
         assert_eq!(zone.leds.len(), 2);
         for (actual, expected) in zone.leds.iter().zip(leds) {
@@ -1562,12 +1574,12 @@ impl Device for LuaDevice {
         if let Some(keyboard) = outcome.keyboard {
             let _ = self.keyboard_descriptor.set(keyboard);
         }
-        if let Some(zones) = outcome.zones {
+        if let Some(channels) = outcome.channels {
             let effects = outcome.native_effects.unwrap_or_default();
             let keyboard = self.keyboard_descriptor.get();
             let ansi_keys = keyboard.map(|descriptor| visual_keys(&descriptor.ansi));
             let _ = self.dynamic_rgb_descriptor.set(build_dynamic_descriptor(
-                zones.clone(),
+                channels.clone(),
                 effects.clone(),
                 ansi_keys.as_deref(),
             ));
@@ -1575,7 +1587,7 @@ impl Device for LuaDevice {
                 let iso_keys = visual_keys(iso);
                 let _ = self
                     .dynamic_rgb_iso_descriptor
-                    .set(build_dynamic_descriptor(zones, effects, Some(&iso_keys)));
+                    .set(build_dynamic_descriptor(channels, effects, Some(&iso_keys)));
             }
         }
         if let Some(lcd) = outcome.lcd {
@@ -1588,13 +1600,14 @@ impl Device for LuaDevice {
                 .store(lcd.needs_rgb_restore, Ordering::Relaxed);
             let _ = self.lcd_descriptor.set(build_lcd_descriptor(&lcd));
         }
-        if let Some(channels) = outcome.chain {
+        if let Some(channels) = outcome.division {
             let descriptors = channels
                 .into_iter()
                 .map(|c| ChannelDescriptor {
                     channel_id: c.id,
                     display_name: c.name,
                     max_leds: c.max_leds,
+                    color_order: c.color_order,
                 })
                 .collect();
             let _ = self.dynamic_chain_channels.set(descriptors);
@@ -1767,7 +1780,7 @@ impl Device for LuaDevice {
         let active = self.caps.read().unwrap().clone();
         for cap in &active {
             match cap {
-                Cap::Rgb => caps.push(CapabilityRef::Rgb(self)),
+                Cap::Lighting => caps.push(CapabilityRef::Lighting(self)),
                 Cap::Cooling => caps.push(CapabilityRef::Cooling(self)),
                 Cap::Fan => caps.push(CapabilityRef::Cooling(self)),
                 Cap::Sensor => caps.push(CapabilityRef::Sensor(self)),
@@ -1784,7 +1797,7 @@ impl Device for LuaDevice {
                 Cap::OnboardProfiles => caps.push(CapabilityRef::OnboardProfiles(self)),
                 Cap::KeyRemap => caps.push(CapabilityRef::KeyRemap(self)),
                 Cap::KeyboardLayout => caps.push(CapabilityRef::KeyboardLayout(self)),
-                Cap::Chain => {
+                Cap::LightingDivision => {
                     caps.push(CapabilityRef::Controller(self));
                 }
             }
@@ -1795,14 +1808,14 @@ impl Device for LuaDevice {
         caps
     }
 
-    fn chain_host(&self) -> Option<&Arc<ChainHost>> {
+    fn chain_host(&self) -> Option<&Arc<LightingDivisionHost>> {
         self.chain_host.get()
     }
 }
 
 #[async_trait]
-impl RgbCapability for LuaDevice {
-    fn descriptor(&self) -> &RgbDescriptor {
+impl LightingCapability for LuaDevice {
+    fn descriptor(&self) -> &LightingDescriptor {
         if let Some(keyboard) = self.keyboard_descriptor.get() {
             let (variant, _) = effective_keyboard_layout(keyboard, &self.keyboard_layout);
             if variant == KeyVariant::Iso {
@@ -1816,48 +1829,26 @@ impl RgbCapability for LuaDevice {
             .unwrap_or(&self.rgb_descriptor)
     }
 
-    async fn apply(&self, state: RgbState) -> Result<()> {
+    async fn apply(&self, state: LightingState) -> Result<()> {
         let state = apply_per_led_transforms(self.descriptor(), &self.rgb_slot, state);
         self.rgb_slot.set_state(Some(state.clone()));
         let r = self.worker()?.rgb_apply(state).await;
         self.track(r).await
     }
 
-    async fn write_frame(&self, zone_id: &str, colors: &[RgbColor]) -> Result<()> {
-        let zone = self
-            .descriptor()
-            .zones
-            .iter()
-            .find(|z| z.id == zone_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown zone: {zone_id}"))?;
-        let led_ids: Vec<_> = zone.leds.iter().map(|led| led.id).collect();
-        let r = self
-            .worker()?
-            .rgb_write_frame(zone_id, colors, &led_ids)
-            .await;
+    async fn write_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()> {
+        let r = self.worker()?.write_lighting_frame(channel_id, bytes).await;
         self.track(r).await
     }
 
-    async fn write_frame_batch(&self, zones: &[(String, Vec<RgbColor>)]) -> Result<()> {
-        let descriptor = self.descriptor();
-        let mut identified = Vec::with_capacity(zones.len());
-        for (zone_id, colors) in zones {
-            let zone = descriptor
-                .zones
-                .iter()
-                .find(|z| z.id == *zone_id)
-                .ok_or_else(|| anyhow::anyhow!("unknown zone: {zone_id}"))?;
-            identified.push((
-                zone_id.clone(),
-                colors.clone(),
-                zone.leds.iter().map(|led| led.id).collect(),
-            ));
+    async fn write_frame_batch(&self, channels: &[(String, Vec<u8>)]) -> Result<()> {
+        for (channel_id, bytes) in channels {
+            self.write_frame(channel_id, bytes).await?;
         }
-        let r = self.worker()?.rgb_write_frame_batch(&identified).await;
-        self.track(r).await
+        Ok(())
     }
 
-    fn rgb_state(&self) -> &RgbStateSlot {
+    fn lighting_state(&self) -> &LightingStateSlot {
         &self.rgb_slot
     }
 }
@@ -1865,22 +1856,22 @@ impl RgbCapability for LuaDevice {
 /// Apply each zone's content transform to PerLed colour maps before handing the
 /// state to the plugin, so the plugin never needs to understand transforms.
 fn apply_per_led_transforms(
-    descriptor: &RgbDescriptor,
-    slot: &RgbStateSlot,
-    state: RgbState,
-) -> RgbState {
-    let RgbState::PerLed { zones } = state else {
+    descriptor: &LightingDescriptor,
+    slot: &LightingStateSlot,
+    state: LightingState,
+) -> LightingState {
+    let LightingState::PerLed { channels } = state else {
         return state;
     };
     let mut transformed = HashMap::new();
-    for (zone_id, led_map) in &zones {
-        let Some(zone) = descriptor.zones.iter().find(|z| &z.id == zone_id) else {
-            transformed.insert(zone_id.clone(), led_map.clone());
+    for (channel_id, led_map) in &channels {
+        let Some(zone) = descriptor.channels.iter().find(|z| &z.id == channel_id) else {
+            transformed.insert(channel_id.clone(), led_map.clone());
             continue;
         };
-        let transform = slot.transform_for(zone_id);
+        let transform = slot.transform_for(channel_id);
         if transform.is_identity() {
-            transformed.insert(zone_id.clone(), led_map.clone());
+            transformed.insert(channel_id.clone(), led_map.clone());
             continue;
         }
         let permutation = build_permutation(zone, &transform);
@@ -1896,9 +1887,11 @@ fn apply_per_led_transforms(
                     .map(|color| (target.id.to_string(), *color))
             })
             .collect();
-        transformed.insert(zone_id.clone(), new_map);
+        transformed.insert(channel_id.clone(), new_map);
     }
-    RgbState::PerLed { zones: transformed }
+    LightingState::PerLed {
+        channels: transformed,
+    }
 }
 
 #[async_trait]
@@ -1931,10 +1924,10 @@ impl SensorCapability for LuaDevice {
 
 // ── Chain / children: the parent surface ────────────────────────────────────
 //
-// Reuses the native `ChainHost` machinery. The script supplies only the probe
+// Reuses the native `LightingDivisionHost` machinery. The script supplies only the probe
 // (`detect_accessories`), the per-accessory descriptor table, and the routing
-// callbacks (`write_ext_frame` / fan-hub). The generic `ChainLeaf` child and the
-// `ChainHost` frame composition are unchanged.
+// callbacks (`write_frame` / cooling hub). The generic segment child and the
+// `LightingDivisionHost` frame composition are unchanged.
 
 #[async_trait]
 impl Controller for LuaDevice {
@@ -2032,7 +2025,7 @@ impl LuaDevice {
             return Vec::new();
         };
         let cooling_hub: Arc<dyn CoolingHub> = parent;
-        let chain_hub: Arc<dyn ChainHub> = host.clone();
+        let chain_hub: Arc<dyn LightingDivisionHub> = host.clone();
 
         let mut out = Vec::new();
         for d in detected {
@@ -2717,21 +2710,21 @@ impl KeyboardLayoutCapability for LuaDevice {
 }
 
 #[async_trait]
-impl ChainAdapter for LuaDevice {
+impl LightingDivisionAdapter for LuaDevice {
     fn parent_id(&self) -> String {
         self.id.clone()
     }
     fn channels(&self) -> Vec<ChannelDescriptor> {
         // Runtime-reported channels (from `initialize`) win over the static
-        // manifest ones. `ChainHost` reads this live, so channels discovered
+        // manifest ones. `LightingDivisionHost` reads this live, so channels discovered
         // during init appear even though the host was built before it.
         self.dynamic_chain_channels
             .get()
             .cloned()
             .unwrap_or_else(|| self.chain_channels.clone())
     }
-    async fn write_composed_frame(&self, channel_id: &str, composed: &[RgbColor]) -> Result<()> {
-        self.worker()?.write_ext_frame(channel_id, composed).await
+    async fn write_divided_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()> {
+        self.worker()?.write_lighting_frame(channel_id, bytes).await
     }
 }
 
@@ -2750,7 +2743,7 @@ mod tests {
     use super::*;
     use crate::drivers::transports::mock::test_transport::MockTransport;
     use crate::drivers::transports::Transport;
-    use crate::drivers::RgbCapability;
+    use crate::drivers::LightingCapability;
 
     fn test_manifest(
         id: &str,
@@ -2853,19 +2846,19 @@ mod tests {
     fn declared_capabilities_expand_controls_and_preserve_order() {
         let (_tmp, manifest) = test_manifest(
             "declared_caps",
-            &["rgb", "controls", "fan", "chain"],
+            &["lighting", "controls", "fan", "lighting_division"],
             "return {}",
         );
         assert_eq!(
             declared_caps(&manifest),
             vec![
-                Cap::Rgb,
+                Cap::Lighting,
                 Cap::Fan,
                 Cap::Choice,
                 Cap::Range,
                 Cap::Boolean,
                 Cap::Action,
-                Cap::Chain,
+                Cap::LightingDivision,
             ]
         );
     }
@@ -2874,13 +2867,19 @@ mod tests {
     fn runtime_capability_names_are_deduplicated_and_unknown_names_ignored() {
         let caps = caps_named(&[
             "controls".into(),
-            "rgb".into(),
+            "lighting".into(),
             "controls".into(),
             "unknown".into(),
         ]);
         assert_eq!(
             caps,
-            vec![Cap::Choice, Cap::Range, Cap::Boolean, Cap::Action, Cap::Rgb,]
+            vec![
+                Cap::Choice,
+                Cap::Range,
+                Cap::Boolean,
+                Cap::Action,
+                Cap::Lighting,
+            ]
         );
     }
 
@@ -2976,7 +2975,7 @@ mod tests {
     #[test]
     fn dynamic_rgb_descriptor_uses_reported_led_ids() {
         let descriptor = build_dynamic_descriptor(
-            vec![InitZone {
+            vec![InitLightingChannel {
                 id: "ring".into(),
                 name: "Ring".into(),
                 topology: "linear".into(),
@@ -2990,9 +2989,9 @@ mod tests {
             Vec::new(),
             None,
         );
-        assert_eq!(descriptor.zones.len(), 1);
+        assert_eq!(descriptor.channels.len(), 1);
         assert_eq!(
-            descriptor.zones[0]
+            descriptor.channels[0]
                 .leds
                 .iter()
                 .map(|led| led.id)
@@ -3007,16 +3006,19 @@ mod tests {
             return {
               initialize = function(dev)
                 return {
-                  capabilities = { "rgb", "fan" },
-                  zones = { { id = "ring", name = "Ring", led_count = 2,
+                  capabilities = { "lighting", "fan" },
+                  channels = { { id = "ring", name = "Ring", led_count = 2,
                               led_ids = { 7, 9 } } },
                   fan = { channel = 3 },
                 }
               end,
             }
         "#;
-        let (_tmp, manifest) =
-            test_manifest("runtime_descriptors", &["rgb", "fan", "sensors"], script);
+        let (_tmp, manifest) = test_manifest(
+            "runtime_descriptors",
+            &["lighting", "fan", "sensors"],
+            script,
+        );
         let dev = hid_device(
             "runtime_descriptors-0",
             &manifest,
@@ -3024,14 +3026,19 @@ mod tests {
         );
         assert!(dev.initialize().await.unwrap());
         let caps = dev.capabilities();
-        assert!(caps.iter().any(|cap| matches!(cap, CapabilityRef::Rgb(_))));
+        assert!(caps
+            .iter()
+            .any(|cap| matches!(cap, CapabilityRef::Lighting(_))));
         assert!(caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Cooling(_))));
         assert!(!caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Sensor(_))));
-        assert_eq!(RgbCapability::descriptor(&dev).zones[0].leds[0].id, 7);
+        assert_eq!(
+            LightingCapability::descriptor(&dev).channels[0].leds[0].id,
+            7
+        );
         dev.close().await;
     }
 
@@ -3072,29 +3079,19 @@ mod tests {
         let script = r#"
             return {
               initialize = function(dev)
-                return { zones = { { id = "ring", name = "Ring", led_count = 2 } } }
+                return { channels = { { id = "ring", name = "Ring", led_count = 2 } } }
               end,
-              write_frame = function(dev, zone, colors)
-                local bytes = { 0xAB }
-                for _, color in ipairs(colors) do
-                  bytes[#bytes + 1] = color.r
-                  bytes[#bytes + 1] = color.g
-                  bytes[#bytes + 1] = color.b
-                end
-                dev.transport:write(string.char(table.unpack(bytes)))
+              write_frame = function(dev, channel, bytes)
+                assert(channel == "ring")
+                dev.transport:write(string.char(0xAB, table.unpack(bytes)))
               end,
             }
         "#;
-        let (_tmp, manifest) = test_manifest("rgb_write", &["rgb"], script);
+        let (_tmp, manifest) = test_manifest("rgb_write", &["lighting"], script);
         let mock = Arc::new(MockTransport::empty());
         let dev = hid_device("rgb_write-0", &manifest, mock.clone());
         assert!(dev.initialize().await.unwrap());
-        dev.write_frame(
-            "ring",
-            &[RgbColor { r: 1, g: 2, b: 3 }, RgbColor { r: 4, g: 5, b: 6 }],
-        )
-        .await
-        .unwrap();
+        dev.write_frame("ring", &[1, 2, 3, 4, 5, 6]).await.unwrap();
         assert_eq!(
             *mock.written.lock().await,
             vec![vec![0xAB, 1, 2, 3, 4, 5, 6]]
@@ -3106,7 +3103,7 @@ mod tests {
     async fn failed_initialize_degrades_and_close_is_terminal() {
         let (_tmp, manifest) = test_manifest(
             "lifecycle",
-            &["rgb"],
+            &["lighting"],
             "return { initialize = function(dev) error('broken') end }",
         );
         let runtime = Arc::new(Mutex::new(RuntimeState::OpeningTransport));
@@ -3166,7 +3163,7 @@ mod tests {
     async fn initialize_false_stays_degraded_and_not_live() {
         let (_tmp, manifest) = test_manifest(
             "not_ready",
-            &["rgb"],
+            &["lighting"],
             "return { initialize = function() return { ok = false } end }",
         );
         let runtime = Arc::new(Mutex::new(RuntimeState::OpeningTransport));

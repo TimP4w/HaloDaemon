@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pub mod chain;
+pub mod lighting_segment;
 pub mod transports;
 pub mod vendors;
 
@@ -24,7 +25,7 @@ pub use rate_limit::*;
 /// Capability types a Device can expose.
 pub enum CapabilityRef<'a> {
     Cooling(&'a dyn CoolingCapability),
-    Rgb(&'a dyn RgbCapability),
+    Lighting(&'a dyn LightingCapability),
     Sensor(&'a dyn SensorCapability),
     Range(&'a dyn RangeCapability),
     Choice(&'a dyn ChoiceCapability),
@@ -81,7 +82,7 @@ macro_rules! capability_dispatch {
 }
 
 capability_dispatch!(
-    persisting: [Cooling, Rgb, Range, Choice, Boolean, Equalizer, Dpi, Lcd, KeyRemap, OnboardProfiles],
+    persisting: [Cooling, Lighting, Range, Choice, Boolean, Equalizer, Dpi, Lcd, KeyRemap, OnboardProfiles],
     wire_only:  [Sensor, Action, Battery, Connection, KeyboardLayout, Controller, Pairing],
 );
 
@@ -104,7 +105,7 @@ pub trait Device: Send + Sync {
     fn name(&self) -> &str;
 
     /// True if the device's display name is owned by a parent (e.g. a
-    /// `ChainHost`) rather than the descriptor/`DeviceRecord`. `set_device_name`
+    /// `LightingDivisionHost`) rather than the descriptor/`DeviceRecord`. `set_device_name`
     /// routes these through the owning host, and the
     /// serializer's name-patch skips them so the parent's name wins.
     fn has_external_name(&self) -> bool {
@@ -223,12 +224,12 @@ pub trait Device: Send + Sync {
     fn capabilities(&self) -> Vec<CapabilityRef<'_>>;
 
     /// Shared chain runtime, when this device owns chainable channels.
-    fn chain_host(&self) -> Option<&Arc<chain::ChainHost>> {
+    fn chain_host(&self) -> Option<&Arc<chain::LightingDivisionHost>> {
         None
     }
 
     as_capability!(as_cooling, Cooling, CoolingCapability);
-    as_capability!(as_rgb, Rgb, RgbCapability);
+    as_capability!(as_lighting, Lighting, LightingCapability);
     as_capability!(as_sensor_capability, Sensor, SensorCapability);
     as_capability!(as_range, Range, RangeCapability);
     as_capability!(as_choice, Choice, ChoiceCapability);
@@ -349,12 +350,12 @@ mod tests {
     fn rgb_state_slot_canvas_zones_round_trip() {
         use crate::config::PlacedZone;
 
-        let slot = RgbStateSlot::default();
-        assert!(slot.canvas_zones().is_empty(), "starts empty");
+        let slot = LightingStateSlot::default();
+        assert!(slot.placed_channels().is_empty(), "starts empty");
 
-        let zones = vec![PlacedZone {
+        let channels = vec![PlacedZone {
             device_id: "dev1".to_string(),
-            zone_id: "z1".to_string(),
+            channel_id: "z1".to_string(),
             x: 0.0,
             y: 0.0,
             w: 1.0,
@@ -363,15 +364,15 @@ mod tests {
             effect: None,
             sampling_mode: Default::default(),
         }];
-        slot.set_canvas_zones(zones.clone());
+        slot.set_canvas_zones(channels.clone());
 
-        let got = slot.canvas_zones();
+        let got = slot.placed_channels();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].device_id, zones[0].device_id);
-        assert_eq!(got[0].zone_id, zones[0].zone_id);
+        assert_eq!(got[0].device_id, channels[0].device_id);
+        assert_eq!(got[0].channel_id, channels[0].channel_id);
 
         slot.set_canvas_zones(vec![]);
-        assert!(slot.canvas_zones().is_empty(), "cleared to empty");
+        assert!(slot.placed_channels().is_empty(), "cleared to empty");
     }
 
     #[test]
@@ -570,7 +571,7 @@ mod tests {
         use halod_shared::zone_transform::ZoneContentTransform;
 
         let dev = MockDevice::new("dev1").with_rgb();
-        let rgb = dev.as_rgb().expect("has rgb");
+        let rgb = dev.as_lighting().expect("has rgb");
 
         let transform = ZoneContentTransform {
             flip_h: true,
@@ -579,7 +580,7 @@ mod tests {
             led_offset: 0,
             swap_rings: false,
         };
-        rgb.set_zone_transform("zone_a".to_string(), transform);
+        rgb.set_channel_transform("zone_a".to_string(), transform);
 
         let saved = rgb.save_state();
         assert!(
@@ -589,10 +590,10 @@ mod tests {
 
         // Simulate restore on a fresh slot.
         let dev2 = MockDevice::new("dev2").with_rgb();
-        let rgb2 = dev2.as_rgb().expect("has rgb");
+        let rgb2 = dev2.as_lighting().expect("has rgb");
         rgb2.restore_state(&saved).await;
 
-        let restored = rgb2.zone_transforms();
+        let restored = rgb2.channel_transforms();
         let t = restored
             .get("zone_a")
             .expect("zone_a transform should be preserved across save/restore");

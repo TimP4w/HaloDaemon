@@ -237,8 +237,8 @@ fn command_writes_device(cmd: &DaemonCommand) -> bool {
             | SetEqPreset { .. }
             | SetEqBands { .. }
             | SetDpiSteps { .. }
-            | RgbApply { .. }
-            | RgbChainDetectChannel { .. }
+            | LightingApply { .. }
+            | LightingDetectSegments { .. }
             | SetButtonMapping { .. }
             | SetSoftwareDpiSteps { .. }
             | OnboardProfileSwitch { .. }
@@ -273,12 +273,12 @@ fn command_target(cmd: &DaemonCommand) -> Option<&str> {
         | SetEqPreset { id, .. }
         | SetEqBands { id, .. }
         | SetDpiSteps { id, .. }
-        | RgbApply { id, .. }
-        | RgbSetZoneTransform { id, .. }
-        | RgbChainAddLink { id, .. }
-        | RgbChainRemoveLink { id, .. }
-        | RgbChainReorderLink { id, .. }
-        | RgbChainDetectChannel { id, .. }
+        | LightingApply { id, .. }
+        | LightingSetChannelTransform { id, .. }
+        | LightingAddSegment { id, .. }
+        | LightingRemoveSegment { id, .. }
+        | LightingReorderSegment { id, .. }
+        | LightingDetectSegments { id, .. }
         | SetButtonMapping { id, .. }
         | SetSoftwareDpiSteps { id, .. }
         | OnboardProfileSwitch { id, .. }
@@ -364,9 +364,10 @@ async fn dispatch(
         DaemonCommand::RemoveProfileOverride { target } => {
             profiles::usecases::profile_override::remove_profile_override(target, app).await
         }
-        DaemonCommand::SetLightingTargets { device_ids, zones } => {
-            profiles::usecases::profiles::set_lighting_targets(device_ids, zones, app).await
-        }
+        DaemonCommand::SetLightingTargets {
+            device_ids,
+            channels,
+        } => profiles::usecases::profiles::set_lighting_targets(device_ids, channels, app).await,
         DaemonCommand::AddAppRule {
             process_names,
             profile,
@@ -530,51 +531,46 @@ async fn dispatch(
             channel_id,
         } => cooling::usecases::fan_curve::remove_cooling_curve(device_id, channel_id, app).await,
 
-        DaemonCommand::RgbApply { id, state } => {
-            lighting::usecases::rgb::rgb_apply(id, state, app).await
+        DaemonCommand::LightingApply { id, state } => {
+            lighting::usecases::rgb::lighting_apply(id, state, app).await
         }
-        DaemonCommand::RgbSetZoneTransform {
+        DaemonCommand::LightingSetChannelTransform {
             id,
-            zone_id,
+            channel_id,
             transform,
-        } => lighting::usecases::rgb::set_zone_transform(id, zone_id, transform, app).await,
-        DaemonCommand::RgbChainAddLink {
+        } => lighting::usecases::rgb::set_channel_transform(id, channel_id, transform, app).await,
+        DaemonCommand::LightingAddSegment {
             id,
             channel_id,
             name,
             led_count,
             topology,
         } => {
-            registry::usecases::chain::rgb_chain_add_link(
+            registry::usecases::chain::lighting_add_segment(
                 id, channel_id, name, led_count, topology, app,
             )
             .await
         }
-        DaemonCommand::RgbChainRemoveLink {
+        DaemonCommand::LightingRemoveSegment {
             id,
             channel_id,
-            child_device_id,
+            device_id,
         } => {
-            registry::usecases::chain::rgb_chain_remove_link(id, channel_id, child_device_id, app)
-                .await
+            registry::usecases::chain::lighting_remove_segment(id, channel_id, device_id, app).await
         }
-        DaemonCommand::RgbChainReorderLink {
+        DaemonCommand::LightingReorderSegment {
             id,
             channel_id,
-            child_device_id,
+            device_id,
             new_index,
         } => {
-            registry::usecases::chain::rgb_chain_reorder_link(
-                id,
-                channel_id,
-                child_device_id,
-                new_index,
-                app,
+            registry::usecases::chain::lighting_reorder_segment(
+                id, channel_id, device_id, new_index, app,
             )
             .await
         }
-        DaemonCommand::RgbChainDetectChannel { id, channel_id } => {
-            registry::usecases::chain::rgb_chain_detect_channel(id, channel_id, app).await
+        DaemonCommand::LightingDetectSegments { id, channel_id } => {
+            registry::usecases::chain::lighting_detect_segments(id, channel_id, app).await
         }
 
         DaemonCommand::SetButtonMapping { id, mapping } => {
@@ -651,7 +647,7 @@ async fn dispatch(
         }
         DaemonCommand::CanvasPlaceZone {
             device_id,
-            zone_id,
+            channel_id,
             x,
             y,
             w,
@@ -662,7 +658,7 @@ async fn dispatch(
         } => {
             lighting::usecases::canvas::place_zone(
                 device_id,
-                zone_id,
+                channel_id,
                 x,
                 y,
                 w,
@@ -674,12 +670,13 @@ async fn dispatch(
             )
             .await
         }
-        DaemonCommand::CanvasRemoveZone { device_id, zone_id } => {
-            lighting::usecases::canvas::remove_zone(device_id, zone_id, app).await
-        }
+        DaemonCommand::CanvasRemoveZone {
+            device_id,
+            channel_id,
+        } => lighting::usecases::canvas::remove_zone(device_id, channel_id, app).await,
         DaemonCommand::CanvasMoveZone {
             device_id,
-            zone_id,
+            channel_id,
             x,
             y,
             w,
@@ -690,7 +687,7 @@ async fn dispatch(
         } => {
             lighting::usecases::canvas::move_zone(
                 device_id,
-                zone_id,
+                channel_id,
                 x,
                 y,
                 w,
@@ -907,7 +904,7 @@ mod tests {
 
         handle_message(
             json!({
-                "type": "rgb_apply",
+                "type": "lighting_apply",
                 "id": "missing-device",
                 "state": {"mode": "static", "color": {"r": 1, "g": 2, "b": 3}},
                 "request_id": "write-1"
@@ -946,10 +943,10 @@ mod tests {
 
     #[test]
     fn only_hardware_commands_are_classified_as_device_writes() {
-        use halod_shared::types::{RgbColor, RgbState};
-        assert!(command_writes_device(&DaemonCommand::RgbApply {
+        use halod_shared::types::{LightingState, RgbColor};
+        assert!(command_writes_device(&DaemonCommand::LightingApply {
             id: "kbd".into(),
-            state: RgbState::Static {
+            state: LightingState::Static {
                 color: RgbColor { r: 1, g: 2, b: 3 },
             },
         }));
@@ -961,13 +958,13 @@ mod tests {
 
     #[test]
     fn command_target_routes_device_commands_and_leaves_globals_unlocked() {
-        use halod_shared::types::{RgbColor, RgbState};
+        use halod_shared::types::{LightingState, RgbColor};
         // Device-scoped commands map to their device id (by whichever field
         // names it) so same-device work serializes on one lock.
         assert_eq!(
-            command_target(&DaemonCommand::RgbApply {
+            command_target(&DaemonCommand::LightingApply {
                 id: "kbd".into(),
-                state: RgbState::Static {
+                state: LightingState::Static {
                     color: RgbColor { r: 0, g: 0, b: 0 }
                 },
             }),
@@ -983,7 +980,7 @@ mod tests {
         assert_eq!(
             command_target(&DaemonCommand::CanvasMoveZone {
                 device_id: "ram".into(),
-                zone_id: "leds".into(),
+                channel_id: "leds".into(),
                 x: 0.0,
                 y: 0.0,
                 w: None,

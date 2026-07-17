@@ -499,7 +499,7 @@ impl Device for IdentifiedDevice {
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
         self.inner.capabilities()
     }
-    fn chain_host(&self) -> Option<&Arc<crate::drivers::chain::ChainHost>> {
+    fn chain_host(&self) -> Option<&Arc<crate::drivers::chain::LightingDivisionHost>> {
         self.inner.chain_host()
     }
     fn keyboard_layout_slot(&self) -> Option<&KeyboardLayoutSlot> {
@@ -621,26 +621,27 @@ mod tests {
     }
     #[tokio::test]
     async fn wrapper_forwards_chain_host_to_inner() {
-        use crate::drivers::chain::{ChainAdapter, ChainHost, ChannelDescriptor};
+        use crate::drivers::chain::{
+            ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost,
+        };
         use anyhow::Result;
         use async_trait::async_trait;
-        use halod_shared::types::RgbColor;
 
         struct StubAdapter;
         #[async_trait]
-        impl ChainAdapter for StubAdapter {
+        impl LightingDivisionAdapter for StubAdapter {
             fn parent_id(&self) -> String {
                 "p".into()
             }
             fn channels(&self) -> Vec<ChannelDescriptor> {
                 vec![]
             }
-            async fn write_composed_frame(&self, _: &str, _: &[RgbColor]) -> Result<()> {
+            async fn write_divided_frame(&self, _: &str, _: &[u8]) -> Result<()> {
                 Ok(())
             }
         }
 
-        struct ChainDevice(Arc<ChainHost>);
+        struct ChainDevice(Arc<LightingDivisionHost>);
         #[async_trait]
         impl Device for ChainDevice {
             fn id(&self) -> &str {
@@ -662,12 +663,12 @@ mod tests {
             fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
                 vec![]
             }
-            fn chain_host(&self) -> Option<&Arc<ChainHost>> {
+            fn chain_host(&self) -> Option<&Arc<LightingDivisionHost>> {
                 Some(&self.0)
             }
         }
 
-        let host = ChainHost::new(Arc::new(StubAdapter));
+        let host = LightingDivisionHost::new(Arc::new(StubAdapter));
         let inner: Arc<dyn Device> = Arc::new(ChainDevice(host));
         let identity = DeviceIdentity {
             scope: Some(IdentityScope::Local),

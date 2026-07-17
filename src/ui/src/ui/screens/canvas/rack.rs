@@ -115,7 +115,7 @@ pub(super) fn instance_indices(state: &AppState) -> HashMap<&str, usize> {
 
 use crate::ui::components::truncate_to_width;
 
-/// Clear any per-instance UI selection (rename target, edit-zones modal,
+/// Clear any per-instance UI selection (rename target, edit-channels modal,
 /// buffered param edits, pending debounced upsert) that no longer names a
 /// live instance — `new_instance_id` can reuse an id after the original
 /// instance was removed elsewhere (another client, profile switch).
@@ -171,34 +171,38 @@ fn device_name<'a>(state: &'a AppState, device_id: &'a str) -> &'a str {
         .unwrap_or(device_id)
 }
 
-fn zone_name<'a>(state: &'a AppState, device_id: &'a str, zone_id: &'a str) -> &'a str {
+fn zone_name<'a>(state: &'a AppState, device_id: &'a str, channel_id: &'a str) -> &'a str {
     state
         .devices
         .iter()
         .find(|d| d.id == device_id)
         .and_then(|d| {
             d.capabilities.iter().find_map(|c| match c {
-                DeviceCapability::Rgb(r) => r.descriptor.zones.iter().find(|z| z.id == zone_id),
+                DeviceCapability::Lighting(r) => {
+                    r.descriptor.channels.iter().find(|z| z.id == channel_id)
+                }
                 _ => None,
             })
         })
         .map(|z| z.name.as_str())
-        .unwrap_or(zone_id)
+        .unwrap_or(channel_id)
 }
 
-/// Lookup an `RgbZone` descriptor by device and zone id.
+/// Lookup an `LightingChannel` descriptor by device and zone id.
 pub(super) fn rgb_zone_descriptor<'a>(
     state: &'a AppState,
     device_id: &str,
-    zone_id: &str,
-) -> Option<&'a halod_shared::types::RgbZone> {
+    channel_id: &str,
+) -> Option<&'a halod_shared::types::LightingChannel> {
     state
         .devices
         .iter()
         .find(|d| d.id == device_id)
         .and_then(|d| {
             d.capabilities.iter().find_map(|c| match c {
-                DeviceCapability::Rgb(r) => r.descriptor.zones.iter().find(|z| z.id == zone_id),
+                DeviceCapability::Lighting(r) => {
+                    r.descriptor.channels.iter().find(|z| z.id == channel_id)
+                }
                 _ => None,
             })
         })
@@ -226,7 +230,7 @@ pub(super) fn ring_zone_context_menu(ui: &mut egui::Ui, cmd: &CommandTx, z: &Pla
 }
 
 /// Layer-first authoring: a rack of named pixmap-effect layers, each assigned
-/// to zones; zones with no layer use the base effect.
+/// to channels; channels with no layer use the base effect.
 fn instance_rack(
     ui: &mut egui::Ui,
     state: &AppState,
@@ -306,7 +310,7 @@ fn instance_rack(
 }
 
 /// The default / fallback effect: a dropdown selecting the instance unassigned
-/// zones use (and the canvas background shows).
+/// channels use (and the canvas background shows).
 fn default_effect_card(
     ui: &mut egui::Ui,
     effects: &HashMap<String, EffectDef>,
@@ -379,7 +383,7 @@ fn instance_row(
         None => std::borrow::Cow::Borrowed(def.effect_id.as_str()),
     };
     let is_default = state.lighting.canvas.default_effect.as_deref() == Some(id);
-    let zones: Vec<&PlacedZone> = state
+    let channels: Vec<&PlacedZone> = state
         .lighting
         .canvas
         .placed_zones
@@ -389,8 +393,8 @@ fn instance_row(
             None => is_default,
         })
         .collect();
-    let zone_count = zones.len();
-    let device_count = zones
+    let zone_count = channels.len();
+    let device_count = channels
         .iter()
         .map(|z| z.device_id.as_str())
         .collect::<HashSet<_>>()
@@ -418,7 +422,7 @@ fn instance_row(
         theme::micro(),
         theme::TEXT_FAINT,
     );
-    // Row 2: effect · zones · devices, truncated to leave room for SYNCED.
+    // Row 2: effect · channels · devices, truncated to leave room for SYNCED.
     let sub_font = theme::value_xs();
     let synced_font = theme::mono(8.5);
     let synced_label = format!("⛓ {}", t!("canvas.synced"));
@@ -625,7 +629,7 @@ fn instance_row(
         }
     }
 
-    // Assigned zones: chips only; assignment happens in the Edit zones modal.
+    // Assigned channels: chips only; assignment happens in the Edit channels modal.
     ui.add_space(theme::SPACE_5);
     egui::Sides::new().show(
         ui,
@@ -648,7 +652,7 @@ fn instance_row(
         },
     );
     ui.add_space(theme::SPACE_3);
-    if zones.is_empty() {
+    if channels.is_empty() {
         if widgets::button(
             ui,
             &t!("canvas.add_zones"),
@@ -660,13 +664,13 @@ fn instance_row(
             canvas_ui.zones_modal = Some(id.to_string());
         }
     } else {
-        // Render up to MAX_ZONE_CHIPS chips inline; ring zones get a
+        // Render up to MAX_ZONE_CHIPS chips inline; ring channels get a
         // right-click context menu for unroll/roll. Overflow folds into a
         // single "+N more" chip.
-        let max = MAX_ZONE_CHIPS.min(zones.len());
-        let shown = &zones[..max];
-        let overflow = if zones.len() > max {
-            Some(t!("canvas.overflow_more", n = zones.len() - max).to_string())
+        let max = MAX_ZONE_CHIPS.min(channels.len());
+        let shown = &channels[..max];
+        let overflow = if channels.len() > max {
+            Some(t!("canvas.overflow_more", n = channels.len() - max).to_string())
         } else {
             None
         };
@@ -676,9 +680,9 @@ fn instance_row(
                 let label = format!(
                     "{} · {}",
                     device_name(state, &z.device_id),
-                    zone_name(state, &z.device_id, &z.zone_id)
+                    zone_name(state, &z.device_id, &z.channel_id)
                 );
-                let is_ring = rgb_zone_descriptor(state, &z.device_id, &z.zone_id)
+                let is_ring = rgb_zone_descriptor(state, &z.device_id, &z.channel_id)
                     .map(|rz| {
                         matches!(rz.topology, ZoneTopology::Ring | ZoneTopology::Rings { .. })
                     })

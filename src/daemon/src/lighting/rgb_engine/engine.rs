@@ -7,8 +7,8 @@ use std::{
 
 use base64::Engine as _;
 use halod_shared::types::{
-    Animation, CanvasFrame, EffectDef, LedFrameEntry, RgbColor, RgbState, RgbZone, VisibilityState,
-    ZoneTopology,
+    Animation, CanvasFrame, EffectDef, LedFrameEntry, LightingChannel, LightingState, RgbColor,
+    VisibilityState, ZoneTopology,
 };
 use halod_shared::zone_transform::ring_slice;
 use std::time::Duration;
@@ -125,8 +125,8 @@ fn build_pixmap_effect(app: &Arc<AppState>, def: Option<&EffectDef>) -> PixmapRu
         .unwrap_or(PixmapRuntime::Off)
 }
 
-/// Number of rings for per-ring motion, or 1 for non-ring / indivisible zones.
-fn ring_count_for(zone: &RgbZone) -> usize {
+/// Number of rings for per-ring motion, or 1 for non-ring / indivisible channels.
+fn ring_count_for(zone: &LightingChannel) -> usize {
     match zone.topology {
         ZoneTopology::Rings { count } if count > 0 => {
             let count = count as usize;
@@ -144,7 +144,7 @@ fn ring_count_for(zone: &RgbZone) -> usize {
 /// tuple every direct effect (built-in or plugin) computes its color from.
 /// Shared by `direct_zone_colors` (built-in, calls `led_color` inline) and the
 /// plugin path (batches these into one `led_colors` round-trip).
-fn zone_led_coords(zone: &RgbZone) -> Vec<(f32, f32, f32, f32)> {
+fn zone_led_coords(zone: &LightingChannel) -> Vec<(f32, f32, f32, f32)> {
     let n = zone.leds.len();
     let last = n.saturating_sub(1).max(1) as f32;
     let ring_count = ring_count_for(zone);
@@ -176,7 +176,11 @@ fn zone_topology_name(topology: &ZoneTopology) -> &'static str {
     }
 }
 
-fn direct_zone_colors(effect: &dyn DirectLedEffect, zone: &RgbZone, t: f32) -> Vec<RgbColor> {
+fn direct_zone_colors(
+    effect: &dyn DirectLedEffect,
+    zone: &LightingChannel,
+    t: f32,
+) -> Vec<RgbColor> {
     zone_led_coords(zone)
         .into_iter()
         .map(|(p, p_ring, nx, ny)| {
@@ -195,12 +199,16 @@ fn direct_zone_colors(effect: &dyn DirectLedEffect, zone: &RgbZone, t: f32) -> V
 /// entries, or `None` if the device has no RGB capability or lacks the zone.
 fn prepare_zone(
     dev: &Arc<dyn Device>,
-    zone_id: &str,
+    channel_id: &str,
     colors: Vec<RgbColor>,
 ) -> Option<(Vec<RgbColor>, Vec<LedFrameEntry>)> {
-    let rgb = dev.as_rgb()?;
-    let rgb_zone = rgb.descriptor().zones.iter().find(|z| z.id == zone_id)?;
-    let transform = rgb.transform_for(zone_id);
+    let rgb = dev.as_lighting()?;
+    let rgb_zone = rgb
+        .descriptor()
+        .channels
+        .iter()
+        .find(|z| z.id == channel_id)?;
+    let transform = rgb.transform_for(channel_id);
     let colors = halod_shared::zone_transform::transform_colors(&colors, rgb_zone, &transform);
     let entries = rgb_zone
         .leds
@@ -208,7 +216,7 @@ fn prepare_zone(
         .zip(colors.iter())
         .map(|(led, color)| LedFrameEntry {
             device_id: dev.id().to_string(),
-            zone_id: zone_id.to_string(),
+            channel_id: channel_id.to_string(),
             led_id: led.id,
             color: *color,
         })
@@ -467,25 +475,31 @@ impl RgbEngine {
             }
         }
 
-        for (key, zones) in &groups {
-            for zone in zones {
+        for (key, channels) in &groups {
+            for zone in channels {
                 let Some(dev) = devices.get(&zone.device_id) else {
                     continue;
                 };
-                let Some(rgb) = dev.as_rgb() else { continue };
-                let Some(rgb_zone) = rgb.descriptor().zones.iter().find(|z| z.id == zone.zone_id)
+                let Some(rgb) = dev.as_lighting() else {
+                    continue;
+                };
+                let Some(rgb_zone) = rgb
+                    .descriptor()
+                    .channels
+                    .iter()
+                    .find(|z| z.id == zone.channel_id)
                 else {
                     continue;
                 };
                 if let Some(lp) = live.get(key) {
                     let colors = sampler.sample_zone(&lp.pixmap, zone, rgb_zone);
-                    if let Some((colors, entries)) = prepare_zone(dev, &zone.zone_id, colors) {
+                    if let Some((colors, entries)) = prepare_zone(dev, &zone.channel_id, colors) {
                         led_colors.extend(entries);
                         pending
                             .entry(zone.device_id.clone())
                             .or_insert_with(|| (Arc::clone(dev), Vec::new()))
                             .1
-                            .push((zone.zone_id.clone(), colors));
+                            .push((zone.channel_id.clone(), colors));
                     }
                 }
             }
@@ -539,18 +553,20 @@ impl RgbEngine {
                 live.insert(dev.id().to_string(), LiveDirect { key: want, runtime });
             }
             let ld = live.get_mut(dev.id()).expect("built above");
-            let Some(rgb) = dev.as_rgb() else { continue };
+            let Some(rgb) = dev.as_lighting() else {
+                continue;
+            };
 
             if let DirectRuntime::Plugin(handle) = &ld.runtime {
                 let handle = handle.clone();
-                for rgb_zone in &rgb.descriptor().zones {
+                for rgb_zone in &rgb.descriptor().channels {
                     let coords = zone_led_coords(rgb_zone);
                     let leds: Vec<crate::plugin::LedCoord> = coords
                         .iter()
                         .zip(&rgb_zone.leds)
                         .map(|(&(p, p_ring, nx, ny), led)| crate::plugin::LedCoord {
                             id: led.id,
-                            zone_id: rgb_zone.id.clone(),
+                            channel_id: rgb_zone.id.clone(),
                             p,
                             p_ring,
                             nx,
@@ -604,7 +620,7 @@ impl RgbEngine {
             }
 
             let DirectRuntime::BuiltIn(effect) = &mut ld.runtime else {
-                for rgb_zone in &rgb.descriptor().zones {
+                for rgb_zone in &rgb.descriptor().channels {
                     let colors = vec![RgbColor { r: 0, g: 0, b: 0 }; rgb_zone.leds.len()];
                     if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
                         led_colors.extend(entries);
@@ -622,7 +638,7 @@ impl RgbEngine {
                 effect.set_sensor_value(value);
             }
             effect.tick(effect_frame.time, effect_frame.dt);
-            for rgb_zone in &rgb.descriptor().zones {
+            for rgb_zone in &rgb.descriptor().channels {
                 let colors = direct_zone_colors(effect.as_ref(), rgb_zone, effect_frame.time);
                 if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
                     led_colors.extend(entries);
@@ -652,8 +668,8 @@ impl RgbEngine {
         let placed_zones: Vec<PlacedZone> = devices_guard
             .iter()
             .filter(|d| d.is_live() && d.active_state() != VisibilityState::Disabled)
-            .filter_map(|d| d.as_rgb())
-            .flat_map(|s| s.canvas_zones())
+            .filter_map(|d| d.as_lighting())
+            .flat_map(|s| s.placed_channels())
             .collect();
 
         let devices: RgbDeviceMap = placed_zones
@@ -661,7 +677,7 @@ impl RgbEngine {
             .filter_map(|p| {
                 devices_guard
                     .iter()
-                    .find(|d| d.id() == p.device_id && d.is_live() && d.as_rgb().is_some())
+                    .find(|d| d.id() == p.device_id && d.is_live() && d.as_lighting().is_some())
                     .cloned()
                     .map(|dev| (p.device_id.clone(), dev))
             })
@@ -670,8 +686,10 @@ impl RgbEngine {
         let direct_devices: Vec<DirectDevice> = devices_guard
             .iter()
             .filter(|d| d.is_live() && d.active_state() != VisibilityState::Disabled)
-            .filter_map(|d| match d.as_rgb()?.current_state() {
-                Some(RgbState::DirectEffect { id, params }) => Some((Arc::clone(d), id, params)),
+            .filter_map(|d| match d.as_lighting()?.current_state() {
+                Some(LightingState::DirectEffect { id, params }) => {
+                    Some((Arc::clone(d), id, params))
+                }
                 _ => None,
             })
             .collect();
@@ -703,19 +721,21 @@ impl RgbEngine {
                 intent.remove(device.id());
                 continue;
             }
-            let Some(rgb) = device.as_rgb() else { continue };
+            let Some(rgb) = device.as_lighting() else {
+                continue;
+            };
             let should_engine = engine_ids.contains(device.id());
 
             let baseline = intent
                 .get(device.id())
                 .copied()
-                .unwrap_or_else(|| matches!(rgb.current_state(), Some(RgbState::Engine)));
+                .unwrap_or_else(|| matches!(rgb.current_state(), Some(LightingState::Engine)));
 
             if should_engine != baseline {
                 let target = if should_engine {
-                    Some(RgbState::Engine)
-                } else if matches!(rgb.current_state(), Some(RgbState::Engine)) {
-                    Some(RgbState::Static {
+                    Some(LightingState::Engine)
+                } else if matches!(rgb.current_state(), Some(LightingState::Engine)) {
+                    Some(LightingState::Static {
                         color: RgbColor { r: 0, g: 0, b: 0 },
                     })
                 } else {
@@ -743,7 +763,7 @@ impl RgbEngine {
     /// the rest of the canvas — the freshest frame always wins.
     fn dispatch_writes(&self, pending: PendingWrites) {
         let mut slots = self.write_slots.lock().expect("write slots poisoned");
-        for (id, (dev, zones)) in pending {
+        for (id, (dev, channels)) in pending {
             // Skip a device that went offline between state sync and dispatch.
             if !dev.is_live() || dev.active_state() == VisibilityState::Disabled {
                 continue;
@@ -755,8 +775,25 @@ impl RgbEngine {
                 if dev.active_state() == VisibilityState::Disabled {
                     return;
                 }
-                let Some(rgb) = dev.as_rgb() else { return };
-                if let Err(e) = rgb.write_frame_batch(&zones).await {
+                let Some(rgb) = dev.as_lighting() else { return };
+                let encoded: Vec<_> = channels
+                    .into_iter()
+                    .filter_map(|(channel_id, colors)| {
+                        let channel = rgb
+                            .descriptor()
+                            .channels
+                            .iter()
+                            .find(|channel| channel.id == channel_id)?;
+                        Some((
+                            channel_id,
+                            colors
+                                .into_iter()
+                                .flat_map(|color| channel.color_order.encode(color))
+                                .collect(),
+                        ))
+                    })
+                    .collect();
+                if let Err(e) = rgb.write_frame_batch(&encoded).await {
                     log::warn!("write_frame_batch failed for {}: {e}", dev.id());
                 }
             });
@@ -798,25 +835,25 @@ impl RgbEngine {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::drivers::{CapabilityRef, RgbCapability, RgbStateSlot, VisibilitySlot};
+    use crate::drivers::{CapabilityRef, LightingCapability, LightingStateSlot, VisibilitySlot};
     use crate::lighting::rgb_engine::color::LinearColor;
     use anyhow::Result;
     use async_trait::async_trait;
     use halod_shared::types::{
-        EffectParamValue, LedPosition, RgbDescriptor, RgbStatus, RgbZone, ZoneTopology,
+        EffectParamValue, LedPosition, LightingChannel, LightingDescriptor, ZoneTopology,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
 
     struct MockRgbDevice {
         device_id: String,
-        descriptor: RgbDescriptor,
+        descriptor: LightingDescriptor,
         fail_write: bool,
         write_count: AtomicUsize,
         batch_count: AtomicUsize,
         last_frame: StdMutex<Vec<RgbColor>>,
-        rgb: RgbStateSlot,
-        rgb_state: StdMutex<Option<RgbState>>,
+        rgb: LightingStateSlot,
+        rgb_state: StdMutex<Option<LightingState>>,
         apply_count: AtomicUsize,
         fail_static_apply: AtomicBool,
         skip_record_on_fail: AtomicBool,
@@ -826,7 +863,7 @@ mod tests {
     }
 
     impl MockRgbDevice {
-        fn new(device_id: &str, zone_id: &str, led_count: usize, fail_write: bool) -> Arc<Self> {
+        fn new(device_id: &str, channel_id: &str, led_count: usize, fail_write: bool) -> Arc<Self> {
             let leds = (0..led_count as u32)
                 .map(|i| LedPosition {
                     id: i,
@@ -836,12 +873,14 @@ mod tests {
                 .collect();
             Arc::new(Self {
                 device_id: device_id.to_string(),
-                descriptor: RgbDescriptor {
-                    zones: vec![RgbZone {
-                        id: zone_id.to_string(),
-                        name: zone_id.to_string(),
+                descriptor: LightingDescriptor {
+                    channels: vec![LightingChannel {
+                        id: channel_id.to_string(),
+                        name: channel_id.to_string(),
                         topology: ZoneTopology::Linear,
                         leds,
+                        color_order: Default::default(),
+                        division: Default::default(),
                     }],
                     native_effects: vec![],
                 },
@@ -849,7 +888,7 @@ mod tests {
                 write_count: AtomicUsize::new(0),
                 batch_count: AtomicUsize::new(0),
                 last_frame: StdMutex::new(Vec::new()),
-                rgb: RgbStateSlot::default(),
+                rgb: LightingStateSlot::default(),
                 rgb_state: StdMutex::new(None),
                 apply_count: AtomicUsize::new(0),
                 fail_static_apply: AtomicBool::new(false),
@@ -860,22 +899,22 @@ mod tests {
             })
         }
 
-        fn new_engine_mode(device_id: &str, zone_id: &str, fail_revert: bool) -> Arc<Self> {
-            let dev = Self::new(device_id, zone_id, 3, false);
-            *dev.rgb_state.lock().unwrap() = Some(RgbState::Engine);
+        fn new_engine_mode(device_id: &str, channel_id: &str, fail_revert: bool) -> Arc<Self> {
+            let dev = Self::new(device_id, channel_id, 3, false);
+            *dev.rgb_state.lock().unwrap() = Some(LightingState::Engine);
             dev.fail_static_apply.store(fail_revert, Ordering::SeqCst);
             dev
         }
 
         fn new_with_zones(
             device_id: &str,
-            zone_id: &str,
+            channel_id: &str,
             led_count: usize,
             fail_write: bool,
-            zones: Vec<PlacedZone>,
+            channels: Vec<PlacedZone>,
         ) -> Arc<Self> {
-            let dev = Self::new(device_id, zone_id, led_count, fail_write);
-            dev.rgb.set_canvas_zones(zones);
+            let dev = Self::new(device_id, channel_id, led_count, fail_write);
+            dev.rgb.set_canvas_zones(channels);
             dev
         }
     }
@@ -902,7 +941,7 @@ mod tests {
             self.live.load(Ordering::SeqCst)
         }
         fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![CapabilityRef::Rgb(self)]
+            vec![CapabilityRef::Lighting(self)]
         }
         fn visibility_slot(&self) -> Option<&VisibilitySlot> {
             Some(&self.visibility)
@@ -910,16 +949,16 @@ mod tests {
     }
 
     #[async_trait]
-    impl RgbCapability for MockRgbDevice {
-        fn descriptor(&self) -> &RgbDescriptor {
+    impl LightingCapability for MockRgbDevice {
+        fn descriptor(&self) -> &LightingDescriptor {
             &self.descriptor
         }
-        fn rgb_state(&self) -> &RgbStateSlot {
+        fn lighting_state(&self) -> &LightingStateSlot {
             &self.rgb
         }
-        async fn apply(&self, state: RgbState) -> Result<()> {
+        async fn apply(&self, state: LightingState) -> Result<()> {
             self.apply_count.fetch_add(1, Ordering::SeqCst);
-            let fail = matches!(state, RgbState::Static { .. })
+            let fail = matches!(state, LightingState::Static { .. })
                 && self.fail_static_apply.load(Ordering::SeqCst);
             if !(fail && self.skip_record_on_fail.load(Ordering::SeqCst)) {
                 *self.rgb_state.lock().unwrap() = Some(state);
@@ -929,10 +968,18 @@ mod tests {
             }
             Ok(())
         }
-        fn current_state(&self) -> Option<RgbState> {
+        fn current_state(&self) -> Option<LightingState> {
             self.rgb_state.lock().unwrap().clone()
         }
-        async fn write_frame(&self, _zone_id: &str, colors: &[RgbColor]) -> Result<()> {
+        async fn write_frame(&self, _zone_id: &str, bytes: &[u8]) -> Result<()> {
+            let colors: Vec<RgbColor> = bytes
+                .chunks_exact(3)
+                .map(|chunk| RgbColor {
+                    r: chunk[0],
+                    g: chunk[1],
+                    b: chunk[2],
+                })
+                .collect();
             self.write_count.fetch_add(1, Ordering::SeqCst);
             *self.last_colors.lock().unwrap() = Some(colors.to_vec());
             *self.last_frame.lock().unwrap() = colors.to_vec();
@@ -941,20 +988,12 @@ mod tests {
             }
             Ok(())
         }
-        async fn write_frame_batch(&self, zones: &[(String, Vec<RgbColor>)]) -> Result<()> {
+        async fn write_frame_batch(&self, channels: &[(String, Vec<u8>)]) -> Result<()> {
             self.batch_count.fetch_add(1, Ordering::SeqCst);
-            for (zone_id, colors) in zones {
-                self.write_frame(zone_id, colors).await?;
+            for (channel_id, colors) in channels {
+                self.write_frame(channel_id, colors).await?;
             }
             Ok(())
-        }
-        fn serialize_rgb(&self) -> RgbStatus {
-            RgbStatus {
-                descriptor: self.descriptor.clone(),
-                state: None,
-                zone_transforms: std::collections::HashMap::new(),
-                chainable_channels: Vec::new(),
-            }
         }
     }
 
@@ -962,10 +1001,10 @@ mod tests {
         Arc::new(AppState::new(Config::default()))
     }
 
-    fn make_zone(device_id: &str, zone_id: &str) -> PlacedZone {
+    fn make_zone(device_id: &str, channel_id: &str) -> PlacedZone {
         PlacedZone {
             device_id: device_id.to_string(),
-            zone_id: zone_id.to_string(),
+            channel_id: channel_id.to_string(),
             x: 0.0,
             y: 0.0,
             w: 1.0,
@@ -1060,7 +1099,7 @@ mod tests {
     #[test]
     fn direct_breathing_is_black_at_phase_zero() {
         let fx: Box<dyn DirectLedEffect> = Box::new(PulseTestEffect);
-        let zone = RgbZone {
+        let zone = LightingChannel {
             id: "z".into(),
             name: "z".into(),
             topology: ZoneTopology::Linear,
@@ -1076,6 +1115,8 @@ mod tests {
                     y: 0.5,
                 },
             ],
+            color_order: Default::default(),
+            division: Default::default(),
         };
         let colors = direct_zone_colors(fx.as_ref(), &zone, 0.0);
         assert!(colors.iter().all(|c| *c == RgbColor { r: 0, g: 0, b: 0 }));
@@ -1084,7 +1125,7 @@ mod tests {
     #[test]
     fn direct_breathing_peak_is_uniform_and_lit() {
         let fx: Box<dyn DirectLedEffect> = Box::new(PulseTestEffect);
-        let zone = RgbZone {
+        let zone = LightingChannel {
             id: "z".into(),
             name: "z".into(),
             topology: ZoneTopology::Linear,
@@ -1100,6 +1141,8 @@ mod tests {
                     y: 0.5,
                 },
             ],
+            color_order: Default::default(),
+            division: Default::default(),
         };
         let colors = direct_zone_colors(fx.as_ref(), &zone, 1.0);
         assert_eq!(colors[0], colors[1], "breathing is position-independent");
@@ -1122,7 +1165,7 @@ mod tests {
         );
         let fx = direct::build_builtin(halod_shared::effect_designer::DESIGNER_EFFECT_ID, &params)
             .unwrap();
-        let zone = RgbZone {
+        let zone = LightingChannel {
             id: "ring".into(),
             name: "ring".into(),
             topology: ZoneTopology::Ring,
@@ -1138,6 +1181,8 @@ mod tests {
                     y: 1.0,
                 },
             ],
+            color_order: Default::default(),
+            division: Default::default(),
         };
         let colors = direct_zone_colors(fx.as_ref(), &zone, 0.0);
         assert_ne!(
@@ -1148,13 +1193,15 @@ mod tests {
 
     #[test]
     fn direct_zone_colors_ring_scope_selects_per_ring_or_whole_zone_motion() {
-        let zone = RgbZone {
+        let zone = LightingChannel {
             id: "triple".into(),
             name: "triple".into(),
             topology: ZoneTopology::Rings { count: 3 },
             leds: (0..6)
                 .map(|id| LedPosition { id, x: 0.0, y: 0.0 })
                 .collect(),
+            color_order: Default::default(),
+            division: Default::default(),
         };
         let params = |ring_scope: &str| {
             let mut m = HashMap::new();
@@ -1231,7 +1278,7 @@ mod tests {
         );
         canvas.live.store(false, Ordering::SeqCst);
         let direct_dev = MockRgbDevice::new("dead1", "ring", 3, false);
-        *direct_dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+        *direct_dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1285,7 +1332,7 @@ mod tests {
     async fn sync_tick_state_collects_direct_effect_devices() {
         let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
-        *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1301,7 +1348,7 @@ mod tests {
     async fn disabled_direct_effect_device_is_never_collected_or_written() {
         let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
-        *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1331,7 +1378,7 @@ mod tests {
     async fn tick_direct_effect_writes_frame() {
         let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1426,7 +1473,7 @@ mod tests {
         let dev = MockRgbDevice::new("dev0", "ring", 2, false);
         let mut params = HashMap::new();
         params.insert("sensor".into(), EffectParamValue::Str("temp1".into()));
-        *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "engine_sensor_fx:probe".to_string(),
             params,
         });
@@ -1453,7 +1500,7 @@ mod tests {
     async fn tick_unknown_direct_effect_falls_back_to_off_and_caches() {
         let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "sensor_gradient".into(),
             params: HashMap::new(),
         });
@@ -1481,7 +1528,7 @@ mod tests {
     async fn tick_prunes_direct_effect_when_reverted() {
         let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1496,7 +1543,7 @@ mod tests {
         let after_first = dev.write_count.load(Ordering::SeqCst);
         assert!(after_first >= 1);
 
-        *dev.rgb_state.lock().unwrap() = Some(RgbState::Static {
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::Static {
             color: RgbColor { r: 1, g: 2, b: 3 },
         });
         engine.tick(0.2, 0.05, 1).await;
@@ -1521,7 +1568,10 @@ mod tests {
         let engine = RgbEngine::new(app).await;
         engine.reconcile_engine_mode(&CanvasState::default()).await;
 
-        assert!(matches!(dev.current_state(), Some(RgbState::Static { .. })));
+        assert!(matches!(
+            dev.current_state(),
+            Some(LightingState::Static { .. })
+        ));
         assert_eq!(dev.apply_count.load(Ordering::SeqCst), 1);
     }
 
@@ -1539,7 +1589,7 @@ mod tests {
         placed.placed_zones.push(make_zone("dev0", "ring"));
         engine.reconcile_engine_mode(&placed).await;
 
-        *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1547,7 +1597,7 @@ mod tests {
         engine.reconcile_engine_mode(&CanvasState::default()).await;
         assert!(matches!(
             dev.current_state(),
-            Some(RgbState::DirectEffect { .. })
+            Some(LightingState::DirectEffect { .. })
         ));
     }
 
@@ -1562,7 +1612,10 @@ mod tests {
 
         let engine = RgbEngine::new(app).await;
         engine.reconcile_engine_mode(&CanvasState::default()).await;
-        assert!(matches!(dev.current_state(), Some(RgbState::Static { .. })));
+        assert!(matches!(
+            dev.current_state(),
+            Some(LightingState::Static { .. })
+        ));
         engine.reconcile_engine_mode(&CanvasState::default()).await;
         assert_eq!(dev.apply_count.load(Ordering::SeqCst), 1);
     }
@@ -1579,7 +1632,7 @@ mod tests {
 
         let engine = RgbEngine::new(app).await;
         engine.reconcile_engine_mode(&CanvasState::default()).await;
-        assert!(matches!(dev.current_state(), Some(RgbState::Engine)));
+        assert!(matches!(dev.current_state(), Some(LightingState::Engine)));
         engine.reconcile_engine_mode(&CanvasState::default()).await;
         assert_eq!(dev.apply_count.load(Ordering::SeqCst), 1);
     }
@@ -1598,7 +1651,7 @@ mod tests {
         assert_eq!(entries.len(), 4);
         assert!(entries
             .iter()
-            .all(|e| e.device_id == "dev0" && e.zone_id == "ring"));
+            .all(|e| e.device_id == "dev0" && e.channel_id == "ring"));
         assert_eq!(
             entries.iter().map(|e| e.led_id).collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
@@ -1714,7 +1767,7 @@ mod tests {
     async fn tick_reports_work_with_a_direct_effect_device() {
         let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1831,7 +1884,7 @@ mod tests {
         let app = make_app();
         let _tmp = load_test_effect_plugin(&app);
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
-        *dev.rgb_state.lock().unwrap() = Some(RgbState::DirectEffect {
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "engine_test_fx:ramp".to_string(),
             params: HashMap::new(),
         });

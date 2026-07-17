@@ -8,7 +8,9 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{ChainLinkInfo, ChainableChannelInfo, DeviceCapability, ZoneTopology};
+use halod_shared::types::{
+    DeviceCapability, LightingChannel, LightingDivision, LightingSegmentInfo, ZoneTopology,
+};
 
 use super::TabCtx;
 use crate::ui::theme;
@@ -51,6 +53,20 @@ fn divisor_for_idx(idx: usize) -> u32 {
     TOPOLOGY_CHOICES.get(idx).map(|(_, d)| *d).unwrap_or(1)
 }
 
+fn segments(channel: &LightingChannel) -> &[LightingSegmentInfo] {
+    match &channel.division {
+        LightingDivision::Divisible { segments, .. } => segments,
+        LightingDivision::Indivisible => &[],
+    }
+}
+
+fn max_leds(channel: &LightingChannel) -> u32 {
+    match channel.division {
+        LightingDivision::Divisible { max_leds, .. } => max_leds,
+        LightingDivision::Indivisible => 0,
+    }
+}
+
 /// Short uppercase badge derived from a channel name: "Header 1" → "H1".
 fn badge_label(name: &str) -> String {
     let letter: String = name
@@ -82,14 +98,20 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
     );
     // Borrow the chainable channels directly from the capability to avoid a
     // per-frame Vec clone. Find the first Rgb capability with non-empty channels.
-    let channels: &[ChainableChannelInfo] = ctx
+    let channels: Vec<&LightingChannel> = ctx
         .dev
         .capabilities
         .iter()
         .find_map(|c| match c {
-            DeviceCapability::Rgb(r) if !r.chainable_channels.is_empty() => {
-                Some(r.chainable_channels.as_slice())
-            }
+            DeviceCapability::Lighting(r) => Some(
+                r.descriptor
+                    .channels
+                    .iter()
+                    .filter(|channel| {
+                        matches!(channel.division, LightingDivision::Divisible { .. })
+                    })
+                    .collect(),
+            ),
             _ => None,
         })
         .unwrap_or_default();
@@ -100,7 +122,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
 
     let total_leds: u32 = channels
         .iter()
-        .flat_map(|ch| ch.links.iter())
+        .flat_map(|channel| segments(channel).iter())
         .map(|l| l.led_count)
         .sum();
 
@@ -145,8 +167,8 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
     }
 }
 
-fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &ChainableChannelInfo) {
-    let used: u32 = channel.links.iter().map(|l| l.led_count).sum();
+fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &LightingChannel) {
+    let used: u32 = segments(channel).iter().map(|l| l.led_count).sum();
 
     egui::Frame::NONE
         .fill(theme::CARD_BG)
@@ -165,17 +187,17 @@ fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &Chainab
             let prev_spacing = ui.style().spacing.item_spacing;
             ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 9.0);
 
-            if channel.links.is_empty() {
+            if segments(channel).is_empty() {
                 empty_placeholder(ui);
             } else {
-                for (li, link) in channel.links.iter().enumerate() {
-                    link_row(ui, ctx, dev_id, &channel.channel_id, li + 1, link);
+                for (li, link) in segments(channel).iter().enumerate() {
+                    link_row(ui, ctx, dev_id, &channel.id, li + 1, link);
                 }
             }
 
             ui.style_mut().spacing.item_spacing = prev_spacing;
 
-            let remaining = channel.max_leds.saturating_sub(used);
+            let remaining = max_leds(channel).saturating_sub(used);
             if remaining > 0 {
                 ui.add_space(theme::SPACE_4);
                 add_link_panel(ui, ctx, dev_id, channel, remaining);
@@ -187,11 +209,11 @@ fn channel_header(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     dev_id: &str,
-    channel: &ChainableChannelInfo,
+    channel: &LightingChannel,
     used: u32,
 ) {
-    let flash_key = egui::Id::new(("ch_flash", dev_id, &channel.channel_id));
-    let flash_at_key = egui::Id::new(("ch_flash_at", dev_id, &channel.channel_id));
+    let flash_key = egui::Id::new(("ch_flash", dev_id, &channel.id));
+    let flash_at_key = egui::Id::new(("ch_flash_at", dev_id, &channel.id));
 
     let flashing = ui
         .ctx()
@@ -237,7 +259,7 @@ fn channel_header(
         crate::domain::tour::AnchorId::ChainsDiscover,
         disc_rect,
     );
-    let disc_id = egui::Id::new(("ch_disc", dev_id, &channel.channel_id));
+    let disc_id = egui::Id::new(("ch_disc", dev_id, &channel.id));
     let disc_resp = if flashing {
         let p = ui.painter();
         p.rect_filled(disc_rect, 8.0, theme::a(theme::hex(0xff2d2d), 0.18));
@@ -271,15 +293,15 @@ fn channel_header(
             .data_mut(|d| d.insert_temp(flash_at_key, now + 2.4));
         crate::runtime::ipc::send(
             ctx.cmd,
-            halod_shared::commands::DaemonCommand::RgbChainDetectChannel {
+            halod_shared::commands::DaemonCommand::LightingDetectSegments {
                 id: dev_id.to_string(),
-                channel_id: channel.channel_id.clone(),
+                channel_id: channel.id.clone(),
             },
         );
     }
 
     let p = ui.painter();
-    let usage = t!("device.chains_usage", used = used, max = channel.max_leds);
+    let usage = t!("device.chains_usage", used = used, max = max_leds(channel));
     let usage_galley = p.layout_no_wrap(usage.to_string(), theme::value_sm(), theme::TEXT_MUT);
     let usage_size = usage_galley.size();
     let usage_r = disc_rect.left() - 8.0;
@@ -305,7 +327,7 @@ fn channel_header(
             Stroke::new(1.0, theme::BORDER_INNER),
             egui::StrokeKind::Middle,
         );
-        let pct = (used as f32 / channel.max_leds as f32).min(1.0);
+        let pct = (used as f32 / max_leds(channel) as f32).min(1.0);
         let bar_col = if pct > 0.85 {
             theme::STAT_AMBER
         } else {
@@ -340,7 +362,7 @@ fn link_row(
     dev_id: &str,
     channel_id: &str,
     index: usize,
-    link: &ChainLinkInfo,
+    link: &LightingSegmentInfo,
 ) {
     egui::Frame::NONE
         .fill(theme::INNER_BG)
@@ -387,7 +409,7 @@ fn link_row(
         });
 }
 
-fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &ChainLinkInfo) {
+fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &LightingSegmentInfo) {
     if link.locked {
         ui.horizontal(|ui| {
             ui.label(
@@ -415,8 +437,8 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &ChainLinkInfo) {
         });
     } else {
         // Inline rename: preserve edit buffer while focused, re-seed from daemon when not.
-        let buf_key = egui::Id::new(("ln_buf", &link.child_device_id));
-        let focused_key = egui::Id::new(("ln_focused", &link.child_device_id));
+        let buf_key = egui::Id::new(("ln_buf", &link.device_id));
+        let focused_key = egui::Id::new(("ln_focused", &link.device_id));
         let was_focused = ui
             .ctx()
             .data(|d| d.get_temp::<bool>(focused_key).unwrap_or(false));
@@ -449,7 +471,7 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &ChainLinkInfo) {
                 crate::runtime::ipc::send(
                     ctx.cmd,
                     halod_shared::commands::DaemonCommand::SetDeviceName {
-                        device_id: link.child_device_id.clone(),
+                        device_id: link.device_id.clone(),
                         name: trimmed,
                     },
                 );
@@ -458,7 +480,7 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &ChainLinkInfo) {
     }
 }
 
-fn led_dots(ui: &mut egui::Ui, link: &ChainLinkInfo) {
+fn led_dots(ui: &mut egui::Ui, link: &LightingSegmentInfo) {
     let count = link.led_count as usize;
     let dot_count = count.min(DOT_CAP);
     let extra = count.saturating_sub(DOT_CAP);
@@ -484,7 +506,7 @@ fn led_dots(ui: &mut egui::Ui, link: &ChainLinkInfo) {
     });
 }
 
-fn locked_right(ui: &mut egui::Ui, link: &ChainLinkInfo) {
+fn locked_right(ui: &mut egui::Ui, link: &LightingSegmentInfo) {
     ui.label(
         egui::RichText::new("🔒")
             .font(theme::body_md())
@@ -509,11 +531,11 @@ fn editable_right(
     ctx: &TabCtx,
     dev_id: &str,
     channel_id: &str,
-    link: &ChainLinkInfo,
+    link: &LightingSegmentInfo,
 ) {
     // Remove button — use an explicit ID so egui can track hover/click state
     // across frames even when the number of link rows changes.
-    let btn_id = egui::Id::new(("ln_rm", &link.child_device_id));
+    let btn_id = egui::Id::new(("ln_rm", &link.device_id));
     let (btn, _) = ui.allocate_exact_size(Vec2::new(30.0, 30.0), Sense::hover());
     let btn_resp = ui.interact(btn, btn_id, Sense::click());
     if btn_resp.hovered() {
@@ -542,10 +564,10 @@ fn editable_right(
     if btn_resp.clicked() {
         crate::runtime::ipc::send(
             ctx.cmd,
-            halod_shared::commands::DaemonCommand::RgbChainRemoveLink {
+            halod_shared::commands::DaemonCommand::LightingRemoveSegment {
                 id: dev_id.to_string(),
                 channel_id: channel_id.to_string(),
-                child_device_id: link.child_device_id.clone(),
+                device_id: link.device_id.clone(),
             },
         );
     }
@@ -568,7 +590,7 @@ fn add_link_panel(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     dev_id: &str,
-    channel: &ChainableChannelInfo,
+    channel: &LightingChannel,
     remaining: u32,
 ) {
     crate::domain::tour::anchor(
@@ -576,10 +598,10 @@ fn add_link_panel(
         crate::domain::tour::AnchorId::ChainsAddLink,
         Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 34.0)),
     );
-    let open_key = egui::Id::new(("ch_add_open", dev_id, &channel.channel_id));
-    let name_key = egui::Id::new(("ch_add_name", dev_id, &channel.channel_id));
-    let topo_key = egui::Id::new(("ch_add_topo", dev_id, &channel.channel_id));
-    let leds_key = egui::Id::new(("ch_add_leds", dev_id, &channel.channel_id));
+    let open_key = egui::Id::new(("ch_add_open", dev_id, &channel.id));
+    let name_key = egui::Id::new(("ch_add_name", dev_id, &channel.id));
+    let topo_key = egui::Id::new(("ch_add_topo", dev_id, &channel.id));
+    let leds_key = egui::Id::new(("ch_add_leds", dev_id, &channel.id));
 
     let open = ui
         .ctx()
@@ -658,7 +680,7 @@ fn add_link_panel(
                         .collect();
                     if let Some(i) = widgets::combo_indexed(
                         ui,
-                        ("ch_topo_cb", dev_id, &channel.channel_id),
+                        ("ch_topo_cb", dev_id, &channel.id),
                         &labels,
                         topo_idx,
                     ) {
@@ -682,14 +704,7 @@ fn add_link_panel(
                             .color(theme::TEXT_MUT),
                     );
                     ui.add_space(theme::SPACE_4);
-                    led_stepper(
-                        ui,
-                        &mut leds,
-                        new_divisor,
-                        remaining,
-                        dev_id,
-                        &channel.channel_id,
-                    );
+                    led_stepper(ui, &mut leds, new_divisor, remaining, dev_id, &channel.id);
                 });
 
                 ui.add_space(theme::SPACE_7);
@@ -719,9 +734,9 @@ fn add_link_panel(
                     {
                         crate::runtime::ipc::send(
                             ctx.cmd,
-                            halod_shared::commands::DaemonCommand::RgbChainAddLink {
+                            halod_shared::commands::DaemonCommand::LightingAddSegment {
                                 id: dev_id.to_string(),
-                                channel_id: channel.channel_id.clone(),
+                                channel_id: channel.id.clone(),
                                 name: name.trim().to_string(),
                                 led_count: leds,
                                 topology: topology_from_idx(topo_idx),
@@ -895,25 +910,31 @@ mod tests {
             model: "m".into(),
             device_type: DeviceType::Other,
             connected: true,
-            capabilities: vec![DeviceCapability::Rgb(RgbStatus {
-                descriptor: RgbDescriptor {
-                    zones: vec![],
+            capabilities: vec![DeviceCapability::Lighting(LightingStatus {
+                descriptor: LightingDescriptor {
+                    channels: vec![LightingChannel {
+                        id: "h1".into(),
+                        name: "Header 1".into(),
+                        topology: ZoneTopology::Linear,
+                        leds: vec![],
+                        color_order: Default::default(),
+                        division: LightingDivision::Divisible {
+                            max_leds: 120,
+                            segments: vec![LightingSegmentInfo {
+                                device_id: "child1".into(),
+                                channel_id: "lighting".into(),
+                                name: "Strip".into(),
+                                topology: ZoneTopology::Linear,
+                                led_count: 30,
+                                color_order: None,
+                                locked: false,
+                            }],
+                        },
+                    }],
                     native_effects: vec![],
                 },
                 state: None,
-                zone_transforms: Default::default(),
-                chainable_channels: vec![ChainableChannelInfo {
-                    channel_id: "h1".into(),
-                    name: "Header 1".into(),
-                    max_leds: 120,
-                    links: vec![ChainLinkInfo {
-                        child_device_id: "child1".into(),
-                        name: "Strip".into(),
-                        topology: ZoneTopology::Linear,
-                        led_count: 30,
-                        locked: false,
-                    }],
-                }],
+                channel_transforms: Default::default(),
             })],
             active_state: Default::default(),
             connection_type: None,
@@ -927,11 +948,15 @@ mod tests {
     }
 
     fn dev_with_links(
-        links: Vec<halod_shared::types::ChainLinkInfo>,
+        links: Vec<halod_shared::types::LightingSegmentInfo>,
     ) -> halod_shared::types::WireDevice {
         let mut d = hub_with_link();
-        if let halod_shared::types::DeviceCapability::Rgb(r) = &mut d.capabilities[0] {
-            r.chainable_channels[0].links = links;
+        if let halod_shared::types::DeviceCapability::Lighting(r) = &mut d.capabilities[0] {
+            if let LightingDivision::Divisible { segments, .. } =
+                &mut r.descriptor.channels[0].division
+            {
+                *segments = links;
+            }
         }
         d
     }
@@ -996,11 +1021,13 @@ mod tests {
         use halod_shared::types::*;
         render_with_watchdog(
             "locked",
-            dev_with_links(vec![ChainLinkInfo {
-                child_device_id: "c".into(),
+            dev_with_links(vec![LightingSegmentInfo {
+                device_id: "c".into(),
+                channel_id: "lighting".into(),
                 name: "Locked".into(),
                 topology: ZoneTopology::Linear,
                 led_count: 30,
+                color_order: None,
                 locked: true,
             }]),
         );

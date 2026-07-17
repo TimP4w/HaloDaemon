@@ -65,7 +65,7 @@ pub fn click_select<K: Eq + Hash>(selected: &mut HashSet<K>, key: K, additive: b
     }
 }
 
-/// Marquee result: the widgets/zones under the rubber-band, unioned with the
+/// Marquee result: the widgets/channels under the rubber-band, unioned with the
 /// pre-drag `base` selection when the drag was additive (modifier held).
 pub fn marquee_result<K: Eq + Hash + Clone>(
     base: &HashSet<K>,

@@ -30,7 +30,7 @@ pub const CANVAS_H: u32 = 300;
 #[derive(Debug, Clone, Serialize)]
 pub struct LedCoord {
     pub id: u32,
-    pub zone_id: String,
+    pub channel_id: String,
     pub p: f32,
     pub p_ring: f32,
     pub nx: f32,
@@ -667,7 +667,7 @@ mod tests {
         (0..count)
             .map(|index| LedCoord {
                 id: 100 + index as u32,
-                zone_id: id.to_owned(),
+                channel_id: id.to_owned(),
                 p: index as f32 / last,
                 p_ring: index as f32 / last,
                 nx: 0.0,
@@ -709,7 +709,7 @@ mod tests {
                 assert(ctx.zone.id == "ring" and ctx.zone.led_count == 3)
                 local out = {}
                 for i, led in ipairs(leds) do
-                    assert(led.id == 99 + i and led.zone_id == "ring")
+                    assert(led.id == 99 + i and led.channel_id == "ring")
                     out[i] = { r = led.p, g = 0, b = 0 }
                 end
                 return out
@@ -937,7 +937,7 @@ mod tests {
                 assert(math.abs(ctx.audio.level - 0.4) < 0.000001 and ctx.audio.seq == 9)
                 assert(ctx.zone.id == "ring" and ctx.zone.topology == "linear")
                 assert(ctx.zone.led_count == 1 and ctx.zone.device_id == "device")
-                assert(leds[1].id == 100 and leds[1].zone_id == "ring")
+                assert(leds[1].id == 100 and leds[1].channel_id == "ring")
 
                 local mixed = ctx:lerp_color({r=0,g=0,b=0}, {r=1,g=0.5,b=0.25}, 0.5)
                 local gradient = ctx:gradient({

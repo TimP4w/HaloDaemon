@@ -166,7 +166,7 @@ pub struct LcdEngineFrame {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedFrameEntry {
     pub device_id: String,
-    pub zone_id: String,
+    pub channel_id: String,
     pub led_id: u32,
     pub color: RgbColor,
 }
@@ -356,7 +356,7 @@ pub enum SamplingMode {
     /// Sample at each LED's real spatial position on the canvas (today).
     #[default]
     Spatial,
-    /// Ring-topology zones: LEDs are laid along the zone rect by chain index.
+    /// Ring-topology channels: LEDs are laid along the zone rect by chain index.
     Unrolled,
 }
 
@@ -365,7 +365,7 @@ pub enum SamplingMode {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlacedZone {
     pub device_id: String,
-    pub zone_id: String,
+    pub channel_id: String,
     pub x: f32,
     pub y: f32,
     #[serde(default = "default_zone_size")]
@@ -417,7 +417,7 @@ impl Default for CanvasState {
     }
 }
 
-/// Max placed zones on one device's canvas.
+/// Max placed channels on one device's canvas.
 pub const MAX_PLACED_ZONES: usize = 256;
 /// Max distinct canvas effect instances.
 pub const MAX_CANVAS_EFFECTS: usize = 256;
@@ -473,7 +473,7 @@ impl Default for CoolingConfig {
     }
 }
 
-/// RGB engine config, nested into [`LightingState`]. Persisted on the daemon
+/// RGB engine config, nested into [`LightingOverviewState`]. Persisted on the daemon
 /// under `config.yaml`'s `rgb` key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -714,14 +714,14 @@ fn bool_true() -> bool {
 }
 
 /// Per-profile device/zone selection for the global RGB Lighting view.
-/// Empty `device_ids` = nothing selected. A device absent from `zones`
-/// targets all of its zones.
+/// Empty `device_ids` = nothing selected. A device absent from `channels`
+/// targets all of its channels.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LightingTargets {
     #[serde(default)]
     pub device_ids: Vec<String>,
     #[serde(default)]
-    pub zones: HashMap<String, Vec<String>>,
+    pub channels: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -896,7 +896,7 @@ pub struct AppState {
     #[serde(default)]
     pub cooling: CoolingState,
     #[serde(default)]
-    pub lighting: LightingState,
+    pub lighting: LightingOverviewState,
     #[serde(default)]
     pub lcd: LcdState,
     #[serde(default)]
@@ -1459,7 +1459,7 @@ pub struct CoolingState {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LightingState {
+pub struct LightingOverviewState {
     #[serde(default)]
     pub canvas: CanvasState,
     /// Active profile's saved RGB Lighting selection.
@@ -1708,7 +1708,7 @@ pub enum DeviceCapability {
     Equalizer(Equalizer),
     Sensors(Vec<Sensor>),
     Cooling(CoolingStatus),
-    Rgb(RgbStatus),
+    Lighting(LightingStatus),
     Dpi(DpiStatus),
     OnboardProfiles(OnboardProfiles),
     Lcd(LcdStatus),
@@ -1897,11 +1897,15 @@ pub enum ZoneTopology {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RgbZone {
+pub struct LightingChannel {
     pub id: String,
     pub name: String,
     pub topology: ZoneTopology,
     pub leds: Vec<LedPosition>,
+    #[serde(default)]
+    pub color_order: ColorOrder,
+    #[serde(default)]
+    pub division: LightingDivision,
 }
 
 /// Widget type for one effect parameter
@@ -1979,13 +1983,13 @@ pub enum EffectParamValue {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
-pub enum RgbState {
+pub enum LightingState {
     Static {
         color: RgbColor,
     },
     // LED IDs use String keys: JSON object keys are always strings.
     PerLed {
-        zones: HashMap<String, HashMap<String, RgbColor>>,
+        channels: HashMap<String, HashMap<String, RgbColor>>,
     },
     NativeEffect {
         id: String,
@@ -2011,38 +2015,65 @@ pub struct EffectDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RgbDescriptor {
-    pub zones: Vec<RgbZone>,
+pub struct LightingDescriptor {
+    pub channels: Vec<LightingChannel>,
     pub native_effects: Vec<NativeEffect>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RgbStatus {
-    pub descriptor: RgbDescriptor,
-    pub state: Option<RgbState>,
+pub struct LightingStatus {
+    pub descriptor: LightingDescriptor,
+    pub state: Option<LightingState>,
     /// Zones absent from the map use the identity transform.
     #[serde(default)]
-    pub zone_transforms: HashMap<String, ZoneContentTransform>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub chainable_channels: Vec<ChainableChannelInfo>,
+    pub channel_transforms: HashMap<String, ZoneContentTransform>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorOrder {
+    #[default]
+    Rgb,
+    Rbg,
+    Grb,
+    Gbr,
+    Brg,
+    Bgr,
+}
+
+impl ColorOrder {
+    pub fn encode(self, color: RgbColor) -> [u8; 3] {
+        match self {
+            Self::Rgb => [color.r, color.g, color.b],
+            Self::Rbg => [color.r, color.b, color.g],
+            Self::Grb => [color.g, color.r, color.b],
+            Self::Gbr => [color.g, color.b, color.r],
+            Self::Brg => [color.b, color.r, color.g],
+            Self::Bgr => [color.b, color.g, color.r],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LightingDivision {
+    #[default]
+    Indivisible,
+    Divisible {
+        max_leds: u32,
+        segments: Vec<LightingSegmentInfo>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChainableChannelInfo {
+pub struct LightingSegmentInfo {
+    pub device_id: String,
     pub channel_id: String,
-    pub name: String,
-    pub max_leds: u32,
-    pub links: Vec<ChainLinkInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChainLinkInfo {
-    pub child_device_id: String,
     pub name: String,
     pub topology: ZoneTopology,
     pub led_count: u32,
-    /// Hardware-detected links cannot be removed, reordered, or renamed
-    /// through chain IPC commands; only the hardware controls them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_order: Option<ColorOrder>,
     pub locked: bool,
 }
 
@@ -2465,7 +2496,7 @@ macro_rules! find_cap {
 impl WireDevice {
     find_cap!(battery, Battery, Vec<Battery>);
     find_cap!(cooling, Cooling, CoolingStatus);
-    find_cap!(rgb, Rgb, RgbStatus);
+    find_cap!(lighting, Lighting, LightingStatus);
     find_cap!(sensors, Sensors, Vec<Sensor>);
     find_cap!(dpi, Dpi, DpiStatus);
     find_cap!(onboard_profiles, OnboardProfiles, OnboardProfiles);
@@ -3029,20 +3060,19 @@ mod tests {
     }
 
     #[test]
-    fn find_cap_rgb_matching() {
+    fn find_cap_lighting_matching() {
         let device = WireDevice {
-            capabilities: vec![DeviceCapability::Rgb(RgbStatus {
-                descriptor: RgbDescriptor {
-                    zones: vec![],
+            capabilities: vec![DeviceCapability::Lighting(LightingStatus {
+                descriptor: LightingDescriptor {
+                    channels: vec![],
                     native_effects: vec![],
                 },
                 state: None,
-                zone_transforms: HashMap::new(),
-                chainable_channels: vec![],
+                channel_transforms: HashMap::new(),
             })],
             ..Default::default()
         };
-        assert!(device.rgb().is_some());
+        assert!(device.lighting().is_some());
     }
 
     #[test]
@@ -3098,20 +3128,19 @@ mod tests {
     // ── UH81: DeviceCapability tagged-enum serde round-trip ──────────────
 
     #[test]
-    fn device_capability_rgb_round_trip() {
-        let cap = DeviceCapability::Rgb(RgbStatus {
-            descriptor: RgbDescriptor {
-                zones: vec![],
+    fn device_capability_lighting_round_trip() {
+        let cap = DeviceCapability::Lighting(LightingStatus {
+            descriptor: LightingDescriptor {
+                channels: vec![],
                 native_effects: vec![],
             },
             state: None,
-            zone_transforms: HashMap::new(),
-            chainable_channels: vec![],
+            channel_transforms: HashMap::new(),
         });
         let json = serde_json::to_string(&cap).unwrap();
-        assert!(json.contains(r#""kind":"rgb""#));
+        assert!(json.contains(r#""kind":"lighting""#));
         let back: DeviceCapability = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, DeviceCapability::Rgb(_)));
+        assert!(matches!(back, DeviceCapability::Lighting(_)));
     }
 
     #[test]
@@ -3211,7 +3240,7 @@ mod default_tests {
     #[test]
     fn placed_zone_defaults_when_size_and_rotation_omitted() {
         let z: PlacedZone =
-            serde_json::from_str(r#"{"device_id":"d","zone_id":"z","x":1.0,"y":2.0}"#).unwrap();
+            serde_json::from_str(r#"{"device_id":"d","channel_id":"z","x":1.0,"y":2.0}"#).unwrap();
         assert_eq!(z.w, 0.15, "default_zone_size");
         assert_eq!(z.h, 0.15, "default_zone_size");
         assert_eq!(z.rotation, 0.0, "default_rotation");
@@ -3529,21 +3558,21 @@ mod rgb_state_tests {
 
     #[test]
     fn per_led_uses_string_keys_for_led_ids() {
-        let state = RgbState::PerLed {
-            zones: {
-                let mut zones = std::collections::HashMap::new();
+        let state = LightingState::PerLed {
+            channels: {
+                let mut channels = std::collections::HashMap::new();
                 let mut led_map = std::collections::HashMap::new();
                 led_map.insert("12".to_string(), RgbColor { r: 255, g: 0, b: 0 });
-                zones.insert("z0".to_string(), led_map);
-                zones
+                channels.insert("z0".to_string(), led_map);
+                channels
             },
         };
         let json = serde_json::to_value(&state).unwrap();
         // Verify LED ID is a string key, not a number
-        assert_eq!(json["zones"]["z0"]["12"]["r"], 255);
+        assert_eq!(json["channels"]["z0"]["12"]["r"], 255);
         // Round-trip
-        let back: RgbState = serde_json::from_value(json).unwrap();
-        assert!(matches!(back, RgbState::PerLed { .. }));
+        let back: LightingState = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, LightingState::PerLed { .. }));
     }
 
     #[test]
@@ -3578,5 +3607,21 @@ mod dpi_status_tests {
     fn get_returns_correct_step() {
         let s = make_status(vec![400, 800, 1600], 1);
         assert_eq!(s.steps.get(s.current_index), Some(&800));
+    }
+}
+
+#[cfg(test)]
+mod color_order_tests {
+    use super::*;
+
+    #[test]
+    fn color_orders_cover_every_rgb_permutation() {
+        let color = RgbColor { r: 1, g: 2, b: 3 };
+        assert_eq!(ColorOrder::Rgb.encode(color), [1, 2, 3]);
+        assert_eq!(ColorOrder::Rbg.encode(color), [1, 3, 2]);
+        assert_eq!(ColorOrder::Grb.encode(color), [2, 1, 3]);
+        assert_eq!(ColorOrder::Gbr.encode(color), [2, 3, 1]);
+        assert_eq!(ColorOrder::Brg.encode(color), [3, 1, 2]);
+        assert_eq!(ColorOrder::Bgr.encode(color), [3, 2, 1]);
     }
 }

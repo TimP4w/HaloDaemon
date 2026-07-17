@@ -43,8 +43,8 @@ impl AppState {
 
         let placed_zones: Vec<PlacedZone> = device_list
             .iter()
-            .filter_map(|d| d.as_rgb())
-            .flat_map(|s| s.canvas_zones())
+            .filter_map(|d| d.as_lighting())
+            .flat_map(|s| s.placed_channels())
             .collect();
 
         let lcd_templates: HashMap<String, String> = device_list
@@ -90,7 +90,7 @@ impl AppState {
                 }
             }
 
-            let transforms = device.as_rgb().map(|r| r.zone_transforms());
+            let transforms = device.as_lighting().map(|r| r.channel_transforms());
 
             wire.capabilities
                 .retain(|capability| !matches!(capability, DeviceCapability::Sensors(_)));
@@ -111,10 +111,10 @@ impl AppState {
             for cap in &mut wire.capabilities {
                 match cap {
                     DeviceCapability::Lcd(_) => {}
-                    DeviceCapability::Rgb(status) => {
+                    DeviceCapability::Lighting(status) => {
                         if let Some(t) = &transforms {
                             if !t.is_empty() {
-                                status.zone_transforms = t.clone();
+                                status.channel_transforms = t.clone();
                             }
                         }
                     }
@@ -521,9 +521,9 @@ mod tests {
         let mut saw_lcd = false;
         for cap in &d.capabilities {
             match cap {
-                DeviceCapability::Rgb(s) => {
+                DeviceCapability::Lighting(s) => {
                     saw_rgb = true;
-                    assert_eq!(s.zone_transforms.get("z1").map(|t| t.flip_h), Some(true));
+                    assert_eq!(s.channel_transforms.get("z1").map(|t| t.flip_h), Some(true));
                 }
                 DeviceCapability::Lcd(s) => {
                     saw_lcd = true;

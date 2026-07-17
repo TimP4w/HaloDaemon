@@ -3,7 +3,8 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::{watch, RwLock};
 
 use halod_shared::types::{
-    finite_or, CanvasState, EffectDef, LightingState as WireLightingState, DEFAULT_SAMPLE_RADIUS,
+    finite_or, CanvasState, EffectDef, LightingOverviewState as WireLightingState,
+    DEFAULT_SAMPLE_RADIUS,
 };
 
 use crate::config::{Config, PlacedZone};
@@ -105,7 +106,7 @@ mod override_map_tests {
     fn placed_zone_sanitize_preserves_finite_fields() {
         let p = PlacedZone {
             device_id: "dev1".into(),
-            zone_id: "zoneA".into(),
+            channel_id: "zoneA".into(),
             x: 0.1,
             y: 0.2,
             w: 0.3,
@@ -116,7 +117,7 @@ mod override_map_tests {
         };
         let w = sanitize_zone(p.clone());
         assert_eq!(w.device_id, p.device_id);
-        assert_eq!(w.zone_id, p.zone_id);
+        assert_eq!(w.channel_id, p.channel_id);
         assert_eq!(w.x, p.x);
         assert_eq!(w.y, p.y);
         assert_eq!(w.w, p.w);
@@ -129,7 +130,7 @@ mod override_map_tests {
     fn placed_zone_nan_inf_replaced_with_fallbacks() {
         let p = PlacedZone {
             device_id: "dev1".into(),
-            zone_id: "zoneA".into(),
+            channel_id: "zoneA".into(),
             x: f32::NAN,
             y: f32::INFINITY,
             w: f32::NEG_INFINITY,
@@ -159,9 +160,9 @@ mod snapshot_tests {
         let app = Arc::new(crate::state::AppState::new(Config::default()));
         let state = LightingState::default();
         let cfg = Config::default();
-        let zones = vec![PlacedZone {
+        let channels = vec![PlacedZone {
             device_id: "rgb_dev".to_string(),
-            zone_id: "zone_1".to_string(),
+            channel_id: "zone_1".to_string(),
             x: 10.0,
             y: 20.0,
             w: 100.0,
@@ -171,11 +172,11 @@ mod snapshot_tests {
             sampling_mode: Default::default(),
         }];
 
-        let wire = state.snapshot(&app.registry, &cfg, zones).await;
+        let wire = state.snapshot(&app.registry, &cfg, channels).await;
 
         assert_eq!(wire.canvas.placed_zones.len(), 1);
         assert_eq!(wire.canvas.placed_zones[0].device_id, "rgb_dev");
-        assert_eq!(wire.canvas.placed_zones[0].zone_id, "zone_1");
+        assert_eq!(wire.canvas.placed_zones[0].channel_id, "zone_1");
         assert_eq!(wire.canvas.placed_zones[0].x, 10.0);
         assert_eq!(wire.canvas.placed_zones[0].y, 20.0);
     }

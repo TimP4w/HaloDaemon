@@ -50,12 +50,12 @@ pub fn tabs_for(dev: &WireDevice) -> Vec<Tab> {
     if has(dev, |c| matches!(c, DeviceCapability::Children(_))) {
         push(TabKind::Devices);
     }
-    if has(dev, |c| matches!(c, DeviceCapability::Rgb(_))) {
+    if has(dev, |c| matches!(c, DeviceCapability::Lighting(_))) {
         push(TabKind::Lighting);
     }
     if has(
         dev,
-        |c| matches!(c, DeviceCapability::Rgb(r) if !r.chainable_channels.is_empty()),
+        |c| matches!(c, DeviceCapability::Lighting(r) if r.descriptor.channels.iter().any(|channel| matches!(channel.division, halod_shared::types::LightingDivision::Divisible { .. }))),
     ) {
         push(TabKind::Chains);
     }
@@ -118,7 +118,23 @@ pub fn tab_label(kind: TabKind, dev: &WireDevice) -> std::borrow::Cow<'static, s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use halod_shared::types::{RgbDescriptor, RgbStatus};
+    use halod_shared::types::{
+        LightingChannel, LightingDescriptor, LightingDivision, LightingStatus, ZoneTopology,
+    };
+
+    fn division_channel() -> LightingChannel {
+        LightingChannel {
+            id: "ch0".into(),
+            name: "Header 1".into(),
+            topology: ZoneTopology::Linear,
+            leds: vec![],
+            color_order: Default::default(),
+            division: LightingDivision::Divisible {
+                max_leds: 300,
+                segments: vec![],
+            },
+        }
+    }
 
     fn dev(ty: DeviceType, caps: Vec<DeviceCapability>) -> WireDevice {
         WireDevice {
@@ -129,14 +145,13 @@ mod tests {
     }
 
     fn rgb_cap() -> DeviceCapability {
-        DeviceCapability::Rgb(RgbStatus {
-            descriptor: RgbDescriptor {
-                zones: vec![],
+        DeviceCapability::Lighting(LightingStatus {
+            descriptor: LightingDescriptor {
+                channels: vec![],
                 native_effects: vec![],
             },
             state: None,
-            zone_transforms: Default::default(),
-            chainable_channels: vec![],
+            channel_transforms: Default::default(),
         })
     }
 
@@ -206,19 +221,13 @@ mod tests {
         // Hub before adding any chain link: no children → no "Devices" tab.
         let before = tabs_for(&dev(
             DeviceType::Hub,
-            vec![DeviceCapability::Rgb(RgbStatus {
-                descriptor: RgbDescriptor {
-                    zones: vec![],
+            vec![DeviceCapability::Lighting(LightingStatus {
+                descriptor: LightingDescriptor {
+                    channels: vec![division_channel()],
                     native_effects: vec![],
                 },
                 state: None,
-                zone_transforms: Default::default(),
-                chainable_channels: vec![halod_shared::types::ChainableChannelInfo {
-                    channel_id: "ch0".into(),
-                    name: "Header 1".into(),
-                    max_leds: 300,
-                    links: vec![],
-                }],
+                channel_transforms: Default::default(),
             })],
         ));
         let chains_idx = before
@@ -232,19 +241,13 @@ mod tests {
             DeviceType::Hub,
             vec![
                 DeviceCapability::Children(vec![]),
-                DeviceCapability::Rgb(RgbStatus {
-                    descriptor: RgbDescriptor {
-                        zones: vec![],
+                DeviceCapability::Lighting(LightingStatus {
+                    descriptor: LightingDescriptor {
+                        channels: vec![division_channel()],
                         native_effects: vec![],
                     },
                     state: None,
-                    zone_transforms: Default::default(),
-                    chainable_channels: vec![halod_shared::types::ChainableChannelInfo {
-                        channel_id: "ch0".into(),
-                        name: "Header 1".into(),
-                        max_leds: 300,
-                        links: vec![],
-                    }],
+                    channel_transforms: Default::default(),
                 }),
             ],
         ));
@@ -276,24 +279,17 @@ mod tests {
     }
 
     #[test]
-    fn chains_tab_appears_only_when_chainable_channels_present() {
-        use halod_shared::types::ChainableChannelInfo;
+    fn segments_tab_appears_only_when_divisible_channels_present() {
         let rgb_no_chains = rgb_cap();
         assert!(!kinds(&dev(DeviceType::Hub, vec![rgb_no_chains])).contains(&TabKind::Chains));
 
-        let rgb_with_chains = DeviceCapability::Rgb(RgbStatus {
-            descriptor: RgbDescriptor {
-                zones: vec![],
+        let rgb_with_chains = DeviceCapability::Lighting(LightingStatus {
+            descriptor: LightingDescriptor {
+                channels: vec![division_channel()],
                 native_effects: vec![],
             },
             state: None,
-            zone_transforms: Default::default(),
-            chainable_channels: vec![ChainableChannelInfo {
-                channel_id: "ch0".into(),
-                name: "Header 1".into(),
-                max_leds: 300,
-                links: vec![],
-            }],
+            channel_transforms: Default::default(),
         });
         let d = dev(DeviceType::Hub, vec![rgb_with_chains]);
         let tabs = kinds(&d);

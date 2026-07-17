@@ -62,7 +62,7 @@ pub(super) fn unroll_cmd(cmd: &CommandTx, zone: &PlacedZone, currently_unrolled:
         cmd,
         DaemonCommand::CanvasMoveZone {
             device_id: zone.device_id.clone(),
-            zone_id: zone.zone_id.clone(),
+            channel_id: zone.channel_id.clone(),
             x: zone.x as f64,
             y: zone.y as f64,
             w: None,
@@ -81,7 +81,7 @@ pub(super) fn unroll_cmd(cmd: &CommandTx, zone: &PlacedZone, currently_unrolled:
 /// Toggle a zone's membership in an instance (`None` = follow the canvas default).
 pub(super) fn assign_zone_cmd(
     device_id: &str,
-    zone_id: &str,
+    channel_id: &str,
     assign: Option<&str>,
     on: bool,
     placed: Option<&PlacedZone>,
@@ -90,14 +90,14 @@ pub(super) fn assign_zone_cmd(
     if on {
         DaemonCommand::CanvasRemoveZone {
             device_id: device_id.to_string(),
-            zone_id: zone_id.to_string(),
+            channel_id: channel_id.to_string(),
         }
     } else if let Some(p) = placed {
         // MoveZone treats `effect: None` as "leave unchanged"; clearing needs PlaceZone.
         match effect {
             Some(_) => DaemonCommand::CanvasMoveZone {
                 device_id: device_id.to_string(),
-                zone_id: zone_id.to_string(),
+                channel_id: channel_id.to_string(),
                 x: p.x as f64,
                 y: p.y as f64,
                 w: Some(p.w as f64),
@@ -108,7 +108,7 @@ pub(super) fn assign_zone_cmd(
             },
             None => DaemonCommand::CanvasPlaceZone {
                 device_id: device_id.to_string(),
-                zone_id: zone_id.to_string(),
+                channel_id: channel_id.to_string(),
                 x: Some(p.x as f64),
                 y: Some(p.y as f64),
                 w: Some(p.w as f64),
@@ -121,7 +121,7 @@ pub(super) fn assign_zone_cmd(
     } else {
         DaemonCommand::CanvasPlaceZone {
             device_id: device_id.to_string(),
-            zone_id: zone_id.to_string(),
+            channel_id: channel_id.to_string(),
             x: None,
             y: None,
             w: None,

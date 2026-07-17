@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Lighting tab — effect grid, zone selector, per-LED paint canvas (laid out
-//! from the real zone topology) and a color picker. Applies via `RgbApply`.
+//! from the real zone topology) and a color picker. Applies via `LightingApply`.
 //!
 //! Colour/params are shown per effect: paint and solid expose a colour picker;
 //! native effects expose their declared params (and a colour only if they take
@@ -15,8 +15,9 @@ use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::commands::DaemonCommand;
 use halod_shared::effect_designer::DESIGNER_EFFECT_ID;
 use halod_shared::types::{
-    Animation, ColorStep, DeviceCapability, EffectParamDescriptor, EffectParamValue, NativeEffect,
-    ParamKind, RgbColor, RgbState, RgbStatus, RgbZone, ZoneTopology,
+    Animation, ColorStep, DeviceCapability, EffectParamDescriptor, EffectParamValue,
+    LightingChannel, LightingState, LightingStatus, NativeEffect, ParamKind, RgbColor,
+    ZoneTopology,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 
@@ -31,7 +32,7 @@ const DEFAULT_PAINT_COLOR: RgbColor = RgbColor {
     b: 0xe8,
 };
 
-/// The active lighting mode, derived from the device's `RgbState`.
+/// The active lighting mode, derived from the device's `LightingState`.
 #[derive(Clone, Debug, PartialEq)]
 enum Mode {
     Solid,
@@ -42,13 +43,13 @@ enum Mode {
     None,
 }
 
-fn current_mode(state: &Option<RgbState>) -> Mode {
+fn current_mode(state: &Option<LightingState>) -> Mode {
     match state {
-        Some(RgbState::Static { .. }) => Mode::Solid,
-        Some(RgbState::PerLed { .. }) => Mode::Paint,
-        Some(RgbState::NativeEffect { id, .. }) => Mode::Effect(id.clone()),
-        Some(RgbState::DirectEffect { id, .. }) => Mode::Direct(id.clone()),
-        Some(RgbState::Engine) => Mode::Engine,
+        Some(LightingState::Static { .. }) => Mode::Solid,
+        Some(LightingState::PerLed { .. }) => Mode::Paint,
+        Some(LightingState::NativeEffect { id, .. }) => Mode::Effect(id.clone()),
+        Some(LightingState::DirectEffect { id, .. }) => Mode::Direct(id.clone()),
+        Some(LightingState::Engine) => Mode::Engine,
         None => Mode::None,
     }
 }
@@ -100,12 +101,12 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         ui.max_rect(),
     );
     let Some(rgb) = ctx.dev.capabilities.iter().find_map(|c| match c {
-        DeviceCapability::Rgb(r) => Some(r),
+        DeviceCapability::Lighting(r) => Some(r),
         _ => None,
     }) else {
         return;
     };
-    if rgb.descriptor.zones.is_empty() {
+    if rgb.descriptor.channels.is_empty() {
         widgets::empty_state(
             ui,
             &t!("lighting.no_zones_title"),
@@ -117,18 +118,18 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     if st.lighting.zone.is_empty()
         || !rgb
             .descriptor
-            .zones
+            .channels
             .iter()
             .any(|z| z.id == st.lighting.zone)
     {
-        st.lighting.zone = rgb.descriptor.zones[0].id.clone();
+        st.lighting.zone = rgb.descriptor.channels[0].id.clone();
     }
     if st.lighting.paint_color.is_none() {
         st.lighting.paint_color = Some(current_color(rgb).unwrap_or(DEFAULT_PAINT_COLOR));
     }
     if !st.lighting.paint_seeded {
-        if let Some(RgbState::PerLed { zones }) = &rgb.state {
-            st.lighting.paint_buf = zones
+        if let Some(LightingState::PerLed { channels }) = &rgb.state {
+            st.lighting.paint_buf = channels
                 .iter()
                 .map(|(z, leds)| {
                     let m = leds
@@ -205,7 +206,7 @@ fn leave_canvas_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     }
 }
 
-fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, mode: &Mode) {
+fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingStatus, mode: &Mode) {
     widgets::card_titled(
         ui,
         &t!("lighting.lighting_preview"),
@@ -231,7 +232,7 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, 
                 if matches!(mode, Mode::Solid | Mode::Direct(_)) {
                     let _ = widgets::pill(ui, &t!("lighting.all_zones"), true);
                 } else {
-                    for z in &rgb.descriptor.zones {
+                    for z in &rgb.descriptor.channels {
                         if widgets::pill(ui, &z.name, z.id == st.lighting.zone) {
                             st.lighting.zone = z.id.clone();
                         }
@@ -248,10 +249,10 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, 
 
             let zone = rgb
                 .descriptor
-                .zones
+                .channels
                 .iter()
                 .find(|z| z.id == st.lighting.zone)
-                .unwrap_or(&rgb.descriptor.zones[0]);
+                .unwrap_or(&rgb.descriptor.channels[0]);
             let painting = matches!(mode, Mode::Paint);
             let live = ctx.led_colors.get(&(ctx.dev.id.clone(), zone.id.clone()));
             let fill = fill_for(
@@ -348,10 +349,10 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, 
 }
 
 /// Zone transform controls: flip H/V for flat layouts, reverse + rotate for rings.
-fn transform_controls(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus) {
+fn transform_controls(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingStatus) {
     let Some(zone) = rgb
         .descriptor
-        .zones
+        .channels
         .iter()
         .find(|z| z.id == st.lighting.zone)
     else {
@@ -362,7 +363,7 @@ fn transform_controls(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &
     }
 
     let live_tx = rgb
-        .zone_transforms
+        .channel_transforms
         .get(&zone.id)
         .copied()
         .unwrap_or_default();
@@ -445,7 +446,13 @@ fn wrap_offset(offset: i32, delta: i32, n: i32) -> i32 {
     (offset + delta).rem_euclid(n)
 }
 
-fn right_panel(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &RgbStatus, mode: &Mode) {
+fn right_panel(
+    ui: &mut egui::Ui,
+    ctx: &TabCtx,
+    st: &mut DeviceUi,
+    rgb: &LightingStatus,
+    mode: &Mode,
+) {
     // Effect grid — uniform cells, 2 per row.
     widgets::card_titled(
         ui,
@@ -676,7 +683,7 @@ fn is_selectable_direct_effect(id: &str) -> bool {
 /// always, native/direct effects only when they declare a `Color` param named
 /// `"color"`. Effects with more than one colour (e.g. a two-stop gradient)
 /// render each individually in [`param_sliders`] instead.
-fn show_color(mode: &Mode, rgb: &RgbStatus, direct: &[Animation]) -> bool {
+fn show_color(mode: &Mode, rgb: &LightingStatus, direct: &[Animation]) -> bool {
     let has_color = |params: &[EffectParamDescriptor]| {
         params
             .iter()
@@ -703,7 +710,7 @@ fn show_color(mode: &Mode, rgb: &RgbStatus, direct: &[Animation]) -> bool {
 fn led_canvas(
     ui: &mut egui::Ui,
     st: &mut DeviceUi,
-    zone: &RgbZone,
+    zone: &LightingChannel,
     painting: bool,
     fill: &LedFill,
 ) -> bool {
@@ -782,7 +789,7 @@ fn key_fill(
 fn keyboard_canvas(
     ui: &mut egui::Ui,
     st: &mut DeviceUi,
-    zone: &RgbZone,
+    zone: &LightingChannel,
     painting: bool,
     fill: &LedFill,
     status: &halod_shared::keyboard::KeyboardLayoutStatus,
@@ -876,7 +883,7 @@ fn paint_gesture(
     ui: &egui::Ui,
     resp: &egui::Response,
     st: &mut DeviceUi,
-    zone_id: &str,
+    channel_id: &str,
     painting: bool,
     hit: impl Fn(Pos2) -> Vec<u32>,
 ) -> bool {
@@ -887,7 +894,7 @@ fn paint_gesture(
             for led in hit(pos) {
                 st.lighting
                     .paint_buf
-                    .entry(zone_id.to_string())
+                    .entry(channel_id.to_string())
                     .or_default()
                     .insert(led, color);
                 changed = true;
@@ -901,7 +908,7 @@ fn paint_gesture(
 }
 
 /// Screen positions + radius for each LED, per zone topology.
-fn led_layout(zone: &RgbZone, rect: Rect) -> Vec<(u32, Pos2, f32)> {
+fn led_layout(zone: &LightingChannel, rect: Rect) -> Vec<(u32, Pos2, f32)> {
     let n = zone.leds.len();
     if n == 0 {
         return Vec::new();
@@ -995,7 +1002,7 @@ fn param_sliders(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    rgb: &RgbStatus,
+    rgb: &LightingStatus,
     kind: EffectKind,
     effect_id: &str,
     params: &[EffectParamDescriptor],
@@ -1107,15 +1114,15 @@ fn param_sliders(
 /// The live param map for the effect currently applied to the device, if
 /// `eid`/`kind` match what the daemon reports (i.e. this is the active effect).
 fn current_effect_params<'a>(
-    rgb: &'a RgbStatus,
+    rgb: &'a LightingStatus,
     kind: EffectKind,
     eid: &str,
 ) -> Option<&'a HashMap<String, EffectParamValue>> {
     match (kind, &rgb.state) {
-        (EffectKind::Native, Some(RgbState::NativeEffect { id, params })) if id == eid => {
+        (EffectKind::Native, Some(LightingState::NativeEffect { id, params })) if id == eid => {
             Some(params)
         }
-        (EffectKind::Direct, Some(RgbState::DirectEffect { id, params })) if id == eid => {
+        (EffectKind::Direct, Some(LightingState::DirectEffect { id, params })) if id == eid => {
             Some(params)
         }
         _ => None,
@@ -1123,7 +1130,7 @@ fn current_effect_params<'a>(
 }
 
 fn current_param<'a>(
-    rgb: &'a RgbStatus,
+    rgb: &'a LightingStatus,
     kind: EffectKind,
     eid: &str,
     pid: &str,
@@ -1131,14 +1138,19 @@ fn current_param<'a>(
     current_effect_params(rgb, kind, eid)?.get(pid)
 }
 
-fn current_param_f32(rgb: &RgbStatus, kind: EffectKind, eid: &str, pid: &str) -> Option<f32> {
+fn current_param_f32(rgb: &LightingStatus, kind: EffectKind, eid: &str, pid: &str) -> Option<f32> {
     match current_param(rgb, kind, eid, pid)? {
         EffectParamValue::Float(f) => Some(*f as f32),
         _ => None,
     }
 }
 
-fn current_param_str(rgb: &RgbStatus, kind: EffectKind, eid: &str, pid: &str) -> Option<String> {
+fn current_param_str(
+    rgb: &LightingStatus,
+    kind: EffectKind,
+    eid: &str,
+    pid: &str,
+) -> Option<String> {
     match current_param(rgb, kind, eid, pid)? {
         EffectParamValue::Str(s) => Some(s.clone()),
         _ => None,
@@ -1146,7 +1158,7 @@ fn current_param_str(rgb: &RgbStatus, kind: EffectKind, eid: &str, pid: &str) ->
 }
 
 fn current_param_steps(
-    rgb: &RgbStatus,
+    rgb: &LightingStatus,
     kind: EffectKind,
     eid: &str,
     pid: &str,
@@ -1158,7 +1170,7 @@ fn current_param_steps(
 }
 
 fn current_param_color(
-    rgb: &RgbStatus,
+    rgb: &LightingStatus,
     kind: EffectKind,
     eid: &str,
     pid: &str,
@@ -1169,9 +1181,9 @@ fn current_param_color(
     }
 }
 
-fn current_color(rgb: &RgbStatus) -> Option<RgbColor> {
+fn current_color(rgb: &LightingStatus) -> Option<RgbColor> {
     match &rgb.state {
-        Some(RgbState::Static { color }) => Some(*color),
+        Some(LightingState::Static { color }) => Some(*color),
         _ => None,
     }
 }
@@ -1179,16 +1191,16 @@ fn current_color(rgb: &RgbStatus) -> Option<RgbColor> {
 // ── Command builders ────────────────────────────────────────────────────────────
 
 fn solid_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
-    DaemonCommand::RgbApply {
+    DaemonCommand::LightingApply {
         id: ctx.dev.id.clone(),
-        state: RgbState::Static {
+        state: LightingState::Static {
             color: st.lighting.paint_color.unwrap_or_default(),
         },
     }
 }
 
 fn paint_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
-    let zones: HashMap<String, HashMap<String, RgbColor>> = st
+    let channels: HashMap<String, HashMap<String, RgbColor>> = st
         .lighting
         .paint_buf
         .iter()
@@ -1197,15 +1209,15 @@ fn paint_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
             (z.clone(), m)
         })
         .collect();
-    DaemonCommand::RgbApply {
+    DaemonCommand::LightingApply {
         id: ctx.dev.id.clone(),
-        state: RgbState::PerLed { zones },
+        state: LightingState::PerLed { channels },
     }
 }
 
 fn collect_effect_params(
     st: &DeviceUi,
-    rgb: &RgbStatus,
+    rgb: &LightingStatus,
     kind: EffectKind,
     effect_id: &str,
     descs: &[EffectParamDescriptor],
@@ -1282,20 +1294,30 @@ fn collect_effect_params(
     params
 }
 
-fn effect_cmd(ctx: &TabCtx, st: &DeviceUi, rgb: &RgbStatus, eff: &NativeEffect) -> DaemonCommand {
-    DaemonCommand::RgbApply {
+fn effect_cmd(
+    ctx: &TabCtx,
+    st: &DeviceUi,
+    rgb: &LightingStatus,
+    eff: &NativeEffect,
+) -> DaemonCommand {
+    DaemonCommand::LightingApply {
         id: ctx.dev.id.clone(),
-        state: RgbState::NativeEffect {
+        state: LightingState::NativeEffect {
             id: eff.id.clone(),
             params: collect_effect_params(st, rgb, EffectKind::Native, &eff.id, &eff.params),
         },
     }
 }
 
-fn direct_cmd(ctx: &TabCtx, st: &DeviceUi, rgb: &RgbStatus, anim: &Animation) -> DaemonCommand {
-    DaemonCommand::RgbApply {
+fn direct_cmd(
+    ctx: &TabCtx,
+    st: &DeviceUi,
+    rgb: &LightingStatus,
+    anim: &Animation,
+) -> DaemonCommand {
+    DaemonCommand::LightingApply {
         id: ctx.dev.id.clone(),
-        state: RgbState::DirectEffect {
+        state: LightingState::DirectEffect {
             id: anim.id.clone(),
             params: collect_effect_params(st, rgb, EffectKind::Direct, &anim.id, &anim.params),
         },
@@ -1305,7 +1327,7 @@ fn direct_cmd(ctx: &TabCtx, st: &DeviceUi, rgb: &RgbStatus, anim: &Animation) ->
 fn place_on_canvas_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
     DaemonCommand::CanvasPlaceZone {
         device_id: ctx.dev.id.clone(),
-        zone_id: st.lighting.zone.clone(),
+        channel_id: st.lighting.zone.clone(),
         x: None,
         y: None,
         w: None,
@@ -1316,10 +1338,10 @@ fn place_on_canvas_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
     }
 }
 
-fn tx_cmd(ctx: &TabCtx, zone_id: &str, transform: ZoneContentTransform) -> DaemonCommand {
-    DaemonCommand::RgbSetZoneTransform {
+fn tx_cmd(ctx: &TabCtx, channel_id: &str, transform: ZoneContentTransform) -> DaemonCommand {
+    DaemonCommand::LightingSetChannelTransform {
         id: ctx.dev.id.clone(),
-        zone_id: zone_id.to_string(),
+        channel_id: channel_id.to_string(),
         transform,
     }
 }
@@ -1351,8 +1373,8 @@ mod tests {
     use super::*;
     use halod_shared::types::LedPosition;
 
-    fn zone(topology: ZoneTopology, n: u32) -> RgbZone {
-        RgbZone {
+    fn zone(topology: ZoneTopology, n: u32) -> LightingChannel {
+        LightingChannel {
             id: "z".into(),
             name: "Z".into(),
             topology,
@@ -1363,6 +1385,8 @@ mod tests {
                     y: (i / 7) as f32,
                 })
                 .collect(),
+            color_order: Default::default(),
+            division: Default::default(),
         }
     }
 
@@ -1423,29 +1447,28 @@ mod tests {
     #[test]
     fn mode_is_derived_from_rgb_state() {
         assert_eq!(
-            current_mode(&Some(RgbState::Static {
+            current_mode(&Some(LightingState::Static {
                 color: RgbColor::default()
             })),
             Mode::Solid
         );
         assert_eq!(
-            current_mode(&Some(RgbState::PerLed {
-                zones: Default::default()
+            current_mode(&Some(LightingState::PerLed {
+                channels: Default::default()
             })),
             Mode::Paint
         );
         assert_eq!(current_mode(&None), Mode::None);
     }
 
-    fn empty_rgb_status() -> RgbStatus {
-        RgbStatus {
-            descriptor: halod_shared::types::RgbDescriptor {
-                zones: vec![],
+    fn empty_rgb_status() -> LightingStatus {
+        LightingStatus {
+            descriptor: halod_shared::types::LightingDescriptor {
+                channels: vec![],
                 native_effects: vec![],
             },
             state: None,
-            zone_transforms: Default::default(),
-            chainable_channels: vec![],
+            channel_transforms: Default::default(),
         }
     }
 

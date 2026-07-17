@@ -15,7 +15,7 @@ use super::color::{srgb_to_linear, LinearColor};
 pub trait DirectLedEffect: Send {
     fn tick(&mut self, _t: f32, _dt: f32) {}
     /// `p` is fractional chain position; `p_ring` is ring-local position
-    /// (equal to `p` for single-ring zones). `nx`/`ny` feed the twinkle hash.
+    /// (equal to `p` for single-ring channels). `nx`/`ny` feed the twinkle hash.
     fn led_color(&self, p: f32, p_ring: f32, nx: f32, ny: f32, t: f32) -> LinearColor;
 
     /// Sensor id this effect wants fed via `set_sensor_value` before each

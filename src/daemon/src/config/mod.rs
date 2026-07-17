@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn placed_zone_effect_defaults_to_none() {
-        let yaml = "device_id: d\nzone_id: z\nx: 0.0\ny: 0.0\n";
+        let yaml = "device_id: d\nchannel_id: z\nx: 0.0\ny: 0.0\n";
         let z: PlacedZone = serde_yaml::from_str(yaml).unwrap();
         assert!(z.effect.is_none());
     }

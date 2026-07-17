@@ -3,7 +3,7 @@
 //! Re-exported from `drivers/mod.rs` so call sites keep using `crate::drivers::*`.
 
 use halod_shared::keyboard::KeyboardLayoutSelection;
-use halod_shared::types::{RgbState, VisibilityState};
+use halod_shared::types::{LightingState, VisibilityState};
 use halod_shared::zone_transform::ZoneContentTransform;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
@@ -122,29 +122,29 @@ pub type ChoiceStateCache = KvStateCache<usize>;
 pub type BoolStateCache = KvStateCache<bool>;
 
 #[derive(Default)]
-pub struct RgbStateSlot(Slot<RgbStateInner>);
+pub struct LightingStateSlot(Slot<LightingStateInner>);
 
 #[derive(Default)]
-struct RgbStateInner {
-    current_state: Option<RgbState>,
-    canvas_zones: Vec<crate::config::PlacedZone>,
-    zone_transforms: HashMap<String, ZoneContentTransform>,
+struct LightingStateInner {
+    current_state: Option<LightingState>,
+    placed_channels: Vec<crate::config::PlacedZone>,
+    channel_transforms: HashMap<String, ZoneContentTransform>,
 }
 
-slot_accessors!(RgbStateSlot {
-    current_state / set_state : current_state : Option<RgbState>,
-    canvas_zones / set_canvas_zones : canvas_zones : Vec<crate::config::PlacedZone>,
-    zone_transforms / set_zone_transforms : zone_transforms : HashMap<String, ZoneContentTransform>,
+slot_accessors!(LightingStateSlot {
+    current_state / set_state : current_state : Option<LightingState>,
+    placed_channels / set_canvas_zones : placed_channels : Vec<crate::config::PlacedZone>,
+    channel_transforms / set_zone_transforms : channel_transforms : HashMap<String, ZoneContentTransform>,
 });
 
-impl RgbStateSlot {
+impl LightingStateSlot {
     pub fn transform_for(&self, id: &str) -> ZoneContentTransform {
         self.0
-            .with(|s| s.zone_transforms.get(id).copied().unwrap_or_default())
+            .with(|s| s.channel_transforms.get(id).copied().unwrap_or_default())
     }
     pub fn set_zone_transform(&self, id: String, t: ZoneContentTransform) {
         self.0.update(|s| {
-            s.zone_transforms.insert(id, t);
+            s.channel_transforms.insert(id, t);
         });
     }
 }

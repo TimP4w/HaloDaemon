@@ -15,14 +15,16 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 
-use crate::drivers::chain::ChainAdapter;
+use crate::drivers::chain::LightingDivisionAdapter;
 use crate::drivers::transports::usb::{UsbCollection, UsbControlResult};
 use crate::drivers::transports::{HidTransport, Transport, TransportEvent};
-use crate::drivers::{Metered, RgbCapability};
+use crate::drivers::{LightingCapability, Metered};
 use crate::services::http::{HttpBackend, HttpPolicy, HttpRequest, HttpResponse, HttpRuntime};
 use std::collections::HashMap;
 
-use halod_shared::types::{EffectParamValue, RgbColor, RgbState, WriteRateLimit, WriteRateStatus};
+use halod_shared::types::{
+    EffectParamValue, LightingState, RgbColor, WriteRateLimit, WriteRateStatus,
+};
 
 use super::manifest::{parse_manifest_from_dir, PluginManifest, UsbConfig};
 use super::runtime::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
@@ -365,17 +367,23 @@ fn recording_http_runtime(
     ))
 }
 
-/// A resolved config for the harness worker: every declared non-secure field at
-/// its manifest default, so `halod.config` and `{host}` origins resolve without
-/// a running daemon.
+/// A resolved config for the harness worker. Secure fields receive a non-empty
+/// test-only placeholder when their manifest default is blank, so a plugin can
+/// exercise its authenticated path without exposing or persisting a secret.
 fn default_resolved_config(manifest: &PluginManifest) -> crate::plugin::ResolvedConfig {
     manifest
         .config_fields()
         .iter()
-        .filter(|field| !field.secure)
         .filter_map(|field| {
-            super::resolved_config_value(field.kind, &field.default)
-                .map(|value| (field.key.clone(), value))
+            if field.secure && field.default.is_empty() {
+                Some((
+                    field.key.clone(),
+                    crate::plugin::ResolvedConfigValue::String("plugin-test-secret".into()),
+                ))
+            } else {
+                super::resolved_config_value(field.kind, &field.default)
+                    .map(|value| (field.key.clone(), value))
+            }
         })
         .collect()
 }
@@ -807,15 +815,15 @@ fn open_integration(
                     item.set("serial", controller.serial.clone())?;
                     item.set("location", controller.location.clone())?;
                     item.set("extra", lua.to_value(&controller.extra)?)?;
-                    let zones = lua.create_table()?;
-                    for (z, zone) in controller.zones.iter().enumerate() {
+                    let channels = lua.create_table()?;
+                    for (z, zone) in controller.channels.iter().enumerate() {
                         let zone_t = lua.create_table()?;
                         zone_t.set("id", zone.id.clone())?;
                         zone_t.set("name", zone.name.clone())?;
                         zone_t.set("led_count", zone.led_count)?;
-                        zones.set(z + 1, zone_t)?;
+                        channels.set(z + 1, zone_t)?;
                     }
-                    item.set("zones", zones)?;
+                    item.set("channels", channels)?;
                     out.set(i + 1, item)?;
                 }
                 Ok(out)
@@ -894,15 +902,15 @@ fn integration_child_table(
             "initialize",
             lua.create_function(move |lua, _self: Table| {
                 let outcome = handle.block_on(child.initialize()).map_err(mlua_err)?;
-                let zones = lua.create_table()?;
-                for (i, zone) in outcome.zones.unwrap_or_default().iter().enumerate() {
+                let channels = lua.create_table()?;
+                for (i, zone) in outcome.channels.unwrap_or_default().iter().enumerate() {
                     let item = lua.create_table()?;
                     item.set("id", zone.id.clone())?;
                     item.set("name", zone.name.clone())?;
                     item.set("led_count", zone.led_count)?;
-                    zones.set(i + 1, item)?;
+                    channels.set(i + 1, item)?;
                 }
-                Ok((outcome.ok, zones))
+                Ok((outcome.ok, channels))
             })?,
         )?;
     }
@@ -1231,9 +1239,9 @@ fn open_device(
         let device = device.clone();
         dev_table
             .set(
-                "rgb_descriptor",
+                "lighting_descriptor",
                 lua.create_function(move |lua, _self: Table| {
-                    lua.to_value(crate::drivers::RgbCapability::descriptor(&*device))
+                    lua.to_value(crate::drivers::LightingCapability::descriptor(&*device))
                 })
                 .anyhow()?,
             )
@@ -1246,14 +1254,14 @@ fn open_device(
         dev_table
             .set(
                 "write_frame",
-                lua.create_function(move |_, (_self, zone, colors): (Table, String, Table)| {
-                    let colors: Vec<RgbColor> = colors
-                        .sequence_values::<Table>()
-                        .filter_map(|color| color.ok().map(|table| table_to_color(&table)))
+                lua.create_function(move |_, (_self, channel, bytes): (Table, String, Table)| {
+                    let bytes: Vec<u8> = bytes
+                        .sequence_values::<u8>()
+                        .filter_map(Result::ok)
                         .collect();
                     handle
-                        .block_on(crate::drivers::RgbCapability::write_frame(
-                            &*device, &zone, &colors,
+                        .block_on(crate::drivers::LightingCapability::write_frame(
+                            &*device, &channel, &bytes,
                         ))
                         .map_err(mlua_err)
                 })
@@ -1546,14 +1554,14 @@ fn open_device(
         let handle = handle.clone();
         dev_table
             .set(
-                "write_ext_frame",
-                lua.create_function(move |_, (_self, channel, colors): (Table, String, Table)| {
-                    let composed: Vec<RgbColor> = colors
-                        .sequence_values::<Table>()
-                        .filter_map(|c| c.ok().map(|t| table_to_color(&t)))
+                "write_divided_frame",
+                lua.create_function(move |_, (_self, channel, bytes): (Table, String, Table)| {
+                    let composed: Vec<u8> = bytes
+                        .sequence_values::<u8>()
+                        .filter_map(Result::ok)
                         .collect();
                     handle
-                        .block_on(device.write_composed_frame(&channel, &composed))
+                        .block_on(device.write_divided_frame(&channel, &composed))
                         .map_err(mlua_err)
                 })
                 .anyhow()?,
@@ -1664,9 +1672,9 @@ fn value_to_param(v: &Value) -> Option<EffectParamValue> {
     }
 }
 
-/// The `RgbState` shapes the harness builds: `static`, `per_led`, and
+/// The `LightingState` shapes the harness builds: `static`, `per_led`, and
 /// `native_effect`. Extend here as packages need more shapes.
-fn table_to_rgb_state(state: &Table) -> Result<RgbState> {
+fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
     let mode: String = state
         .get("mode")
         .anyhow()
@@ -1677,26 +1685,26 @@ fn table_to_rgb_state(state: &Table) -> Result<RgbState> {
                 .get("color")
                 .anyhow()
                 .context("static state needs a color")?;
-            Ok(RgbState::Static {
+            Ok(LightingState::Static {
                 color: table_to_color(&color),
             })
         }
         "per_led" => {
             let zones_t: Table = state
-                .get("zones")
+                .get("channels")
                 .anyhow()
-                .context("per_led state needs a zones table")?;
-            let mut zones = HashMap::new();
+                .context("per_led state needs a channels table")?;
+            let mut channels = HashMap::new();
             for pair in zones_t.pairs::<String, Table>() {
-                let (zone_id, leds_t) = pair.anyhow()?;
+                let (channel_id, leds_t) = pair.anyhow()?;
                 let mut leds = HashMap::new();
                 for led in leds_t.pairs::<String, Table>() {
                     let (led_id, c) = led.anyhow()?;
                     leds.insert(led_id, table_to_color(&c));
                 }
-                zones.insert(zone_id, leds);
+                channels.insert(channel_id, leds);
             }
-            Ok(RgbState::PerLed { zones })
+            Ok(LightingState::PerLed { channels })
         }
         "native_effect" => {
             let id: String = state
@@ -1712,7 +1720,7 @@ fn table_to_rgb_state(state: &Table) -> Result<RgbState> {
                     }
                 }
             }
-            Ok(RgbState::NativeEffect { id, params })
+            Ok(LightingState::NativeEffect { id, params })
         }
         other => anyhow::bail!("plugin-test harness does not support state.mode = '{other}' yet"),
     }

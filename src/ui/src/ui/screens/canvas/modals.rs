@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Canvas modals: assign-zones, new-instance picker, FPS adjust.
+//! Canvas modals: assign-channels, new-instance picker, FPS adjust.
 
 use std::collections::HashMap;
 
@@ -18,8 +18,8 @@ use super::params::{assign_zone_cmd, upsert_instance_cmd};
 use super::rack::{instance_color_for, instance_name};
 use super::{CanvasUi, DEBOUNCE};
 
-/// Modal assigning device zones to one effect instance (design: "Assign zones
-/// · <name>"). Lists every RGB device's zones; ● marks zones driven by a
+/// Modal assigning device channels to one effect instance (design: "Assign channels
+/// · <name>"). Lists every RGB device's channels; ● marks channels driven by a
 /// different instance — clicking one reassigns it here.
 pub(super) fn zones_assign_modal(
     ctx: &egui::Context,
@@ -67,7 +67,7 @@ pub(super) fn zones_assign_modal(
         "canvas.assign_zones_sub",
         eff = eff_name,
         n = assigned,
-        zones = zone_word
+        channels = zone_word
     );
 
     let mut done = false;
@@ -88,30 +88,30 @@ pub(super) fn zones_assign_modal(
                     continue;
                 }
                 let Some(rgb) = dev.capabilities.iter().find_map(|c| match c {
-                    DeviceCapability::Rgb(r) => Some(r),
+                    DeviceCapability::Lighting(r) => Some(r),
                     _ => None,
                 }) else {
                     continue;
                 };
-                if rgb.descriptor.zones.is_empty() {
+                if rgb.descriptor.channels.is_empty() {
                     continue;
                 }
                 let assign = (!is_default).then_some(inst_id.as_str());
-                let placed_of = |zone_id: &str| {
+                let placed_of = |channel_id: &str| {
                     state
                         .lighting
                         .canvas
                         .placed_zones
                         .iter()
-                        .find(|p| p.device_id == dev.id && p.zone_id == zone_id)
+                        .find(|p| p.device_id == dev.id && p.channel_id == channel_id)
                 };
                 let on_count = rgb
                     .descriptor
-                    .zones
+                    .channels
                     .iter()
                     .filter(|z| modal_zone_state(placed_of(&z.id), &inst_id, is_default).0)
                     .count();
-                let total = rgb.descriptor.zones.len();
+                let total = rgb.descriptor.channels.len();
                 let all_on = on_count == total;
 
                 ui.add_space(theme::SPACE_5);
@@ -153,10 +153,10 @@ pub(super) fn zones_assign_modal(
                         )
                         .clicked()
                         {
-                            for z in &rgb.descriptor.zones {
+                            for z in &rgb.descriptor.channels {
                                 let placed = placed_of(&z.id);
                                 let (on, _) = modal_zone_state(placed, &inst_id, is_default);
-                                // Select all assigns the missing zones; Clear removes them all.
+                                // Select all assigns the missing channels; Clear removes them all.
                                 if on == all_on {
                                     crate::runtime::ipc::send(
                                         cmd,
@@ -175,7 +175,7 @@ pub(super) fn zones_assign_modal(
                 ui.add_space(theme::SPACE_3);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                    for z in &rgb.descriptor.zones {
+                    for z in &rgb.descriptor.channels {
                         let placed = placed_of(&z.id);
                         let (on, marked) = modal_zone_state(placed, &inst_id, is_default);
                         let label = if marked {
@@ -377,7 +377,7 @@ pub(crate) fn fps_modal(
     }
 }
 
-/// Display state of a zone pill in the assign-zones modal: `on` when the zone
+/// Display state of a zone pill in the assign-channels modal: `on` when the zone
 /// is driven by this instance, `marked` when it is placed under another one.
 fn modal_zone_state(placed: Option<&PlacedZone>, inst_id: &str, is_default: bool) -> (bool, bool) {
     let on = placed.is_some_and(|p| {
@@ -432,7 +432,7 @@ mod tests {
         let mine = zone_with("z", Some("effect-1"));
         let other = zone_with("z", Some("effect-2"));
         let unowned = zone_with("z", None);
-        // Non-default instance: owns only its explicit zones.
+        // Non-default instance: owns only its explicit channels.
         assert_eq!(
             modal_zone_state(Some(&mine), "effect-1", false),
             (true, false)
@@ -446,7 +446,7 @@ mod tests {
             (false, true)
         );
         assert_eq!(modal_zone_state(None, "effect-1", false), (false, false));
-        // Default instance: owns the unassigned placed zones.
+        // Default instance: owns the unassigned placed channels.
         assert_eq!(
             modal_zone_state(Some(&unowned), "effect-1", true),
             (true, false)

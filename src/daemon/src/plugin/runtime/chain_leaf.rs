@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Generic chain-leaf child device — the de-vendored `NZXTFFan`. A plugin's
 //! parent produces these from `discover_children`; each delegates RGB to the
-//! parent's `ChainHub` (composited into one channel frame) and, if it has a
+//! parent's `LightingDivisionHub` (composited into one channel frame) and, if it has a
 //! fan, delegates cooling to the parent's `CoolingHub`. It holds no transport
 //! of its own — every call routes back to the parent.
 
@@ -10,14 +10,14 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use halod_shared::types::{
-    CoolingChannel, CoolingChannelKind, DeviceType, RgbColor, RgbDescriptor, RgbState,
+    CoolingChannel, CoolingChannelKind, DeviceType, LightingDescriptor, LightingState, RgbColor,
 };
 
-use crate::drivers::chain::ChainHub;
+use crate::drivers::chain::LightingDivisionHub;
 use crate::drivers::vendors::generic::devices::common::transformed_zone_frame;
 use crate::drivers::{
-    CapabilityRef, CoolingCapability, CoolingHub, CoolingStateSlot, Device, RgbCapability,
-    RgbStateSlot, VisibilitySlot,
+    CapabilityRef, CoolingCapability, CoolingHub, CoolingStateSlot, Device, LightingCapability,
+    LightingStateSlot, VisibilitySlot,
 };
 
 use super::manifest::AccessoryManifest;
@@ -26,16 +26,16 @@ pub struct ChainLeaf {
     id: String,
     name: String,
     vendor: String,
-    /// Chain channel this leaf sits on (string id used with the `ChainHub`).
+    /// Chain channel this leaf sits on (string id used with the `LightingDivisionHub`).
     channel_id: String,
     /// Numeric parent cooling channel.
     fan_channel: u8,
     has_fan: bool,
-    rgb_descriptor: RgbDescriptor,
-    rgb: RgbStateSlot,
+    rgb_descriptor: LightingDescriptor,
+    rgb: LightingStateSlot,
     cooling: CoolingStateSlot,
     visibility: VisibilitySlot,
-    chain_hub: Arc<dyn ChainHub>,
+    chain_hub: Arc<dyn LightingDivisionHub>,
     cooling_hub: Arc<dyn CoolingHub>,
 }
 
@@ -46,7 +46,7 @@ impl ChainLeaf {
         channel_id: String,
         fan_channel: u8,
         accessory: &AccessoryManifest,
-        chain_hub: Arc<dyn ChainHub>,
+        chain_hub: Arc<dyn LightingDivisionHub>,
         cooling_hub: Arc<dyn CoolingHub>,
     ) -> Self {
         Self {
@@ -57,7 +57,7 @@ impl ChainLeaf {
             fan_channel,
             has_fan: accessory.fan,
             rgb_descriptor: accessory.rgb_descriptor(),
-            rgb: RgbStateSlot::default(),
+            rgb: LightingStateSlot::default(),
             cooling: CoolingStateSlot::default(),
             visibility: VisibilitySlot::default(),
             chain_hub,
@@ -65,26 +65,28 @@ impl ChainLeaf {
         }
     }
 
-    async fn apply_state(&self, state: RgbState) -> Result<()> {
-        let led_count = self.rgb_descriptor.zones[0].leds.len();
+    async fn apply_state(&self, state: LightingState) -> Result<()> {
+        let led_count = self.rgb_descriptor.channels[0].leds.len();
         let dev_id = self.id.clone();
         match &state {
-            RgbState::Static { color } => {
+            LightingState::Static { color } => {
                 let colors = vec![*color; led_count];
                 self.chain_hub
                     .write_chain_slice(&self.channel_id, &dev_id, &colors)
                     .await?;
             }
-            RgbState::PerLed { zones } => {
-                if let Some(leds) = zones.get("ring") {
-                    let zone = &self.rgb_descriptor.zones[0];
+            LightingState::PerLed { channels } => {
+                if let Some(leds) = channels.get("ring") {
+                    let zone = &self.rgb_descriptor.channels[0];
                     let colors = transformed_zone_frame(zone, &self.rgb, leds);
                     self.chain_hub
                         .write_chain_slice(&self.channel_id, &dev_id, &colors)
                         .await?;
                 }
             }
-            RgbState::NativeEffect { .. } | RgbState::DirectEffect { .. } | RgbState::Engine => {}
+            LightingState::NativeEffect { .. }
+            | LightingState::DirectEffect { .. }
+            | LightingState::Engine => {}
         }
         self.rgb.set_state(Some(state));
         Ok(())
@@ -121,7 +123,7 @@ impl Device for ChainLeaf {
     }
 
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-        let mut caps = vec![CapabilityRef::Rgb(self)];
+        let mut caps = vec![CapabilityRef::Lighting(self)];
         if self.has_fan {
             caps.push(CapabilityRef::Cooling(self));
         }
@@ -138,22 +140,34 @@ impl Device for ChainLeaf {
 }
 
 #[async_trait]
-impl RgbCapability for ChainLeaf {
-    fn descriptor(&self) -> &RgbDescriptor {
+impl LightingCapability for ChainLeaf {
+    fn descriptor(&self) -> &LightingDescriptor {
         &self.rgb_descriptor
     }
-    fn rgb_state(&self) -> &RgbStateSlot {
+    fn lighting_state(&self) -> &LightingStateSlot {
         &self.rgb
     }
-    async fn apply(&self, state: RgbState) -> Result<()> {
+    async fn apply(&self, state: LightingState) -> Result<()> {
         self.apply_state(state).await
     }
-    async fn write_frame(&self, zone_id: &str, colors: &[RgbColor]) -> Result<()> {
-        if zone_id != "ring" {
-            anyhow::bail!("unknown zone: {zone_id}");
+    async fn write_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()> {
+        if channel_id != "ring" {
+            anyhow::bail!("unknown zone: {channel_id}");
         }
+        anyhow::ensure!(
+            bytes.len().is_multiple_of(3),
+            "invalid lighting frame length"
+        );
+        let colors: Vec<_> = bytes
+            .chunks_exact(3)
+            .map(|chunk| RgbColor {
+                r: chunk[0],
+                g: chunk[1],
+                b: chunk[2],
+            })
+            .collect();
         self.chain_hub
-            .write_chain_slice(&self.channel_id, &self.id, colors)
+            .write_chain_slice(&self.channel_id, &self.id, &colors)
             .await
     }
 }

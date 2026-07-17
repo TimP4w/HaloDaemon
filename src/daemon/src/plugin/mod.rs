@@ -23,6 +23,7 @@ pub(crate) mod runtime;
 pub mod usecases;
 
 #[cfg(any(test, feature = "plugin-test"))]
+#[allow(unused_imports)]
 pub use manifest::parse_manifest_from_dir;
 pub use manifest::{DeviceSpec, EffectKind, PluginManifest, ProbeMode};
 pub use runtime::device::LuaDevice;
@@ -2168,10 +2169,10 @@ impl Registry {
         if manifest
             .capabilities
             .iter()
-            .any(|capability| capability == "chain")
+            .any(|capability| capability == "lighting_division")
         {
-            let adapter: Arc<dyn crate::drivers::chain::ChainAdapter> = device.clone();
-            let host = crate::drivers::chain::ChainHost::new(adapter);
+            let adapter: Arc<dyn crate::drivers::chain::LightingDivisionAdapter> = device.clone();
+            let host = crate::drivers::chain::LightingDivisionHost::new(adapter);
             device.install_chain_host(host);
         }
         Some(device as Arc<dyn Device>)

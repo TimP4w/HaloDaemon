@@ -59,14 +59,8 @@ pub const CALLBACKS_V1: &[CallbackContract] = &[
     callback!("close", Lifecycle, "dev", "nil"),
     callback!("close_child", Lifecycle, "dev", "nil"),
     callback!("pre_scan", Lifecycle, "dev", "nil"),
-    callback!("apply", Capability, "dev, RgbState", "nil"),
-    callback!(
-        "write_frame",
-        Capability,
-        "dev, zone_id, colors, led_ids",
-        "nil"
-    ),
-    callback!("write_frame_batch", Optional, "dev, Frame[]", "nil"),
+    callback!("apply", Capability, "dev, LightingState", "nil"),
+    callback!("write_frame", Capability, "dev, channel_id, bytes", "nil"),
     callback!("read_status", Optional, "dev", "PollOutcome | nil"),
     callback!("event", Optional, "dev, Event", "PollOutcome | nil"),
     callback!(
@@ -82,12 +76,6 @@ pub const CALLBACKS_V1: &[CallbackContract] = &[
         "DetectedController[]"
     ),
     callback!("detect_accessories", Optional, "dev", "DetectedAccessory[]"),
-    callback!(
-        "write_ext_frame",
-        Capability,
-        "dev, channel_id, colors",
-        "nil"
-    ),
     callback!(
         "get_cooling_status",
         Capability,
@@ -203,7 +191,7 @@ pub const TABLES_V1: &[TableContract] = &[
     },
     TableContract {
         name: "dev",
-        fields: "transport; match; status?; zones?; audio?",
+        fields: "transport; match; status?; channels?; audio?",
     },
     TableContract {
         name: "dev.match",
@@ -215,7 +203,7 @@ pub const TABLES_V1: &[TableContract] = &[
     },
     TableContract {
         name: "Frame",
-        fields: "zone_id; colors; led_ids",
+        fields: "channel_id; bytes",
     },
     TableContract {
         name: "PollOutcome",
@@ -223,11 +211,11 @@ pub const TABLES_V1: &[TableContract] = &[
     },
     TableContract {
         name: "InitTable",
-        fields: "ok?; model?; capabilities?; zones?; native_effects?; lcd?; chain?; accessories?; controls?; dpi?; cooling={channels={{id; name; kind='fan'|'pump'; controllable}, ...}}?; fan?; key_remap?; keyboard?; ranges?; choices?",
+        fields: "ok?; model?; capabilities?; lighting={channels={{id; name; topology; led_count; color_order?; division?}, ...}; native_effects?}?; lcd?; accessories?; controls?; dpi?; cooling={channels={{id; name; kind='fan'|'pump'; controllable}, ...}}?; key_remap?; keyboard?; ranges?; choices?",
     },
     TableContract {
         name: "DetectedController",
-        fields: "index; name; device_type?; id?; key?; serial?; location?; extra?; zones?",
+        fields: "index; name; device_type?; id?; key?; serial?; location?; extra?; channels?",
     },
     TableContract {
         name: "DetectedControllerZone",

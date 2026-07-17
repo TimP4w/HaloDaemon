@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::types::{
-    ButtonMapping, EffectDef, EffectParamValue, MacroStep, PluginAuthority, RgbState, SamplingMode,
-    VisibilityState, ZoneTopology,
+    ButtonMapping, EffectDef, EffectParamValue, LightingState, MacroStep, PluginAuthority,
+    SamplingMode, VisibilityState, ZoneTopology,
 };
 use crate::zone_transform::ZoneContentTransform;
 use serde::{Deserialize, Serialize};
@@ -102,7 +102,7 @@ pub enum DaemonCommand {
     SetLightingTargets {
         device_ids: Vec<String>,
         #[serde(default)]
-        zones: HashMap<String, Vec<String>>,
+        channels: HashMap<String, Vec<String>>,
     },
 
     // App rules
@@ -285,34 +285,34 @@ pub enum DaemonCommand {
     },
 
     // RGB
-    RgbApply {
+    LightingApply {
         id: String,
-        state: RgbState,
+        state: LightingState,
     },
-    RgbSetZoneTransform {
+    LightingSetChannelTransform {
         id: String,
-        zone_id: String,
+        channel_id: String,
         transform: ZoneContentTransform,
     },
-    RgbChainAddLink {
+    LightingAddSegment {
         id: String,
         channel_id: String,
         name: String,
         led_count: u32,
         topology: ZoneTopology,
     },
-    RgbChainRemoveLink {
+    LightingRemoveSegment {
         id: String,
         channel_id: String,
-        child_device_id: String,
+        device_id: String,
     },
-    RgbChainReorderLink {
+    LightingReorderSegment {
         id: String,
         channel_id: String,
-        child_device_id: String,
+        device_id: String,
         new_index: usize,
     },
-    RgbChainDetectChannel {
+    LightingDetectSegments {
         id: String,
         channel_id: String,
     },
@@ -410,7 +410,7 @@ pub enum DaemonCommand {
     },
     CanvasPlaceZone {
         device_id: String,
-        zone_id: String,
+        channel_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         x: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,11 +428,11 @@ pub enum DaemonCommand {
     },
     CanvasRemoveZone {
         device_id: String,
-        zone_id: String,
+        channel_id: String,
     },
     CanvasMoveZone {
         device_id: String,
-        zone_id: String,
+        channel_id: String,
         x: f64,
         y: f64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -946,14 +946,14 @@ mod tests {
     fn set_lighting_targets_wire_format() {
         let v = roundtrip(&DaemonCommand::SetLightingTargets {
             device_ids: vec!["dev1".into()],
-            zones: HashMap::from([("dev1".to_string(), vec!["z0".to_string()])]),
+            channels: HashMap::from([("dev1".to_string(), vec!["z0".to_string()])]),
         });
         assert_eq!(
             v,
             json!({
                 "type": "set_lighting_targets",
                 "device_ids": ["dev1"],
-                "zones": {"dev1": ["z0"]}
+                "channels": {"dev1": ["z0"]}
             })
         );
     }
@@ -988,37 +988,37 @@ mod tests {
     }
 
     #[test]
-    fn rgb_apply_carries_rgb_state() {
-        let v = roundtrip(&DaemonCommand::RgbApply {
+    fn lighting_apply_carries_rgb_state() {
+        let v = roundtrip(&DaemonCommand::LightingApply {
             id: "d".into(),
-            state: RgbState::Static {
+            state: LightingState::Static {
                 color: RgbColor { r: 1, g: 2, b: 3 },
             },
         });
         assert_eq!(
             v,
-            json!({"type": "rgb_apply", "id": "d", "state": {"mode": "static", "color": {"r": 1, "g": 2, "b": 3}}})
+            json!({"type": "lighting_apply", "id": "d", "state": {"mode": "static", "color": {"r": 1, "g": 2, "b": 3}}})
         );
     }
 
     #[test]
-    fn rgb_apply_carries_direct_effect_state() {
-        let v = roundtrip(&DaemonCommand::RgbApply {
+    fn lighting_apply_carries_direct_effect_state() {
+        let v = roundtrip(&DaemonCommand::LightingApply {
             id: "d".into(),
-            state: RgbState::DirectEffect {
+            state: LightingState::DirectEffect {
                 id: "rainbow".into(),
                 params: HashMap::new(),
             },
         });
         assert_eq!(
             v,
-            json!({"type": "rgb_apply", "id": "d", "state": {"mode": "direct_effect", "id": "rainbow", "params": {}}})
+            json!({"type": "lighting_apply", "id": "d", "state": {"mode": "direct_effect", "id": "rainbow", "params": {}}})
         );
         let back: DaemonCommand = serde_json::from_value(v).unwrap();
         assert!(matches!(
             back,
-            DaemonCommand::RgbApply {
-                state: RgbState::DirectEffect { .. },
+            DaemonCommand::LightingApply {
+                state: LightingState::DirectEffect { .. },
                 ..
             }
         ));
@@ -1075,7 +1075,7 @@ mod tests {
     fn place_zone_carries_effect_instance() {
         let v = roundtrip(&DaemonCommand::CanvasPlaceZone {
             device_id: "d".into(),
-            zone_id: "z".into(),
+            channel_id: "z".into(),
             x: None,
             y: None,
             w: None,
@@ -1207,7 +1207,7 @@ mod tests {
     #[test]
     fn struct_variant_ignores_unmodelled_fields() {
         let cmd: DaemonCommand = serde_json::from_value(
-            json!({"type": "canvas_place_zone", "device_id": "d", "zone_id": "z", "x": 0.1, "y": 0.2}),
+            json!({"type": "canvas_place_zone", "device_id": "d", "channel_id": "z", "x": 0.1, "y": 0.2}),
         )
         .unwrap();
         assert!(matches!(cmd, DaemonCommand::CanvasPlaceZone { .. }));

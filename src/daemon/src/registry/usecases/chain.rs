@@ -1,69 +1,35 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! IPC use cases for chainable ARGB channels. Each handler forwards to the
-//! device's shared [`crate::drivers::chain::ChainHost`], then persists and broadcasts.
+//! device's shared [`crate::drivers::chain::LightingDivisionHost`], then persists and broadcasts.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
-use crate::drivers::chain::ChainHost;
+use crate::drivers::chain::LightingDivisionHost;
 use crate::drivers::{ChainLinkSpec, Device};
 use crate::ipc;
-use crate::platform::notify;
-use crate::registry::config::{ChainLinkRecord, ChannelLayoutRecord, DeviceLayout};
 use crate::state::AppState;
 use halod_shared::types::ZoneTopology;
 
-fn require_chain(device: &Arc<dyn Device>) -> Result<&Arc<ChainHost>> {
+fn require_chain(device: &Arc<dyn Device>) -> Result<&Arc<LightingDivisionHost>> {
     device
         .chain_host()
         .context("device does not support chainable channels")
 }
 
-/// Locked (hardware-detected) links are skipped — rediscovered each boot.
+/// Lighting segments are intentionally not persisted across the hard lighting
+/// model cut.  The runtime descriptor is the only source of truth.
 pub(super) async fn persist_layout(app: &Arc<AppState>, device: &dyn Device) -> Result<()> {
-    let Some(chain) = device.chain_host() else {
-        return Ok(());
-    };
     let dev_id = device.id().to_owned();
-
-    let layout = {
-        let mut channels = std::collections::HashMap::new();
-        for channel in chain.chainable_channels() {
-            let mut links = Vec::new();
-            for link in channel.links {
-                if link.locked {
-                    continue;
-                }
-                links.push(ChainLinkRecord {
-                    id: link.child_device_id,
-                    name: link.name,
-                    topology: link.topology,
-                    led_count: link.led_count,
-                });
-            }
-            if !links.is_empty() {
-                channels.insert(
-                    channel.channel_id,
-                    ChannelLayoutRecord { chain_links: links },
-                );
-            }
-        }
-        DeviceLayout { channels }
-    };
-
     {
         let mut cfg = app.config.write().await;
-        if layout.channels.is_empty() {
-            cfg.device_layouts.remove(&dev_id);
-        } else {
-            cfg.device_layouts.insert(dev_id, layout);
-        }
+        cfg.device_layouts.remove(&dev_id);
     }
     app.request_config_save();
     Ok(())
 }
 
-pub async fn rgb_chain_add_link(
+pub async fn lighting_add_segment(
     id: String,
     channel_id: String,
     name: String,
@@ -93,7 +59,7 @@ pub async fn rgb_chain_add_link(
     Ok(())
 }
 
-pub async fn rgb_chain_remove_link(
+pub async fn lighting_remove_segment(
     id: String,
     channel_id: String,
     child_device_id: String,
@@ -112,7 +78,7 @@ pub async fn rgb_chain_remove_link(
     Ok(())
 }
 
-pub async fn rgb_chain_reorder_link(
+pub async fn lighting_reorder_segment(
     id: String,
     channel_id: String,
     child_device_id: String,
@@ -131,7 +97,7 @@ pub async fn rgb_chain_reorder_link(
     Ok(())
 }
 
-pub async fn rgb_chain_detect_channel(
+pub async fn lighting_detect_segments(
     id: String,
     channel_id: String,
     app: Arc<AppState>,
@@ -141,84 +107,10 @@ pub async fn rgb_chain_detect_channel(
     chain.detect_channel(&channel_id).await
 }
 
-/// No broadcast — the regular startup broadcast picks the restored links up.
-///
-/// Failed records (e.g. a topology that no longer validates) are purged from
-/// the saved config: the UI cannot edit a link that never materialized as a
-/// device, so leaving the record around would fail every restart. The user
-/// gets a notification explaining what was dropped.
+/// Legacy chain layouts are deliberately discarded by the lighting hard cut.
 pub async fn restore_saved_chains(app: Arc<AppState>) {
-    let layouts = {
-        let cfg = app.config.read().await;
-        cfg.device_layouts.clone()
-    };
-    if layouts.is_empty() {
-        return;
-    }
-
-    let mut failed: Vec<(String, String, String)> = Vec::new();
-
-    let devices = app.devices.read().await.clone();
-    for device in &devices {
-        let Some(layout) = layouts.get(device.id()) else {
-            continue;
-        };
-        let Some(chain) = device.chain_host() else {
-            log::warn!(
-                "[chain restore] device {} has saved layout but no chain host, skipping",
-                device.id()
-            );
-            continue;
-        };
-        for (channel_id, channel_layout) in &layout.channels {
-            for record in &channel_layout.chain_links {
-                match chain.restore_link(channel_id, record).await {
-                    Ok(child_device) => {
-                        crate::registry::usecases::registration::register_device(
-                            &app,
-                            child_device,
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        notify::send(
-                            &app,
-                            halod_shared::types::NotificationCode::ChainLinkRestoreFailed {
-                                name: record.name.clone(),
-                                detail: format!("{}/{}: {e}", device.id(), channel_id),
-                            },
-                        )
-                        .await;
-                        failed.push((
-                            device.id().to_owned(),
-                            channel_id.clone(),
-                            record.id.clone(),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    if failed.is_empty() {
-        return;
-    }
-
     let mut cfg = app.config.write().await;
-    for (device_id, channel_id, record_id) in &failed {
-        let Some(layout) = cfg.device_layouts.get_mut(device_id) else {
-            continue;
-        };
-        if let Some(channel) = layout.channels.get_mut(channel_id) {
-            channel.chain_links.retain(|r| r.id != *record_id);
-            if channel.chain_links.is_empty() {
-                layout.channels.remove(channel_id);
-            }
-        }
-        if layout.channels.is_empty() {
-            cfg.device_layouts.remove(device_id);
-        }
-    }
+    cfg.device_layouts.clear();
     drop(cfg);
     app.request_config_save();
 }
@@ -227,11 +119,11 @@ pub async fn restore_saved_chains(app: Arc<AppState>) {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::drivers::chain::{ChainAdapter, ChainHost, ChainLinkRuntime, ChannelDescriptor};
+    use crate::drivers::chain::{ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost};
     use crate::drivers::{CapabilityRef, Device};
-    use crate::registry::config::{ChannelLayoutRecord, DeviceLayout};
+    use crate::registry::config::{ChainLinkRecord, ChannelLayoutRecord, DeviceLayout};
     use async_trait::async_trait;
-    use halod_shared::types::{ChainLinkInfo, ChainableChannelInfo, ZoneTopology};
+    use halod_shared::types::{ColorOrder, ZoneTopology};
     use std::sync::Arc;
 
     fn make_app_with(dev: Arc<dyn Device>) -> Arc<AppState> {
@@ -246,7 +138,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ChainAdapter for MockAdapter {
+    impl LightingDivisionAdapter for MockAdapter {
         fn parent_id(&self) -> String {
             self.id.clone()
         }
@@ -255,24 +147,24 @@ mod tests {
             self.channels.clone()
         }
 
-        async fn write_composed_frame(
+        async fn write_divided_frame(
             &self,
             _channel_id: &str,
-            _composed: &[halod_shared::types::RgbColor],
+            _composed: &[u8],
         ) -> anyhow::Result<()> {
             Ok(())
         }
     }
 
-    /// Minimal Device with a real ChainHost controlled by the test.
+    /// Minimal Device with a real LightingDivisionHost controlled by the test.
     struct MockChainDevice {
         id: String,
-        host: Arc<ChainHost>,
+        host: Arc<LightingDivisionHost>,
     }
 
     impl MockChainDevice {
         fn new(id: &str) -> Self {
-            let host = ChainHost::new(Arc::new(MockAdapter {
+            let host = LightingDivisionHost::new(Arc::new(MockAdapter {
                 id: id.to_owned(),
                 channels: vec![],
             }));
@@ -281,37 +173,14 @@ mod tests {
                 host,
             }
         }
-        fn with_channels(self, channels: Vec<ChainableChannelInfo>) -> Self {
-            let descriptors = channels
-                .iter()
-                .map(|channel| ChannelDescriptor {
-                    channel_id: channel.channel_id.clone(),
-                    display_name: channel.name.clone(),
-                    max_leds: channel.max_leds,
-                })
-                .collect();
-            let host = ChainHost::new(Arc::new(MockAdapter {
+        fn with_channels(self, descriptors: Vec<ChannelDescriptor>) -> Self {
+            let host = LightingDivisionHost::new(Arc::new(MockAdapter {
                 id: self.id.clone(),
                 channels: descriptors,
             }));
             {
                 let mut state = host.state.lock().unwrap();
-                for channel in channels {
-                    let target = state.get_mut(&channel.channel_id).unwrap();
-                    target.links = channel
-                        .links
-                        .into_iter()
-                        .map(|link| {
-                            ChainLinkRuntime::new(
-                                link.child_device_id,
-                                link.name,
-                                link.topology,
-                                link.led_count,
-                                link.locked,
-                            )
-                        })
-                        .collect();
-                }
+                let _ = &mut state;
             }
             Self { id: self.id, host }
         }
@@ -341,7 +210,7 @@ mod tests {
         fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
             vec![]
         }
-        fn chain_host(&self) -> Option<&Arc<ChainHost>> {
+        fn chain_host(&self) -> Option<&Arc<LightingDivisionHost>> {
             Some(&self.host)
         }
     }
@@ -350,21 +219,26 @@ mod tests {
         ZoneTopology::Linear
     }
 
+    fn channel(id: &str, name: &str, max_leds: u32) -> ChannelDescriptor {
+        ChannelDescriptor {
+            channel_id: id.into(),
+            display_name: name.into(),
+            max_leds,
+            color_order: ColorOrder::Rgb,
+        }
+    }
+
     // led_count == 0
 
     #[tokio::test]
     async fn rgb_chain_add_link_rejects_led_count_zero() {
-        let dev =
-            Arc::new(
-                MockChainDevice::new("dev1").with_channels(vec![ChainableChannelInfo {
-                    channel_id: "ch0".into(),
-                    name: "Channel 0".into(),
-                    max_leds: 100,
-                    links: vec![],
-                }]),
-            );
+        let dev = Arc::new(MockChainDevice::new("dev1").with_channels(vec![channel(
+            "ch0",
+            "Channel 0",
+            100,
+        )]));
         let app = make_app_with(dev as Arc<dyn Device>);
-        let err = rgb_chain_add_link(
+        let err = lighting_add_segment(
             "dev1".into(),
             "ch0".into(),
             "strip".into(),
@@ -380,70 +254,31 @@ mod tests {
         );
     }
 
-    // persist_layout skips locked links; removes entry when empty
+    // The hard cut drops every persisted segment layout.
 
     #[tokio::test]
-    async fn persist_layout_skips_locked_links() {
-        let dev =
-            Arc::new(
-                MockChainDevice::new("dev1").with_channels(vec![ChainableChannelInfo {
-                    channel_id: "ch0".into(),
-                    name: "Channel 0".into(),
-                    max_leds: 100,
-                    links: vec![
-                        ChainLinkInfo {
-                            child_device_id: "locked-child".into(),
-                            name: "Locked".into(),
-                            topology: strip_topology(),
-                            led_count: 5,
-                            locked: true,
-                        },
-                        ChainLinkInfo {
-                            child_device_id: "user-child".into(),
-                            name: "User".into(),
-                            topology: strip_topology(),
-                            led_count: 3,
-                            locked: false,
-                        },
-                    ],
-                }]),
-            );
+    async fn persist_layout_discards_legacy_layout() {
+        let dev = Arc::new(MockChainDevice::new("dev1").with_channels(vec![channel(
+            "ch0",
+            "Channel 0",
+            100,
+        )]));
         let app = make_app_with(dev.clone() as Arc<dyn Device>);
 
         persist_layout(&app, dev.as_ref()).await.unwrap();
 
         let cfg = app.config.read().await;
-        let layout = cfg
-            .device_layouts
-            .get("dev1")
-            .expect("layout must be saved");
-        let channel = layout.channels.get("ch0").expect("channel must exist");
-        assert_eq!(
-            channel.chain_links.len(),
-            1,
-            "only the unlocked link should be persisted"
-        );
-        assert_eq!(channel.chain_links[0].id, "user-child");
+        assert!(!cfg.device_layouts.contains_key("dev1"));
     }
 
     #[tokio::test]
     async fn persist_layout_removes_device_entry_when_all_channels_empty() {
         // All links are locked → nothing to persist → device entry removed.
-        let dev =
-            Arc::new(
-                MockChainDevice::new("dev1").with_channels(vec![ChainableChannelInfo {
-                    channel_id: "ch0".into(),
-                    name: "Channel 0".into(),
-                    max_leds: 100,
-                    links: vec![ChainLinkInfo {
-                        child_device_id: "locked".into(),
-                        name: "Locked".into(),
-                        topology: strip_topology(),
-                        led_count: 5,
-                        locked: true,
-                    }],
-                }]),
-            );
+        let dev = Arc::new(MockChainDevice::new("dev1").with_channels(vec![channel(
+            "ch0",
+            "Channel 0",
+            100,
+        )]));
         let app = make_app_with(dev.clone() as Arc<dyn Device>);
         // Pre-seed a stale entry so we can confirm it's removed.
         app.config.write().await.device_layouts.insert(

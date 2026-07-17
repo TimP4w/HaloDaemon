@@ -4,14 +4,15 @@
 use std::sync::Arc;
 
 use crate::drivers::{
-    chain::ChainHub,
+    chain::LightingDivisionHub,
     vendors::generic::devices::common::{ring_led_positions, transformed_zone_frame},
-    CapabilityRef, Device, RgbCapability, RgbStateSlot, VisibilitySlot,
+    CapabilityRef, Device, LightingCapability, LightingStateSlot, VisibilitySlot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{
-    DeviceType, LedPosition, RgbColor, RgbDescriptor, RgbState, RgbZone, ZoneTopology,
+    DeviceType, LedPosition, LightingChannel, LightingDescriptor, LightingState, RgbColor,
+    ZoneTopology,
 };
 
 fn topology_to_positions(topology: &ZoneTopology, count: u32) -> Vec<LedPosition> {
@@ -52,21 +53,21 @@ fn topology_to_positions(topology: &ZoneTopology, count: u32) -> Vec<LedPosition
     }
 }
 
-/// Shared state for the unified `GenericArgb`. The authoritative display name
-/// lives in the parent's `ChainHost` state, read via `ChainHub::link_name`;
+/// Shared state for the unified `LightingSegmentDevice`. The authoritative display name
+/// lives in the parent's `LightingDivisionHost` state, read via `LightingDivisionHub::link_name`;
 /// `fallback_name` is only used when the host has lost the slot.
-pub struct GenericArgbCore {
+pub struct LightingSegmentCore {
     pub id: String,
     pub channel_id: String,
     pub fallback_name: String,
     pub topology: ZoneTopology,
     pub led_count: u32,
     pub leds: Vec<LedPosition>,
-    pub rgb: RgbStateSlot,
+    pub rgb: LightingStateSlot,
     pub visibility: VisibilitySlot,
 }
 
-impl GenericArgbCore {
+impl LightingSegmentCore {
     pub fn new(
         id: String,
         channel_id: String,
@@ -82,34 +83,36 @@ impl GenericArgbCore {
             topology,
             led_count,
             leds,
-            rgb: RgbStateSlot::default(),
+            rgb: LightingStateSlot::default(),
             visibility: VisibilitySlot::default(),
         }
     }
 }
 
-pub struct GenericArgb {
-    core: GenericArgbCore,
-    hub: Arc<dyn ChainHub>,
-    rgb_descriptor: RgbDescriptor,
+pub struct LightingSegmentDevice {
+    core: LightingSegmentCore,
+    hub: Arc<dyn LightingDivisionHub>,
+    rgb_descriptor: LightingDescriptor,
 }
 
-impl GenericArgb {
+impl LightingSegmentDevice {
     pub fn new(
         id: String,
         channel_id: String,
         name: String,
         topology: ZoneTopology,
         led_count: u32,
-        hub: Arc<dyn ChainHub>,
+        hub: Arc<dyn LightingDivisionHub>,
     ) -> Self {
-        let core = GenericArgbCore::new(id, channel_id, name, topology, led_count);
-        let rgb_descriptor = RgbDescriptor {
-            zones: vec![RgbZone {
+        let core = LightingSegmentCore::new(id, channel_id, name, topology, led_count);
+        let rgb_descriptor = LightingDescriptor {
+            channels: vec![LightingChannel {
                 id: "strip".to_string(),
                 name: "Strip".to_string(),
                 topology: core.topology.clone(),
                 leds: core.leds.clone(),
+                color_order: Default::default(),
+                division: Default::default(),
             }],
             native_effects: vec![],
         };
@@ -120,25 +123,27 @@ impl GenericArgb {
         }
     }
 
-    async fn apply_state(&self, state: RgbState) -> Result<()> {
+    async fn apply_state(&self, state: LightingState) -> Result<()> {
         let led_count = self.core.led_count as usize;
         match &state {
-            RgbState::Static { color } => {
+            LightingState::Static { color } => {
                 let colors = vec![*color; led_count];
                 self.hub
                     .write_chain_slice(&self.core.channel_id, &self.core.id, &colors)
                     .await?;
             }
-            RgbState::PerLed { zones } => {
-                if let Some(led_map) = zones.get("strip") {
-                    let zone = &self.rgb_descriptor.zones[0];
+            LightingState::PerLed { channels } => {
+                if let Some(led_map) = channels.get("strip") {
+                    let zone = &self.rgb_descriptor.channels[0];
                     let colors = transformed_zone_frame(zone, &self.core.rgb, led_map);
                     self.hub
                         .write_chain_slice(&self.core.channel_id, &self.core.id, &colors)
                         .await?;
                 }
             }
-            RgbState::NativeEffect { .. } | RgbState::Engine | RgbState::DirectEffect { .. } => {}
+            LightingState::NativeEffect { .. }
+            | LightingState::Engine
+            | LightingState::DirectEffect { .. } => {}
         }
         self.core.rgb.set_state(Some(state));
         Ok(())
@@ -146,7 +151,7 @@ impl GenericArgb {
 }
 
 #[async_trait]
-impl Device for GenericArgb {
+impl Device for LightingSegmentDevice {
     fn id(&self) -> &str {
         &self.core.id
     }
@@ -184,7 +189,7 @@ impl Device for GenericArgb {
     }
 
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-        vec![CapabilityRef::Rgb(self)]
+        vec![CapabilityRef::Lighting(self)]
     }
 
     fn visibility_slot(&self) -> Option<&VisibilitySlot> {
@@ -197,25 +202,37 @@ impl Device for GenericArgb {
 }
 
 #[async_trait]
-impl RgbCapability for GenericArgb {
-    fn descriptor(&self) -> &RgbDescriptor {
+impl LightingCapability for LightingSegmentDevice {
+    fn descriptor(&self) -> &LightingDescriptor {
         &self.rgb_descriptor
     }
 
-    async fn apply(&self, state: RgbState) -> Result<()> {
+    async fn apply(&self, state: LightingState) -> Result<()> {
         self.apply_state(state).await
     }
 
-    fn rgb_state(&self) -> &RgbStateSlot {
+    fn lighting_state(&self) -> &LightingStateSlot {
         &self.core.rgb
     }
 
-    async fn write_frame(&self, zone_id: &str, colors: &[RgbColor]) -> Result<()> {
-        if zone_id != "strip" {
-            anyhow::bail!("unknown zone: {zone_id}");
+    async fn write_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()> {
+        if channel_id != "strip" {
+            anyhow::bail!("unknown zone: {channel_id}");
         }
+        anyhow::ensure!(
+            bytes.len() == self.core.led_count as usize * 3,
+            "invalid lighting frame length"
+        );
+        let colors: Vec<_> = bytes
+            .chunks_exact(3)
+            .map(|chunk| RgbColor {
+                r: chunk[0],
+                g: chunk[1],
+                b: chunk[2],
+            })
+            .collect();
         self.hub
-            .write_chain_slice(&self.core.channel_id, &self.core.id, colors)
+            .write_chain_slice(&self.core.channel_id, &self.core.id, &colors)
             .await
     }
 }

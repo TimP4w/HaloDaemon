@@ -10,8 +10,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use halod_shared::types::{
     Animation, CategoryLayout, ChoiceDisplay, ChoiceOption, DeviceType, EffectParamDescriptor,
     EffectParamValue, LcdPresetDescriptor, LcdWidgetDescriptor, LcdWidgetResize, LcdWidgetUpdates,
-    ParamKind, Permission, PluginConfigFieldKind, PluginConfigVisibility, PluginKind, RangeDisplay,
-    RgbDescriptor, RgbZone, ZoneTopology,
+    LightingChannel, LightingDescriptor, ParamKind, Permission, PluginConfigFieldKind,
+    PluginConfigVisibility, PluginKind, RangeDisplay, ZoneTopology,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -490,7 +490,7 @@ pub struct ActionDef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectKind {
-    /// Fills a shared pixmap once per frame; zones sample it (`canvas`).
+    /// Fills a shared pixmap once per frame; channels sample it (`canvas`).
     Pixmap,
     /// Computes one color per LED directly (`direct`).
     Direct,
@@ -665,7 +665,7 @@ pub struct AccessoryManifest {
 }
 
 /// Map a topology name (+ ring count for "rings") to a [`ZoneTopology`]. Shared
-/// by static accessory zones and dynamic `initialize`-reported zones.
+/// by static accessory channels and dynamic `initialize`-reported channels.
 pub fn topology_from(topology: &str, rings: u8) -> ZoneTopology {
     match topology {
         "linear" => ZoneTopology::Linear,
@@ -682,15 +682,17 @@ impl AccessoryManifest {
         topology_from(&self.topology, self.rings)
     }
 
-    pub fn rgb_descriptor(&self) -> RgbDescriptor {
+    pub fn rgb_descriptor(&self) -> LightingDescriptor {
         let topology = self.zone_topology();
         let leds = ring_led_positions(&topology, self.led_count);
-        RgbDescriptor {
-            zones: vec![RgbZone {
+        LightingDescriptor {
+            channels: vec![LightingChannel {
                 id: "ring".to_owned(),
                 name: "Ring".to_owned(),
                 topology,
                 leds,
+                color_order: Default::default(),
+                division: Default::default(),
             }],
             native_effects: vec![],
         }
@@ -1249,7 +1251,7 @@ pub fn check_led_count(what: &str, led_count: u32) -> Result<()> {
 /// tables the daemon builds per zone outside the plugin VM's memory cap.
 pub fn check_zone_count(n: usize) -> Result<()> {
     if n > MAX_PLUGIN_ZONES {
-        bail!("declares {n} RGB zones, exceeding the {MAX_PLUGIN_ZONES} limit");
+        bail!("declares {n} RGB channels, exceeding the {MAX_PLUGIN_ZONES} limit");
     }
     Ok(())
 }
@@ -1844,7 +1846,7 @@ fn validate_device_identifiers(manifest: &PluginManifest) -> Result<()> {
 
 /// Capability identifiers accepted by the canonical package contract.
 pub(in crate::plugin) const SUPPORTED_CAPABILITIES: &[&str] = &[
-    "rgb",
+    "lighting",
     "cooling",
     "fan",
     "sensors",
@@ -1858,7 +1860,7 @@ pub(in crate::plugin) const SUPPORTED_CAPABILITIES: &[&str] = &[
     "equalizer",
     "pairing",
     "controls",
-    "chain",
+    "lighting_division",
 ];
 
 fn validate_catalog(manifest: &PluginManifest) -> Result<()> {
@@ -3339,20 +3341,20 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "dirplug",
-            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
         assert_eq!(m.plugin_id, "dirplug");
         assert_eq!(m.devices.len(), 1);
         assert_eq!(m.devices[0].vendor, "Acme");
-        assert_eq!(m.capabilities, vec!["rgb"]);
+        assert_eq!(m.capabilities, vec!["lighting"]);
     }
 
     #[test]
     fn rich_config_fields_parse_with_metadata_and_typed_defaults() {
         let tmp = tempfile::tempdir().unwrap();
-        let common = "permissions: [hid, secure_storage]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, options: [auto, manual], default: auto }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 6742 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com/api' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 2500, min: 100, max: 10000 }\n    - key: detail\n      label: Detail\n      placeholder: Optional value\n      help: Used only in manual mode.\n      visible_when: { field: mode, equals: manual }\n    - { key: token, label: Token, secure: true }\n";
+        let common = "permissions: [hid, secure_storage]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, options: [auto, manual], default: auto }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 6742 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com/api' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 2500, min: 100, max: 10000 }\n    - key: detail\n      label: Detail\n      placeholder: Optional value\n      help: Used only in manual mode.\n      visible_when: { field: mode, equals: manual }\n    - { key: token, label: Token, secure: true }\n";
         let dir = write_plugin_dir(tmp.path(), "rich_config", common, ENTRY_LUA);
 
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -3377,7 +3379,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "insecure_secret",
-            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: token, label: Token, secure: true }\n",
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: token, label: Token, secure: true }\n",
             ENTRY_LUA,
         );
 
@@ -3434,7 +3436,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: dirplug2\nentry: driver.lua\nlicense: GPL-3.0-or-later\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "id: dirplug2\nentry: driver.lua\nlicense: GPL-3.0-or-later\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("driver.lua"), ENTRY_LUA).unwrap();
@@ -3453,12 +3455,12 @@ mod tests {
             type = "integration",
             devices = { { transport = "hid", vid = 9, pid = 9, vendor = "Lua", model = "Ignored" } },
             identity = { name = "Ignored Name" },
-            rgb = { zones = {} },
+            lighting = { channels = {} },
         }"#;
         let dir = write_plugin_dir(
             tmp.path(),
             "overlaid",
-            "type: device\nname: Real Name\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Real\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "type: device\nname: Real Name\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Real\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             lua,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
@@ -3587,13 +3589,13 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "actual-dir-name",
-            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         // Rewrite plugin.yaml claiming a different id than the directory name.
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: someone-else\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "id: someone-else\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
         )
         .unwrap();
         assert!(parse_manifest_from_dir(&dir).is_err());
@@ -3610,7 +3612,7 @@ mod tests {
         let no_entry = write_plugin_dir(
             tmp.path(),
             "no_entry",
-            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         std::fs::remove_file(no_entry.join("main.lua")).unwrap();
@@ -3633,7 +3635,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "noassets",
-            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
@@ -3647,7 +3649,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "withassets",
-            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
              logo: logo.png\n\
              effects:\n  - kind: pixmap\n    id: rainbow\n    name: Rainbow\n\
              effect_assets:\n  - id: rainbow\n    thumbnail: rainbow.png\n",
@@ -3666,7 +3668,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "conv",
-            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         // No `logo:` in the manifest, but the file is present.
@@ -3685,7 +3687,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: nested_match\nname: Nested Match\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: mouse\n    match:\n      hid:\n        vid: 0x1234\n        pid: 0x5678\n",
+            "id: nested_match\nname: Nested Match\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: mouse\n    match:\n      hid:\n        vid: 0x1234\n        pid: 0x5678\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
@@ -3703,7 +3705,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: nested_smbus\npermissions: [smbus]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: DRAM\n    type: ram\n    match:\n      smbus:\n        bus: chipset\n        addresses: [0x50]\n",
+            "id: nested_smbus\npermissions: [smbus]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: DRAM\n    type: ram\n    match:\n      smbus:\n        bus: chipset\n        addresses: [0x50]\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();

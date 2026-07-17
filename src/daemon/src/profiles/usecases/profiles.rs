@@ -212,22 +212,25 @@ pub async fn rename_profile(old_name: String, new_name: String, app: Arc<AppStat
 /// Persist the RGB Lighting view's device/zone selection in the active profile.
 pub async fn set_lighting_targets(
     device_ids: Vec<String>,
-    zones: std::collections::HashMap<String, Vec<String>>,
+    channels: std::collections::HashMap<String, Vec<String>>,
     app: Arc<AppState>,
 ) -> Result<()> {
     let cap = halod_shared::types::MAX_LIGHTING_TARGET_IDS;
     anyhow::ensure!(device_ids.len() <= cap, "too many lighting target devices");
-    anyhow::ensure!(zones.len() <= cap, "too many lighting target zones");
+    anyhow::ensure!(channels.len() <= cap, "too many lighting target channels");
     anyhow::ensure!(
-        zones.values().all(|v| v.len() <= cap),
-        "too many zones for a device"
+        channels.values().all(|v| v.len() <= cap),
+        "too many channels for a device"
     );
     app.config
         .write()
         .await
         .active_profile_data_mut()
         .lighting
-        .targets = halod_shared::types::LightingTargets { device_ids, zones };
+        .targets = halod_shared::types::LightingTargets {
+        device_ids,
+        channels,
+    };
     app.request_config_save();
     crate::ipc::broadcast_state(&app).await;
     Ok(())
@@ -257,7 +260,7 @@ mod tests {
         let cfg = app.config.read().await;
         let gaming = &cfg.profiles["Gaming"].lighting.targets;
         assert_eq!(gaming.device_ids, vec!["dev1"]);
-        assert_eq!(gaming.zones["dev1"], vec!["z0"]);
+        assert_eq!(gaming.channels["dev1"], vec!["z0"]);
         assert!(cfg.profiles[DEFAULT_PROFILE_NAME]
             .lighting
             .targets

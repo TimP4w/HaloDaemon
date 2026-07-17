@@ -236,7 +236,7 @@ mod tests {
         }
     }
 
-    const KRAKEN: &str = "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: NZXT\n    model: Kraken\n    type: led_strip\n    match:\n      hid: { vid: 0x1e71, pid: 0x2007 }\n";
+    const KRAKEN: &str = "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: NZXT\n    model: Kraken\n    type: led_strip\n    match:\n      hid: { vid: 0x1e71, pid: 0x2007 }\n";
 
     #[test]
     fn concrete_match_recommends_a_disabled_plugin() {
@@ -289,7 +289,7 @@ mod tests {
     fn wildcard_match_never_recommends() {
         let m = manifest(
             "wild",
-            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: X\n    model: Y\n    type: led_strip\n    match:\n      hid: { any: true }\n",
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: X\n    model: Y\n    type: led_strip\n    match:\n      hid: { any: true }\n",
         );
         assert!(
             recommendations(&[m], &|_| false, &[hid_entry(1, 2)], &[], &[], &|_| false,).is_empty()
@@ -300,7 +300,7 @@ mod tests {
     fn usage_constraint_is_honored_and_duplicates_collapse() {
         let m = manifest(
             "usage_gated",
-            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: X\n    model: Y\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678, usage_page: 0xffab }\n",
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: X\n    model: Y\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678, usage_page: 0xffab }\n",
         );
         // Wrong usage_page → no match.
         assert!(recommendations(
@@ -359,7 +359,7 @@ mod tests {
     fn gpu_smbus_match_is_passive_and_pci_gated() {
         let m = manifest(
             "gpu_smbus",
-            "permissions: [smbus]\ncapabilities: [rgb]\ndevices:\n  - vendor: X\n    model: GPU\n    type: gpu\n    match:\n      smbus:\n        bus: gpu\n        addresses: [0x67]\n        pci_match: [{ vendor: 0x10de, sub_vendor: 0x1043 }]\n",
+            "permissions: [smbus]\ncapabilities: [lighting]\ndevices:\n  - vendor: X\n    model: GPU\n    type: gpu\n    match:\n      smbus:\n        bus: gpu\n        addresses: [0x67]\n        pci_match: [{ vendor: 0x10de, sub_vendor: 0x1043 }]\n",
         );
         let bus = BusInfo {
             bus_number: 1,

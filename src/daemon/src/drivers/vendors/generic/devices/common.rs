@@ -6,17 +6,17 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 
 use halod_shared::types::{
-    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, LedPosition, RgbColor, RgbZone,
-    WireDevice, ZoneTopology,
+    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, LedPosition, LightingChannel,
+    LightingDivision, RgbColor, WireDevice, ZoneTopology,
 };
 use halod_shared::zone_transform::transform_colors;
 
-use crate::drivers::RgbStateSlot;
+use crate::drivers::LightingStateSlot;
 
 /// Assemble a fixed-length per-LED colour frame from one zone's
 /// `index -> colour` map. LED indices are decimal strings; any index missing
 /// from the map (or `>= count`) is left black. This turns the sparse
-/// `RgbState::PerLed` representation into the contiguous frame hardware wants.
+/// `LightingState::PerLed` representation into the contiguous frame hardware wants.
 pub fn per_led_frame(led_map: &HashMap<String, RgbColor>, count: usize) -> Vec<RgbColor> {
     (0..count)
         .map(|i| {
@@ -29,12 +29,12 @@ pub fn per_led_frame(led_map: &HashMap<String, RgbColor>, count: usize) -> Vec<R
 }
 
 /// Build one zone's transformed per-LED frame: assemble the sparse
-/// `RgbState::PerLed` map into a contiguous frame ([`per_led_frame`]), then apply
+/// `LightingState::PerLed` map into a contiguous frame ([`per_led_frame`]), then apply
 /// the zone's saved content transform. One source of truth for the LED-frame path
 /// shared by every RGB device and child leaf.
 pub fn transformed_zone_frame(
-    zone: &RgbZone,
-    slot: &RgbStateSlot,
+    zone: &LightingChannel,
+    slot: &LightingStateSlot,
     led_map: &HashMap<String, RgbColor>,
 ) -> Vec<RgbColor> {
     let colors = per_led_frame(led_map, zone.leds.len());
@@ -78,7 +78,7 @@ pub fn ring_led_positions(topology: &ZoneTopology, count: u32) -> Vec<LedPositio
 }
 
 /// Build a linear RGB zone with `led_count` evenly-spaced LEDs.
-pub fn linear_rgb_zone(id: &str, name: &str, led_count: usize) -> RgbZone {
+pub fn linear_lighting_channel(id: &str, name: &str, led_count: usize) -> LightingChannel {
     let leds = (0..led_count)
         .map(|i| LedPosition {
             id: i as u32,
@@ -90,11 +90,13 @@ pub fn linear_rgb_zone(id: &str, name: &str, led_count: usize) -> RgbZone {
             y: 0.5,
         })
         .collect();
-    RgbZone {
+    LightingChannel {
         id: id.to_string(),
         name: name.to_string(),
         topology: ZoneTopology::Linear,
         leds,
+        color_order: Default::default(),
+        division: LightingDivision::Indivisible,
     }
 }
 
@@ -229,7 +231,7 @@ mod tests {
 
     #[test]
     fn linear_rgb_zone_single_led_centered() {
-        let zone = linear_rgb_zone("leds", "LEDs", 1);
+        let zone = linear_lighting_channel("leds", "LEDs", 1);
         assert_eq!(zone.id, "leds");
         assert_eq!(zone.name, "LEDs");
         assert!(matches!(zone.topology, ZoneTopology::Linear));
@@ -240,7 +242,7 @@ mod tests {
 
     #[test]
     fn linear_rgb_zone_multiple_leds_evenly_spaced() {
-        let zone = linear_rgb_zone("leds", "LEDs", 5);
+        let zone = linear_lighting_channel("leds", "LEDs", 5);
         assert_eq!(zone.leds.len(), 5);
         assert!((zone.leds[0].x - 0.0).abs() < f32::EPSILON);
         assert!((zone.leds[4].x - 1.0).abs() < f32::EPSILON);

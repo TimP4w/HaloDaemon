@@ -165,11 +165,11 @@ impl PendingCommands {
     /// Queue a debounced move for one zone (replacing any pending move for it).
     fn queue_move(&mut self, z: &PlacedZone, deadline: f64) {
         self.move_zones.insert(
-            geometry::zone_key(&z.device_id, &z.zone_id),
+            geometry::zone_key(&z.device_id, &z.channel_id),
             (
                 halod_shared::commands::DaemonCommand::CanvasMoveZone {
                     device_id: z.device_id.clone(),
-                    zone_id: z.zone_id.clone(),
+                    channel_id: z.channel_id.clone(),
                     x: z.x as f64,
                     y: z.y as f64,
                     w: Some(z.w as f64),
@@ -203,7 +203,7 @@ pub struct CanvasUi {
     rename_buf: String,
     /// Set when rename editing starts; cleared after requesting focus.
     rename_just_started: bool,
-    /// The instance whose assign-zones modal is open.
+    /// The instance whose assign-channels modal is open.
     zones_modal: Option<String>,
     /// Whether the "new instance" picker modal is open.
     new_instance_modal: bool,
@@ -292,7 +292,7 @@ fn regroup_led_colors(dst: &mut LedColorMap, entries: &[halod_shared::types::Led
         inner.clear();
     }
     for e in entries {
-        dst.entry((e.device_id.clone(), e.zone_id.clone()))
+        dst.entry((e.device_id.clone(), e.channel_id.clone()))
             .or_default()
             .insert(e.led_id, e.color);
     }
@@ -366,7 +366,7 @@ pub(crate) fn body(
                 cmd,
                 halod_shared::commands::DaemonCommand::CanvasRemoveZone {
                     device_id: dev,
-                    zone_id: zone,
+                    channel_id: zone,
                 },
             );
         }
@@ -445,7 +445,7 @@ fn prune_drag_zones(canvas_ui: &mut CanvasUi, state: &AppState) {
             .canvas
             .placed_zones
             .iter()
-            .find(|z| geometry::zone_key(&z.device_id, &z.zone_id) == *key)
+            .find(|z| geometry::zone_key(&z.device_id, &z.channel_id) == *key)
         {
             Some(z) => {
                 let matched = (z.x - ov.x).abs() < 5e-3
@@ -472,7 +472,7 @@ mod test_fixtures {
     pub fn z(x: f32, y: f32, w: f32, h: f32) -> PlacedZone {
         PlacedZone {
             device_id: "d".into(),
-            zone_id: "z".into(),
+            channel_id: "z".into(),
             x,
             y,
             w,
@@ -483,9 +483,9 @@ mod test_fixtures {
         }
     }
 
-    pub fn zone_with(zone_id: &str, effect: Option<&str>) -> PlacedZone {
+    pub fn zone_with(channel_id: &str, effect: Option<&str>) -> PlacedZone {
         let mut zone = z(0.0, 0.0, 0.1, 0.1);
-        zone.zone_id = zone_id.into();
+        zone.channel_id = channel_id.into();
         zone.effect = effect.map(str::to_string);
         zone
     }
@@ -511,7 +511,7 @@ mod test_fixtures {
     pub fn led(dev: &str, zone: &str, id: u32, v: u8) -> halod_shared::types::LedFrameEntry {
         halod_shared::types::LedFrameEntry {
             device_id: dev.into(),
-            zone_id: zone.into(),
+            channel_id: zone.into(),
             led_id: id,
             color: RgbColor { r: v, g: v, b: v },
         }

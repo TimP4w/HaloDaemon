@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Vendor-agnostic chain machinery.
 //!
-//! Parent drivers that expose chainable ARGB channels embed a [`ChainHost`]
-//! and implement [`ChainAdapter`]. The host owns all chain state and CRUD;
+//! Parent drivers that expose chainable ARGB channels embed a [`LightingDivisionHost`]
+//! and implement [`LightingDivisionAdapter`]. The host owns all chain state and CRUD;
 //! the adapter is the small vendor-specific surface that just enumerates
 //! channels and writes composed frames to the wire.
 //!
 //! Children — instances of
-//! [`crate::drivers::vendors::generic::devices::generic_argb::GenericArgb`] —
-//! talk to the host through the [`ChainHub`] trait.
+//! [`crate::drivers::lighting_segment::LightingSegmentDevice`] —
+//! talk to the host through the [`LightingDivisionHub`] trait.
 //!
 //! See `docs/chainable-argb.md` for the end-to-end walkthrough.
 
@@ -21,13 +21,12 @@ use async_trait::async_trait;
 use tokio::sync::Mutex as TokioMutex;
 
 use halod_shared::types::{
-    ChainLinkInfo, ChainableChannelInfo, DeviceCapability, RgbColor, RgbDescriptor, RgbStatus,
-    ZoneTopology,
+    ColorOrder, DeviceCapability, LightingChannel, LightingDescriptor, LightingDivision,
+    LightingSegmentInfo, LightingStatus, RgbColor, ZoneTopology,
 };
 
-use crate::drivers::vendors::generic::devices::generic_argb::GenericArgb;
+use crate::drivers::lighting_segment::LightingSegmentDevice;
 use crate::drivers::{ChainLinkSpec, Device};
-use crate::registry::config::ChainLinkRecord;
 
 #[derive(Debug, Clone)]
 pub struct ChainLinkRuntime {
@@ -58,12 +57,14 @@ impl ChainLinkRuntime {
         }
     }
 
-    pub fn info(&self) -> ChainLinkInfo {
-        ChainLinkInfo {
-            child_device_id: self.child_id.clone(),
+    pub fn info(&self) -> LightingSegmentInfo {
+        LightingSegmentInfo {
+            device_id: self.child_id.clone(),
+            channel_id: "lighting".to_string(),
             name: self.name.clone(),
             topology: self.topology.clone(),
             led_count: self.led_count,
+            color_order: None,
             locked: self.locked,
         }
     }
@@ -159,26 +160,27 @@ pub struct ChannelDescriptor {
     pub channel_id: String,
     pub display_name: String,
     pub max_leds: u32,
+    pub color_order: ColorOrder,
 }
 
 /// Vendor-specific surface a parent must implement. Tiny on purpose — the
-/// shared CRUD lives in [`ChainHost`].
+/// shared CRUD lives in [`LightingDivisionHost`].
 #[async_trait]
-pub trait ChainAdapter: Send + Sync + 'static {
+pub trait LightingDivisionAdapter: Send + Sync + 'static {
     fn parent_id(&self) -> String;
 
     /// Enumerate every chainable channel this parent exposes, in stable order.
     fn channels(&self) -> Vec<ChannelDescriptor>;
 
-    /// Write `composed` (already a single contiguous color array for the whole
-    /// channel) to the wire.
-    async fn write_composed_frame(&self, channel_id: &str, composed: &[RgbColor]) -> Result<()>;
+    /// Write a fully encoded, contiguous frame to the wire.  Drivers must
+    /// transmit these bytes verbatim; channel encoding is owned by the host.
+    async fn write_divided_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()>;
 }
 
 /// Child-side interface. Generic ARGB children call this to push their slice
 /// of the chain frame.
 #[async_trait]
-pub trait ChainHub: Send + Sync + 'static {
+pub trait LightingDivisionHub: Send + Sync + 'static {
     async fn write_chain_slice(
         &self,
         channel_id: &str,
@@ -188,25 +190,25 @@ pub trait ChainHub: Send + Sync + 'static {
 
     /// Look up the runtime name of a chain link. Children call this from
     /// `serialize()` so a `set_device_name` IPC (routed via
-    /// the owning `ChainHost` for external-name devices) reaches
+    /// the owning `LightingDivisionHost` for external-name devices) reaches
     /// the wire device label without per-child name storage.
     fn link_name(&self, channel_id: &str, child_device_id: &str) -> Option<String>;
 }
 
 /// Shared chain runtime. Owns state + adapter + the Arc handles to spawned
-/// children; drivers expose their embedded `Arc<ChainHost>` through
+/// children; drivers expose their embedded `Arc<LightingDivisionHost>` through
 /// [`crate::drivers::Device::chain_host`].
-pub struct ChainHost {
-    adapter: Arc<dyn ChainAdapter>,
+pub struct LightingDivisionHost {
+    adapter: Arc<dyn LightingDivisionAdapter>,
     /// `std::sync::Mutex`: operations never cross `.await` while holding it.
     pub(crate) state: Mutex<HashMap<String, ChannelChainState>>,
     /// Every device the host knows about; `TokioMutex` since `serialize()` reads it async.
     children: TokioMutex<Vec<Arc<dyn Device>>>,
 }
 
-impl ChainHost {
+impl LightingDivisionHost {
     /// Build a host wrapping `adapter`, pre-seeded with an empty chain per channel.
-    pub fn new(adapter: Arc<dyn ChainAdapter>) -> Arc<Self> {
+    pub fn new(adapter: Arc<dyn LightingDivisionAdapter>) -> Arc<Self> {
         let mut state: HashMap<String, ChannelChainState> = HashMap::new();
         for d in adapter.channels() {
             state.insert(d.channel_id, ChannelChainState::default());
@@ -227,7 +229,7 @@ impl ChainHost {
 
     /// Snapshot of every chainable channel + its current links. Sync method
     /// called from the device serializer.
-    pub fn chainable_channels(&self) -> Vec<ChainableChannelInfo> {
+    pub fn lighting_channels(&self) -> Vec<LightingChannel> {
         let channels = self.adapter.channels();
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         channels
@@ -235,7 +237,17 @@ impl ChainHost {
             .map(|d| {
                 let empty = ChannelChainState::default();
                 let chain = state.get(&d.channel_id).unwrap_or(&empty);
-                channel_info(&d.channel_id, &d.display_name, d.max_leds, chain)
+                LightingChannel {
+                    id: d.channel_id,
+                    name: d.display_name,
+                    topology: ZoneTopology::Linear,
+                    leds: Vec::new(),
+                    color_order: d.color_order,
+                    division: LightingDivision::Divisible {
+                        max_leds: d.max_leds,
+                        segments: chain.links.iter().map(ChainLinkRuntime::info).collect(),
+                    },
+                }
             })
             .collect()
     }
@@ -243,13 +255,13 @@ impl ChainHost {
     /// Register a hardware-detected first link (locked). Called from the
     /// parent's `discover_children` after `child.initialize()` succeeds. The
     /// host tracks the child Arc itself so the parent's `serialize()` reads
-    /// children directly from [`ChainHost::children`].
+    /// children directly from [`LightingDivisionHost::children`].
     pub async fn register_auto_link(&self, channel_id: &str, child: Arc<dyn Device>) {
-        let Some(rgb) = child.as_rgb() else {
+        let Some(rgb) = child.as_lighting() else {
             return;
         };
         let desc = rgb.descriptor().clone();
-        let Some(zone) = desc.zones.first() else {
+        let Some(zone) = desc.channels.first() else {
             return;
         };
         let link = ChainLinkRuntime::new(
@@ -290,6 +302,14 @@ impl ChainHost {
             .into_iter()
             .find(|d| d.channel_id == channel_id)
             .map(|d| d.max_leds)
+    }
+
+    fn color_order(&self, channel_id: &str) -> Option<ColorOrder> {
+        self.adapter
+            .channels()
+            .into_iter()
+            .find(|d| d.channel_id == channel_id)
+            .map(|d| d.color_order)
     }
 
     /// Append a new user-added chain link, spawn its child device, register it
@@ -440,35 +460,31 @@ impl ChainHost {
         let black = vec![RgbColor { r: 0, g: 0, b: 0 }; max_leds as usize];
 
         for _ in 0..3 {
-            self.adapter.write_composed_frame(channel_id, &red).await?;
+            self.adapter
+                .write_divided_frame(
+                    channel_id,
+                    &encode_frame(self.color_order(channel_id).unwrap_or_default(), &red),
+                )
+                .await?;
             tokio::time::sleep(Duration::from_millis(300)).await;
             self.adapter
-                .write_composed_frame(channel_id, &black)
+                .write_divided_frame(
+                    channel_id,
+                    &encode_frame(self.color_order(channel_id).unwrap_or_default(), &black),
+                )
                 .await?;
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
         if !saved.is_empty() {
-            self.adapter.write_composed_frame(channel_id, saved).await?;
+            self.adapter
+                .write_divided_frame(
+                    channel_id,
+                    &encode_frame(self.color_order(channel_id).unwrap_or_default(), saved),
+                )
+                .await?;
         }
         Ok(())
-    }
-
-    /// Replay a persisted link at startup. No broadcast; no persist — the
-    /// caller already owns both responsibilities at boot time.
-    pub async fn restore_link(
-        self: &Arc<Self>,
-        channel_id: &str,
-        record: &ChainLinkRecord,
-    ) -> Result<Arc<dyn Device>> {
-        self.spawn_link(
-            channel_id,
-            &record.id,
-            record.name.clone(),
-            record.topology.clone(),
-            record.led_count,
-        )
-        .await
     }
 
     fn spawn_child(
@@ -478,9 +494,9 @@ impl ChainHost {
         name: String,
         topology: ZoneTopology,
         led_count: u32,
-    ) -> Arc<GenericArgb> {
-        let hub: Arc<dyn ChainHub> = self.clone();
-        Arc::new(GenericArgb::new(
+    ) -> Arc<LightingSegmentDevice> {
+        let hub: Arc<dyn LightingDivisionHub> = self.clone();
+        Arc::new(LightingSegmentDevice::new(
             child_id.to_string(),
             channel_id.to_string(),
             name,
@@ -492,7 +508,7 @@ impl ChainHost {
 }
 
 /// Serialize chain children for the parent's wire capability list.
-pub async fn children_to_wire(host: &ChainHost) -> Option<DeviceCapability> {
+pub async fn children_to_wire(host: &LightingDivisionHost) -> Option<DeviceCapability> {
     let children = host.children().await;
     if children.is_empty() {
         return None;
@@ -504,36 +520,45 @@ pub async fn children_to_wire(host: &ChainHost) -> Option<DeviceCapability> {
     Some(DeviceCapability::Children(wires))
 }
 
-/// Merge a host's chainable channels into an existing RGB capability, or
-/// prepend a minimal RGB carrier when the parent has no RGB capability.
-pub fn enrich_wire_capabilities(host: &ChainHost, caps: &mut Vec<DeviceCapability>) {
-    let channels = host.chainable_channels();
+/// Merge a host's divisible channels into the parent lighting capability.
+pub fn enrich_wire_capabilities(host: &LightingDivisionHost, caps: &mut Vec<DeviceCapability>) {
+    let channels = host.lighting_channels();
     if channels.is_empty() {
         return;
     }
-    if let Some(rgb) = caps.iter_mut().find_map(|cap| match cap {
-        DeviceCapability::Rgb(rgb) => Some(rgb),
+    if let Some(lighting) = caps.iter_mut().find_map(|cap| match cap {
+        DeviceCapability::Lighting(lighting) => Some(lighting),
         _ => None,
     }) {
-        rgb.chainable_channels = channels;
+        for channel in channels {
+            if let Some(existing) = lighting
+                .descriptor
+                .channels
+                .iter_mut()
+                .find(|existing| existing.id == channel.id)
+            {
+                *existing = channel;
+            } else {
+                lighting.descriptor.channels.push(channel);
+            }
+        }
     } else {
         caps.insert(
             0,
-            DeviceCapability::Rgb(RgbStatus {
-                descriptor: RgbDescriptor {
-                    zones: vec![],
+            DeviceCapability::Lighting(LightingStatus {
+                descriptor: LightingDescriptor {
+                    channels: vec![],
                     native_effects: vec![],
                 },
                 state: None,
-                zone_transforms: HashMap::new(),
-                chainable_channels: channels,
+                channel_transforms: HashMap::new(),
             }),
         );
     }
 }
 
 #[async_trait]
-impl ChainHub for ChainHost {
+impl LightingDivisionHub for LightingDivisionHost {
     async fn write_chain_slice(
         &self,
         channel_id: &str,
@@ -555,8 +580,15 @@ impl ChainHub for ChainHost {
             }
             chain.composed_frame()
         };
+        let order = self
+            .adapter
+            .channels()
+            .into_iter()
+            .find(|channel| channel.channel_id == channel_id)
+            .map(|channel| channel.color_order)
+            .ok_or_else(|| anyhow::anyhow!("unknown lighting channel: {channel_id}"))?;
         self.adapter
-            .write_composed_frame(channel_id, &outcome)
+            .write_divided_frame(channel_id, &encode_frame(order, &outcome))
             .await
     }
 
@@ -568,18 +600,11 @@ impl ChainHub for ChainHost {
     }
 }
 
-pub fn channel_info(
-    channel_id: &str,
-    name: &str,
-    max_leds: u32,
-    state: &ChannelChainState,
-) -> ChainableChannelInfo {
-    ChainableChannelInfo {
-        channel_id: channel_id.to_string(),
-        name: name.to_string(),
-        max_leds,
-        links: state.links.iter().map(|l| l.info()).collect(),
-    }
+fn encode_frame(order: ColorOrder, colors: &[RgbColor]) -> Vec<u8> {
+    colors
+        .iter()
+        .flat_map(|color| order.encode(*color))
+        .collect()
 }
 
 /// Returns a user-facing reason on failure.
@@ -752,36 +777,31 @@ mod tests {
     }
 
     #[test]
-    fn channel_info_carries_state_metadata_and_links() {
+    fn segment_info_carries_runtime_metadata() {
         let mut state = ChannelChainState::default();
         state.append(link("a", 24, true));
         state.append(link("b", 30, false));
-        let info = channel_info("ch0", "Channel 1", 120, &state);
-        assert_eq!(info.channel_id, "ch0");
-        assert_eq!(info.links.len(), 2);
-        assert!(info.links[0].locked);
-        assert!(!info.links[1].locked);
+        let info: Vec<_> = state.links.iter().map(ChainLinkRuntime::info).collect();
+        assert_eq!(info.len(), 2);
+        assert!(info[0].locked);
+        assert!(!info[1].locked);
     }
 
     struct StubAdapter {
         parent_id: String,
         channels: Vec<ChannelDescriptor>,
-        last_written: Mutex<Vec<(String, Vec<RgbColor>)>>,
+        last_written: Mutex<Vec<(String, Vec<u8>)>>,
     }
 
     #[async_trait]
-    impl ChainAdapter for StubAdapter {
+    impl LightingDivisionAdapter for StubAdapter {
         fn parent_id(&self) -> String {
             self.parent_id.clone()
         }
         fn channels(&self) -> Vec<ChannelDescriptor> {
             self.channels.clone()
         }
-        async fn write_composed_frame(
-            &self,
-            channel_id: &str,
-            composed: &[RgbColor],
-        ) -> Result<()> {
+        async fn write_divided_frame(&self, channel_id: &str, composed: &[u8]) -> Result<()> {
             self.last_written
                 .lock()
                 .unwrap()
@@ -790,27 +810,31 @@ mod tests {
         }
     }
 
-    fn stub_parts() -> (Arc<ChainHost>, Arc<StubAdapter>) {
+    fn stub_parts() -> (Arc<LightingDivisionHost>, Arc<StubAdapter>) {
         let adapter = Arc::new(StubAdapter {
             parent_id: "parent_x".to_string(),
             channels: vec![ChannelDescriptor {
                 channel_id: "a".to_string(),
                 display_name: "Channel A".to_string(),
                 max_leds: 120,
+                color_order: ColorOrder::Rgb,
             }],
             last_written: Mutex::new(Vec::new()),
         });
-        let host = ChainHost::new(adapter.clone());
+        let host = LightingDivisionHost::new(adapter.clone());
         (host, adapter)
     }
 
     #[test]
-    fn chainable_channels_reports_seeded_channels_with_empty_state() {
+    fn lighting_channels_reports_seeded_division() {
         let host = stub_parts().0;
-        let info = host.chainable_channels();
+        let info = host.lighting_channels();
         assert_eq!(info.len(), 1);
-        assert_eq!(info[0].channel_id, "a");
-        assert!(info[0].links.is_empty());
+        assert_eq!(info[0].id, "a");
+        assert!(matches!(
+            &info[0].division,
+            LightingDivision::Divisible { segments, .. } if segments.is_empty()
+        ));
     }
 
     #[tokio::test(start_paused = true)]
@@ -836,15 +860,15 @@ mod tests {
         assert_eq!(written.len(), 6);
         for (i, (ch, colors)) in written.iter().enumerate() {
             assert_eq!(ch, "a");
-            assert_eq!(colors.len(), 120);
+            assert_eq!(colors.len(), 360);
             if i % 2 == 0 {
                 assert!(
-                    colors.iter().all(|c| c.r == 255 && c.g == 0 && c.b == 0),
+                    colors.chunks_exact(3).all(|pixel| pixel == [255, 0, 0]),
                     "write {i} should be red"
                 );
             } else {
                 assert!(
-                    colors.iter().all(|c| *c == (RgbColor { r: 0, g: 0, b: 0 })),
+                    colors.iter().all(|byte| *byte == 0),
                     "write {i} should be black"
                 );
             }
@@ -912,23 +936,23 @@ mod tests {
             .is_empty());
     }
 
-    use crate::drivers::{CapabilityRef, RgbCapability, RgbStateSlot};
-    use halod_shared::types::{LedPosition, RgbDescriptor, RgbState, RgbZone};
+    use crate::drivers::{CapabilityRef, LightingCapability, LightingStateSlot};
+    use halod_shared::types::{LedPosition, LightingChannel, LightingDescriptor, LightingState};
 
     /// Minimal RGB device with a single zone — enough to exercise
     /// `register_auto_link`, which reads the first zone's topology + led count.
     struct StubRgbDevice {
         id: String,
-        desc: RgbDescriptor,
-        rgb: RgbStateSlot,
+        desc: LightingDescriptor,
+        rgb: LightingStateSlot,
     }
 
     impl StubRgbDevice {
         fn new(id: &str, leds: u32) -> Arc<Self> {
             Arc::new(Self {
                 id: id.to_string(),
-                desc: RgbDescriptor {
-                    zones: vec![RgbZone {
+                desc: LightingDescriptor {
+                    channels: vec![LightingChannel {
                         id: "z0".to_string(),
                         name: "z0".to_string(),
                         topology: ZoneTopology::Linear,
@@ -939,10 +963,12 @@ mod tests {
                                 y: 0.0,
                             })
                             .collect(),
+                        color_order: Default::default(),
+                        division: Default::default(),
                     }],
                     native_effects: vec![],
                 },
-                rgb: RgbStateSlot::default(),
+                rgb: LightingStateSlot::default(),
             })
         }
     }
@@ -966,22 +992,22 @@ mod tests {
         }
         async fn close(&self) {}
         fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![CapabilityRef::Rgb(self)]
+            vec![CapabilityRef::Lighting(self)]
         }
     }
 
     #[async_trait]
-    impl RgbCapability for StubRgbDevice {
-        fn descriptor(&self) -> &RgbDescriptor {
+    impl LightingCapability for StubRgbDevice {
+        fn descriptor(&self) -> &LightingDescriptor {
             &self.desc
         }
-        async fn apply(&self, _: RgbState) -> Result<()> {
+        async fn apply(&self, _: LightingState) -> Result<()> {
             Ok(())
         }
-        async fn write_frame(&self, _: &str, _: &[RgbColor]) -> Result<()> {
+        async fn write_frame(&self, _: &str, _: &[u8]) -> Result<()> {
             Ok(())
         }
-        fn rgb_state(&self) -> &RgbStateSlot {
+        fn lighting_state(&self) -> &LightingStateSlot {
             &self.rgb
         }
     }

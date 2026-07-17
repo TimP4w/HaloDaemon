@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{LedPosition, RgbColor, RgbZone, ZoneTopology};
+use crate::types::{LedPosition, LightingChannel, RgbColor, ZoneTopology};
 
 /// LED-content transform parameters for one RGB zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -117,7 +117,7 @@ pub fn unrolled_led_pos(index: usize, total: usize) -> (f32, f32) {
 /// slice for `Rings`); non-ring topologies use a position-mirror — each LED is
 /// mapped to the LED nearest the mirror of its position about the zone centre.
 /// An identity transform (or an unpartitionable `Rings` zone) yields `0..n`.
-pub fn build_permutation(zone: &RgbZone, t: &ZoneContentTransform) -> Vec<usize> {
+pub fn build_permutation(zone: &LightingChannel, t: &ZoneContentTransform) -> Vec<usize> {
     let n = zone.leds.len();
     if t.is_identity() || n == 0 {
         return (0..n).collect();
@@ -202,7 +202,7 @@ pub(crate) fn is_bijection(perm: &[usize]) -> bool {
 /// Apply [`build_permutation`] to a zone's colour array.
 pub fn transform_colors(
     colors: &[RgbColor],
-    zone: &RgbZone,
+    zone: &LightingChannel,
     t: &ZoneContentTransform,
 ) -> Vec<RgbColor> {
     if t.is_identity() {
@@ -223,8 +223,8 @@ pub fn transform_colors(
 mod tests {
     use super::*;
 
-    fn ring_zone(topology: ZoneTopology, n: usize) -> RgbZone {
-        RgbZone {
+    fn ring_zone(topology: ZoneTopology, n: usize) -> LightingChannel {
+        LightingChannel {
             id: "z".into(),
             name: "Z".into(),
             topology,
@@ -235,12 +235,14 @@ mod tests {
                     y: 0.0,
                 })
                 .collect(),
+            color_order: Default::default(),
+            division: Default::default(),
         }
     }
 
-    fn grid_zone() -> RgbZone {
+    fn grid_zone() -> LightingChannel {
         // 2x2 grid: ids 0,1 top row; 2,3 bottom row.
-        RgbZone {
+        LightingChannel {
             id: "g".into(),
             name: "G".into(),
             topology: ZoneTopology::Grid,
@@ -266,6 +268,8 @@ mod tests {
                     y: 1.0,
                 },
             ],
+            color_order: Default::default(),
+            division: Default::default(),
         }
     }
 
@@ -449,7 +453,7 @@ mod tests {
         // Three collinear LEDs with no mirror partner for the middle one: the
         // nearest-neighbour mirror collides (both ends map to the same source),
         // so the flip must degrade to identity rather than drop/duplicate a LED.
-        let zone = RgbZone {
+        let zone = LightingChannel {
             id: "k".into(),
             name: "K".into(),
             topology: ZoneTopology::Keyboard {
@@ -473,6 +477,8 @@ mod tests {
                     y: 0.0,
                 },
             ],
+            color_order: Default::default(),
+            division: Default::default(),
         };
         let t = ZoneContentTransform {
             flip_h: true,
@@ -518,8 +524,8 @@ mod prop_tests {
     use super::*;
     use proptest::prelude::*;
 
-    fn line_zone(topology: ZoneTopology, n: usize) -> RgbZone {
-        RgbZone {
+    fn line_zone(topology: ZoneTopology, n: usize) -> LightingChannel {
+        LightingChannel {
             id: "z".into(),
             name: "Z".into(),
             topology,
@@ -530,6 +536,8 @@ mod prop_tests {
                     y: 0.0,
                 })
                 .collect(),
+            color_order: Default::default(),
+            division: Default::default(),
         }
     }
 
@@ -647,13 +655,15 @@ mod prop_tests {
             ys in prop::collection::vec(-100.0f32..100.0, 1..40),
         ) {
             let n = xs.len().min(ys.len());
-            let zone = RgbZone {
+            let zone = LightingChannel {
                 id: "z".into(),
                 name: "Z".into(),
                 topology: ZoneTopology::Grid,
                 leds: (0..n)
                     .map(|i| LedPosition { id: i as u32, x: xs[i], y: ys[i] })
                     .collect(),
+                color_order: Default::default(),
+                division: Default::default(),
             };
             let perm = build_permutation(&zone, &t);
             prop_assert_eq!(perm.len(), n);

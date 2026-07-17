@@ -26,7 +26,7 @@ pub(super) async fn restore_saved_state(app: &Arc<AppState>, device: &Arc<dyn De
         log::debug!("[{}] restoring saved state", device.name());
         device.load_state(&state).await;
     }
-    if let Some(rgb) = device.as_rgb() {
+    if let Some(rgb) = device.as_lighting() {
         let transforms = {
             let cfg = app.config.read().await;
             cfg.device_transforms
@@ -43,7 +43,7 @@ pub(super) async fn restore_saved_state(app: &Arc<AppState>, device: &Arc<dyn De
 /// Empty every engine-participation slot so engines treat the device as
 /// non-participating. Shared by the disabled-register and visibility paths.
 pub(super) fn clear_engine_slots(device: &Arc<dyn Device>) {
-    if let Some(s) = device.as_rgb() {
+    if let Some(s) = device.as_lighting() {
         s.set_canvas_zones(vec![]);
     }
     if let Some(s) = device.as_cooling() {
@@ -336,7 +336,7 @@ async fn finish_registration(app: &Arc<AppState>, id: &str) {
 /// Register `device`, then — if it's a `Controller` — discover and register
 /// its children too. Shared by every scanner that hosts children (HID hubs,
 /// the plugin-integration scanner): register the parent first so children can
-/// resolve it (e.g. as a `ChainHub`/`FanHub`), then walk `discover_children()`.
+/// resolve it (e.g. as a `LightingDivisionHub`/`FanHub`), then walk `discover_children()`.
 /// Returns whether the parent itself was registered.
 pub async fn register_device_and_children(app: &Arc<AppState>, device: Arc<dyn Device>) -> bool {
     if !register_device(app, device.clone()).await {
@@ -558,7 +558,7 @@ mod tests {
             .unwrap()
             .set_canvas_zones(vec![crate::config::PlacedZone {
                 device_id: "dev-1".into(),
-                zone_id: "ring".into(),
+                channel_id: "ring".into(),
                 x: 0.0,
                 y: 0.0,
                 w: 1.0,
@@ -576,7 +576,7 @@ mod tests {
         clear_engine_slots(&device);
 
         assert!(device.as_cooling().unwrap().curve("default").is_none());
-        assert!(device.as_rgb().unwrap().canvas_zones().is_empty());
+        assert!(device.as_lighting().unwrap().placed_channels().is_empty());
         assert!(device.as_lcd().unwrap().lcd_template_id().is_none());
     }
 
@@ -868,9 +868,9 @@ mod tests {
                 "dev-1".to_string(),
                 serde_json::json!({
                     "rgb": {
-                        "canvas_zones": [{
+                        "placed_channels": [{
                             "device_id": "dev-1",
-                            "zone_id": "ring",
+                            "channel_id": "ring",
                             "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "rotation": 0.0
                         }]
                     }
@@ -882,8 +882,8 @@ mod tests {
 
         assert!(result, "disabled device should register");
         assert!(
-            device.rgb.as_ref().unwrap().canvas_zones().is_empty(),
-            "canvas_zones must be cleared after registering a disabled device, \
+            device.rgb.as_ref().unwrap().placed_channels().is_empty(),
+            "placed_channels must be cleared after registering a disabled device, \
              so the canvas engine treats it as non-participating"
         );
     }

@@ -6,14 +6,14 @@ use halod_shared::types::{Battery, BatteryStatus, ConnectionType, DeviceCapabili
 
 use crate::ui::theme::{self, a};
 
-/// Total LED count reported across all of the device's RGB capabilities and zones.
+/// Total LED count reported across all of the device's RGB capabilities and channels.
 pub(super) fn led_count(dev: &WireDevice) -> usize {
     dev.capabilities
         .iter()
         .filter_map(|c| match c {
-            DeviceCapability::Rgb(r) => Some(
+            DeviceCapability::Lighting(r) => Some(
                 r.descriptor
-                    .zones
+                    .channels
                     .iter()
                     .map(|z| z.leds.len())
                     .sum::<usize>(),
@@ -356,8 +356,10 @@ mod tests {
 
     #[test]
     fn led_count_sums_leds_across_zones() {
-        use halod_shared::types::{LedPosition, RgbDescriptor, RgbStatus, RgbZone, ZoneTopology};
-        let zone = |n: u32| RgbZone {
+        use halod_shared::types::{
+            LedPosition, LightingChannel, LightingDescriptor, LightingStatus, ZoneTopology,
+        };
+        let zone = |n: u32| LightingChannel {
             id: "z".into(),
             name: "z".into(),
             topology: ZoneTopology::Linear,
@@ -368,15 +370,16 @@ mod tests {
                     y: 0.0,
                 })
                 .collect(),
+            color_order: Default::default(),
+            division: Default::default(),
         };
-        let cap = DeviceCapability::Rgb(RgbStatus {
-            descriptor: RgbDescriptor {
-                zones: vec![zone(3), zone(5)],
+        let cap = DeviceCapability::Lighting(LightingStatus {
+            descriptor: LightingDescriptor {
+                channels: vec![zone(3), zone(5)],
                 native_effects: vec![],
             },
             state: None,
-            zone_transforms: Default::default(),
-            chainable_channels: vec![],
+            channel_transforms: Default::default(),
         });
         assert_eq!(led_count(&dev(DeviceType::Keyboard, vec![cap])), 8);
         // No RGB capability → zero.

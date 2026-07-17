@@ -56,10 +56,14 @@ pub fn conflict_presentation(
 /// their own `write_rate` is always `None`.
 pub(crate) fn find_hub_write_rate(state: &AppState, device_id: &str) -> Option<WriteRateStatus> {
     state.devices.iter().find_map(|parent| {
-        let is_hub_for_device = parent.rgb().is_some_and(|rgb| {
-            rgb.chainable_channels
-                .iter()
-                .any(|ch| ch.links.iter().any(|l| l.child_device_id == device_id))
+        let is_hub_for_device = parent.lighting().is_some_and(|lighting| {
+            lighting.descriptor.channels.iter().any(|channel| {
+                matches!(
+                    &channel.division,
+                    halod_shared::types::LightingDivision::Divisible { segments, .. }
+                        if segments.iter().any(|segment| segment.device_id == device_id)
+                )
+            })
         });
         is_hub_for_device.then_some(parent.write_rate).flatten()
     })
@@ -616,29 +620,36 @@ mod tests {
         rate: Option<halod_shared::types::WriteRateStatus>,
     ) -> WireDevice {
         use halod_shared::types::{
-            ChainLinkInfo, ChainableChannelInfo, RgbDescriptor, RgbStatus, ZoneTopology,
+            LightingChannel, LightingDescriptor, LightingDivision, LightingSegmentInfo,
+            LightingStatus, ZoneTopology,
         };
         WireDevice {
             id: hub_id.into(),
-            capabilities: vec![DeviceCapability::Rgb(RgbStatus {
-                descriptor: RgbDescriptor {
-                    zones: vec![],
+            capabilities: vec![DeviceCapability::Lighting(LightingStatus {
+                descriptor: LightingDescriptor {
+                    channels: vec![LightingChannel {
+                        id: "0".into(),
+                        name: "Ext".into(),
+                        topology: ZoneTopology::Linear,
+                        leds: vec![],
+                        color_order: Default::default(),
+                        division: LightingDivision::Divisible {
+                            max_leds: 40,
+                            segments: vec![LightingSegmentInfo {
+                                device_id: child_id.into(),
+                                channel_id: "lighting".into(),
+                                name: "Fan".into(),
+                                topology: ZoneTopology::Ring,
+                                led_count: 8,
+                                color_order: None,
+                                locked: false,
+                            }],
+                        },
+                    }],
                     native_effects: vec![],
                 },
                 state: None,
-                zone_transforms: Default::default(),
-                chainable_channels: vec![ChainableChannelInfo {
-                    channel_id: "0".into(),
-                    name: "Ext".into(),
-                    max_leds: 40,
-                    links: vec![ChainLinkInfo {
-                        child_device_id: child_id.into(),
-                        name: "Fan".into(),
-                        topology: ZoneTopology::Ring,
-                        led_count: 8,
-                        locked: false,
-                    }],
-                }],
+                channel_transforms: Default::default(),
             })],
             write_rate: rate,
             ..Default::default()

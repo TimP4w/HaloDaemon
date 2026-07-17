@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Unified device-rename IPC. Routes chain-link children (whose name lives in
-//! the parent's `ChainHost`) through that host, and
+//! the parent's `LightingDivisionHost`) through that host, and
 //! every other device through its `DeviceRecord.name` in the persisted config.
 
 use anyhow::{anyhow, Result};
@@ -55,9 +55,14 @@ async fn rename_chain_link(
         let Some(chain) = parent.chain_host() else {
             continue;
         };
-        for channel in chain.chainable_channels() {
-            if channel.links.iter().any(|l| l.child_device_id == child_id) {
-                found = Some((parent.clone(), channel.channel_id));
+        for channel in chain.lighting_channels() {
+            let halod_shared::types::LightingDivision::Divisible { segments, .. } =
+                channel.division
+            else {
+                continue;
+            };
+            if segments.iter().any(|segment| segment.device_id == child_id) {
+                found = Some((parent.clone(), channel.id));
                 break;
             }
         }
@@ -111,10 +116,10 @@ async fn rename_normal_device(
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::drivers::chain::{ChainAdapter, ChainHost, ChannelDescriptor};
+    use crate::drivers::chain::{ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost};
     use crate::drivers::{CapabilityRef, ChainLinkSpec, Device};
     use async_trait::async_trait;
-    use halod_shared::types::{RgbColor, ZoneTopology};
+    use halod_shared::types::ZoneTopology;
 
     #[tokio::test]
     async fn writes_name_to_device_record() {
@@ -230,7 +235,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ChainAdapter for StubAdapter {
+    impl LightingDivisionAdapter for StubAdapter {
         fn parent_id(&self) -> String {
             self.parent_id.clone()
         }
@@ -239,19 +244,16 @@ mod tests {
                 channel_id: "ch0".into(),
                 display_name: "Channel".into(),
                 max_leds: 120,
+                color_order: Default::default(),
             }]
         }
-        async fn write_composed_frame(
-            &self,
-            _channel_id: &str,
-            _composed: &[RgbColor],
-        ) -> Result<()> {
+        async fn write_divided_frame(&self, _channel_id: &str, _composed: &[u8]) -> Result<()> {
             Ok(())
         }
     }
 
     struct ChainParent {
-        host: Arc<ChainHost>,
+        host: Arc<LightingDivisionHost>,
     }
 
     #[async_trait]
@@ -275,13 +277,13 @@ mod tests {
         fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
             vec![]
         }
-        fn chain_host(&self) -> Option<&Arc<ChainHost>> {
+        fn chain_host(&self) -> Option<&Arc<LightingDivisionHost>> {
             Some(&self.host)
         }
     }
 
     async fn setup_chain_parent_with_one_link(app: &Arc<AppState>) -> String {
-        let host = ChainHost::new(Arc::new(StubAdapter {
+        let host = LightingDivisionHost::new(Arc::new(StubAdapter {
             parent_id: "parent_x".into(),
         }));
         let parent: Arc<dyn Device> = Arc::new(ChainParent { host: host.clone() });
@@ -313,8 +315,12 @@ mod tests {
         let devices = app.devices.read().await;
         let parent = devices.iter().find(|d| d.id() == "parent_x").unwrap();
         let chain = parent.chain_host().unwrap();
-        let info = chain.chainable_channels();
-        assert_eq!(info[0].links.last().unwrap().name, "Top Strip");
+        let info = chain.lighting_channels();
+        let halod_shared::types::LightingDivision::Divisible { segments, .. } = &info[0].division
+        else {
+            panic!("expected divisible channel");
+        };
+        assert_eq!(segments.last().unwrap().name, "Top Strip");
 
         // Chain-link rename must NOT pollute the parent's DeviceRecord.
         let cfg = app.config.read().await;

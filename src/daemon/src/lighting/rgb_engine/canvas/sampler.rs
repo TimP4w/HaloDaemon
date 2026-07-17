@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use halod_shared::types::{RgbColor, RgbZone, SamplingMode, ZoneTopology};
+use halod_shared::types::{LightingChannel, RgbColor, SamplingMode, ZoneTopology};
 use tiny_skia::Pixmap;
 
 use super::super::color::{linear_to_led, linear_to_srgb};
@@ -72,7 +72,7 @@ impl Sampler {
         &self,
         pixmap: &Pixmap,
         placed: &PlacedZone,
-        zone: &RgbZone,
+        zone: &LightingChannel,
     ) -> Vec<RgbColor> {
         let pw = pixmap.width() as f32;
         let ph = pixmap.height() as f32;
@@ -133,7 +133,7 @@ mod tests {
 
         let placed = PlacedZone {
             device_id: "test".to_string(),
-            zone_id: "ring".to_string(),
+            channel_id: "ring".to_string(),
             x: 0.0,
             y: 0.0,
             w: 1.0,
@@ -143,7 +143,7 @@ mod tests {
             sampling_mode: Default::default(),
         };
 
-        let zone = RgbZone {
+        let zone = LightingChannel {
             id: "ring".to_string(),
             name: "Ring".to_string(),
             topology: ZoneTopology::Ring,
@@ -159,6 +159,8 @@ mod tests {
                     y: 0.5,
                 },
             ],
+            color_order: Default::default(),
+            division: Default::default(),
         };
 
         let sampler = Sampler::new(3.0);
@@ -214,8 +216,8 @@ mod tests {
         pixmap
     }
 
-    fn single_led_zone(lx: f32, ly: f32) -> RgbZone {
-        RgbZone {
+    fn single_led_zone(lx: f32, ly: f32) -> LightingChannel {
+        LightingChannel {
             id: "z".to_string(),
             name: "Z".to_string(),
             topology: ZoneTopology::Ring,
@@ -224,13 +226,15 @@ mod tests {
                 x: lx,
                 y: ly,
             }],
+            color_order: Default::default(),
+            division: Default::default(),
         }
     }
 
     fn full_zone() -> PlacedZone {
         PlacedZone {
             device_id: "d".into(),
-            zone_id: "z".into(),
+            channel_id: "z".into(),
             x: 0.0,
             y: 0.0,
             w: 1.0,
@@ -263,7 +267,7 @@ mod tests {
         let sampler = Sampler::new(1.0);
         let placed = PlacedZone {
             device_id: "d".into(),
-            zone_id: "z".into(),
+            channel_id: "z".into(),
             x: 0.25,
             y: 0.25,
             w: 0.5,
