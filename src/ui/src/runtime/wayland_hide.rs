@@ -292,6 +292,9 @@ impl WaylandApp {
                 return;
             }
         };
+        // Deliver while HaloDaemon is still hidden. Some desktops suppress a
+        // banner attributed to the application that currently has focus.
+        self.app.replay_integrity_native_on_reopen();
         win.window.set_visible(true);
         win.window.request_redraw();
         // Rebuild egui input state against the fresh window: the compositor may

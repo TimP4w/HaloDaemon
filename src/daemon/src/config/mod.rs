@@ -377,6 +377,12 @@ pub struct PluginRepoRecord {
     /// URL or branch from silently becoming a different repository.
     #[serde(default)]
     pub repository_id: Option<String>,
+    /// Publisher key pinned on first successful signed import. A later
+    /// revision must verify with this exact key (TOFU continuity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_key: Option<halod_plugin_signing::RepositorySigningKey>,
+    #[serde(default)]
+    pub source_kind: PluginRepoSourceKind,
     #[serde(default)]
     pub branch: Option<String>,
     /// Commit SHA the checked-out working tree is pinned to.
@@ -396,6 +402,14 @@ pub struct PluginRepoRecord {
     /// (RFC 3339), for the GUI's repo detail panel. `None` until the first sync.
     #[serde(default)]
     pub last_sync: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginRepoSourceKind {
+    #[default]
+    Git,
+    Archive,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -728,6 +742,8 @@ mod tests {
             url: "https://example.com/foo.git".into(),
             slug: "foo".into(),
             repository_id: None,
+            trusted_key: None,
+            source_kind: PluginRepoSourceKind::Git,
             branch: Some("main".into()),
             locked_sha: "deadbeef".into(),
             active_revision: Some("deadbeef".into()),
@@ -742,7 +758,22 @@ mod tests {
         assert_eq!(reloaded.plugins.repos[0].slug, "foo");
         assert_eq!(reloaded.plugins.repos[0].locked_sha, "deadbeef");
         assert_eq!(reloaded.plugins.repos[0].branch.as_deref(), Some("main"));
+        assert_eq!(
+            reloaded.plugins.repos[0].source_kind,
+            PluginRepoSourceKind::Git
+        );
+        assert!(reloaded.plugins.repos[0].trusted_key.is_none());
 
         unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
+    }
+
+    #[test]
+    fn legacy_repository_record_defaults_to_unsigned_git() {
+        let record: PluginRepoRecord = serde_yaml::from_str(
+            "url: https://example.com/plugins.git\nslug: plugins\nlocked_sha: abc\n",
+        )
+        .unwrap();
+        assert_eq!(record.source_kind, PluginRepoSourceKind::Git);
+        assert!(record.trusted_key.is_none());
     }
 }

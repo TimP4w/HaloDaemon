@@ -132,18 +132,10 @@ pub enum DaemonCommand {
         id: String,
         enabled: bool,
     },
-    /// Install a plugin package (a directory containing `plugin.yaml` + its
-    /// entry script) into the plugins directory. `source_dir` is a local
-    /// filesystem path — the GUI's folder picker already runs on the same
-    /// host as the daemon. The daemon validates the package before copying
-    /// it in. Applies immediately.
-    ImportPlugin {
-        source_dir: String,
-    },
-    /// Delete a user plugin script by id. Built-in plugins cannot be deleted
-    /// and the daemon rejects the request. Applies immediately.
-    DeletePlugin {
-        id: String,
+    /// Import a complete local repository from a Git directory or a
+    /// `.tar`/`.tar.gz` archive. Standalone plugin packages are not accepted.
+    ImportPluginRepository {
+        source_path: String,
     },
     /// Confirm the exact manifest-derived authority currently displayed in the
     /// enable modal, then enable the plugin. The daemon rejects stale snapshots
@@ -713,22 +705,14 @@ mod tests {
     }
 
     #[test]
-    fn import_plugin_wire_format() {
-        let v = roundtrip(&DaemonCommand::ImportPlugin {
-            source_dir: "/home/user/my-driver".into(),
+    fn import_plugin_repository_wire_format() {
+        let v = roundtrip(&DaemonCommand::ImportPluginRepository {
+            source_path: "/home/user/my-repository.tar.gz".into(),
         });
         assert_eq!(
             v,
-            json!({"type": "import_plugin", "source_dir": "/home/user/my-driver"})
+            json!({"type": "import_plugin_repository", "source_path": "/home/user/my-repository.tar.gz"})
         );
-    }
-
-    #[test]
-    fn delete_plugin_wire_format() {
-        let v = roundtrip(&DaemonCommand::DeletePlugin {
-            id: "my_driver".into(),
-        });
-        assert_eq!(v, json!({"type": "delete_plugin", "id": "my_driver"}));
     }
 
     #[test]

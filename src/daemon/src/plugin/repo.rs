@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use super::PLUGIN_API;
 use crate::constants::OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS;
-pub use halod_plugin_signing::{package_hash, reject_symlinks, RepositoryManifest};
+pub use halod_plugin_signing::{
+    package_hash, reject_symlinks, RepositoryManifest, RepositorySigningKey,
+};
 #[cfg(test)]
 use halod_plugin_signing::{RepositoryCompatibility, REPOSITORY_SCHEMA};
 
@@ -33,7 +35,19 @@ pub fn read_repository_index(repo_dir: &Path) -> Result<RepositoryManifest> {
 /// Verify only the detached official signature at a fetched commit. This does
 /// not parse or validate repository compatibility; callers use it exclusively
 /// for the GUI's signature indicator.
-pub fn verify_official_repository_signature_at_commit(repo_dir: &Path, sha: &str) -> Result<()> {
+#[derive(Debug, Clone, Default)]
+pub enum RepositoryTrust {
+    Official,
+    Pinned(RepositorySigningKey),
+    #[default]
+    Unsigned,
+}
+
+pub fn verify_repository_signature_at_commit(
+    repo_dir: &Path,
+    sha: &str,
+    trust: &RepositoryTrust,
+) -> Result<()> {
     let repo = git2::Repository::open(repo_dir)
         .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
     let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
@@ -44,7 +58,38 @@ pub fn verify_official_repository_signature_at_commit(repo_dir: &Path, sha: &str
         .context("reading commit tree")?;
     let yaml = read_blob_at(&repo, &tree, Path::new("repository.yaml"))?;
     let signature = read_blob_at(&repo, &tree, Path::new("repository.sig"))?;
-    verify_official_signature(&yaml, &signature)
+    verify_signature(&yaml, &signature, trust)
+}
+
+pub fn advertised_signing_key_at_commit(
+    repo_dir: &Path,
+    sha: &str,
+) -> Result<Option<RepositorySigningKey>> {
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let oid = git2::Oid::from_str(sha).with_context(|| format!("parsing sha '{sha}'"))?;
+    let tree = repo.find_commit(oid)?.tree()?;
+    let yaml = read_blob_at(&repo, &tree, Path::new("repository.yaml"))?;
+    let manifest: RepositoryManifest = serde_yaml::from_slice(&yaml)?;
+    halod_plugin_signing::validate_repository_index(&manifest)?;
+    let Some(key) = manifest.signing_key else {
+        return Ok(None);
+    };
+    let signature = read_blob_at(&repo, &tree, Path::new("repository.sig"))?;
+    halod_plugin_signing::verify_advertised_signature(&yaml, &signature, &key)?;
+    Ok(Some(key))
+}
+
+pub fn advertised_signing_key(repo_dir: &Path) -> Result<Option<RepositorySigningKey>> {
+    let yaml = std::fs::read(repo_dir.join("repository.yaml"))?;
+    let manifest: RepositoryManifest = serde_yaml::from_slice(&yaml)?;
+    halod_plugin_signing::validate_repository_index(&manifest)?;
+    let Some(key) = manifest.signing_key else {
+        return Ok(None);
+    };
+    let signature = std::fs::read(repo_dir.join("repository.sig"))?;
+    halod_plugin_signing::verify_advertised_signature(&yaml, &signature, &key)?;
+    Ok(Some(key))
 }
 
 /// Validate only the repository-index structure and Halo/plugin-API
@@ -88,13 +133,17 @@ pub fn verify_official_repository(repo_dir: &Path) -> Result<RepositoryManifest>
 /// Verify only the detached official signature in a materialized revision.
 /// Compatibility and package validation deliberately remain separate.
 pub fn verify_official_repository_signature(repo_dir: &Path) -> Result<()> {
+    verify_repository_signature(repo_dir, &RepositoryTrust::Official)
+}
+
+pub fn verify_repository_signature(repo_dir: &Path, trust: &RepositoryTrust) -> Result<()> {
     let yaml_path = repo_dir.join("repository.yaml");
     let yaml =
         std::fs::read(&yaml_path).with_context(|| format!("reading {}", yaml_path.display()))?;
     let sig_path = repo_dir.join("repository.sig");
     let signature =
         std::fs::read(&sig_path).with_context(|| format!("reading {}", sig_path.display()))?;
-    verify_official_signature(&yaml, &signature)
+    verify_signature(&yaml, &signature, trust)
         .with_context(|| format!("verifying {}", sig_path.display()))
 }
 
@@ -104,6 +153,16 @@ pub fn verify_official_repository_signature(repo_dir: &Path) -> Result<()> {
 /// signature validation.
 fn verify_official_signature(yaml: &[u8], sig_bytes: &[u8]) -> Result<()> {
     halod_plugin_signing::verify_signature(yaml, sig_bytes, OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS)
+}
+
+fn verify_signature(yaml: &[u8], sig_bytes: &[u8], trust: &RepositoryTrust) -> Result<()> {
+    match trust {
+        RepositoryTrust::Official => verify_official_signature(yaml, sig_bytes),
+        RepositoryTrust::Pinned(key) => {
+            halod_plugin_signing::verify_advertised_signature(yaml, sig_bytes, key)
+        }
+        RepositoryTrust::Unsigned => Ok(()),
+    }
 }
 
 fn validate_repository_manifest(repo_dir: &Path, manifest: &RepositoryManifest) -> Result<()> {
@@ -138,7 +197,7 @@ pub struct CompatibleRevision {
 pub fn latest_compatible_revision(
     repo_dir: &Path,
     tip_sha: &str,
-    official: bool,
+    trust: &RepositoryTrust,
 ) -> Result<Option<CompatibleRevision>> {
     let repo = git2::Repository::open(repo_dir)
         .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
@@ -154,9 +213,9 @@ pub fn latest_compatible_revision(
             let manifest: RepositoryManifest =
                 serde_yaml::from_slice(&yaml).context("parsing repository.yaml from commit")?;
             halod_plugin_signing::validate_repository_index(&manifest)?;
-            if official {
+            if !matches!(trust, RepositoryTrust::Unsigned) {
                 let signature = read_blob_at(&repo, &tree, Path::new("repository.sig"))?;
-                verify_official_signature(&yaml, &signature)?;
+                verify_signature(&yaml, &signature, trust)?;
             }
             halod_plugin_signing::validate_compatibility(
                 &manifest,
@@ -364,6 +423,7 @@ mod compatibility_tests {
             name: "Test".to_owned(),
             version: "1.0.0".to_owned(),
             licenses_sha256: None,
+            signing_key: None,
             compatibility: RepositoryCompatibility {
                 halod: halod.to_owned(),
                 plugin_api,

@@ -1,10 +1,10 @@
 plugins:
   title: Plugin
-  subtitle: I plugin aggiungono il supporto a nuovi dispositivi senza ricompilare il daemon.
+  subtitle: I pacchetti dei repository aggiungono il supporto a nuovi dispositivi senza ricompilare il daemon.
   counts: "%{count} pacchetti · %{active} attivi"
   empty_title: Nessun plugin installato
-  empty_hint: Aggiungi un pacchetto plugin per estendere HaloDaemon con nuovi dispositivi.
-  add: Aggiungi plugin
+  empty_hint: Aggiungi un repository di plugin per estendere HaloDaemon con nuovi dispositivi.
+  add: Aggiungi repository
   # Repository dei plugin
   repos_title: Repository
   repos_check_updates: Controlla aggiornamenti
@@ -19,26 +19,30 @@ plugins:
   repos_add: Aggiungi
   repos_add_title: Aggiungi repository
   repos_add_sub: Collega HaloDaemon a un repository Git remoto per esplorare, installare e aggiornare i plugin disponibili.
+  repos_import_folder: Cartella Git locale
+  repos_import_archive: Archivio tar
   repos_empty: Nessun repository di plugin registrato.
   repos_update: Aggiorna
   repos_update_repo: Aggiorna il repository
   repos_repair: Pull forzato
   repos_repair_title: Riparare il repository?
   repos_repair_body: Questa operazione ripristina la revisione attiva del repository dalla sua sorgente verificata. Tutte le modifiche locali nel repository andranno perse.
-  integrity_modal_title: Problema di integrità del repository
-  integrity_modal_body: Qualcosa non va. HaloDaemon ha rilevato che un pacchetto plugin non corrisponde più all'indice autenticato del repository, quindi i plugin interessati non sono stati caricati.
-  integrity_modal_repository: "Repository: %{repository}"
-  integrity_modal_package: "Pacchetto interessato: %{package}"
-  integrity_modal_expected: "Previsto: %{hash}"
-  integrity_modal_actual: "Trovato:  %{hash}"
-  integrity_modal_restore_available: La firma del repository è verificata. Puoi ripristinare in modo sicuro questa revisione dalla fonte remota.
-  integrity_modal_restore_unavailable: Il ripristino automatico è disponibile solo per un repository firmato e verificato quando il download dei plugin è attivo.
-  integrity_modal_restore: Ripristina dal repository
-  integrity_modal_close: Chiudi
+  repos_resolve: Risolvi problema
+  repos_remove_reimport: Rimuovi e reimporta
+  integrity_ok: Il contenuto del repository corrisponde al relativo indice dei pacchetti.
+  integrity_failed: La verifica del contenuto del repository non è riuscita. I plugin interessati sono stati disattivati.
+  integrity_banner_title: Controllo di integrità del repository non riuscito
+  integrity_banner_signed: "I file in '%{repository}' sono cambiati sul disco o non corrispondono più allo SHA-256 previsto. Ripristina il repository dalla sorgente verificata."
+  integrity_banner_unsigned: "I file nel repository non firmato '%{repository}' sono cambiati sul disco o non corrispondono più allo SHA-256 previsto. HaloDaemon non può ripristinare in sicurezza una sorgente non autenticata: rimuovi il repository e reimportalo."
+  integrity_restore: Ripristina dal repository
   repos_remove: Rimuovi repository
   repos_remove_title: Vuoi rimuovere il repository?
   repos_remove_body: In questo modo rimuoverai %{name} e disinstallerai tutti i plugin forniti dal repository.
   repo_source: ORIGINE
+  repo_source_remote_git: Git remoto
+  repo_source_local_git: Git locale
+  repo_source_local_archive: Archivio locale
+  repo_signing_fingerprint: "Chiave dell'autore: %{fingerprint}"
   repo_last_sync: ULTIMA SINCRONIZZAZIONE
   repo_never_synced: mai
   repo_sync_just_now: proprio ora
@@ -49,9 +53,9 @@ plugins:
   repo_drivers_count: "%{count} installati"
   repo_drivers_from: DRIVER DA QUESTO REPOSITORY
   repo_no_drivers: Nessun driver installato da questo repository.
-  repo_signature_verified: Firma verificata. L'indice del repository è autenticato da HaloDaemon.
+  repo_signature_verified: Firma verificata con la chiave dell'autore registrata alla prima importazione del repository.
   repo_signature_unsigned: Repository non firmato. Gli hash dei pacchetti vengono controllati, ma l'autore non è autenticato.
-  repo_signature_invalid: "Verifica della firma non riuscita. HaloDaemon non caricherà la revisione non attendibile: %{reason}"
+  repo_signature_verification_failed: Verifica della firma del repository non riuscita.
   repo_compatible_fallback: Revisione compatibile
   repo_compatibility_incompatible: "L'ultima revisione del repository non è compatibile, quindi HaloDaemon usa il commit supportato più recente: %{reason}"
   # Aggiornamenti per plugin
@@ -93,6 +97,7 @@ plugins:
   issue_load_warning: Caricato con un avviso
   issue_load_failed: Caricamento non riuscito
   repository_hash_mismatch: "Il pacchetto plugin '%{package}' non ha superato il controllo di integrità. SHA-256 previsto: %{expected}; SHA-256 rilevato: %{actual}."
+  repository_manifest_mismatch: "Il pacchetto plugin '%{package}' non ha superato il controllo di integrità. Il campo %{field} dovrebbe essere %{expected}, ma plugin.yaml dichiara %{actual}."
   issue_details: Dettagli
   issue_modal_title: "Il plugin %{plugin} sta riscontrando un problema"
   issue_copy: Copia
@@ -123,7 +128,6 @@ plugins:
   req_hwmon_pwm_permission: "Il controllo delle ventole richiede l'accesso in scrittura ai file PWM in /sys/class/hwmon."
   enable: Attiva
   disable: Disattiva
-  delete: Elimina script
   repo_sourced_note: Questo plugin proviene da un repository. Rimuovi il repository per disinstallarlo.
   provenance_official: Ufficiale verificato
   provenance_repository: Repository non firmato
@@ -165,12 +169,5 @@ plugins:
   consent_cancel: Annulla
   consent_deny: Non ora
   # Finestra di aggiunta
-  add_title: Aggiungi un plugin
-  add_sub: Installa un pacchetto plugin, cioè una cartella contenente plugin.yaml e lo script principale.
-  choose_folder: Scegli cartella…
-  upload_hint: Scegli la cartella di un pacchetto plugin
-  upload_sub: Verrà copiata nella cartella dei plugin.
   cancel: Annulla
   # Conferma eliminazione
-  delete_title: Vuoi eliminare lo script?
-  delete_body: Questo rimuove definitivamente %{name} dalla cartella dei plugin.

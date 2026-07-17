@@ -58,6 +58,21 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
             t!("notify.plugin_recommended.title").to_string(),
             t!("notify.plugin_recommended.message", plugin = plugin).to_string(),
         ),
+        RepositoryIntegrityError {
+            repository,
+            package,
+            expected: _,
+            actual: _,
+            restore_slug: _,
+        } => (
+            t!("notify.repository_integrity.title").to_string(),
+            t!(
+                "notify.repository_integrity.message",
+                repository = repository.as_deref().unwrap_or("unknown"),
+                package = package
+            )
+            .to_string(),
+        ),
         Generic { message } => (t!("notify.error_title").to_string(), message.clone()),
     }
 }
@@ -108,6 +123,13 @@ mod tests {
             },
             PluginRecommended {
                 plugin: "NZXT Kraken".into(),
+            },
+            RepositoryIntegrityError {
+                repository: Some("official".into()),
+                package: "halo_lcd".into(),
+                expected: "expected".into(),
+                actual: "actual".into(),
+                restore_slug: Some("official".into()),
             },
             Generic {
                 message: "boom".into(),

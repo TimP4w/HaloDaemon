@@ -259,6 +259,47 @@ fn indexed_repository_with_a_bad_digest_does_not_fall_back_to_loose_scanning() {
 }
 
 #[test]
+fn indexed_repository_with_a_version_mismatch_is_recoverable_integrity_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let package = root.path().join("plugins").join("philips_evnia");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("plugin.yaml"),
+        "id: philips_evnia\nversion: 1.0.0\ntype: device\n",
+    )
+    .unwrap();
+    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
+    let digest = halod_plugin_signing::package_hash(&package).unwrap();
+    std::fs::write(
+        root.path().join("repository.yaml"),
+        format!(
+            "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.0.0'\n  plugin_api: 2\npackages:\n  - id: philips_evnia\n    path: plugins/philips_evnia\n    version: 2.0.0\n    sha256: {digest}\n"
+        ),
+    )
+    .unwrap();
+
+    let mut scan = super::LoadScan::default();
+    super::scan_repo(root.path(), &mut scan);
+
+    assert!(scan.manifests.is_empty());
+    assert_eq!(scan.invalid.len(), 1);
+    assert!(matches!(
+        scan.invalid[0].2,
+        Some(
+            halod_shared::types::PluginIssueContext::RepositoryManifestMismatch {
+                ref package,
+                ref field,
+                ref expected,
+                ref actual,
+            }
+        ) if package == "philips_evnia"
+            && field == "version"
+            && expected == "2.0.0"
+            && actual == "1.0.0"
+    ));
+}
+
+#[test]
 fn indexed_repository_with_a_bad_digest_is_listed_as_failed() {
     let root = tempfile::tempdir().unwrap();
     let package = root.path().join("plugins").join("demo");

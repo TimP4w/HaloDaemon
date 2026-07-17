@@ -476,11 +476,17 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             if value.get("handled").and_then(|v| v.as_bool()) == Some(true) {
                 return false;
             }
-            let message = value
-                .get("message")
-                .and_then(|m| m.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| t!("notify.unknown_error").to_string());
+            let message = if value.get("code").and_then(|code| code.as_str())
+                == Some(halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED)
+            {
+                t!("plugins.repo_signature_verification_failed").to_string()
+            } else {
+                value
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| t!("notify.unknown_error").to_string())
+            };
             push_notification(
                 tx,
                 Notification {
@@ -800,5 +806,22 @@ mod tests {
             &|| {}
         ));
         assert!(tx.notifications.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn signature_failure_uses_localized_message_instead_of_backend_text() {
+        let (tx, _rx) = test_tx();
+        assert!(!handle_json(
+            br#"{"type":"error","code":"repository_signature_verification_failed","message":"repository signature does not match repository.yaml"}"#,
+            &tx,
+            &|| {}
+        ));
+        let notification = tx.notifications.lock().unwrap().pop().unwrap();
+        assert_eq!(
+            notification.code,
+            NotificationCode::Generic {
+                message: "Repository signature verification failed.".into()
+            }
+        );
     }
 }

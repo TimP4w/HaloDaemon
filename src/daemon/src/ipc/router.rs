@@ -206,6 +206,9 @@ fn reply_error_with_handled(
 ) {
     log::warn!("command '{cmd}' failed: {e}");
     let mut reply = json!({"type": "error", "message": e.to_string()});
+    if e.is::<halod_plugin_signing::RepositorySignatureMismatch>() {
+        reply["code"] = halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED.into();
+    }
     if handled
         || e.downcast_ref::<crate::plugin::SurfacedPluginError>()
             .is_some()
@@ -389,10 +392,9 @@ async fn dispatch(
         DaemonCommand::SetPluginEnabled { id, enabled } => {
             plugin::usecases::plugins::set_enabled(id, enabled, app).await
         }
-        DaemonCommand::ImportPlugin { source_dir } => {
-            plugin::usecases::plugins::import(source_dir, app).await
+        DaemonCommand::ImportPluginRepository { source_path } => {
+            plugin::usecases::repos::import_local_repo(source_path, app).await
         }
-        DaemonCommand::DeletePlugin { id } => plugin::usecases::plugins::delete(id, app).await,
         DaemonCommand::ConfirmPluginEnable { id, authority } => {
             plugin::usecases::plugins::confirm_enable(id, authority, app).await
         }
@@ -861,6 +863,33 @@ mod tests {
         let reply: Value = serde_json::from_slice(&frame[5..]).unwrap();
         assert_eq!(reply["type"], "error");
         assert_eq!(reply["request_id"], "req-42");
+    }
+
+    #[tokio::test]
+    async fn signature_failure_reply_has_localizable_code_and_raw_log_message() {
+        let (tx, mut rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(1);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: std::sync::Arc::default(),
+        };
+        reply_error(
+            &client,
+            "add_plugin_repo",
+            None,
+            halod_plugin_signing::RepositorySignatureMismatch.into(),
+        );
+
+        let frame = rx.recv().await.unwrap();
+        let reply: Value = serde_json::from_slice(&frame[5..]).unwrap();
+        assert_eq!(
+            reply["code"],
+            halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED
+        );
+        assert_eq!(
+            reply["message"],
+            "repository signature does not match repository.yaml"
+        );
     }
 
     #[tokio::test]

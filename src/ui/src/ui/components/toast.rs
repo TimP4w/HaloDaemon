@@ -28,16 +28,29 @@ fn shows_details(code: &NotificationCode) -> bool {
     code.detail().is_some()
 }
 
-/// Height of the Details button row.
+/// Height of the optional action-button row.
 const DETAILS_ROW_H: f32 = 30.0;
 
 /// Extra card height for the Details row (0 when the code has no detail).
 fn details_extra_height(note: &Notification) -> f32 {
-    if shows_details(&note.code) {
+    if shows_details(&note.code) || restore_slug(&note.code).is_some() {
         DETAILS_ROW_H
     } else {
         0.0
     }
+}
+
+fn restore_slug(code: &NotificationCode) -> Option<&str> {
+    match code {
+        NotificationCode::RepositoryIntegrityError { restore_slug, .. } => restore_slug.as_deref(),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ToastEvent {
+    Details(Notification),
+    RestoreRepository(String),
 }
 
 /// Accent color for a toast's severity indicator and title.
@@ -92,7 +105,7 @@ impl Toasts {
     /// Render the toast stack, handling dismiss clicks. Returns the notification
     /// whose "Details" button was clicked, if any, so the caller can open its
     /// modal. Call once per frame after the page content so toasts overlay it.
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<Notification> {
+    pub fn show(&mut self, ctx: &egui::Context) -> Option<ToastEvent> {
         let now = ctx.input(|i| i.time);
         if !self.prune(now) {
             return None;
@@ -104,7 +117,7 @@ impl Toasts {
         const W: f32 = 320.0;
         const GAP: f32 = 10.0;
         let mut dismiss: Option<usize> = None;
-        let mut details: Option<Notification> = None;
+        let mut event = None;
 
         egui::Area::new(egui::Id::new("toasts"))
             .order(egui::Order::Foreground)
@@ -123,7 +136,13 @@ impl Toasts {
                         dismiss = Some(i);
                     }
                     if action.details {
-                        details = Some(toast.note.clone());
+                        event = Some(ToastEvent::Details(toast.note.clone()));
+                    }
+                    if action.restore {
+                        if let Some(slug) = restore_slug(&toast.note.code) {
+                            event = Some(ToastEvent::RestoreRepository(slug.to_owned()));
+                            dismiss = Some(i);
+                        }
                     }
                     bottom -= h + GAP;
                 }
@@ -132,7 +151,7 @@ impl Toasts {
         if let Some(i) = dismiss {
             self.items.remove(i);
         }
-        details
+        event
     }
 }
 
@@ -154,6 +173,7 @@ fn toast_height(ui: &egui::Ui, note: &Notification, w: f32) -> f32 {
 struct ToastAction {
     dismiss: bool,
     details: bool,
+    restore: bool,
 }
 
 /// Paint one toast, returning which of its controls were clicked.
@@ -217,6 +237,7 @@ fn toast_card(ui: &mut egui::Ui, rect: Rect, note: &Notification, idx: usize) ->
     let mut action = ToastAction {
         dismiss: resp.clicked(),
         details: false,
+        restore: false,
     };
 
     // Details action: a compact pill in the bottom-right, separated from the
@@ -265,6 +286,48 @@ fn toast_card(ui: &mut egui::Ui, rect: Rect, note: &Notification, idx: usize) ->
             d_col,
         );
         action.details = d_resp.clicked();
+    } else if restore_slug(&note.code).is_some() {
+        let label = t!("plugins.integrity_restore");
+        const RESTORE_W: f32 = 150.0;
+        let d_rect = Rect::from_min_size(
+            Pos2::new(
+                rect.right() - 14.0 - RESTORE_W,
+                rect.bottom() - DETAILS_ROW_H + 4.0,
+            ),
+            Vec2::new(RESTORE_W, 20.0),
+        );
+        let d_resp = ui.interact(
+            d_rect,
+            ui.id().with(("toast_restore", idx, note.timestamp_ms)),
+            Sense::click(),
+        );
+        let d_col = if d_resp.hovered() {
+            color
+        } else {
+            theme::TEXT_DIM
+        };
+        if d_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        ui.painter().rect_filled(
+            d_rect,
+            8.0,
+            a(color, if d_resp.hovered() { 0.18 } else { 0.06 }),
+        );
+        ui.painter().rect_stroke(
+            d_rect,
+            8.0,
+            Stroke::new(1.0, a(color, if d_resp.hovered() { 0.55 } else { 0.28 })),
+            egui::StrokeKind::Middle,
+        );
+        ui.painter().text(
+            d_rect.center(),
+            Align2::CENTER_CENTER,
+            &label,
+            theme::subhead(),
+            d_col,
+        );
+        action.restore = d_resp.clicked();
     }
 
     action
@@ -314,6 +377,19 @@ mod tests {
         }
     }
 
+    fn integrity_error() -> Notification {
+        Notification {
+            code: NotificationCode::RepositoryIntegrityError {
+                repository: Some("official".into()),
+                package: "halo_lcd".into(),
+                expected: "a".into(),
+                actual: "b".into(),
+                restore_slug: Some("official".into()),
+            },
+            timestamp_ms: 0,
+        }
+    }
+
     #[test]
     fn errors_are_sticky_others_time_out() {
         assert_eq!(toast_timeout(&note(NotificationSeverity::Error).code), None);
@@ -337,6 +413,15 @@ mod tests {
         assert!(!shows_details(&w.code));
         assert!(toast_timeout(&w.code).is_some());
         assert_eq!(details_extra_height(&w), 0.0);
+    }
+
+    #[test]
+    fn integrity_error_is_sticky_and_exposes_restore_action() {
+        let note = integrity_error();
+        assert_eq!(toast_timeout(&note.code), None);
+        assert!(!shows_details(&note.code));
+        assert_eq!(restore_slug(&note.code), Some("official"));
+        assert_eq!(details_extra_height(&note), DETAILS_ROW_H);
     }
 
     #[test]

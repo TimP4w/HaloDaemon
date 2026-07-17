@@ -189,8 +189,8 @@ tour:
       title: "Il repository ufficiale"
       body: "Il repository ufficiale è la fonte attendibile dei plugin mantenuti da HaloDaemon. I suoi plugin possono essere aggiornati insieme da questa pagina."
     add_plugin:
-      title: "Aggiungi un plugin"
-      body: "Usa Aggiungi plugin per caricare una cartella locale. Controlla dettagli e permessi prima di abilitarla."
+      title: "Aggiungi una fonte di plugin"
+      body: "Aggiungi un repository Git remoto, una cartella Git locale o un archivio del repository. Controlla dettagli e permessi prima di attivare i pacchetti."
     add_repo:
       title: "Aggiungi un repository"
       body: "Aggiungi un altro repository Git per usare plugin della comunità o privati. Puoi scegliere un branch quando disponibile."

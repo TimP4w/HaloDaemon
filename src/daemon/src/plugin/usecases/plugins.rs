@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Managing device plugins: enable/disable, import, and delete.
+//! Managing repository-provided plugins: enable/disable and configuration.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -144,156 +144,6 @@ pub async fn set_config(
     Ok(())
 }
 
-static IMPORT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Tracks plugin ids with an import in flight, so concurrent imports of the same
-/// id are rejected rather than racing on the destination directory.
-static IMPORTS_IN_FLIGHT: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
-    std::sync::Mutex::new(None);
-
-struct ImportGuard(String);
-
-impl ImportGuard {
-    fn acquire(id: &str) -> Result<Self> {
-        let mut guard = IMPORTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-        let set = guard.get_or_insert_with(std::collections::HashSet::new);
-        if !set.insert(id.to_owned()) {
-            bail!("an import for plugin '{id}' is already in progress");
-        }
-        Ok(Self(id.to_owned()))
-    }
-}
-
-impl Drop for ImportGuard {
-    fn drop(&mut self) {
-        if let Ok(mut guard) = IMPORTS_IN_FLIGHT
-            .lock()
-            .or_else(|e| Ok::<_, ()>(e.into_inner()))
-        {
-            if let Some(set) = guard.as_mut() {
-                set.remove(&self.0);
-            }
-        }
-    }
-}
-
-/// Recursively copy `src` into `dst` (both directories), creating `dst`.
-/// Rejects symlinks: `std::fs::copy` dereferences them, so a symlinked entry in
-/// an imported package would otherwise copy the *target's* contents (an
-/// arbitrary host file the daemon can read) into the plugins dir. A legitimate
-/// plugin package has no need for symlinks, so we fail the import outright.
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)
-        .with_context(|| format!("creating plugin dir {}", dst.display()))?;
-    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            bail!("plugin package contains a symlink: {}", from.display());
-        } else if file_type.is_dir() {
-            copy_dir_all(&from, &to)?;
-        } else if file_type.is_file() {
-            std::fs::copy(&from, &to)
-                .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
-        } else {
-            bail!(
-                "plugin package contains a non-regular file: {}",
-                from.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Install a plugin package (a directory containing `plugin.yaml` + its entry
-/// script) as a new plugin directory: validated in place first, then copied
-/// in and re-parsed from its final location. Staged — see the module docs.
-pub async fn import(source_dir: String, app: Arc<AppState>) -> Result<()> {
-    let src = Path::new(&source_dir);
-    let parsed = crate::plugin::parse_manifest_from_dir(src)
-        .context("plugin package is not a valid manifest")?;
-    let id = parsed.plugin_id.clone();
-
-    // Serialize concurrent imports of the same id so two callers can't race on
-    // the same destination.
-    let _guard = ImportGuard::acquire(&id)?;
-
-    let plugins_dir = crate::config::plugins_dir();
-    let dst = plugins_dir.join(&id);
-    if dst.exists() {
-        bail!("a plugin '{id}' is already installed");
-    }
-
-    // Copy into a uniquely-named private temp dir, validate the completed copy,
-    // then atomically rename it into place so a failed import never leaves a
-    // partial installed plugin behind. The re-parse re-checks that the directory
-    // name equals the manifest id, so the copy's leaf must keep the id — the
-    // uniqueness goes on the parent dir instead.
-    std::fs::create_dir_all(&plugins_dir)?;
-    let seq = IMPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let staging_parent = plugins_dir.join(format!(".import.{}.{seq}", std::process::id()));
-    let staging = staging_parent.join(&id);
-    let _ = std::fs::remove_dir_all(&staging_parent);
-    let manifest = (|| {
-        copy_dir_all(src, &staging)?;
-        crate::plugin::parse_manifest_from_dir(&staging)
-            .context("re-parsing imported plugin directory")
-    })();
-    let manifest = match manifest {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&staging_parent);
-            return Err(e);
-        }
-    };
-    if let Err(e) = std::fs::rename(&staging, &dst) {
-        let _ = std::fs::remove_dir_all(&staging_parent);
-        return Err(e).with_context(|| format!("installing plugin into {}", dst.display()));
-    }
-    let _ = std::fs::remove_dir_all(&staging_parent);
-    log::info!(
-        "Imported plugin package {} into {}",
-        src.display(),
-        dst.display()
-    );
-
-    reconcile_plugins(&app, &[manifest.plugin_id]).await;
-    Ok(())
-}
-
-/// Delete a user plugin directory by id. A repo-sourced plugin has no
-/// standalone directory to delete on its own — remove its repo instead —
-/// so this refuses anything but a `Local` plugin. Staged — see the module docs.
-pub async fn delete(id: String, app: Arc<AppState>) -> Result<()> {
-    let is_local = app
-        .registry
-        .list(&*app.secret_store)
-        .into_iter()
-        .find(|p| p.id == id)
-        .map(|p| matches!(p.source, halod_shared::types::PluginSource::Local))
-        .unwrap_or(true);
-    if !is_local {
-        bail!("plugin '{id}' is provided by a repository — remove the repository instead");
-    }
-    let dir = crate::config::plugins_dir().join(&id);
-    match std::fs::remove_dir_all(&dir) {
-        Ok(()) => log::info!("Deleted plugin {}", dir.display()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::warn!("Plugin {} already gone", dir.display());
-        }
-        Err(e) => return Err(e).with_context(|| format!("deleting {}", dir.display())),
-    }
-
-    if purge_plugin_state(&id, &app).await {
-        app.request_config_save();
-    }
-
-    reconcile_plugins(&app, &[id]).await;
-    Ok(())
-}
-
 /// Purge every id-keyed piece of plugin state — secret, disabled flag, plaintext
 /// config, granted permissions, installed content hash, and integration
 /// disable — returning whether config changed. Shared by [`delete`] and
@@ -339,7 +189,7 @@ pub(crate) async fn reload_registry(app: &Arc<AppState>) {
         development_repo.as_deref(),
         #[cfg(not(feature = "dev-plugin-repo"))]
         development_repo,
-        &crate::plugin::repo_plugin_dirs(&cfg.plugins.repos),
+        &crate::plugin::repo_plugin_sources(&cfg.plugins.repos),
     );
     app.registry.replace_policy(&cfg.plugins);
     drop(cfg);
@@ -693,98 +543,6 @@ mod tests {
             assert!(plugin.path.starts_with(development_repo.path().to_string_lossy().as_ref()));
         })
         .await;
-    }
-
-    #[test]
-    fn import_guard_serializes_same_id() {
-        let _a = ImportGuard::acquire("dup-id").unwrap();
-        assert!(ImportGuard::acquire("dup-id").is_err());
-        drop(_a);
-        // Once released, a fresh acquire succeeds.
-        assert!(ImportGuard::acquire("dup-id").is_ok());
-    }
-
-    #[tokio::test]
-    async fn import_installs_a_local_package_under_its_id() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let pkg = src.path().join("demo_plugin");
-            std::fs::create_dir_all(&pkg).unwrap();
-            std::fs::write(
-                pkg.join("plugin.yaml"),
-                "id: demo_plugin\nname: Demo\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Example\n    model: Device\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678 }\n",
-            )
-            .unwrap();
-            std::fs::write(pkg.join("main.lua"), "return {}\n").unwrap();
-
-            import(pkg.to_string_lossy().into_owned(), app.clone())
-                .await
-                .unwrap();
-
-            // The re-parse of the staged copy checks that its directory name
-            // equals the manifest id, so the install must land at plugins_dir/<id>
-            // and leave no `.import.*` staging dir behind.
-            let installed = crate::config::plugins_dir().join("demo_plugin");
-            assert!(installed.join("plugin.yaml").is_file());
-            let leftovers: Vec<_> = std::fs::read_dir(crate::config::plugins_dir())
-                .unwrap()
-                .map(|e| e.unwrap().file_name())
-                .filter(|n| n.to_string_lossy().starts_with(".import."))
-                .collect();
-            assert!(leftovers.is_empty(), "staging dir left behind: {leftovers:?}");
-        })
-        .await;
-    }
-
-    #[test]
-    fn copy_dir_all_copies_files_and_nested_dirs() {
-        let src = tempfile::tempdir().unwrap();
-        std::fs::write(
-            src.path().join("plugin.yaml"),
-            "id: demo\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\n",
-        )
-        .unwrap();
-        std::fs::create_dir(src.path().join("assets")).unwrap();
-        std::fs::write(src.path().join("assets").join("a.png"), b"png").unwrap();
-
-        let dst = tempfile::tempdir().unwrap();
-        let out = dst.path().join("demo");
-        copy_dir_all(src.path(), &out).unwrap();
-
-        assert_eq!(
-            std::fs::read(out.join("plugin.yaml")).unwrap(),
-            b"id: demo\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\n"
-        );
-        assert_eq!(
-            std::fs::read(out.join("assets").join("a.png")).unwrap(),
-            b"png"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn copy_dir_all_rejects_a_symlink() {
-        let secret = tempfile::tempdir().unwrap();
-        std::fs::write(secret.path().join("secret.txt"), b"top-secret").unwrap();
-
-        let src = tempfile::tempdir().unwrap();
-        std::fs::write(
-            src.path().join("plugin.yaml"),
-            "id: demo\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\n",
-        )
-        .unwrap();
-        std::os::unix::fs::symlink(
-            secret.path().join("secret.txt"),
-            src.path().join("leak.txt"),
-        )
-        .unwrap();
-
-        let dst = tempfile::tempdir().unwrap();
-        let out = dst.path().join("demo");
-        let err = copy_dir_all(src.path(), &out).unwrap_err();
-        assert!(err.to_string().contains("symlink"));
-        // The dereferenced target's contents must never land in the plugins dir.
-        assert!(!out.join("leak.txt").exists());
     }
 
     #[test]
@@ -1321,31 +1079,6 @@ mod tests {
                 .unwrap();
 
             app.registry.load_all(std::path::Path::new("/nonexistent"));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn delete_purges_the_plugins_stored_secret() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let dir = crate::config::plugins_dir();
-            std::fs::create_dir_all(&dir).unwrap();
-            write_config_test_plugin(&dir);
-            app.registry.load_all(&dir);
-
-            let mut values = std::collections::HashMap::new();
-            values.insert("token".to_string(), "s3cr3t".to_string());
-            set_config("cfgtest".into(), values, app.clone())
-                .await
-                .unwrap();
-            assert_eq!(
-                app.secret_store.get("cfgtest", "token").unwrap(),
-                Some("s3cr3t".to_string())
-            );
-
-            delete("cfgtest".into(), app.clone()).await.unwrap();
-
-            assert_eq!(app.secret_store.get("cfgtest", "token").unwrap(), None);
         })
         .await;
     }

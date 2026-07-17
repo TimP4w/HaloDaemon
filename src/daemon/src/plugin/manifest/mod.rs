@@ -2528,6 +2528,7 @@ pub(super) fn validate_component(what: &str, value: &str) -> Result<()> {
 /// Parse a directory plugin. `plugin.yaml` is the only declarative manifest;
 /// `dir/<entry>` is read as inert source for the consent hash and later runtime
 /// execution, but is deliberately not compiled or evaluated here.
+#[cfg(any(test, feature = "plugin-test"))]
 pub fn parse_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
     let manifest = build_manifest_from_dir(dir)?;
     validate_manifest(&manifest)?;

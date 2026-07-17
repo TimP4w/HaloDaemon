@@ -8,6 +8,7 @@
 
 pub mod lifecycle;
 pub mod models;
+pub mod native_notification;
 pub mod state;
 pub mod tour;
 pub mod tray;

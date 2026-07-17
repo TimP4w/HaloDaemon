@@ -565,6 +565,12 @@ pub enum NotificationSeverity {
     Error,
 }
 
+/// Stable IPC error code for a repository whose detached signature does not
+/// verify. The daemon retains its diagnostic message; the GUI translates this
+/// code instead of displaying backend text.
+pub const ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED: &str =
+    "repository_signature_verification_failed";
+
 /// A user-visible notification identified by a stable code plus structured,
 /// runtime-supplied parameters (device ids, error text, …). The daemon emits
 /// these; the GUI owns all human-readable copy and translation. `severity()`
@@ -631,6 +637,16 @@ pub enum NotificationCode {
     PluginRecommended {
         plugin: String,
     },
+    /// A package no longer matches its repository index. This is an error (and
+    /// therefore a sticky GUI notification); signed repositories may expose a
+    /// restore action through `restore_slug`.
+    RepositoryIntegrityError {
+        repository: Option<String>,
+        package: String,
+        expected: String,
+        actual: String,
+        restore_slug: Option<String>,
+    },
     /// A generic error surfaced as free text (e.g. a failed command's error).
     /// The GUI translates only the title and shows `message` verbatim.
     Generic {
@@ -646,6 +662,7 @@ impl NotificationCode {
             | ChainLinkRestoreFailed { .. }
             | DeviceInitFailed { .. }
             | DeviceWriteFailed { .. }
+            | RepositoryIntegrityError { .. }
             | Generic { .. } => NotificationSeverity::Error,
             KeyRemapUnavailable { .. }
             | DeviceReconnectFailed { .. }
@@ -794,14 +811,28 @@ pub struct PluginRepoInfo {
     /// True for the seeded official repo — the GUI hides its remove control.
     #[serde(default)]
     pub official: bool,
-    /// Whether this repository's index is authenticated by Halo's official
-    /// signing key. Third-party repositories intentionally remain unsigned.
+    #[serde(default)]
+    pub location: PluginRepoLocation,
+    /// Whether this repository's index is authenticated by Halo's built-in
+    /// official key or a third-party publisher key pinned on first import.
     #[serde(default)]
     pub signature: RepoSignatureStatus,
+    /// SHA-256 fingerprint of the publisher key pinned at first import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_key_fingerprint: Option<String>,
     /// Compatibility of the latest fetched branch tip. This is independent
     /// from signature authentication and may cause history fallback.
     #[serde(default)]
     pub compatibility: RepoCompatibilityStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginRepoLocation {
+    #[default]
+    RemoteGit,
+    LocalGit,
+    LocalArchive,
 }
 
 /// Authentication state for a plugin repository index.
@@ -1057,6 +1088,12 @@ pub enum PluginIssueKind {
 pub enum PluginIssueContext {
     RepositoryHashMismatch {
         package: String,
+        expected: String,
+        actual: String,
+    },
+    RepositoryManifestMismatch {
+        package: String,
+        field: String,
         expected: String,
         actual: String,
     },
@@ -2882,6 +2919,13 @@ mod tests {
                 detail: "e".into(),
             },
             FanStalled { fan: "f".into() },
+            RepositoryIntegrityError {
+                repository: Some("official".into()),
+                package: "halo_lcd".into(),
+                expected: "a".into(),
+                actual: "b".into(),
+                restore_slug: Some("official".into()),
+            },
             Generic {
                 message: "m".into(),
             },

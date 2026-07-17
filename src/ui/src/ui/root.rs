@@ -10,6 +10,34 @@ use crate::domain::state::Page;
 const DEPCHECK_GRACE_SECS: f64 = 4.0;
 
 impl App {
+    /// Re-deliver an active integrity alert when a tray-resident Linux window
+    /// is opened again. The sticky in-app toast survives close-to-tray, so its
+    /// native counterpart must not be limited to the toast's original ingest.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn replay_integrity_native_on_reopen(&self) {
+        let state = self.ui.state.borrow();
+        let Some(alert) = crate::domain::models::plugin_issues::repository_integrity_alert(
+            &state,
+            &std::collections::HashSet::new(),
+        ) else {
+            return;
+        };
+        if !self.integrity_alert_notified.contains(&alert.key) {
+            return;
+        }
+        let notification = halod_shared::types::Notification {
+            code: halod_shared::types::NotificationCode::RepositoryIntegrityError {
+                repository: alert.repository,
+                package: alert.package,
+                expected: alert.expected,
+                actual: alert.actual,
+                restore_slug: alert.restore_slug,
+            },
+            timestamp_ms: 0,
+        };
+        show_native_notifications(std::slice::from_ref(&notification));
+    }
+
     // Single render path shared by eframe (Windows/macOS) and winit+glow (Linux).
     pub(crate) fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -143,7 +171,32 @@ impl App {
             });
         }
         crate::ui::screens::profile::observe_notifications(&mut self.profile_ui, &incoming);
+        show_native_notifications(&incoming);
         self.toasts.ingest(incoming, time);
+
+        // Repository validation failures are part of the state snapshot rather
+        // than a transient daemon event, so synthesize a notification once per
+        // distinct mismatch episode. This also catches startup failures that
+        // happened before the GUI connected.
+        if let Some(alert) = crate::domain::models::plugin_issues::repository_integrity_alert(
+            &state,
+            &self.integrity_alert_notified,
+        ) {
+            self.integrity_alert_notified.insert(alert.key);
+            let code = halod_shared::types::NotificationCode::RepositoryIntegrityError {
+                repository: alert.repository,
+                package: alert.package,
+                expected: alert.expected,
+                actual: alert.actual,
+                restore_slug: alert.restore_slug,
+            };
+            let notification = halod_shared::types::Notification {
+                code,
+                timestamp_ms: (time * 1000.0) as u64,
+            };
+            show_native_notifications(std::slice::from_ref(&notification));
+            self.toasts.ingest([notification], time);
+        }
 
         if let Some(ref frame) = canvas_frame {
             crate::ui::screens::canvas::ingest_frame(ctx, &mut self.canvas_ui, frame);
@@ -190,6 +243,7 @@ impl App {
                 &mut self.quarantine_toasted,
                 (time * 1000.0) as u64,
             );
+            show_native_notifications(&quarantine);
             self.toasts.ingest(quarantine, time);
         }
 
@@ -472,13 +526,7 @@ impl App {
             }
         }
 
-        let integrity_alert_pending =
-            crate::domain::models::plugin_issues::repository_integrity_alert(
-                &state,
-                &self.integrity_alert_dismissed,
-            )
-            .is_some();
-        if !onboarding_shown && !tour_active && !integrity_alert_pending {
+        if !onboarding_shown && !tour_active {
             crate::ui::screens::depcheck::show(
                 ctx,
                 &state,
@@ -491,7 +539,6 @@ impl App {
         }
         let depcheck_visible = !onboarding_shown
             && !tour_active
-            && !integrity_alert_pending
             && crate::ui::screens::depcheck::visible(
                 &state,
                 debug.as_ref(),
@@ -515,6 +562,7 @@ impl App {
                     crate::runtime::ipc::send(&self.cmd, MarkTourSeen { tour: key });
                     notifications.push(notification);
                 }
+                show_native_notifications(&notifications);
                 self.toasts.ingest(notifications, time);
             }
         }
@@ -530,14 +578,24 @@ impl App {
         );
 
         // Toasts overlay everything, including the daemon-down scrim.
-        if let Some(note) = self.toasts.show(ctx) {
-            if let Some(detail) = note.code.detail() {
-                let (title, _) =
-                    crate::domain::models::notifications::notification_text(&note.code);
-                self.issue_details_modal = Some(crate::app::IssueDetailsModal {
-                    title,
-                    detail: detail.to_owned(),
-                });
+        if let Some(event) = self.toasts.show(ctx) {
+            match event {
+                crate::ui::components::toast::ToastEvent::Details(note) => {
+                    if let Some(detail) = note.code.detail() {
+                        let (title, _) =
+                            crate::domain::models::notifications::notification_text(&note.code);
+                        self.issue_details_modal = Some(crate::app::IssueDetailsModal {
+                            title,
+                            detail: detail.to_owned(),
+                        });
+                    }
+                }
+                crate::ui::components::toast::ToastEvent::RestoreRepository(slug) => {
+                    crate::runtime::ipc::send(
+                        &self.cmd,
+                        halod_shared::commands::DaemonCommand::UpdatePluginRepo { slug },
+                    );
+                }
             }
         }
         if !domain::tour::is_active(&self.tour) && !onboarding_active {
@@ -552,104 +610,15 @@ impl App {
                     self.issue_details_modal = None;
                 }
             }
-            if self.issue_details_modal.is_none() {
-                repository_integrity_modal(
-                    ctx,
-                    &state,
-                    &self.cmd,
-                    &mut self.integrity_alert_dismissed,
-                );
-            }
         }
     }
 }
 
-fn repository_integrity_modal(
-    ctx: &egui::Context,
-    state: &halod_shared::types::AppState,
-    cmd: &crate::runtime::ipc::CommandTx,
-    dismissed: &mut std::collections::HashSet<String>,
-) {
-    let Some(alert) =
-        crate::domain::models::plugin_issues::repository_integrity_alert(state, dismissed)
-    else {
-        return;
-    };
-    let mut close = false;
-    let mut restore = false;
-    let modal_dismissed = crate::ui::components::dialog(
-        ctx,
-        "repository_integrity_alert",
-        &t!("plugins.integrity_modal_title"),
-        500.0,
-        |ui| {
-            ui.label(
-                egui::RichText::new(t!("plugins.integrity_modal_body"))
-                    .font(crate::ui::theme::body_md())
-                    .color(crate::ui::theme::TEXT_DIM),
-            );
-            ui.add_space(crate::ui::theme::SPACE_5);
-            if let Some(repository) = &alert.repository {
-                ui.label(t!(
-                    "plugins.integrity_modal_repository",
-                    repository = repository
-                ));
-            }
-            ui.label(t!(
-                "plugins.integrity_modal_package",
-                package = &alert.package
-            ));
-            ui.add_space(crate::ui::theme::SPACE_4);
-            ui.monospace(t!(
-                "plugins.integrity_modal_expected",
-                hash = &alert.expected
-            ));
-            ui.monospace(t!("plugins.integrity_modal_actual", hash = &alert.actual));
-            ui.add_space(crate::ui::theme::SPACE_5);
-            let guidance = if alert.restore_slug.is_some() {
-                t!("plugins.integrity_modal_restore_available")
-            } else {
-                t!("plugins.integrity_modal_restore_unavailable")
-            };
-            ui.label(
-                egui::RichText::new(guidance)
-                    .font(crate::ui::theme::body_sm())
-                    .color(crate::ui::theme::TEXT_MUT),
-            );
-        },
-        |ui| {
-            if let Some(slug) = &alert.restore_slug {
-                if crate::ui::components::button(
-                    ui,
-                    &t!("plugins.integrity_modal_restore"),
-                    crate::ui::components::ButtonKind::Warn,
-                    egui::Vec2::new(150.0, 34.0),
-                )
-                .clicked()
-                {
-                    crate::runtime::ipc::send(
-                        cmd,
-                        halod_shared::commands::DaemonCommand::UpdatePluginRepo {
-                            slug: slug.clone(),
-                        },
-                    );
-                    restore = true;
-                }
-            }
-            if crate::ui::components::button(
-                ui,
-                &t!("plugins.integrity_modal_close"),
-                crate::ui::components::ButtonKind::Ghost,
-                egui::Vec2::new(90.0, 34.0),
-            )
-            .clicked()
-            {
-                close = true;
-            }
-        },
-    );
-    if close || restore || modal_dismissed {
-        dismissed.insert(alert.key);
+fn show_native_notifications(notifications: &[halod_shared::types::Notification]) {
+    for notification in notifications {
+        let (title, message) =
+            crate::domain::models::notifications::notification_text(&notification.code);
+        crate::domain::native_notification::show(&title, &message);
     }
 }
 

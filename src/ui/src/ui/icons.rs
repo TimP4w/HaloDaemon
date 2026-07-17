@@ -18,6 +18,8 @@ pub enum Icon {
     Integrations,
     Lock,
     Check,
+    VerifiedBadge,
+    IntegrityShield,
 }
 
 impl Icon {
@@ -31,6 +33,8 @@ impl Icon {
             Icon::Integrations => include_bytes!("../../assets/icons/integrations.svg"),
             Icon::Lock => include_bytes!("../../assets/icons/lock.svg"),
             Icon::Check => include_bytes!("../../assets/icons/check.svg"),
+            Icon::VerifiedBadge => include_bytes!("../../assets/icons/verified_badge.svg"),
+            Icon::IntegrityShield => include_bytes!("../../assets/icons/integrity_shield.svg"),
         }
     }
 
@@ -44,6 +48,8 @@ impl Icon {
             Icon::Integrations => "nav_integrations",
             Icon::Lock => "lock",
             Icon::Check => "check",
+            Icon::VerifiedBadge => "verified_badge",
+            Icon::IntegrityShield => "integrity_shield",
         }
     }
 }
@@ -103,7 +109,10 @@ fn texture(ctx: &egui::Context, icon: Icon) -> egui::TextureHandle {
             .borrow_mut()
             .entry(icon)
             .or_insert_with(|| {
-                let img = if matches!(icon, Icon::Lock | Icon::Check) {
+                let img = if matches!(
+                    icon,
+                    Icon::Lock | Icon::Check | Icon::VerifiedBadge | Icon::IntegrityShield
+                ) {
                     rasterize_mask(icon.svg(), ICON_PX)
                 } else {
                     rasterize(icon.svg(), ICON_PX)
@@ -254,6 +263,8 @@ mod tests {
             Icon::Integrations,
             Icon::Lock,
             Icon::Check,
+            Icon::VerifiedBadge,
+            Icon::IntegrityShield,
         ] {
             let img = rasterize(icon.svg(), ICON_PX)
                 .unwrap_or_else(|| panic!("{} failed to rasterize", icon.key()));

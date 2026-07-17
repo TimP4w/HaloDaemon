@@ -63,7 +63,7 @@ pub async fn initialize_app_state(
     let mut discovered_hashes = Vec::new();
     {
         let cfg = app.config.read().await;
-        let repo_dirs = crate::plugin::repo_plugin_dirs(&cfg.plugins.repos);
+        let repo_sources = crate::plugin::repo_plugin_sources(&cfg.plugins.repos);
         if dev_plugin_repo.is_none() {
             let official_dir = cfg
                 .plugins
@@ -92,7 +92,7 @@ pub async fn initialize_app_state(
         app.registry.load_all_with_priority_repo(
             &crate::config::plugins_dir(),
             dev_plugin_repo.as_deref(),
-            &repo_dirs,
+            &repo_sources,
         );
         app.registry.replace_policy(&cfg.plugins);
     }
@@ -148,6 +148,8 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
                 url: url.to_owned(),
                 slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
                 repository_id: None,
+                trusted_key: None,
+                source_kind: crate::config::PluginRepoSourceKind::Git,
                 branch: None,
                 locked_sha: String::new(),
                 active_revision: None,
@@ -201,7 +203,7 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
             let sha = {
                 let dest = dest.clone();
                 match tokio::task::spawn_blocking(move || {
-                    repo::latest_compatible_revision(&dest, &sha, true)
+                    repo::latest_compatible_revision(&dest, &sha, &repo::RepositoryTrust::Official)
                 })
                 .await
                 {

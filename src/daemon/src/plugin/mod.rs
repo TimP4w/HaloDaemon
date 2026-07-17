@@ -22,7 +22,9 @@ pub mod repo;
 pub(crate) mod runtime;
 pub mod usecases;
 
-pub use manifest::{parse_manifest_from_dir, DeviceSpec, EffectKind, PluginManifest, ProbeMode};
+#[cfg(any(test, feature = "plugin-test"))]
+pub use manifest::parse_manifest_from_dir;
+pub use manifest::{DeviceSpec, EffectKind, PluginManifest, ProbeMode};
 pub use runtime::device::LuaDevice;
 use runtime::device::{LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
 pub use runtime::effect_worker::{EffectFrameInput, EffectZoneInput, LedCoord, PluginEffectHandle};
@@ -1727,30 +1729,7 @@ fn scan_repo(repo_dir: &Path, scan: &mut LoadScan) {
             return;
         }
         Err(error) if repo_dir.join("repository.yaml").is_file() => {
-            log::warn!(
-                "Ignoring invalid plugin repository {}: {error:#}",
-                repo_dir.display()
-            );
-            if let Ok(repository) = repo::read_repository_index(repo_dir) {
-                let reason = format!("repository package failed integrity validation: {error:#}");
-                let context = error
-                    .downcast_ref::<halod_plugin_signing::PackageHashMismatch>()
-                    .map(|mismatch| PluginIssueContext::RepositoryHashMismatch {
-                        package: mismatch.package.clone(),
-                        expected: mismatch.expected.clone(),
-                        actual: mismatch.actual.clone(),
-                    });
-                for package in repository.packages {
-                    record_invalid_plugin_dir(
-                        &repo_dir.join(package.path),
-                        package.id,
-                        package.version,
-                        &reason,
-                        context.as_ref(),
-                        scan,
-                    );
-                }
-            }
+            record_invalid_repository(repo_dir, &error, scan);
             return;
         }
         Err(_) => {}
@@ -1758,6 +1737,60 @@ fn scan_repo(repo_dir: &Path, scan: &mut LoadScan) {
     try_load_plugin_dir(repo_dir, scan);
     scan_plugin_subdirs(repo_dir, scan);
     scan_plugin_subdirs(&repo_dir.join("plugins"), scan);
+}
+
+fn record_invalid_repository(repo_dir: &Path, error: &anyhow::Error, scan: &mut LoadScan) {
+    log::warn!(
+        "Ignoring invalid plugin repository {}: {error:#}",
+        repo_dir.display()
+    );
+    if let Ok(repository) = repo::read_repository_index(repo_dir) {
+        let reason = format!("repository failed integrity validation: {error:#}");
+        let context = error
+            .downcast_ref::<halod_plugin_signing::PackageHashMismatch>()
+            .map(|mismatch| PluginIssueContext::RepositoryHashMismatch {
+                package: mismatch.package.clone(),
+                expected: mismatch.expected.clone(),
+                actual: mismatch.actual.clone(),
+            })
+            .or_else(|| {
+                error
+                    .downcast_ref::<halod_plugin_signing::PackageManifestMismatch>()
+                    .map(|mismatch| PluginIssueContext::RepositoryManifestMismatch {
+                        package: mismatch.package.clone(),
+                        field: mismatch.field.clone(),
+                        expected: mismatch.expected.clone(),
+                        actual: mismatch.actual.clone(),
+                    })
+            });
+        for package in repository.packages {
+            record_invalid_plugin_dir(
+                &repo_dir.join(package.path),
+                package.id,
+                package.version,
+                &reason,
+                context.as_ref(),
+                scan,
+            );
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RepoPluginSource {
+    slug: String,
+    dir: std::path::PathBuf,
+    trust: repo::RepositoryTrust,
+}
+
+fn scan_repo_source(source: &RepoPluginSource, scan: &mut LoadScan) {
+    if !matches!(source.trust, repo::RepositoryTrust::Unsigned) {
+        if let Err(error) = repo::verify_repository_signature(&source.dir, &source.trust) {
+            record_invalid_repository(&source.dir, &error, scan);
+            return;
+        }
+    }
+    scan_repo(&source.dir, scan);
 }
 
 /// Scan a repo without integrity verification — for the local development repo
@@ -1783,8 +1816,21 @@ pub fn repo_plugin_ids(repo_dir: &Path) -> Vec<String> {
 }
 
 /// Every configured repo's checked-out clone directory, for [`Registry::load_all_with_repos`].
-pub fn repo_plugin_dirs(repos: &[crate::config::PluginRepoRecord]) -> Vec<std::path::PathBuf> {
-    repos.iter().map(repo::active_revision_dir).collect()
+pub fn repo_plugin_sources(repos: &[crate::config::PluginRepoRecord]) -> Vec<RepoPluginSource> {
+    repos
+        .iter()
+        .map(|record| RepoPluginSource {
+            slug: record.slug.clone(),
+            dir: repo::active_revision_dir(record),
+            trust: if record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
+                repo::RepositoryTrust::Official
+            } else if let Some(key) = &record.trusted_key {
+                repo::RepositoryTrust::Pinned(key.clone())
+            } else {
+                repo::RepositoryTrust::Unsigned
+            },
+        })
+        .collect()
 }
 
 impl Registry {
@@ -1801,7 +1847,19 @@ impl Registry {
     /// [`try_load_plugin_dir`]'s collision handling).
     #[cfg(test)]
     pub fn load_all_with_repos(&self, dir: &Path, repo_dirs: &[std::path::PathBuf]) {
-        self.load_all_with_priority_repo(dir, None, repo_dirs);
+        let sources: Vec<_> = repo_dirs
+            .iter()
+            .map(|dir| RepoPluginSource {
+                slug: dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                dir: dir.clone(),
+                trust: repo::RepositoryTrust::Unsigned,
+            })
+            .collect();
+        self.load_all_inner(dir, None, &sources, true);
     }
 
     /// Load a directly supplied development repository ahead of the normal
@@ -1811,22 +1869,32 @@ impl Registry {
         &self,
         dir: &Path,
         priority_repo: Option<&Path>,
-        repo_dirs: &[std::path::PathBuf],
+        repo_sources: &[RepoPluginSource],
+    ) {
+        self.load_all_inner(dir, priority_repo, repo_sources, false);
+    }
+
+    fn load_all_inner(
+        &self,
+        dir: &Path,
+        priority_repo: Option<&Path>,
+        repo_sources: &[RepoPluginSource],
+        allow_standalone: bool,
     ) {
         let mut scan = LoadScan::default();
-        let is_official = |d: &std::path::PathBuf| {
-            d.file_name().and_then(|n| n.to_str())
-                == Some(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-        };
+        let is_official =
+            |source: &&RepoPluginSource| source.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
         if let Some(repo_dir) = priority_repo {
             scan_repo_trusted(repo_dir, &mut scan);
         } else {
-            for repo_dir in repo_dirs.iter().filter(|d| is_official(d)) {
-                scan_repo(repo_dir, &mut scan);
+            for source in repo_sources.iter().filter(is_official) {
+                scan_repo_source(source, &mut scan);
             }
-            scan_plugin_subdirs(dir, &mut scan);
-            for repo_dir in repo_dirs.iter().filter(|d| !is_official(d)) {
-                scan_repo(repo_dir, &mut scan);
+            if allow_standalone {
+                scan_plugin_subdirs(dir, &mut scan);
+            }
+            for source in repo_sources.iter().filter(|source| !is_official(source)) {
+                scan_repo_source(source, &mut scan);
             }
         }
         let effects: Vec<PluginEffectEntry> =

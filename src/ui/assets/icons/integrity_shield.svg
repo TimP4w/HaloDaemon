@@ -1,0 +1,10 @@
+<!--
+SPDX-License-Identifier: CC-BY-4.0
+SPDX-FileCopyrightText: Microsoft Corporation <https://github.com/microsoft/vscode-codicons>
+Source: https://github.com/microsoft/vscode-codicons
+License: https://github.com/microsoft/vscode-codicons/blob/main/LICENSE
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 16 16">
+  <path d="M0 0h16v16H0z" fill="none" />
+  <path fill="currentColor" d="M13.4 3c-1.837 0-3.486-.333-4.974-1.824a.6.6 0 0 0-.848 0C6.086 2.667 4.436 3 2.601 3a.6.6 0 0 0-.6.6v3.602c0 3.862 1.97 6.487 5.81 7.768a.6.6 0 0 0 .38 0c3.841-1.28 5.81-3.906 5.81-7.768V3.6c0-.331-.27-.6-.601-.6M13 7.201c0 3.396-1.636 5.614-5 6.776c-3.364-1.162-5-3.38-5-6.776V3.995c1.579-.039 3.352-.349 5.001-1.843C9.647 3.645 11.421 3.955 13 3.995zM7.499 8.793l2.646-2.646a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 0 1 .708-.708z" />
+</svg>

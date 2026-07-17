@@ -156,7 +156,7 @@ fn main() -> Result<()> {
             registry.load_all_with_priority_repo(
                 &config::plugins_dir(),
                 None,
-                &plugin::repo_plugin_dirs(&cfg.plugins.repos),
+                &plugin::repo_plugin_sources(&cfg.plugins.repos),
             );
             registry.udev_rules()
         };

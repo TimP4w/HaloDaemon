@@ -4,6 +4,7 @@
 use egui::{Align2, Color32, Pos2, Rect, Response, Sense, Stroke, Vec2};
 
 use crate::ui::theme;
+use crate::ui::{icons, icons::Icon};
 
 /// Height of a pill/chip control, shared so inline labels beside them can match.
 pub const PILL_H: f32 = 31.0;
@@ -174,6 +175,39 @@ pub fn chip_colored(ui: &mut egui::Ui, label: &str, color: Color32) -> Response 
         color.gamma_multiply(0.14),
         color.gamma_multiply(0.3),
     )
+}
+
+/// A static chip with a solid accent fill and a leading bundled icon. Used for
+/// high-confidence identity/status badges that should carry primary emphasis.
+#[must_use]
+pub fn chip_filled_icon(ui: &mut egui::Ui, label: &str, fill: Color32, icon: Icon) -> Response {
+    let text = Color32::WHITE;
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), theme::caption(), text);
+    const ICON_SIZE: f32 = 14.0;
+    const GAP: f32 = 5.0;
+    const H_PAD: f32 = 9.0;
+    let size = Vec2::new(
+        H_PAD * 2.0 + ICON_SIZE + GAP + galley.size().x,
+        (galley.size().y + 10.0).max(24.0),
+    );
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().rect_filled(rect, theme::RADIUS_SM, fill);
+    let icon_rect = Rect::from_center_size(
+        Pos2::new(rect.left() + H_PAD + ICON_SIZE / 2.0, rect.center().y),
+        Vec2::splat(ICON_SIZE),
+    );
+    icons::draw(ui, icon_rect, icon, text);
+    ui.painter().galley(
+        Pos2::new(
+            icon_rect.right() + GAP,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        text,
+    );
+    response
 }
 
 fn chip_impl(

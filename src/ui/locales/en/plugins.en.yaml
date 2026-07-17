@@ -1,10 +1,10 @@
 plugins:
   title: Plugins
-  subtitle: Device plugins add hardware support without rebuilding the daemon.
+  subtitle: Repository packages add hardware support without rebuilding the daemon.
   counts: "%{count} packages · %{active} active"
   empty_title: No plugins installed
-  empty_hint: Add a plugin package to extend HaloDaemon with new devices.
-  add: Add plugin
+  empty_hint: Add a plugin repository to extend HaloDaemon with new devices.
+  add: Add repository
   # Plugin repositories
   repos_title: Repositories
   repos_check_updates: Check for updates
@@ -19,26 +19,30 @@ plugins:
   repos_add: Add
   repos_add_title: Add repository
   repos_add_sub: Connect HaloDaemon to a remote Git repository to browse, install, and update its plugins.
+  repos_import_folder: Local Git folder
+  repos_import_archive: Tar archive
   repos_empty: No plugin repositories registered.
   repos_update: Update
   repos_update_repo: Update repo
   repos_repair: Force pull
   repos_repair_title: Repair repository?
   repos_repair_body: This restores the repository's active revision from its verified source. Any local changes within that repository will be lost.
-  integrity_modal_title: Repository integrity problem
-  integrity_modal_body: Something is not right. HaloDaemon found that a plugin package no longer matches its authenticated repository index, so the affected plugins were not loaded.
-  integrity_modal_repository: "Repository: %{repository}"
-  integrity_modal_package: "Affected package: %{package}"
-  integrity_modal_expected: "Expected: %{hash}"
-  integrity_modal_actual: "Found:    %{hash}"
-  integrity_modal_restore_available: The repository signature is verified. You can safely restore this revision from its remote source.
-  integrity_modal_restore_unavailable: Automatic restore is available only for a signed and verified repository when plugin downloads are enabled.
-  integrity_modal_restore: Restore from repository
-  integrity_modal_close: Close
+  repos_resolve: Resolve issue
+  repos_remove_reimport: Remove and re-import
+  integrity_ok: Repository contents match its package index.
+  integrity_failed: Repository content verification failed. Its affected plugins were disabled.
+  integrity_banner_title: Repository integrity check failed
+  integrity_banner_signed: "Files in '%{repository}' changed on disk or no longer match their expected SHA-256. Restore the repository from its verified source."
+  integrity_banner_unsigned: "Files in unsigned repository '%{repository}' changed on disk or no longer match their expected SHA-256. HaloDaemon cannot safely restore an unauthenticated source; remove the repository and re-import it."
+  integrity_restore: Restore from repository
   repos_remove: Remove repository
   repos_remove_title: Remove repository?
   repos_remove_body: This removes %{name} and uninstalls every plugin provided by the repository.
   repo_source: SOURCE
+  repo_source_remote_git: Remote Git
+  repo_source_local_git: Local Git
+  repo_source_local_archive: Local archive
+  repo_signing_fingerprint: "Publisher key: %{fingerprint}"
   repo_last_sync: LAST SYNC
   repo_never_synced: never
   repo_sync_just_now: just now
@@ -49,9 +53,9 @@ plugins:
   repo_drivers_count: "%{count} installed"
   repo_drivers_from: DRIVERS FROM THIS REPOSITORY
   repo_no_drivers: No drivers installed from this repository yet.
-  repo_signature_verified: Signature verified. This repository index is authenticated by HaloDaemon.
+  repo_signature_verified: Signature verified with the publisher key pinned when this repository was first imported.
   repo_signature_unsigned: Unsigned repository. Package hashes are checked, but the publisher is not authenticated.
-  repo_signature_invalid: "Signature verification failed. HaloDaemon will not load the untrusted revision: %{reason}"
+  repo_signature_verification_failed: Repository signature verification failed.
   repo_compatible_fallback: Compatible revision
   repo_compatibility_incompatible: "The latest repository revision is incompatible, so HaloDaemon is using the newest supported commit: %{reason}"
   # Per-plugin updates
@@ -93,6 +97,7 @@ plugins:
   issue_load_warning: Loaded with a warning
   issue_load_failed: Failed to load
   repository_hash_mismatch: "Plugin package '%{package}' failed integrity validation. Expected SHA-256 %{expected}, but found %{actual}."
+  repository_manifest_mismatch: "Plugin package '%{package}' failed integrity validation. Its %{field} should be %{expected}, but plugin.yaml declares %{actual}."
   issue_details: Details
   issue_modal_title: "Plugin issue: %{plugin}"
   issue_copy: Copy
@@ -123,7 +128,6 @@ plugins:
   req_hwmon_pwm_permission: "Fan control requires write access to the PWM files in /sys/class/hwmon."
   enable: Enable
   disable: Disable
-  delete: Delete script
   repo_sourced_note: This plugin is provided by a repository. Remove the repository to uninstall it.
   provenance_official: Verified official
   provenance_repository: Unsigned repository
@@ -165,12 +169,5 @@ plugins:
   consent_cancel: Cancel
   consent_deny: Not now
   # Add dialog
-  add_title: Add a plugin
-  add_sub: Install a plugin package, which is a folder containing plugin.yaml and its entry script.
-  choose_folder: Choose folder…
-  upload_hint: Choose a plugin package folder
-  upload_sub: The package will be copied into your plugins folder.
   cancel: Cancel
   # Delete confirmation
-  delete_title: Delete script?
-  delete_body: This permanently removes %{name} from your plugins folder.

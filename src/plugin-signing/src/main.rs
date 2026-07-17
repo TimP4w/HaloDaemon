@@ -110,8 +110,16 @@ fn sign(args: &[String]) -> Result<()> {
             .try_into()
             .map_err(|_| anyhow!("signing key seed is not 32 bytes"))?,
     );
-    let payload = std::fs::read(repo.join("repository.yaml"))?;
-    let signature = SigningKey::from_bytes(&seed).sign(&payload).to_bytes();
+    let signing_key = SigningKey::from_bytes(&seed);
+    let mut manifest = signing::read_repository_index(&repo)?;
+    manifest.signing_key = Some(signing::RepositorySigningKey {
+        id: key_id.to_owned(),
+        algorithm: signing::SIGNATURE_ALGORITHM.to_owned(),
+        public_key: B64.encode(signing_key.verifying_key().to_bytes()),
+    });
+    let payload = signing::canonical_index_bytes(&manifest)?;
+    atomic_write(&repo.join("repository.yaml"), &payload)?;
+    let signature = signing_key.sign(&payload).to_bytes();
     atomic_write(
         &repo.join("repository.sig"),
         &signing::signature_bytes(key_id, &signature),

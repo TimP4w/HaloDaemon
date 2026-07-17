@@ -71,9 +71,9 @@ Source: "staging\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs creat
 
 [Icons]
 ; One user-facing entry. Launches the UI directly.
-Name: "{group}\HaloDaemon"; Filename: "{app}\halod-gui.exe"
+Name: "{group}\HaloDaemon"; Filename: "{app}\halod-gui.exe"; AppUserModelID: "dev.timp4w.Halod"
 Name: "{group}\Uninstall HaloDaemon"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\HaloDaemon"; Filename: "{app}\halod-gui.exe"; Tasks: desktopicon
+Name: "{autodesktop}\HaloDaemon"; Filename: "{app}\halod-gui.exe"; Tasks: desktopicon; AppUserModelID: "dev.timp4w.Halod"
 ; Sign-in autostart is owned by the app itself now (Settings' "Start on boot"
 ; toggle writes an HKCU Run value — see ui/src/lifecycle/autostart/windows.rs).
 ; No installer-created shortcut: an elevated installer writing a per-machine

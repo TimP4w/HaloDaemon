@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Plugins page — a master–detail view of canonical plugin packages. The left
 //! column lists every plugin with an enable toggle; the right column shows the
-//! manifest catalog, authority, and provenance. Packages may be imported or
-//! supplied by repositories; only standalone local packages can be deleted.
+//! manifest catalog, authority, and provenance. Every package is supplied by
+//! a registered remote, local Git, or archive repository.
 
 use std::collections::{HashMap, HashSet};
 
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
     AppState, PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
-    PluginRecommendation, PluginRepoInfo, PluginRequirement, PluginRequirementStatus, PluginSource,
-    PluginUpdateStatus, RepoCompatibilityStatus, RepoSignatureStatus, RepoUpdateStatus,
-    RequirementImpact,
+    PluginRecommendation, PluginRepoInfo, PluginRepoLocation, PluginRequirement,
+    PluginRequirementStatus, PluginSource, PluginUpdateStatus, RepoCompatibilityStatus,
+    RepoSignatureStatus, RepoUpdateStatus, RequirementImpact,
 };
 
 use crate::domain::models::plugin_issues::plugin_issue_detail;
@@ -20,12 +20,6 @@ use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::icons;
 use crate::ui::theme;
-
-/// In-progress state of the add-plugin modal. A plugin is always a directory
-/// package (`plugin.yaml` + entry script) — there is no single-file/pasted
-/// import path.
-#[derive(Default)]
-struct AddState;
 
 /// In-progress state of the "Add repository" modal.
 #[derive(Default)]
@@ -75,12 +69,8 @@ enum Selection {
 pub struct PluginsUi {
     /// What the detail column shows.
     selection: Selection,
-    /// The add-plugin modal, when open.
-    add: Option<AddState>,
     /// The add-repository modal, when open.
     add_repo: Option<AddRepoState>,
-    /// Id pending a delete confirmation, when the dialog is open.
-    pending_delete: Option<String>,
     /// Repo slug pending a remove confirmation, when the dialog is open.
     pending_repo_delete: Option<String>,
     /// Repository pending a whole-repository recovery confirmation.
@@ -92,16 +82,6 @@ pub struct PluginsUi {
     /// Plugin ids whose enable/disable is applying → target state; the toggle is
     /// locked at the target until the daemon confirms.
     in_flight: HashMap<String, bool>,
-    /// Plugin ids seen as of the previous frame, used only to spot a
-    /// freshly-imported plugin. `None` until the first frame, so pre-existing
-    /// plugins at startup never spuriously pop the dialog.
-    known_ids: Option<std::collections::HashSet<String>>,
-    /// Set right when the GUI sends an import command, cleared on the next
-    /// new plugin id it sees (whichever outcome). Distinguishes "the user
-    /// just added this through the Add-plugin modal" (blocking consent
-    /// dialog here) from an auto-discovered plugin found by a directory scan
-    /// (the daemon pushes a toast notification for those instead).
-    awaiting_import: bool,
     /// Asset cache keys already requested, so a pending fetch isn't re-sent.
     requested_assets: HashSet<String>,
     /// Decoded asset bytes turned into textures, keyed like `requested_assets`.
@@ -164,14 +144,11 @@ impl PluginsUi {
             &state.plugins.plugins,
             &state.plugins.repos,
         );
-        self.detect_new_plugin_needing_consent(&state.plugins.plugins);
         self.sync_assets(ui.ctx(), cmd, &state.plugins.plugins, plugin_assets);
 
         self.body(ui, state, cmd, repo_updates, plugin_updates, udev_status);
 
-        self.add_modal(ui.ctx(), cmd);
         self.add_repo_modal(ui.ctx(), cmd, repo_branches);
-        self.delete_modal(ui.ctx(), state, cmd);
         self.repo_delete_modal(ui.ctx(), cmd);
         self.repo_repair_modal(ui.ctx(), cmd);
         self.consent_modal(ui.ctx(), state, cmd);
@@ -231,24 +208,6 @@ impl PluginsUi {
             }
         }
         decode_new_assets(ctx, plugin_assets, &mut self.asset_textures);
-    }
-
-    /// A plugin id that appears now but wasn't present last frame opens the
-    /// consent modal only when it arrived via our own import (see
-    /// `awaiting_import`) — an auto-discovered plugin gets a toast instead
-    /// (pushed by the daemon), not a blocking dialog.
-    fn detect_new_plugin_needing_consent(&mut self, plugins: &[PluginInfo]) {
-        let ids: std::collections::HashSet<String> = plugins.iter().map(|p| p.id.clone()).collect();
-        if let Some(known) = &self.known_ids {
-            let new: Vec<&PluginInfo> = plugins.iter().filter(|p| !known.contains(&p.id)).collect();
-            if self.awaiting_import && !new.is_empty() {
-                if let Some(p) = new.iter().find(|p| plugin_needs_permission(p)) {
-                    self.pending_consent = Some(p.id.clone());
-                }
-                self.awaiting_import = false;
-            }
-        }
-        self.known_ids = Some(ids);
     }
 
     fn sync_update_progress(&mut self, plugin_updates: &[PluginUpdateStatus], now: f64) {
@@ -343,36 +302,15 @@ impl PluginsUi {
             .filter(|p| p.platform_supported);
         let total = shown.clone().count();
         let active = shown.filter(|p| p.active).count();
-        egui::Sides::new().show(
-            ui,
-            |ui| {
-                let title_resp = ui.label(
-                    egui::RichText::new(t!("plugins.title"))
-                        .font(theme::bold(18.0))
-                        .color(theme::TEXT),
-                );
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::PluginsOverview,
-                    title_resp.rect,
-                );
-            },
-            |ui| {
-                let add_resp = widgets::button(
-                    ui,
-                    &t!("plugins.add"),
-                    ButtonKind::Primary,
-                    Vec2::new(90.0, 30.0),
-                );
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::PluginsAddPlugin,
-                    add_resp.rect,
-                );
-                if add_resp.clicked() {
-                    self.add = Some(AddState);
-                }
-            },
+        let title_resp = ui.label(
+            egui::RichText::new(t!("plugins.title"))
+                .font(theme::bold(18.0))
+                .color(theme::TEXT),
+        );
+        crate::domain::tour::anchor(
+            ui.ctx(),
+            crate::domain::tour::AnchorId::PluginsOverview,
+            title_resp.rect,
         );
         ui.add_space(theme::SPACE_1);
         ui.label(
@@ -384,6 +322,16 @@ impl PluginsUi {
 
         // Global banners sit above the plugin list.
         let now = ui.input(|i| i.time);
+        if let Some(problem) = repository_integrity_problem(state) {
+            if repository_integrity_banner(ui, &problem) {
+                if problem.repairable {
+                    self.pending_repo_repair = Some(PendingRepoRepair { slug: problem.slug });
+                } else {
+                    self.pending_repo_delete = Some(problem.slug);
+                }
+            }
+            ui.add_space(theme::SPACE_5);
+        }
         if let Some(status) = udev_status.filter(|status| udev_rules_need_action(status)) {
             match udev_rules_banner(ui, status, self.udev_command_copied) {
                 UdevBannerAction::Install => {
@@ -508,7 +456,7 @@ impl PluginsUi {
         );
         ui.add_space(theme::SPACE_4);
 
-        let rows = repo_rows(&state.plugins.repos, repo_updates);
+        let rows = repo_rows(&state.plugins.repos, repo_updates, &state.plugins.plugins);
         if rows.is_empty() {
             ui.label(
                 egui::RichText::new(t!("plugins.repos_empty"))
@@ -553,15 +501,27 @@ impl PluginsUi {
                 },
                 |ui| {
                     if let Some((slug, _)) = skipped_repo_location(&s.path, &state.plugins.repos) {
-                        if widgets::button(
-                            ui,
-                            &t!("plugins.repos_repair"),
-                            ButtonKind::Danger,
-                            Vec2::new(70.0, 26.0),
-                        )
-                        .clicked()
-                        {
-                            self.pending_repo_repair = Some(PendingRepoRepair { slug });
+                        if let Some(repo) = state.plugins.repos.iter().find(|r| r.slug == slug) {
+                            let verified = repo.signature == RepoSignatureStatus::Verified;
+                            let label = if verified {
+                                t!("plugins.repos_repair")
+                            } else {
+                                t!("plugins.repos_remove_reimport")
+                            };
+                            if widgets::button(
+                                ui,
+                                &label,
+                                ButtonKind::Warn,
+                                Vec2::new(if verified { 86.0 } else { 138.0 }, 26.0),
+                            )
+                            .clicked()
+                            {
+                                if verified {
+                                    self.pending_repo_repair = Some(PendingRepoRepair { slug });
+                                } else {
+                                    self.pending_repo_delete = Some(slug);
+                                }
+                            }
                         }
                         ui.add_space(theme::SPACE_3);
                     }
@@ -631,7 +591,6 @@ impl PluginsUi {
                                 cmd,
                                 logo_tex,
                                 update,
-                                &mut self.pending_delete,
                                 &mut self.pending_consent,
                                 &mut self.in_flight,
                                 &mut self.updating,
@@ -696,6 +655,7 @@ impl PluginsUi {
                                 r,
                                 &state.plugins.plugins,
                                 &mut self.pending_repo_delete,
+                                &mut self.pending_repo_repair,
                                 checking,
                                 updates_enabled,
                                 repo_has_updates,
@@ -745,57 +705,6 @@ impl PluginsUi {
 
     // ── Dialogs ─────────────────────────────────────────────────────────────
 
-    fn add_modal(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
-        let Some(add) = self.add.take() else {
-            return;
-        };
-        let mut pick_folder = false;
-        let mut cancel = false;
-
-        let dismissed = widgets::dialog(
-            ctx,
-            "add_plugin",
-            &t!("plugins.add_title"),
-            480.0,
-            add_body,
-            |ui| {
-                // `dialog` lays actions out right-to-left; add the primary first.
-                if widgets::button(
-                    ui,
-                    &t!("plugins.choose_folder"),
-                    ButtonKind::Primary,
-                    Vec2::new(150.0, 34.0),
-                )
-                .clicked()
-                {
-                    pick_folder = true;
-                }
-                if widgets::button(
-                    ui,
-                    &t!("plugins.cancel"),
-                    ButtonKind::Ghost,
-                    Vec2::new(90.0, 34.0),
-                )
-                .clicked()
-                {
-                    cancel = true;
-                }
-            },
-        );
-
-        if pick_folder {
-            // Optimistic: the folder dialog may still be cancelled, in which
-            // case no plugin ever appears and this flag is simply never consumed.
-            self.awaiting_import = true;
-            spawn_import_plugin(ctx, cmd.clone());
-            return; // modal closes; import completes when the user picks a folder
-        }
-        if cancel || dismissed {
-            return;
-        }
-        self.add = Some(add);
-    }
-
     fn add_repo_modal(
         &mut self,
         ctx: &egui::Context,
@@ -807,6 +716,8 @@ impl PluginsUi {
         };
         let mut confirm = false;
         let mut cancel = false;
+        let mut pick_folder = false;
+        let mut pick_archive = false;
         let mut fetch_url: Option<String> = None;
         let now = ctx.input(|i| i.time);
 
@@ -814,7 +725,7 @@ impl PluginsUi {
             ctx,
             "add_plugin_repo",
             &t!("plugins.repos_add_title"),
-            420.0,
+            620.0,
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("plugins.repos_add_sub"))
@@ -859,6 +770,26 @@ impl PluginsUi {
                 }
                 if widgets::button(
                     ui,
+                    &t!("plugins.repos_import_archive"),
+                    ButtonKind::Ghost,
+                    Vec2::new(130.0, 34.0),
+                )
+                .clicked()
+                {
+                    pick_archive = true;
+                }
+                if widgets::button(
+                    ui,
+                    &t!("plugins.repos_import_folder"),
+                    ButtonKind::Ghost,
+                    Vec2::new(130.0, 34.0),
+                )
+                .clicked()
+                {
+                    pick_folder = true;
+                }
+                if widgets::button(
+                    ui,
                     &t!("plugins.cancel"),
                     ButtonKind::Ghost,
                     Vec2::new(90.0, 34.0),
@@ -900,68 +831,18 @@ impl PluginsUi {
                 return;
             }
         }
+        if pick_folder {
+            spawn_import_repository_folder(ctx, cmd.clone());
+            return;
+        }
+        if pick_archive {
+            spawn_import_repository_archive(ctx, cmd.clone());
+            return;
+        }
         if cancel || dismissed {
             return;
         }
         self.add_repo = Some(form);
-    }
-
-    fn delete_modal(&mut self, ctx: &egui::Context, state: &AppState, cmd: &CommandTx) {
-        if self.pending_delete.is_none() {
-            return;
-        }
-        let name = self
-            .pending_delete
-            .as_deref()
-            .and_then(|id| state.plugins.plugins.iter().find(|p| p.id == id))
-            .map(|p| p.name.clone())
-            .unwrap_or_default();
-
-        let mut confirm = false;
-        let mut cancel = false;
-        let dismissed = widgets::dialog(
-            ctx,
-            "delete_plugin",
-            &t!("plugins.delete_title"),
-            420.0,
-            |ui| {
-                ui.label(
-                    egui::RichText::new(t!("plugins.delete_body", name = name))
-                        .font(theme::body_md())
-                        .color(theme::TEXT_DIM),
-                );
-            },
-            |ui| {
-                if widgets::button(
-                    ui,
-                    &t!("plugins.delete"),
-                    ButtonKind::Danger,
-                    Vec2::new(110.0, 34.0),
-                )
-                .clicked()
-                {
-                    confirm = true;
-                }
-                if widgets::button(
-                    ui,
-                    &t!("plugins.cancel"),
-                    ButtonKind::Ghost,
-                    Vec2::new(90.0, 34.0),
-                )
-                .clicked()
-                {
-                    cancel = true;
-                }
-            },
-        );
-        if let Some(id) =
-            widgets::resolve_delete_confirm(&mut self.pending_delete, confirm, cancel || dismissed)
-        {
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::DeletePlugin { id },
-            );
-        }
     }
 
     /// Confirm removing a repository before unregistering it (this uninstalls
@@ -1220,6 +1101,37 @@ struct RepoRow<'a> {
     remote_short: Option<String>,
     behind: bool,
     signature: &'a RepoSignatureStatus,
+    integrity_failed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoIntegrityProblem {
+    slug: String,
+    repairable: bool,
+}
+
+fn repo_integrity_failed(slug: &str, plugins: &[PluginInfo]) -> bool {
+    plugins.iter().any(|plugin| {
+        matches!(&plugin.source, PluginSource::Repo { slug: source } if source == slug)
+            && plugin.health.issue.as_ref().is_some_and(|issue| {
+                matches!(
+                    issue.context.as_ref(),
+                    Some(
+                        halod_shared::types::PluginIssueContext::RepositoryHashMismatch { .. }
+                            | halod_shared::types::PluginIssueContext::RepositoryManifestMismatch { .. }
+                    )
+                )
+            })
+    })
+}
+
+fn repository_integrity_problem(state: &AppState) -> Option<RepoIntegrityProblem> {
+    state.plugins.repos.iter().find_map(|repo| {
+        repo_integrity_failed(&repo.slug, &state.plugins.plugins).then(|| RepoIntegrityProblem {
+            slug: repo.slug.clone(),
+            repairable: repo.signature == RepoSignatureStatus::Verified,
+        })
+    })
 }
 
 /// A commit SHA truncated to a short, still-unambiguous display form.
@@ -1229,7 +1141,11 @@ fn truncate_sha(sha: &str) -> &str {
 
 /// Pair each repo with its update status, sorted by slug for a stable order
 /// — except the official repo, which always sorts first.
-fn repo_rows<'a>(repos: &'a [PluginRepoInfo], updates: &[RepoUpdateStatus]) -> Vec<RepoRow<'a>> {
+fn repo_rows<'a>(
+    repos: &'a [PluginRepoInfo],
+    updates: &[RepoUpdateStatus],
+    plugins: &[PluginInfo],
+) -> Vec<RepoRow<'a>> {
     let mut rows: Vec<RepoRow> = repos
         .iter()
         .map(|r| {
@@ -1245,6 +1161,7 @@ fn repo_rows<'a>(repos: &'a [PluginRepoInfo], updates: &[RepoUpdateStatus]) -> V
                     .map(|s| truncate_sha(&s.remote_sha).to_owned()),
                 behind,
                 signature: &r.signature,
+                integrity_failed: repo_integrity_failed(&r.slug, plugins),
             }
         })
         .collect();
@@ -1273,8 +1190,8 @@ fn repo_signature_tooltip(status: &RepoSignatureStatus) -> String {
     match status {
         RepoSignatureStatus::Verified => t!("plugins.repo_signature_verified").to_string(),
         RepoSignatureStatus::Unsigned => t!("plugins.repo_signature_unsigned").to_string(),
-        RepoSignatureStatus::Invalid { reason } => {
-            t!("plugins.repo_signature_invalid", reason = reason.clone()).to_string()
+        RepoSignatureStatus::Invalid { .. } => {
+            t!("plugins.repo_signature_verification_failed").to_string()
         }
     }
 }
@@ -1294,6 +1211,22 @@ fn draw_repo_lock(
 
     ui.interact(rect, ui.id().with(id), Sense::hover())
         .on_hover_text(repo_signature_tooltip(status));
+}
+
+fn draw_repo_integrity(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    failed: bool,
+    id: impl std::hash::Hash + std::fmt::Debug,
+) {
+    let (color, tooltip) = if failed {
+        (theme::TRAFFIC_RED, t!("plugins.integrity_failed"))
+    } else {
+        (theme::ONLINE, t!("plugins.integrity_ok"))
+    };
+    icons::draw(ui, rect, icons::Icon::IntegrityShield, color);
+    ui.interact(rect, ui.id().with(id), Sense::hover())
+        .on_hover_text(tooltip);
 }
 
 /// One selectable repo row in the list column. Returns whether it was clicked.
@@ -1374,9 +1307,19 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
         Vec2::splat(16.0),
     );
     draw_repo_lock(ui, lock_rect, row.signature, ("repo_signature", row.slug));
+    let integrity_rect = Rect::from_center_size(
+        Pos2::new(rect.right() - 35.0, rect.center().y),
+        Vec2::splat(16.0),
+    );
+    draw_repo_integrity(
+        ui,
+        integrity_rect,
+        row.integrity_failed,
+        ("repo_integrity", row.slug),
+    );
 
     if let Some(branch) = row.branch {
-        let branch_pos = Pos2::new(rect.right() - 27.0, rect.center().y);
+        let branch_pos = Pos2::new(rect.right() - 49.0, rect.center().y);
         ui.painter().text(
             branch_pos,
             Align2::RIGHT_CENTER,
@@ -2076,7 +2019,6 @@ fn detail_body(
     cmd: &CommandTx,
     logo_tex: Option<&egui::TextureHandle>,
     update: Option<&PluginUpdateStatus>,
-    pending_delete: &mut Option<String>,
     pending_consent: &mut Option<String>,
     in_flight: &mut HashMap<String, bool>,
     updating: &mut HashMap<String, f64>,
@@ -2185,7 +2127,16 @@ fn detail_body(
             if let PluginSource::Repo { slug } = &p.source {
                 widgets::chip(ui, slug);
             }
-            widgets::chip(ui, &provenance_label(p.provenance));
+            if p.provenance == PluginProvenance::VerifiedOfficial {
+                let _ = widgets::chip_filled_icon(
+                    ui,
+                    &provenance_label(p.provenance),
+                    theme::CYAN,
+                    icons::Icon::VerifiedBadge,
+                );
+            } else {
+                widgets::chip(ui, &provenance_label(p.provenance));
+            }
         });
     }
 
@@ -2279,20 +2230,7 @@ fn detail_body(
                 apply_and_lock(in_flight, &p.id, target);
             }
         }
-        if matches!(p.source, halod_shared::types::PluginSource::Local) {
-            if widgets::button(
-                ui,
-                &t!("plugins.delete"),
-                ButtonKind::Danger,
-                Vec2::new(120.0, 34.0),
-            )
-            .clicked()
-            {
-                *pending_delete = Some(p.id.clone());
-            }
-        } else {
-            widgets::caps_label_inline(ui, &t!("plugins.repo_sourced_note"));
-        }
+        widgets::caps_label_inline(ui, &t!("plugins.repo_sourced_note"));
     });
 }
 
@@ -2764,6 +2702,39 @@ fn udev_rules_banner(
     action
 }
 
+fn repository_integrity_banner(ui: &mut egui::Ui, problem: &RepoIntegrityProblem) -> bool {
+    let title = t!("plugins.integrity_banner_title");
+    let subtitle = if problem.repairable {
+        t!(
+            "plugins.integrity_banner_signed",
+            repository = problem.slug.clone()
+        )
+    } else {
+        t!(
+            "plugins.integrity_banner_unsigned",
+            repository = problem.slug.clone()
+        )
+    };
+    let action = if problem.repairable {
+        t!("plugins.repos_resolve")
+    } else {
+        t!("plugins.repos_remove_reimport")
+    };
+    widgets::Banner::danger(&title)
+        .subtitle(&subtitle)
+        .dot(theme::TRAFFIC_RED)
+        .show_with(ui, |ui| {
+            ui.add_space(theme::SPACE_5);
+            widgets::button(
+                ui,
+                &action,
+                ButtonKind::Warn,
+                Vec2::new(if problem.repairable { 112.0 } else { 150.0 }, 30.0),
+            )
+            .clicked()
+        })
+}
+
 fn udev_info_modal(
     ctx: &egui::Context,
     status: &halod_shared::types::UdevRulesStatus,
@@ -3161,6 +3132,7 @@ fn repo_detail_body(
     r: &PluginRepoInfo,
     plugins: &[PluginInfo],
     pending_repo_delete: &mut Option<String>,
+    pending_repo_repair: &mut Option<PendingRepoRepair>,
     checking: bool,
     updates_enabled: bool,
     has_updates: bool,
@@ -3168,6 +3140,8 @@ fn repo_detail_body(
     start_check: &mut bool,
     start_update: &mut bool,
 ) -> Option<String> {
+    let integrity_failed = repo_integrity_failed(&r.slug, plugins);
+    let repairable = r.signature == RepoSignatureStatus::Verified;
     egui::Sides::new().show(
         ui,
         |ui| {
@@ -3210,6 +3184,14 @@ fn repo_detail_body(
                             &r.signature,
                             ("repo_detail_signature", &r.slug),
                         );
+                        let (integrity_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                        draw_repo_integrity(
+                            ui,
+                            integrity_rect,
+                            integrity_failed,
+                            ("repo_detail_integrity", &r.slug),
+                        );
                     });
                     let url = ui.add(
                         egui::Label::new(
@@ -3220,14 +3202,24 @@ fn repo_detail_body(
                         )
                         .sense(Sense::click()),
                     );
-                    if url.hovered() {
+                    if url.hovered() && r.location == PluginRepoLocation::RemoteGit {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                    if url.clicked() {
+                    if url.clicked() && r.location == PluginRepoLocation::RemoteGit {
                         ui.ctx().open_url(egui::OpenUrl {
                             url: r.url.clone(),
                             new_tab: true,
                         });
+                    }
+                    if let Some(fingerprint) = &r.signing_key_fingerprint {
+                        ui.label(
+                            egui::RichText::new(t!(
+                                "plugins.repo_signing_fingerprint",
+                                fingerprint = fingerprint
+                            ))
+                            .font(theme::mono(9.0))
+                            .color(theme::TEXT_MUT),
+                        );
                     }
                 });
             });
@@ -3241,7 +3233,12 @@ fn repo_detail_body(
         .filter(|p| matches!(&p.source, PluginSource::Repo { slug } if *slug == r.slug))
         .collect();
     ui.columns(3, |cols| {
-        stat_box(&mut cols[0], &t!("plugins.repo_source"), "Git remote");
+        let source = match r.location {
+            PluginRepoLocation::RemoteGit => t!("plugins.repo_source_remote_git"),
+            PluginRepoLocation::LocalGit => t!("plugins.repo_source_local_git"),
+            PluginRepoLocation::LocalArchive => t!("plugins.repo_source_local_archive"),
+        };
+        stat_box(&mut cols[0], &t!("plugins.repo_source"), &source);
         stat_box(
             &mut cols[1],
             &t!("plugins.repo_last_sync"),
@@ -3258,6 +3255,25 @@ fn repo_detail_body(
     });
 
     ui.add_space(theme::SPACE_7);
+    if integrity_failed {
+        let title = t!("plugins.integrity_banner_title");
+        let subtitle = if repairable {
+            t!(
+                "plugins.integrity_banner_signed",
+                repository = r.slug.clone()
+            )
+        } else {
+            t!(
+                "plugins.integrity_banner_unsigned",
+                repository = r.slug.clone()
+            )
+        };
+        widgets::Banner::danger(&title)
+            .subtitle(&subtitle)
+            .dot(theme::TRAFFIC_RED)
+            .show(ui);
+        ui.add_space(theme::SPACE_5);
+    }
     if !updates_enabled {
         updates_disabled_note(ui);
         ui.add_space(theme::SPACE_5);
@@ -3300,6 +3316,31 @@ fn repo_detail_body(
                 .clicked()
             {
                 *start_update = true;
+            }
+        }
+
+        if integrity_failed {
+            ui.add_space(theme::SPACE_5);
+            let label = if repairable {
+                t!("plugins.repos_resolve")
+            } else {
+                t!("plugins.repos_remove_reimport")
+            };
+            if widgets::button(
+                ui,
+                &label,
+                ButtonKind::Warn,
+                Vec2::new(if repairable { 130.0 } else { 170.0 }, 32.0),
+            )
+            .clicked()
+            {
+                if repairable {
+                    *pending_repo_repair = Some(PendingRepoRepair {
+                        slug: r.slug.clone(),
+                    });
+                } else {
+                    *pending_repo_delete = Some(r.slug.clone());
+                }
             }
         }
     });
@@ -3376,49 +3417,33 @@ fn repo_detail_body(
     clicked
 }
 
-// ── Add-plugin modal body ───────────────────────────────────────────────────
-
-fn add_body(ui: &mut egui::Ui) {
-    ui.label(
-        egui::RichText::new(t!("plugins.add_sub"))
-            .font(theme::body_sm())
-            .color(theme::TEXT_MUT),
-    );
-    ui.add_space(theme::SPACE_7);
-
-    egui::Frame::NONE
-        .fill(theme::INNER_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(theme::RADIUS_MD)
-        .inner_margin(egui::Margin::symmetric(20, 26))
-        .show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new(t!("plugins.upload_hint"))
-                        .font(theme::body_md())
-                        .color(theme::TEXT),
-                );
-                ui.add_space(theme::SPACE_2);
-                ui.label(
-                    egui::RichText::new(t!("plugins.upload_sub"))
-                        .font(theme::body_sm())
-                        .color(theme::TEXT_MUT),
-                );
-            });
-        });
-}
-
-/// Open a native folder picker on a background thread and send an import
-/// command for the chosen plugin package directory straight from the thread
-/// (the command channel is cheap to clone). Mirrors `effect_designer::spawn_import`.
-fn spawn_import_plugin(ctx: &egui::Context, cmd: CommandTx) {
+fn spawn_import_repository_folder(ctx: &egui::Context, cmd: CommandTx) {
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         if let Some(path) = rfd::FileDialog::new().pick_folder() {
-            let source_dir = path.to_string_lossy().into_owned();
             crate::runtime::ipc::send(
                 &cmd,
-                halod_shared::commands::DaemonCommand::ImportPlugin { source_dir },
+                halod_shared::commands::DaemonCommand::ImportPluginRepository {
+                    source_path: path.to_string_lossy().into_owned(),
+                },
+            );
+        }
+        ctx.request_repaint();
+    });
+}
+
+fn spawn_import_repository_archive(ctx: &egui::Context, cmd: CommandTx) {
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Repository archive", &["tar", "gz", "tgz"])
+            .pick_file()
+        {
+            crate::runtime::ipc::send(
+                &cmd,
+                halod_shared::commands::DaemonCommand::ImportPluginRepository {
+                    source_path: path.to_string_lossy().into_owned(),
+                },
             );
         }
         ctx.request_repaint();
@@ -3887,9 +3912,31 @@ mod tests {
             previous_verified_sha: None,
             last_sync: None,
             official: false,
+            location: Default::default(),
             signature: RepoSignatureStatus::Unsigned,
+            signing_key_fingerprint: None,
             compatibility: RepoCompatibilityStatus::Compatible,
         }
+    }
+
+    fn integrity_failed_plugin(slug: &str) -> PluginInfo {
+        let mut plugin = info("broken", false);
+        plugin.source = PluginSource::Repo {
+            slug: slug.to_owned(),
+        };
+        plugin.health.issue = Some(PluginIssue {
+            kind: PluginIssueKind::LoadFailed,
+            detail: "repository failed integrity validation".into(),
+            context: Some(
+                halod_shared::types::PluginIssueContext::RepositoryHashMismatch {
+                    package: "broken".into(),
+                    expected: "aaaa".into(),
+                    actual: "bbbb".into(),
+                },
+            ),
+            timestamp_ms: 0,
+        });
+        plugin
     }
 
     #[test]
@@ -3899,9 +3946,18 @@ mod tests {
     }
 
     #[test]
+    fn invalid_signature_tooltip_does_not_expose_backend_reason() {
+        let tooltip = repo_signature_tooltip(&RepoSignatureStatus::Invalid {
+            reason: "repository signature does not match repository.yaml".into(),
+        });
+        assert_eq!(tooltip, "Repository signature verification failed.");
+        assert!(!tooltip.contains("repository.yaml"));
+    }
+
+    #[test]
     fn repo_rows_sorts_by_slug_and_marks_up_to_date_repos_unbehind() {
         let repos = vec![repo("zebra", "aaaaaaaa1111"), repo("alpha", "bbbbbbbb2222")];
-        let rows = repo_rows(&repos, &[]);
+        let rows = repo_rows(&repos, &[], &[]);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].slug, "alpha");
         assert_eq!(rows[1].slug, "zebra");
@@ -3920,7 +3976,7 @@ mod tests {
             remote_sha: "aaaaaaaa".into(),
             behind: false,
         }];
-        let rows = repo_rows(&repos, &up_to_date);
+        let rows = repo_rows(&repos, &up_to_date, &[]);
         assert!(!rows[0].behind);
         assert!(rows[0].remote_short.is_none());
 
@@ -3930,7 +3986,7 @@ mod tests {
             remote_sha: "cccccccc9999".into(),
             behind: true,
         }];
-        let rows = repo_rows(&repos, &behind);
+        let rows = repo_rows(&repos, &behind, &[]);
         assert!(rows[0].behind);
         assert_eq!(rows[0].remote_short.as_deref(), Some("cccccccc"));
     }
@@ -3940,9 +3996,35 @@ mod tests {
         let mut official = repo("aaa-not-alphabetically-first", "aaaaaaaa");
         official.official = true;
         let repos = vec![repo("alpha", "bbbbbbbb"), official];
-        let rows = repo_rows(&repos, &[]);
+        let rows = repo_rows(&repos, &[], &[]);
         assert!(rows[0].official, "the official repo must sort first");
         assert_eq!(rows[1].slug, "alpha");
+    }
+
+    #[test]
+    fn repository_integrity_problem_repairs_only_verified_sources() {
+        let mut state = AppState::default();
+        state.plugins.repos = vec![repo("publisher", "aaaaaaaa")];
+        state.plugins.plugins = vec![integrity_failed_plugin("publisher")];
+
+        let unsigned = repository_integrity_problem(&state).unwrap();
+        assert_eq!(unsigned.slug, "publisher");
+        assert!(!unsigned.repairable);
+
+        state.plugins.repos[0].signature = RepoSignatureStatus::Verified;
+        let verified = repository_integrity_problem(&state).unwrap();
+        assert!(verified.repairable);
+
+        state.plugins.plugins[0].health.issue = None;
+        assert!(repository_integrity_problem(&state).is_none());
+    }
+
+    #[test]
+    fn repo_row_marks_package_hash_mismatch_as_failed_integrity() {
+        let repos = vec![repo("publisher", "aaaaaaaa")];
+        let plugins = vec![integrity_failed_plugin("publisher")];
+        let rows = repo_rows(&repos, &[], &plugins);
+        assert!(rows[0].integrity_failed);
     }
 
     #[test]

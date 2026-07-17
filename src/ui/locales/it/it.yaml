@@ -42,6 +42,9 @@ notify:
   plugin_recommended:
     title: Plugin consigliato disponibile
     message: "%{plugin} è consigliato per questo sistema. Apri Plugin per attivarlo."
+  repository_integrity:
+    title: Errore di integrità del repository
+    message: "Qualcosa non va. Il pacchetto %{package} del repository %{repository} non ha superato la convalida e non è stato caricato."
 
 tray:
   open: Apri HaloDaemon

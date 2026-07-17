@@ -47,11 +47,18 @@ glutin = "0.32"
 glutin-winit = "0.5"
 glow = "0.17"
 egui_glow = { version = "0.35", default-features = false, features = ["winit", "wayland"] }
+zbus = "4"
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.24.1"
 # HKCU Run-key autostart entry (ui/src/lifecycle/autostart/windows.rs).
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Registry"] }
+windows = { version = "0.62.2", features = [
+    "Data_Xml_Dom",
+    "UI_Notifications",
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+] }
 
 [target.'cfg(windows)'.build-dependencies]
 # Embeds assets/icon.ico as the exe's Win32 icon resource so Windows shows the

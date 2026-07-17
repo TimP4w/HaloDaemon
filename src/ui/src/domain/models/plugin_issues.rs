@@ -4,8 +4,8 @@
 use std::collections::HashSet;
 
 use halod_shared::types::{
-    AppState, PluginDownloadConsent, PluginIssue, PluginIssueContext, PluginSource,
-    RepoSignatureStatus,
+    AppState, PluginDownloadConsent, PluginIssue, PluginIssueContext, PluginRepoLocation,
+    PluginSource, RepoSignatureStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,38 +20,50 @@ pub struct RepositoryIntegrityAlert {
 
 pub fn repository_integrity_alert(
     state: &AppState,
-    dismissed: &HashSet<String>,
+    notified: &HashSet<String>,
 ) -> Option<RepositoryIntegrityAlert> {
     state.plugins.plugins.iter().find_map(|plugin| {
-        let PluginIssueContext::RepositoryHashMismatch {
-            package,
-            expected,
-            actual,
-        } = plugin.health.issue.as_ref()?.context.as_ref()?;
+        let (package, field, expected, actual) =
+            match plugin.health.issue.as_ref()?.context.as_ref()? {
+                PluginIssueContext::RepositoryHashMismatch {
+                    package,
+                    expected,
+                    actual,
+                } => (package, "sha256", expected, actual),
+                PluginIssueContext::RepositoryManifestMismatch {
+                    package,
+                    field,
+                    expected,
+                    actual,
+                } => (package, field.as_str(), expected, actual),
+            };
         let repository = match &plugin.source {
             PluginSource::Repo { slug } => Some(slug.clone()),
             PluginSource::Local => None,
         };
         let key = format!(
-            "{}/{package}/{expected}/{actual}",
+            "{}/{package}/{field}/{expected}/{actual}",
             repository.as_deref().unwrap_or(&plugin.id)
         );
-        if dismissed.contains(&key) {
+        if notified.contains(&key) {
             return None;
         }
-        let restore_slug = if state.gui.plugin_downloads == PluginDownloadConsent::Allowed {
-            repository.as_ref().and_then(|slug| {
-                state
-                    .plugins
-                    .repos
-                    .iter()
-                    .find(|repo| repo.slug == *slug)
-                    .filter(|repo| repo.signature == RepoSignatureStatus::Verified)
-                    .map(|repo| repo.slug.clone())
-            })
-        } else {
-            None
-        };
+        let restore_slug = repository.as_ref().and_then(|slug| {
+            state
+                .plugins
+                .repos
+                .iter()
+                .find(|repo| repo.slug == *slug)
+                .filter(|repo| {
+                    repo.signature == RepoSignatureStatus::Verified
+                        && (state.gui.plugin_downloads == PluginDownloadConsent::Allowed
+                            || matches!(
+                                repo.location,
+                                PluginRepoLocation::LocalGit | PluginRepoLocation::LocalArchive
+                            ))
+                })
+                .map(|repo| repo.slug.clone())
+        });
         Some(RepositoryIntegrityAlert {
             key,
             repository,
@@ -72,6 +84,19 @@ pub fn plugin_issue_detail(issue: &PluginIssue) -> String {
         }) => t!(
             "plugins.repository_hash_mismatch",
             package = package,
+            expected = expected,
+            actual = actual
+        )
+        .to_string(),
+        Some(PluginIssueContext::RepositoryManifestMismatch {
+            package,
+            field,
+            expected,
+            actual,
+        }) => t!(
+            "plugins.repository_manifest_mismatch",
+            package = package,
+            field = field,
             expected = expected,
             actual = actual
         )
@@ -139,7 +164,9 @@ mod tests {
             previous_verified_sha: None,
             last_sync: None,
             official: true,
+            location: Default::default(),
             signature: RepoSignatureStatus::Verified,
+            signing_key_fingerprint: None,
             compatibility: Default::default(),
         };
         let mut state = AppState::default();
@@ -158,6 +185,26 @@ mod tests {
         state.gui.plugin_downloads = PluginDownloadConsent::Denied;
         let alert = repository_integrity_alert(&state, &HashSet::new()).unwrap();
         assert!(alert.restore_slug.is_none());
+
+        state.plugins.repos[0].location = PluginRepoLocation::LocalArchive;
+        let alert = repository_integrity_alert(&state, &HashSet::new()).unwrap();
+        assert_eq!(alert.restore_slug.as_deref(), Some("official"));
+
+        state.plugins.plugins[0]
+            .health
+            .issue
+            .as_mut()
+            .unwrap()
+            .context = Some(PluginIssueContext::RepositoryManifestMismatch {
+            package: "halo_lcd".into(),
+            field: "version".into(),
+            expected: "2.0.0".into(),
+            actual: "1.0.0".into(),
+        });
+        let alert = repository_integrity_alert(&state, &HashSet::new()).unwrap();
+        assert_eq!(alert.restore_slug.as_deref(), Some("official"));
+        assert_eq!(alert.expected, "2.0.0");
+        assert_eq!(alert.actual, "1.0.0");
 
         let dismissed = HashSet::from([alert.key]);
         assert!(repository_integrity_alert(&state, &dismissed).is_none());

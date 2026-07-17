@@ -10,19 +10,25 @@ use halod_shared::types::{
 };
 
 fn active_repo_signature_status(record: &crate::config::PluginRepoRecord) -> RepoSignatureStatus {
-    if record.slug != crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
+    let trust = if record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
+        crate::plugin::repo::RepositoryTrust::Official
+    } else if let Some(key) = &record.trusted_key {
+        crate::plugin::repo::RepositoryTrust::Pinned(key.clone())
+    } else {
         return RepoSignatureStatus::Unsigned;
-    }
+    };
 
     let root = crate::config::plugin_repos_dir().join(&record.slug);
     let result = if !record.locked_sha.is_empty() && root.join(".git").is_dir() {
-        crate::plugin::repo::verify_official_repository_signature_at_commit(
+        crate::plugin::repo::verify_repository_signature_at_commit(
             &root,
             &record.locked_sha,
+            &trust,
         )
     } else if record.active_revision.is_some() {
-        crate::plugin::repo::verify_official_repository_signature(
+        crate::plugin::repo::verify_repository_signature(
             &crate::plugin::repo::active_revision_dir(record),
+            &trust,
         )
     } else {
         return RepoSignatureStatus::Invalid {
@@ -118,11 +124,28 @@ pub async fn serialize_state(
                     previous_verified_sha: r.previous_verified_sha.clone(),
                     last_sync: r.last_sync.clone(),
                     official: r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG,
+                    location: match r.source_kind {
+                        crate::config::PluginRepoSourceKind::Archive => {
+                            halod_shared::types::PluginRepoLocation::LocalArchive
+                        }
+                        crate::config::PluginRepoSourceKind::Git
+                            if r.url.starts_with("file://") =>
+                        {
+                            halod_shared::types::PluginRepoLocation::LocalGit
+                        }
+                        crate::config::PluginRepoSourceKind::Git => {
+                            halod_shared::types::PluginRepoLocation::RemoteGit
+                        }
+                    },
                     signature: observed_repo_signatures
                         .get(&r.slug)
                         .filter(|(sha, _)| sha != &r.locked_sha)
                         .map(|(_, status)| status.clone())
                         .unwrap_or_else(|| active_repo_signature_status(r)),
+                    signing_key_fingerprint: r
+                        .trusted_key
+                        .as_ref()
+                        .and_then(|key| halod_plugin_signing::signing_key_fingerprint(key).ok()),
                     compatibility: repo_compatibility
                         .get(&r.slug)
                         .cloned()
@@ -156,6 +179,8 @@ mod tests {
             url: format!("https://example.com/{slug}.git"),
             slug: slug.to_owned(),
             repository_id: None,
+            trusted_key: None,
+            source_kind: crate::config::PluginRepoSourceKind::Git,
             branch: None,
             locked_sha: String::new(),
             active_revision: None,

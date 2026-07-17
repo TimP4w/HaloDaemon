@@ -44,6 +44,39 @@ impl std::fmt::Display for PackageHashMismatch {
 
 impl std::error::Error for PackageHashMismatch {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageManifestMismatch {
+    pub package: String,
+    pub field: String,
+    pub expected: String,
+    pub actual: String,
+}
+
+impl std::fmt::Display for PackageManifestMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "repository package '{}' does not match its plugin.yaml {}: expected {}, got {}",
+            self.package, self.field, self.expected, self.actual
+        )
+    }
+}
+
+impl std::error::Error for PackageManifestMismatch {}
+
+/// Detached signature verification failed. Its stable type lets IPC clients
+/// localize the user-facing error while logs retain the precise diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepositorySignatureMismatch;
+
+impl std::fmt::Display for RepositorySignatureMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("repository signature does not match repository.yaml")
+    }
+}
+
+impl std::error::Error for RepositorySignatureMismatch {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryManifest {
@@ -53,8 +86,20 @@ pub struct RepositoryManifest {
     pub version: String,
     #[serde(default)]
     pub licenses_sha256: Option<String>,
+    /// Optional publisher identity. On first import Halo verifies the detached
+    /// signature with this key and pins it for all later revisions (TOFU).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_key: Option<RepositorySigningKey>,
     pub compatibility: RepositoryCompatibility,
     pub packages: Vec<RepositoryPackage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositorySigningKey {
+    pub id: String,
+    pub algorithm: String,
+    pub public_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +306,16 @@ pub fn validate_repository_index(manifest: &RepositoryManifest) -> Result<()> {
     }) {
         bail!("repository has an invalid licenses_sha256 digest");
     }
+    if let Some(key) = &manifest.signing_key {
+        validate_identifier("repository signing key id", &key.id)?;
+        if key.algorithm != SIGNATURE_ALGORITHM {
+            bail!(
+                "unsupported repository signing key algorithm '{}'",
+                key.algorithm
+            );
+        }
+        let _: [u8; 32] = decode_array(&key.public_key, "repository public key")?;
+    }
     semver::VersionReq::parse(&manifest.compatibility.halod)
         .context("parsing repository compatibility.halod")?;
 
@@ -333,16 +388,22 @@ pub fn validate_repository_packages(repo_dir: &Path, manifest: &RepositoryManife
         let meta = read_package_meta(&dir)
             .with_context(|| format!("reading package '{}' manifest", package.id))?;
         if meta.id != package.id {
-            bail!(
-                "repository package '{}' does not match its plugin.yaml id",
-                package.id
-            );
+            return Err(PackageManifestMismatch {
+                package: package.id.clone(),
+                field: "id".into(),
+                expected: package.id.clone(),
+                actual: meta.id,
+            }
+            .into());
         }
         if meta.version != package.version {
-            bail!(
-                "repository package '{}' does not match its plugin.yaml version",
-                package.id
-            );
+            return Err(PackageManifestMismatch {
+                package: package.id.clone(),
+                field: "version".into(),
+                expected: package.version.clone(),
+                actual: meta.version,
+            }
+            .into());
         }
         let actual = package_hash(&dir)
             .with_context(|| format!("hashing repository package '{}'", package.id))?;
@@ -471,6 +532,14 @@ pub fn canonical_index_bytes(manifest: &RepositoryManifest) -> Result<Vec<u8>> {
             digest.to_ascii_lowercase()
         ));
     }
+    if let Some(key) = &manifest.signing_key {
+        out.push_str(&format!(
+            "signing_key:\n  id: {}\n  algorithm: {}\n  public_key: {}\n\n",
+            yaml_string(&key.id),
+            yaml_string(&key.algorithm),
+            yaml_string(&key.public_key),
+        ));
+    }
     out.push_str(&format!(
         "compatibility:\n  halod: {}\n  plugin_api: {}\n\npackages:\n",
         yaml_string(&manifest.compatibility.halod),
@@ -575,7 +644,29 @@ pub fn verify_signature(
     let raw_signature: [u8; 64] = decode_array(&signature.signature, "repository signature")?;
     let key = VerifyingKey::from_bytes(&public).context("constructing repository verifying key")?;
     key.verify(payload, &Signature::from_bytes(&raw_signature))
-        .map_err(|_| anyhow!("repository signature does not match repository.yaml"))
+        .map_err(|_| RepositorySignatureMismatch.into())
+}
+
+pub fn verify_advertised_signature(
+    payload: &[u8],
+    signature_bytes: &[u8],
+    key: &RepositorySigningKey,
+) -> Result<()> {
+    verify_signature(
+        payload,
+        signature_bytes,
+        &[(key.id.as_str(), key.public_key.as_str())],
+    )
+}
+
+pub fn signing_key_fingerprint(key: &RepositorySigningKey) -> Result<String> {
+    let public: [u8; 32] = decode_array(&key.public_key, "repository public key")?;
+    let digest = Sha256::digest(public);
+    Ok(digest
+        .chunks(2)
+        .map(|chunk| format!("{:02X}{:02X}", chunk[0], chunk[1]))
+        .collect::<Vec<_>>()
+        .join(":"))
 }
 
 pub fn reject_symlinks(root: &Path) -> Result<()> {
@@ -774,6 +865,7 @@ mod tests {
             name: "Test repository".into(),
             version: "1.0.0".into(),
             licenses_sha256: None,
+            signing_key: None,
             compatibility: RepositoryCompatibility {
                 halod: ">=0.2.0, <0.3.0".into(),
                 plugin_api: 1,
@@ -810,6 +902,7 @@ mod tests {
             name: "Test repository".into(),
             version: "1.0.0".into(),
             licenses_sha256: None,
+            signing_key: None,
             compatibility: RepositoryCompatibility {
                 halod: ">=0.2.0".into(),
                 plugin_api: 1,
@@ -841,6 +934,24 @@ mod tests {
         let document = signature_bytes("test", &signature);
         let public = B64.encode(key.verifying_key().to_bytes());
         verify_signature(payload, &document, &[("test", &public)]).unwrap();
-        assert!(verify_signature(b"schema: 2\n", &document, &[("test", &public)]).is_err());
+        let error = verify_signature(b"schema: 2\n", &document, &[("test", &public)]).unwrap_err();
+        assert!(error.is::<RepositorySignatureMismatch>());
+    }
+
+    #[test]
+    fn advertised_key_verifies_and_has_a_stable_fingerprint() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let advertised = RepositorySigningKey {
+            id: "publisher".into(),
+            algorithm: SIGNATURE_ALGORITHM.into(),
+            public_key: B64.encode(key.verifying_key().to_bytes()),
+        };
+        let payload = b"repository index";
+        let document = signature_bytes("publisher", &key.sign(payload).to_bytes());
+
+        verify_advertised_signature(payload, &document, &advertised).unwrap();
+        assert_eq!(signing_key_fingerprint(&advertised).unwrap().len(), 79);
+        assert!(verify_advertised_signature(b"changed", &document, &advertised).is_err());
     }
 }

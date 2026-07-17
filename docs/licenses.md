@@ -118,13 +118,21 @@ shared by the daemon (LCD text rendering) and the GUI (egui):
 - Credited in the About dialog "Bundled assets" section, which ships the full OFL-1.1
   text (see `append_bundled_asset_licenses()` in [`ui/build.rs`](../src/ui/build.rs)).
 
-## 4a. Bundled icons — Apache-2.0
+## 4a. Bundled icons — Apache-2.0, MIT, and CC-BY-4.0
 
 The GUI embeds a small SVG icon set from [`ui/assets/icons/`](../src/ui/assets/icons/).
 Most glyphs are original HaloDaemon assets and inherit the project license. The SVGs
 that came from Pictogrammers Material Design Icons or Google Material Icons carry
 their own `Apache-2.0` SPDX header and copyright attribution. The About dialog names
 both icon projects and includes the full Apache-2.0 text from `LICENSES/`.
+The verified-publisher badge comes from
+[Boxicons](https://github.com/box-icons/boxicons-core), carries its own `MIT`
+SPDX attribution, and is accompanied by the MIT text in `LICENSES/` and the
+About dialog.
+The repository-integrity shield comes from Microsoft's
+[Visual Studio Code Codicons](https://github.com/microsoft/vscode-codicons),
+is licensed under [CC-BY-4.0](https://github.com/microsoft/vscode-codicons/blob/main/LICENSE),
+and retains its source and attribution in the SVG and About dialog.
 
 ## 5. PawnIO kernel blobs — LGPL-2.1-or-later
 

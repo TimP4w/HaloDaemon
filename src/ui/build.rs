@@ -280,7 +280,16 @@ fn append_bundled_asset_licenses(workspace: &std::path::Path, buf: &mut Vec<u8>)
          Google Material Icons (selected SVG glyphs)\n\
            Copyright: Google LLC\n\
            License: Apache-2.0\n\
-           URL: https://fonts.google.com/icons\n\n",
+           URL: https://fonts.google.com/icons\n\n\
+         Boxicons (verified badge SVG)\n\
+           Copyright: 2015-2021 Aniket Suvarna\n\
+           License: MIT\n\
+           URL: https://github.com/box-icons/boxicons-core\n\n\
+         Visual Studio Code Codicons (integrity shield SVG)\n\
+           Copyright: Microsoft Corporation\n\
+           License: CC-BY-4.0\n\
+           Source: https://github.com/microsoft/vscode-codicons\n\
+           License URL: https://github.com/microsoft/vscode-codicons/blob/main/LICENSE\n\n",
     );
     buf.extend_from_slice(header.as_bytes());
 
@@ -290,6 +299,7 @@ fn append_bundled_asset_licenses(workspace: &std::path::Path, buf: &mut Vec<u8>)
         .join("LICENSES");
     append_license_text(buf, &licenses, "OFL-1.1", "OFL-1.1.txt");
     append_license_text(buf, &licenses, "Apache-2.0", "Apache-2.0.txt");
+    append_license_text(buf, &licenses, "MIT", "MIT.txt");
 
     buf.extend_from_slice(format!("\n{sep}\nINCORPORATED SOURCE LICENSES\n{sep}\n\n").as_bytes());
     append_license_text(buf, &licenses, "GPL-2.0-or-later", "GPL-2.0-or-later.txt");

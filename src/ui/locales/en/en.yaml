@@ -42,6 +42,9 @@ notify:
   plugin_recommended:
     title: Recommended plugin available
     message: "%{plugin} is recommended for this system. Open Plugins to enable it."
+  repository_integrity:
+    title: Repository integrity error
+    message: "Something is not right. Package %{package} from repository %{repository} failed validation and was not loaded."
 
 tray:
   open: Open HaloDaemon

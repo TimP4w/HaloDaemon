@@ -149,8 +149,8 @@ it in `AppState`, restores its saved config, runs `discover_children()`, and cal
 
 Built-in host devices register at **compile time** via `inventory`. **Device plugins**
 ([plugin/](../src/daemon/src/plugin/)) add a parallel **runtime**
-registry: `load_all_with_repos()` reads directory packages (`plugin.yaml` + entry
-script) from the local plugins directory and every registered git-repo source, and
+registry: `load_all_with_repos()` reads packages (`plugin.yaml` + entry script)
+only from registered remote Git, local Git, or imported archive repositories, and
 `make_device()` consults `plugins::match_handle()` *before* built-in descriptors —
 so a plugin **shadows** a built-in host device for the same hardware. A single generic
 `LuaDevice` implements the `Device` + capability traits and forwards each call into a
