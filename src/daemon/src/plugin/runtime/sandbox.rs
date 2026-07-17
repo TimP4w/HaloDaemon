@@ -35,6 +35,16 @@ const REMOVED: &[&str] = &[
 /// consent itself. `config` is this plugin's own resolved config values (see
 /// `plugins::resolved_config_for`) — never another plugin's, since the caller
 /// builds one `config` map per VM.
+/// A plugin's optional `log` level.
+fn plugin_log_level(name: Option<&str>) -> log::Level {
+    match name {
+        Some("trace") => log::Level::Trace,
+        Some("debug") => log::Level::Debug,
+        Some("warn") => log::Level::Warn,
+        _ => log::Level::Info,
+    }
+}
+
 pub fn apply(
     lua: &Lua,
     granted: &[Permission],
@@ -42,8 +52,9 @@ pub fn apply(
 ) -> mlua::Result<()> {
     let globals = lua.globals();
     strip_escape_hatches(lua)?;
-    let logger = lua.create_function(|_, msg: mlua::String| {
-        log::info!("[plugin] {}", msg.to_string_lossy());
+    let logger = lua.create_function(|_, (msg, level): (mlua::String, Option<mlua::String>)| {
+        let level = plugin_log_level(level.as_ref().map(|l| l.to_string_lossy()).as_deref());
+        log::log!(level, "[plugin] {}", msg.to_string_lossy());
         Ok(())
     })?;
     globals.set("log", logger)?;
@@ -308,6 +319,24 @@ mod tests {
             let value: mlua::Value = loaded.get(name).unwrap();
             assert!(!value.is_nil(), "stdlib '{name}' was not loaded");
         }
+    }
+
+    #[test]
+    fn log_accepts_an_optional_level_and_never_fails_the_call() {
+        let (lua, _) = bootstrap_vm(&[], &HashMap::new(), 1024 * 1024, 1_000_000).unwrap();
+        for call in [
+            r#"log("m")"#,
+            r#"log("m", "trace")"#,
+            r#"log("m", "nonsense")"#,
+            r#"log("m", 42)"#,
+        ] {
+            lua.load(call)
+                .exec()
+                .unwrap_or_else(|e| panic!("{call}: {e}"));
+        }
+        assert_eq!(plugin_log_level(Some("trace")), log::Level::Trace);
+        assert_eq!(plugin_log_level(Some("nonsense")), log::Level::Info);
+        assert_eq!(plugin_log_level(None), log::Level::Info);
     }
 
     #[test]
