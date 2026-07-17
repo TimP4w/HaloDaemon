@@ -25,7 +25,7 @@ use crate::drivers::transports::{HidTransport, Transport};
 
 use super::bytebuf::check_alloc;
 use super::ffi::{bytes_from, to_lua_err};
-use super::transport::{AddrScope, CommandExecutor, PluginIo, RegisterBus};
+use super::transport::{command_result_table, AddrScope, CommandExecutor, PluginIo, RegisterBus};
 
 /// Lua userdata wrapping one transport. Rate limiting is inherited: this holds
 /// the real (metered) transport, so a script cannot outrun the hardware.
@@ -270,11 +270,11 @@ impl UserData for TransportApi {
         methods.add_method(
             "run",
             |lua, this, (executable, args): (String, Vec<String>)| {
-                let output = this
+                let result = this
                     .command()?
                     .run(&executable, &args)
                     .map_err(to_lua_err)?;
-                lua.create_string(&output)
+                command_result_table(lua, &result)
             },
         );
 

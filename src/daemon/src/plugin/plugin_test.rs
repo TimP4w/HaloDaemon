@@ -25,7 +25,7 @@ use halod_shared::types::{EffectParamValue, RgbColor, RgbState, WriteRateLimit, 
 
 use super::manifest::{parse_manifest_from_dir, PluginManifest, UsbConfig};
 use super::runtime::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
-use super::runtime::transport::PluginIo;
+use super::runtime::transport::{CommandExecutor, CommandRunResult, PluginIo};
 use super::runtime::worker::{DevMatch, PluginHandle};
 
 /// `mlua::Error` isn't reliably `Send + Sync` (an `ExternalError` may box a
@@ -516,18 +516,29 @@ fn open_integration(
     } else {
         None
     };
-    #[cfg(target_os = "linux")]
-    let io = hwmon
-        .clone()
-        .map(PluginIo::Hwmon)
-        .unwrap_or_else(|| PluginIo::Stream {
-            transport: recording.clone() as Arc<dyn Transport>,
-            usb: None,
-        });
-    #[cfg(not(target_os = "linux"))]
-    let io = PluginIo::Stream {
-        transport: recording.clone() as Arc<dyn Transport>,
-        usb: None,
+    let io = if let Some(command) = &manifest.transports.command {
+        PluginIo::Command(CommandExecutor::scripted(
+            command.commands.clone(),
+            command_results_from_spec(&spec_table)?,
+        ))
+    } else {
+        #[cfg(target_os = "linux")]
+        {
+            hwmon
+                .clone()
+                .map(PluginIo::Hwmon)
+                .unwrap_or_else(|| PluginIo::Stream {
+                    transport: recording.clone() as Arc<dyn Transport>,
+                    usb: None,
+                })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            PluginIo::Stream {
+                transport: recording.clone() as Arc<dyn Transport>,
+                usb: None,
+            }
+        }
     };
     let transport_kind = manifest
         .transports
@@ -724,7 +735,14 @@ fn integration_child_table(
 #[cfg(target_os = "linux")]
 fn hwmon_fixtures_from_spec(
     spec: &Option<Table>,
-) -> Result<Vec<(String, String, std::collections::HashMap<String, String>, Vec<String>)>> {
+) -> Result<
+    Vec<(
+        String,
+        String,
+        std::collections::HashMap<String, String>,
+        Vec<String>,
+    )>,
+> {
     let Some(spec) = spec else {
         return Ok(Vec::new());
     };
@@ -786,6 +804,33 @@ fn reads_from_spec(spec: &Option<Table>) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Read `spec.command_results`, a queue of complete `command.run` outcomes.
+/// Spawn failures are intentionally not scriptable as results: like production,
+/// they surface as Lua errors rather than being confused with timeouts.
+fn command_results_from_spec(spec: &Option<Table>) -> Result<Vec<CommandRunResult>> {
+    let Some(spec) = spec else {
+        return Ok(Vec::new());
+    };
+    let Ok(results) = spec.get::<Table>("command_results") else {
+        return Ok(Vec::new());
+    };
+    results
+        .sequence_values::<Table>()
+        .map(|result| {
+            let result = result.anyhow()?;
+            let stdout = result.get::<mlua::String>("stdout").anyhow()?;
+            let stderr = result.get::<mlua::String>("stderr").anyhow()?;
+            Ok(CommandRunResult {
+                success: result.get::<bool>("success").anyhow()?,
+                exit_code: result.get::<i32>("exit_code").anyhow()?,
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+                timed_out: result.get::<bool>("timed_out").anyhow()?,
+            })
+        })
+        .collect()
+}
+
 /// Build a `LuaDevice` over the plugin's first declared device, wired to a
 /// fresh `RecordingStream`, and return it as a Lua table of methods.
 fn open_device(
@@ -798,9 +843,9 @@ fn open_device(
         .devices
         .first()
         .context("plugin declares no devices")?;
-    if !matches!(spec.transport.as_str(), "hid" | "tcp" | "usb") {
+    if !matches!(spec.transport.as_str(), "hid" | "tcp" | "usb" | "command") {
         anyhow::bail!(
-            "plugin-test harness only supports hid/tcp/usb transports today (got '{}')",
+            "plugin-test harness only supports hid/tcp/usb/command transports today (got '{}')",
             spec.transport
         );
     }
@@ -836,6 +881,26 @@ fn open_device(
         name: None,
         extra: Default::default(),
     };
+    let transport = match spec.transport.as_str() {
+        "usb" => PluginIo::Usb(usb_recording.clone().expect("USB manifest config")),
+        "command" => {
+            let command = manifest
+                .transports
+                .command
+                .as_ref()
+                .context("command device has no command transport configuration")?;
+            PluginIo::Command(CommandExecutor::scripted(
+                command.commands.clone(),
+                command_results_from_spec(&spec_table)?,
+            ))
+        }
+        _ => PluginIo::Stream {
+            transport: recording.clone() as Arc<dyn Transport>,
+            usb: usb_recording
+                .clone()
+                .map(|usb| usb as Arc<dyn UsbCollection>),
+        },
+    };
     let device = Arc::new(LuaDevice::new(LuaDeviceParts {
         id: "plugin-test".to_owned(),
         manifest,
@@ -846,16 +911,7 @@ fn open_device(
         ))),
         worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
             dev_match,
-            transport: if spec.transport == "usb" {
-                PluginIo::Usb(usb_recording.clone().expect("USB manifest config"))
-            } else {
-                PluginIo::Stream {
-                    transport: recording.clone() as Arc<dyn Transport>,
-                    usb: usb_recording
-                        .clone()
-                        .map(|usb| usb as Arc<dyn UsbCollection>),
-                }
-            },
+            transport,
             handle: handle.clone(),
             // The harness grants every declared permission (so gated transports
             // open), uses no config, and has no `AppState` to notify.
@@ -1536,5 +1592,55 @@ mod tests {
             .unwrap();
         let handle = runtime.handle().clone();
         assert_eq!(run(handle, &dir).unwrap(), 0);
+    }
+
+    #[test]
+    fn command_fixture_provides_structured_results_to_plugins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("command_fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: command_fixture\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [fixture-tool]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.lua"),
+            r#"return {
+                enumerate_controllers = function(_dev)
+                    local result = command.run("fixture-tool", { "arg" })
+                    return {{
+                        index = result.exit_code,
+                        id = tostring(result.success),
+                        key = result.stdout,
+                        name = result.stderr,
+                        location = tostring(result.timed_out),
+                    }}
+                end,
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("test.lua"),
+            r#"return function(h)
+                local dev = h:open_integration({ command_results = {{
+                    success = false, exit_code = 23, stdout = "partial",
+                    stderr = "failure detail", timed_out = true,
+                }} })
+                local result = dev:enumerate_controllers()[1]
+                h:assert_eq(result.id, "false", "success is structured")
+                h:assert_eq(result.index, 23, "exit code is structured")
+                h:assert_eq(result.key, "partial", "stdout is structured")
+                h:assert_eq(result.name, "failure detail", "stderr is structured")
+                h:assert_eq(result.location, "true", "timeout is structured")
+            end"#,
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(run(runtime.handle().clone(), &dir).unwrap(), 0);
     }
 }

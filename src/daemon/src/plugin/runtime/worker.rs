@@ -33,7 +33,7 @@ use super::manifest::{
     validate_short_text, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, RangeDef,
 };
 use super::sandbox;
-use super::transport::{AddrScope, CommandExecutor, PluginIo, RegisterBus};
+use super::transport::{command_result_table, AddrScope, CommandExecutor, PluginIo, RegisterBus};
 use super::transport_api::TransportApi;
 use crate::drivers::transports::smbus::SmBusDevice;
 
@@ -1389,8 +1389,8 @@ fn install_command_api(lua: &Lua, command: CommandExecutor) -> Result<()> {
         .map_err(|e| lua_err("command table", e))?;
     let run = lua
         .create_function(move |lua, (executable, args): (String, Vec<String>)| {
-            let output = command.run(&executable, &args).map_err(to_lua_err)?;
-            lua.create_string(&output)
+            let result = command.run(&executable, &args).map_err(to_lua_err)?;
+            command_result_table(lua, &result)
         })
         .map_err(|e| lua_err("command.run", e))?;
     api.set("run", run).map_err(|e| lua_err("command.run", e))?;

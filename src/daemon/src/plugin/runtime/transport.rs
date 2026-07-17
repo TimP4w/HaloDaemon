@@ -110,6 +110,20 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
 pub struct CommandExecutor {
     allowed: Arc<[String]>,
     unrecoverable: Arc<std::sync::Mutex<Option<String>>>,
+    #[cfg(feature = "plugin-test")]
+    scripted: Option<Arc<std::sync::Mutex<std::collections::VecDeque<CommandRunResult>>>>,
+}
+
+/// The bounded outcome of one allowlisted command invocation. Failures before
+/// a child exists (resolution/spawn) remain errors, so callers can distinguish
+/// them from a child killed by the execution timeout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRunResult {
+    pub success: bool,
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub timed_out: bool,
 }
 
 impl CommandExecutor {
@@ -120,7 +134,21 @@ impl CommandExecutor {
         Self {
             allowed: allowed.into(),
             unrecoverable: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(feature = "plugin-test")]
+            scripted: None,
         }
+    }
+
+    #[cfg(feature = "plugin-test")]
+    pub fn scripted(
+        commands: impl IntoIterator<Item = String>,
+        results: impl IntoIterator<Item = CommandRunResult>,
+    ) -> Self {
+        let mut executor = Self::new(commands);
+        executor.scripted = Some(Arc::new(std::sync::Mutex::new(
+            results.into_iter().collect(),
+        )));
+        executor
     }
 
     fn reject<T>(&self, detail: String) -> Result<T> {
@@ -135,7 +163,7 @@ impl CommandExecutor {
         self.unrecoverable.lock().unwrap().clone()
     }
 
-    pub fn run(&self, executable: &str, args: &[String]) -> Result<Vec<u8>> {
+    pub fn run(&self, executable: &str, args: &[String]) -> Result<CommandRunResult> {
         if !self.allowed.iter().any(|name| name == executable) {
             return self.reject(format!(
                 "command '{executable}' is outside the declared transport scope"
@@ -153,6 +181,23 @@ impl CommandExecutor {
         {
             return self.reject("command arguments exceed the declared execution limits".into());
         }
+        #[cfg(feature = "plugin-test")]
+        if let Some(results) = &self.scripted {
+            return results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("no more scripted command results queued"));
+        }
+        self.run_system(executable, args, COMMAND_TIMEOUT)
+    }
+
+    fn run_system(
+        &self,
+        executable: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<CommandRunResult> {
         // Resolve once and execute that exact path. This keeps the runtime
         // behavior identical to the requirement probe and avoids a second,
         // potentially different PATH lookup between readiness and execution.
@@ -200,17 +245,19 @@ impl CommandExecutor {
             Result::<Vec<u8>>::Ok(bytes)
         });
         let started = Instant::now();
+        let mut timed_out = false;
         loop {
             if child.try_wait()?.is_some() {
                 break;
             }
-            if started.elapsed() >= COMMAND_TIMEOUT {
+            if started.elapsed() >= timeout {
                 let _ = child.kill();
-                let _ = child.wait();
-                anyhow::bail!("command '{executable}' exceeded its execution timeout");
+                timed_out = true;
+                break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+        let status = child.wait()?;
         let stdout = out
             .join()
             .map_err(|_| anyhow::anyhow!("command stdout reader panicked"))??;
@@ -226,8 +273,29 @@ impl CommandExecutor {
                 String::from_utf8_lossy(&stderr)
             );
         }
-        Ok(stdout)
+        Ok(CommandRunResult {
+            success: status.success() && !timed_out,
+            exit_code: status.code().unwrap_or(-1),
+            stdout,
+            stderr,
+            timed_out,
+        })
     }
+}
+
+/// Convert a command outcome without UTF-8 loss: Lua strings are byte strings,
+/// which preserves command output exactly up to the existing output bound.
+pub fn command_result_table(
+    lua: &mlua::Lua,
+    result: &CommandRunResult,
+) -> mlua::Result<mlua::Table> {
+    let table = lua.create_table()?;
+    table.set("success", result.success)?;
+    table.set("exit_code", result.exit_code)?;
+    table.set("stdout", lua.create_string(&result.stdout)?)?;
+    table.set("stderr", lua.create_string(&result.stderr)?)?;
+    table.set("timed_out", result.timed_out)?;
+    Ok(table)
 }
 
 /// The set of SMBus addresses a plugin is allowed to touch through a
@@ -362,7 +430,7 @@ pub fn known_kinds() -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::CommandExecutor;
+    use super::{command_result_table, CommandExecutor};
 
     #[test]
     fn command_executor_rejects_undeclared_executable() {
@@ -384,6 +452,60 @@ mod tests {
             .to_string()
             .contains("shell, interpreter, or command launcher"));
         assert!(commands.unrecoverable_error().is_some());
+    }
+
+    #[test]
+    fn command_executor_returns_nonzero_exit_and_stderr() {
+        let commands = CommandExecutor::new(["rustc".to_owned()]);
+        let result = commands
+            .run("rustc", &["--definitely-not-a-rustc-option".to_owned()])
+            .unwrap();
+        assert!(!result.success);
+        assert_ne!(result.exit_code, 0);
+        assert!(result.stdout.len() <= super::MAX_COMMAND_OUTPUT_BYTES);
+        assert!(!result.stderr.is_empty());
+        assert!(result.stderr.len() <= super::MAX_COMMAND_OUTPUT_BYTES);
+        assert!(!result.timed_out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_is_a_result_while_spawn_failure_is_an_error() {
+        let commands = CommandExecutor::new(["definitely-missing-halod-command".to_owned()]);
+        assert!(commands
+            .run("definitely-missing-halod-command", &[])
+            .is_err());
+
+        let commands = CommandExecutor::new(["sleep".to_owned()]);
+        let result = commands
+            .run_system("sleep", &["1".to_owned()], std::time::Duration::ZERO)
+            .expect("sleep should spawn");
+        assert!(!result.success);
+        assert!(result.timed_out);
+    }
+
+    #[test]
+    fn command_result_lua_table_preserves_all_fields() {
+        let lua = mlua::Lua::new();
+        let result = super::CommandRunResult {
+            success: false,
+            exit_code: 7,
+            stdout: b"out".to_vec(),
+            stderr: b"err".to_vec(),
+            timed_out: false,
+        };
+        let table = command_result_table(&lua, &result).unwrap();
+        assert!(!table.get::<bool>("success").unwrap());
+        assert_eq!(table.get::<i32>("exit_code").unwrap(), 7);
+        assert_eq!(
+            table.get::<mlua::String>("stdout").unwrap().as_bytes(),
+            b"out"
+        );
+        assert_eq!(
+            table.get::<mlua::String>("stderr").unwrap().as_bytes(),
+            b"err"
+        );
+        assert!(!table.get::<bool>("timed_out").unwrap());
     }
 
     #[test]
