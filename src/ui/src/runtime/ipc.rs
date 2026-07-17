@@ -125,6 +125,32 @@ struct UiTx {
 pub type CommandTx = mpsc::UnboundedSender<DaemonCommand>;
 type CommandRx = mpsc::UnboundedReceiver<DaemonCommand>;
 
+/// Parse `value[field]` into `T`, falling back to `T::default()` when the
+/// field is missing or malformed — the tolerant shape every push-stream
+/// payload field is read with.
+fn field_or_default<T: serde::de::DeserializeOwned + Default>(
+    value: &serde_json::Value,
+    field: &str,
+) -> T {
+    value
+        .get(field)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Take a watch channel's new value, if any: `Some` exactly once per change.
+/// Logs once per call under `name` if the channel has closed.
+pub fn take_changed<T: Clone>(rx: &mut watch::Receiver<T>, name: &str) -> Option<T> {
+    match rx.has_changed() {
+        Ok(true) => Some(rx.borrow_and_update().clone()),
+        Ok(false) => None,
+        Err(_) => {
+            log::warn!("IPC {name} channel closed");
+            None
+        }
+    }
+}
+
 /// Queue a typed command for delivery to the daemon (non-blocking).
 pub fn send(tx: &CommandTx, cmd: DaemonCommand) {
     if tx.send(cmd).is_err() {
@@ -552,28 +578,19 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             return false;
         }
         Some("plugin_repo_updates") => {
-            let statuses: Vec<RepoUpdateStatus> = value
-                .get("repos")
-                .and_then(|r| serde_json::from_value(r.clone()).ok())
-                .unwrap_or_default();
-            tx.repo_updates.send_replace(statuses);
+            tx.repo_updates
+                .send_replace(field_or_default(&value, "repos"));
             repaint();
             return false;
         }
         Some("plugin_updates") => {
-            let statuses: Vec<PluginUpdateStatus> = value
-                .get("plugins")
-                .and_then(|p| serde_json::from_value(p.clone()).ok())
-                .unwrap_or_default();
-            tx.plugin_updates.send_replace(statuses);
+            tx.plugin_updates
+                .send_replace(field_or_default(&value, "plugins"));
             repaint();
             return false;
         }
         Some("udev_rules_status") => {
-            let status = value
-                .get("data")
-                .and_then(|data| serde_json::from_value(data.clone()).ok());
-            tx.udev_rules.send_replace(status);
+            tx.udev_rules.send_replace(field_or_default(&value, "data"));
             repaint();
             return false;
         }
@@ -822,6 +839,36 @@ mod tests {
             NotificationCode::Generic {
                 message: "Repository signature verification failed.".into()
             }
+        );
+    }
+
+    #[test]
+    fn take_changed_yields_each_value_exactly_once() {
+        let (tx, mut rx) = watch::channel(0u32);
+        assert_eq!(take_changed(&mut rx, "test"), None);
+        tx.send_replace(7);
+        assert_eq!(take_changed(&mut rx, "test"), Some(7));
+        assert_eq!(take_changed(&mut rx, "test"), None);
+        // A closed channel yields None instead of panicking.
+        drop(tx);
+        assert_eq!(take_changed(&mut rx, "test"), None);
+    }
+
+    #[test]
+    fn field_or_default_tolerates_missing_and_malformed_fields() {
+        let valid = serde_json::json!({ "repos": ["a", "b"] });
+        assert_eq!(
+            field_or_default::<Vec<String>>(&valid, "repos"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert_eq!(
+            field_or_default::<Vec<String>>(&valid, "missing"),
+            Vec::<String>::new()
+        );
+        let malformed = serde_json::json!({ "repos": 42 });
+        assert_eq!(
+            field_or_default::<Vec<String>>(&malformed, "repos"),
+            Vec::<String>::new()
         );
     }
 }

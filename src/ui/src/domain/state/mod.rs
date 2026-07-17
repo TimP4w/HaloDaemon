@@ -39,3 +39,16 @@ pub struct Rename {
 
 /// Rolling sensor/write-rate history length (seconds, sampled once per second).
 pub(crate) const HISTORY_LEN: usize = 40;
+
+/// Drop optimistic toggle locks whose plugin has vanished or whose `landed`
+/// predicate says the daemon state caught up with the queued `target`.
+pub fn retain_in_flight(
+    in_flight: &mut std::collections::HashMap<String, bool>,
+    plugins: &[halod_shared::types::PluginInfo],
+    landed: impl Fn(&halod_shared::types::PluginInfo, bool) -> bool,
+) {
+    in_flight.retain(|id, target| match plugins.iter().find(|p| &p.id == id) {
+        Some(p) => !landed(p, *target),
+        None => false,
+    });
+}

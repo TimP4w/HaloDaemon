@@ -341,9 +341,8 @@ fn integration_issue_bar(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
 
 /// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
 fn reconcile_in_flight(in_flight: &mut HashMap<String, bool>, plugins: &[PluginInfo]) {
-    in_flight.retain(|id, target| match plugins.iter().find(|p| &p.id == id) {
-        Some(p) => p.integration_enabled != *target,
-        None => false,
+    crate::domain::state::retain_in_flight(in_flight, plugins, |p, target| {
+        p.integration_enabled == target
     });
 }
 

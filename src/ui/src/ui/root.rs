@@ -43,11 +43,8 @@ impl App {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
         // Only re-clone when the watch channel reports a change.
-        if self.ui.state.has_changed().unwrap_or_else(|_| {
-            log::warn!("IPC state channel closed");
-            false
-        }) {
-            self.state_cache = std::sync::Arc::new(self.ui.state.borrow_and_update().clone());
+        if let Some(state) = crate::runtime::ipc::take_changed(&mut self.ui.state, "state") {
+            self.state_cache = std::sync::Arc::new(state);
             crate::ui::screens::settings::apply_locale(&self.state_cache.gui.language);
         }
         let state = std::sync::Arc::clone(&self.state_cache);
@@ -60,39 +57,31 @@ impl App {
         let connected = *self.ui.connected.borrow();
         let debug = self.ui.debug.borrow().clone();
         let udev_rules = self.ui.udev_rules.borrow().clone();
-        if self.ui.lcd_images.has_changed().unwrap_or_else(|_| {
-            log::warn!("IPC lcd_images channel closed");
-            false
-        }) {
-            self.lcd_images_cache =
-                std::sync::Arc::new(self.ui.lcd_images.borrow_and_update().clone());
+        if let Some(imgs) = crate::runtime::ipc::take_changed(&mut self.ui.lcd_images, "lcd_images")
+        {
+            self.lcd_images_cache = std::sync::Arc::new(imgs);
         }
         let lcd_images = std::sync::Arc::clone(&self.lcd_images_cache);
-        if self.ui.plugin_assets.has_changed().unwrap_or_else(|_| {
-            log::warn!("IPC plugin_assets channel closed");
-            false
-        }) {
-            self.plugin_assets_cache =
-                std::sync::Arc::new(self.ui.plugin_assets.borrow_and_update().clone());
+        if let Some(assets) =
+            crate::runtime::ipc::take_changed(&mut self.ui.plugin_assets, "plugin_assets")
+        {
+            self.plugin_assets_cache = std::sync::Arc::new(assets);
         }
         let plugin_assets = std::sync::Arc::clone(&self.plugin_assets_cache);
-        if self.ui.repo_updates.has_changed().unwrap_or_else(|_| {
-            log::warn!("IPC repo_updates channel closed");
-            false
-        }) {
-            self.repo_updates_cache = self.ui.repo_updates.borrow_and_update().clone();
+        if let Some(updates) =
+            crate::runtime::ipc::take_changed(&mut self.ui.repo_updates, "repo_updates")
+        {
+            self.repo_updates_cache = updates;
         }
-        if self.ui.plugin_updates.has_changed().unwrap_or_else(|_| {
-            log::warn!("IPC plugin_updates channel closed");
-            false
-        }) {
-            self.plugin_updates_cache = self.ui.plugin_updates.borrow_and_update().clone();
+        if let Some(updates) =
+            crate::runtime::ipc::take_changed(&mut self.ui.plugin_updates, "plugin_updates")
+        {
+            self.plugin_updates_cache = updates;
         }
-        if self.ui.repo_branches.has_changed().unwrap_or_else(|_| {
-            log::warn!("IPC repo_branches channel closed");
-            false
-        }) {
-            self.repo_branches_cache = self.ui.repo_branches.borrow_and_update().clone();
+        if let Some(branches) =
+            crate::runtime::ipc::take_changed(&mut self.ui.repo_branches, "repo_branches")
+        {
+            self.repo_branches_cache = branches;
         }
         let lcd_preview = if let Page::Device(ref id) = self.page {
             self.ui.lcd_frames.borrow().get(id).cloned()
@@ -102,8 +91,10 @@ impl App {
         // A delta reply is one small message per ~200ms; cloning it every
         // frame (as with a plain `.borrow()`) churns the allocator for
         // nothing on the ~60 idle frames between updates.
-        if self.ui.lcd_editor_render.has_changed().unwrap_or(false) {
-            self.lcd_editor_render_cache = self.ui.lcd_editor_render.borrow_and_update().clone();
+        if let Some(render) =
+            crate::runtime::ipc::take_changed(&mut self.ui.lcd_editor_render, "lcd_editor_render")
+        {
+            self.lcd_editor_render_cache = render;
         }
         let lcd_editor_render = if let Page::Device(ref id) = self.page {
             self.lcd_editor_render_cache
@@ -115,20 +106,21 @@ impl App {
         // A terminal (`Done`/`Failed`) is consumed as a one-shot edge: `Some`
         // only on the frame it newly arrives, so a retained stale terminal
         // can't clear a freshly-armed upload spinner.
-        let lcd_upload_terminal = if self.ui.lcd_upload.has_changed().unwrap_or(false) {
-            self.ui.lcd_upload.borrow_and_update().clone().filter(|p| {
-                matches!(
-                    p.stage,
-                    halod_shared::types::LcdUploadStage::Done
-                        | halod_shared::types::LcdUploadStage::Failed
-                )
-            })
-        } else {
-            None
-        };
+        let lcd_upload_terminal =
+            crate::runtime::ipc::take_changed(&mut self.ui.lcd_upload, "lcd_upload")
+                .flatten()
+                .filter(|p| {
+                    matches!(
+                        p.stage,
+                        halod_shared::types::LcdUploadStage::Done
+                            | halod_shared::types::LcdUploadStage::Failed
+                    )
+                });
         let lcd_upload = self.ui.lcd_upload.borrow().clone();
-        if self.ui.lcd_template.has_changed().unwrap_or(false) {
-            self.pending_lcd_template = self.ui.lcd_template.borrow_and_update().clone();
+        if let Some(template) =
+            crate::runtime::ipc::take_changed(&mut self.ui.lcd_template, "lcd_template")
+        {
+            self.pending_lcd_template = template;
         }
         let lcd_template = self.pending_lcd_template.take();
         let canvas_frame = if self.page == Page::Lighting {

@@ -1644,9 +1644,8 @@ fn reconcile_in_flight(
     plugins: &[PluginInfo],
     discovering: bool,
 ) {
-    in_flight.retain(|id, target| match plugins.iter().find(|p| &p.id == id) {
-        Some(p) => !plugin_toggle_landed(p, *target, discovering),
-        None => false,
+    crate::domain::state::retain_in_flight(in_flight, plugins, |p, target| {
+        plugin_toggle_landed(p, target, discovering)
     });
 }
 
