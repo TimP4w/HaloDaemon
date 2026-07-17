@@ -59,7 +59,7 @@ chacha20poly1305 = "0.11.0"
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
 keyring = "4.1.4"
 # Fully vendored (libgit2/libssh2/openssl via `cc`), matching mlua's `vendored` Lua.
-git2 = { version = "0.19", default-features = false, features = ["ssh", "https", "vendored-libgit2", "vendored-openssl"] }
+git2 = { version = "0.20", default-features = false, features = ["ssh", "https", "vendored-libgit2", "vendored-openssl"] }
 futures-util = "0.3"
 url      = "2"
 flate2   = "1"
