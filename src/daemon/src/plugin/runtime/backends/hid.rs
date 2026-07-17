@@ -2,7 +2,6 @@
 //! HID plugin transport backend: a byte-stream `Transport` opened from the
 //! matched device's HID path.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -45,7 +44,7 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
 fn open(
     manifest: &PluginManifest,
     handle: &DiscoveryHandle<'_>,
-    _config: &HashMap<String, String>,
+    _config: &crate::plugin::ResolvedConfig,
     granted: &[halod_shared::types::Permission],
     limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {

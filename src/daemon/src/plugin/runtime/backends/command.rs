@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Scoped direct command execution for command-backed plugins.
 
-use std::collections::HashMap;
-
 use anyhow::{bail, Result};
 use halod_shared::types::{Permission, WriteRateLimit};
 
@@ -18,7 +16,7 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
 fn open(
     manifest: &PluginManifest,
     _: &DiscoveryHandle<'_>,
-    _: &HashMap<String, String>,
+    _: &crate::plugin::ResolvedConfig,
     granted: &[Permission],
     _: Option<WriteRateLimit>,
 ) -> Result<PluginIo> {

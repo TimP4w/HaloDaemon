@@ -2,8 +2,6 @@
 //! SMBus plugin transport backend: an addressed [`RegisterBus`] scoped to the
 //! device's own address, opened from an `SmBusScanEntry`-produced handle.
 
-use std::collections::HashMap;
-
 use anyhow::{bail, Result};
 
 use crate::drivers::transports::smbus::SmbusBusKind;
@@ -23,7 +21,7 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
 fn open(
     _manifest: &PluginManifest,
     handle: &DiscoveryHandle<'_>,
-    _config: &HashMap<String, String>,
+    _config: &crate::plugin::ResolvedConfig,
     granted: &[halod_shared::types::Permission],
     limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {

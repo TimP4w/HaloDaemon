@@ -3,7 +3,7 @@
 
 use anyhow::{bail, Result};
 use halod_shared::types::{Permission, WriteRateLimit};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::drivers::transports::usb::{UsbDevices, UsbSelector};
 use crate::plugin::manifest::{DeviceSpec, PluginManifest};
@@ -49,7 +49,7 @@ pub(crate) fn open_usb(
 fn open(
     manifest: &PluginManifest,
     handle: &DiscoveryHandle<'_>,
-    _config: &HashMap<String, String>,
+    _config: &crate::plugin::ResolvedConfig,
     granted: &[Permission],
     limit: Option<WriteRateLimit>,
 ) -> Result<PluginIo> {

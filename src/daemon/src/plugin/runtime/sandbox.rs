@@ -5,7 +5,6 @@
 //! `string.pack`) stay available — they're what protocol encoding needs.
 
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -39,7 +38,7 @@ const REMOVED: &[&str] = &[
 pub fn apply(
     lua: &Lua,
     granted: &[Permission],
-    config: &HashMap<String, String>,
+    config: &crate::plugin::ResolvedConfig,
 ) -> mlua::Result<()> {
     let globals = lua.globals();
     strip_escape_hatches(lua)?;
@@ -129,7 +128,7 @@ pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
 /// parser hand-rolling the trio outside this chokepoint).
 pub(super) fn bootstrap_vm(
     granted: &[Permission],
-    config: &HashMap<String, String>,
+    config: &crate::plugin::ResolvedConfig,
     memory_limit: usize,
     instruction_budget: u64,
 ) -> mlua::Result<(Lua, Rc<Cell<u64>>)> {
@@ -237,11 +236,22 @@ fn inject_platform(lua: &Lua) -> mlua::Result<()> {
 /// Populate `halod.config` with this plugin's resolved values. Read-only in
 /// spirit (nothing enforces it in Lua, but plugins have no reason to mutate
 /// it and no callback ever reads it back from the host).
-fn inject_config(lua: &Lua, config: &HashMap<String, String>) -> mlua::Result<()> {
+fn inject_config(lua: &Lua, config: &crate::plugin::ResolvedConfig) -> mlua::Result<()> {
     let halod: Table = lua.globals().get("halod")?;
     let table = lua.create_table()?;
     for (key, value) in config {
-        table.set(key.as_str(), value.as_str())?;
+        match value {
+            crate::plugin::ResolvedConfigValue::Boolean(value) => {
+                table.set(key.as_str(), *value)?
+            }
+            crate::plugin::ResolvedConfigValue::Number(value) => table.set(key.as_str(), *value)?,
+            crate::plugin::ResolvedConfigValue::Integer(value) => {
+                table.set(key.as_str(), *value)?
+            }
+            crate::plugin::ResolvedConfigValue::String(value) => {
+                table.set(key.as_str(), value.as_str())?
+            }
+        }
     }
     halod.set("config", table)
 }
@@ -270,6 +280,7 @@ fn reinject_clock(lua: &Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn removes_every_escape_hatch_and_keeps_string_lib() {
@@ -332,7 +343,10 @@ mod tests {
     #[test]
     fn halod_config_exposes_only_the_given_values() {
         let lua = Lua::new();
-        let config = HashMap::from([("host".to_string(), "127.0.0.1".to_string())]);
+        let config = HashMap::from([(
+            "host".to_string(),
+            crate::plugin::ResolvedConfigValue::String("127.0.0.1".to_string()),
+        )]);
         apply(&lua, &[], &config).unwrap();
         let host: String = lua.load("return halod.config.host").eval().unwrap();
         assert_eq!(host, "127.0.0.1");
@@ -349,14 +363,20 @@ mod tests {
         apply(
             &lua_a,
             &[],
-            &HashMap::from([("secret".to_string(), "plugin-a-value".to_string())]),
+            &HashMap::from([(
+                "secret".to_string(),
+                crate::plugin::ResolvedConfigValue::String("plugin-a-value".to_string()),
+            )]),
         )
         .unwrap();
         let lua_b = Lua::new();
         apply(
             &lua_b,
             &[],
-            &HashMap::from([("secret".to_string(), "plugin-b-value".to_string())]),
+            &HashMap::from([(
+                "secret".to_string(),
+                crate::plugin::ResolvedConfigValue::String("plugin-b-value".to_string()),
+            )]),
         )
         .unwrap();
 
@@ -364,6 +384,39 @@ mod tests {
         let b: String = lua_b.load("return halod.config.secret").eval().unwrap();
         assert_eq!(a, "plugin-a-value");
         assert_eq!(b, "plugin-b-value");
+    }
+
+    #[test]
+    fn halod_config_preserves_declared_lua_types() {
+        let lua = Lua::new();
+        let config = HashMap::from([
+            (
+                "enabled".to_string(),
+                crate::plugin::ResolvedConfigValue::Boolean(true),
+            ),
+            (
+                "scale".to_string(),
+                crate::plugin::ResolvedConfigValue::Number(1.5),
+            ),
+            (
+                "timeout".to_string(),
+                crate::plugin::ResolvedConfigValue::Integer(2500),
+            ),
+            (
+                "mode".to_string(),
+                crate::plugin::ResolvedConfigValue::String("quiet".to_string()),
+            ),
+        ]);
+        apply(&lua, &[], &config).unwrap();
+
+        lua.load(
+            "assert(type(halod.config.enabled) == 'boolean')\n\
+             assert(type(halod.config.scale) == 'number')\n\
+             assert(type(halod.config.timeout) == 'number')\n\
+             assert(type(halod.config.mode) == 'string')",
+        )
+        .exec()
+        .unwrap();
     }
 
     #[test]

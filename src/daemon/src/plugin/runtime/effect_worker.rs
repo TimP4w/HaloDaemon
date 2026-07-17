@@ -99,7 +99,7 @@ impl PluginEffectHandle {
         effect_id: String,
         params: HashMap<String, EffectParamValue>,
         granted: Vec<Permission>,
-        config: HashMap<String, String>,
+        config: crate::plugin::ResolvedConfig,
     ) -> Self {
         let worker = LuaWorker::spawn(
             "halod-effect",
@@ -254,7 +254,7 @@ fn build_ctx(
     effect_id: &str,
     params: &HashMap<String, EffectParamValue>,
     granted: &[Permission],
-    config: &HashMap<String, String>,
+    config: &crate::plugin::ResolvedConfig,
 ) -> Result<EffectCtx> {
     let (lua, budget) = sandbox::bootstrap_vm(
         granted,

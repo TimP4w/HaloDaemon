@@ -724,14 +724,7 @@ fn integration_child_table(
 #[cfg(target_os = "linux")]
 fn hwmon_fixtures_from_spec(
     spec: &Option<Table>,
-) -> Result<
-    Vec<(
-        String,
-        String,
-        std::collections::HashMap<String, String>,
-        Vec<String>,
-    )>,
-> {
+) -> Result<Vec<(String, String, std::collections::HashMap<String, String>, Vec<String>)>> {
     let Some(spec) = spec else {
         return Ok(Vec::new());
     };

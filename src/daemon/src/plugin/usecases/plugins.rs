@@ -964,7 +964,7 @@ mod tests {
 
     /// Every declaration lives in YAML; the Lua entry contains callbacks only.
     const CONFIG_TEST_PLUGIN_YAML: &str =
-        "id: cfgtest\npermissions: [network, hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
+        "id: cfgtest\npermissions: [network, hid, secure_storage]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
 
     fn write_config_test_plugin(root: &std::path::Path) {
         let dir = root.join("cfgtest");
@@ -1228,14 +1228,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_config_rejects_unknown_key_and_out_of_range_number() {
+    async fn set_config_validates_every_field_kind_at_ingress() {
         crate::test_support::with_tmp_config(|app| async move {
             let dir = crate::config::plugins_dir();
             let pdir = dir.join("numcfg");
             std::fs::create_dir_all(&pdir).unwrap();
             std::fs::write(
                 pdir.join("plugin.yaml"),
-                "id: numcfg\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: hz\n      label: Hz\n      kind: number\n      min: 1\n      max: 100\n",
+                "id: numcfg\npermissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: hz, label: Hz, kind: number, default: 50, min: 1, max: 100 }\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, default: auto, options: [auto, manual] }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 8080 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 1000, min: 10, max: 5000 }\n",
             )
             .unwrap();
             std::fs::write(
@@ -1244,6 +1244,32 @@ mod tests {
             )
             .unwrap();
             app.registry.load_all(&dir);
+
+            let resolved = app.registry.resolved_config_for(
+                app.secret_store.as_ref(),
+                "numcfg",
+                &[],
+            );
+            assert_eq!(
+                resolved.get("enabled"),
+                Some(&crate::plugin::ResolvedConfigValue::Boolean(true))
+            );
+            assert_eq!(
+                resolved.get("hz"),
+                Some(&crate::plugin::ResolvedConfigValue::Number(50.0))
+            );
+            assert_eq!(
+                resolved.get("port"),
+                Some(&crate::plugin::ResolvedConfigValue::Integer(8080))
+            );
+            assert_eq!(
+                resolved.get("timeout"),
+                Some(&crate::plugin::ResolvedConfigValue::Integer(1000))
+            );
+            assert_eq!(
+                resolved.get("mode"),
+                Some(&crate::plugin::ResolvedConfigValue::String("auto".into()))
+            );
 
             let one = |k: &str, v: &str| {
                 let mut m = std::collections::HashMap::new();
@@ -1259,6 +1285,36 @@ mod tests {
             assert!(set_config("numcfg".into(), one("hz", "abc"), app.clone())
                 .await
                 .is_err());
+            for (key, invalid) in [
+                ("enabled", "yes"),
+                ("mode", "invalid"),
+                ("host", "bad host"),
+                ("port", "0"),
+                ("port", "65536"),
+                ("endpoint", "/relative"),
+                ("endpoint", "ftp://example.com"),
+                ("timeout", "-1"),
+                ("timeout", "1.5"),
+            ] {
+                assert!(
+                    app.registry
+                        .validate_config_values("numcfg", &one(key, invalid))
+                        .is_err(),
+                    "{key} accepted invalid value {invalid}"
+                );
+            }
+            for (key, valid) in [
+                ("enabled", "false"),
+                ("mode", "manual"),
+                ("host", "127.0.0.1"),
+                ("port", "443"),
+                ("endpoint", "https://example.com/api"),
+                ("timeout", "2500"),
+            ] {
+                app.registry
+                    .validate_config_values("numcfg", &one(key, valid))
+                    .unwrap();
+            }
             set_config("numcfg".into(), one("hz", "50"), app.clone())
                 .await
                 .unwrap();

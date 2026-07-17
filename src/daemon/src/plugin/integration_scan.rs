@@ -39,16 +39,19 @@ fn sanitize(value: &str) -> String {
 
 /// Stable device id for an integration root. TCP roots include their endpoint;
 /// local host integrations use a fixed headless root id.
-fn root_device_id(
-    manifest: &PluginManifest,
-    config: &std::collections::HashMap<String, String>,
-) -> String {
+fn root_device_id(manifest: &PluginManifest, config: &crate::plugin::ResolvedConfig) -> String {
     if manifest.transports.tcp.is_none() {
         return format!("{}-integration", manifest.id_prefix());
     }
     let tcp = manifest.transports.tcp.clone().unwrap_or_default();
-    let host = config.get(&tcp.host_key).cloned().unwrap_or_default();
-    let port = config.get(&tcp.port_key).cloned().unwrap_or_default();
+    let host = config
+        .get(&tcp.host_key)
+        .map(crate::plugin::ResolvedConfigValue::to_config_string)
+        .unwrap_or_default();
+    let port = config
+        .get(&tcp.port_key)
+        .map(crate::plugin::ResolvedConfigValue::to_config_string)
+        .unwrap_or_default();
     format!(
         "{}-{}_{}",
         manifest.id_prefix(),
@@ -77,7 +80,7 @@ fn placeholder_handle<'a>() -> DiscoveryHandle<'a> {
 /// callers run this off-runtime; local transports use the same path.
 pub(super) fn open_probe(
     manifest: &PluginManifest,
-    config: &std::collections::HashMap<String, String>,
+    config: &crate::plugin::ResolvedConfig,
     granted: &[Permission],
 ) -> Result<PluginIo> {
     let kind = manifest

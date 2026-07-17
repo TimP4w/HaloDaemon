@@ -585,7 +585,7 @@ pub(in crate::plugin) struct LuaDeviceSpawnParts {
     pub transport: PluginIo,
     pub handle: tokio::runtime::Handle,
     pub granted: Vec<Permission>,
-    pub config: HashMap<String, String>,
+    pub config: crate::plugin::ResolvedConfig,
 }
 
 pub(in crate::plugin) struct LuaDeviceChildParts {
@@ -2135,8 +2135,14 @@ impl LuaDevice {
         {
             let tcp = root_manifest.transports.tcp.clone().unwrap_or_default();
             crate::registry::identity::integration_scope(
-                config.get(&tcp.host_key).map(String::as_str),
-                config.get(&tcp.port_key).map(String::as_str),
+                config
+                    .get(&tcp.host_key)
+                    .map(crate::plugin::ResolvedConfigValue::to_config_string)
+                    .as_deref(),
+                config
+                    .get(&tcp.port_key)
+                    .map(crate::plugin::ResolvedConfigValue::to_config_string)
+                    .as_deref(),
             )
         } else {
             crate::registry::identity::IdentityScope::Local

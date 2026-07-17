@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Linux hwmon integration transport backend.
 
-use std::collections::HashMap;
-
 use anyhow::{bail, Result};
 use halod_shared::types::{Permission, WriteRateLimit};
 
@@ -14,7 +12,7 @@ use super::super::transport::{PluginIo, PluginTransportDescriptor};
 fn open(
     _: &PluginManifest,
     _: &DiscoveryHandle<'_>,
-    _: &HashMap<String, String>,
+    _: &crate::plugin::ResolvedConfig,
     granted: &[Permission],
     limit: Option<WriteRateLimit>,
 ) -> Result<PluginIo> {

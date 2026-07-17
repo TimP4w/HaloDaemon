@@ -97,7 +97,7 @@ impl PluginWidgetHandle {
         modules: BTreeMap<String, String>,
         widget_ids: Vec<String>,
         granted: Vec<Permission>,
-        config: HashMap<String, String>,
+        config: crate::plugin::ResolvedConfig,
     ) -> Self {
         let worker = LuaWorker::spawn(
             "halod-lcd-widget",
@@ -138,7 +138,7 @@ fn build_ctx(
     modules: &BTreeMap<String, String>,
     widget_ids: &[String],
     granted: &[Permission],
-    config: &HashMap<String, String>,
+    config: &crate::plugin::ResolvedConfig,
 ) -> Result<WorkerCtx> {
     let (lua, budget) = sandbox::bootstrap_vm(
         granted,

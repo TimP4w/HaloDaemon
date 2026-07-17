@@ -7,7 +7,6 @@ use super::super::transport::{PluginIo, PluginTransportDescriptor};
 use crate::registry::discovery::DiscoveryHandle;
 use anyhow::{bail, Result};
 use halod_shared::types::{Permission, WriteRateLimit};
-use std::collections::HashMap;
 
 #[cfg(target_os = "windows")]
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
@@ -28,7 +27,7 @@ fn suffix(handle: &DiscoveryHandle<'_>) -> String {
 fn open(
     _: &PluginManifest,
     _: &DiscoveryHandle<'_>,
-    _: &HashMap<String, String>,
+    _: &crate::plugin::ResolvedConfig,
     granted: &[Permission],
     _: Option<WriteRateLimit>,
 ) -> Result<PluginIo> {

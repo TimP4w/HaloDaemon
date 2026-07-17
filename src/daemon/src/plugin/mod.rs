@@ -119,7 +119,28 @@ pub struct PluginPresetEntry {
 /// consent.
 struct ReadyPlugin {
     granted: Vec<Permission>,
-    config: HashMap<String, String>,
+    config: ResolvedConfig,
+}
+
+pub(crate) type ResolvedConfig = HashMap<String, ResolvedConfigValue>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ResolvedConfigValue {
+    Boolean(bool),
+    Number(f64),
+    Integer(i64),
+    String(String),
+}
+
+impl ResolvedConfigValue {
+    pub fn to_config_string(&self) -> String {
+        match self {
+            Self::Boolean(value) => value.to_string(),
+            Self::Number(value) => value.to_string(),
+            Self::Integer(value) => value.to_string(),
+            Self::String(value) => value.clone(),
+        }
+    }
 }
 
 /// Whether a plugin may activate, from [`Registry::activation_status`].
@@ -665,34 +686,26 @@ fn config_values_for(state: &PluginState, manifest: &PluginManifest) -> HashMap<
 /// resolving persisted values for a plugin worker.  The second use makes stale
 /// or hand-edited config inert instead of passing it to Lua or a transport.
 fn validate_config_value(field: &manifest::ConfigFieldDef, value: &str) -> anyhow::Result<()> {
+    manifest::validate_config_value(field, value)
+}
+
+fn resolved_config_value(
+    kind: halod_shared::types::PluginConfigFieldKind,
+    value: &str,
+) -> Option<ResolvedConfigValue> {
     use halod_shared::types::PluginConfigFieldKind;
 
-    anyhow::ensure!(
-        value.len() <= 4096 && !value.contains('\0'),
-        "config '{}' exceeds the text bounds",
-        field.key
-    );
-    if field.kind == PluginConfigFieldKind::Number && !value.is_empty() {
-        let n: f64 = value
-            .parse()
-            .map_err(|_| anyhow::anyhow!("config '{}' must be a number", field.key))?;
-        anyhow::ensure!(n.is_finite(), "config '{}' must be finite", field.key);
-        if let Some(min) = field.min {
-            anyhow::ensure!(
-                n >= min,
-                "config '{}' is below the minimum {min}",
-                field.key
-            );
+    match kind {
+        PluginConfigFieldKind::Boolean => value.parse().ok().map(ResolvedConfigValue::Boolean),
+        PluginConfigFieldKind::Number => value.parse().ok().map(ResolvedConfigValue::Number),
+        PluginConfigFieldKind::Port | PluginConfigFieldKind::DurationMs => {
+            value.parse().ok().map(ResolvedConfigValue::Integer)
         }
-        if let Some(max) = field.max {
-            anyhow::ensure!(
-                n <= max,
-                "config '{}' is above the maximum {max}",
-                field.key
-            );
-        }
+        PluginConfigFieldKind::Text
+        | PluginConfigFieldKind::Enum
+        | PluginConfigFieldKind::Host
+        | PluginConfigFieldKind::Url => Some(ResolvedConfigValue::String(value.to_owned())),
     }
-    Ok(())
 }
 
 impl Registry {
@@ -937,31 +950,41 @@ impl Registry {
         secrets: &dyn crate::secrets::SecretStore,
         plugin_id: &str,
         granted: &[Permission],
-    ) -> HashMap<String, String> {
+    ) -> ResolvedConfig {
         let mut config = self.config_for(plugin_id);
-        if !granted.contains(&Permission::SecureStorage) {
-            return config;
-        }
         let snapshot = self.snapshot();
         let manifest = snapshot.manifests.iter().find(|m| m.plugin_id == plugin_id);
-        for key in self.secure_config_keys_for(plugin_id) {
-            match secrets.get(plugin_id, &key) {
-                Ok(Some(value)) => {
-                    let valid = manifest
-                        .as_ref()
-                        .and_then(|m| m.config_fields().iter().find(|f| f.key == key))
-                        .is_some_and(|field| validate_config_value(field, &value).is_ok());
-                    if valid {
-                        config.insert(key, value);
-                    } else {
-                        log::warn!("ignoring invalid persisted secret config '{key}' for plugin '{plugin_id}'");
+        if granted.contains(&Permission::SecureStorage) {
+            for key in self.secure_config_keys_for(plugin_id) {
+                match secrets.get(plugin_id, &key) {
+                    Ok(Some(value)) => {
+                        let valid = manifest
+                            .as_ref()
+                            .and_then(|m| m.config_fields().iter().find(|f| f.key == key))
+                            .is_some_and(|field| validate_config_value(field, &value).is_ok());
+                        if valid {
+                            config.insert(key, value);
+                        } else {
+                            log::warn!("ignoring invalid persisted secret config '{key}' for plugin '{plugin_id}'");
+                        }
                     }
+                    Ok(None) => {}
+                    Err(e) => log::warn!("reading secret '{key}' for plugin '{plugin_id}': {e:#}"),
                 }
-                Ok(None) => {}
-                Err(e) => log::warn!("reading secret '{key}' for plugin '{plugin_id}': {e:#}"),
             }
         }
-        config
+        let Some(manifest) = manifest else {
+            return HashMap::new();
+        };
+        manifest
+            .config_fields()
+            .iter()
+            .filter_map(|field| {
+                let value = config.get(&field.key)?;
+                resolved_config_value(field.kind, value)
+                    .map(|resolved| (field.key.clone(), resolved))
+            })
+            .collect()
     }
 
     /// Keys of `plugin_id`'s declared `secure = true` config fields, for splitting

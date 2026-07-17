@@ -1339,6 +1339,19 @@ pub enum PluginConfigFieldKind {
     #[default]
     Text,
     Number,
+    Boolean,
+    Enum,
+    Host,
+    Port,
+    Url,
+    DurationMs,
+}
+
+/// Shows a config field only when a sibling field equals the declared value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginConfigVisibility {
+    pub field: String,
+    pub equals: String,
 }
 
 /// One user-editable setting a plugin declares (mirrors the manifest's
@@ -1354,10 +1367,19 @@ pub struct PluginConfigField {
     pub category: String,
     #[serde(default)]
     pub secure: bool,
+    /// Allowed values for an `Enum` field.
+    #[serde(default)]
+    pub options: Vec<String>,
     #[serde(default)]
     pub min: Option<f64>,
     #[serde(default)]
     pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_when: Option<PluginConfigVisibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2443,6 +2465,16 @@ mod app_rule_tests {
         );
         assert_eq!(c.hide_window_controls, DEFAULT_HIDE_WINDOW_CONTROLS);
         assert_eq!(c.log_level, DEFAULT_LOG_LEVEL);
+    }
+
+    #[test]
+    fn plugin_config_field_new_metadata_has_backward_compatible_defaults() {
+        let field: PluginConfigField =
+            serde_json::from_str(r#"{"key":"host","label":"Host","kind":"host"}"#).unwrap();
+        assert!(field.options.is_empty());
+        assert!(field.visible_when.is_none());
+        assert!(field.help.is_none());
+        assert!(field.placeholder.is_none());
     }
 
     /// An empty AppState JSON must materialize the manual config defaults through

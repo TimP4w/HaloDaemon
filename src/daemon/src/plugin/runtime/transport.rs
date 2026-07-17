@@ -12,7 +12,6 @@
 //! descriptor plus, if its I/O shape is new, a new `PluginIo` variant; the
 //! plugin core (`manifest`/`worker`/`mod`) never grows a per-bus branch.
 
-use std::collections::HashMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -320,7 +319,7 @@ impl RegisterBus {
 type PluginOpenFn = fn(
     &PluginManifest,
     &DiscoveryHandle<'_>,
-    &HashMap<String, String>,
+    &crate::plugin::ResolvedConfig,
     &[Permission],
     Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo>;

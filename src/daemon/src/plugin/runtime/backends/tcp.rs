@@ -6,7 +6,6 @@
 //! spec) — `matches` always returns `false`, so a `match = { transport =
 //! "tcp" }` spec (unsupported) simply never triggers rather than erroring.
 
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
 use anyhow::{bail, Context, Result};
@@ -76,7 +75,7 @@ pub(crate) fn is_blocked_ip(ip: &IpAddr) -> bool {
 fn open(
     manifest: &PluginManifest,
     _handle: &DiscoveryHandle<'_>,
-    config: &HashMap<String, String>,
+    config: &crate::plugin::ResolvedConfig,
     granted: &[Permission],
     limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
@@ -91,7 +90,10 @@ fn open(
         );
     }
     let tcp = manifest.transports.tcp.clone().unwrap_or_default();
-    let host = config.get(&tcp.host_key).cloned().unwrap_or_default();
+    let host = config
+        .get(&tcp.host_key)
+        .map(crate::plugin::ResolvedConfigValue::to_config_string)
+        .unwrap_or_default();
     if host.is_empty() {
         bail!(
             "plugin '{}': config field '{}' (tcp host) is not set",
@@ -99,7 +101,10 @@ fn open(
             tcp.host_key
         );
     }
-    let port_str = config.get(&tcp.port_key).cloned().unwrap_or_default();
+    let port_str = config
+        .get(&tcp.port_key)
+        .map(crate::plugin::ResolvedConfigValue::to_config_string)
+        .unwrap_or_default();
     let port: u16 = port_str.parse().with_context(|| {
         format!(
             "plugin '{}': config field '{}' (tcp port) is not a valid port number: '{port_str}'",
@@ -136,6 +141,15 @@ inventory::submit!(PluginTransportDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn text(value: &str) -> crate::plugin::ResolvedConfigValue {
+        crate::plugin::ResolvedConfigValue::String(value.to_owned())
+    }
+
+    fn integer(value: i64) -> crate::plugin::ResolvedConfigValue {
+        crate::plugin::ResolvedConfigValue::Integer(value)
+    }
 
     fn manifest_with_tcp(allow_private: bool) -> PluginManifest {
         let temp = tempfile::tempdir().unwrap();
@@ -144,7 +158,7 @@ mod tests {
         std::fs::write(
             dir.join("plugin.yaml"),
             format!(
-                "id: tcptest\npermissions: [hid, network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 200\n    allow_private: {allow_private}\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: text\n    - key: port\n      label: Port\n      kind: number\ndevices:\n  - vendor: Test\n    model: TCP\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
+                "id: tcptest\npermissions: [hid, network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 200\n    allow_private: {allow_private}\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n    - key: port\n      label: Port\n      kind: port\ndevices:\n  - vendor: Test\n    model: TCP\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
             ),
         )
         .unwrap();
@@ -179,7 +193,7 @@ mod tests {
     #[test]
     fn open_errors_when_host_field_is_unset() {
         let manifest = manifest_with_tcp(true);
-        let config = HashMap::from([("port".to_string(), "6742".to_string())]);
+        let config = HashMap::from([("port".to_string(), integer(6742))]);
         let err = match open(&manifest, &hid(), &config, NET, None) {
             Err(e) => e,
             Ok(_) => panic!("expected an error"),
@@ -191,8 +205,8 @@ mod tests {
     fn open_errors_on_an_invalid_port() {
         let manifest = manifest_with_tcp(true);
         let config = HashMap::from([
-            ("host".to_string(), "127.0.0.1".to_string()),
-            ("port".to_string(), "not-a-number".to_string()),
+            ("host".to_string(), text("127.0.0.1")),
+            ("port".to_string(), text("not-a-number")),
         ]);
         let err = match open(&manifest, &hid(), &config, NET, None) {
             Err(e) => e,
@@ -205,8 +219,8 @@ mod tests {
     fn open_errors_when_nothing_is_listening() {
         let manifest = manifest_with_tcp(true);
         let config = HashMap::from([
-            ("host".to_string(), "127.0.0.1".to_string()),
-            ("port".to_string(), "1".to_string()),
+            ("host".to_string(), text("127.0.0.1")),
+            ("port".to_string(), integer(1)),
         ]);
         // Requires a runtime for `TcpStream::from_std`'s reactor registration.
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -218,8 +232,8 @@ mod tests {
     fn open_requires_the_network_permission() {
         let manifest = manifest_with_tcp(true);
         let config = HashMap::from([
-            ("host".to_string(), "127.0.0.1".to_string()),
-            ("port".to_string(), "6742".to_string()),
+            ("host".to_string(), text("127.0.0.1")),
+            ("port".to_string(), integer(6742)),
         ]);
         let err = err_msg(open(&manifest, &hid(), &config, &[], None));
         assert!(err.contains("network"), "{err}");
@@ -230,8 +244,8 @@ mod tests {
         let manifest = manifest_with_tcp(false);
         for host in ["127.0.0.1", "169.254.169.254", "10.0.0.1", "::1"] {
             let config = HashMap::from([
-                ("host".to_string(), host.to_string()),
-                ("port".to_string(), "80".to_string()),
+                ("host".to_string(), text(host)),
+                ("port".to_string(), integer(80)),
             ]);
             let err = err_msg(open(&manifest, &hid(), &config, NET, None));
             assert!(

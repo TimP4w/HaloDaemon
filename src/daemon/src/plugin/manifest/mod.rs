@@ -10,8 +10,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use halod_shared::types::{
     Animation, CategoryLayout, ChoiceDisplay, ChoiceOption, DeviceType, EffectParamDescriptor,
     EffectParamValue, LcdPresetDescriptor, LcdWidgetDescriptor, LcdWidgetResize, LcdWidgetUpdates,
-    ParamKind, Permission, PluginConfigFieldKind, PluginKind, RangeDisplay, RgbDescriptor, RgbZone,
-    ZoneTopology,
+    ParamKind, Permission, PluginConfigFieldKind, PluginConfigVisibility, PluginKind, RangeDisplay,
+    RgbDescriptor, RgbZone, ZoneTopology,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -295,7 +295,7 @@ pub struct ConfigFieldDef {
     pub label: String,
     #[serde(default)]
     pub kind: PluginConfigFieldKind,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_config_default")]
     pub default: String,
     #[serde(default)]
     pub category: String,
@@ -304,11 +304,35 @@ pub struct ConfigFieldDef {
     /// plugin was granted `Permission::SecureStorage`.
     #[serde(default)]
     pub secure: bool,
+    /// Allowed values for an `Enum` field.
+    #[serde(default)]
+    pub options: Vec<String>,
     /// Inclusive bounds enforced on a `Number` value at ingress.
     #[serde(default)]
     pub min: Option<f64>,
     #[serde(default)]
     pub max: Option<f64>,
+    #[serde(default)]
+    pub visible_when: Option<PluginConfigVisibility>,
+    #[serde(default)]
+    pub help: Option<String>,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+}
+
+fn deserialize_config_default<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    match serde_yaml::Value::deserialize(deserializer)? {
+        serde_yaml::Value::Null => Ok(String::new()),
+        serde_yaml::Value::Bool(value) => Ok(value.to_string()),
+        serde_yaml::Value::Number(value) => Ok(value.to_string()),
+        serde_yaml::Value::String(value) => Ok(value),
+        _ => Err(D::Error::custom("config defaults must be scalar values")),
+    }
 }
 
 /// A plugin's declared user-editable settings.
@@ -509,8 +533,12 @@ impl From<&ConfigFieldDef> for halod_shared::types::PluginConfigField {
             kind: f.kind,
             category: f.category.clone(),
             secure: f.secure,
+            options: f.options.clone(),
             min: f.min,
             max: f.max,
+            visible_when: f.visible_when.clone(),
+            help: f.help.clone(),
+            placeholder: f.placeholder.clone(),
         }
     }
 }
@@ -1905,13 +1933,18 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
             bail!("tcp timeout_ms must be 1..=60000");
         }
         if manifest.config.is_some() {
-            let fields: HashSet<&str> = manifest
+            let host = manifest
                 .config_fields()
                 .iter()
-                .map(|field| field.key.as_str())
-                .collect();
-            if !fields.contains(tcp.host_key.as_str()) || !fields.contains(tcp.port_key.as_str()) {
-                bail!("tcp host_key and port_key must name declared config fields");
+                .find(|field| field.key == tcp.host_key);
+            let port = manifest
+                .config_fields()
+                .iter()
+                .find(|field| field.key == tcp.port_key);
+            if !host.is_some_and(|field| field.kind == PluginConfigFieldKind::Host)
+                || !port.is_some_and(|field| field.kind == PluginConfigFieldKind::Port)
+            {
+                bail!("tcp host_key and port_key must name host and port config fields");
             }
         }
     }
@@ -2088,11 +2121,23 @@ fn validate_control_layout(spec: &DeviceSpec) -> Result<()> {
 
 fn validate_controls(manifest: &PluginManifest) -> Result<()> {
     if let Some(config) = &manifest.config {
+        if config.fields.iter().any(|field| field.secure)
+            && !manifest.permissions.contains(&Permission::SecureStorage)
+        {
+            bail!("secure config fields require the 'secure_storage' permission");
+        }
         check_count("config fields", config.fields.len(), MAX_CONFIG_FIELDS)?;
         let mut keys = HashSet::new();
         for field in &config.fields {
             validate_component("config field key", &field.key)?;
             validate_short_text("config field label", &field.label)?;
+            if !field.category.is_empty() {
+                validate_short_text("config field category", &field.category)?;
+            }
+            validate_optional_text("config field help", &field.help, MAX_LONG_TEXT_BYTES)?;
+            if let Some(placeholder) = &field.placeholder {
+                validate_short_text("config field placeholder", placeholder)?;
+            }
             if !keys.insert(&field.key) {
                 bail!(
                     "config field key '{}' is declared more than once",
@@ -2105,41 +2150,184 @@ fn validate_controls(manifest: &PluginManifest) -> Result<()> {
                     field.key
                 );
             }
-            match field.kind {
-                PluginConfigFieldKind::Text => {
-                    if field.min.is_some() || field.max.is_some() {
+            if field.kind == PluginConfigFieldKind::Enum {
+                if field.options.is_empty() {
+                    bail!("enum config field '{}' has no options", field.key);
+                }
+                check_count("enum config options", field.options.len(), 128)?;
+                let mut options = HashSet::new();
+                for option in &field.options {
+                    validate_short_text("enum config option", option)?;
+                    if !options.insert(option) {
                         bail!(
-                            "text config field '{}' must not declare numeric bounds",
+                            "enum config field '{}' declares option '{option}' more than once",
                             field.key
                         );
                     }
                 }
-                PluginConfigFieldKind::Number => {
-                    if field.default.is_empty() {
-                        continue;
-                    }
-                    let value: f64 = field.default.parse().map_err(|_| {
-                        anyhow!(
-                            "number config field '{}' has a non-numeric default",
-                            field.key
-                        )
-                    })?;
-                    if !value.is_finite()
-                        || field.min.is_some_and(|v| !v.is_finite())
-                        || field.max.is_some_and(|v| !v.is_finite())
-                        || field.min.zip(field.max).is_some_and(|(min, max)| min > max)
-                        || field.min.is_some_and(|min| value < min)
-                        || field.max.is_some_and(|max| value > max)
-                    {
-                        bail!(
-                            "number config field '{}' has invalid bounds or default",
-                            field.key
-                        );
-                    }
-                }
+            } else if !field.options.is_empty() {
+                bail!(
+                    "non-enum config field '{}' must not declare options",
+                    field.key
+                );
             }
+            validate_config_value(field, &field.default)
+                .with_context(|| format!("invalid default for config field '{}'", field.key))?;
+        }
+        for field in &config.fields {
+            let Some(rule) = &field.visible_when else {
+                continue;
+            };
+            if rule.field == field.key {
+                bail!(
+                    "config field '{}' cannot control its own visibility",
+                    field.key
+                );
+            }
+            let source = config
+                .fields
+                .iter()
+                .find(|candidate| candidate.key == rule.field)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "config field '{}' visibility source '{}' is not declared",
+                        field.key,
+                        rule.field
+                    )
+                })?;
+            validate_config_value(source, &rule.equals).with_context(|| {
+                format!(
+                    "config field '{}' has an invalid visibility value for '{}'",
+                    field.key, rule.field
+                )
+            })?;
         }
     }
+    Ok(())
+}
+
+/// Validate one persisted or incoming config value according to its manifest field.
+pub(super) fn validate_config_value(field: &ConfigFieldDef, value: &str) -> Result<()> {
+    anyhow::ensure!(
+        value.len() <= MAX_LONG_TEXT_BYTES && !value.contains('\0'),
+        "config '{}' exceeds the text bounds",
+        field.key
+    );
+    anyhow::ensure!(
+        field.min.is_none_or(f64::is_finite)
+            && field.max.is_none_or(f64::is_finite)
+            && field.min.zip(field.max).is_none_or(|(min, max)| min <= max),
+        "config '{}' has invalid numeric bounds",
+        field.key
+    );
+
+    let number = match field.kind {
+        PluginConfigFieldKind::Text => {
+            reject_bounds(field)?;
+            None
+        }
+        PluginConfigFieldKind::Boolean => {
+            reject_bounds(field)?;
+            anyhow::ensure!(
+                matches!(value, "true" | "false"),
+                "config '{}' must be true or false",
+                field.key
+            );
+            None
+        }
+        PluginConfigFieldKind::Enum => {
+            reject_bounds(field)?;
+            anyhow::ensure!(
+                field.options.iter().any(|option| option == value),
+                "config '{}' is not a declared option",
+                field.key
+            );
+            None
+        }
+        PluginConfigFieldKind::Host => {
+            reject_bounds(field)?;
+            if !value.is_empty() {
+                url::Host::parse(value)
+                    .map_err(|_| anyhow!("config '{}' must be a valid host", field.key))?;
+            }
+            None
+        }
+        PluginConfigFieldKind::Url => {
+            reject_bounds(field)?;
+            if !value.is_empty() {
+                let parsed = url::Url::parse(value)
+                    .map_err(|_| anyhow!("config '{}' must be an absolute URL", field.key))?;
+                anyhow::ensure!(
+                    matches!(parsed.scheme(), "http" | "https") && parsed.host().is_some(),
+                    "config '{}' must be an HTTP(S) URL with a host",
+                    field.key
+                );
+            }
+            None
+        }
+        PluginConfigFieldKind::Number => {
+            if value.is_empty() {
+                None
+            } else {
+                let parsed: f64 = value
+                    .parse()
+                    .map_err(|_| anyhow!("config '{}' must be a number", field.key))?;
+                anyhow::ensure!(parsed.is_finite(), "config '{}' must be finite", field.key);
+                Some(parsed)
+            }
+        }
+        PluginConfigFieldKind::Port => {
+            if value.is_empty() {
+                None
+            } else {
+                let parsed: u16 = value
+                    .parse()
+                    .map_err(|_| anyhow!("config '{}' must be a port", field.key))?;
+                anyhow::ensure!(parsed != 0, "config '{}' must be in 1..=65535", field.key);
+                Some(f64::from(parsed))
+            }
+        }
+        PluginConfigFieldKind::DurationMs => {
+            if value.is_empty() {
+                None
+            } else {
+                let parsed: u64 = value
+                    .parse()
+                    .map_err(|_| anyhow!("config '{}' must be milliseconds", field.key))?;
+                anyhow::ensure!(
+                    parsed <= i64::MAX as u64,
+                    "config '{}' duration is too large",
+                    field.key
+                );
+                Some(parsed as f64)
+            }
+        }
+    };
+    if let Some(number) = number {
+        if let Some(min) = field.min {
+            anyhow::ensure!(
+                number >= min,
+                "config '{}' is below the minimum {min}",
+                field.key
+            );
+        }
+        if let Some(max) = field.max {
+            anyhow::ensure!(
+                number <= max,
+                "config '{}' is above the maximum {max}",
+                field.key
+            );
+        }
+    }
+    Ok(())
+}
+
+fn reject_bounds(field: &ConfigFieldDef) -> Result<()> {
+    anyhow::ensure!(
+        field.min.is_none() && field.max.is_none(),
+        "config '{}' kind must not declare numeric bounds",
+        field.key
+    );
     Ok(())
 }
 
@@ -2488,6 +2676,42 @@ mod tests {
         assert_eq!(m.devices.len(), 1);
         assert_eq!(m.devices[0].vendor, "Acme");
         assert_eq!(m.capabilities, vec!["rgb"]);
+    }
+
+    #[test]
+    fn rich_config_fields_parse_with_metadata_and_typed_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let common = "permissions: [hid, secure_storage]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, options: [auto, manual], default: auto }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 6742 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com/api' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 2500, min: 100, max: 10000 }\n    - key: detail\n      label: Detail\n      placeholder: Optional value\n      help: Used only in manual mode.\n      visible_when: { field: mode, equals: manual }\n    - { key: token, label: Token, secure: true }\n";
+        let dir = write_plugin_dir(tmp.path(), "rich_config", common, ENTRY_LUA);
+
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        let fields = manifest.config_fields();
+        assert_eq!(fields[0].default, "true");
+        assert_eq!(fields[3].default, "6742");
+        assert_eq!(fields[1].options, ["auto", "manual"]);
+        assert_eq!(fields[6].placeholder.as_deref(), Some("Optional value"));
+        assert_eq!(fields[6].help.as_deref(), Some("Used only in manual mode."));
+        assert_eq!(
+            fields[6].visible_when,
+            Some(PluginConfigVisibility {
+                field: "mode".into(),
+                equals: "manual".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn secure_config_requires_secure_storage_permission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "insecure_secret",
+            "permissions: [hid]\ncapabilities: [rgb]\ndevices:\n  - vendor: Acme\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: token, label: Token, secure: true }\n",
+            ENTRY_LUA,
+        );
+
+        let error = parse_manifest_from_dir(&dir).unwrap_err();
+        assert!(format!("{error:#}").contains("secure_storage"));
     }
 
     #[test]
