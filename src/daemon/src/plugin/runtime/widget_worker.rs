@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Sandboxed renderer for plugin-declared LCD widgets.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
 use std::rc::Rc;
@@ -10,8 +10,8 @@ use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
 use anyhow::{anyhow, Result};
 use image::{ImageBuffer, Pixel as _, Rgba};
 use imageproc::drawing::{
-    draw_filled_circle_mut, draw_filled_rect_mut, draw_hollow_circle_mut, draw_hollow_polygon_mut,
-    draw_line_segment_mut, draw_polygon_mut,
+    draw_filled_circle_mut, draw_filled_rect_mut, draw_hollow_circle_mut, draw_line_segment_mut,
+    draw_polygon_mut,
 };
 use imageproc::point::Point;
 use imageproc::rect::Rect;
@@ -31,6 +31,9 @@ use super::{PLUGIN_INSTRUCTION_BUDGET, PLUGIN_VM_MEMORY_BYTES};
 
 const MAX_WIDGET_SIDE: u32 = 1024;
 const MAX_DRAW_TEXT_BYTES: usize = halod_shared::lcd_custom::MAX_WIDGET_TEXT_BYTES;
+const MAX_COMPOSITION_DEPTH: usize = 8;
+const MAX_DRAW_POINTS: usize = 64;
+const MAX_RENDER_WORK_PIXELS: usize = 32 * 1024 * 1024;
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[derive(Clone)]
@@ -243,6 +246,8 @@ fn render_one(ctx: &WorkerCtx, input: WidgetRenderInput) -> Result<Vec<u8>> {
         images: input.images,
         assets: input.assets,
         preview: input.preview,
+        composition: RefCell::new(CompositionState::new(input.width, input.height)),
+        render_work_pixels: Cell::new(0),
     };
     let canvas = ctx
         .lua
@@ -320,10 +325,243 @@ struct RenderCtx {
     images: HashMap<String, WidgetImageInput>,
     assets: HashMap<String, WidgetImageInput>,
     preview: bool,
+    composition: RefCell<CompositionState>,
+    render_work_pixels: Cell<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ClipRect {
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+}
+
+impl ClipRect {
+    fn canvas(width: u32, height: u32) -> Self {
+        Self {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        }
+    }
+
+    fn intersect(self, other: Self) -> Self {
+        Self {
+            left: self.left.max(other.left),
+            top: self.top.max(other.top),
+            right: self.right.min(other.right).max(self.left.max(other.left)),
+            bottom: self.bottom.min(other.bottom).max(self.top.max(other.top)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AffineTransform {
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    e: f32,
+    f: f32,
+}
+
+impl AffineTransform {
+    const IDENTITY: Self = Self {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    };
+
+    fn rotation(degrees: f32, cx: f32, cy: f32) -> Self {
+        let radians = degrees.to_radians();
+        let (sin, cos) = radians.sin_cos();
+        Self {
+            a: cos,
+            b: sin,
+            c: -sin,
+            d: cos,
+            e: cx - cos * cx + sin * cy,
+            f: cy - sin * cx - cos * cy,
+        }
+    }
+
+    fn then(self, next: Self) -> Self {
+        Self {
+            a: next.a * self.a + next.c * self.b,
+            b: next.b * self.a + next.d * self.b,
+            c: next.a * self.c + next.c * self.d,
+            d: next.b * self.c + next.d * self.d,
+            e: next.a * self.e + next.c * self.f + next.e,
+            f: next.b * self.e + next.d * self.f + next.f,
+        }
+    }
+
+    fn inverse(self) -> Option<Self> {
+        let determinant = self.a * self.d - self.b * self.c;
+        if determinant.abs() <= f32::EPSILON {
+            return None;
+        }
+        let inverse = determinant.recip();
+        Some(Self {
+            a: self.d * inverse,
+            b: -self.b * inverse,
+            c: -self.c * inverse,
+            d: self.a * inverse,
+            e: (self.c * self.f - self.d * self.e) * inverse,
+            f: (self.b * self.e - self.a * self.f) * inverse,
+        })
+    }
+
+    fn map(self, x: f32, y: f32) -> (f32, f32) {
+        (
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        )
+    }
+}
+
+#[derive(Clone)]
+struct CompositionState {
+    canvas: ClipRect,
+    clips: Vec<ClipRect>,
+    opacities: Vec<f32>,
+    transforms: Vec<AffineTransform>,
+}
+
+impl CompositionState {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            canvas: ClipRect::canvas(width, height),
+            clips: Vec::new(),
+            opacities: Vec::new(),
+            transforms: Vec::new(),
+        }
+    }
+
+    fn clip(&self) -> ClipRect {
+        self.clips.last().copied().unwrap_or(self.canvas)
+    }
+
+    fn opacity(&self) -> f32 {
+        self.opacities.last().copied().unwrap_or(1.0)
+    }
+
+    fn transform(&self) -> AffineTransform {
+        self.transforms
+            .last()
+            .copied()
+            .unwrap_or(AffineTransform::IDENTITY)
+    }
+
+    fn requires_layer(&self) -> bool {
+        !self.clips.is_empty() || !self.opacities.is_empty() || !self.transforms.is_empty()
+    }
+}
+
+impl RenderCtx {
+    fn charge_render_work(&self, multiplier: usize) -> mlua::Result<()> {
+        let pixels = self.width as usize * self.height as usize;
+        let next = self
+            .render_work_pixels
+            .get()
+            .saturating_add(pixels.saturating_mul(multiplier.max(1)));
+        if next > MAX_RENDER_WORK_PIXELS {
+            return Err(mlua::Error::RuntimeError(
+                "widget drawing exceeds the per-frame work limit".into(),
+            ));
+        }
+        self.render_work_pixels.set(next);
+        Ok(())
+    }
 }
 
 impl UserData for RenderCtx {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method(
+            "push_clip",
+            |_, this, (x, y, width, height): (f32, f32, f32, f32)| {
+                require_finite("push_clip", &[x, y, width, height])?;
+                if width < 0.0 || height < 0.0 {
+                    return Err(mlua::Error::RuntimeError(
+                        "push_clip width and height must be non-negative".into(),
+                    ));
+                }
+                let mut state = this.composition.borrow_mut();
+                if state.clips.len() >= MAX_COMPOSITION_DEPTH {
+                    return Err(stack_limit_error("clip"));
+                }
+                let clip = ClipRect {
+                    left: x.floor().clamp(0.0, this.width as f32) as u32,
+                    top: y.floor().clamp(0.0, this.height as f32) as u32,
+                    right: (x + width).ceil().clamp(0.0, this.width as f32) as u32,
+                    bottom: (y + height).ceil().clamp(0.0, this.height as f32) as u32,
+                };
+                let clip = state.clip().intersect(clip);
+                state.clips.push(clip);
+                Ok(())
+            },
+        );
+        methods.add_method("pop_clip", |_, this, ()| {
+            this.composition
+                .borrow_mut()
+                .clips
+                .pop()
+                .ok_or_else(|| stack_underflow_error("clip"))?;
+            Ok(())
+        });
+        methods.add_method("push_opacity", |_, this, opacity: f32| {
+            require_finite("push_opacity", &[opacity])?;
+            if !(0.0..=1.0).contains(&opacity) {
+                return Err(mlua::Error::RuntimeError(
+                    "opacity must be between 0 and 1".into(),
+                ));
+            }
+            let mut state = this.composition.borrow_mut();
+            if state.opacities.len() >= MAX_COMPOSITION_DEPTH {
+                return Err(stack_limit_error("opacity"));
+            }
+            let opacity = state.opacity() * opacity;
+            state.opacities.push(opacity);
+            Ok(())
+        });
+        methods.add_method("pop_opacity", |_, this, ()| {
+            this.composition
+                .borrow_mut()
+                .opacities
+                .pop()
+                .ok_or_else(|| stack_underflow_error("opacity"))?;
+            Ok(())
+        });
+        methods.add_method(
+            "push_rotation",
+            |_, this, (degrees, center_x, center_y): (f32, f32, f32)| {
+                require_finite("push_rotation", &[degrees, center_x, center_y])?;
+                let mut state = this.composition.borrow_mut();
+                if state.transforms.len() >= MAX_COMPOSITION_DEPTH {
+                    return Err(stack_limit_error("transform"));
+                }
+                let transform = state.transform().then(AffineTransform::rotation(
+                    degrees.rem_euclid(360.0),
+                    bounded_coord(center_x, this.width) as f32,
+                    bounded_coord(center_y, this.height) as f32,
+                ));
+                state.transforms.push(transform);
+                Ok(())
+            },
+        );
+        methods.add_method("pop_rotation", |_, this, ()| {
+            this.composition
+                .borrow_mut()
+                .transforms
+                .pop()
+                .ok_or_else(|| stack_underflow_error("transform"))?;
+            Ok(())
+        });
         methods.add_method("is_preview", |_, this, ()| Ok(this.preview));
         methods.add_method("color", |lua, this, ()| lua.to_value(&this.color));
         methods.add_method("sensor_info", |lua, this, id: String| {
@@ -402,17 +640,19 @@ impl UserData for RenderCtx {
                 else {
                     return Ok(false);
                 };
-                let width = width.round().clamp(1.0, this.width as f32) as u32;
-                let height = height.round().clamp(1.0, this.height as f32) as u32;
+                require_finite("draw_media_art", &[x, y, width, height])?;
+                let width = checked_draw_dimension(width, this.width, "width")?;
+                let height = checked_draw_dimension(height, this.height, "height")?;
                 let fitted = fit_image(&source, width, height, "cover");
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
-                let mut target = canvas_image(this, &mut canvas)?;
-                image::imageops::overlay(
-                    &mut target,
-                    &fitted,
-                    i64::from(bounded_coord(x, this.width)),
-                    i64::from(bounded_coord(y, this.height)),
-                );
+                with_composed_canvas(this, &mut canvas, 2, |target| {
+                    image::imageops::overlay(
+                        target,
+                        &fitted,
+                        i64::from(bounded_coord(x, this.width)),
+                        i64::from(bounded_coord(y, this.height)),
+                    );
+                })?;
                 Ok(true)
             },
         );
@@ -438,18 +678,20 @@ impl UserData for RenderCtx {
                 else {
                     return Ok(false);
                 };
-                let width = width.round().clamp(1.0, this.width as f32) as u32;
-                let height = height.round().clamp(1.0, this.height as f32) as u32;
+                require_finite("draw_image", &[x, y, width, height])?;
+                let width = checked_draw_dimension(width, this.width, "width")?;
+                let height = checked_draw_dimension(height, this.height, "height")?;
                 let mut fitted = fit_image(&source, width, height, &fit);
                 mask_image(&mut fitted, &shape);
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
-                let mut target = canvas_image(this, &mut canvas)?;
-                image::imageops::overlay(
-                    &mut target,
-                    &fitted,
-                    i64::from(bounded_coord(x, this.width)),
-                    i64::from(bounded_coord(y, this.height)),
-                );
+                with_composed_canvas(this, &mut canvas, 2, |target| {
+                    image::imageops::overlay(
+                        target,
+                        &fitted,
+                        i64::from(bounded_coord(x, this.width)),
+                        i64::from(bounded_coord(y, this.height)),
+                    );
+                })?;
                 Ok(true)
             },
         );
@@ -474,17 +716,19 @@ impl UserData for RenderCtx {
                 else {
                     return Ok(false);
                 };
-                let width = width.round().clamp(1.0, this.width as f32) as u32;
-                let height = height.round().clamp(1.0, this.height as f32) as u32;
+                require_finite("draw_asset", &[x, y, width, height])?;
+                let width = checked_draw_dimension(width, this.width, "width")?;
+                let height = checked_draw_dimension(height, this.height, "height")?;
                 let fitted = fit_image(&source, width, height, &fit);
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
-                let mut target = canvas_image(this, &mut canvas)?;
-                image::imageops::overlay(
-                    &mut target,
-                    &fitted,
-                    i64::from(bounded_coord(x, this.width)),
-                    i64::from(bounded_coord(y, this.height)),
-                );
+                with_composed_canvas(this, &mut canvas, 2, |target| {
+                    image::imageops::overlay(
+                        target,
+                        &fitted,
+                        i64::from(bounded_coord(x, this.width)),
+                        i64::from(bounded_coord(y, this.height)),
+                    );
+                })?;
                 Ok(true)
             },
         );
@@ -526,20 +770,22 @@ impl UserData for RenderCtx {
                 f32,
                 Option<mlua::Value>,
             )| {
+                require_finite("fill_rect", &[x, y, width, height])?;
                 let color = lua_color(lua, color, this.color)?;
-                let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
-                let mut image = canvas_image(this, &mut canvas)?;
                 let width = width.round().clamp(0.0, this.width as f32) as u32;
                 let height = height.round().clamp(0.0, this.height as f32) as u32;
                 if width == 0 || height == 0 {
                     return Ok(());
                 }
-                draw_filled_rect_mut(
-                    &mut image,
-                    Rect::at(bounded_coord(x, this.width), bounded_coord(y, this.height))
-                        .of_size(width, height),
-                    color,
-                );
+                let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
+                with_composed_canvas(this, &mut canvas, 1, |image| {
+                    draw_filled_rect_mut(
+                        image,
+                        Rect::at(bounded_coord(x, this.width), bounded_coord(y, this.height))
+                            .of_size(width, height),
+                        color,
+                    );
+                })?;
                 Ok(())
             },
         );
@@ -556,28 +802,26 @@ impl UserData for RenderCtx {
                 f32,
                 Option<mlua::Value>,
             )| {
+                require_finite("fill_rounded_rect", &[x, y, width, height, radius])?;
                 let color = lua_color(lua, color, this.color)?;
-                let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
-                let mut image = canvas_image(this, &mut canvas)?;
                 let width = width.round().clamp(0.0, this.width as f32) as u32;
                 let height = height.round().clamp(0.0, this.height as f32) as u32;
                 if width == 0 || height == 0 {
                     return Ok(());
                 }
-                let radius = if radius.is_finite() {
-                    radius.round().clamp(0.0, width.min(height) as f32 / 2.0)
-                } else {
-                    0.0
-                };
-                fill_rounded_rect_mut(
-                    &mut image,
-                    bounded_coord(x, this.width),
-                    bounded_coord(y, this.height),
-                    width,
-                    height,
-                    radius,
-                    color,
-                );
+                let radius = radius.round().clamp(0.0, width.min(height) as f32 / 2.0);
+                let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
+                with_composed_canvas(this, &mut canvas, 1, |image| {
+                    fill_rounded_rect_mut(
+                        image,
+                        bounded_coord(x, this.width),
+                        bounded_coord(y, this.height),
+                        width,
+                        height,
+                        radius,
+                        color,
+                    );
+                })?;
                 Ok(())
             },
         );
@@ -585,19 +829,20 @@ impl UserData for RenderCtx {
             "draw_line",
             |lua,
              this,
-             (canvas, x1, y1, x2, y2, color): (
+             (canvas, x1, y1, x2, y2, color, stroke_width): (
                 AnyUserData,
                 f32,
                 f32,
                 f32,
                 f32,
                 Option<mlua::Value>,
+                Option<f32>,
             )| {
+                require_finite("draw_line", &[x1, y1, x2, y2])?;
+                let stroke_width = checked_stroke_width(stroke_width)?;
                 let color = lua_color(lua, color, this.color)?;
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
-                let mut image = canvas_image(this, &mut canvas)?;
-                draw_line_segment_mut(
-                    &mut image,
+                let points = [
                     (
                         bounded_coord(x1, this.width) as f32,
                         bounded_coord(y1, this.height) as f32,
@@ -606,8 +851,10 @@ impl UserData for RenderCtx {
                         bounded_coord(x2, this.width) as f32,
                         bounded_coord(y2, this.height) as f32,
                     ),
-                    color,
-                );
+                ];
+                with_composed_canvas(this, &mut canvas, 1, |image| {
+                    stroke_polyline_mut(image, &points, stroke_width, false, color);
+                })?;
                 Ok(())
             },
         );
@@ -615,24 +862,28 @@ impl UserData for RenderCtx {
             "draw_circle",
             |lua,
              this,
-             (canvas, x, y, radius, filled, color): (
+             (canvas, x, y, radius, filled, color, stroke_width): (
                 AnyUserData,
                 f32,
                 f32,
                 f32,
                 bool,
                 Option<mlua::Value>,
+                Option<f32>,
             )| {
+                require_finite("draw_circle", &[x, y, radius])?;
                 let color = lua_color(lua, color, this.color)?;
-                let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
-                let mut image = canvas_image(this, &mut canvas)?;
                 let center = (bounded_coord(x, this.width), bounded_coord(y, this.height));
                 let radius = bounded_dimension(radius, this.width.max(this.height)) as i32;
-                if filled {
-                    draw_filled_circle_mut(&mut image, center, radius, color);
-                } else {
-                    draw_hollow_circle_mut(&mut image, center, radius, color);
-                }
+                let stroke_width = checked_stroke_width(stroke_width)?;
+                let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
+                with_composed_canvas(this, &mut canvas, 1, |image| {
+                    if filled {
+                        draw_filled_circle_mut(image, center, radius, color);
+                    } else {
+                        draw_stroked_circle_mut(image, center, radius, stroke_width, color);
+                    }
+                })?;
                 Ok(())
             },
         );
@@ -651,22 +902,27 @@ impl UserData for RenderCtx {
                 f32,
                 Option<mlua::Value>,
             )| {
+                require_finite(
+                    "draw_arc",
+                    &[x, y, radius, thickness, start, sweep, cap_radius],
+                )?;
                 let color = lua_color(lua, color, this.color)?;
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
-                let mut image = canvas_image(this, &mut canvas)?;
-                draw_arc_mut(
-                    &mut image,
-                    (
-                        bounded_coord(x, this.width) as f32,
-                        bounded_coord(y, this.height) as f32,
-                    ),
-                    bounded_dimension(radius, this.width.max(this.height)) as f32,
-                    bounded_dimension(thickness, this.width.max(this.height)) as f32,
-                    bounded_angle(start, 0.0),
-                    bounded_angle(sweep, 0.0).clamp(-360.0, 360.0),
-                    bounded_dimension_or_zero(cap_radius, this.width.max(this.height)),
-                    color,
-                );
+                with_composed_canvas(this, &mut canvas, 1, |image| {
+                    draw_arc_mut(
+                        image,
+                        (
+                            bounded_coord(x, this.width) as f32,
+                            bounded_coord(y, this.height) as f32,
+                        ),
+                        bounded_dimension(radius, this.width.max(this.height)) as f32,
+                        bounded_dimension(thickness, this.width.max(this.height)) as f32,
+                        bounded_angle(start, 0.0),
+                        bounded_angle(sweep, 0.0).clamp(-360.0, 360.0),
+                        bounded_dimension_or_zero(cap_radius, this.width.max(this.height)),
+                        color,
+                    );
+                })?;
                 Ok(())
             },
         );
@@ -674,7 +930,7 @@ impl UserData for RenderCtx {
             "draw_triangle",
             |lua,
              this,
-             (canvas, x1, y1, x2, y2, x3, y3, filled, color): (
+             (canvas, x1, y1, x2, y2, x3, y3, filled, color, stroke_width): (
                 AnyUserData,
                 f32,
                 f32,
@@ -684,34 +940,75 @@ impl UserData for RenderCtx {
                 f32,
                 bool,
                 Option<mlua::Value>,
+                Option<f32>,
             )| {
+                require_finite("draw_triangle", &[x1, y1, x2, y2, x3, y3])?;
+                let stroke_width = checked_stroke_width(stroke_width)?;
                 let color = lua_color(lua, color, this.color)?;
                 let points = [
-                    Point::new(
-                        bounded_coord(x1, this.width),
-                        bounded_coord(y1, this.height),
+                    (
+                        bounded_coord(x1, this.width) as f32,
+                        bounded_coord(y1, this.height) as f32,
                     ),
-                    Point::new(
-                        bounded_coord(x2, this.width),
-                        bounded_coord(y2, this.height),
+                    (
+                        bounded_coord(x2, this.width) as f32,
+                        bounded_coord(y2, this.height) as f32,
                     ),
-                    Point::new(
-                        bounded_coord(x3, this.width),
-                        bounded_coord(y3, this.height),
+                    (
+                        bounded_coord(x3, this.width) as f32,
+                        bounded_coord(y3, this.height) as f32,
                     ),
                 ];
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
-                let mut image = canvas_image(this, &mut canvas)?;
-                if filled {
-                    draw_polygon_mut(&mut image, &points, color);
-                } else {
-                    let points = points.map(|point| Point::new(point.x as f32, point.y as f32));
-                    draw_hollow_polygon_mut(&mut image, &points, color);
-                }
+                with_composed_canvas(this, &mut canvas, 1, |image| {
+                    draw_polygon_or_stroke_mut(image, &points, filled, stroke_width, color);
+                })?;
+                Ok(())
+            },
+        );
+        methods.add_method(
+            "draw_polyline",
+            |lua,
+             this,
+             (canvas, points, color, stroke_width): (
+                AnyUserData,
+                Table,
+                Option<Value>,
+                Option<f32>,
+            )| {
+                let points = lua_points(&points, this.width, this.height, 2, "draw_polyline")?;
+                let stroke_width = checked_stroke_width(stroke_width)?;
+                let color = lua_color(lua, color, this.color)?;
+                let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
+                with_composed_canvas(this, &mut canvas, points.len().div_ceil(16), |image| {
+                    stroke_polyline_mut(image, &points, stroke_width, false, color);
+                })?;
+                Ok(())
+            },
+        );
+        methods.add_method(
+            "draw_polygon",
+            |lua,
+             this,
+             (canvas, points, filled, color, stroke_width): (
+                AnyUserData,
+                Table,
+                bool,
+                Option<Value>,
+                Option<f32>,
+            )| {
+                let points = lua_points(&points, this.width, this.height, 3, "draw_polygon")?;
+                let stroke_width = checked_stroke_width(stroke_width)?;
+                let color = lua_color(lua, color, this.color)?;
+                let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
+                with_composed_canvas(this, &mut canvas, points.len().div_ceil(16), |image| {
+                    draw_polygon_or_stroke_mut(image, &points, filled, stroke_width, color);
+                })?;
                 Ok(())
             },
         );
         methods.add_method("measure_text", |_, this, (text, size): (String, f32)| {
+            require_finite("measure_text", &[size])?;
             let text = bounded_text(text);
             let size = bounded_dimension(size, this.height) as f32;
             Ok(styled_text_size(&this.font, &text, size, this.text_style))
@@ -756,20 +1053,22 @@ impl UserData for RenderCtx {
                 f32,
                 Option<mlua::Value>,
             )| {
+                require_finite("draw_text", &[x, y, size])?;
                 let text = bounded_text(text);
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
-                let mut image = canvas_image(this, &mut canvas)?;
                 let color = lua_color(lua, color, this.color)?;
-                draw_styled_text_mut(
-                    &mut image,
-                    color,
-                    bounded_coord(x, this.width),
-                    bounded_coord(y, this.height),
-                    bounded_dimension(size, this.height) as f32,
-                    &this.font,
-                    &text,
-                    this.text_style,
-                );
+                with_composed_canvas(this, &mut canvas, 1, |image| {
+                    draw_styled_text_mut(
+                        image,
+                        color,
+                        bounded_coord(x, this.width),
+                        bounded_coord(y, this.height),
+                        bounded_dimension(size, this.height) as f32,
+                        &this.font,
+                        &text,
+                        this.text_style,
+                    );
+                })?;
                 Ok(())
             },
         );
@@ -787,6 +1086,7 @@ impl UserData for RenderCtx {
                 Table,
                 Option<Value>,
             )| {
+                require_finite("draw_text_box", &[x, y, width, height])?;
                 let style = TextBoxStyle::from_lua(&style, this.height)?;
                 let width = checked_text_box_dimension(width, MAX_WIDGET_SIDE, "width")?;
                 let height = checked_text_box_dimension(height, MAX_WIDGET_SIDE, "height")?;
@@ -799,22 +1099,240 @@ impl UserData for RenderCtx {
                 );
                 let color = lua_color(lua, color, this.color)?;
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
-                let mut image = canvas_image(this, &mut canvas)?;
-                draw_text_box_mut(
-                    &mut image,
-                    color,
-                    bounded_coord(x, this.width),
-                    bounded_coord(y, this.height),
-                    width.ceil() as u32,
-                    height.ceil() as u32,
-                    &this.font,
-                    &layout,
-                    style,
-                    this.text_style,
-                );
+                with_composed_canvas(this, &mut canvas, 2, |image| {
+                    draw_text_box_mut(
+                        image,
+                        color,
+                        bounded_coord(x, this.width),
+                        bounded_coord(y, this.height),
+                        width.ceil() as u32,
+                        height.ceil() as u32,
+                        &this.font,
+                        &layout,
+                        style,
+                        this.text_style,
+                    );
+                })?;
                 Ok(())
             },
         );
+    }
+}
+
+fn stack_limit_error(stack: &str) -> mlua::Error {
+    mlua::Error::RuntimeError(format!(
+        "{stack} stack exceeds the depth limit of {MAX_COMPOSITION_DEPTH}"
+    ))
+}
+
+fn stack_underflow_error(stack: &str) -> mlua::Error {
+    mlua::Error::RuntimeError(format!("{stack} stack is empty"))
+}
+
+fn require_finite(operation: &str, values: &[f32]) -> mlua::Result<()> {
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(mlua::Error::RuntimeError(format!(
+            "{operation} requires finite numeric arguments"
+        )));
+    }
+    Ok(())
+}
+
+fn checked_draw_dimension(value: f32, limit: u32, name: &str) -> mlua::Result<u32> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(mlua::Error::RuntimeError(format!(
+            "drawing {name} must be finite and positive"
+        )));
+    }
+    Ok(value.round().clamp(1.0, limit.max(1) as f32) as u32)
+}
+
+fn checked_stroke_width(value: Option<f32>) -> mlua::Result<f32> {
+    let value = value.unwrap_or(1.0);
+    if !value.is_finite() || !(0.25..=32.0).contains(&value) {
+        return Err(mlua::Error::RuntimeError(
+            "stroke width must be between 0.25 and 32".into(),
+        ));
+    }
+    Ok(value)
+}
+
+fn lua_points(
+    table: &Table,
+    canvas_width: u32,
+    canvas_height: u32,
+    minimum: usize,
+    operation: &str,
+) -> mlua::Result<Vec<(f32, f32)>> {
+    let count = table.raw_len();
+    if count < minimum || count > MAX_DRAW_POINTS {
+        return Err(mlua::Error::RuntimeError(format!(
+            "{operation} requires {minimum}..={MAX_DRAW_POINTS} points"
+        )));
+    }
+    let mut points = Vec::with_capacity(count);
+    for index in 1..=count {
+        let point: Table = table.raw_get(index)?;
+        let x = point
+            .get::<Option<f32>>("x")?
+            .or(point.get::<Option<f32>>(1)?)
+            .ok_or_else(|| {
+                mlua::Error::RuntimeError(format!("{operation} point {index} has no x"))
+            })?;
+        let y = point
+            .get::<Option<f32>>("y")?
+            .or(point.get::<Option<f32>>(2)?)
+            .ok_or_else(|| {
+                mlua::Error::RuntimeError(format!("{operation} point {index} has no y"))
+            })?;
+        require_finite(operation, &[x, y])?;
+        points.push((
+            bounded_coord(x, canvas_width) as f32,
+            bounded_coord(y, canvas_height) as f32,
+        ));
+    }
+    Ok(points)
+}
+
+fn with_composed_canvas<F>(
+    ctx: &RenderCtx,
+    canvas: &mut ByteBuf,
+    work_multiplier: usize,
+    draw: F,
+) -> mlua::Result<()>
+where
+    F: FnOnce(&mut ImageBuffer<Rgba<u8>, &mut [u8]>),
+{
+    ctx.charge_render_work(work_multiplier)?;
+    let state = ctx.composition.borrow().clone();
+    if !state.requires_layer() {
+        let mut image = canvas_image(ctx, canvas)?;
+        draw(&mut image);
+        return Ok(());
+    }
+
+    let len = ctx.width as usize * ctx.height as usize * 4;
+    let mut layer_bytes = alloc_zeroed(len)?;
+    let mut layer = ImageBuffer::from_raw(ctx.width, ctx.height, layer_bytes.as_mut_slice())
+        .ok_or_else(|| mlua::Error::RuntimeError("invalid widget layer".into()))?;
+    draw(&mut layer);
+    let mut target = canvas_image(ctx, canvas)?;
+    composite_layer(&mut target, &layer, &state);
+    Ok(())
+}
+
+fn composite_layer(
+    target: &mut ImageBuffer<Rgba<u8>, &mut [u8]>,
+    layer: &ImageBuffer<Rgba<u8>, &mut [u8]>,
+    state: &CompositionState,
+) {
+    let opacity = state.opacity();
+    if opacity <= 0.0 {
+        return;
+    }
+    let clip = state.clip();
+    let Some(inverse) = state.transform().inverse() else {
+        return;
+    };
+    for y in clip.top..clip.bottom {
+        for x in clip.left..clip.right {
+            let (source_x, source_y) = inverse.map(x as f32 + 0.5, y as f32 + 0.5);
+            let source_x = source_x.floor() as i32;
+            let source_y = source_y.floor() as i32;
+            if source_x < 0
+                || source_y < 0
+                || source_x >= layer.width() as i32
+                || source_y >= layer.height() as i32
+            {
+                continue;
+            }
+            let mut source = *layer.get_pixel(source_x as u32, source_y as u32);
+            source.0[3] = (f32::from(source.0[3]) * opacity).round() as u8;
+            if source.0[3] != 0 {
+                target.get_pixel_mut(x, y).blend(&source);
+            }
+        }
+    }
+}
+
+fn stroke_polyline_mut(
+    image: &mut ImageBuffer<Rgba<u8>, &mut [u8]>,
+    points: &[(f32, f32)],
+    width: f32,
+    closed: bool,
+    color: Rgba<u8>,
+) {
+    let segment_count = if closed {
+        points.len()
+    } else {
+        points.len().saturating_sub(1)
+    };
+    for index in 0..segment_count {
+        let start = points[index];
+        let end = points[(index + 1) % points.len()];
+        if width <= 1.0 {
+            draw_line_segment_mut(image, start, end, color);
+            continue;
+        }
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let length = dx.hypot(dy);
+        let radius = width / 2.0;
+        if length > f32::EPSILON {
+            let nx = -dy / length * radius;
+            let ny = dx / length * radius;
+            let polygon = [
+                Point::new((start.0 + nx).round() as i32, (start.1 + ny).round() as i32),
+                Point::new((end.0 + nx).round() as i32, (end.1 + ny).round() as i32),
+                Point::new((end.0 - nx).round() as i32, (end.1 - ny).round() as i32),
+                Point::new((start.0 - nx).round() as i32, (start.1 - ny).round() as i32),
+            ];
+            draw_polygon_mut(image, &polygon, color);
+        }
+        draw_filled_circle_mut(
+            image,
+            (start.0.round() as i32, start.1.round() as i32),
+            radius.ceil() as i32,
+            color,
+        );
+        draw_filled_circle_mut(
+            image,
+            (end.0.round() as i32, end.1.round() as i32),
+            radius.ceil() as i32,
+            color,
+        );
+    }
+}
+
+fn draw_stroked_circle_mut(
+    image: &mut ImageBuffer<Rgba<u8>, &mut [u8]>,
+    center: (i32, i32),
+    radius: i32,
+    width: f32,
+    color: Rgba<u8>,
+) {
+    let pixels = width.ceil() as i32;
+    let start = radius.saturating_sub(pixels / 2);
+    for offset in 0..pixels {
+        draw_hollow_circle_mut(image, center, start + offset, color);
+    }
+}
+
+fn draw_polygon_or_stroke_mut(
+    image: &mut ImageBuffer<Rgba<u8>, &mut [u8]>,
+    points: &[(f32, f32)],
+    filled: bool,
+    stroke_width: f32,
+    color: Rgba<u8>,
+) {
+    if filled {
+        let points: Vec<_> = points
+            .iter()
+            .map(|&(x, y)| Point::new(x.round() as i32, y.round() as i32))
+            .collect();
+        draw_polygon_mut(image, &points, color);
+    } else {
+        stroke_polyline_mut(image, points, stroke_width, true, color);
     }
 }
 
@@ -1820,6 +2338,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn composition_clips_rotates_and_applies_opacity() {
+        let source = r#"
+            local function render(canvas, ctx)
+                ctx:push_clip(8, 2, 5, 9)
+                ctx:push_opacity(0.5)
+                ctx:push_rotation(90, 8, 8)
+                ctx:fill_rect(canvas, 2, 4, 8, 4, { r = 255, g = 0, b = 0 })
+                ctx:pop_rotation()
+                ctx:pop_opacity()
+                ctx:pop_clip()
+
+                ctx:draw_polyline(canvas, {
+                    { x = 16, y = 3 }, { x = 22, y = 9 }, { x = 28, y = 3 },
+                }, { r = 0, g = 255, b = 0 }, 3)
+                ctx:draw_polygon(canvas, {
+                    { 18, 14 }, { 28, 14 }, { 23, 22 },
+                }, false, { r = 0, g = 0, b = 255 }, 4)
+            end
+            return {
+                render_widget_meter = function(canvas, w, h, t, dt, params, ctx) render(canvas, ctx) end,
+                preview_widget_meter = function(canvas, w, h, params, ctx) render(canvas, ctx) end,
+            }
+        "#;
+        let worker = PluginWidgetHandle::spawn(
+            source.to_owned(),
+            BTreeMap::new(),
+            vec!["meter".to_owned()],
+            vec![],
+            HashMap::new(),
+        );
+        let pixels = worker.render(input(true)).await.unwrap();
+        let pixel = |x: usize, y: usize| &pixels[(y * 32 + x) * 4..(y * 32 + x + 1) * 4];
+
+        assert_eq!(pixel(10, 5), [255, 0, 0, 128]);
+        assert_eq!(pixel(4, 6), [0, 0, 0, 0]);
+        assert!(pixels
+            .chunks_exact(4)
+            .any(|pixel| pixel[1] != 0 && pixel[3] == 255));
+        assert!(pixels
+            .chunks_exact(4)
+            .any(|pixel| pixel[2] != 0 && pixel[3] == 255));
+    }
+
+    #[tokio::test]
+    async fn composition_rejects_non_finite_values_and_stack_overflow() {
+        let source = r#"
+            local function render(canvas, ctx)
+                assert(not pcall(function() ctx:push_clip(0 / 0, 0, 1, 1) end))
+                assert(not pcall(function() ctx:push_opacity(1 / 0) end))
+                assert(not pcall(function() ctx:push_rotation(0, 0 / 0, 0) end))
+                assert(not pcall(function() ctx:pop_clip() end))
+                assert(not pcall(function() ctx:pop_opacity() end))
+                assert(not pcall(function() ctx:pop_rotation() end))
+                assert(not pcall(function()
+                    ctx:draw_line(canvas, 0 / 0, 0, 1, 1, nil, 1)
+                end))
+                assert(not pcall(function()
+                    ctx:draw_polyline(canvas, { { 0, 0 }, { 1 / 0, 1 } }, nil, 1)
+                end))
+                assert(not pcall(function()
+                    ctx:draw_polygon(canvas, { { 0, 0 }, { 1, 1 }, { 2, 0 } }, false, nil, 0)
+                end))
+                for _ = 1, 8 do ctx:push_clip(0, 0, 1, 1) end
+                assert(not pcall(function() ctx:push_clip(0, 0, 1, 1) end))
+                for _ = 1, 8 do ctx:pop_clip() end
+                canvas:set_u8(3, 255)
+            end
+            return {
+                render_widget_meter = function(canvas, w, h, t, dt, params, ctx) render(canvas, ctx) end,
+                preview_widget_meter = function(canvas, w, h, params, ctx) render(canvas, ctx) end,
+            }
+        "#;
+        let worker = PluginWidgetHandle::spawn(
+            source.to_owned(),
+            BTreeMap::new(),
+            vec!["meter".to_owned()],
+            vec![],
+            HashMap::new(),
+        );
+        assert_eq!(worker.render(input(true)).await.unwrap()[3], 255);
+    }
+
+    #[tokio::test]
+    async fn worst_case_valid_composition_stays_within_callback_timeout() {
+        let source = r#"
+            local points = {}
+            for i = 1, 64 do
+                local angle = (i - 1) * math.pi * 2 / 64
+                points[i] = { x = 512 + math.cos(angle) * 480, y = 512 + math.sin(angle) * 480 }
+            end
+            local function render(canvas, ctx)
+                for _ = 1, 8 do
+                    ctx:push_clip(0, 0, 1024, 1024)
+                    ctx:push_opacity(0.98)
+                    ctx:push_rotation(1, 512, 512)
+                end
+                ctx:draw_polygon(canvas, points, true, { r = 20, g = 40, b = 60 }, 32)
+                ctx:draw_polyline(canvas, points, { r = 255, g = 255, b = 255 }, 32)
+            end
+            return {
+                render_widget_meter = function(canvas, w, h, t, dt, params, ctx) render(canvas, ctx) end,
+                preview_widget_meter = function(canvas, w, h, params, ctx) render(canvas, ctx) end,
+            }
+        "#;
+        let worker = PluginWidgetHandle::spawn(
+            source.to_owned(),
+            BTreeMap::new(),
+            vec!["meter".to_owned()],
+            vec![],
+            HashMap::new(),
+        );
+        let mut render = input(true);
+        render.width = 1024;
+        render.height = 1024;
+        assert!(worker
+            .render(render)
+            .await
+            .unwrap()
+            .chunks_exact(4)
+            .any(|pixel| pixel[3] != 0));
+    }
+
+    #[tokio::test]
     async fn text_boxes_measure_and_draw_unicode_with_host_layout() {
         let source = r#"
             local style = {
@@ -2079,6 +2720,39 @@ mod tests {
         assert!(pixels
             .chunks_exact(4)
             .any(|pixel| pixel == [0, 255, 0, 255]));
+    }
+
+    #[tokio::test]
+    async fn image_opacity_is_composited_by_the_host() {
+        let source = r#"
+            local function render(canvas, ctx)
+                ctx:push_opacity(0.25)
+                assert(ctx:draw_asset(canvas, "logo.svg", 0, 0, 8, 8, "fit"))
+                ctx:pop_opacity()
+            end
+            return {
+                render_widget_meter = function(canvas, w, h, t, dt, params, ctx) render(canvas, ctx) end,
+                preview_widget_meter = function(canvas, w, h, params, ctx) render(canvas, ctx) end,
+            }
+        "#;
+        let worker = PluginWidgetHandle::spawn(
+            source.to_owned(),
+            BTreeMap::new(),
+            vec!["meter".to_owned()],
+            vec![],
+            HashMap::new(),
+        );
+        let mut render = input(true);
+        render.assets.insert(
+            "logo.svg".to_owned(),
+            WidgetImageInput {
+                width: 2,
+                height: 2,
+                rgba: [0, 255, 0, 255].repeat(4),
+            },
+        );
+        let pixels = worker.render(render).await.unwrap();
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel == [0, 255, 0, 64]));
     }
 
     #[tokio::test]
