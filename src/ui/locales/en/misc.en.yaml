@@ -91,6 +91,7 @@ misc:
   macro_mouse_back: Back
   macro_mouse_forward: Forward
   # widgets.rs
+  widget_cancel: Cancel
   widget_up_to: up to
   widget_from: from
   widget_add_step: "+ Add step"

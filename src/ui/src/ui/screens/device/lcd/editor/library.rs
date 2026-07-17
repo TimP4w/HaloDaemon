@@ -13,11 +13,6 @@ use super::{send_def, DeviceUi, TabCtx};
 use crate::ui::components as widgets;
 use crate::ui::theme;
 
-/// Reduce the delete-confirmation modal's outcome: `Some(name)` means the
-/// delete was confirmed and should be sent; the pending state is cleared on
-/// any outcome.
-use widgets::resolve_delete_confirm;
-
 pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
     crate::domain::tour::anchor(
         ui.ctx(),
@@ -167,47 +162,13 @@ pub(super) fn delete_template_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut De
     let Some(name) = st.lcd.editor.confirm_delete.clone() else {
         return;
     };
-    let (mut confirm, mut cancel) = (false, false);
-    let dismissed = widgets::dialog(
+    if let Some(name) = widgets::confirm_delete_dialog(
         ui.ctx(),
         "lcd_delete_template",
         &t!("lcd.delete_template_title"),
-        420.0,
-        |ui| {
-            ui.label(
-                egui::RichText::new(t!("lcd.delete_confirm_body", name = name))
-                    .font(theme::body_md())
-                    .color(theme::TEXT_MUT),
-            );
-        },
-        |ui| {
-            if widgets::button(
-                ui,
-                &t!("lcd.delete"),
-                widgets::ButtonKind::Danger,
-                egui::vec2(96.0, 32.0),
-            )
-            .clicked()
-            {
-                confirm = true;
-            }
-            ui.add_space(theme::SPACE_4);
-            if widgets::button(
-                ui,
-                &t!("lcd.cancel"),
-                widgets::ButtonKind::Ghost,
-                egui::vec2(96.0, 32.0),
-            )
-            .clicked()
-            {
-                cancel = true;
-            }
-        },
-    );
-    if let Some(name) = resolve_delete_confirm(
+        &t!("lcd.delete_confirm_body", name = name),
+        &t!("lcd.delete"),
         &mut st.lcd.editor.confirm_delete,
-        confirm,
-        cancel || dismissed,
     ) {
         crate::runtime::ipc::send(
             ctx.cmd,

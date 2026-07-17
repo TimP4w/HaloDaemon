@@ -152,11 +152,7 @@ impl PluginsUi {
         self.repo_delete_modal(ui.ctx(), cmd);
         self.repo_repair_modal(ui.ctx(), cmd);
         self.consent_modal(ui.ctx(), state, cmd);
-        if let Some((title, detail)) = &self.issue_modal {
-            if widgets::issue_modal(ui.ctx(), "plugin_issue_page", title, detail) {
-                self.issue_modal = None;
-            }
-        }
+        widgets::issue_modal_slot(ui.ctx(), "plugin_issue_page", &mut self.issue_modal);
         if self.udev_info_open {
             if let Some(status) = udev_status.filter(|status| status.supported) {
                 let rechecking = self
@@ -851,48 +847,13 @@ impl PluginsUi {
         let Some(slug) = self.pending_repo_delete.clone() else {
             return;
         };
-
-        let mut confirm = false;
-        let mut cancel = false;
-        let dismissed = widgets::dialog(
+        if let Some(slug) = widgets::confirm_delete_dialog(
             ctx,
             "remove_plugin_repo",
             &t!("plugins.repos_remove_title"),
-            420.0,
-            |ui| {
-                ui.label(
-                    egui::RichText::new(t!("plugins.repos_remove_body", name = slug.clone()))
-                        .font(theme::body_md())
-                        .color(theme::TEXT_DIM),
-                );
-            },
-            |ui| {
-                if widgets::button(
-                    ui,
-                    &t!("plugins.repos_remove"),
-                    ButtonKind::Danger,
-                    Vec2::new(150.0, 34.0),
-                )
-                .clicked()
-                {
-                    confirm = true;
-                }
-                if widgets::button(
-                    ui,
-                    &t!("plugins.cancel"),
-                    ButtonKind::Ghost,
-                    Vec2::new(90.0, 34.0),
-                )
-                .clicked()
-                {
-                    cancel = true;
-                }
-            },
-        );
-        if let Some(slug) = widgets::resolve_delete_confirm(
+            &t!("plugins.repos_remove_body", name = slug),
+            &t!("plugins.repos_remove"),
             &mut self.pending_repo_delete,
-            confirm,
-            cancel || dismissed,
         ) {
             crate::runtime::ipc::send(
                 cmd,
@@ -907,48 +868,13 @@ impl PluginsUi {
         if self.pending_repo_repair.is_none() {
             return;
         }
-
-        let mut confirm = false;
-        let mut cancel = false;
-        let dismissed = widgets::dialog(
+        if let Some(pending) = widgets::confirm_delete_dialog(
             ctx,
             "repair_plugin_repo",
             &t!("plugins.repos_repair_title"),
-            440.0,
-            |ui| {
-                ui.label(
-                    egui::RichText::new(t!("plugins.repos_repair_body"))
-                        .font(theme::body_md())
-                        .color(theme::TEXT_DIM),
-                );
-            },
-            |ui| {
-                if widgets::button(
-                    ui,
-                    &t!("plugins.repos_repair"),
-                    ButtonKind::Danger,
-                    Vec2::new(130.0, 34.0),
-                )
-                .clicked()
-                {
-                    confirm = true;
-                }
-                if widgets::button(
-                    ui,
-                    &t!("plugins.cancel"),
-                    ButtonKind::Ghost,
-                    Vec2::new(90.0, 34.0),
-                )
-                .clicked()
-                {
-                    cancel = true;
-                }
-            },
-        );
-        if let Some(pending) = widgets::resolve_delete_confirm(
+            &t!("plugins.repos_repair_body"),
+            &t!("plugins.repos_repair"),
             &mut self.pending_repo_repair,
-            confirm,
-            cancel || dismissed,
         ) {
             crate::runtime::ipc::send(
                 cmd,
@@ -2363,9 +2289,9 @@ fn data_reads_bullet(ui: &mut egui::Ui, keys: &[String], color: egui::Color32) {
     );
 }
 
-/// One permission as a full-width dark card for the grant modal: an amber dot +
-/// mono label, then its explanation.
-fn permission_card(ui: &mut egui::Ui, perm: halod_shared::types::Permission) {
+/// Full-width dark card for the grant modal: an amber dot + mono title, then a
+/// muted explanation line.
+fn authority_card(ui: &mut egui::Ui, title: &str, detail: &str) {
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
@@ -2377,18 +2303,23 @@ fn permission_card(ui: &mut egui::Ui, perm: halod_shared::types::Permission) {
                 dot(ui, theme::STAT_AMBER);
                 ui.add_space(theme::SPACE_1);
                 ui.label(
-                    egui::RichText::new(permission_label(perm))
+                    egui::RichText::new(title)
                         .font(theme::mono(12.0))
                         .color(theme::TEXT),
                 );
             });
             ui.add_space(theme::SPACE_1);
             ui.label(
-                egui::RichText::new(permission_description(perm))
+                egui::RichText::new(detail)
                     .font(theme::body_sm())
                     .color(theme::TEXT_MUT),
             );
         });
+}
+
+/// One declared permission as a full-width card in the grant modal.
+fn permission_card(ui: &mut egui::Ui, perm: halod_shared::types::Permission) {
+    authority_card(ui, &permission_label(perm), &permission_description(perm));
 }
 
 fn command_scope_names(authority: &halod_shared::types::PluginAuthority) -> Vec<&str> {
@@ -2444,24 +2375,11 @@ pub(crate) fn authority_review_cards(ui: &mut egui::Ui, plugin: &PluginInfo) {
         ui.add_space(theme::SPACE_4);
     }
     if !plugin.authority.data_reads.is_empty() {
-        egui::Frame::NONE
-            .fill(theme::INNER_BG)
-            .stroke(Stroke::new(1.0, theme::STAT_AMBER))
-            .corner_radius(theme::RADIUS_MD)
-            .inner_margin(egui::Margin::symmetric(14, 12))
-            .show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new("Can read shared data")
-                        .font(theme::body_md())
-                        .strong()
-                        .color(theme::STAT_AMBER),
-                );
-                ui.label(
-                    egui::RichText::new(plugin.authority.data_reads.join(", "))
-                        .font(theme::mono(12.0))
-                        .color(theme::TEXT),
-                );
-            });
+        authority_card(
+            ui,
+            "Can read shared data",
+            &plugin.authority.data_reads.join(", "),
+        );
         ui.add_space(theme::SPACE_4);
     }
 }

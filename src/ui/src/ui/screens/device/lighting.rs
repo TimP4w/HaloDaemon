@@ -196,12 +196,12 @@ fn leave_canvas_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
             }
         },
     );
-    if confirm {
-        if let Some(cmd) = st.lighting.confirm_leave_canvas.take() {
-            crate::runtime::ipc::send(ctx.cmd, cmd);
-        }
-    } else if cancel || dismissed {
-        st.lighting.confirm_leave_canvas = None;
+    if let Some(cmd) = widgets::resolve_delete_confirm(
+        &mut st.lighting.confirm_leave_canvas,
+        confirm,
+        cancel || dismissed,
+    ) {
+        crate::runtime::ipc::send(ctx.cmd, cmd);
     }
 }
 

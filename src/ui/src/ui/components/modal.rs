@@ -248,6 +248,69 @@ pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> 
     dismissed || close
 }
 
+/// Render a pending issue modal held as `Some((title, detail))`, clearing the
+/// slot when dismissed. A no-op while `slot` is `None`.
+pub fn issue_modal_slot(ctx: &egui::Context, id: &str, slot: &mut Option<(String, String)>) {
+    if let Some((title, detail)) = slot {
+        if issue_modal(ctx, id, title, detail) {
+            *slot = None;
+        }
+    }
+}
+
+/// The standard destructive-confirmation dialog: `body` text, a Danger
+/// `confirm_label` button, and a Ghost Cancel. Renders only while `pending` is
+/// `Some`; returns the taken target when confirmed.
+pub fn confirm_delete_dialog<T>(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    body: &str,
+    confirm_label: &str,
+    pending: &mut Option<T>,
+) -> Option<T> {
+    use super::button::{button, ButtonKind};
+    pending.as_ref()?;
+    let (mut confirm, mut cancel) = (false, false);
+    let dismissed = dialog(
+        ctx,
+        id,
+        title,
+        420.0,
+        |ui| {
+            ui.label(
+                egui::RichText::new(body)
+                    .font(theme::body_md())
+                    .color(theme::TEXT_MUT),
+            );
+        },
+        |ui| {
+            if button(
+                ui,
+                confirm_label,
+                ButtonKind::Danger,
+                egui::vec2(96.0, 32.0),
+            )
+            .clicked()
+            {
+                confirm = true;
+            }
+            ui.add_space(theme::SPACE_4);
+            if button(
+                ui,
+                &t!("misc.widget_cancel"),
+                ButtonKind::Ghost,
+                egui::vec2(96.0, 32.0),
+            )
+            .clicked()
+            {
+                cancel = true;
+            }
+        },
+    );
+    resolve_delete_confirm(pending, confirm, cancel || dismissed)
+}
+
 /// Reduce a delete/remove-confirmation modal's outcome: `Some(target)` means
 /// the action was confirmed; the pending state is cleared on any outcome.
 pub fn resolve_delete_confirm<T>(
@@ -270,6 +333,26 @@ mod tests {
     use super::super::button::{button, ButtonKind};
     use super::*;
     use egui::{Pos2, Rect, Sense, Vec2};
+
+    #[test]
+    fn resolve_delete_confirm_only_deletes_on_confirm() {
+        // Dialog still open: nothing happens, pending preserved.
+        let mut pending = Some("Gaming".to_string());
+        assert_eq!(resolve_delete_confirm(&mut pending, false, false), None);
+        assert_eq!(pending.as_deref(), Some("Gaming"));
+
+        // Dismissed (cancel or backdrop): pending cleared, no delete.
+        assert_eq!(resolve_delete_confirm(&mut pending, false, true), None);
+        assert_eq!(pending, None);
+
+        // Confirmed: returns the name and clears pending.
+        pending = Some("Gaming".to_string());
+        assert_eq!(
+            resolve_delete_confirm(&mut pending, true, false).as_deref(),
+            Some("Gaming")
+        );
+        assert_eq!(pending, None);
+    }
 
     #[test]
     fn close_button_is_16px_from_right_and_centered_on_the_title() {

@@ -18,12 +18,6 @@ use crate::domain::{
 use crate::runtime::ipc::{self, CommandTx, UiRx};
 use crate::ui;
 
-/// A notification Details modal's translated title and full error text.
-pub struct IssueDetailsModal {
-    pub title: String,
-    pub detail: String,
-}
-
 pub struct App {
     pub(crate) ui: UiRx,
     /// Last daemon `AppState`, re-cloned only when its watch channel changes.
@@ -74,7 +68,8 @@ pub struct App {
     pub(crate) tray: domain::tray::Tray,
     pub(crate) toasts: ui::components::toast::Toasts,
     /// Open notification Details modal. Outlives the toast that spawned it.
-    pub(crate) issue_details_modal: Option<IssueDetailsModal>,
+    /// A notification Details modal's translated title and full error text.
+    pub(crate) issue_details_modal: Option<(String, String)>,
     /// Repository-integrity episodes already notified during this GUI session.
     pub(crate) integrity_alert_notified: std::collections::HashSet<String>,
     /// Set by the tray "Quit" so a close request bypasses "close to tray" and

@@ -92,18 +92,7 @@ fn page_body(
     st: &mut SettingsUi,
 ) {
     ui.set_max_width(ui.available_width().min(840.0));
-    ui.label(
-        egui::RichText::new(t!("settings.title"))
-            .font(theme::bold(22.0))
-            .color(theme::TEXT),
-    );
-    ui.add_space(theme::SPACE_1);
-    ui.label(
-        egui::RichText::new(t!("settings.subtitle"))
-            .font(theme::body_md())
-            .color(theme::TEXT_MUT),
-    );
-    ui.add_space(22.0);
+    widgets::page_header(ui, &t!("settings.title"), &t!("settings.subtitle"), None);
 
     // ── APPLICATION ───────────────────────────────────────────────────────
     section_header(ui, &t!("settings.section_application"));

@@ -116,11 +116,7 @@ impl IntegrationsUi {
     ) {
         self.sync_logos(ui.ctx(), cmd, &state.plugins.plugins, plugin_assets);
         widgets::page_frame(ui, |ui| self.body(ui, state, cmd));
-        if let Some((title, detail)) = &self.issue_modal {
-            if widgets::issue_modal(ui.ctx(), "integration_issue", title, detail) {
-                self.issue_modal = None;
-            }
-        }
+        widgets::issue_modal_slot(ui.ctx(), "integration_issue", &mut self.issue_modal);
     }
 
     /// Request the logo of every visible integration that hasn't been fetched
@@ -153,23 +149,12 @@ impl IntegrationsUi {
     fn body(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
         ui.set_max_width(ui.available_width().min(840.0));
         reconcile_in_flight(&mut self.in_flight, &state.plugins.plugins);
-        let title_resp = ui.label(
-            egui::RichText::new(t!("integrations.title"))
-                .font(theme::bold(22.0))
-                .color(theme::TEXT),
+        widgets::page_header(
+            ui,
+            &t!("integrations.title"),
+            &t!("integrations.subtitle"),
+            Some(crate::domain::tour::AnchorId::IntegrationsOverview),
         );
-        crate::domain::tour::anchor(
-            ui.ctx(),
-            crate::domain::tour::AnchorId::IntegrationsOverview,
-            title_resp.rect,
-        );
-        ui.add_space(theme::SPACE_1);
-        ui.label(
-            egui::RichText::new(t!("integrations.subtitle"))
-                .font(theme::body_md())
-                .color(theme::TEXT_MUT),
-        );
-        ui.add_space(theme::SPACE_9);
 
         let integrations: Vec<&PluginInfo> = state
             .plugins

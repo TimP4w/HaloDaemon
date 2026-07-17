@@ -754,10 +754,6 @@ pub fn add_modal(ctx: &egui::Context, state: &AppState, cmd: &CommandTx, st: &mu
 
 // ── Delete-profile confirm dialog ─────────────────────────────────────────────
 
-/// Resolve a pending delete against the dialog's confirm/dismiss outcome —
-/// delegates to the shared widget helper.
-use widgets::resolve_delete_confirm;
-
 /// Confirm dialog shown before a profile is removed. Rendered every frame; a
 /// no-op until a delete is pending. Must be called from any page that can open
 /// the profile dropdown.
@@ -765,47 +761,14 @@ pub fn delete_confirm_modal(ctx: &egui::Context, cmd: &CommandTx, st: &mut Profi
     let Some(name) = st.confirm_delete.clone() else {
         return;
     };
-
-    let (mut confirm, mut cancel) = (false, false);
-    let dismissed = widgets::dialog(
+    if let Some(name) = widgets::confirm_delete_dialog(
         ctx,
         "delete_profile",
         &t!("profile.delete_title"),
-        380.0,
-        |ui| {
-            ui.label(
-                egui::RichText::new(t!("profile.delete_confirm", name = name))
-                    .font(theme::body_md())
-                    .color(theme::TEXT_MUT),
-            );
-        },
-        |ui| {
-            if widgets::button(
-                ui,
-                &t!("profile.delete"),
-                ButtonKind::Danger,
-                egui::vec2(96.0, 32.0),
-            )
-            .clicked()
-            {
-                confirm = true;
-            }
-            ui.add_space(theme::SPACE_4);
-            if widgets::button(
-                ui,
-                &t!("profile.cancel"),
-                ButtonKind::Ghost,
-                egui::vec2(96.0, 32.0),
-            )
-            .clicked()
-            {
-                cancel = true;
-            }
-        },
-    );
-
-    if let Some(name) = resolve_delete_confirm(&mut st.confirm_delete, confirm, cancel || dismissed)
-    {
+        &t!("profile.delete_confirm", name = name),
+        &t!("profile.delete"),
+        &mut st.confirm_delete,
+    ) {
         crate::runtime::ipc::send(
             cmd,
             halod_shared::commands::DaemonCommand::RemoveProfile { name },
@@ -1612,26 +1575,6 @@ mod tests {
             })],
         );
         assert!(st.switching_to.is_none());
-    }
-
-    #[test]
-    fn resolve_delete_confirm_only_deletes_on_confirm() {
-        // Dialog still open: nothing happens, pending preserved.
-        let mut pending = Some("Gaming".to_string());
-        assert_eq!(resolve_delete_confirm(&mut pending, false, false), None);
-        assert_eq!(pending.as_deref(), Some("Gaming"));
-
-        // Dismissed (cancel or backdrop): pending cleared, no delete.
-        assert_eq!(resolve_delete_confirm(&mut pending, false, true), None);
-        assert_eq!(pending, None);
-
-        // Confirmed: returns the name and clears pending.
-        pending = Some("Gaming".to_string());
-        assert_eq!(
-            resolve_delete_confirm(&mut pending, true, false).as_deref(),
-            Some("Gaming")
-        );
-        assert_eq!(pending, None);
     }
 
     #[test]

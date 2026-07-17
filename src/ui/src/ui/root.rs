@@ -584,10 +584,7 @@ impl App {
                     if let Some(detail) = note.code.detail() {
                         let (title, _) =
                             crate::domain::models::notifications::notification_text(&note.code);
-                        self.issue_details_modal = Some(crate::app::IssueDetailsModal {
-                            title,
-                            detail: detail.to_owned(),
-                        });
+                        self.issue_details_modal = Some((title, detail.to_owned()));
                     }
                 }
                 crate::ui::components::toast::ToastEvent::RestoreRepository(slug) => {
@@ -599,17 +596,11 @@ impl App {
             }
         }
         if !domain::tour::is_active(&self.tour) && !onboarding_active {
-            if let Some(modal) = &self.issue_details_modal {
-                let dismissed = crate::ui::components::issue_modal(
-                    ctx,
-                    "issue_details",
-                    &modal.title,
-                    &modal.detail,
-                );
-                if dismissed {
-                    self.issue_details_modal = None;
-                }
-            }
+            crate::ui::components::issue_modal_slot(
+                ctx,
+                "issue_details",
+                &mut self.issue_details_modal,
+            );
         }
     }
 }

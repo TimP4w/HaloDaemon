@@ -1317,46 +1317,14 @@ fn delete_confirm_modal(ui: &mut egui::Ui, st: &mut LightingUi, cmd: &CommandTx)
     let Some(name) = st.confirm_delete.clone() else {
         return;
     };
-    let (mut confirm, mut cancel) = (false, false);
-    let dismissed = widgets::dialog(
+    if let Some(name) = widgets::confirm_delete_dialog(
         ui.ctx(),
         "lighting_delete_confirm",
         &t!("lighting.delete_effect_title"),
-        420.0,
-        |ui| {
-            ui.label(
-                egui::RichText::new(t!("lighting.delete_confirm", name = name))
-                    .font(theme::body_md())
-                    .color(theme::TEXT_MUT),
-            );
-        },
-        |ui| {
-            if widgets::button(
-                ui,
-                &t!("lighting.delete"),
-                widgets::ButtonKind::Danger,
-                egui::vec2(96.0, 32.0),
-            )
-            .clicked()
-            {
-                confirm = true;
-            }
-            ui.add_space(theme::SPACE_4);
-            if widgets::button(
-                ui,
-                &t!("lighting.cancel"),
-                widgets::ButtonKind::Ghost,
-                egui::vec2(96.0, 32.0),
-            )
-            .clicked()
-            {
-                cancel = true;
-            }
-        },
-    );
-    if let Some(name) =
-        widgets::resolve_delete_confirm(&mut st.confirm_delete, confirm, cancel || dismissed)
-    {
+        &t!("lighting.delete_confirm", name = name),
+        &t!("lighting.delete"),
+        &mut st.confirm_delete,
+    ) {
         crate::runtime::ipc::send(
             cmd,
             halod_shared::commands::DaemonCommand::DeleteCustomEffect { name: name.clone() },

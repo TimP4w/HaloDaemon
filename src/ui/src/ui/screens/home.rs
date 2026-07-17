@@ -577,28 +577,12 @@ fn tag_pill(p: &egui::Painter, left_center: Pos2, text: &str, color: Color32) {
 }
 
 fn ellipsize(painter: &egui::Painter, text: &str, font: &egui::FontId, max_width: f32) -> String {
-    if painter
-        .layout_no_wrap(text.to_owned(), font.clone(), theme::TEXT)
-        .rect
-        .width()
-        <= max_width
-    {
-        return text.to_owned();
-    }
-    let mut clipped = text.chars().collect::<Vec<_>>();
-    while !clipped.is_empty() {
-        let candidate = format!("{}…", clipped.iter().collect::<String>());
-        if painter
-            .layout_no_wrap(candidate.clone(), font.clone(), theme::TEXT)
+    widgets::truncate_to_width(text, max_width, |s| {
+        painter
+            .layout_no_wrap(s.to_owned(), font.clone(), theme::TEXT)
             .rect
             .width()
-            <= max_width
-        {
-            return candidate;
-        }
-        clipped.pop();
-    }
-    "…".into()
+    })
 }
 
 fn conflict_source_label(source: &ConflictDeviceSource) -> String {
@@ -641,46 +625,14 @@ fn remove_confirm_modal(
     let Some(target) = confirm_remove.as_ref() else {
         return;
     };
-    let (mut confirm, mut cancel) = (false, false);
-    let dismissed = widgets::dialog(
+    if let Some(target) = widgets::confirm_delete_dialog(
         ctx,
         "home_remove_chain",
         &t!("home.remove_device_title"),
-        380.0,
-        |ui| {
-            ui.label(
-                egui::RichText::new(t!("home.remove_device_confirm", name = target.child_name))
-                    .font(theme::body_md())
-                    .color(theme::TEXT_MUT),
-            );
-        },
-        |ui| {
-            if widgets::button(
-                ui,
-                &t!("home.remove"),
-                widgets::ButtonKind::Danger,
-                egui::vec2(96.0, 32.0),
-            )
-            .clicked()
-            {
-                confirm = true;
-            }
-            ui.add_space(theme::SPACE_4);
-            if widgets::button(
-                ui,
-                &t!("home.cancel"),
-                widgets::ButtonKind::Ghost,
-                egui::vec2(96.0, 32.0),
-            )
-            .clicked()
-            {
-                cancel = true;
-            }
-        },
-    );
-    if let Some(target) =
-        widgets::resolve_delete_confirm(confirm_remove, confirm, cancel || dismissed)
-    {
+        &t!("home.remove_device_confirm", name = target.child_name),
+        &t!("home.remove"),
+        confirm_remove,
+    ) {
         crate::runtime::ipc::send(
             cmd,
             halod_shared::commands::DaemonCommand::RgbChainRemoveLink {

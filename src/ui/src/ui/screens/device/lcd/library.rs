@@ -11,7 +11,6 @@ use halod_shared::types::{LcdStatus, LcdUploadProgress, LcdUploadStage};
 use super::gif::decode_next_thumb;
 use super::{DeviceUi, LcdMediaTab, PickerTarget, TabCtx};
 use crate::ui::components as widgets;
-use crate::ui::components::resolve_delete_confirm;
 use crate::ui::theme;
 
 /// Maximum library tiles shown (not counting the "None" slot).
@@ -249,47 +248,13 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
     let Some(filename) = st.lcd.confirm_delete_image.clone() else {
         return;
     };
-    let (mut confirm, mut cancel) = (false, false);
-    let dismissed = widgets::dialog(
+    if let Some(filename) = widgets::confirm_delete_dialog(
         ui.ctx(),
         "lcd_delete_image",
         &t!("lcd.delete_image_title"),
-        420.0,
-        |ui| {
-            ui.label(
-                egui::RichText::new(t!("lcd.delete_confirm_body", name = filename))
-                    .font(theme::body_md())
-                    .color(theme::TEXT_MUT),
-            );
-        },
-        |ui| {
-            if widgets::button(
-                ui,
-                &t!("lcd.delete"),
-                widgets::ButtonKind::Danger,
-                egui::vec2(96.0, 32.0),
-            )
-            .clicked()
-            {
-                confirm = true;
-            }
-            ui.add_space(theme::SPACE_4);
-            if widgets::button(
-                ui,
-                &t!("lcd.cancel"),
-                widgets::ButtonKind::Ghost,
-                egui::vec2(96.0, 32.0),
-            )
-            .clicked()
-            {
-                cancel = true;
-            }
-        },
-    );
-    if let Some(filename) = resolve_delete_confirm(
+        &t!("lcd.delete_confirm_body", name = filename),
+        &t!("lcd.delete"),
         &mut st.lcd.confirm_delete_image,
-        confirm,
-        cancel || dismissed,
     ) {
         crate::runtime::ipc::send(
             ctx.cmd,

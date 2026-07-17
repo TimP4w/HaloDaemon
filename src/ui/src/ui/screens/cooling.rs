@@ -58,23 +58,12 @@ pub fn show(
                     .filter(|d| has_fan(d) && !model::is_hidden(d))
                     .collect();
 
-                let title_resp = ui.label(
-                    egui::RichText::new(t!("cooling.title"))
-                        .font(theme::bold(22.0))
-                        .color(theme::TEXT),
+                widgets::page_header(
+                    ui,
+                    &t!("cooling.title"),
+                    &t!("cooling.subtitle", count = coolers.len()),
+                    Some(crate::domain::tour::AnchorId::CoolingCurve),
                 );
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::CoolingCurve,
-                    title_resp.rect,
-                );
-                ui.add_space(theme::SPACE_1);
-                ui.label(
-                    egui::RichText::new(t!("cooling.subtitle", count = coolers.len()))
-                        .font(theme::body_md())
-                        .color(theme::TEXT_MUT),
-                );
-                ui.add_space(22.0);
 
                 if !crate::domain::models::sensors::sensors(state, false).is_empty() {
                     crate::ui::screens::home::sensors_grid(ui, state, cmd, false, history, 3);

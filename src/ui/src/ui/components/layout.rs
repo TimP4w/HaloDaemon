@@ -56,6 +56,32 @@ pub fn page_frame<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -
         .inner
 }
 
+/// The standard page heading: bold title (optionally registered as a tour
+/// anchor), muted subtitle, and the gap before the page body.
+pub fn page_header(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: &str,
+    anchor: Option<crate::domain::tour::AnchorId>,
+) {
+    use crate::ui::theme;
+    let title_resp = ui.label(
+        egui::RichText::new(title)
+            .font(theme::bold(22.0))
+            .color(theme::TEXT),
+    );
+    if let Some(anchor) = anchor {
+        crate::domain::tour::anchor(ui.ctx(), anchor, title_resp.rect);
+    }
+    ui.add_space(theme::SPACE_1);
+    ui.label(
+        egui::RichText::new(subtitle)
+            .font(theme::body_md())
+            .color(theme::TEXT_MUT),
+    );
+    ui.add_space(theme::SPACE_9);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
