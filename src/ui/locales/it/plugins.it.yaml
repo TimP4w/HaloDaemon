@@ -53,8 +53,6 @@ plugins:
   update_via_repo: Aggiorna dal repository di questo plugin.
   modified_on_disk: Disabilitato perché modificato su disco
   modified_on_disk_sub: I file di questo plugin sono cambiati dall'installazione, quindi è stato disabilitato per sicurezza. Riabilitalo per accettare la modifica.
-  udev_installed: L'accesso ai dispositivi Linux è installato
-  udev_installed_sub: "%{count} regole dispositivo generate sono aggiornate in %{path}."
   udev_missing: L'accesso ai dispositivi Linux non è installato
   udev_missing_sub: "Nessun file udev di HaloDaemon trovato. Genera e installa le %{count} regole dispositivo per abilitare l'accesso."
   udev_outdated: L'accesso ai dispositivi Linux deve essere aggiornato
@@ -136,11 +134,13 @@ plugins:
   permission_secure_storage: Archiviazione sicura
   permission_smbus: SMBus
   permission_audio_routing: Instradamento audio
+  permission_data_reads: Dati condivisi
   permission_network_desc: Apre connessioni di rete, ad esempio verso un SDK o un server locale. Uno script dannoso potrebbe inviare dati all'esterno del computer.
   permission_os_desc: Legge l'orologio di sistema (os.time / os.clock). Il rischio è basso e non viene mai concesso l'accesso a file o processi.
   permission_secure_storage_desc: Legge i valori segreti salvati di questo plugin (es. un token API) in chiaro durante l'esecuzione.
   permission_smbus_desc: Scansiona, legge e scrive dispositivi SMBus/I2C. Raggiunge ogni dispositivo sul bus, non solo l'hardware di questo plugin, quindi una scrittura errata può destabilizzare altri dispositivi.
   permission_audio_routing_desc: Crea e instrada sink audio di sistema. Uno script malevolo potrebbe avviare moduli audio o catturare/reindirizzare l'audio su questo computer.
+  permission_data_reads_desc: "Legge i dati pubblicati dal sistema o da altri plugin:"
   # Campi di configurazione
   settings: IMPOSTAZIONI
   save_settings: Salva

@@ -15,6 +15,7 @@ use halod_shared::types::{
 };
 
 use crate::domain::models::plugin_issues::plugin_issue_detail;
+use crate::domain::models::udev::udev_rules_need_action;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::icons;
@@ -383,7 +384,7 @@ impl PluginsUi {
 
         // Global banners sit above the plugin list.
         let now = ui.input(|i| i.time);
-        if let Some(status) = udev_status.filter(|status| status.supported) {
+        if let Some(status) = udev_status.filter(|status| udev_rules_need_action(status)) {
             match udev_rules_banner(ui, status, self.udev_command_copied) {
                 UdevBannerAction::Install => {
                     ui.ctx().copy_text(udev_install_commands());
@@ -2391,6 +2392,39 @@ fn permission_bullet(
     );
 }
 
+pub(crate) fn data_reads_granted(p: &PluginInfo) -> bool {
+    p.accepted_authority.as_ref().is_some_and(|accepted| {
+        p.authority
+            .data_reads
+            .iter()
+            .all(|key| accepted.data_reads.contains(key))
+    })
+}
+
+/// Shared-data reads as a bullet in the same list as declared permissions. The
+/// consent modal charges for them like a permission, so a plugin that declares
+/// only `consumes` must still show what it was granted.
+fn data_reads_bullet(ui: &mut egui::Ui, keys: &[String], color: egui::Color32) {
+    ui.horizontal(|ui| {
+        dot(ui, color);
+        ui.add_space(theme::SPACE_1);
+        ui.label(
+            egui::RichText::new(t!("plugins.permission_data_reads"))
+                .font(theme::value_sm())
+                .color(theme::TEXT),
+        );
+    });
+    ui.label(
+        egui::RichText::new(format!(
+            "{} {}",
+            t!("plugins.permission_data_reads_desc"),
+            keys.join(", ")
+        ))
+        .font(theme::body_sm())
+        .color(theme::TEXT_MUT),
+    );
+}
+
 /// One permission as a full-width dark card for the grant modal: an amber dot +
 /// mono label, then its explanation.
 fn permission_card(ui: &mut egui::Ui, perm: halod_shared::types::Permission) {
@@ -2499,7 +2533,7 @@ pub(crate) fn authority_review_cards(ui: &mut egui::Ui, plugin: &PluginInfo) {
 fn targets_permissions_row(ui: &mut egui::Ui, p: &PluginInfo, cmd: &CommandTx) {
     let has_targets =
         p.plugin_type == halod_shared::types::PluginKind::Device && !p.targets.is_empty();
-    let has_perms = !p.declared_permissions.is_empty();
+    let has_perms = !p.declared_permissions.is_empty() || !p.authority.data_reads.is_empty();
     if !has_targets && !has_perms {
         return;
     }
@@ -2559,6 +2593,15 @@ pub(crate) fn permissions_section(ui: &mut egui::Ui, p: &PluginInfo, cmd: &Comma
             theme::STAT_AMBER
         };
         permission_bullet(ui, *perm, color);
+        ui.add_space(theme::SPACE_3);
+    }
+    if !p.authority.data_reads.is_empty() {
+        let color = if data_reads_granted(p) {
+            theme::ONLINE
+        } else {
+            theme::STAT_AMBER
+        };
+        data_reads_bullet(ui, &p.authority.data_reads, color);
         ui.add_space(theme::SPACE_3);
     }
 
@@ -2654,28 +2697,14 @@ fn udev_rules_banner(
     copied: bool,
 ) -> UdevBannerAction {
     let mut action = UdevBannerAction::None;
-    let installed = status.installed_path.is_some();
-    let color = if status.current {
-        theme::STAT_GREEN
-    } else {
-        theme::STAT_AMBER
-    };
-    let (title, subtitle) = if status.current {
-        (
-            t!("plugins.udev_installed"),
-            t!(
-                "plugins.udev_installed_sub",
-                count = status.generated_rule_count,
-                path = status.installed_path.as_deref().unwrap_or_default()
-            ),
-        )
-    } else if installed {
+    let color = theme::STAT_AMBER;
+    let (title, subtitle) = if let Some(path) = &status.installed_path {
         (
             t!("plugins.udev_outdated"),
             t!(
                 "plugins.udev_outdated_sub",
                 count = status.generated_rule_count,
-                path = status.installed_path.as_deref().unwrap_or_default()
+                path = path
             ),
         )
     } else {
@@ -2711,19 +2740,15 @@ fn udev_rules_banner(
             );
             ui.add_space(theme::SPACE_5);
             ui.horizontal(|ui| {
-                if !status.current {
-                    let label = if copied {
-                        t!("plugins.udev_copied")
-                    } else {
-                        t!("plugins.udev_generate")
-                    };
-                    if widgets::button(ui, &label, ButtonKind::Warn, Vec2::new(150.0, 30.0))
-                        .clicked()
-                    {
-                        action = UdevBannerAction::Install;
-                    }
-                    ui.add_space(theme::SPACE_3);
+                let label = if copied {
+                    t!("plugins.udev_copied")
+                } else {
+                    t!("plugins.udev_generate")
+                };
+                if widgets::button(ui, &label, ButtonKind::Warn, Vec2::new(150.0, 30.0)).clicked() {
+                    action = UdevBannerAction::Install;
                 }
+                ui.add_space(theme::SPACE_3);
                 if widgets::button(
                     ui,
                     &t!("plugins.udev_info"),
@@ -4063,6 +4088,29 @@ mod tests {
         // Consented → satisfied.
         p.consented = true;
         assert!(!plugin_needs_permission(&p));
+    }
+
+    /// A plugin can declare no `permissions:` yet still consume shared data
+    /// (halo_lcd, halo_effects). Its granted authority must stay visible.
+    #[test]
+    fn data_reads_are_granted_only_when_every_key_was_accepted() {
+        let mut p = info("halo_lcd", true);
+        p.authority.data_reads = vec!["host.media.playback".into(), "host.sensors.*".into()];
+        assert!(!data_reads_granted(&p), "never granted");
+
+        p.accepted_authority = Some(halod_shared::types::PluginAuthority {
+            permissions: vec![],
+            transport_scopes: vec![],
+            data_reads: vec!["host.sensors.*".into()],
+        });
+        assert!(!data_reads_granted(&p), "a key added since the grant");
+
+        p.accepted_authority = Some(halod_shared::types::PluginAuthority {
+            permissions: vec![],
+            transport_scopes: vec![],
+            data_reads: p.authority.data_reads.clone(),
+        });
+        assert!(data_reads_granted(&p));
     }
 
     #[test]
