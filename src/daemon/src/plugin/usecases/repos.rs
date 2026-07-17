@@ -129,7 +129,13 @@ fn materialize_revision(
         }
     };
     if final_dir.is_dir() {
-        return validate(&final_dir);
+        if let Ok(manifest) = validate(&final_dir) {
+            return Ok(manifest);
+        }
+        log::warn!(
+            "rebuilding corrupted repository revision {} from fetched Git objects",
+            final_dir.display()
+        );
     }
     std::fs::create_dir_all(&revisions)
         .with_context(|| format!("creating revision store {}", revisions.display()))?;
@@ -142,13 +148,36 @@ fn materialize_revision(
             return Err(error).context("validating materialized repository revision");
         }
     };
-    std::fs::rename(&staging, &final_dir).with_context(|| {
-        format!(
-            "activating immutable revision {} from {}",
-            final_dir.display(),
-            staging.display()
-        )
-    })?;
+    if final_dir.exists() {
+        let backup = revisions.join(format!(".{sha}.corrupt-{}", uuid::Uuid::new_v4()));
+        std::fs::rename(&final_dir, &backup)
+            .with_context(|| format!("quarantining corrupted revision {}", final_dir.display()))?;
+        if let Err(error) = std::fs::rename(&staging, &final_dir) {
+            let _ = std::fs::rename(&backup, &final_dir);
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error).with_context(|| {
+                format!(
+                    "activating rebuilt revision {} from {}",
+                    final_dir.display(),
+                    staging.display()
+                )
+            });
+        }
+        if let Err(error) = std::fs::remove_dir_all(&backup) {
+            log::warn!(
+                "removing quarantined repository revision {}: {error}",
+                backup.display()
+            );
+        }
+    } else {
+        std::fs::rename(&staging, &final_dir).with_context(|| {
+            format!(
+                "activating immutable revision {} from {}",
+                final_dir.display(),
+                staging.display()
+            )
+        })?;
+    }
     Ok(manifest)
 }
 
@@ -856,6 +885,33 @@ mod tests {
             .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
             .unwrap();
         oid.to_string()
+    }
+
+    #[test]
+    fn materialize_revision_rebuilds_a_corrupted_existing_revision() {
+        let source = tempfile::tempdir().unwrap();
+        let id = "demo";
+        init_source_repo(source.path(), id);
+        let checkout_root = tempfile::tempdir().unwrap();
+        let checkout = checkout_root.path().join("checkout");
+        let sha = repo::clone(&file_url(source.path()), &checkout, None).unwrap();
+
+        materialize_revision(&checkout, &sha, false).unwrap();
+        let revision = checkout.join("revisions").join(&sha);
+        std::fs::write(
+            revision.join("plugins").join(id).join("main.lua"),
+            "return { tampered = true }",
+        )
+        .unwrap();
+        assert!(repo::read_repository_manifest(&revision).is_err());
+
+        materialize_revision(&checkout, &sha, false).unwrap();
+
+        assert!(repo::read_repository_manifest(&revision).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(revision.join("plugins").join(id).join("main.lua")).unwrap(),
+            "return {}"
+        );
     }
 
     #[tokio::test]

@@ -54,7 +54,7 @@ pub fn integrations_needing_action(state: &AppState) -> usize {
         .plugins
         .iter()
         .filter(|plugin| {
-            plugin.plugin_type == halod_shared::types::PluginKind::Integration
+            crate::ui::screens::integrations::is_visible_integration(plugin)
                 && plugin.health.issue.is_some()
         })
         .count()
@@ -609,6 +609,28 @@ mod tests {
         let mut state = AppState::default();
         state.plugins.plugins = vec![with_issue, plugin("ok", true)];
         assert_eq!(plugins_needing_action(&state, &[]), 0);
+        assert_eq!(integrations_needing_action(&state), 1);
+    }
+
+    #[test]
+    fn integrations_needing_action_ignores_unloaded_plugins() {
+        let issue = halod_shared::types::PluginIssue {
+            kind: halod_shared::types::PluginIssueKind::LoadFailed,
+            detail: "package hash mismatch".into(),
+            context: None,
+            timestamp_ms: 0,
+        };
+        let mut unloaded = plugin("unloaded", false);
+        unloaded.plugin_type = halod_shared::types::PluginKind::Integration;
+        unloaded.enabled = false;
+        unloaded.active = false;
+        unloaded.health.issue = Some(issue.clone());
+        let mut loaded = plugin("loaded", true);
+        loaded.plugin_type = halod_shared::types::PluginKind::Integration;
+        loaded.health.issue = Some(issue);
+        let mut state = AppState::default();
+        state.plugins.plugins = vec![unloaded, loaded];
+
         assert_eq!(integrations_needing_action(&state), 1);
     }
 

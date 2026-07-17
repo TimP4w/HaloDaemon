@@ -1142,6 +1142,13 @@ impl Registry {
 
 /// Where `plugin_dir` came from: `Repo { slug }` under `plugin_repos_dir()`, else `Local`.
 fn plugin_source_for(plugin_dir: &Path) -> halod_shared::types::PluginSource {
+    let embedded_official = crate::config::embedded_plugin_revisions_dir()
+        .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
+    if plugin_dir.starts_with(embedded_official) {
+        return halod_shared::types::PluginSource::Repo {
+            slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
+        };
+    }
     let repos_dir = crate::config::plugin_repos_dir();
     match plugin_dir.strip_prefix(&repos_dir).ok().and_then(|rel| {
         rel.components().next().and_then(|c| match c {

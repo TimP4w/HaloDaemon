@@ -1,7 +1,67 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Localized detail text for structured plugin failures.
 
-use halod_shared::types::{PluginIssue, PluginIssueContext};
+use std::collections::HashSet;
+
+use halod_shared::types::{
+    AppState, PluginDownloadConsent, PluginIssue, PluginIssueContext, PluginSource,
+    RepoSignatureStatus,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryIntegrityAlert {
+    pub key: String,
+    pub repository: Option<String>,
+    pub package: String,
+    pub expected: String,
+    pub actual: String,
+    pub restore_slug: Option<String>,
+}
+
+pub fn repository_integrity_alert(
+    state: &AppState,
+    dismissed: &HashSet<String>,
+) -> Option<RepositoryIntegrityAlert> {
+    state.plugins.plugins.iter().find_map(|plugin| {
+        let PluginIssueContext::RepositoryHashMismatch {
+            package,
+            expected,
+            actual,
+        } = plugin.health.issue.as_ref()?.context.as_ref()?;
+        let repository = match &plugin.source {
+            PluginSource::Repo { slug } => Some(slug.clone()),
+            PluginSource::Local => None,
+        };
+        let key = format!(
+            "{}/{package}/{expected}/{actual}",
+            repository.as_deref().unwrap_or(&plugin.id)
+        );
+        if dismissed.contains(&key) {
+            return None;
+        }
+        let restore_slug = if state.gui.plugin_downloads == PluginDownloadConsent::Allowed {
+            repository.as_ref().and_then(|slug| {
+                state
+                    .plugins
+                    .repos
+                    .iter()
+                    .find(|repo| repo.slug == *slug)
+                    .filter(|repo| repo.signature == RepoSignatureStatus::Verified)
+                    .map(|repo| repo.slug.clone())
+            })
+        } else {
+            None
+        };
+        Some(RepositoryIntegrityAlert {
+            key,
+            repository,
+            package: package.clone(),
+            expected: expected.clone(),
+            actual: actual.clone(),
+            restore_slug,
+        })
+    })
+}
 
 pub fn plugin_issue_detail(issue: &PluginIssue) -> String {
     match &issue.context {
@@ -23,7 +83,7 @@ pub fn plugin_issue_detail(issue: &PluginIssue) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use halod_shared::types::{PluginIssueContext, PluginIssueKind};
+    use halod_shared::types::{PluginIssueContext, PluginIssueKind, PluginRepoInfo};
 
     #[test]
     fn repository_hash_mismatch_uses_translated_copy() {
@@ -43,5 +103,63 @@ mod tests {
         assert!(detail.contains("expected-hash"));
         assert!(detail.contains("actual-hash"));
         assert!(!detail.contains("raw backend text"));
+    }
+
+    #[test]
+    fn restore_is_offered_only_for_a_verified_repository() {
+        let plugin = serde_json::from_value(serde_json::json!({
+            "id": "halo_lcd",
+            "name": "Halo LCD",
+            "path": "/plugins/official/revisions/abc/plugins/halo_lcd/main.lua",
+            "enabled": false,
+            "source": { "kind": "repo", "slug": "official" },
+            "health": {
+                "status": "degraded",
+                "issue": {
+                    "kind": "load_failed",
+                    "detail": "hash mismatch",
+                    "context": {
+                        "type": "repository_hash_mismatch",
+                        "package": "halo_lcd",
+                        "expected": "expected",
+                        "actual": "actual"
+                    },
+                    "timestamp_ms": 0
+                }
+            }
+        }))
+        .unwrap();
+        let repo = PluginRepoInfo {
+            url: "https://example.invalid/plugins.git".into(),
+            slug: "official".into(),
+            repository_id: None,
+            branch: None,
+            locked_sha: "abc".into(),
+            active_revision: Some("abc".into()),
+            previous_verified_sha: None,
+            last_sync: None,
+            official: true,
+            signature: RepoSignatureStatus::Verified,
+            compatibility: Default::default(),
+        };
+        let mut state = AppState::default();
+        state.gui.plugin_downloads = PluginDownloadConsent::Allowed;
+        state.plugins.plugins = vec![plugin];
+        state.plugins.repos = vec![repo];
+
+        let alert = repository_integrity_alert(&state, &HashSet::new()).unwrap();
+        assert_eq!(alert.restore_slug.as_deref(), Some("official"));
+
+        state.plugins.repos[0].signature = RepoSignatureStatus::Unsigned;
+        let alert = repository_integrity_alert(&state, &HashSet::new()).unwrap();
+        assert!(alert.restore_slug.is_none());
+
+        state.plugins.repos[0].signature = RepoSignatureStatus::Verified;
+        state.gui.plugin_downloads = PluginDownloadConsent::Denied;
+        let alert = repository_integrity_alert(&state, &HashSet::new()).unwrap();
+        assert!(alert.restore_slug.is_none());
+
+        let dismissed = HashSet::from([alert.key]);
+        assert!(repository_integrity_alert(&state, &dismissed).is_none());
     }
 }

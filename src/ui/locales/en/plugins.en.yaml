@@ -25,6 +25,16 @@ plugins:
   repos_repair: Force pull
   repos_repair_title: Repair repository?
   repos_repair_body: This restores the repository's active revision from its verified source. Any local changes within that repository will be lost.
+  integrity_modal_title: Repository integrity problem
+  integrity_modal_body: Something is not right. HaloDaemon found that a plugin package no longer matches its authenticated repository index, so the affected plugins were not loaded.
+  integrity_modal_repository: "Repository: %{repository}"
+  integrity_modal_package: "Affected package: %{package}"
+  integrity_modal_expected: "Expected: %{hash}"
+  integrity_modal_actual: "Found:    %{hash}"
+  integrity_modal_restore_available: The repository signature is verified. You can safely restore this revision from its remote source.
+  integrity_modal_restore_unavailable: Automatic restore is available only for a signed and verified repository when plugin downloads are enabled.
+  integrity_modal_restore: Restore from repository
+  integrity_modal_close: Close
   repos_remove: Remove repository
   repos_remove_title: Remove repository?
   repos_remove_body: This removes %{name} and uninstalls every plugin provided by the repository.

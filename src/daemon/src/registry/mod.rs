@@ -63,7 +63,7 @@ pub async fn initialize_app_state(
     let mut discovered_hashes = Vec::new();
     {
         let cfg = app.config.read().await;
-        let mut repo_dirs = crate::plugin::repo_plugin_dirs(&cfg.plugins.repos);
+        let repo_dirs = crate::plugin::repo_plugin_dirs(&cfg.plugins.repos);
         if dev_plugin_repo.is_none() {
             let official_dir = cfg
                 .plugins
@@ -85,7 +85,6 @@ pub async fn initialize_app_state(
                     ),
                     Err(e) => {
                         log::warn!("official plugin repository failed validation: {e:#}");
-                        repo_dirs.retain(|dir| dir != &official_dir);
                     }
                 }
             }

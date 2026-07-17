@@ -75,6 +75,8 @@ pub struct App {
     pub(crate) toasts: ui::components::toast::Toasts,
     /// Open notification Details modal. Outlives the toast that spawned it.
     pub(crate) issue_details_modal: Option<IssueDetailsModal>,
+    /// Repository-integrity episodes dismissed during this GUI session.
+    pub(crate) integrity_alert_dismissed: std::collections::HashSet<String>,
     /// Set by the tray "Quit" so a close request bypasses "close to tray" and
     /// actually exits instead of hiding the window.
     pub(crate) force_quit: Arc<AtomicBool>,
@@ -150,6 +152,7 @@ impl App {
             tray,
             toasts: ui::components::toast::Toasts::default(),
             issue_details_modal: None,
+            integrity_alert_dismissed: std::collections::HashSet::new(),
             force_quit,
             pending_lcd_template: None,
             lcd_editor_render_cache: None,

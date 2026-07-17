@@ -25,6 +25,16 @@ plugins:
   repos_repair: Pull forzato
   repos_repair_title: Riparare il repository?
   repos_repair_body: Questa operazione ripristina la revisione attiva del repository dalla sua sorgente verificata. Tutte le modifiche locali nel repository andranno perse.
+  integrity_modal_title: Problema di integrità del repository
+  integrity_modal_body: Qualcosa non va. HaloDaemon ha rilevato che un pacchetto plugin non corrisponde più all'indice autenticato del repository, quindi i plugin interessati non sono stati caricati.
+  integrity_modal_repository: "Repository: %{repository}"
+  integrity_modal_package: "Pacchetto interessato: %{package}"
+  integrity_modal_expected: "Previsto: %{hash}"
+  integrity_modal_actual: "Trovato:  %{hash}"
+  integrity_modal_restore_available: La firma del repository è verificata. Puoi ripristinare in modo sicuro questa revisione dalla fonte remota.
+  integrity_modal_restore_unavailable: Il ripristino automatico è disponibile solo per un repository firmato e verificato quando il download dei plugin è attivo.
+  integrity_modal_restore: Ripristina dal repository
+  integrity_modal_close: Chiudi
   repos_remove: Rimuovi repository
   repos_remove_title: Vuoi rimuovere il repository?
   repos_remove_body: In questo modo rimuoverai %{name} e disinstallerai tutti i plugin forniti dal repository.

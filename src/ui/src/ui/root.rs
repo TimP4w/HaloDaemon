@@ -472,7 +472,13 @@ impl App {
             }
         }
 
-        if !onboarding_shown && !tour_active {
+        let integrity_alert_pending =
+            crate::domain::models::plugin_issues::repository_integrity_alert(
+                &state,
+                &self.integrity_alert_dismissed,
+            )
+            .is_some();
+        if !onboarding_shown && !tour_active && !integrity_alert_pending {
             crate::ui::screens::depcheck::show(
                 ctx,
                 &state,
@@ -485,6 +491,7 @@ impl App {
         }
         let depcheck_visible = !onboarding_shown
             && !tour_active
+            && !integrity_alert_pending
             && crate::ui::screens::depcheck::visible(
                 &state,
                 debug.as_ref(),
@@ -545,7 +552,104 @@ impl App {
                     self.issue_details_modal = None;
                 }
             }
+            if self.issue_details_modal.is_none() {
+                repository_integrity_modal(
+                    ctx,
+                    &state,
+                    &self.cmd,
+                    &mut self.integrity_alert_dismissed,
+                );
+            }
         }
+    }
+}
+
+fn repository_integrity_modal(
+    ctx: &egui::Context,
+    state: &halod_shared::types::AppState,
+    cmd: &crate::runtime::ipc::CommandTx,
+    dismissed: &mut std::collections::HashSet<String>,
+) {
+    let Some(alert) =
+        crate::domain::models::plugin_issues::repository_integrity_alert(state, dismissed)
+    else {
+        return;
+    };
+    let mut close = false;
+    let mut restore = false;
+    let modal_dismissed = crate::ui::components::dialog(
+        ctx,
+        "repository_integrity_alert",
+        &t!("plugins.integrity_modal_title"),
+        500.0,
+        |ui| {
+            ui.label(
+                egui::RichText::new(t!("plugins.integrity_modal_body"))
+                    .font(crate::ui::theme::body_md())
+                    .color(crate::ui::theme::TEXT_DIM),
+            );
+            ui.add_space(crate::ui::theme::SPACE_5);
+            if let Some(repository) = &alert.repository {
+                ui.label(t!(
+                    "plugins.integrity_modal_repository",
+                    repository = repository
+                ));
+            }
+            ui.label(t!(
+                "plugins.integrity_modal_package",
+                package = &alert.package
+            ));
+            ui.add_space(crate::ui::theme::SPACE_4);
+            ui.monospace(t!(
+                "plugins.integrity_modal_expected",
+                hash = &alert.expected
+            ));
+            ui.monospace(t!("plugins.integrity_modal_actual", hash = &alert.actual));
+            ui.add_space(crate::ui::theme::SPACE_5);
+            let guidance = if alert.restore_slug.is_some() {
+                t!("plugins.integrity_modal_restore_available")
+            } else {
+                t!("plugins.integrity_modal_restore_unavailable")
+            };
+            ui.label(
+                egui::RichText::new(guidance)
+                    .font(crate::ui::theme::body_sm())
+                    .color(crate::ui::theme::TEXT_MUT),
+            );
+        },
+        |ui| {
+            if let Some(slug) = &alert.restore_slug {
+                if crate::ui::components::button(
+                    ui,
+                    &t!("plugins.integrity_modal_restore"),
+                    crate::ui::components::ButtonKind::Warn,
+                    egui::Vec2::new(150.0, 34.0),
+                )
+                .clicked()
+                {
+                    crate::runtime::ipc::send(
+                        cmd,
+                        halod_shared::commands::DaemonCommand::UpdatePluginRepo {
+                            slug: slug.clone(),
+                        },
+                    );
+                    restore = true;
+                }
+            }
+            if crate::ui::components::button(
+                ui,
+                &t!("plugins.integrity_modal_close"),
+                crate::ui::components::ButtonKind::Ghost,
+                egui::Vec2::new(90.0, 34.0),
+            )
+            .clicked()
+            {
+                close = true;
+            }
+        },
+    );
+    if close || restore || modal_dismissed {
+        dismissed.insert(alert.key);
     }
 }
 

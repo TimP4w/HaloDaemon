@@ -259,6 +259,65 @@ fn indexed_repository_with_a_bad_digest_does_not_fall_back_to_loose_scanning() {
 }
 
 #[test]
+fn indexed_repository_with_a_bad_digest_is_listed_as_failed() {
+    let root = tempfile::tempdir().unwrap();
+    let package = root.path().join("plugins").join("demo");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("plugin.yaml"),
+        "id: demo\nversion: 1.0.0\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
+    )
+    .unwrap();
+    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
+    std::fs::write(
+        root.path().join("repository.yaml"),
+        format!(
+            "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.0.0'\n  plugin_api: 2\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {}\n",
+            "0".repeat(64)
+        ),
+    )
+    .unwrap();
+
+    let registry = super::Registry::default();
+    registry.load_all_with_repos(&root.path().join("local"), &[root.path().to_path_buf()]);
+
+    let plugins = registry.list(&crate::secrets::FileKeyStore::new());
+    assert_eq!(plugins.len(), 1);
+    assert_eq!(plugins[0].id, "demo");
+    assert!(!plugins[0].active);
+    assert!(matches!(
+        plugins[0].health.issue.as_ref(),
+        Some(halod_shared::types::PluginIssue {
+            kind: halod_shared::types::PluginIssueKind::LoadFailed,
+            context: Some(
+                halod_shared::types::PluginIssueContext::RepositoryHashMismatch { package, .. }
+            ),
+            ..
+        }) if package == "demo"
+    ));
+}
+
+#[tokio::test]
+async fn embedded_official_packages_keep_their_repository_source() {
+    crate::test_support::with_tmp_config(|_| async move {
+        let package = crate::config::embedded_plugin_revisions_dir()
+            .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+            .join("revisions")
+            .join("abc")
+            .join("plugins")
+            .join("halo_lcd");
+
+        assert_eq!(
+            super::plugin_source_for(&package),
+            halod_shared::types::PluginSource::Repo {
+                slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
+            }
+        );
+    })
+    .await;
+}
+
+#[test]
 fn trusted_repo_scan_loads_packages_despite_a_bad_digest() {
     // The dev repo (`--dev-plugin-repo`) is edited in place, so its hashes won't
     // match the generated index. A trusted scan must load anyway.

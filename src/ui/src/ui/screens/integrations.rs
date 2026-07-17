@@ -28,7 +28,7 @@ use crate::ui::theme;
 /// connect). Showing an inert integration here — with a toggle that would
 /// silently do nothing — would be misleading, so this page only lists ready
 /// ones and never has to surface a permission prompt itself.
-fn is_visible_integration(p: &PluginInfo) -> bool {
+pub(crate) fn is_visible_integration(p: &PluginInfo) -> bool {
     p.plugin_type == PluginKind::Integration && p.enabled && !plugin_needs_permission(p)
 }
 
