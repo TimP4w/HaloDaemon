@@ -96,17 +96,11 @@ fn active_count(st: &OnboardingUi, plugins: &[PluginInfo]) -> usize {
 }
 
 /// The primary button label for a step (pure, tested).
-fn primary_label(step: u8, plugins: bool, active: usize) -> String {
+fn primary_label(step: u8, active: usize) -> String {
     match step {
         WELCOME => t!("onboarding.p_get_started").to_string(),
         HEALTH => t!("onboarding.p_continue").to_string(),
-        PREFS => {
-            if plugins {
-                t!("onboarding.p_scan").to_string()
-            } else {
-                t!("onboarding.p_finish_setup").to_string()
-            }
-        }
+        PREFS => t!("onboarding.p_scan").to_string(),
         PLUGINS => {
             if active > 0 {
                 t!("onboarding.p_grant_enable").to_string()
@@ -149,7 +143,6 @@ pub fn show(
     st: &mut OnboardingUi,
     time: f64,
 ) -> Outcome {
-    let plugins = plugins_on(state);
     let recs = &state.plugins.recommendations;
     seed_plugin_selection(st, recs, &state.plugins.plugins);
 
@@ -200,7 +193,6 @@ pub fn show(
             footer(
                 ui,
                 st,
-                plugins,
                 active_count(st, &state.plugins.plugins),
                 &mut outcome,
                 state,
@@ -642,7 +634,6 @@ fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &AppState, plugins: &[
 fn footer(
     ui: &mut egui::Ui,
     st: &mut OnboardingUi,
-    plugins: bool,
     active: usize,
     outcome: &mut Outcome,
     state: &AppState,
@@ -671,10 +662,10 @@ fn footer(
         // Centered progress dots.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if st.step != SCANNING {
-                let label = primary_label(st.step, plugins, active);
+                let label = primary_label(st.step, active);
                 if widgets::button(ui, &label, ButtonKind::Primary, Vec2::new(0.0, 38.0)).clicked()
                 {
-                    advance_primary(st, plugins, state, cmd, outcome);
+                    advance_primary(st, state, cmd, outcome);
                 }
             } else {
                 ui.label(
@@ -710,7 +701,6 @@ fn dots(ui: &mut egui::Ui, step: u8) {
 
 fn advance_primary(
     st: &mut OnboardingUi,
-    plugins: bool,
     state: &AppState,
     cmd: &CommandTx,
     outcome: &mut Outcome,
@@ -719,18 +709,17 @@ fn advance_primary(
         WELCOME => st.step = HEALTH,
         HEALTH => st.step = PREFS,
         PREFS => {
-            if plugins {
-                st.step = SCANNING;
-                st.scan_started = None;
-            } else {
-                if state.gui.plugin_downloads == PluginDownloadConsent::Unset {
-                    ipc::send(
-                        cmd,
-                        DaemonCommand::SetPluginDownloadConsent { allowed: false },
-                    );
-                }
-                st.step = DONE;
+            if state.gui.plugin_downloads == PluginDownloadConsent::Unset {
+                ipc::send(
+                    cmd,
+                    DaemonCommand::SetPluginDownloadConsent { allowed: false },
+                );
             }
+            // Official plugins are bundled, so their recommendation and
+            // authority-review steps remain useful even when future plugin
+            // downloads are disabled.
+            st.step = SCANNING;
+            st.scan_started = None;
         }
         PLUGINS => {
             let plugins: Vec<halod_shared::commands::PluginEnableConfirmation> =
@@ -790,17 +779,28 @@ mod tests {
 
     #[test]
     fn primary_label_tracks_step_and_selection() {
-        assert!(!primary_label(WELCOME, true, 0).is_empty());
-        // Prefs with plugins on offers to scan; off finishes.
-        assert_ne!(
-            primary_label(PREFS, true, 0),
-            primary_label(PREFS, false, 0)
-        );
+        assert!(!primary_label(WELCOME, 0).is_empty());
+        assert!(!primary_label(PREFS, 0).is_empty());
         // Plugin selection label reflects the active count.
-        assert_ne!(
-            primary_label(PLUGINS, true, 0),
-            primary_label(PLUGINS, true, 2)
-        );
+        assert_ne!(primary_label(PLUGINS, 0), primary_label(PLUGINS, 2));
+    }
+
+    #[test]
+    fn disabled_downloads_still_continue_to_bundled_plugin_scan() {
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::default();
+        state.gui.plugin_downloads = PluginDownloadConsent::Denied;
+        let mut st = OnboardingUi {
+            step: PREFS,
+            ..Default::default()
+        };
+        let mut outcome = Outcome::Pending;
+
+        advance_primary(&mut st, &state, &cmd, &mut outcome);
+
+        assert_eq!(st.step, SCANNING);
+        assert_eq!(outcome, Outcome::Pending);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -869,7 +869,7 @@ mod tests {
         };
         let mut outcome = Outcome::Pending;
 
-        advance_primary(&mut st, true, &state, &cmd, &mut outcome);
+        advance_primary(&mut st, &state, &cmd, &mut outcome);
         assert_eq!(st.step, DONE);
         assert_eq!(outcome, Outcome::Pending);
         assert!(matches!(
@@ -878,7 +878,7 @@ mod tests {
                 if plugins.len() == 1 && plugins[0].id == "a"
         ));
 
-        advance_primary(&mut st, true, &state, &cmd, &mut outcome);
+        advance_primary(&mut st, &state, &cmd, &mut outcome);
         assert_eq!(outcome, Outcome::Finished);
     }
 
