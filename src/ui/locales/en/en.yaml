@@ -74,8 +74,8 @@ onboarding:
   plugins_retrying: Retrying the official plugin download…
   permissions_none: No additional system access required.
   done_title: You're all set
-  done_summary_plugins: "Your plugins are ready and will stay up to date. You can manage them from the Plugins tab."
-  done_summary_basic: "HaloDaemon is ready. You can enable plugins later from the Plugins tab."
+  done_summary_plugins: "Your plugins are ready and will stay up to date.\nYou can manage them from the Plugins tab."
+  done_summary_basic: "HaloDaemon is ready.\nYou can enable plugins later from the Plugins tab."
   back: Back
   please_wait: Scanning…
   p_get_started: Get started

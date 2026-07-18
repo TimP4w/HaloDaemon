@@ -72,6 +72,14 @@ static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// callbacks can't accumulate unbounded memory.
 const WORKER_QUEUE_CAP: usize = 64;
 
+/// A panicking job drops its reply sender before the worker
+/// thread can publish [`WorkerState::Panicked`], so a caller woken by that drop
+/// can momentarily observe `Healthy` state. Poll briefly for the panic
+/// to surface before falling back to a bare dropped-reply error, so a panic is
+/// never misreported as a silent drop.
+const DROPPED_REPLY_GRACE_POLLS: u32 = 40;
+const DROPPED_REPLY_GRACE_INTERVAL: Duration = Duration::from_millis(5);
+
 /// Decrements [`WORKER_COUNT`] when the worker thread exits.
 struct WorkerSlot;
 impl Drop for WorkerSlot {
@@ -240,7 +248,8 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
             }
         })?;
         match tokio::time::timeout(self.call_timeout, rx).await {
-            Ok(res) => res.map_err(|_| self.dropped_reply_error(req_id)),
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(_)) => Err(self.dropped_reply_error(req_id).await),
             Err(_) => {
                 *self.state.lock().unwrap() = WorkerState::Wedged(WedgeReason::Timeout);
                 Err(anyhow!(
@@ -278,39 +287,45 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
         }
         let (reply, rx) = oneshot::channel();
         let command = make(reply);
-        let result = tokio::time::timeout(self.call_timeout, async {
-            self.tx.send(command).await.map_err(|_| {
+        // One deadline bounds both waiting for queue capacity and the reply, so a
+        // slow send can't hand the recv a fresh full budget.
+        let deadline = tokio::time::Instant::now() + self.call_timeout;
+        let wedged = |worker: &Self| {
+            *worker.state.lock().unwrap() = WorkerState::Wedged(WedgeReason::Timeout);
+            anyhow!(
+                "{} worker exceeded its {:?} terminal deadline (req {req_id})",
+                worker.label,
+                worker.call_timeout
+            )
+        };
+        match tokio::time::timeout_at(deadline, self.tx.send(command)).await {
+            Err(_) => return Err(wedged(self)),
+            Ok(Err(_)) => {
                 *self.state.lock().unwrap() = WorkerState::Closed;
-                anyhow!("{} worker is gone", self.label)
-            })?;
-            rx.await.map_err(|_| self.dropped_reply_error(req_id))
-        })
-        .await;
-        match result {
-            Ok(result) => result,
-            Err(_) => {
-                *self.state.lock().unwrap() = WorkerState::Wedged(WedgeReason::Timeout);
-                Err(anyhow!(
-                    "{} worker exceeded its {:?} terminal deadline (req {req_id})",
-                    self.label,
-                    self.call_timeout
-                ))
+                return Err(anyhow!("{} worker is gone", self.label));
             }
+            Ok(Ok(())) => {}
+        }
+        match tokio::time::timeout_at(deadline, rx).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(_)) => Err(self.dropped_reply_error(req_id).await),
+            Err(_) => Err(wedged(self)),
         }
     }
 }
 
 impl<Cmd> LuaWorker<Cmd> {
-    fn dropped_reply_error(&self, req_id: u64) -> anyhow::Error {
-        match &*self.state.lock().unwrap() {
-            WorkerState::Panicked(message) => {
-                anyhow!(
+    async fn dropped_reply_error(&self, req_id: u64) -> anyhow::Error {
+        for _ in 0..DROPPED_REPLY_GRACE_POLLS {
+            if let WorkerState::Panicked(message) = &*self.state.lock().unwrap() {
+                return anyhow!(
                     "{} worker panicked while handling req {req_id}: {message}",
                     self.label
-                )
+                );
             }
-            _ => anyhow!("{} worker dropped the reply (req {req_id})", self.label),
+            tokio::time::sleep(DROPPED_REPLY_GRACE_INTERVAL).await;
         }
+        anyhow!("{} worker dropped the reply (req {req_id})", self.label)
     }
 }
 

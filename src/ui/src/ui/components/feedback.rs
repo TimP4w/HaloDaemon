@@ -100,6 +100,8 @@ pub fn success_check(ui: &mut egui::Ui, diameter: f32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(diameter), Sense::hover());
     let r = diameter / 2.0;
     let c = rect.center();
+    // Green halo behind the disc, echoing the logo mark's glow.
+    theme::glow(ui.painter(), c, r * 1.6, theme::ONLINE, 0.32);
     ui.painter().circle_filled(c, r, theme::SUCCESS_FILL);
     ui.painter()
         .circle_stroke(c, r, Stroke::new(1.0, theme::SUCCESS_RING));

@@ -159,7 +159,7 @@ pub async fn select_setup_mode(
         return Ok(());
     }
     status.phase = IntegrationSetupPhase::Discovering;
-    status.message = Some("Searching for devices…".into());
+    status.message = Some("integrations.setup_searching".into());
     status.candidates.clear();
     publish_setup(&app, &id, status.clone()).await;
     let candidates = match async {
@@ -286,7 +286,7 @@ pub async fn retry_pairing(id: String, app: Arc<AppState>) -> Result<()> {
     if status.auth != IntegrationAuthKind::Button {
         bail!("integration does not use button pairing");
     }
-    status.message = Some("Pairing…".into());
+    status.message = Some("integrations.setup_pairing_fallback".into());
     status.error = None;
     publish_setup(&app, &id, status.clone()).await;
     let result = match setup_worker(&app, &manifest)
@@ -436,7 +436,7 @@ async fn start_oauth(
     }
     status.phase = IntegrationSetupPhase::Pairing;
     status.external_url = Some(authorization.into());
-    status.message = Some("Complete authorization in your browser…".into());
+    status.message = Some("integrations.setup_authorize_sub".into());
     let id = manifest.plugin_id.clone();
     publish_setup(&app, &id, status.clone()).await;
     tokio::spawn(async move {

@@ -173,40 +173,50 @@ fn config_field_row(
     edits: &mut HashMap<String, String>,
 ) {
     let secret_set = f.secure && p.secret_set.get(&f.key).copied().unwrap_or(false);
+    const INPUT_COL: f32 = 220.0;
     let height = if f.help.is_some() { 52.0 } else { 40.0 };
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
         egui::Sense::hover(),
     );
 
+    let label_w = (rect.width() - INPUT_COL).max(120.0);
+    let measure = |ui: &egui::Ui, text: &str, font: egui::FontId| {
+        ui.painter()
+            .layout(text.to_owned(), font, theme::TEXT, label_w)
+            .size()
+            .y
+    };
+    let block_h = match &f.help {
+        Some(help) => {
+            measure(ui, &f.label, theme::body_md())
+                + theme::SPACE_1
+                + measure(ui, help, theme::body_sm())
+        }
+        None => measure(ui, &f.label, theme::body_md()),
+    };
+    let label_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.center().y - block_h / 2.0),
+        egui::vec2(label_w, block_h),
+    );
     let mut left = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            .max_rect(label_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
     );
-    // Center the label block against the row height (so a subtitle centers on the
-    // gap between the two lines): a content-height block allocated into a
-    // `Center` layout is what centers it — a full-height `vertical()` child would
-    // top-align instead. Mirrors `widgets::setting_row`.
-    left.allocate_ui_with_layout(
-        egui::vec2((rect.width() - 220.0).max(120.0), 0.0),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.label(
-                egui::RichText::new(&f.label)
-                    .font(theme::body_md())
-                    .color(theme::TEXT),
-            );
-            if let Some(help) = &f.help {
-                ui.add_space(theme::SPACE_1);
-                ui.label(
-                    egui::RichText::new(help)
-                        .font(theme::body_sm())
-                        .color(theme::TEXT_FAINT),
-                );
-            }
-        },
+    left.label(
+        egui::RichText::new(&f.label)
+            .font(theme::body_md())
+            .color(theme::TEXT),
     );
+    if let Some(help) = &f.help {
+        left.add_space(theme::SPACE_1);
+        left.label(
+            egui::RichText::new(help)
+                .font(theme::body_sm())
+                .color(theme::TEXT_FAINT),
+        );
+    }
 
     let mut right = ui.new_child(
         egui::UiBuilder::new()

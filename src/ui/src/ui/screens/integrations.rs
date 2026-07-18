@@ -277,17 +277,6 @@ impl IntegrationsUi {
                 |ui| status_row(ui, p, &status),
                 |ui| {
                     ui.horizontal(|ui| {
-                        if can_reset_setup(p)
-                            && widgets::button(
-                                ui,
-                                &t!("integrations.reset_setup"),
-                                ButtonKind::Ghost,
-                                egui::Vec2::new(110.0, 28.0),
-                            )
-                            .clicked()
-                        {
-                            self.reset_confirm = Some((p.id.clone(), p.name.clone()));
-                        }
                         if has_config {
                             let label = if expanded {
                                 t!("integrations.hide_configure")
@@ -304,6 +293,17 @@ impl IntegrationsUi {
                             {
                                 self.expanded = if expanded { None } else { Some(p.id.clone()) };
                             }
+                        }
+                        if can_reset_setup(p)
+                            && widgets::button(
+                                ui,
+                                &t!("integrations.reset_setup"),
+                                ButtonKind::Ghost,
+                                egui::Vec2::new(110.0, 28.0),
+                            )
+                            .clicked()
+                        {
+                            self.reset_confirm = Some((p.id.clone(), p.name.clone()));
                         }
                     });
                 },
@@ -530,7 +530,7 @@ impl IntegrationsUi {
         // `candidates` empty (see the integration setup usecase).
         if let Some(message) = &setup.message {
             ui.add_space(theme::SPACE_6);
-            scanning_card(ui, message, time);
+            scanning_card(ui, &t!(message.as_str()), time);
             return;
         }
         step_subtext(ui, &t!("integrations.setup_found_on_network"));
@@ -615,9 +615,12 @@ impl IntegrationsUi {
                 theme::glow(ui.painter(), rect.center(), 44.0, theme::PROGRESS_A, 0.28);
                 widgets::paint_spinner(ui.painter(), rect.center(), 46.0, time);
                 ui.add_space(theme::SPACE_9);
-                let pairing = t!("integrations.setup_pairing_fallback");
+                let key = setup
+                    .message
+                    .as_deref()
+                    .unwrap_or("integrations.setup_pairing_fallback");
                 ui.label(
-                    RichText::new(setup.message.as_deref().unwrap_or(&pairing))
+                    RichText::new(t!(key))
                         .font(theme::bold(18.0))
                         .color(theme::TEXT),
                 );
@@ -758,36 +761,29 @@ fn rail_step(setup: &halod_shared::types::IntegrationSetupStatus) -> usize {
 
 /// The gradient step rail across the modal top: filled bars for reached steps,
 /// a track bar for the rest, with the active step's label picked out in accent.
+/// One equal column per step — all sharing a top edge — so the bars line up on a
+/// single baseline instead of stair-stepping.
 fn setup_rail(ui: &mut egui::Ui, setup: &halod_shared::types::IntegrationSetupStatus) {
     let cur = rail_step(setup);
-    let gap = theme::SPACE_5;
-    let cell = ((ui.available_width() - gap * (RAIL_STEP_COUNT as f32 - 1.0))
-        / RAIL_STEP_COUNT as f32)
-        .max(1.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = gap;
-        for i in 0..RAIL_STEP_COUNT {
-            // Center-align the cell so its label centers under its bar.
-            ui.allocate_ui_with_layout(
-                Vec2::new(cell, 0.0),
-                egui::Layout::top_down(egui::Align::Center),
-                |ui| {
-                    widgets::progress_bar(ui, cell, 4.0, Some(if i <= cur { 1.0 } else { 0.0 }));
-                    ui.add_space(theme::SPACE_1);
-                    let color = if i == cur {
-                        theme::PROGRESS_A
-                    } else if i < cur {
-                        theme::TEXT_MUT
-                    } else {
-                        theme::TEXT_FAINT2
-                    };
-                    ui.label(
-                        RichText::new(rail_label(i))
-                            .font(theme::bold(10.5))
-                            .color(color),
-                    );
-                },
-            );
+    ui.columns(RAIL_STEP_COUNT, |cols| {
+        for (i, col) in cols.iter_mut().enumerate() {
+            let w = col.available_width();
+            widgets::progress_bar(col, w, 4.0, Some(if i <= cur { 1.0 } else { 0.0 }));
+            col.add_space(theme::SPACE_1);
+            let color = if i == cur {
+                theme::PROGRESS_A
+            } else if i < cur {
+                theme::TEXT_MUT
+            } else {
+                theme::TEXT_FAINT2
+            };
+            col.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(rail_label(i))
+                        .font(theme::bold(10.5))
+                        .color(color),
+                );
+            });
         }
     });
 }
@@ -913,17 +909,39 @@ fn device_row(ui: &mut egui::Ui, name: &str, id: &str, selected: bool) -> bool {
         .corner_radius(theme::RADIUS_MD)
         .inner_margin(Margin::symmetric(14, 12))
         .show(ui, |ui| {
-            // Allocate one fixed-height row, then paint the dot and radio at
-            // `rect.center().y` — bulletproof vertical centering that layout
-            // cross-alignment kept getting wrong for the short right-hand widget.
-            let height = if id.is_empty() { 22.0 } else { 34.0 };
-            let (rect, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-
-            let dot_c = Pos2::new(rect.left() + 4.5, rect.center().y);
-            theme::glow(ui.painter(), dot_c, 5.0, theme::ONLINE, 0.7);
-            ui.painter().circle_filled(dot_c, 4.5, theme::ONLINE);
-
+            let full_w = ui.available_width();
+            ui.set_width(full_w);
+            const DOT: f32 = 9.0;
+            const RADIO_GUTTER: f32 = 34.0;
+            let indent = DOT + theme::SPACE_3;
+            ui.allocate_ui_with_layout(
+                Vec2::new((full_w - RADIO_GUTTER).max(40.0), 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        let (dot, _) = ui.allocate_exact_size(Vec2::splat(DOT), Sense::hover());
+                        theme::glow(ui.painter(), dot.center(), 5.0, theme::ONLINE, 0.7);
+                        ui.painter().circle_filled(dot.center(), 4.5, theme::ONLINE);
+                        ui.add_space(theme::SPACE_3);
+                        ui.label(
+                            RichText::new(name)
+                                .font(theme::heading())
+                                .color(theme::TEXT),
+                        );
+                    });
+                    if !id.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(indent);
+                            ui.label(
+                                RichText::new(id)
+                                    .font(theme::value_xs())
+                                    .color(theme::TEXT_MUT),
+                            );
+                        });
+                    }
+                },
+            );
+            let rect = ui.min_rect();
             let radio_c = Pos2::new(rect.right() - 10.0, rect.center().y);
             let ring = if selected {
                 theme::CYAN
@@ -935,35 +953,6 @@ fn device_row(ui: &mut egui::Ui, name: &str, id: &str, selected: bool) -> bool {
             if selected {
                 ui.painter().circle_filled(radio_c, 5.0, theme::CYAN);
             }
-
-            // Text block between dot and radio, vertically centered in the row.
-            let text_rect = Rect::from_min_max(
-                Pos2::new(rect.left() + 22.0, rect.top()),
-                Pos2::new(rect.right() - 30.0, rect.bottom()),
-            );
-            let mut text = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(text_rect)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            );
-            text.allocate_ui_with_layout(
-                Vec2::new(text_rect.width(), 0.0),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.label(
-                        RichText::new(name)
-                            .font(theme::heading())
-                            .color(theme::TEXT),
-                    );
-                    if !id.is_empty() {
-                        ui.label(
-                            RichText::new(id)
-                                .font(theme::value_xs())
-                                .color(theme::TEXT_MUT),
-                        );
-                    }
-                },
-            );
         })
         .response
         .interact(Sense::click())
@@ -1078,10 +1067,16 @@ fn instruction_row(ui: &mut egui::Ui, n: usize, text: &str) {
             theme::PROGRESS_A,
         );
         ui.add_space(theme::SPACE_5);
-        ui.label(
-            RichText::new(text)
-                .font(theme::body_md())
-                .color(theme::TEXT_DIM),
+        // Wrap: a label in a horizontal layout won't wrap on its own, so a long
+        // (e.g. localized) instruction would overrun the modal instead of
+        // flowing under itself.
+        ui.add(
+            egui::Label::new(
+                RichText::new(text)
+                    .font(theme::body_md())
+                    .color(theme::TEXT_DIM),
+            )
+            .wrap(),
         );
     });
 }
@@ -1219,9 +1214,11 @@ fn logos_to_request(
 fn status_row(ui: &mut egui::Ui, p: &PluginInfo, status: &IntegrationStatus) {
     let (color, label) = match integration_state(p, status) {
         IntegrationState::Disabled => (theme::TEXT_FAINT2, t!("integrations.status_disabled")),
-        IntegrationState::Unconfigured => (theme::STAT_AMBER, "Unconfigured".into()),
-        IntegrationState::Configured => (theme::STAT_AMBER, "Configured".into()),
-        IntegrationState::Active => (theme::ONLINE, "Active".into()),
+        IntegrationState::Unconfigured => {
+            (theme::STAT_AMBER, t!("integrations.status_unconfigured"))
+        }
+        IntegrationState::Configured => (theme::STAT_AMBER, t!("integrations.status_configured")),
+        IntegrationState::Active => (theme::ONLINE, t!("integrations.status_active")),
     };
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(8.0), egui::Sense::hover());

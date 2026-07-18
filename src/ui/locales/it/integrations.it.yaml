@@ -12,6 +12,9 @@ integrations:
   status_connected: Connessa
   status_connecting: Non connessa
   status_disabled: Disattivata
+  status_unconfigured: Non configurata
+  status_configured: Configurata
+  status_active: Attiva
   devices_exposed: "%{count} dispositivi"
   issue_connect_failed: Connessione non riuscita
   issue_runtime_error: Errore di esecuzione
@@ -41,6 +44,7 @@ integrations:
   setup_no_devices_hint: "Assicurati che il dispositivo sia acceso e connesso alla stessa rete. Poi aggiorna l'elenco o inserisci manualmente i dati."
   setup_enter_manually: Inserisci manualmente
   setup_refresh: Aggiorna
+  setup_searching: "Ricerca dei dispositivi nella rete…"
   setup_pairing_fallback: "Associazione…"
   setup_pairing_wait: In attesa di una risposta dal dispositivo.
   setup_pair_title_fallback: Metti il dispositivo in modalità di associazione

@@ -1259,6 +1259,7 @@ pub struct IntegrationSetupStatus {
     pub title: Option<String>,
     #[serde(default)]
     pub instructions: Vec<String>,
+    /// A GUI i18n key
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

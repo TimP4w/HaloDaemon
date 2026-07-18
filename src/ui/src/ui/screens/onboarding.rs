@@ -557,7 +557,13 @@ fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &AppState, plugins: &[
         } else {
             t!("onboarding.done_summary_basic")
         };
-        centered_wrapped(ui, &summary, 380.0, theme::TEXT_DIM, 13.5);
+        // Center each line on its own so the explicit break stays balanced.
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for line in summary.split('\n') {
+                centered_wrapped(ui, line, 380.0, theme::TEXT_DIM, 13.5);
+            }
+        });
     });
 }
 

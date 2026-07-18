@@ -2548,10 +2548,13 @@ fn udev_rules_banner(
             ui.horizontal(|ui| {
                 let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
                 ui.painter().circle_filled(dot.center(), 3.5, color);
-                ui.label(
-                    egui::RichText::new(title)
-                        .font(theme::semibold(12.5))
-                        .color(theme::TEXT),
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(title)
+                            .font(theme::semibold(12.5))
+                            .color(theme::TEXT),
+                    )
+                    .wrap(),
                 );
             });
             ui.add_space(theme::SPACE_1);

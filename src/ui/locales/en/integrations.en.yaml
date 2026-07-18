@@ -12,6 +12,9 @@ integrations:
   status_connected: Connected
   status_connecting: Not connected
   status_disabled: Disabled
+  status_unconfigured: Unconfigured
+  status_configured: Configured
+  status_active: Active
   devices_exposed: "%{count} devices"
   issue_connect_failed: Connection failed
   issue_runtime_error: Runtime error
@@ -41,6 +44,7 @@ integrations:
   setup_no_devices_hint: "Make sure the device is turned on and connected to the same network. Then refresh the list or enter the details manually."
   setup_enter_manually: Enter manually
   setup_refresh: Refresh
+  setup_searching: "Searching your network…"
   setup_pairing_fallback: "Pairing…"
   setup_pairing_wait: Waiting for a response from the device.
   setup_pair_title_fallback: Put the device in pairing mode

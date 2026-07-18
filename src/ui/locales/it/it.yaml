@@ -74,8 +74,8 @@ onboarding:
   plugins_retrying: Nuovo tentativo di download dei plugin ufficiali…
   permissions_none: Non richiede accesso aggiuntivo al sistema.
   done_title: Tutto pronto
-  done_summary_plugins: "I plugin sono pronti e verranno aggiornati automaticamente. Puoi gestirli dalla scheda Plugin."
-  done_summary_basic: "HaloDaemon è pronto. Puoi attivare i plugin in seguito dalla scheda Plugin."
+  done_summary_plugins: "I plugin sono pronti e verranno aggiornati automaticamente.\nPuoi gestirli dalla scheda Plugin."
+  done_summary_basic: "HaloDaemon è pronto.\nPuoi attivare i plugin in seguito dalla scheda Plugin."
   back: Indietro
   please_wait: Ricerca in corso…
   p_get_started: Inizia
