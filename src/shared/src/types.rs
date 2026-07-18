@@ -917,6 +917,77 @@ pub struct AppState {
     pub plugins: PluginsState,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StateDelta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<Vec<WireDevice>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<ProfileState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling: Option<CoolingState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lighting: Option<LightingOverviewState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lcd: Option<LcdState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gui: Option<GuiConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<HealthCheckState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_icons: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<PluginsState>,
+}
+
+impl AppState {
+    pub fn apply_delta(&mut self, delta: StateDelta) {
+        let StateDelta {
+            discovery,
+            devices,
+            profiles,
+            cooling,
+            lighting,
+            lcd,
+            gui,
+            health,
+            process_icons,
+            plugins,
+        } = delta;
+        if let Some(v) = discovery {
+            self.discovery = v;
+        }
+        if let Some(v) = devices {
+            self.devices = v;
+        }
+        if let Some(v) = profiles {
+            self.profiles = v;
+        }
+        if let Some(v) = cooling {
+            self.cooling = v;
+        }
+        if let Some(v) = lighting {
+            self.lighting = v;
+        }
+        if let Some(v) = lcd {
+            self.lcd = v;
+        }
+        if let Some(v) = gui {
+            self.gui = v;
+        }
+        if let Some(v) = health {
+            self.health = v;
+        }
+        if let Some(v) = process_icons {
+            self.process_icons = v;
+        }
+        if let Some(v) = plugins {
+            self.plugins = v;
+        }
+    }
+}
+
 /// A privileged capability a plugin must declare before the daemon grants it —
 /// the enforcement boundary between "trusted to talk to its matched device"
 /// (every plugin) and "trusted to reach outside it".
@@ -2745,6 +2816,66 @@ mod app_rule_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_state() -> AppState {
+        let mut s = AppState {
+            config_dir: "/keep".into(),
+            ..Default::default()
+        };
+        s.gui.language = "de".into();
+        s.profiles.active = "gaming".into();
+        s.process_icons.insert("proc".into(), "icon".into());
+        s.devices.push(WireDevice {
+            id: "dev-1".into(),
+            ..Default::default()
+        });
+        s.discovery.phase = DiscoveryPhase::Complete;
+        s
+    }
+
+    fn full_delta(s: &AppState) -> StateDelta {
+        StateDelta {
+            discovery: Some(s.discovery.clone()),
+            devices: Some(s.devices.clone()),
+            profiles: Some(s.profiles.clone()),
+            cooling: Some(s.cooling.clone()),
+            lighting: Some(s.lighting.clone()),
+            lcd: Some(s.lcd.clone()),
+            gui: Some(s.gui.clone()),
+            health: Some(s.health.clone()),
+            process_icons: Some(s.process_icons.clone()),
+            plugins: Some(s.plugins.clone()),
+        }
+    }
+
+    #[test]
+    fn all_domain_delta_reproduces_the_snapshot() {
+        let snap = sample_state();
+        let mut applied = AppState::default();
+        applied.config_dir = snap.config_dir.clone();
+        applied.apply_delta(full_delta(&snap));
+        assert_eq!(
+            serde_json::to_value(&applied).unwrap(),
+            serde_json::to_value(&snap).unwrap()
+        );
+    }
+
+    #[test]
+    fn apply_delta_replaces_only_present_domains() {
+        let mut base = sample_state();
+        let delta = StateDelta {
+            gui: Some(GuiConfig {
+                language: "it".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        base.apply_delta(delta);
+        assert_eq!(base.gui.language, "it");
+        assert_eq!(base.profiles.active, "gaming");
+        assert_eq!(base.devices.len(), 1);
+        assert_eq!(base.config_dir, "/keep");
+    }
 
     #[test]
     fn notification_detail_and_severity_for_detail_codes() {

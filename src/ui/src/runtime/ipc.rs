@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Minimal read-only IPC client for the egui prototype.
 //!
-//! The daemon pushes a `state` frame on connect and re-broadcasts every 250 ms,
-//! so a client only has to connect and decode inbound JSON frames — no
+//! The daemon pushes a full `state` frame on connect and `state_delta` frames
+//! as domains change, so a client only has to connect and decode inbound JSON
+//! frames — no
 //! subscribe handshake is required (except the LCD engine preview, which is
 //! lease-gated: see `device/lcd.rs`'s keepalive). Each distinct data stream
 //! (state, canvas frames, LCD previews, …) lives on its own
@@ -342,6 +343,7 @@ where
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut header = [0u8; 5];
+    let mut last_gen: Option<u64> = None;
     // Biased: heartbeat and outbound commands take priority over inbound
     // reads so queued commands and pings go out immediately.
     loop {
@@ -368,10 +370,17 @@ where
                 if payload_len > 0 {
                     stream.read_exact(&mut payload).await?;
                 }
-                // An upload completing asks us to re-fetch the image library.
-                if frame_type == FRAME_JSON && handle_json(&payload, tx, repaint) {
-                    write_cmd(stream, &DaemonCommand::ListLcdImages).await?;
-                    stream.flush().await?;
+                if frame_type == FRAME_JSON {
+                    let reaction = handle_json(&payload, tx, repaint, &mut last_gen);
+                    if reaction.relist_lcd_images {
+                        write_cmd(stream, &DaemonCommand::ListLcdImages).await?;
+                    }
+                    if reaction.request_resync {
+                        write_cmd(stream, &DaemonCommand::RequestState).await?;
+                    }
+                    if reaction.relist_lcd_images || reaction.request_resync {
+                        stream.flush().await?;
+                    }
                 }
             }
         }
@@ -410,18 +419,83 @@ pub fn plugin_asset_cache_key(plugin_id: &str, name: &str) -> String {
     format!("{plugin_id}/{name}")
 }
 
-/// Route one inbound JSON frame onto the right channel. Returns `true` when the
-/// caller should re-request the LCD image library (an upload just completed).
-fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Reaction {
+    pub relist_lcd_images: bool,
+    pub request_resync: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameKind {
+    Full,
+    Delta,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenAction {
+    Apply,
+    Ignore,
+    Resync,
+}
+
+pub fn reconcile_gen(last_gen: &mut Option<u64>, kind: FrameKind, gen: Option<u64>) -> GenAction {
+    match kind {
+        FrameKind::Full => {
+            *last_gen = gen;
+            GenAction::Apply
+        }
+        FrameKind::Delta => match (*last_gen, gen) {
+            (Some(prev), Some(g)) if g == prev.wrapping_add(1) => {
+                *last_gen = Some(g);
+                GenAction::Apply
+            }
+            (Some(prev), Some(g)) if g <= prev => GenAction::Ignore,
+            _ => GenAction::Resync,
+        },
+    }
+}
+
+fn handle_json(
+    payload: &[u8],
+    tx: &UiTx,
+    repaint: &impl Fn(),
+    last_gen: &mut Option<u64>,
+) -> Reaction {
     let value = match serde_json::from_slice::<serde_json::Value>(payload) {
         Ok(v) => v,
         Err(e) => {
             log::warn!("dropping malformed daemon frame ({e})");
-            return false;
+            return Reaction::default();
         }
     };
+    let gen = value.get("gen").and_then(|g| g.as_u64());
     match value.get("type").and_then(|t| t.as_str()) {
         Some("state") => {}
+        Some("state_delta") => match reconcile_gen(last_gen, FrameKind::Delta, gen) {
+            GenAction::Apply => {
+                if let Some(data) = value.get("data").cloned() {
+                    match serde_json::from_value::<halod_shared::types::StateDelta>(data) {
+                        Ok(delta) => {
+                            tx.state.send_modify(|s| s.apply_delta(delta));
+                            crate::ui::screens::settings::apply_locale(
+                                &tx.state.borrow().gui.language,
+                            );
+                            tx.connected.send_replace(true);
+                            repaint();
+                        }
+                        Err(e) => log::warn!("state_delta parse failed: {e}"),
+                    }
+                }
+                return Reaction::default();
+            }
+            GenAction::Ignore => return Reaction::default(),
+            GenAction::Resync => {
+                return Reaction {
+                    request_resync: true,
+                    ..Reaction::default()
+                }
+            }
+        },
         Some("debug_info") => {
             if let Some(data) = value.get("data").cloned() {
                 if let Ok(info) =
@@ -431,13 +505,13 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                     repaint();
                 }
             }
-            return false;
+            return Reaction::default();
         }
         Some("image_uploaded") => {
             // Upload finished; drop any stale progress and trigger a library
             // refresh on the next read-loop iteration.
             tx.lcd_upload.send_replace(None);
-            return true;
+            return Reaction { relist_lcd_images: true, ..Reaction::default() };
         }
         Some("lcd_upload_progress") => {
             if let Some(p) = value
@@ -447,7 +521,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                 tx.lcd_upload.send_replace(Some(p));
                 repaint();
             }
-            return false;
+            return Reaction::default();
         }
         Some("lcd_engine_frame") => {
             if let Some(data) = value.get("data").cloned() {
@@ -472,7 +546,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                     }
                 }
             }
-            return false;
+            return Reaction::default();
         }
         Some("lcd_editor_render") => {
             if let Some(data) = value.get("data").cloned() {
@@ -505,7 +579,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                     repaint();
                 }
             }
-            return false;
+            return Reaction::default();
         }
         Some("canvas_frame") => {
             if let Some(data) = value.get("data").cloned() {
@@ -514,7 +588,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                     repaint();
                 }
             }
-            return false;
+            return Reaction::default();
         }
         Some("notification") => {
             if let Some(n) = value
@@ -523,13 +597,13 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             {
                 push_notification(tx, n, repaint);
             }
-            return false;
+            return Reaction::default();
         }
         Some("error") => {
             // The plugin layer already sent a structured notification whose
             // Details modal contains the full callback error.
             if value.get("handled").and_then(|v| v.as_bool()) == Some(true) {
-                return false;
+                return Reaction::default();
             }
             let message = if value.get("code").and_then(|code| code.as_str())
                 == Some(halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED)
@@ -550,7 +624,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                 },
                 repaint,
             );
-            return false;
+            return Reaction::default();
         }
         Some("running_apps_list") => {
             let apps: Vec<RunningApp> = value
@@ -559,7 +633,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                 .unwrap_or_default();
             tx.running_apps.send_replace(apps);
             repaint();
-            return false;
+            return Reaction::default();
         }
         Some("lcd_images") => {
             let names: Vec<String> = value
@@ -574,7 +648,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                 .unwrap_or_default();
             tx.lcd_images.send_replace(names);
             repaint();
-            return false;
+            return Reaction::default();
         }
         Some("plugin_asset") => {
             let plugin_id = value.get("plugin_id").and_then(|v| v.as_str());
@@ -590,7 +664,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                     repaint();
                 }
             }
-            return false;
+            return Reaction::default();
         }
         Some("lcd_widget_icon") => {
             let catalog_id = value.get("catalog_id").and_then(|value| value.as_str());
@@ -604,24 +678,24 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                     repaint();
                 }
             }
-            return false;
+            return Reaction::default();
         }
         Some("plugin_repo_updates") => {
             tx.repo_updates
                 .send_replace(field_or_default(&value, "repos"));
             repaint();
-            return false;
+            return Reaction::default();
         }
         Some("plugin_updates") => {
             tx.plugin_updates
                 .send_replace(field_or_default(&value, "plugins"));
             repaint();
-            return false;
+            return Reaction::default();
         }
         Some("udev_rules_status") => {
             tx.udev_rules.send_replace(field_or_default(&value, "data"));
             repaint();
-            return false;
+            return Reaction::default();
         }
         Some("serial_ports") => {
             if let Some(ports) = value.get("ports").and_then(|p| {
@@ -630,7 +704,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                 tx.serial_ports.send_replace(ports);
                 repaint();
             }
-            return false;
+            return Reaction::default();
         }
         Some("repo_branches") => {
             let url = value.get("url").and_then(|u| u.as_str());
@@ -644,7 +718,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                 });
                 repaint();
             }
-            return false;
+            return Reaction::default();
         }
         Some("lcd_template") => {
             let name = value
@@ -658,7 +732,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                 tx.lcd_template.send_replace(Some((name, def)));
                 repaint();
             }
-            return false;
+            return Reaction::default();
         }
         Some("lcd_plugin_preset") => {
             let name = value
@@ -672,14 +746,15 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
                 tx.lcd_template.send_replace(Some((name, def)));
                 repaint();
             }
-            return false;
+            return Reaction::default();
         }
         Some(unknown) => {
             log::debug!("IPC: dropping unknown frame type: {unknown:?}");
-            return false;
+            return Reaction::default();
         }
-        None => return false,
+        None => return Reaction::default(),
     }
+    reconcile_gen(last_gen, FrameKind::Full, gen);
     let data = value.get("data").cloned().unwrap_or(value);
     match serde_json::from_value::<AppState>(data) {
         Ok(state) => {
@@ -694,12 +769,73 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
         }
         Err(e) => log::warn!("state parse failed: {e}"),
     }
-    false
+    Reaction::default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_frame_always_applies_and_resets_baseline() {
+        let mut last = Some(99);
+        assert_eq!(
+            reconcile_gen(&mut last, FrameKind::Full, Some(5)),
+            GenAction::Apply
+        );
+        assert_eq!(last, Some(5));
+    }
+
+    #[test]
+    fn contiguous_delta_applies_and_advances() {
+        let mut last = Some(5);
+        assert_eq!(
+            reconcile_gen(&mut last, FrameKind::Delta, Some(6)),
+            GenAction::Apply
+        );
+        assert_eq!(last, Some(6));
+    }
+
+    #[test]
+    fn stale_delta_is_ignored_without_moving_baseline() {
+        let mut last = Some(6);
+        assert_eq!(
+            reconcile_gen(&mut last, FrameKind::Delta, Some(6)),
+            GenAction::Ignore
+        );
+        assert_eq!(reconcile_gen(&mut last, FrameKind::Delta, Some(4)), GenAction::Ignore);
+        assert_eq!(last, Some(6));
+    }
+
+    #[test]
+    fn gapped_delta_requests_resync_without_merging() {
+        let mut last = Some(5);
+        assert_eq!(
+            reconcile_gen(&mut last, FrameKind::Delta, Some(8)),
+            GenAction::Resync
+        );
+        assert_eq!(last, Some(5));
+    }
+
+    #[test]
+    fn delta_before_any_baseline_requests_resync() {
+        let mut last = None;
+        assert_eq!(
+            reconcile_gen(&mut last, FrameKind::Delta, Some(1)),
+            GenAction::Resync
+        );
+        assert_eq!(last, None);
+    }
+
+    #[test]
+    fn delta_wraps_from_u64_max_to_zero() {
+        let mut last = Some(u64::MAX);
+        assert_eq!(
+            reconcile_gen(&mut last, FrameKind::Delta, Some(0)),
+            GenAction::Apply
+        );
+        assert_eq!(last, Some(0));
+    }
 
     fn test_tx() -> (UiTx, watch::Receiver<Option<LcdUploadProgress>>) {
         let (upload_s, upload_r) = watch::channel(None);
@@ -729,7 +865,7 @@ mod tests {
     fn lcd_upload_progress_frame_lands_on_the_watch_channel() {
         let (tx, rx) = test_tx();
         let payload = br#"{"type":"lcd_upload_progress","data":{"device_id":"lcd","stage":"processing","percent":42}}"#;
-        assert!(!handle_json(payload, &tx, &|| {}));
+        assert!(!handle_json(payload, &tx, &|| {}, &mut None).relist_lcd_images);
         let got = rx.borrow().clone().expect("progress routed");
         assert_eq!(got.device_id, "lcd");
         assert_eq!(got.percent, Some(42));
@@ -746,9 +882,60 @@ mod tests {
             "data": AppState::default(),
         }))
         .unwrap();
-        assert!(!handle_json(&payload, &tx, &|| {}));
+        assert!(!handle_json(&payload, &tx, &|| {}, &mut None).relist_lcd_images);
 
         assert!(*connected.borrow());
+    }
+
+    #[test]
+    fn state_delta_merges_into_cached_state_after_a_baseline() {
+        let (tx, _u) = test_tx();
+        let mut last_gen = None;
+        let full =
+            serde_json::to_vec(&serde_json::json!({"type":"state","gen":1,"data": AppState::default()}))
+                .unwrap();
+        handle_json(&full, &tx, &|| {}, &mut last_gen);
+        assert_eq!(last_gen, Some(1));
+
+        let mut gui = halod_shared::types::GuiConfig::default();
+        gui.language = "it".into();
+        let delta = halod_shared::types::StateDelta {
+            gui: Some(gui),
+            ..Default::default()
+        };
+        let frame = serde_json::to_vec(&serde_json::json!({
+            "type": "state_delta",
+            "gen": 2,
+            "data": serde_json::to_value(&delta).unwrap(),
+        }))
+        .unwrap();
+        let reaction = handle_json(&frame, &tx, &|| {}, &mut last_gen);
+        assert!(!reaction.request_resync);
+        assert_eq!(last_gen, Some(2));
+        assert_eq!(tx.state.borrow().gui.language, "it");
+    }
+
+    #[test]
+    fn gapped_state_delta_asks_for_resync_and_leaves_state_untouched() {
+        let (tx, _u) = test_tx();
+        let mut last_gen = Some(1);
+        let delta = halod_shared::types::StateDelta {
+            gui: Some(halod_shared::types::GuiConfig {
+                language: "zz".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let frame = serde_json::to_vec(&serde_json::json!({
+            "type": "state_delta",
+            "gen": 9,
+            "data": serde_json::to_value(&delta).unwrap(),
+        }))
+        .unwrap();
+        let reaction = handle_json(&frame, &tx, &|| {}, &mut last_gen);
+        assert!(reaction.request_resync);
+        assert_eq!(last_gen, Some(1));
+        assert_ne!(tx.state.borrow().gui.language, "zz");
     }
 
     #[test]
@@ -769,7 +956,7 @@ mod tests {
         let payload = format!(
             r#"{{"type":"plugin_asset","plugin_id":"acme","name":"logo.png","data_b64":"{data_b64}"}}"#
         );
-        assert!(!handle_json(payload.as_bytes(), &tx, &|| {}));
+        assert!(!handle_json(payload.as_bytes(), &tx, &|| {}, &mut None).relist_lcd_images);
         let got = assets_r
             .borrow_and_update()
             .get("acme/logo.png")
@@ -785,7 +972,7 @@ mod tests {
         let payload = br#"{"type":"plugin_repo_updates","repos":[
             {"slug":"foo","locked_sha":"aaa","remote_sha":"bbb","behind":true}
         ]}"#;
-        assert!(!handle_json(payload, &tx, &|| {}));
+        assert!(!handle_json(payload, &tx, &|| {}, &mut None).relist_lcd_images);
         let got = repo_updates_r.borrow_and_update().clone();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].slug, "foo");
@@ -797,7 +984,7 @@ mod tests {
         let (tx, _) = test_tx();
         let mut rx = tx.udev_rules.subscribe();
         let payload = br#"{"type":"udev_rules_status","data":{"supported":true,"current":false,"installed_path":"/usr/lib/udev/rules.d/60-halod.rules","generated_rule_count":43}}"#;
-        assert!(!handle_json(payload, &tx, &|| {}));
+        assert!(!handle_json(payload, &tx, &|| {}, &mut None).relist_lcd_images);
         let got = rx.borrow_and_update().clone().unwrap();
         assert!(got.supported);
         assert!(!got.current);
@@ -811,7 +998,7 @@ mod tests {
         let payload = br#"{"type":"plugin_updates","plugins":[
             {"plugin_id":"wled_udp","slug":"foo","update_available":true,"current_version":"1.0.0","available_version":"1.1.0"}
         ]}"#;
-        assert!(!handle_json(payload, &tx, &|| {}));
+        assert!(!handle_json(payload, &tx, &|| {}, &mut None).relist_lcd_images);
         let got = plugin_updates_r.borrow_and_update().clone();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].plugin_id, "wled_udp");
@@ -835,7 +1022,7 @@ mod tests {
             ),
         ] {
             let (tx, rx) = test_tx();
-            assert!(!handle_json(raw, &tx, &|| {}));
+            assert!(!handle_json(raw, &tx, &|| {}, &mut None).relist_lcd_images);
             let got = rx.borrow().clone().expect("terminal routed");
             assert_eq!(got.stage, stage);
         }
@@ -849,7 +1036,7 @@ mod tests {
             stage: halod_shared::types::LcdUploadStage::Applying,
             percent: None,
         }));
-        assert!(handle_json(br#"{"type":"image_uploaded"}"#, &tx, &|| {}));
+        assert!(handle_json(br#"{"type":"image_uploaded"}"#, &tx, &|| {}, &mut None).relist_lcd_images);
         assert!(rx.borrow().is_none(), "stale progress cleared");
     }
 
@@ -859,8 +1046,8 @@ mod tests {
         assert!(!handle_json(
             br#"{"type":"error","message":"raw stack trace","handled":true}"#,
             &tx,
-            &|| {}
-        ));
+            &|| {}, &mut None
+        ).relist_lcd_images);
         assert!(tx.notifications.lock().unwrap().is_empty());
     }
 
@@ -870,8 +1057,8 @@ mod tests {
         assert!(!handle_json(
             br#"{"type":"error","code":"repository_signature_verification_failed","message":"repository signature does not match repository.yaml"}"#,
             &tx,
-            &|| {}
-        ));
+            &|| {}, &mut None
+        ).relist_lcd_images);
         let notification = tx.notifications.lock().unwrap().pop().unwrap();
         assert_eq!(
             notification.code,

@@ -67,7 +67,7 @@ pub async fn lighting_apply(id: String, state: LightingState, app: Arc<AppState>
     persist_device_state(&app, device.as_ref()).await;
 
     if left_canvas {
-        ipc::broadcast_state(&app).await;
+        ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
     }
 
     if needs_engine {

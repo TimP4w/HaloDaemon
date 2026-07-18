@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::drivers::Device;
-use crate::ipc::broadcast_state;
+use crate::ipc::{broadcast_delta, Domain};
 use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::state::AppState;
@@ -38,7 +38,7 @@ pub async fn set_capability_param(
         persist_device_state(&app, dev.as_ref()).await;
     }
     if effects.broadcast {
-        broadcast_state(&app).await;
+        broadcast_delta(&app, &[Domain::Devices]).await;
     }
     Ok(())
 }

@@ -230,7 +230,7 @@ impl KeyRemapEngine {
             held.insert(key, MomentaryDpiState::RestorePending { original });
         } else {
             held.remove(&key);
-            crate::ipc::broadcast_state(&self.app).await;
+            crate::ipc::broadcast_delta(&self.app, &[crate::ipc::Domain::Devices]).await;
         }
     }
 
@@ -292,7 +292,7 @@ impl KeyRemapEngine {
                                         temporary: *dpi,
                                     },
                                 );
-                                crate::ipc::broadcast_state(&self.app).await;
+                                crate::ipc::broadcast_delta(&self.app, &[crate::ipc::Domain::Devices]).await;
                             }
                         }
                     }

@@ -4,9 +4,10 @@ pub mod serializer;
 
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::{interval, Duration};
 
 use halod_shared::frames::{
@@ -543,8 +544,7 @@ where
         subs: Arc::default(),
     };
 
-    let state_msg = build_state_msg(&app).await;
-    handle.send_json(&state_msg);
+    send_full_to(&app, &handle).await;
 
     let plugin_updates = app.plugin_update_status.lock().await.clone();
     if !plugin_updates.is_empty() {
@@ -736,29 +736,87 @@ where
     }
 }
 
-/// Periodic broadcast of device state to all clients.
+pub use serializer::Domain;
+
+const LIVE_DOMAINS: &[Domain] = &[Domain::Devices, Domain::Cooling];
+
 pub fn broadcast_loop(app: Arc<AppState>) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
-        let mut tick = interval(Duration::from_millis(250));
+        let mut changes = app.data_bus.subscribe();
+        let mut tick = interval(Duration::from_secs(2));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tick.tick().await;
-            broadcast_state(&app).await;
+            tokio::select! {
+                _ = tick.tick() => {}
+                recv = changes.recv() => {
+                    if matches!(recv, Err(broadcast::error::RecvError::Closed)) {
+                        break;
+                    }
+                    while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) =
+                        changes.try_recv()
+                    {}
+                }
+            }
+            broadcast_delta(&app, LIVE_DOMAINS).await;
         }
+        Ok(())
     })
 }
 
-pub async fn broadcast_state(app: &Arc<AppState>) {
-    // Full snapshots walk every device capability. Many call sites can request
-    // one at once (including the periodic loop), but state is latest-wins: an
-    // already-running snapshot makes another concurrent pass redundant. More
-    // importantly, overlapping passes used to enqueue repeated read callbacks
-    // on each plugin's single worker ahead of GUI write commands.
-    let Ok(_broadcast) = app.ipc_broadcast_lock.try_lock() else {
+fn state_value<T: serde::Serialize>(wire: &T) -> Option<Value> {
+    match serde_json::to_value(wire) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            log::error!("state serialize failed (non-finite float in config?): {e}");
+            None
+        }
+    }
+}
+
+async fn fan_out(app: &Arc<AppState>, kind: &str, data: Value) {
+    let clients = app.clients.lock().await;
+    let gen = app.state_gen.fetch_add(1, Ordering::Relaxed) + 1;
+    let Some(frame) = encode_json_frame(&json!({ "type": kind, "gen": gen, "data": data })) else {
         return;
     };
-    let msg = build_state_msg(app).await;
-    broadcast_json(app, &msg).await;
+    let frame = Arc::new(frame);
+    for client in clients.iter() {
+        client.send_frame(frame.clone());
+    }
+}
+
+pub async fn broadcast_state(app: &Arc<AppState>) {
+    let _broadcast = app.ipc_broadcast_lock.lock().await;
+    let cfg = app.config.read().await.clone();
+    let wire = serializer::build_full(app, &cfg).await;
+    let Some(data) = state_value(&wire) else {
+        return;
+    };
+    fan_out(app, "state", data).await;
+}
+
+pub async fn broadcast_delta(app: &Arc<AppState>, domains: &[Domain]) {
+    let _guard = if domains.iter().any(|d| d.uses_device_pass()) {
+        Some(app.ipc_broadcast_lock.lock().await)
+    } else {
+        None
+    };
+    let cfg = app.config.read().await.clone();
+    let delta = serializer::build_delta(app, &cfg, domains).await;
+    let Some(data) = state_value(&delta) else {
+        return;
+    };
+    fan_out(app, "state_delta", data).await;
+}
+
+pub async fn send_full_to(app: &Arc<AppState>, handle: &ClientHandle) {
+    let gen = app.state_gen.load(Ordering::Relaxed);
+    let cfg = app.config.read().await.clone();
+    let wire = serializer::build_full(app, &cfg).await;
+    let Some(data) = state_value(&wire) else {
+        return;
+    };
+    handle.send_json(&json!({ "type": "state", "gen": gen, "data": data }));
 }
 
 /// Fan an arbitrary JSON frame out to every connected client (encoded once).
@@ -771,20 +829,6 @@ pub async fn broadcast_json(app: &Arc<AppState>, msg: &Value) {
     for client in clients.iter() {
         client.send_frame(frame.clone());
     }
-}
-
-pub async fn build_state_msg(app: &Arc<AppState>) -> Value {
-    let cfg = app.config.read().await.clone();
-    let mut names: Vec<String> = cfg
-        .app_rules
-        .iter()
-        .flat_map(|r| r.process_names.iter().cloned())
-        .collect();
-    names.sort();
-    names.dedup();
-    let process_icons = crate::profiles::running_apps::resolve_process_icons(&names);
-    let data = serializer::serialize_state(app, cfg, process_icons).await;
-    json!({ "type": "state", "data": data })
 }
 
 /// Path to the IPC command channel. Shared with the UI via `halod-shared`
@@ -1034,7 +1078,7 @@ mod handle_tests {
     }
 
     #[tokio::test]
-    async fn concurrent_state_broadcasts_are_coalesced() {
+    async fn concurrent_state_broadcasts_do_not_overlap_device_passes() {
         use crate::config::Config;
         use crate::state::AppState;
 
@@ -1056,16 +1100,29 @@ mod handle_tests {
             .await
             .expect("first snapshot did not start");
 
-        tokio::time::timeout(Duration::from_millis(100), broadcast_state(&app))
-            .await
-            .expect("redundant broadcast waited behind the active snapshot");
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let second = tokio::spawn({
+            let app = app.clone();
+            async move { broadcast_state(&app).await }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "second pass must wait behind the first, never overlap on the device"
+        );
 
         release.notify_one();
-        tokio::time::timeout(Duration::from_secs(1), first)
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
             .await
-            .expect("first snapshot did not finish")
-            .expect("snapshot task panicked");
+            .expect("second snapshot did not start after the first released");
+        release.notify_one();
+        for task in [first, second] {
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("snapshot did not finish")
+                .expect("snapshot task panicked");
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

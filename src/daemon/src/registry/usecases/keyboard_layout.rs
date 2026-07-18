@@ -2,7 +2,7 @@
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
-use crate::ipc::broadcast_state;
+use crate::ipc::{broadcast_delta, Domain};
 use crate::state::AppState;
 use halod_shared::keyboard::KeyboardLayoutSelection;
 
@@ -45,7 +45,7 @@ pub async fn set_keyboard_layout(
         }
     }
 
-    broadcast_state(&app).await;
+    broadcast_delta(&app, &[Domain::Devices]).await;
     Ok(())
 }
 

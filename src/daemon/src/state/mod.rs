@@ -59,6 +59,7 @@ pub struct AppState {
     /// filling their single-threaded worker queues ahead of interactive writes.
     pub ipc_broadcast_lock: Mutex<()>,
     pub clients: Mutex<Vec<ClientHandle>>,
+    pub state_gen: std::sync::atomic::AtomicU64,
     /// Flipped to `true` once every domain's engine has been set
     pub engines_ready: watch::Sender<bool>,
     /// Notified to request a graceful daemon shutdown (e.g. an IPC `shutdown`
@@ -112,6 +113,7 @@ impl AppState {
             device_locks: Mutex::new(std::collections::HashMap::new()),
             ipc_broadcast_lock: Mutex::new(()),
             clients: Mutex::new(Vec::new()),
+            state_gen: std::sync::atomic::AtomicU64::new(0),
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
             discovery_scope: RwLock::new(DiscoveryScope::Clean),

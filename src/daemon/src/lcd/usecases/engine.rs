@@ -53,7 +53,7 @@ pub async fn set_template(
     }
     slot.lcd_state().set_health(LcdHealth::Stable);
 
-    ipc::broadcast_state(&app).await;
+    ipc::broadcast_delta(&app, &[ipc::Domain::Lcd, ipc::Domain::Devices]).await;
     Ok(())
 }
 
@@ -72,7 +72,7 @@ pub async fn deactivate(device_id: String, app: Arc<AppState>) -> Result<()> {
     }
     slot.lcd_state().set_health(LcdHealth::Stable);
 
-    ipc::broadcast_state(&app).await;
+    ipc::broadcast_delta(&app, &[ipc::Domain::Lcd, ipc::Domain::Devices]).await;
     Ok(())
 }
 

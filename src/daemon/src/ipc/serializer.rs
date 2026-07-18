@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::config::{Config, PlacedZone};
+use crate::cooling::config::FanCurveRecord;
+use crate::registry::snapshot::DevicesSnapshot;
 use crate::state::AppState;
 use halod_shared::types::{
-    AppState as WireAppState, HealthCheckState, PluginRepoInfo, PluginsState, ProfileState,
-    RepoCompatibilityStatus, RepoSignatureStatus,
+    AppState as WireAppState, CoolingState, DiscoveryStatus, HealthCheckState,
+    LightingOverviewState, LcdState, PluginRepoInfo, PluginsState, ProfileState,
+    RepoCompatibilityStatus, RepoSignatureStatus, StateDelta, WireDevice,
 };
 
 fn active_repo_signature_status(record: &crate::config::PluginRepoRecord) -> RepoSignatureStatus {
@@ -44,28 +47,103 @@ fn active_repo_signature_status(record: &crate::config::PluginRepoRecord) -> Rep
     }
 }
 
-pub async fn serialize_state(
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Domain {
+    Discovery,
+    Devices,
+    Profiles,
+    Cooling,
+    Lighting,
+    Lcd,
+    Gui,
+    Health,
+    ProcessIcons,
+    Plugins,
+}
+
+impl Domain {
+    pub fn uses_device_pass(self) -> bool {
+        matches!(
+            self,
+            Domain::Devices | Domain::Cooling | Domain::Lighting | Domain::Lcd | Domain::Plugins
+        )
+    }
+}
+
+async fn serialize_discovery(app: &Arc<AppState>) -> DiscoveryStatus {
+    app.discovery.lock().await.clone()
+}
+
+fn serialize_profiles(cfg: &Config) -> ProfileState {
+    ProfileState {
+        active: cfg.active_profile.clone(),
+        available: cfg.profile_names(),
+        app_rules: cfg.app_rules.clone(),
+        overrides: cfg.profile_overrides(),
+    }
+}
+
+fn serialize_gui(cfg: &Config) -> halod_shared::types::GuiConfig {
+    cfg.gui.clone()
+}
+
+fn serialize_health(app: &Arc<AppState>) -> HealthCheckState {
+    HealthCheckState {
+        focus_watcher_supported: app.focus.supported(),
+        ffmpeg_available: crate::lcd::engine::video::ffmpeg_available(),
+    }
+}
+
+fn serialize_process_icons(cfg: &Config) -> HashMap<String, String> {
+    let mut names: Vec<String> = cfg
+        .app_rules
+        .iter()
+        .flat_map(|r| r.process_names.iter().cloned())
+        .collect();
+    names.sort();
+    names.dedup();
+    crate::profiles::running_apps::resolve_process_icons(&names)
+}
+
+async fn serialize_cooling(
     app: &Arc<AppState>,
-    cfg: crate::config::Config,
-    process_icons: HashMap<String, String>,
-) -> Value {
-    let disc = app.discovery.lock().await.clone();
-    let snap = app.snapshot_devices(&cfg).await;
-    // The daemon persists each domain's config separately; the wire form nests
-    // it under the matching State struct, so inject it here (the domain
-    // snapshots stay config-free).
-    let mut cooling = app.cooling.snapshot(snap.fan_curves).await;
+    cfg: &Config,
+    fan_curves: Vec<(String, String, FanCurveRecord)>,
+) -> CoolingState {
+    let mut cooling = app.cooling.snapshot(fan_curves).await;
     cooling.config = cfg.cooling.clone();
-    let mut lighting = app
-        .lighting
-        .snapshot(&app.registry, &cfg, snap.placed_zones)
-        .await;
+    cooling
+}
+
+async fn serialize_lighting(
+    app: &Arc<AppState>,
+    cfg: &Config,
+    placed_zones: Vec<PlacedZone>,
+) -> LightingOverviewState {
+    let mut lighting = app.lighting.snapshot(&app.registry, cfg, placed_zones).await;
     lighting.config = cfg.rgb.clone();
+    lighting
+}
+
+async fn serialize_lcd(
+    app: &Arc<AppState>,
+    cfg: &Config,
+    lcd_templates: HashMap<String, String>,
+    lcd_template_params: HashMap<String, HashMap<String, halod_shared::types::EffectParamValue>>,
+) -> LcdState {
     let mut lcd = app
         .lcd
-        .snapshot(&app.registry, snap.lcd_templates, snap.lcd_template_params)
+        .snapshot(&app.registry, lcd_templates, lcd_template_params)
         .await;
     lcd.config = cfg.lcd.clone();
+    lcd
+}
+
+async fn serialize_plugins(
+    app: &Arc<AppState>,
+    cfg: &Config,
+    devices: &[WireDevice],
+) -> PluginsState {
     let observed_repo_signatures = app.repo_signature_status.lock().await.clone();
     let repo_compatibility = app.repo_compatibility_status.lock().await.clone();
 
@@ -74,7 +152,7 @@ pub async fn serialize_state(
         if plugin.plugin_type == halod_shared::types::PluginKind::Integration
             && plugin.integration_state
                 == halod_shared::types::IntegrationLifecycleState::Configured
-            && snap.devices.iter().any(|device| {
+            && devices.iter().any(|device| {
                 device.integration_id.as_deref() == Some(plugin.id.as_str()) && device.connected
             })
         {
@@ -98,80 +176,123 @@ pub async fn serialize_state(
             )
             .collect();
     }
-    let wire = WireAppState {
-        discovery: disc,
-        devices: snap.devices,
-        profiles: ProfileState {
-            active: cfg.active_profile.clone(),
-            available: cfg.profile_names(),
-            app_rules: cfg.app_rules.clone(),
-            overrides: cfg.profile_overrides(),
-        },
-        cooling,
-        lighting,
-        lcd,
-        gui: cfg.gui.clone(),
+    PluginsState {
+        plugins: plugin_list,
+        repos: cfg
+            .plugins
+            .repos
+            .iter()
+            .map(|r| PluginRepoInfo {
+                url: r.url.clone(),
+                slug: r.slug.clone(),
+                repository_id: r.repository_id.clone(),
+                branch: r.branch.clone(),
+                locked_sha: r.locked_sha.clone(),
+                active_revision: r.active_revision.clone(),
+                previous_verified_sha: r.previous_verified_sha.clone(),
+                last_sync: r.last_sync.clone(),
+                official: r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG,
+                location: match r.source_kind {
+                    crate::config::PluginRepoSourceKind::Archive => {
+                        halod_shared::types::PluginRepoLocation::LocalArchive
+                    }
+                    crate::config::PluginRepoSourceKind::Git if r.url.starts_with("file://") => {
+                        halod_shared::types::PluginRepoLocation::LocalGit
+                    }
+                    crate::config::PluginRepoSourceKind::Git => {
+                        halod_shared::types::PluginRepoLocation::RemoteGit
+                    }
+                },
+                signature: observed_repo_signatures
+                    .get(&r.slug)
+                    .filter(|(sha, _)| sha != &r.locked_sha)
+                    .map(|(_, status)| status.clone())
+                    .unwrap_or_else(|| active_repo_signature_status(r)),
+                signing_key_fingerprint: r
+                    .trusted_key
+                    .as_ref()
+                    .and_then(|key| halod_plugin_signing::signing_key_fingerprint(key).ok()),
+                compatibility: repo_compatibility
+                    .get(&r.slug)
+                    .cloned()
+                    .unwrap_or(RepoCompatibilityStatus::Compatible),
+            })
+            .collect(),
+        skipped: app.registry.skipped(),
+        recommendations: app.registry.recommendations(),
+    }
+}
+
+pub async fn build_full(app: &Arc<AppState>, cfg: &Config) -> WireAppState {
+    let DevicesSnapshot {
+        devices,
+        fan_curves,
+        placed_zones,
+        lcd_templates,
+        lcd_template_params,
+    } = app.snapshot_devices(cfg).await;
+    let plugins = serialize_plugins(app, cfg, &devices).await;
+    WireAppState {
+        discovery: serialize_discovery(app).await,
+        devices,
+        profiles: serialize_profiles(cfg),
+        cooling: serialize_cooling(app, cfg, fan_curves).await,
+        lighting: serialize_lighting(app, cfg, placed_zones).await,
+        lcd: serialize_lcd(app, cfg, lcd_templates, lcd_template_params).await,
+        gui: serialize_gui(cfg),
         config_dir: crate::config::config_dir().display().to_string(),
-        health: HealthCheckState {
-            focus_watcher_supported: app.focus.supported(),
-            ffmpeg_available: crate::lcd::engine::video::ffmpeg_available(),
-        },
-        process_icons,
-        plugins: PluginsState {
-            plugins: plugin_list,
-            repos: cfg
-                .plugins
-                .repos
-                .iter()
-                .map(|r| PluginRepoInfo {
-                    url: r.url.clone(),
-                    slug: r.slug.clone(),
-                    repository_id: r.repository_id.clone(),
-                    branch: r.branch.clone(),
-                    locked_sha: r.locked_sha.clone(),
-                    active_revision: r.active_revision.clone(),
-                    previous_verified_sha: r.previous_verified_sha.clone(),
-                    last_sync: r.last_sync.clone(),
-                    official: r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG,
-                    location: match r.source_kind {
-                        crate::config::PluginRepoSourceKind::Archive => {
-                            halod_shared::types::PluginRepoLocation::LocalArchive
-                        }
-                        crate::config::PluginRepoSourceKind::Git
-                            if r.url.starts_with("file://") =>
-                        {
-                            halod_shared::types::PluginRepoLocation::LocalGit
-                        }
-                        crate::config::PluginRepoSourceKind::Git => {
-                            halod_shared::types::PluginRepoLocation::RemoteGit
-                        }
-                    },
-                    signature: observed_repo_signatures
-                        .get(&r.slug)
-                        .filter(|(sha, _)| sha != &r.locked_sha)
-                        .map(|(_, status)| status.clone())
-                        .unwrap_or_else(|| active_repo_signature_status(r)),
-                    signing_key_fingerprint: r
-                        .trusted_key
-                        .as_ref()
-                        .and_then(|key| halod_plugin_signing::signing_key_fingerprint(key).ok()),
-                    compatibility: repo_compatibility
-                        .get(&r.slug)
-                        .cloned()
-                        .unwrap_or(RepoCompatibilityStatus::Compatible),
-                })
-                .collect(),
-            skipped: app.registry.skipped(),
-            recommendations: app.registry.recommendations(),
-        },
-    };
-    match serde_json::to_value(wire) {
-        Ok(v) => v,
-        Err(e) => {
-            log::error!("serialize_state failed (non-finite float in config?): {e}");
-            serde_json::json!({"__serialize_error": true})
+        health: serialize_health(app),
+        process_icons: serialize_process_icons(cfg),
+        plugins,
+    }
+}
+
+pub async fn build_delta(app: &Arc<AppState>, cfg: &Config, domains: &[Domain]) -> StateDelta {
+    let want = |d: Domain| domains.contains(&d);
+    let mut delta = StateDelta::default();
+
+    if want(Domain::Discovery) {
+        delta.discovery = Some(serialize_discovery(app).await);
+    }
+    if want(Domain::Profiles) {
+        delta.profiles = Some(serialize_profiles(cfg));
+    }
+    if want(Domain::Gui) {
+        delta.gui = Some(serialize_gui(cfg));
+    }
+    if want(Domain::Health) {
+        delta.health = Some(serialize_health(app));
+    }
+    if want(Domain::ProcessIcons) {
+        delta.process_icons = Some(serialize_process_icons(cfg));
+    }
+
+    if domains.iter().any(|d| d.uses_device_pass()) {
+        let DevicesSnapshot {
+            devices,
+            fan_curves,
+            placed_zones,
+            lcd_templates,
+            lcd_template_params,
+        } = app.snapshot_devices(cfg).await;
+        if want(Domain::Cooling) {
+            delta.cooling = Some(serialize_cooling(app, cfg, fan_curves).await);
+        }
+        if want(Domain::Lighting) {
+            delta.lighting = Some(serialize_lighting(app, cfg, placed_zones).await);
+        }
+        if want(Domain::Lcd) {
+            delta.lcd = Some(serialize_lcd(app, cfg, lcd_templates, lcd_template_params).await);
+        }
+        if want(Domain::Plugins) {
+            delta.plugins = Some(serialize_plugins(app, cfg, &devices).await);
+        }
+        if want(Domain::Devices) {
+            delta.devices = Some(devices);
         }
     }
+
+    delta
 }
 
 #[cfg(test)]
@@ -237,8 +358,7 @@ mod tests {
             },
         );
 
-        let value = serialize_state(&app, cfg, HashMap::new()).await;
-        let wire: halod_shared::types::AppState = serde_json::from_value(value).unwrap();
+        let wire = build_full(&app, &cfg).await;
         assert_eq!(
             wire.plugins.repos[0].signature,
             RepoSignatureStatus::Invalid {
@@ -261,10 +381,8 @@ mod tests {
         cfg.rgb.canvas_fps = 33;
         cfg.lcd.fps = 12;
         cfg.gui.language = "it".into();
-        let value = serialize_state(&app, cfg, HashMap::new()).await;
-        let wire: halod_shared::types::AppState = serde_json::from_value(value).unwrap();
+        let wire = build_full(&app, &cfg).await;
         assert_eq!(wire.devices.len(), 0);
-        // The per-domain config is injected into each nested State struct.
         assert_eq!(wire.cooling.config.fan_failsafe_duty, 42);
         assert_eq!(wire.lighting.config.canvas_fps, 33);
         assert_eq!(wire.lcd.config.fps, 12);
@@ -285,11 +403,78 @@ mod tests {
         );
         app.devices.write().await.push(dev);
         let cfg = app.config.read().await.clone();
-        let value = serialize_state(&app, cfg, HashMap::new()).await;
-        let wire: halod_shared::types::AppState = serde_json::from_value(value).unwrap();
+        let wire = build_full(&app, &cfg).await;
         assert_eq!(wire.devices.len(), 1);
         assert_eq!(wire.devices[0].id, "test_device");
         assert_eq!(wire.devices[0].name, "Test Fan");
         assert_eq!(wire.devices[0].vendor, "Acme");
+    }
+
+    struct CountingDevice {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Device for CountingDevice {
+        fn id(&self) -> &str {
+            "counting"
+        }
+        fn name(&self) -> &str {
+            "Counting"
+        }
+        fn vendor(&self) -> &str {
+            "test"
+        }
+        fn model(&self) -> &str {
+            "test"
+        }
+        async fn initialize(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn close(&self) {}
+        async fn serialize(&self) -> halod_shared::types::WireDevice {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::drivers::vendors::generic::devices::common::WireDeviceBuilder::from_parts(
+                self.id().to_string(),
+                self.name().to_string(),
+                self.vendor().to_string(),
+                self.model().to_string(),
+            )
+            .build()
+        }
+        fn capabilities(&self) -> Vec<crate::drivers::CapabilityRef<'_>> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn non_device_domains_skip_the_device_pass() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        app.devices.write().await.push(Arc::new(CountingDevice {
+            calls: calls.clone(),
+        }));
+        let cfg = app.config.read().await.clone();
+        let delta = build_delta(&app, &cfg, &[Domain::Profiles, Domain::Gui]).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(delta.profiles.is_some());
+        assert!(delta.gui.is_some());
+        assert!(delta.devices.is_none());
+        assert!(delta.cooling.is_none());
+    }
+
+    #[tokio::test]
+    async fn multi_device_domains_run_a_single_device_pass() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        app.devices.write().await.push(Arc::new(CountingDevice {
+            calls: calls.clone(),
+        }));
+        let cfg = app.config.read().await.clone();
+        let delta = build_delta(&app, &cfg, &[Domain::Devices, Domain::Cooling]).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(delta.devices.is_some());
+        assert!(delta.cooling.is_some());
+        assert!(delta.profiles.is_none());
     }
 }

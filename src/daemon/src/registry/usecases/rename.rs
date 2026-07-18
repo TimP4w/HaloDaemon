@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
 use crate::drivers::Device;
-use crate::ipc::broadcast_state;
+use crate::ipc::{broadcast_delta, Domain};
 use crate::registry::config::ensure_record;
 use crate::state::AppState;
 
@@ -80,7 +80,7 @@ async fn rename_chain_link(
     chain.rename_link(&channel_id, child_id, &new_name)?;
 
     super::chain::persist_layout(app, parent.as_ref()).await?;
-    broadcast_state(app).await;
+    broadcast_delta(app, &[Domain::Devices]).await;
     Ok(())
 }
 
@@ -108,7 +108,7 @@ async fn rename_normal_device(
         app.request_config_save();
     }
 
-    broadcast_state(app).await;
+    broadcast_delta(app, &[Domain::Devices]).await;
     Ok(())
 }
 

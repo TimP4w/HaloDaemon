@@ -141,7 +141,7 @@ pub async fn upsert_effect(
         effects.insert(instance_id, def);
     }
     app.request_config_save();
-    ipc::broadcast_state(&app).await;
+    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
     Ok(())
 }
 
@@ -161,7 +161,7 @@ pub async fn remove_effect(instance_id: String, app: Arc<AppState>) -> Result<()
         }
     }
     app.request_config_save();
-    ipc::broadcast_state(&app).await;
+    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
     Ok(())
 }
 
@@ -179,7 +179,7 @@ pub async fn set_default_effect(instance_id: Option<String>, app: Arc<AppState>)
         cs.default_effect = instance_id;
     }
     app.request_config_save();
-    ipc::broadcast_state(&app).await;
+    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
     Ok(())
 }
 
@@ -280,7 +280,7 @@ pub async fn place_zone(
     )
     .await?;
 
-    ipc::broadcast_state(&app).await;
+    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
     Ok(())
 }
 
@@ -291,7 +291,7 @@ pub async fn remove_zone(device_id: String, channel_id: String, app: Arc<AppStat
     })
     .await;
 
-    ipc::broadcast_state(&app).await;
+    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
     Ok(())
 }
 
@@ -865,7 +865,7 @@ pub async fn stop(app: Arc<AppState>) -> Result<()> {
         }
     }
 
-    ipc::broadcast_state(&app).await;
+    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
     Ok(())
 }
 
@@ -877,6 +877,6 @@ pub async fn set_sample_radius(radius: f64, app: Arc<AppState>) -> Result<()> {
         cfg.canvas_state_for_edit().sample_radius = radius.clamp(0.5, 64.0);
     }
     app.request_config_save();
-    ipc::broadcast_state(&app).await;
+    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
     Ok(())
 }

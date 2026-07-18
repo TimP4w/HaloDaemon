@@ -801,7 +801,6 @@ impl DataBus {
             .collect()
     }
 
-    #[allow(dead_code)] // Phase 12 wires this into reactive render scheduling.
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<DataChange> {
         self.changes.subscribe()
     }

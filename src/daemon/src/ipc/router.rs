@@ -793,6 +793,10 @@ async fn dispatch(
 
         DaemonCommand::ListRunningApps => profiles::running_apps::list(client).await,
         DaemonCommand::GetDebugInfo => registry::usecases::debug::get_debug_info(client, app).await,
+        DaemonCommand::RequestState => {
+            crate::ipc::send_full_to(&app, &client).await;
+            Ok(())
+        }
         DaemonCommand::SetEngineConfig {
             engine,
             enabled,

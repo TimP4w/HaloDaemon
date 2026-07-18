@@ -2,7 +2,7 @@
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
-use crate::ipc::broadcast_state;
+use crate::ipc::{broadcast_delta, Domain};
 use crate::profiles::device_state::persist_device_state;
 use crate::registry::config::ensure_record;
 use crate::state::AppState;
@@ -65,7 +65,7 @@ pub async fn set_device_visibility(
         return Ok(());
     }
 
-    broadcast_state(&app).await;
+    broadcast_delta(&app, &[Domain::Devices]).await;
     Ok(())
 }
 
@@ -89,7 +89,7 @@ pub async fn set_sensor_visibility(
         app.request_config_save();
     }
 
-    broadcast_state(&app).await;
+    broadcast_delta(&app, &[Domain::Devices]).await;
     Ok(())
 }
 
