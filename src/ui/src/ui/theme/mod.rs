@@ -426,6 +426,67 @@ pub fn glow(painter: &egui::Painter, center: Pos2, radius: f32, color: Color32, 
     glow_ellipse(painter, center, radius, radius, color, strength);
 }
 
+/// A broad, low-contrast glow with a curved falloff and no perceptible rim.
+pub fn gentle_glow(
+    painter: &egui::Painter,
+    center: Pos2,
+    radius: f32,
+    color: Color32,
+    strength: f32,
+) {
+    gentle_glow_ellipse(painter, center, radius, radius, color, strength);
+}
+
+/// Elliptical form of [`gentle_glow`], useful behind wide hover surfaces.
+pub fn gentle_glow_ellipse(
+    painter: &egui::Painter,
+    center: Pos2,
+    radius_x: f32,
+    radius_y: f32,
+    color: Color32,
+    strength: f32,
+) {
+    const SEGMENTS: usize = 48;
+    let mut mesh = Mesh::default();
+    let bands = gentle_glow_bands(strength);
+    for i in 0..=SEGMENTS {
+        let angle = std::f32::consts::TAU * i as f32 / SEGMENTS as f32;
+        let base = mesh.vertices.len() as u32;
+        for &(factor, alpha) in &bands {
+            mesh.colored_vertex(
+                center
+                    + egui::vec2(
+                        angle.cos() * radius_x * factor,
+                        angle.sin() * radius_y * factor,
+                    ),
+                a(color, alpha),
+            );
+        }
+        if i > 0 {
+            let columns = bands.len() as u32;
+            for band in 0..columns - 1 {
+                let previous = base - columns + band;
+                let current = base + band;
+                mesh.add_triangle(previous, previous + 1, current);
+                mesh.add_triangle(previous + 1, current, current + 1);
+            }
+        }
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+fn gentle_glow_bands(strength: f32) -> [(f32, f32); 7] {
+    [
+        (0.0, strength),
+        (0.20, strength * 0.92),
+        (0.40, strength * 0.72),
+        (0.60, strength * 0.43),
+        (0.78, strength * 0.19),
+        (0.92, strength * 0.045),
+        (1.0, 0.0),
+    ]
+}
+
 /// Like [`glow`] but elliptical — a wide, short dome reads as a far subtler
 /// wash than a full circle when anchored at a card's top edge.
 pub fn glow_ellipse(
@@ -452,6 +513,98 @@ pub fn glow_ellipse(
         }
     }
     painter.add(Shape::mesh(mesh));
+}
+
+/// Paint a slowly drifting wash of the logo hues into the top-right of a view.
+pub fn top_right_halo(painter: &egui::Painter, rect: Rect, time: f32) {
+    let painter = painter.with_clip_rect(rect);
+    for (center, rx, ry, color, strength) in top_right_halo_blobs(rect, time) {
+        glow_ellipse(&painter, center, rx, ry, color, strength);
+    }
+}
+
+/// Paint the same ambient logo wash around a focal point, such as the radar.
+pub fn centered_halo(
+    painter: &egui::Painter,
+    clip_rect: Rect,
+    center: Pos2,
+    radius: f32,
+    time: f32,
+) {
+    let painter = painter.with_clip_rect(clip_rect);
+    for (center, rx, ry, color, strength) in centered_halo_blobs(center, radius, time) {
+        glow_ellipse(&painter, center, rx, ry, color, strength);
+    }
+}
+
+fn centered_halo_blobs(
+    center: Pos2,
+    radius: f32,
+    time: f32,
+) -> [(Pos2, f32, f32, Color32, f32); 3] {
+    let drift = |phase: f32, amount: f32| {
+        egui::vec2(
+            (time * 0.16 + phase).sin() * amount,
+            (time * 0.12 + phase).cos() * amount,
+        )
+    };
+    [
+        (
+            center + drift(0.0, radius * 0.18),
+            radius * 2.15,
+            radius * 1.75,
+            LOGO_STOPS[0],
+            0.075,
+        ),
+        (
+            center + drift(2.1, radius * 0.22),
+            radius * 1.65,
+            radius * 1.45,
+            LOGO_STOPS[2],
+            0.055,
+        ),
+        (
+            center + drift(4.2, radius * 0.20),
+            radius * 1.55,
+            radius * 1.35,
+            LOGO_STOPS[3],
+            0.045,
+        ),
+    ]
+}
+
+fn top_right_halo_blobs(rect: Rect, time: f32) -> [(Pos2, f32, f32, Color32, f32); 3] {
+    let scale = rect.width().min(900.0) / 900.0;
+    let radius = |value: f32| value * scale.max(0.65);
+    let drift = |phase: f32, x: f32, y: f32| {
+        egui::vec2(
+            (time * 0.16 + phase).sin() * x,
+            (time * 0.12 + phase).cos() * y,
+        )
+    };
+    [
+        (
+            rect.right_top() + egui::vec2(-55.0, 18.0) + drift(0.0, 42.0, 24.0),
+            radius(430.0),
+            radius(275.0),
+            LOGO_STOPS[0],
+            0.08,
+        ),
+        (
+            rect.right_top() + egui::vec2(48.0, -30.0) + drift(2.1, 34.0, 20.0),
+            radius(310.0),
+            radius(220.0),
+            LOGO_STOPS[2],
+            0.06,
+        ),
+        (
+            rect.right_top() + egui::vec2(-225.0, -52.0) + drift(4.2, 38.0, 18.0),
+            radius(285.0),
+            radius(185.0),
+            LOGO_STOPS[3],
+            0.05,
+        ),
+    ]
 }
 
 /// Repaint the four corner cut-outs of a rounded rect with `bg`. egui has no
@@ -570,5 +723,59 @@ mod tests {
             DEVICE_HUES.len(),
             crate::domain::models::device::DEVICE_HUE_COUNT
         );
+    }
+
+    #[test]
+    fn view_halo_stays_subtle_and_anchored_to_top_right() {
+        let rect = Rect::from_min_size(Pos2::new(20.0, 40.0), egui::vec2(900.0, 700.0));
+        let blobs = top_right_halo_blobs(rect, 0.0);
+
+        assert_eq!(
+            blobs.map(|blob| blob.3),
+            [LOGO_STOPS[0], LOGO_STOPS[2], LOGO_STOPS[3]]
+        );
+        assert!(blobs.iter().all(|blob| blob.4 < 0.1));
+        assert!(blobs.iter().all(|blob| blob.0.x > rect.center().x));
+        assert!(blobs.iter().all(|blob| blob.0.y < rect.top() + 45.0));
+    }
+
+    #[test]
+    fn view_halo_drifts_without_changing_its_palette_or_size() {
+        let rect = Rect::from_min_size(Pos2::new(20.0, 40.0), egui::vec2(900.0, 700.0));
+        let start = top_right_halo_blobs(rect, 0.0);
+        let later = top_right_halo_blobs(rect, 4.0);
+
+        assert!(start.iter().zip(later).all(|(a, b)| a.0 != b.0));
+        assert_eq!(
+            start.map(|blob| (blob.1, blob.2, blob.3, blob.4)),
+            later.map(|blob| (blob.1, blob.2, blob.3, blob.4))
+        );
+    }
+
+    #[test]
+    fn centered_halo_surrounds_its_anchor() {
+        let center = Pos2::new(400.0, 300.0);
+        let radius = 180.0;
+        let blobs = centered_halo_blobs(center, radius, 0.0);
+
+        assert!(blobs
+            .iter()
+            .all(|blob| blob.0.distance(center) <= radius * 0.22 + 1e-3));
+        assert!(blobs.iter().all(|blob| blob.1 > radius));
+        assert_eq!(
+            blobs.map(|blob| blob.3),
+            [LOGO_STOPS[0], LOGO_STOPS[2], LOGO_STOPS[3]]
+        );
+    }
+
+    #[test]
+    fn gentle_glow_fades_smoothly_to_transparent() {
+        let bands = gentle_glow_bands(0.16);
+
+        assert_eq!(bands.first(), Some(&(0.0, 0.16)));
+        assert_eq!(bands.last(), Some(&(1.0, 0.0)));
+        assert!(bands.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(bands.windows(2).all(|pair| pair[0].1 > pair[1].1));
+        assert!(bands[bands.len() - 2].1 < 0.01);
     }
 }

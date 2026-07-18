@@ -380,6 +380,8 @@ impl App {
                     },
                     crate::ui::theme::MAIN_BG,
                 );
+                crate::ui::theme::top_right_halo(ui.painter(), ui.max_rect(), time as f32);
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
                 match &self.page {
                     Page::Home => {
                         crate::ui::screens::home::show(

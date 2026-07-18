@@ -971,6 +971,9 @@ fn sensor_card(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let p = ui.painter();
+    if t > 0.0 {
+        theme::gentle_glow_ellipse(p, rect.center(), w * 0.68, 68.0, color, 0.10 * t);
+    }
     p.rect_filled(rect, theme::RADIUS_LG, theme::CARD_BG);
 
     // Background sparkline from the rolling history.

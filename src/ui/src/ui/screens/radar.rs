@@ -84,8 +84,11 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                 .clamp(48.0, 210.0);
             let composition_height = fixed_height + radius * 2.0;
             let top = full.center().y - composition_height / 2.0;
+            let center = Pos2::new(full.center().x, top + logo_height + gap + radius);
 
-            let logo = crate::ui::components::paint_logo(
+            theme::centered_halo(&p, full, center, radius, time as f32);
+
+            crate::ui::components::paint_logo(
                 &p,
                 &ctx,
                 Pos2::new(full.center().x - logo_size.x / 2.0, top),
@@ -94,7 +97,6 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                 time as f32,
             );
 
-            let center = Pos2::new(full.center().x, logo.bottom() + gap + radius);
             draw_radar(&p, center, radius, time);
 
             for (i, d) in state

@@ -43,7 +43,7 @@ pub(super) fn header(
     {
         let badge = Rect::from_min_size(Pos2::new(rect.left(), cy - 28.0), Vec2::new(60.0, 56.0));
         let p = ui.painter();
-        theme::glow(p, badge.center(), 30.0, color, 0.45);
+        theme::gentle_glow(p, badge.center(), 50.0, color, 0.16);
         crate::ui::components::device_badge(p, badge, dev.device_type);
     }
 
