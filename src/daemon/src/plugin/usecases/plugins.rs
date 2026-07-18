@@ -51,7 +51,8 @@ pub(crate) async fn persist_config_values(
     values: &std::collections::HashMap<String, String>,
     app: &Arc<AppState>,
 ) -> Result<()> {
-    app.registry.validate_config_values(id, values)?;
+    let values = app.registry.normalize_config_values(id, values);
+    app.registry.validate_config_values(id, &values)?;
     let secure_keys: std::collections::HashSet<String> = app
         .registry
         .secure_config_keys_for(id)
@@ -59,7 +60,7 @@ pub(crate) async fn persist_config_values(
         .collect();
     let mut cfg = app.config.write().await;
     let plaintext = cfg.plugins.config.entry(id.to_owned()).or_default();
-    for (key, value) in values {
+    for (key, value) in &values {
         if secure_keys.contains(key) {
             if !value.is_empty() {
                 app.secret_store

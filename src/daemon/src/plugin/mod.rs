@@ -1112,6 +1112,33 @@ impl Registry {
 
     /// Reject config values whose key isn't a declared field, or whose `Number`
     /// value doesn't parse or falls outside the field's declared `min`/`max`.
+    /// Canonicalize incoming config values (trimming connection fields) before
+    /// they are validated and persisted, so a pasted address with stray
+    /// whitespace neither fails validation nor reaches a plugin verbatim.
+    /// Unknown keys pass through untouched for the validator to reject.
+    pub fn normalize_config_values(
+        &self,
+        plugin_id: &str,
+        values: &HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        let snap = self.snapshot();
+        let Some(manifest) = snap.manifests.iter().find(|m| m.plugin_id == plugin_id) else {
+            return values.clone();
+        };
+        let fields = manifest.config_fields();
+        values
+            .iter()
+            .map(|(key, value)| {
+                let normalized = fields
+                    .iter()
+                    .find(|f| &f.key == key)
+                    .map(|field| manifest::normalize_config_value(field, value))
+                    .unwrap_or_else(|| value.clone());
+                (key.clone(), normalized)
+            })
+            .collect()
+    }
+
     pub fn validate_config_values(
         &self,
         plugin_id: &str,

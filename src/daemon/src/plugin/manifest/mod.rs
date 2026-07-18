@@ -3004,6 +3004,27 @@ fn validate_controls(manifest: &PluginManifest) -> Result<()> {
     Ok(())
 }
 
+/// A host config value is any name/IPv4 `url::Host` accepts, plus a bare IPv6
+/// literal — which `url::Host::parse` only takes bracketed, but the origin
+/// builder and plugins bracket for themselves.
+fn is_valid_host(value: &str) -> bool {
+    url::Host::parse(value).is_ok() || value.parse::<std::net::Ipv6Addr>().is_ok()
+}
+
+/// Canonicalize a raw config value before it is validated and stored. Connection
+/// fields drop surrounding whitespace so a pasted address with a stray space is
+/// neither rejected on save nor handed to a plugin verbatim.
+pub(super) fn normalize_config_value(field: &ConfigFieldDef, value: &str) -> String {
+    match field.kind {
+        PluginConfigFieldKind::Host
+        | PluginConfigFieldKind::Port
+        | PluginConfigFieldKind::Url
+        | PluginConfigFieldKind::Number
+        | PluginConfigFieldKind::DurationMs => value.trim().to_owned(),
+        _ => value.to_owned(),
+    }
+}
+
 /// Validate one persisted or incoming config value according to its manifest field.
 pub(super) fn validate_config_value(field: &ConfigFieldDef, value: &str) -> Result<()> {
     anyhow::ensure!(
@@ -3044,9 +3065,8 @@ pub(super) fn validate_config_value(field: &ConfigFieldDef, value: &str) -> Resu
         }
         PluginConfigFieldKind::Host => {
             reject_bounds(field)?;
-            if !value.is_empty() {
-                url::Host::parse(value)
-                    .map_err(|_| anyhow!("config '{}' must be a valid host", field.key))?;
+            if !value.is_empty() && !is_valid_host(value) {
+                bail!("config '{}' must be a valid host", field.key);
             }
             None
         }
@@ -3281,6 +3301,33 @@ mod tests {
     fn write_widget_asset(dir: &Path, name: &str, contents: &str) {
         std::fs::create_dir_all(dir.join("assets")).unwrap();
         std::fs::write(dir.join("assets").join(name), contents).unwrap();
+    }
+
+    #[test]
+    fn host_config_value_accepts_ipv6_and_normalizes_whitespace() {
+        let host: ConfigFieldDef =
+            serde_yaml::from_str("key: host\nlabel: Host\nkind: host\n").unwrap();
+        assert!(validate_config_value(&host, "192.168.1.60").is_ok());
+        // Bare IPv6 is accepted even though `url::Host::parse` needs brackets.
+        assert!(validate_config_value(&host, "fe80::1").is_ok());
+        // A pasted address with surrounding whitespace normalizes to a valid host
+        // rather than being rejected verbatim on save.
+        assert_eq!(
+            normalize_config_value(&host, "  192.168.1.60 "),
+            "192.168.1.60"
+        );
+        assert!(
+            validate_config_value(&host, &normalize_config_value(&host, "\t10.0.0.5\n")).is_ok()
+        );
+        // A scheme or embedded port is still not a bare host.
+        assert!(validate_config_value(&host, "https://192.168.1.60").is_err());
+        assert!(validate_config_value(&host, "192.168.1.60:443").is_err());
+
+        // A non-connection field keeps its surrounding whitespace (a token may
+        // legitimately carry it).
+        let token: ConfigFieldDef =
+            serde_yaml::from_str("key: app_key\nlabel: Key\nkind: text\n").unwrap();
+        assert_eq!(normalize_config_value(&token, " secret "), " secret ");
     }
 
     #[test]
