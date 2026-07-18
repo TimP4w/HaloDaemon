@@ -13,6 +13,7 @@ device_type:
   ram: RAM
   sensor: Sensore
   speaker: Altoparlante
+  computer: Computer
   other: Dispositivo
 
 device_code:
@@ -30,6 +31,7 @@ device_code:
   ram: RAM
   sensor: SEN
   speaker: SPK
+  computer: PC
   other: DEV
 
 model:

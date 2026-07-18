@@ -22,7 +22,9 @@ use crate::drivers::{
     BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache, Device, SensorCapability,
     VisibilitySlot,
 };
-use halod_shared::types::{Boolean, Choice, ChoiceDisplay, ChoiceOption, DeviceCapability, Sensor};
+use halod_shared::types::{
+    Boolean, Choice, ChoiceDisplay, ChoiceOption, DeviceCapability, DeviceType, Sensor,
+};
 
 pub mod keep_awake;
 pub mod metrics;
@@ -91,6 +93,9 @@ impl Device for ComputerDevice {
     }
     fn model(&self) -> &str {
         os_label()
+    }
+    fn wire_device_type(&self) -> DeviceType {
+        DeviceType::Computer
     }
 
     async fn initialize(&self) -> Result<bool> {
@@ -302,6 +307,11 @@ mod tests {
         assert_eq!(device(Some("balanced")).capabilities().len(), 3);
         // No power profile -> Boolean + Sensor only.
         assert_eq!(device(None).capabilities().len(), 2);
+    }
+
+    #[test]
+    fn reports_computer_device_type() {
+        assert_eq!(device(None).wire_device_type(), DeviceType::Computer);
     }
 
     #[tokio::test]

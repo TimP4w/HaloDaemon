@@ -162,6 +162,7 @@ pub fn code(d: &WireDevice) -> std::borrow::Cow<'static, str> {
         DeviceType::Ram => t!("device_code.ram"),
         DeviceType::Sensor => t!("device_code.sensor"),
         DeviceType::Speaker => t!("device_code.speaker"),
+        DeviceType::Computer => t!("device_code.computer"),
         DeviceType::Other => t!("device_code.other"),
     }
 }
@@ -190,6 +191,7 @@ pub fn device_type_label(ty: DeviceType) -> std::borrow::Cow<'static, str> {
         DeviceType::Ram => t!("device_type.ram"),
         DeviceType::Sensor => t!("device_type.sensor"),
         DeviceType::Speaker => t!("device_type.speaker"),
+        DeviceType::Computer => t!("device_type.computer"),
         DeviceType::Other => t!("device_type.other"),
     }
 }
@@ -461,7 +463,7 @@ mod tests {
         assert_eq!(transport_label(&d), "Wired");
     }
 
-    const ALL_TYPES: [DeviceType; 15] = [
+    const ALL_TYPES: [DeviceType; 16] = [
         DeviceType::Other,
         DeviceType::Fan,
         DeviceType::Hub,
@@ -477,6 +479,7 @@ mod tests {
         DeviceType::Sensor,
         DeviceType::AIO,
         DeviceType::Speaker,
+        DeviceType::Computer,
     ];
 
     #[test]

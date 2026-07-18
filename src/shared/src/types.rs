@@ -1717,6 +1717,7 @@ pub enum DeviceType {
     Sensor,
     AIO,
     Speaker,
+    Computer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

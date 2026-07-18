@@ -68,6 +68,7 @@ fn device_svg(ty: DeviceType) -> &'static [u8] {
         DeviceType::Hub => include_bytes!("../../assets/icons/devices/hub.svg"),
         DeviceType::Dongle => include_bytes!("../../assets/icons/devices/dongle.svg"),
         DeviceType::Speaker => include_bytes!("../../assets/icons/devices/speaker.svg"),
+        DeviceType::Computer => include_bytes!("../../assets/icons/devices/computer.svg"),
         DeviceType::Sensor => include_bytes!("../../assets/icons/devices/sensor.svg"),
         DeviceType::Motherboard => include_bytes!("../../assets/icons/devices/motherboard.svg"),
         DeviceType::Other => include_bytes!("../../assets/icons/devices/other.svg"),
@@ -75,7 +76,7 @@ fn device_svg(ty: DeviceType) -> &'static [u8] {
 }
 
 #[cfg(test)]
-const DEVICE_TYPES: [DeviceType; 15] = [
+const DEVICE_TYPES: [DeviceType; 16] = [
     DeviceType::Keyboard,
     DeviceType::Mouse,
     DeviceType::Headset,
@@ -88,6 +89,7 @@ const DEVICE_TYPES: [DeviceType; 15] = [
     DeviceType::Hub,
     DeviceType::Dongle,
     DeviceType::Speaker,
+    DeviceType::Computer,
     DeviceType::Sensor,
     DeviceType::Motherboard,
     DeviceType::Other,
