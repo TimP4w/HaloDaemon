@@ -936,6 +936,8 @@ pub enum Permission {
     AmdSmn,
     /// Spawn one of the executable names advertised by the command transport.
     Command,
+    /// Open the serial/COM port scoped by the plugin's declared serial transport.
+    Serial,
     /// Open network connections (e.g. a TCP client to a local SDK server).
     Network,
     /// Reach OS-level primitives beyond pure computation (currently: clock
@@ -1485,6 +1487,15 @@ pub struct PluginDeviceInfo {
     pub device_type: Option<DeviceType>,
 }
 
+/// One host serial port offered to the GUI dropdown for a `serial_port` config
+/// field. `value` is the string to store (a replug-stable `/dev/serial/by-id`
+/// path when available); `label` is the human description.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerialPortInfo {
+    pub value: String,
+    pub label: String,
+}
+
 /// Interpretation hint for a [`PluginConfigField`] value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1496,6 +1507,9 @@ pub enum PluginConfigFieldKind {
     Enum,
     Host,
     Port,
+    /// A serial/COM port path, offered as a dropdown of the host's available
+    /// ports (with a free-text fallback for a stable by-id path).
+    SerialPort,
     Url,
     DurationMs,
 }

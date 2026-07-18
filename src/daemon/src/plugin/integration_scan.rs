@@ -42,6 +42,15 @@ fn sanitize(value: &str) -> String {
 /// Stable device id for an integration root. TCP roots include their endpoint;
 /// local host integrations use a fixed headless root id.
 fn root_device_id(manifest: &PluginManifest, config: &crate::plugin::ResolvedConfig) -> String {
+    // A serial root's stable identity is the configured port (ideally a
+    // replug-stable /dev/serial/by-id path), sanitized into the device id.
+    if let Some(serial) = &manifest.transports.serial {
+        let port = config
+            .get(&serial.port_key)
+            .map(crate::plugin::ResolvedConfigValue::to_config_string)
+            .unwrap_or_default();
+        return format!("{}-{}", manifest.id_prefix(), sanitize(&port));
+    }
     if manifest.transports.tcp.is_none() {
         return format!("{}-integration", manifest.id_prefix());
     }

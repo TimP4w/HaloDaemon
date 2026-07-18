@@ -123,6 +123,16 @@ pub async fn get_lcd_preset(
     Ok(())
 }
 
+/// Enumerate the host's serial ports for a `serial_port` config-field dropdown.
+pub async fn list_serial_ports(client: ClientHandle) -> Result<()> {
+    let ports = crate::drivers::transports::serial::list_ports();
+    client.send_json(&json!({
+        "type": "serial_ports",
+        "ports": ports,
+    }));
+    Ok(())
+}
+
 /// Return current Linux udev-rule drift without modifying system files.
 pub async fn get_udev_rules_status(client: ClientHandle, app: Arc<AppState>) -> Result<()> {
     client.send_json(&json!({

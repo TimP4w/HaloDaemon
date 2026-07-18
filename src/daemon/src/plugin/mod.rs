@@ -789,6 +789,7 @@ fn resolved_config_value(
         PluginConfigFieldKind::Text
         | PluginConfigFieldKind::Enum
         | PluginConfigFieldKind::Host
+        | PluginConfigFieldKind::SerialPort
         | PluginConfigFieldKind::Url => Some(ResolvedConfigValue::String(value.to_owned())),
     }
 }

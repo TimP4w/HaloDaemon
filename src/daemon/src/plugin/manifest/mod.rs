@@ -105,6 +105,100 @@ impl Default for TcpConfig {
     }
 }
 
+/// Serial line parity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SerialParity {
+    #[default]
+    None,
+    Odd,
+    Even,
+}
+
+/// A config-instantiated serial/COM byte-stream transport. Like [`TcpConfig`],
+/// the port is chosen by the user through a named config field (`port_key`) — the
+/// declaration holds the line settings and authority, never the port literal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SerialConfig {
+    /// `config` field whose value is the selected port path (e.g. `/dev/ttyUSB0`
+    /// or `COM3`), or the stable by-id identity from discovery.
+    #[serde(default = "default_serial_port_key")]
+    pub port_key: String,
+    #[serde(default = "default_serial_baud")]
+    pub baud: u32,
+    #[serde(default = "default_serial_data_bits")]
+    pub data_bits: u8,
+    #[serde(default)]
+    pub parity: SerialParity,
+    #[serde(default = "default_serial_stop_bits")]
+    pub stop_bits: u8,
+    #[serde(default = "default_serial_timeout_ms")]
+    pub read_timeout_ms: u64,
+    /// Initial DTR line state asserted on open; unset leaves the driver default.
+    #[serde(default)]
+    pub dtr: Option<bool>,
+    /// Initial RTS line state asserted on open; unset leaves the driver default.
+    #[serde(default)]
+    pub rts: Option<bool>,
+    /// Clear the input buffer once on open so stale bytes don't corrupt the first
+    /// framed read.
+    #[serde(default)]
+    pub flush_on_open: bool,
+    /// Reopen the port automatically after an I/O failure (unplug/replug).
+    #[serde(default)]
+    pub reconnect: bool,
+    /// Deliver unsolicited inbound bytes to the plugin's `event()` callback.
+    #[serde(default)]
+    pub events: bool,
+    /// Upper bound on a single `read`/`write` payload and on the buffered event
+    /// queue, so a chatty device can't exhaust memory.
+    #[serde(default = "default_serial_max_bytes")]
+    pub max_bytes: usize,
+    /// Per-port write ceiling, mirroring the other transports.
+    #[serde(default)]
+    pub max_bytes_per_sec: Option<u32>,
+}
+
+fn default_serial_port_key() -> String {
+    "serial_port".to_owned()
+}
+fn default_serial_baud() -> u32 {
+    115_200
+}
+fn default_serial_data_bits() -> u8 {
+    8
+}
+fn default_serial_stop_bits() -> u8 {
+    1
+}
+fn default_serial_timeout_ms() -> u64 {
+    1_000
+}
+fn default_serial_max_bytes() -> usize {
+    64 * 1024
+}
+
+impl Default for SerialConfig {
+    fn default() -> Self {
+        Self {
+            port_key: default_serial_port_key(),
+            baud: default_serial_baud(),
+            data_bits: default_serial_data_bits(),
+            parity: SerialParity::None,
+            stop_bits: default_serial_stop_bits(),
+            read_timeout_ms: default_serial_timeout_ms(),
+            dtr: None,
+            rts: None,
+            flush_on_open: false,
+            reconnect: false,
+            events: false,
+            max_bytes: default_serial_max_bytes(),
+            max_bytes_per_sec: None,
+        }
+    }
+}
+
 fn default_http_methods() -> Vec<String> {
     vec!["GET".to_owned()]
 }
@@ -381,6 +475,8 @@ pub struct TransportsConfig {
     #[serde(default)]
     pub hwmon: Option<HwmonConfig>,
     #[serde(default)]
+    pub serial: Option<SerialConfig>,
+    #[serde(default)]
     pub amd_smn: Option<AmdSmnConfig>,
     #[serde(default)]
     pub lpcio: Option<LpcioConfig>,
@@ -395,6 +491,7 @@ impl TransportsConfig {
             && self.usb.is_none()
             && self.command.is_none()
             && self.hwmon.is_none()
+            && self.serial.is_none()
             && self.amd_smn.is_none()
             && self.lpcio.is_none()
             && self.http.is_none()
@@ -408,6 +505,7 @@ impl TransportsConfig {
             self.tcp.is_some().then_some("tcp"),
             self.hwmon.is_some().then_some("hwmon"),
             self.command.is_some().then_some("command"),
+            self.serial.is_some().then_some("serial"),
         ]
         .into_iter()
         .flatten()
@@ -1541,7 +1639,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 && manifest.transports.http.is_none()
             {
                 bail!(
-                    "integration plugin must declare a tcp, hwmon, or command transport, or an http capability"
+                    "integration plugin must declare a tcp, hwmon, serial, or command transport, or an http capability"
                 );
             }
             if manifest.transports.hid.is_some()
@@ -1603,6 +1701,26 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     }
     if manifest.transports.usb.is_some() && !manifest.permissions.contains(&Permission::Usb) {
         bail!("a usb transport requires the 'usb' permission to be declared");
+    }
+    if let Some(serial) = &manifest.transports.serial {
+        if !manifest.permissions.contains(&Permission::Serial) {
+            bail!("a serial transport requires the 'serial' permission to be declared");
+        }
+        if serial.port_key.is_empty() {
+            bail!("a serial transport requires a non-empty port_key");
+        }
+        if serial.baud == 0 {
+            bail!("a serial transport requires a non-zero baud");
+        }
+        if !(5..=8).contains(&serial.data_bits) {
+            bail!("serial data_bits must be between 5 and 8");
+        }
+        if !(1..=2).contains(&serial.stop_bits) {
+            bail!("serial stop_bits must be 1 or 2");
+        }
+        if serial.max_bytes == 0 {
+            bail!("serial max_bytes must be non-zero");
+        }
     }
     validate_http_transport(manifest)?;
     validate_component("plugin id", &manifest.plugin_id)?;
@@ -2836,6 +2954,17 @@ pub(super) fn validate_config_value(field: &ConfigFieldDef, value: &str) -> Resu
             }
             None
         }
+        PluginConfigFieldKind::SerialPort => {
+            // A port path/by-id string; the selectable values come from host
+            // enumeration, so only reject control characters that can't be a path.
+            reject_bounds(field)?;
+            anyhow::ensure!(
+                !value.contains(['\0', '\n', '\r']),
+                "config '{}' is not a valid serial port",
+                field.key
+            );
+            None
+        }
         PluginConfigFieldKind::Url => {
             reject_bounds(field)?;
             if !value.is_empty() {
@@ -3770,6 +3899,55 @@ mod tests {
             manifest.transports.integration_transport_kind(),
             Some("hwmon")
         );
+    }
+
+    #[test]
+    fn serial_integration_is_valid_and_selects_the_serial_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "serial_ok",
+            "type: integration\npermissions: [serial]\ntransports:\n  serial:\n    port_key: serial_port\n    baud: 9600\n    parity: even\nconfig:\n  fields:\n    - { key: serial_port, label: Port, kind: serial_port }\n",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest.transports.integration_transport_kind(),
+            Some("serial")
+        );
+        let serial = manifest.transports.serial.as_ref().unwrap();
+        assert_eq!(serial.baud, 9600);
+        assert_eq!(serial.parity, SerialParity::Even);
+    }
+
+    #[test]
+    fn serial_transport_requires_the_serial_permission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "serial_no_perm",
+            "type: integration\ntransports:\n  serial:\n    port_key: serial_port\nconfig:\n  fields:\n    - { key: serial_port, label: Port, kind: serial_port }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&dir)
+            .unwrap_err()
+            .to_string()
+            .contains("serial"));
+    }
+
+    #[test]
+    fn serial_transport_rejects_out_of_range_line_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "serial_bad_bits",
+            "type: integration\npermissions: [serial]\ntransports:\n  serial:\n    port_key: serial_port\n    data_bits: 9\nconfig:\n  fields:\n    - { key: serial_port, label: Port, kind: serial_port }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&dir)
+            .unwrap_err()
+            .to_string()
+            .contains("data_bits"));
     }
 
     #[test]

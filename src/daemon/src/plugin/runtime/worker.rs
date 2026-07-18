@@ -980,10 +980,7 @@ impl PluginHandle {
     pub async fn on_transport_events(&self) -> Result<Vec<PollOutcome>> {
         self.run(|ctx, dev, _| {
             let transport = match &ctx.transport {
-                PluginIo::Stream { transport, .. } => match transport.as_hid() {
-                    Some(hid) => hid,
-                    None => return Ok(Vec::new()),
-                },
+                PluginIo::Stream { transport, .. } => transport,
                 _ => return Ok(Vec::new()),
             };
             let events = ctx
@@ -1652,6 +1649,11 @@ mod tests {
             Default::default()
         }
         fn set_write_rate_limit(&self, _limit: Option<halod_shared::types::WriteRateLimit>) {}
+        async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+            let mut events = self.events.lock().unwrap();
+            let count = events.len().min(limit);
+            Ok(events.drain(..count).collect())
+        }
     }
 
     #[async_trait::async_trait]
@@ -1667,11 +1669,6 @@ mod tests {
         }
         async fn read_companion(&self, _size: usize) -> Result<Vec<u8>> {
             Ok(Vec::new())
-        }
-        async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
-            let mut events = self.events.lock().unwrap();
-            let count = events.len().min(limit);
-            Ok(events.drain(..count).collect())
         }
     }
 

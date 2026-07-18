@@ -505,6 +505,18 @@ impl Transport for HidTransport {
     fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
         self.io.set_limit(limit);
     }
+
+    fn event_receiver(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.events.wake.subscribe())
+    }
+
+    async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+        Ok(self.events.drain(limit))
+    }
+
+    fn enable_event_listener(&self) -> Result<()> {
+        self.start_event_listener()
+    }
 }
 
 #[async_trait]
@@ -656,18 +668,6 @@ impl HidTransportTrait for HidTransport {
 
     fn has_companion(&self) -> bool {
         self.io.read_access().companion.is_some()
-    }
-
-    fn event_receiver(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
-        Some(self.events.wake.subscribe())
-    }
-
-    async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
-        Ok(self.events.drain(limit))
-    }
-
-    fn enable_event_listener(&self) -> Result<()> {
-        self.start_event_listener()
     }
 }
 

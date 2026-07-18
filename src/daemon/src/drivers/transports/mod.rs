@@ -8,6 +8,7 @@ pub mod hwmon;
 pub mod lpcio;
 pub mod mock;
 pub mod register_ops;
+pub mod serial;
 pub mod smbus;
 pub mod tcp;
 pub mod usb;
@@ -116,6 +117,12 @@ pub trait Transport: Send + Sync {
         None
     }
 
+    /// Expose serial line-control (DTR/RTS/BREAK/flush) when this byte stream is
+    /// a serial port, the same downcast pattern as [`Self::as_hid`].
+    fn as_serial(&self) -> Option<&dyn serial::SerialControl> {
+        None
+    }
+
     /// Live write-rate limit and throughput. No default: every implementor
     /// (including test mocks) must back this with a real `Metered` gate
     /// rather than silently reporting nothing — a device generic over
@@ -123,6 +130,29 @@ pub trait Transport: Send + Sync {
     fn rate_status(&self) -> WriteRateStatus;
 
     fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>);
+
+    // ── Unsolicited-input events ─────────────────────────────────────────
+    // A stream that pushes reports the plugin didn't request (HID input
+    // reports, serial bytes) implements these three; the worker drives the
+    // same event path for any stream. Non-event transports keep the defaults.
+
+    /// Subscribe to dispatcher wakeups for event-driven transports. Request
+    /// reads use a separate input handle and never consume this event stream.
+    fn event_receiver(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
+
+    /// Drain unsolicited input in arrival order for delivery to Lua `event()`.
+    async fn drain_events(&self, _limit: usize) -> Result<Vec<TransportEvent>> {
+        Ok(Vec::new())
+    }
+
+    /// Start dispatching unsolicited input. The listener opens a dedicated input
+    /// handle lazily; request/reply reads retain their own. Called only when the
+    /// owning plugin declares an `event()` callback.
+    fn enable_event_listener(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// HID-only byte-stream operations, including companion collections and
@@ -196,24 +226,6 @@ pub trait HidTransport: Transport {
 
     fn has_companion(&self) -> bool {
         false
-    }
-
-    /// Subscribe to dispatcher wakeups for event-driven transports. Request
-    /// reads use a separate input handle and never consume this event stream.
-    fn event_receiver(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
-        None
-    }
-
-    /// Drain unsolicited input in arrival order for delivery to Lua `event()`.
-    async fn drain_events(&self, _limit: usize) -> Result<Vec<TransportEvent>> {
-        Ok(Vec::new())
-    }
-
-    /// Start dispatching unsolicited input reports. HID opens a dedicated
-    /// event handle lazily; request/reply reads retain their own input handle.
-    /// Called only when the owning plugin declares an `event()` callback.
-    fn enable_event_listener(&self) -> Result<()> {
-        Ok(())
     }
 }
 

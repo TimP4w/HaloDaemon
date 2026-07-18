@@ -41,6 +41,7 @@ inventory  = "0.3"
 # `serialize` bridges manifest tables straight into serde types.
 mlua       = { version = "0.10", features = ["lua54", "vendored", "serialize"] }
 rusb       = { version = "0.9" }
+serialport = "4"
 uuid       = { version = "1", features = ["v4"] }
 base64     = "0.22"
 image      = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }

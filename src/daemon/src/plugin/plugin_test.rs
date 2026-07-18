@@ -63,6 +63,10 @@ struct RecordingStream {
     reads: Mutex<std::collections::VecDeque<Vec<u8>>>,
     deferred: Mutex<std::collections::VecDeque<Vec<u8>>>,
     companion: bool,
+    /// Serial line-control calls (`set_dtr`/`set_rts`/`send_break`/`flush_input`)
+    /// recorded in order, so a serial package's `test.lua` can drive them without
+    /// erroring and a future assertion helper can inspect them.
+    serial_ops: Mutex<Vec<String>>,
     rate: Metered<()>,
 }
 
@@ -77,6 +81,7 @@ impl RecordingStream {
             reads: Mutex::new(reads.into()),
             deferred: Mutex::new(std::collections::VecDeque::new()),
             companion,
+            serial_ops: Mutex::new(Vec::new()),
             rate: Metered::new((), None),
         }
     }
@@ -121,12 +126,28 @@ impl Transport for RecordingStream {
         Some(self)
     }
 
+    fn as_serial(&self) -> Option<&dyn crate::drivers::transports::serial::SerialControl> {
+        Some(self)
+    }
+
     fn rate_status(&self) -> WriteRateStatus {
         self.rate.status()
     }
 
     fn set_write_rate_limit(&self, limit: Option<WriteRateLimit>) {
         self.rate.set_limit(limit);
+    }
+
+    async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+        let mut deferred = self.deferred.lock().expect("recording stream poisoned");
+        let count = deferred.len().min(limit);
+        Ok(deferred
+            .drain(..count)
+            .map(|data| TransportEvent {
+                endpoint: "deferred",
+                data,
+            })
+            .collect())
     }
 }
 
@@ -164,24 +185,46 @@ impl HidTransport for RecordingStream {
         Ok(())
     }
 
-    async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
-        let mut deferred = self.deferred.lock().expect("recording stream poisoned");
-        let count = deferred.len().min(limit);
-        Ok(deferred
-            .drain(..count)
-            .map(|data| TransportEvent {
-                endpoint: "deferred",
-                data,
-            })
-            .collect())
-    }
-
     fn has_companion(&self) -> bool {
         self.companion
     }
 
     async fn read_companion(&self, size: usize) -> Result<Vec<u8>> {
         self.read(size).await
+    }
+}
+
+impl crate::drivers::transports::serial::SerialControl for RecordingStream {
+    fn set_dtr(&self, level: bool) -> Result<()> {
+        self.serial_ops
+            .lock()
+            .expect("recording stream poisoned")
+            .push(format!("set_dtr({level})"));
+        Ok(())
+    }
+
+    fn set_rts(&self, level: bool) -> Result<()> {
+        self.serial_ops
+            .lock()
+            .expect("recording stream poisoned")
+            .push(format!("set_rts({level})"));
+        Ok(())
+    }
+
+    fn send_break(&self, duration_ms: u64) -> Result<()> {
+        self.serial_ops
+            .lock()
+            .expect("recording stream poisoned")
+            .push(format!("send_break({duration_ms})"));
+        Ok(())
+    }
+
+    fn flush_input(&self) -> Result<()> {
+        self.serial_ops
+            .lock()
+            .expect("recording stream poisoned")
+            .push("flush_input".to_owned());
+        Ok(())
     }
 }
 
@@ -464,6 +507,7 @@ fn attach_http_methods(
                 item.set("method", req.method.clone())?;
                 item.set("origin", req.origin.clone())?;
                 item.set("path", req.path.clone())?;
+                item.set("body", lua.create_string(&req.body)?)?;
                 out.set(i + 1, item)?;
             }
             Ok(out)
@@ -935,9 +979,46 @@ fn integration_child_table(
                     item.set("id", zone.id.clone())?;
                     item.set("name", zone.name.clone())?;
                     item.set("led_count", zone.led_count)?;
+                    item.set("topology", zone.topology.clone())?;
+                    let leds = lua.create_table()?;
+                    for (l, led) in zone.leds.iter().enumerate() {
+                        let led_t = lua.create_table()?;
+                        led_t.set("id", led.id)?;
+                        led_t.set("x", led.x)?;
+                        led_t.set("y", led.y)?;
+                        leds.set(l + 1, led_t)?;
+                    }
+                    item.set("leds", leds)?;
                     channels.set(i + 1, item)?;
                 }
                 Ok((outcome.ok, channels))
+            })?,
+        )?;
+    }
+    {
+        let child = child.clone();
+        let handle = handle.clone();
+        table.set(
+            "write_frame",
+            lua.create_function(move |_, (_self, channel, bytes): (Table, String, Table)| {
+                let bytes: Vec<u8> = bytes
+                    .sequence_values::<u8>()
+                    .filter_map(Result::ok)
+                    .collect();
+                handle
+                    .block_on(child.write_lighting_frame(&channel, &bytes))
+                    .map_err(mlua_err)
+            })?,
+        )?;
+    }
+    {
+        let child = child.clone();
+        let handle = handle.clone();
+        table.set(
+            "apply",
+            lua.create_function(move |_, (_self, state): (Table, Table)| {
+                let rgb_state = table_to_rgb_state(&state).map_err(mlua_err)?;
+                handle.block_on(child.rgb_apply(rgb_state)).map_err(mlua_err)
             })?,
         )?;
     }

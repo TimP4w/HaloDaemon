@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use egui::Stroke;
-use halod_shared::types::{PluginConfigField, PluginConfigFieldKind, PluginInfo};
+use halod_shared::types::{PluginConfigField, PluginConfigFieldKind, PluginInfo, SerialPortInfo};
 
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::theme;
@@ -20,6 +20,7 @@ enum ConfigEditor {
     Enum,
     Host,
     Port,
+    SerialPort,
     Url,
     DurationMs,
 }
@@ -32,6 +33,7 @@ fn config_editor(kind: PluginConfigFieldKind) -> ConfigEditor {
         PluginConfigFieldKind::Enum => ConfigEditor::Enum,
         PluginConfigFieldKind::Host => ConfigEditor::Host,
         PluginConfigFieldKind::Port => ConfigEditor::Port,
+        PluginConfigFieldKind::SerialPort => ConfigEditor::SerialPort,
         PluginConfigFieldKind::Url => ConfigEditor::Url,
         PluginConfigFieldKind::DurationMs => ConfigEditor::DurationMs,
     }
@@ -89,12 +91,13 @@ pub fn config_section(
     ui: &mut egui::Ui,
     p: &PluginInfo,
     edits: &mut HashMap<String, String>,
+    serial_ports: &[SerialPortInfo],
     mut on_save: impl FnMut(HashMap<String, String>),
 ) {
     widgets::caps_label(ui, &t!("plugins.settings"));
     ui.add_space(theme::SPACE_4);
 
-    config_fields_editor(ui, p, edits);
+    config_fields_editor(ui, p, edits, serial_ports);
 
     ui.add_space(theme::SPACE_6);
     let save = ui
@@ -125,6 +128,7 @@ pub fn config_fields_editor(
     ui: &mut egui::Ui,
     p: &PluginInfo,
     edits: &mut HashMap<String, String>,
+    serial_ports: &[SerialPortInfo],
 ) {
     let mut groups: std::collections::BTreeMap<String, Vec<&PluginConfigField>> =
         std::collections::BTreeMap::new();
@@ -159,7 +163,7 @@ pub fn config_fields_editor(
                         field_separator(ui);
                     }
                     first = false;
-                    config_field_row(ui, p, f, edits);
+                    config_field_row(ui, p, f, edits, serial_ports);
                 }
             }
         });
@@ -171,6 +175,7 @@ fn config_field_row(
     p: &PluginInfo,
     f: &PluginConfigField,
     edits: &mut HashMap<String, String>,
+    serial_ports: &[SerialPortInfo],
 ) {
     let secret_set = f.secure && p.secret_set.get(&f.key).copied().unwrap_or(false);
     const INPUT_COL: f32 = 220.0;
@@ -244,6 +249,33 @@ fn config_field_row(
                     });
                 return;
             }
+            ConfigEditor::SerialPort => {
+                // Dropdown of enumerated host ports; the current value stays the
+                // selected text so a stale/hand-typed by-id path survives an
+                // unplug, and the popup carries a free-text field so a path that
+                // was never enumerated (or an empty list) can still be entered.
+                let selected = serial_ports
+                    .iter()
+                    .find(|port| &port.value == buf)
+                    .map(|port| port.label.clone())
+                    .unwrap_or_else(|| buf.clone());
+                egui::ComboBox::from_id_salt(("plugin_config", &f.key))
+                    .selected_text(selected)
+                    .width(200.0)
+                    .show_ui(&mut right, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(buf)
+                                .hint_text("/dev/serial/by-id/… or COM3"),
+                        );
+                        if !serial_ports.is_empty() {
+                            ui.separator();
+                        }
+                        for port in serial_ports {
+                            ui.selectable_value(buf, port.value.clone(), &port.label);
+                        }
+                    });
+                return;
+            }
             _ => {}
         }
     }
@@ -267,7 +299,10 @@ fn config_field_row(
             ConfigEditor::Port => Some("1–65535"),
             ConfigEditor::Url => Some("https://example.com"),
             ConfigEditor::DurationMs => Some("milliseconds"),
-            ConfigEditor::Text | ConfigEditor::Boolean | ConfigEditor::Enum => None,
+            ConfigEditor::Text
+            | ConfigEditor::Boolean
+            | ConfigEditor::Enum
+            | ConfigEditor::SerialPort => None,
         };
         if let Some(hint) = hint {
             edit = edit.hint_text(hint);

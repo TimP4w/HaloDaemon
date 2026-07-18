@@ -89,6 +89,11 @@ pub struct App {
     pub(crate) plugin_updates_cache: Vec<halod_shared::types::PluginUpdateStatus>,
     /// Remote branch lists keyed by repo URL, for the Add-repository picker.
     pub(crate) repo_branches_cache: std::collections::HashMap<String, Vec<String>>,
+    /// Host serial ports, for the `serial_port` config-field dropdown.
+    pub(crate) serial_ports_cache: Vec<halod_shared::types::SerialPortInfo>,
+    /// Set once we've requested the serial-port list, so we ask the daemon at
+    /// most once per session instead of every frame a picker is visible.
+    pub(crate) serial_ports_requested: bool,
 }
 
 impl App {
@@ -155,6 +160,8 @@ impl App {
             repo_updates_cache: Vec::new(),
             repo_branches_cache: std::collections::HashMap::new(),
             plugin_updates_cache: Vec::new(),
+            serial_ports_cache: Vec::new(),
+            serial_ports_requested: false,
         }
     }
 

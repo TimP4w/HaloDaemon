@@ -88,6 +88,11 @@ impl App {
         {
             self.repo_branches_cache = branches;
         }
+        if let Some(ports) =
+            crate::runtime::ipc::take_changed(&mut self.ui.serial_ports, "serial_ports")
+        {
+            self.serial_ports_cache = ports;
+        }
         let lcd_preview = if let Page::Device(ref id) = self.page {
             self.ui.lcd_frames.borrow().get(id).cloned()
         } else {
@@ -461,8 +466,20 @@ impl App {
                         );
                     }
                     Page::Integrations => {
-                        self.integrations_ui
-                            .show(ui, &state, &self.cmd, &plugin_assets);
+                        if !self.serial_ports_requested {
+                            self.serial_ports_requested = true;
+                            crate::runtime::ipc::send(
+                                &self.cmd,
+                                halod_shared::commands::DaemonCommand::ListSerialPorts,
+                            );
+                        }
+                        self.integrations_ui.show(
+                            ui,
+                            &state,
+                            &self.cmd,
+                            &plugin_assets,
+                            &self.serial_ports_cache,
+                        );
                     }
                     Page::Profile(name) => {
                         let name = name.clone();

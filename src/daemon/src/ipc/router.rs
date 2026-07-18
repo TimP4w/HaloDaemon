@@ -658,6 +658,9 @@ async fn dispatch(
         DaemonCommand::GetLcdPluginPreset { catalog_id } => {
             plugin::usecases::plugins::get_lcd_preset(catalog_id, client, app).await
         }
+        DaemonCommand::ListSerialPorts => {
+            plugin::usecases::plugins::list_serial_ports(client).await
+        }
 
         DaemonCommand::CanvasUpsertEffect { instance_id, def } => {
             lighting::usecases::canvas::upsert_effect(instance_id, def, app).await

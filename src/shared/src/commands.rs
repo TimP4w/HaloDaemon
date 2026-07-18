@@ -415,6 +415,9 @@ pub enum DaemonCommand {
     GetLcdPluginPreset {
         catalog_id: String,
     },
+    /// Enumerate the host's serial ports; the daemon replies with a
+    /// `serial_ports` frame for a `serial_port` config-field dropdown.
+    ListSerialPorts,
 
     // Canvas
     CanvasUpsertEffect {

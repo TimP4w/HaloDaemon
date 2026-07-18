@@ -57,6 +57,9 @@ pub struct IntegrationsUi {
     setup_candidate: Option<String>,
     opened_oauth_urls: HashSet<String>,
     reset_confirm: Option<(String, String)>,
+    /// Host serial ports for the `serial_port` config dropdown, mirrored from the
+    /// App's cache each frame so the deep config renderers can read them.
+    serial_ports: Vec<halod_shared::types::SerialPortInfo>,
 }
 
 /// How many devices an integration currently exposes, and whether its root
@@ -125,7 +128,9 @@ impl IntegrationsUi {
         state: &AppState,
         cmd: &CommandTx,
         plugin_assets: &HashMap<String, Vec<u8>>,
+        serial_ports: &[halod_shared::types::SerialPortInfo],
     ) {
+        self.serial_ports = serial_ports.to_vec();
         self.sync_logos(ui.ctx(), cmd, &state.plugins.plugins, plugin_assets);
         widgets::page_frame(ui, |ui| self.body(ui, state, cmd));
         self.reset_setup_modal(ui.ctx(), cmd);
@@ -323,7 +328,7 @@ impl IntegrationsUi {
                 ui.add_space(theme::SPACE_6);
                 seed_config_edit_if_needed(&mut self.config_edit, &p.id, &p.config_values);
                 let edits = &mut self.config_edit.as_mut().expect("just seeded above").1;
-                config_section(ui, p, edits, |values| {
+                config_section(ui, p, edits, &self.serial_ports, |values| {
                     crate::runtime::ipc::send(
                         cmd,
                         halod_shared::commands::DaemonCommand::SetIntegrationConfig {
@@ -494,7 +499,7 @@ impl IntegrationsUi {
         ui.add_space(theme::SPACE_5);
         seed_config_edit_if_needed(&mut self.config_edit, &plugin.id, &plugin.config_values);
         let edits = &mut self.config_edit.as_mut().expect("setup edit seeded").1;
-        config_fields_editor(ui, plugin, edits);
+        config_fields_editor(ui, plugin, edits, &self.serial_ports);
         ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
             if widgets::button(
                 ui,

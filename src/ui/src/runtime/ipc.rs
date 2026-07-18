@@ -88,6 +88,9 @@ pub struct UiRx {
     /// Remote branch lists keyed by the repo URL they were fetched for; empty
     /// until the Add-repository picker requests one via `ListRepoBranches`.
     pub repo_branches: watch::Receiver<HashMap<String, Vec<String>>>,
+    /// Host serial ports for the `serial_port` config-field dropdown; empty until
+    /// a config screen requests one via `ListSerialPorts`.
+    pub serial_ports: watch::Receiver<Vec<halod_shared::types::SerialPortInfo>>,
     /// Stage/percent of the in-flight LCD image upload; `None` when idle.
     pub lcd_upload: watch::Receiver<Option<LcdUploadProgress>>,
     /// The most recently loaded named LCD template, pushed in response to
@@ -112,6 +115,7 @@ pub(crate) struct UiTx {
     plugin_updates: watch::Sender<Vec<PluginUpdateStatus>>,
     udev_rules: watch::Sender<Option<halod_shared::types::UdevRulesStatus>>,
     repo_branches: watch::Sender<HashMap<String, Vec<String>>>,
+    serial_ports: watch::Sender<Vec<halod_shared::types::SerialPortInfo>>,
     lcd_upload: watch::Sender<Option<LcdUploadProgress>>,
     lcd_template: watch::Sender<Option<(String, CustomTemplateDef)>>,
     lcd_editor_render: watch::Sender<Option<DecodedEditorRender>>,
@@ -174,6 +178,7 @@ fn channels() -> (UiTx, UiRx) {
     let (plugin_updates_s, plugin_updates_r) = watch::channel(Vec::new());
     let (udev_rules_s, udev_rules_r) = watch::channel(None);
     let (repo_branches_s, repo_branches_r) = watch::channel(HashMap::new());
+    let (serial_ports_s, serial_ports_r) = watch::channel(Vec::new());
     let (upload_s, upload_r) = watch::channel(None);
     let (template_s, template_r) = watch::channel(None);
     let (editor_render_s, editor_render_r) = watch::channel(None);
@@ -192,6 +197,7 @@ fn channels() -> (UiTx, UiRx) {
         plugin_updates: plugin_updates_s,
         udev_rules: udev_rules_s,
         repo_branches: repo_branches_s,
+        serial_ports: serial_ports_s,
         lcd_upload: upload_s,
         lcd_template: template_s,
         lcd_editor_render: editor_render_s,
@@ -210,6 +216,7 @@ fn channels() -> (UiTx, UiRx) {
         plugin_updates: plugin_updates_r,
         udev_rules: udev_rules_r,
         repo_branches: repo_branches_r,
+        serial_ports: serial_ports_r,
         lcd_upload: upload_r,
         lcd_template: template_r,
         lcd_editor_render: editor_render_r,
@@ -616,6 +623,16 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             repaint();
             return false;
         }
+        Some("serial_ports") => {
+            if let Some(ports) = value
+                .get("ports")
+                .and_then(|p| serde_json::from_value::<Vec<halod_shared::types::SerialPortInfo>>(p.clone()).ok())
+            {
+                tx.serial_ports.send_replace(ports);
+                repaint();
+            }
+            return false;
+        }
         Some("repo_branches") => {
             let url = value.get("url").and_then(|u| u.as_str());
             let branches: Option<Vec<String>> = value
@@ -700,6 +717,7 @@ mod tests {
             plugin_updates: watch::channel(Vec::new()).0,
             udev_rules: watch::channel(None).0,
             repo_branches: watch::channel(HashMap::new()).0,
+            serial_ports: watch::channel(Vec::new()).0,
             lcd_upload: upload_s,
             lcd_template: watch::channel(None).0,
             lcd_editor_render: watch::channel(None).0,

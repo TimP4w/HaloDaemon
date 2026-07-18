@@ -19,6 +19,7 @@ use mlua::LuaSerdeExt;
 use mlua::{Function, UserData, UserDataMethods, Value};
 use tokio::runtime::Handle;
 
+use crate::drivers::transports::serial::SerialControl;
 use crate::drivers::transports::smbus::SmBusSyncOps;
 use crate::drivers::transports::usb::{UsbCollection, UsbControlResult};
 use crate::drivers::transports::{HidTransport, Transport};
@@ -52,6 +53,12 @@ impl TransportApi {
     fn hid(&self) -> mlua::Result<&dyn HidTransport> {
         self.stream()?.as_hid().ok_or_else(|| {
             mlua::Error::RuntimeError("this byte stream is not a HID transport".into())
+        })
+    }
+
+    fn serial(&self) -> mlua::Result<&dyn SerialControl> {
+        self.stream()?.as_serial().ok_or_else(|| {
+            mlua::Error::RuntimeError("this byte stream is not a serial port".into())
         })
     }
 
@@ -216,6 +223,20 @@ impl UserData for TransportApi {
 
         methods.add_method("has_companion", |_, this, ()| {
             Ok(this.hid()?.has_companion())
+        });
+
+        // ── Serial line control ──────────────────────────────────────────
+        methods.add_method("set_dtr", |_, this, level: bool| {
+            this.serial()?.set_dtr(level).map_err(to_lua_err)
+        });
+        methods.add_method("set_rts", |_, this, level: bool| {
+            this.serial()?.set_rts(level).map_err(to_lua_err)
+        });
+        methods.add_method("send_break", |_, this, duration_ms: u64| {
+            this.serial()?.send_break(duration_ms).map_err(to_lua_err)
+        });
+        methods.add_method("flush_input", |_, this, ()| {
+            this.serial()?.flush_input().map_err(to_lua_err)
         });
 
         methods.add_method("write_many", |_, this, packets: Vec<Value>| {
