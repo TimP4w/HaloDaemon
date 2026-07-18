@@ -17,3 +17,39 @@ integrations:
   issue_runtime_error: Errore di esecuzione
   issue_details: Dettagli
   issue_modal_title: "Problema dell'integrazione: %{integration}"
+  # finestra di associazione / configurazione
+  setup_connect: "Connetti %{name}"
+  setup_step_discover: Cerca
+  setup_step_prepare: Configura
+  setup_step_pair: Associa
+  setup_step_done: Fatto
+  setup_method_title: Come vuoi che Halo trovi il dispositivo?
+  setup_method_sub: Scegli come Halo deve individuare il dispositivo nella rete locale.
+  setup_method_auto: Trova automaticamente
+  setup_method_auto_desc: Cerca nella rete locale tramite il servizio di rilevamento dell'integrazione.
+  setup_method_manual: Inserisci i dati di connessione
+  setup_method_manual_desc: Inserisci manualmente l'indirizzo e gli altri dati richiesti.
+  setup_auto_title: Trova automaticamente un dispositivo
+  setup_auto_sub: Halo cercherà sulla rete locale i dispositivi compatibili.
+  setup_search: Cerca
+  setup_manual_title: Inserisci i dati di connessione
+  setup_manual_sub: Inserisci le informazioni necessarie a Halo per connettersi al dispositivo.
+  setup_continue: Continua
+  setup_choose_device: Scegli un dispositivo
+  setup_found_on_network: Dispositivi trovati nella rete locale
+  setup_no_devices: Nessun dispositivo trovato
+  setup_no_devices_hint: "Assicurati che il dispositivo sia acceso e connesso alla stessa rete. Poi aggiorna l'elenco o inserisci manualmente i dati."
+  setup_enter_manually: Inserisci manualmente
+  setup_refresh: Aggiorna
+  setup_pairing_fallback: "Associazione…"
+  setup_pairing_wait: In attesa di una risposta dal dispositivo.
+  setup_pair_title_fallback: Metti il dispositivo in modalità di associazione
+  setup_start_pairing: Avvia associazione
+  setup_back: Indietro
+  setup_authorize_title: Autorizza nel browser
+  setup_authorize_sub: Halo è in attesa che completi l'autorizzazione nel browser.
+  setup_open_browser: Apri il browser
+  setup_connected: "Connessione a %{name} completata"
+  setup_connected_sub: Il dispositivo è ora disponibile nell'area di lavoro.
+  setup_failed: Configurazione non riuscita
+  setup_finish: Chiudi

@@ -17,3 +17,39 @@ integrations:
   issue_runtime_error: Runtime error
   issue_details: Details
   issue_modal_title: "Integration issue: %{integration}"
+  # pairing / setup modal
+  setup_connect: "Connect %{name}"
+  setup_step_discover: Discover
+  setup_step_prepare: Prepare
+  setup_step_pair: Pair
+  setup_step_done: Done
+  setup_method_title: How would you like Halo to find the device?
+  setup_method_sub: Choose how Halo should locate the device on your local network.
+  setup_method_auto: Find automatically
+  setup_method_auto_desc: Search your local network using the integration's discovery service.
+  setup_method_manual: Enter connection details
+  setup_method_manual_desc: Enter the address and any required details yourself.
+  setup_auto_title: Find a device automatically
+  setup_auto_sub: Halo will search the local network for compatible devices.
+  setup_search: Search
+  setup_manual_title: Enter connection details
+  setup_manual_sub: Provide the information Halo needs to connect to the device.
+  setup_continue: Continue
+  setup_choose_device: Choose a device
+  setup_found_on_network: Devices found on your local network
+  setup_no_devices: No devices found
+  setup_no_devices_hint: "Make sure the device is turned on and connected to the same network. Then refresh the list or enter the details manually."
+  setup_enter_manually: Enter manually
+  setup_refresh: Refresh
+  setup_pairing_fallback: "Pairing…"
+  setup_pairing_wait: Waiting for a response from the device.
+  setup_pair_title_fallback: Put the device in pairing mode
+  setup_start_pairing: Start pairing
+  setup_back: Back
+  setup_authorize_title: Authorize in your browser
+  setup_authorize_sub: Halo is waiting for you to complete authorization in your browser.
+  setup_open_browser: Open browser
+  setup_connected: "Connected to %{name}"
+  setup_connected_sub: The device is now available in your workspace.
+  setup_failed: Setup failed
+  setup_finish: Close

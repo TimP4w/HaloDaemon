@@ -97,14 +97,18 @@ pub fn config_section(
     config_fields_editor(ui, p, edits);
 
     ui.add_space(theme::SPACE_6);
-    if widgets::button(
-        ui,
-        &t!("plugins.save_settings"),
-        ButtonKind::Primary,
-        egui::Vec2::new(140.0, 30.0),
-    )
-    .clicked()
-    {
+    let save = ui
+        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            widgets::button(
+                ui,
+                &t!("plugins.save_settings"),
+                ButtonKind::Primary,
+                egui::Vec2::new(140.0, 30.0),
+            )
+            .clicked()
+        })
+        .inner;
+    if save {
         let values = config_values_to_send(edits, &p.config_fields);
         on_save(values);
         for f in &p.config_fields {

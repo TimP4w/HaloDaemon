@@ -406,7 +406,7 @@ impl IntegrationsUi {
             return;
         };
         let mut close = false;
-        let title = format!("Connect {}", plugin.name);
+        let title = t!("integrations.setup_connect", name = plugin.name).to_string();
         let time = ctx.input(|i| i.time) as f32;
         let dismissed =
             widgets::modal_frame_raw(ctx, "integration_setup", &title, 620.0, 500.0, |ui| {
@@ -442,15 +442,15 @@ impl IntegrationsUi {
         cmd: &CommandTx,
     ) {
         if setup.selected_mode.is_none() && setup.modes.len() > 1 {
-            step_heading(ui, "How should Halo find it?");
-            step_subtext(ui, "Choose how to locate the device on your network.");
+            step_heading(ui, &t!("integrations.setup_method_title"));
+            step_subtext(ui, &t!("integrations.setup_method_sub"));
             ui.add_space(theme::SPACE_6);
             if setup.modes.contains(&IntegrationSetupMode::Automatic)
                 && option_card(
                     ui,
                     paint_scan_icon,
-                    "Find automatically",
-                    "Scan the local network using this integration's discovery services.",
+                    &t!("integrations.setup_method_auto"),
+                    &t!("integrations.setup_method_auto_desc"),
                 )
             {
                 send_setup_mode(cmd, &plugin.id, IntegrationSetupMode::Automatic);
@@ -460,8 +460,8 @@ impl IntegrationsUi {
                 && option_card(
                     ui,
                     paint_fields_icon,
-                    "Enter details",
-                    "Type the address and required values yourself.",
+                    &t!("integrations.setup_method_manual"),
+                    &t!("integrations.setup_method_manual_desc"),
                 )
             {
                 send_setup_mode(cmd, &plugin.id, IntegrationSetupMode::Manual);
@@ -473,29 +473,36 @@ impl IntegrationsUi {
             .or_else(|| setup.modes.first().copied())
             .unwrap_or(IntegrationSetupMode::Manual);
         if mode == IntegrationSetupMode::Automatic {
-            step_heading(ui, "Find automatically");
-            step_subtext(
-                ui,
-                "Halo will search the local network for compatible devices.",
-            );
+            step_heading(ui, &t!("integrations.setup_auto_title"));
+            step_subtext(ui, &t!("integrations.setup_auto_sub"));
             ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
-                if widgets::button(ui, "Search", ButtonKind::Primary, egui::vec2(110.0, 40.0))
-                    .clicked()
+                if widgets::button(
+                    ui,
+                    &t!("integrations.setup_search"),
+                    ButtonKind::Primary,
+                    egui::vec2(110.0, 40.0),
+                )
+                .clicked()
                 {
                     send_setup_mode(cmd, &plugin.id, mode);
                 }
             });
             return;
         }
-        step_heading(ui, "Connection details");
-        step_subtext(ui, "Enter the values Halo needs to reach the device.");
+        step_heading(ui, &t!("integrations.setup_manual_title"));
+        step_subtext(ui, &t!("integrations.setup_manual_sub"));
         ui.add_space(theme::SPACE_5);
         seed_config_edit_if_needed(&mut self.config_edit, &plugin.id, &plugin.config_values);
         let edits = &mut self.config_edit.as_mut().expect("setup edit seeded").1;
         config_fields_editor(ui, plugin, edits);
         ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
-            if widgets::button(ui, "Continue", ButtonKind::Primary, egui::vec2(110.0, 40.0))
-                .clicked()
+            if widgets::button(
+                ui,
+                &t!("integrations.setup_continue"),
+                ButtonKind::Primary,
+                egui::vec2(110.0, 40.0),
+            )
+            .clicked()
             {
                 let values = config_values_to_send(edits, &plugin.config_fields);
                 crate::runtime::ipc::send(
@@ -518,7 +525,7 @@ impl IntegrationsUi {
         cmd: &CommandTx,
         time: f32,
     ) {
-        step_heading(ui, "Choose a device");
+        step_heading(ui, &t!("integrations.setup_choose_device"));
         // While the worker is still probing, the daemon keeps `message` set and
         // `candidates` empty (see the integration setup usecase).
         if let Some(message) = &setup.message {
@@ -526,7 +533,7 @@ impl IntegrationsUi {
             scanning_card(ui, message, time);
             return;
         }
-        step_subtext(ui, "Found on your local network");
+        step_subtext(ui, &t!("integrations.setup_found_on_network"));
         ui.add_space(theme::SPACE_5);
         if let Some(error) = &setup.error {
             self.setup_error_bar(ui, plugin, error);
@@ -535,8 +542,8 @@ impl IntegrationsUi {
         if setup.candidates.is_empty() {
             empty_state(
                 ui,
-                "No devices found",
-                "Make sure the device is powered and on the same network, then refresh — or enter the details manually.",
+                &t!("integrations.setup_no_devices"),
+                &t!("integrations.setup_no_devices_hint"),
             );
         } else {
             egui::ScrollArea::vertical()
@@ -556,7 +563,7 @@ impl IntegrationsUi {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
             ui.horizontal(|ui| {
                 let ready = self.setup_candidate.is_some();
-                if setup_primary(ui, "Continue", ready) {
+                if setup_primary(ui, &t!("integrations.setup_continue"), ready) {
                     if let Some(candidate_id) = self.setup_candidate.clone() {
                         crate::runtime::ipc::send(
                             cmd,
@@ -571,7 +578,7 @@ impl IntegrationsUi {
                 if setup.modes.contains(&IntegrationSetupMode::Manual)
                     && widgets::button(
                         ui,
-                        "Enter manually",
+                        &t!("integrations.setup_enter_manually"),
                         ButtonKind::Ghost,
                         egui::vec2(130.0, 40.0),
                     )
@@ -579,8 +586,13 @@ impl IntegrationsUi {
                 {
                     send_setup_mode(cmd, &plugin.id, IntegrationSetupMode::Manual);
                 }
-                if widgets::button(ui, "Refresh", ButtonKind::Ghost, egui::vec2(90.0, 40.0))
-                    .clicked()
+                if widgets::button(
+                    ui,
+                    &t!("integrations.setup_refresh"),
+                    ButtonKind::Ghost,
+                    egui::vec2(90.0, 40.0),
+                )
+                .clicked()
                 {
                     send_setup_mode(cmd, &plugin.id, IntegrationSetupMode::Automatic);
                 }
@@ -603,14 +615,15 @@ impl IntegrationsUi {
                 theme::glow(ui.painter(), rect.center(), 44.0, theme::PROGRESS_A, 0.28);
                 widgets::paint_spinner(ui.painter(), rect.center(), 46.0, time);
                 ui.add_space(theme::SPACE_9);
+                let pairing = t!("integrations.setup_pairing_fallback");
                 ui.label(
-                    RichText::new(setup.message.as_deref().unwrap_or("Pairing…"))
+                    RichText::new(setup.message.as_deref().unwrap_or(&pairing))
                         .font(theme::bold(18.0))
                         .color(theme::TEXT),
                 );
                 ui.add_space(theme::SPACE_3);
                 ui.label(
-                    RichText::new("Waiting for the device to respond.")
+                    RichText::new(t!("integrations.setup_pairing_wait"))
                         .font(theme::body_md())
                         .color(theme::TEXT_MUT),
                 );
@@ -624,12 +637,12 @@ impl IntegrationsUi {
             if self.opened_oauth_urls.insert(url.clone()) {
                 let _ = webbrowser::open(url);
             }
-            step_heading(ui, "Authorize in your browser");
-            step_subtext(ui, "Halo is waiting for the secure OAuth2 callback.");
+            step_heading(ui, &t!("integrations.setup_authorize_title"));
+            step_subtext(ui, &t!("integrations.setup_authorize_sub"));
             ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
                 if widgets::button(
                     ui,
-                    "Open browser",
+                    &t!("integrations.setup_open_browser"),
                     ButtonKind::Primary,
                     egui::vec2(140.0, 40.0),
                 )
@@ -640,13 +653,8 @@ impl IntegrationsUi {
             });
             return;
         }
-        step_heading(
-            ui,
-            setup
-                .title
-                .as_deref()
-                .unwrap_or("Put the device in pairing mode"),
-        );
+        let pair_title = t!("integrations.setup_pair_title_fallback");
+        step_heading(ui, setup.title.as_deref().unwrap_or(&pair_title));
         ui.add_space(theme::SPACE_6);
         pairing_hero(ui, &plugin.name, time);
         ui.add_space(theme::SPACE_8);
@@ -662,7 +670,7 @@ impl IntegrationsUi {
             ui.horizontal(|ui| {
                 if widgets::button(
                     ui,
-                    "Start pairing",
+                    &t!("integrations.setup_start_pairing"),
                     ButtonKind::Primary,
                     egui::vec2(140.0, 40.0),
                 )
@@ -675,7 +683,13 @@ impl IntegrationsUi {
                         },
                     );
                 }
-                if widgets::button(ui, "Back", ButtonKind::Ghost, egui::vec2(90.0, 40.0)).clicked()
+                if widgets::button(
+                    ui,
+                    &t!("integrations.setup_back"),
+                    ButtonKind::Ghost,
+                    egui::vec2(90.0, 40.0),
+                )
+                .clicked()
                 {
                     send_setup_mode(
                         cmd,
@@ -715,8 +729,19 @@ impl IntegrationsUi {
     }
 }
 
-/// The rail's four stages, and the zero-based index of the one now active.
-const RAIL_STEPS: [&str; 4] = ["Discover", "Prepare", "Pair", "Done"];
+/// The rail's four stages; the index of the active one comes from [`rail_step`].
+const RAIL_STEP_COUNT: usize = 4;
+
+/// Localized uppercase label for rail stage `i`.
+fn rail_label(i: usize) -> String {
+    match i {
+        0 => t!("integrations.setup_step_discover"),
+        1 => t!("integrations.setup_step_prepare"),
+        2 => t!("integrations.setup_step_pair"),
+        _ => t!("integrations.setup_step_done"),
+    }
+    .to_uppercase()
+}
 
 fn rail_step(setup: &halod_shared::types::IntegrationSetupStatus) -> usize {
     match setup.phase {
@@ -736,29 +761,33 @@ fn rail_step(setup: &halod_shared::types::IntegrationSetupStatus) -> usize {
 fn setup_rail(ui: &mut egui::Ui, setup: &halod_shared::types::IntegrationSetupStatus) {
     let cur = rail_step(setup);
     let gap = theme::SPACE_5;
-    let cell = ((ui.available_width() - gap * (RAIL_STEPS.len() as f32 - 1.0))
-        / RAIL_STEPS.len() as f32)
+    let cell = ((ui.available_width() - gap * (RAIL_STEP_COUNT as f32 - 1.0))
+        / RAIL_STEP_COUNT as f32)
         .max(1.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
-        for (i, label) in RAIL_STEPS.iter().enumerate() {
-            ui.vertical(|ui| {
-                ui.set_width(cell);
-                widgets::progress_bar(ui, cell, 4.0, Some(if i <= cur { 1.0 } else { 0.0 }));
-                ui.add_space(theme::SPACE_3);
-                let color = if i == cur {
-                    theme::PROGRESS_A
-                } else if i < cur {
-                    theme::TEXT_MUT
-                } else {
-                    theme::TEXT_FAINT2
-                };
-                ui.label(
-                    RichText::new(label.to_uppercase())
-                        .font(theme::micro())
-                        .color(color),
-                );
-            });
+        for i in 0..RAIL_STEP_COUNT {
+            // Center-align the cell so its label centers under its bar.
+            ui.allocate_ui_with_layout(
+                Vec2::new(cell, 0.0),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    widgets::progress_bar(ui, cell, 4.0, Some(if i <= cur { 1.0 } else { 0.0 }));
+                    ui.add_space(theme::SPACE_1);
+                    let color = if i == cur {
+                        theme::PROGRESS_A
+                    } else if i < cur {
+                        theme::TEXT_MUT
+                    } else {
+                        theme::TEXT_FAINT2
+                    };
+                    ui.label(
+                        RichText::new(rail_label(i))
+                            .font(theme::bold(10.5))
+                            .color(color),
+                    );
+                },
+            );
         }
     });
 }
@@ -884,16 +913,43 @@ fn device_row(ui: &mut egui::Ui, name: &str, id: &str, selected: bool) -> bool {
         .corner_radius(theme::RADIUS_MD)
         .inner_margin(Margin::symmetric(14, 12))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            // `ui.horizontal` cross-centers each item against the tallest (the
-            // name+id block), so the status dot and radio sit on its midline —
-            // `egui::Sides` top-aligns the shorter side instead.
-            ui.horizontal(|ui| {
-                let (dot, _) = ui.allocate_exact_size(Vec2::splat(9.0), Sense::hover());
-                theme::glow(ui.painter(), dot.center(), 5.0, theme::ONLINE, 0.7);
-                ui.painter().circle_filled(dot.center(), 4.5, theme::ONLINE);
-                ui.add_space(theme::SPACE_5);
-                ui.vertical(|ui| {
+            // Allocate one fixed-height row, then paint the dot and radio at
+            // `rect.center().y` — bulletproof vertical centering that layout
+            // cross-alignment kept getting wrong for the short right-hand widget.
+            let height = if id.is_empty() { 22.0 } else { 34.0 };
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+
+            let dot_c = Pos2::new(rect.left() + 4.5, rect.center().y);
+            theme::glow(ui.painter(), dot_c, 5.0, theme::ONLINE, 0.7);
+            ui.painter().circle_filled(dot_c, 4.5, theme::ONLINE);
+
+            let radio_c = Pos2::new(rect.right() - 10.0, rect.center().y);
+            let ring = if selected {
+                theme::CYAN
+            } else {
+                theme::TEXT_FAINT2
+            };
+            ui.painter()
+                .circle_stroke(radio_c, 9.0, Stroke::new(2.0, ring));
+            if selected {
+                ui.painter().circle_filled(radio_c, 5.0, theme::CYAN);
+            }
+
+            // Text block between dot and radio, vertically centered in the row.
+            let text_rect = Rect::from_min_max(
+                Pos2::new(rect.left() + 22.0, rect.top()),
+                Pos2::new(rect.right() - 30.0, rect.bottom()),
+            );
+            let mut text = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(text_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            text.allocate_ui_with_layout(
+                Vec2::new(text_rect.width(), 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
                     ui.label(
                         RichText::new(name)
                             .font(theme::heading())
@@ -906,25 +962,8 @@ fn device_row(ui: &mut egui::Ui, name: &str, id: &str, selected: bool) -> bool {
                                 .color(theme::TEXT_MUT),
                         );
                     }
-                });
-                ui.allocate_ui_with_layout(
-                    Vec2::new(ui.available_width(), 0.0),
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        let (r, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
-                        let ring = if selected {
-                            theme::CYAN
-                        } else {
-                            theme::TEXT_FAINT2
-                        };
-                        ui.painter()
-                            .circle_stroke(r.center(), 9.0, Stroke::new(2.0, ring));
-                        if selected {
-                            ui.painter().circle_filled(r.center(), 5.0, theme::CYAN);
-                        }
-                    },
-                );
-            });
+                },
+            );
         })
         .response
         .interact(Sense::click())
@@ -1061,13 +1100,13 @@ fn setup_done(
             widgets::success_check(ui, 68.0);
             ui.add_space(theme::SPACE_9);
             ui.label(
-                RichText::new(format!("{} connected", plugin.name))
+                RichText::new(t!("integrations.setup_connected", name = plugin.name))
                     .font(theme::bold(21.0))
                     .color(theme::TEXT),
             );
             ui.add_space(theme::SPACE_3);
             ui.label(
-                RichText::new("The device is connected and available in your workspace.")
+                RichText::new(t!("integrations.setup_connected_sub"))
                     .font(theme::body_md())
                     .color(theme::TEXT_DIM),
             );
@@ -1086,14 +1125,16 @@ fn setup_done(
             );
             ui.add_space(theme::SPACE_9);
             ui.label(
-                RichText::new("Setup failed")
+                RichText::new(t!("integrations.setup_failed"))
                     .font(theme::bold(21.0))
                     .color(theme::TEXT),
             );
             if let Some(error) = &setup.error {
+                // Only the first line, so a long trace never blows up the modal.
+                let short = error.lines().find(|line| !line.trim().is_empty());
                 ui.add_space(theme::SPACE_3);
                 ui.label(
-                    RichText::new(error)
+                    RichText::new(short.unwrap_or(error))
                         .font(theme::body_sm())
                         .color(theme::TEXT_MUT),
                 );
@@ -1101,7 +1142,14 @@ fn setup_done(
         }
     });
     ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
-        if widgets::button(ui, "Finish", ButtonKind::Primary, egui::vec2(110.0, 40.0)).clicked() {
+        if widgets::button(
+            ui,
+            &t!("integrations.setup_finish"),
+            ButtonKind::Primary,
+            egui::vec2(110.0, 40.0),
+        )
+        .clicked()
+        {
             finish = true;
         }
     });
