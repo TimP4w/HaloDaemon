@@ -1779,7 +1779,7 @@ fn validate_http_transport(manifest: &PluginManifest) -> Result<()> {
 /// An origin is an exact `scheme://host[:port]` — no path, query, credentials,
 /// or wildcards. `https` is always allowed; plain `http` only when the plugin
 /// opted into `allow_private` (LAN devices that speak cleartext).
-fn validate_http_origin(origin: &str, allow_private: bool) -> Result<()> {
+pub(crate) fn validate_http_origin(origin: &str, allow_private: bool) -> Result<()> {
     let (scheme, authority) = origin
         .split_once("://")
         .ok_or_else(|| anyhow::anyhow!("http origin '{origin}' must be scheme://host[:port]"))?;
@@ -1795,12 +1795,31 @@ fn validate_http_origin(origin: &str, allow_private: bool) -> Result<()> {
     {
         bail!("http origin '{origin}' must be exactly scheme://host[:port]");
     }
-    if let Some((host, port)) = authority.rsplit_once(':') {
-        if host.is_empty() {
-            bail!("http origin '{origin}' has an empty host");
-        }
-        if port.parse::<u16>().is_err() {
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let (address, suffix) = bracketed
+            .split_once(']')
+            .context("bracketed http origin is missing its closing bracket")?;
+        address
+            .parse::<std::net::Ipv6Addr>()
+            .with_context(|| format!("http origin '{origin}' has an invalid IPv6 address"))?;
+        if !suffix.is_empty()
+            && (suffix
+                .strip_prefix(':')
+                .is_none_or(|port| port.is_empty() || port.parse::<u16>().is_err()))
+        {
             bail!("http origin '{origin}' has an invalid port");
+        }
+    } else {
+        if authority.contains(['[', ']']) {
+            bail!("http origin '{origin}' has malformed address brackets");
+        }
+        if let Some((host, port)) = authority.rsplit_once(':') {
+            if host.is_empty() {
+                bail!("http origin '{origin}' has an empty host");
+            }
+            if port.parse::<u16>().is_err() {
+                bail!("http origin '{origin}' has an invalid port");
+            }
         }
     }
     Ok(())

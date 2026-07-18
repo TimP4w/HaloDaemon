@@ -216,6 +216,23 @@ fn validate_candidates(
     Ok(())
 }
 
+fn validate_pair_result_values(
+    manifest: &crate::plugin::manifest::PluginManifest,
+    values: &HashMap<String, String>,
+) -> Result<()> {
+    for (key, value) in values {
+        if value.is_empty()
+            && manifest
+                .config_fields()
+                .iter()
+                .any(|field| field.secure && &field.key == key)
+        {
+            bail!("pair() returned an empty credential for secure field '{key}'");
+        }
+    }
+    Ok(())
+}
+
 pub async fn submit_setup(
     id: String,
     candidate_id: Option<String>,
@@ -297,6 +314,12 @@ pub async fn retry_pairing(id: String, app: Arc<AppState>) -> Result<()> {
         return Ok(());
     }
     if app.registry.integration_setup_status(&id).is_none() {
+        return Ok(());
+    }
+    if let Err(error) = validate_pair_result_values(&manifest, &result.values) {
+        status.message = None;
+        status.error = Some(error.to_string());
+        publish_setup(&app, &id, status).await;
         return Ok(());
     }
     super::plugins::persist_config_values(&id, &result.values, &app).await?;
@@ -765,6 +788,72 @@ mod tests {
 
             assert_eq!(app.devices.read().await.len(), 1);
             assert!(!unrelated.closed.load(Ordering::SeqCst));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pairing_rejects_an_empty_secure_credential() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let plugin_dir = dir.path().join("empty_pair");
+            std::fs::create_dir_all(&plugin_dir).unwrap();
+            std::fs::write(
+                plugin_dir.join("plugin.yaml"),
+                "id: empty_pair\ntype: integration\npermissions: [network, secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    methods: [POST]\nsetup:\n  modes: [manual]\n  auth:\n    kind: button\n    title: Pair\n    instructions: [Press the button]\nconfig:\n  fields:\n    - { key: host, label: Host, default: api.example.com }\n    - { key: token, label: Token, secure: true }\n",
+            )
+            .unwrap();
+            std::fs::write(
+                plugin_dir.join("main.lua"),
+                "return {\n  pair = function(_) return { ok = true, values = { token = '' } } end,\n  validate = function(_) return { ok = true } end,\n}",
+            )
+            .unwrap();
+            app.registry.load_all(dir.path());
+
+            let authority = app
+                .registry
+                .list(app.secret_store.as_ref())
+                .into_iter()
+                .find(|plugin| plugin.id == "empty_pair")
+                .unwrap()
+                .authority;
+            {
+                // Keep the temporary registry loaded; the production enable
+                // helper reconciles from configured repository paths.
+                let mut cfg = app.config.write().await;
+                cfg.plugins
+                    .accepted_authorities
+                    .insert("empty_pair".into(), authority.normalized());
+                cfg.plugins.enabled.push("empty_pair".into());
+                app.registry.replace_policy(&cfg.plugins);
+            }
+
+            begin_setup("empty_pair".into(), app.clone()).await.unwrap();
+            select_setup_mode(
+                "empty_pair".into(),
+                IntegrationSetupMode::Manual,
+                app.clone(),
+            )
+            .await
+            .unwrap();
+            submit_setup("empty_pair".into(), None, HashMap::new(), app.clone())
+                .await
+                .unwrap();
+            retry_pairing("empty_pair".into(), app.clone())
+                .await
+                .unwrap();
+
+            let status = app
+                .registry
+                .integration_setup_status("empty_pair")
+                .unwrap();
+            assert_eq!(status.phase, IntegrationSetupPhase::Pairing);
+            assert!(status
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("empty credential")));
+            assert_eq!(app.secret_store.get("empty_pair", "token").unwrap(), None);
+            assert!(!app.registry.integration_is_configured("empty_pair"));
         })
         .await;
     }

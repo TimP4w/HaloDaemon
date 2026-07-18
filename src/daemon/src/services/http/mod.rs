@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,14 +88,25 @@ impl HttpPolicy {
     /// request — safer than reaching an unintended address.
     pub fn from_config(config: &HttpConfig, host: Option<&str>, identity: Option<&str>) -> Self {
         let host = host.map(str::trim).filter(|h| !h.is_empty());
+        let origin_host = host.map(origin_authority);
         let origins = config
             .origins
             .iter()
             .filter_map(|origin| {
-                if origin.contains("{host}") {
-                    host.map(|h| origin.replace("{host}", h))
+                let resolved = if origin.contains("{host}") {
+                    origin_host
+                        .as_deref()
+                        .map(|authority| origin.replace("{host}", authority))
                 } else {
                     Some(origin.clone())
+                }?;
+                if let Err(error) =
+                    crate::plugin::manifest::validate_http_origin(&resolved, config.allow_private)
+                {
+                    log::warn!("dropping malformed resolved HTTP origin '{resolved}': {error:#}");
+                    None
+                } else {
+                    Some(resolved)
                 }
             })
             .collect();
@@ -166,6 +177,14 @@ impl HttpPolicy {
     }
     pub fn tls_profile(&self) -> &str {
         &self.tls_profile
+    }
+}
+
+fn origin_authority(host: &str) -> String {
+    if host.parse::<IpAddr>().is_ok_and(|ip| ip.is_ipv6()) {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
     }
 }
 
@@ -250,6 +269,10 @@ impl ureq::Resolver for NetGuardResolver {
             .as_ref()
             .filter(|(identity, _)| identity.eq_ignore_ascii_case(host))
             .map(|(_, connect_host)| connect_host.as_str())
+            .unwrap_or(host);
+        let host = host
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
             .unwrap_or(host);
         let addr = net_guard::resolve_vetted_addr(host, port, self.allow_private).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string())
@@ -574,6 +597,42 @@ mod tests {
     }
 
     #[test]
+    fn resolved_host_must_remain_an_exact_origin_authority() {
+        let config = HttpConfig {
+            origins: vec!["http://{host}".into()],
+            host_key: Some("host".into()),
+            methods: vec!["GET".into()],
+            max_request_bytes: 1024,
+            max_response_bytes: 1024,
+            max_timeout_ms: 1000,
+            max_concurrency: 1,
+            allow_private: true,
+            tls: None,
+        };
+        let valid = HttpPolicy::from_config(&config, Some("192.168.1.50:16021"), None);
+        assert_eq!(valid.origins, ["http://192.168.1.50:16021"]);
+
+        let ipv6 =
+            HttpPolicy::from_config(&config, Some("2a04:ee41:4:2168:eeb5:faff:fe2c:f912"), None);
+        assert_eq!(
+            ipv6.origins,
+            ["http://[2a04:ee41:4:2168:eeb5:faff:fe2c:f912]"]
+        );
+
+        for malformed in [
+            "192.168.1.50/api",
+            "192.168.1.50?query",
+            "user@192.168.1.50",
+        ] {
+            let policy = HttpPolicy::from_config(&config, Some(malformed), None);
+            assert!(
+                policy.origins.is_empty(),
+                "accepted malformed host {malformed}"
+            );
+        }
+    }
+
+    #[test]
     fn request_timeout_is_preserved_or_clamped_to_policy() {
         let admitted = policy().admit(request(Vec::new())).unwrap();
         assert_eq!(admitted.timeout, Duration::from_secs(1));
@@ -582,5 +641,32 @@ mod tests {
         long.timeout = Duration::from_secs(30);
         let admitted = policy().admit(long).unwrap();
         assert_eq!(admitted.timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn request_scope_and_body_limits_are_enforced() {
+        let mut wrong_origin = request(Vec::new());
+        wrong_origin.origin = "https://other.example.com".into();
+        assert!(policy().admit(wrong_origin).is_err());
+
+        let mut wrong_method = request(Vec::new());
+        wrong_method.method = "GET".into();
+        assert!(policy().admit(wrong_method).is_err());
+
+        let mut oversized = request(Vec::new());
+        oversized.body = vec![0; 1025];
+        assert!(policy().admit(oversized).is_err());
+    }
+
+    #[test]
+    fn response_body_limit_is_enforced() {
+        let exact = ureq::Response::new(200, "OK", "1234").unwrap();
+        assert_eq!(read_response(exact, 4).unwrap().body, b"1234");
+
+        let oversized = ureq::Response::new(200, "OK", "12345").unwrap();
+        assert!(read_response(oversized, 4)
+            .unwrap_err()
+            .to_string()
+            .contains("max_response_bytes"));
     }
 }

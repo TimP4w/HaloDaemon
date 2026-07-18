@@ -239,6 +239,23 @@ fn write_recover<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 }
 
 impl Registry {
+    fn integration_manifest_eligible(
+        &self,
+        state: &PluginState,
+        manifest: &PluginManifest,
+        require_active_lifecycle: bool,
+    ) -> bool {
+        manifest.plugin_type == PluginKind::Integration
+            && manifest.supports_current_platform()
+            && !state.disabled.contains(&manifest.plugin_id)
+            && consent_satisfied_in(state, manifest)
+            && self.blocking_requirements_met(manifest)
+            && (!require_active_lifecycle
+                || (!state.integrations_disabled.contains(&manifest.plugin_id)
+                    && (manifest.setup.is_none()
+                        || state.integrations_configured.contains(&manifest.plugin_id))))
+    }
+
     pub fn content_revision(&self) -> u64 {
         self.content_revision
             .load(std::sync::atomic::Ordering::Acquire)
@@ -1145,15 +1162,7 @@ impl Registry {
         state
             .manifests
             .iter()
-            .filter(|m| {
-                m.plugin_type == PluginKind::Integration
-                    && m.supports_current_platform()
-                    && !state.integrations_disabled.contains(&m.plugin_id)
-                    && !state.disabled.contains(&m.plugin_id)
-                    && (m.setup.is_none() || state.integrations_configured.contains(&m.plugin_id))
-                    && consent_satisfied_in(&state, m)
-                    && self.blocking_requirements_met(m)
-            })
+            .filter(|manifest| self.integration_manifest_eligible(&state, manifest, true))
             .cloned()
             .collect()
     }
@@ -1177,13 +1186,9 @@ impl Registry {
         state
             .manifests
             .iter()
-            .find(|m| {
-                m.plugin_id == plugin_id
-                    && m.plugin_type == PluginKind::Integration
-                    && m.supports_current_platform()
-                    && !state.disabled.contains(plugin_id)
-                    && consent_satisfied_in(&state, m)
-                    && self.blocking_requirements_met(m)
+            .find(|manifest| {
+                manifest.plugin_id == plugin_id
+                    && self.integration_manifest_eligible(&state, manifest, false)
             })
             .cloned()
     }

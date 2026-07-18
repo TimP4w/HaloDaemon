@@ -1014,6 +1014,10 @@ mod tests {
             }),
             Some("ram")
         );
+        assert_eq!(
+            command_target(&DaemonCommand::RetryIntegrationPairing { id: "hue".into() }),
+            Some("hue")
+        );
         // Global commands run inline (no device lock) so a stuck device can't
         // stall them.
         assert_eq!(command_target(&DaemonCommand::CanvasStop), None);
