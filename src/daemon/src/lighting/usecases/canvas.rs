@@ -303,7 +303,6 @@ pub async fn remove_zone(device_id: String, channel_id: String, app: Arc<AppStat
 }
 
 /// Update the canvas position (and optionally size/rotation) of an existing zone.
-/// Called on every drag-end — skips broadcast to avoid flooding.
 #[allow(clippy::too_many_arguments)]
 pub async fn move_zone(
     device_id: String,
@@ -362,6 +361,11 @@ pub async fn move_zone(
         "zone '{channel_id}' is not placed on device '{device_id}'"
     );
 
+    // The UI keeps an optimistic transform until the daemon confirms the new
+    // placement. Before state deltas, the periodic full-state broadcast did
+    // that implicitly; the periodic delta only contains live device/cooling
+    // data, so canvas geometry must now be published explicitly.
+    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting]).await;
     Ok(())
 }
 
