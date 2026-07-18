@@ -106,7 +106,7 @@ pub fn recommendations(
         if !m.supports_current_platform() || is_enabled(&m.plugin_id) {
             continue;
         }
-        if m.plugin_id == "halo_effects" {
+        if m.plugin_id == "halo_effects" || m.plugin_id == "halo_lcd" {
             let hardware = PluginRecommendationMatch::Always;
             seen.insert((m.plugin_id.clone(), hardware.clone()));
             out.push(PluginRecommendation {
@@ -381,6 +381,19 @@ mod tests {
     fn stock_effects_are_always_recommended_when_disabled() {
         let m = manifest(
             "halo_effects",
+            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\n",
+        );
+        let recs = recommendations(&[m], &|_| false, &[], &[], &[], &|_| false);
+        assert!(matches!(
+            recs[0].hardware,
+            PluginRecommendationMatch::Always
+        ));
+    }
+
+    #[test]
+    fn stock_lcd_is_always_recommended_when_disabled() {
+        let m = manifest(
+            "halo_lcd",
             "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\n",
         );
         let recs = recommendations(&[m], &|_| false, &[], &[], &[], &|_| false);
