@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::types::{
-    ButtonMapping, EffectDef, EffectParamValue, LightingState, MacroStep, PluginAuthority,
-    SamplingMode, VisibilityState, ZoneTopology,
+    ButtonMapping, EffectDef, EffectParamValue, IntegrationSetupMode, LightingState, MacroStep,
+    PluginAuthority, SamplingMode, VisibilityState, ZoneTopology,
 };
 use crate::zone_transform::ZoneContentTransform;
 use serde::{Deserialize, Serialize};
@@ -195,12 +195,32 @@ pub enum DaemonCommand {
         id: String,
         values: HashMap<String, String>,
     },
-    /// Run an integration's manifest-declared, host-owned HTTP pairing exchange.
-    PairIntegration {
+    /// Open the daemon-owned setup flow for an integration.
+    BeginIntegrationSetup {
         id: String,
-        /// Current edits are persisted before the request, so Pair never uses
-        /// a stale saved host while the user has an unsaved address in the UI.
+    },
+    /// Delete an integration's persisted setup data and start its setup flow again.
+    ResetIntegrationSetup {
+        id: String,
+    },
+    /// Choose automatic discovery or manual configuration.
+    SelectIntegrationSetupMode {
+        id: String,
+        mode: IntegrationSetupMode,
+    },
+    /// Select an automatic candidate or submit manual/configuration values.
+    SubmitIntegrationSetup {
+        id: String,
+        candidate_id: Option<String>,
         values: HashMap<String, String>,
+    },
+    /// Retry the manifest-declared button-pairing hook.
+    RetryIntegrationPairing {
+        id: String,
+    },
+    /// Close and discard transient setup progress. Persisted credentials are untouched.
+    CancelIntegrationSetup {
+        id: String,
     },
     SetLogLevel {
         level: String,
@@ -827,6 +847,50 @@ mod tests {
         assert_eq!(
             v,
             json!({"type": "set_integration_config", "id": "openrgb", "values": {"host": "127.0.0.1"}})
+        );
+    }
+
+    #[test]
+    fn integration_setup_commands_have_stable_wire_formats() {
+        assert_eq!(
+            serde_json::to_value(DaemonCommand::BeginIntegrationSetup {
+                id: "nanoleaf".into(),
+            })
+            .unwrap(),
+            json!({"type": "begin_integration_setup", "id": "nanoleaf"})
+        );
+        assert_eq!(
+            serde_json::to_value(DaemonCommand::ResetIntegrationSetup {
+                id: "nanoleaf".into(),
+            })
+            .unwrap(),
+            json!({"type": "reset_integration_setup", "id": "nanoleaf"})
+        );
+        assert_eq!(
+            serde_json::to_value(DaemonCommand::SelectIntegrationSetupMode {
+                id: "nanoleaf".into(),
+                mode: crate::types::IntegrationSetupMode::Automatic,
+            })
+            .unwrap(),
+            json!({
+                "type": "select_integration_setup_mode",
+                "id": "nanoleaf",
+                "mode": "automatic"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(DaemonCommand::SubmitIntegrationSetup {
+                id: "nanoleaf".into(),
+                candidate_id: Some("device-1".into()),
+                values: HashMap::new(),
+            })
+            .unwrap(),
+            json!({
+                "type": "submit_integration_setup",
+                "id": "nanoleaf",
+                "candidate_id": "device-1",
+                "values": {}
+            })
         );
     }
 

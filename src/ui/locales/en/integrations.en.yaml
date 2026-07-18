@@ -5,6 +5,10 @@ integrations:
   empty_hint: You don't have any integrations yet.
   configure: Configure
   hide_configure: Hide
+  reset_setup: Reset setup
+  reset_setup_title: Reset integration setup?
+  reset_setup_confirm: "This removes the saved configuration and credentials for %{name}. The integration will be disabled until setup succeeds again."
+  reset_setup_action: Reset and configure
   status_connected: Connected
   status_connecting: Not connected
   status_disabled: Disabled

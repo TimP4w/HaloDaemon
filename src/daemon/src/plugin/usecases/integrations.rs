@@ -10,11 +10,534 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use anyhow::{bail, Context};
+use base64::Engine as _;
+use halod_shared::types::{
+    IntegrationAuthKind, IntegrationSetupMode, IntegrationSetupPhase, IntegrationSetupStatus,
+};
+use rand::RngCore;
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 use crate::plugin::integration_scan;
 use crate::registry::usecases::registration::unregister_device_and_children;
 use crate::state::AppState;
+
+fn setup_worker(
+    app: &Arc<AppState>,
+    manifest: &crate::plugin::manifest::PluginManifest,
+) -> crate::plugin::runtime::worker::PluginHandle {
+    let granted = app.registry.granted_for(&manifest.plugin_id);
+    let config =
+        app.registry
+            .resolved_config_for(app.secret_store.as_ref(), &manifest.plugin_id, &granted);
+    let http = crate::plugin::runtime::worker::http_runtime_for(manifest, &granted, &config);
+    crate::plugin::runtime::worker::PluginHandle::spawn_with_data(
+        manifest.script_source.clone(),
+        manifest.module_sources.clone(),
+        crate::plugin::runtime::transport::PluginIo::None,
+        crate::plugin::runtime::worker::DevMatch {
+            transport: "setup".into(),
+            ..Default::default()
+        },
+        granted,
+        config,
+        tokio::runtime::Handle::current(),
+        vec![],
+        Default::default(),
+        Default::default(),
+        http,
+    )
+}
+
+fn config_context(app: &Arc<AppState>, id: &str) -> serde_json::Value {
+    let granted = app.registry.granted_for(id);
+    let values = app
+        .registry
+        .resolved_config_for(app.secret_store.as_ref(), id, &granted)
+        .into_iter()
+        .map(|(key, value)| (key, value.to_config_string()))
+        .collect::<HashMap<_, _>>();
+    json!({ "config": values })
+}
+
+async fn publish_setup(app: &Arc<AppState>, id: &str, status: IntegrationSetupStatus) {
+    app.registry
+        .set_integration_setup_status(id.to_owned(), status);
+    crate::ipc::broadcast_state(app).await;
+}
+
+pub async fn begin_setup(id: String, app: Arc<AppState>) -> Result<()> {
+    let manifest = app
+        .registry
+        .setup_integration_manifest(&id)
+        .context("unknown, disabled, or unconsented integration")?;
+    let setup = manifest
+        .setup
+        .as_ref()
+        .context("integration does not require an interactive setup flow")?;
+    let (title, instructions) = match &setup.auth {
+        crate::plugin::manifest::IntegrationAuthConfig::Button {
+            title,
+            instructions,
+        } => (Some(title.clone()), instructions.clone()),
+        _ => (None, vec![]),
+    };
+    publish_setup(
+        &app,
+        &id,
+        IntegrationSetupStatus {
+            modes: setup.modes.clone(),
+            auth: setup.auth.kind(),
+            title,
+            instructions,
+            ..Default::default()
+        },
+    )
+    .await;
+    Ok(())
+}
+
+/// Return an integration to its pre-setup state, removing both plaintext
+/// connection values and host-stored credentials, then open a fresh flow.
+pub async fn reset_setup(id: String, app: Arc<AppState>) -> Result<()> {
+    let manifest = app
+        .registry
+        .setup_integration_manifest(&id)
+        .context("unknown, disabled, or unconsented integration")?;
+    if manifest.setup.is_none() {
+        bail!("integration does not have an interactive setup flow");
+    }
+
+    disable_one(&app, &id).await;
+    app.registry.clear_integration_operational_errors(&id);
+    app.registry.clear_integration_setup_status(&id);
+
+    for key in app.registry.secure_config_keys_for(&id) {
+        app.secret_store
+            .delete(&id, &key)
+            .with_context(|| format!("deleting secret '{key}' for integration '{id}'"))?;
+    }
+    {
+        let mut cfg = app.config.write().await;
+        cfg.plugins.config.remove(&id);
+        cfg.plugins
+            .integrations_configured
+            .retain(|configured| configured != &id);
+        cfg.plugins.integration_devices.remove(&id);
+        app.registry.replace_policy(&cfg.plugins);
+    }
+    app.request_config_save();
+    begin_setup(id, app).await
+}
+
+pub async fn select_setup_mode(
+    id: String,
+    mode: IntegrationSetupMode,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let manifest = app
+        .registry
+        .setup_integration_manifest(&id)
+        .context("unknown, disabled, or unconsented integration")?;
+    let setup = manifest
+        .setup
+        .as_ref()
+        .context("integration has no setup")?;
+    if !setup.modes.contains(&mode) {
+        bail!("integration does not support the selected setup mode");
+    }
+    let mut status = app
+        .registry
+        .integration_setup_status(&id)
+        .context("integration setup has not started")?;
+    status.selected_mode = Some(mode);
+    status.error = None;
+    if mode == IntegrationSetupMode::Manual {
+        status.phase = IntegrationSetupPhase::Init;
+        publish_setup(&app, &id, status).await;
+        return Ok(());
+    }
+    status.phase = IntegrationSetupPhase::Discovering;
+    status.message = Some("Searching for devices…".into());
+    status.candidates.clear();
+    publish_setup(&app, &id, status.clone()).await;
+    let candidates = match async {
+        let raw = crate::services::integration_discovery::scan(setup.discovery.clone()).await?;
+        let candidates = setup_worker(&app, &manifest).setup_discover(raw).await?;
+        validate_candidates(&manifest, &candidates)?;
+        Ok::<_, anyhow::Error>(candidates)
+    }
+    .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            status.message = None;
+            status.error = Some(error.to_string());
+            publish_setup(&app, &id, status).await;
+            return Ok(());
+        }
+    };
+    if app.registry.integration_setup_status(&id).is_none() {
+        return Ok(());
+    }
+    status.candidates = candidates;
+    status.message = None;
+    status.error = None;
+    publish_setup(&app, &id, status).await;
+    Ok(())
+}
+
+fn validate_candidates(
+    manifest: &crate::plugin::manifest::PluginManifest,
+    candidates: &[halod_shared::types::IntegrationSetupCandidate],
+) -> Result<()> {
+    let mut ids = std::collections::HashSet::new();
+    for candidate in candidates {
+        if candidate.id.trim().is_empty() || candidate.name.trim().is_empty() {
+            bail!("discover() returned a candidate without an id or name");
+        }
+        if !ids.insert(&candidate.id) {
+            bail!(
+                "discover() returned duplicate candidate id '{}'",
+                candidate.id
+            );
+        }
+        for key in candidate.values.keys() {
+            let declared = manifest
+                .config_fields()
+                .iter()
+                .any(|field| &field.key == key && !field.secure);
+            if !declared {
+                bail!("discover() returned undeclared config key '{key}'");
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn submit_setup(
+    id: String,
+    candidate_id: Option<String>,
+    mut values: HashMap<String, String>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let manifest = app
+        .registry
+        .setup_integration_manifest(&id)
+        .context("unknown, disabled, or unconsented integration")?;
+    let mut status = app
+        .registry
+        .integration_setup_status(&id)
+        .context("integration setup has not started")?;
+    if let Some(candidate_id) = candidate_id {
+        let candidate = status
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .context("unknown integration discovery candidate")?;
+        for (key, value) in &candidate.values {
+            values.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+        status.selected_candidate = Some(candidate_id);
+    }
+    super::plugins::persist_config_values(&id, &values, &app).await?;
+    app.request_config_save();
+    match manifest.setup.as_ref().map(|setup| setup.auth.kind()) {
+        Some(IntegrationAuthKind::Button) => {
+            status.phase = IntegrationSetupPhase::Pairing;
+            status.error = None;
+            publish_setup(&app, &id, status).await;
+        }
+        Some(IntegrationAuthKind::Oauth2Pkce) => {
+            start_oauth(manifest, status, app).await?;
+        }
+        _ => finish_setup(&id, &manifest, status, app).await?,
+    }
+    Ok(())
+}
+
+pub async fn retry_pairing(id: String, app: Arc<AppState>) -> Result<()> {
+    let manifest = app
+        .registry
+        .setup_integration_manifest(&id)
+        .context("unknown, disabled, or unconsented integration")?;
+    let mut status = app
+        .registry
+        .integration_setup_status(&id)
+        .context("integration setup has not started")?;
+    if status.auth != IntegrationAuthKind::Button {
+        bail!("integration does not use button pairing");
+    }
+    status.message = Some("Pairing…".into());
+    status.error = None;
+    publish_setup(&app, &id, status.clone()).await;
+    let result = match setup_worker(&app, &manifest)
+        .setup_pair(config_context(&app, &id))
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            if app.registry.integration_setup_status(&id).is_none() {
+                return Ok(());
+            }
+            status.message = None;
+            status.error = Some(error.to_string());
+            publish_setup(&app, &id, status).await;
+            return Ok(());
+        }
+    };
+    if result.pending || !result.ok {
+        if app.registry.integration_setup_status(&id).is_none() {
+            return Ok(());
+        }
+        status.message = None;
+        status.error = result.reason;
+        publish_setup(&app, &id, status).await;
+        return Ok(());
+    }
+    if app.registry.integration_setup_status(&id).is_none() {
+        return Ok(());
+    }
+    super::plugins::persist_config_values(&id, &result.values, &app).await?;
+    app.request_config_save();
+    finish_setup(&id, &manifest, status, app).await
+}
+
+async fn finish_setup(
+    id: &str,
+    manifest: &crate::plugin::manifest::PluginManifest,
+    mut status: IntegrationSetupStatus,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let validation = match setup_worker(&app, manifest)
+        .setup_validate(config_context(&app, id))
+        .await
+    {
+        Ok(validation) => validation,
+        Err(error) => crate::plugin::runtime::worker::SetupHookResult {
+            ok: false,
+            pending: false,
+            reason: Some(error.to_string()),
+            values: HashMap::new(),
+        },
+    };
+    status.phase = IntegrationSetupPhase::Done;
+    status.message = None;
+    status.success = validation.ok;
+    status.error = (!validation.ok).then(|| {
+        validation
+            .reason
+            .unwrap_or_else(|| "Validation failed".into())
+    });
+    if validation.ok {
+        {
+            let mut cfg = app.config.write().await;
+            if !cfg
+                .plugins
+                .integrations_configured
+                .iter()
+                .any(|item| item == id)
+            {
+                cfg.plugins.integrations_configured.push(id.to_owned());
+            }
+            if !cfg
+                .plugins
+                .integrations_enabled
+                .iter()
+                .any(|item| item == id)
+            {
+                cfg.plugins.integrations_enabled.push(id.to_owned());
+            }
+            if let Some(candidate) = &status.selected_candidate {
+                cfg.plugins
+                    .integration_devices
+                    .insert(id.to_owned(), candidate.clone());
+            }
+            app.registry.replace_policy(&cfg.plugins);
+        }
+        app.request_config_save();
+        enable_one(&app, id).await;
+    }
+    publish_setup(&app, id, status).await;
+    Ok(())
+}
+
+async fn start_oauth(
+    manifest: crate::plugin::manifest::PluginManifest,
+    mut status: IntegrationSetupStatus,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let crate::plugin::manifest::IntegrationAuthConfig::Oauth2Pkce {
+        authorization_url,
+        token_url,
+        client_id,
+        scopes,
+        access_token_key,
+        refresh_token_key,
+    } = manifest
+        .setup
+        .as_ref()
+        .context("integration has no setup")?
+        .auth
+        .clone()
+    else {
+        bail!("integration does not use OAuth2 PKCE");
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("binding OAuth2 loopback callback")?;
+    let redirect_uri = format!(
+        "http://127.0.0.1:{}/callback",
+        listener.local_addr()?.port()
+    );
+    let mut random = [0u8; 32];
+    rand::rng().fill_bytes(&mut random);
+    let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random);
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
+    let csrf = uuid::Uuid::new_v4().to_string();
+    let mut authorization = url::Url::parse(&authorization_url)?;
+    authorization
+        .query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &client_id)
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", &csrf);
+    if !scopes.is_empty() {
+        authorization
+            .query_pairs_mut()
+            .append_pair("scope", &scopes.join(" "));
+    }
+    status.phase = IntegrationSetupPhase::Pairing;
+    status.external_url = Some(authorization.into());
+    status.message = Some("Complete authorization in your browser…".into());
+    let id = manifest.plugin_id.clone();
+    publish_setup(&app, &id, status.clone()).await;
+    tokio::spawn(async move {
+        let result = async {
+            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(300), listener.accept())
+                .await
+                .context("OAuth2 authorization timed out")??;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = vec![0u8; 8192];
+            let length = stream.read(&mut request).await?;
+            let first_line = std::str::from_utf8(&request[..length])?
+                .lines()
+                .next()
+                .context("OAuth2 callback was empty")?;
+            let path = first_line
+                .split_whitespace()
+                .nth(1)
+                .context("OAuth2 callback request was malformed")?;
+            let callback = url::Url::parse(&format!("http://localhost{path}"))?;
+            let params: HashMap<String, String> = callback.query_pairs().into_owned().collect();
+            if params.get("state") != Some(&csrf) {
+                bail!("OAuth2 callback state did not match");
+            }
+            let code = params
+                .get("code")
+                .context("OAuth2 callback did not contain a code")?;
+            if app.registry.integration_setup_status(&id).is_none() {
+                bail!("OAuth2 setup was cancelled");
+            }
+            const CALLBACK_BODY: &str =
+                "Authorization complete. You can return to HaloDaemon.";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{CALLBACK_BODY}",
+                CALLBACK_BODY.len()
+            );
+            stream.write_all(response.as_bytes()).await?;
+
+            let token = url::Url::parse(&token_url)?;
+            let origin = format!(
+                "{}://{}{}",
+                token.scheme(),
+                token.host_str().context("OAuth2 token URL has no host")?,
+                token.port().map(|port| format!(":{port}")).unwrap_or_default()
+            );
+            let body = {
+                let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+                serializer
+                    .append_pair("grant_type", "authorization_code")
+                    .append_pair("code", code)
+                    .append_pair("client_id", &client_id)
+                    .append_pair("redirect_uri", &redirect_uri)
+                    .append_pair("code_verifier", &verifier);
+                serializer.finish().into_bytes()
+            };
+            let policy = crate::plugin::manifest::HttpConfig {
+                origins: vec![origin.clone()],
+                host_key: None,
+                methods: vec!["POST".into()],
+                max_request_bytes: 64 * 1024,
+                max_response_bytes: 1024 * 1024,
+                max_timeout_ms: 30_000,
+                max_concurrency: 1,
+                allow_private: false,
+                tls: None,
+            };
+            let runtime = crate::services::http::HttpRuntime::from_config(&policy, None, None)?;
+            let response = runtime.request(crate::services::http::HttpRequest {
+                method: "POST".into(),
+                origin,
+                path: match token.query() {
+                    Some(query) => format!("{}?{query}", token.path()),
+                    None => token.path().to_owned(),
+                },
+                headers: vec![(
+                    "Content-Type".into(),
+                    "application/x-www-form-urlencoded".into(),
+                )],
+                body,
+                timeout: Duration::from_secs(30),
+            })?;
+            if !(200..300).contains(&response.status) {
+                bail!("OAuth2 token exchange returned HTTP {}", response.status);
+            }
+            let token: serde_json::Value = serde_json::from_slice(&response.body)?;
+            let access_token = token
+                .get("access_token")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .context("OAuth2 response did not contain an access token")?;
+            let mut values = HashMap::from([(access_token_key, access_token.to_owned())]);
+            if let (Some(key), Some(value)) = (
+                refresh_token_key,
+                token.get("refresh_token").and_then(serde_json::Value::as_str),
+            ) {
+                values.insert(key, value.to_owned());
+            }
+            if app.registry.integration_setup_status(&id).is_none() {
+                bail!("OAuth2 setup was cancelled");
+            }
+            super::plugins::persist_config_values(&id, &values, &app).await?;
+            app.request_config_save();
+            finish_setup(&id, &manifest, status, app.clone()).await
+        }
+        .await;
+        if let Err(error) = result {
+            let Some(mut failed) = app.registry.integration_setup_status(&id) else {
+                return;
+            };
+            failed.phase = IntegrationSetupPhase::Done;
+            failed.success = false;
+            failed.message = None;
+            failed.external_url = None;
+            failed.error = Some(error.to_string());
+            publish_setup(&app, &id, failed).await;
+        }
+    });
+    Ok(())
+}
+
+pub async fn cancel_setup(id: String, app: Arc<AppState>) -> Result<()> {
+    app.registry.clear_integration_setup_status(&id);
+    crate::ipc::broadcast_state(&app).await;
+    Ok(())
+}
 
 /// Close and drop `id`'s integration root (and the children it exposes) from
 /// `app.devices`, if currently registered. No-op otherwise.
@@ -48,6 +571,26 @@ async fn enable_one(app: &Arc<AppState>, id: &str) {
 /// toggle. Applies immediately and only touches this one integration's root
 /// + exposed devices — no global rediscovery.
 pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
+    if enabled {
+        let manifest = app
+            .registry
+            .setup_integration_manifest(&id)
+            .context("unknown, disabled, or unconsented integration")?;
+        if !app.registry.integration_is_configured(&id) {
+            bail!("integration must be configured before it can be enabled");
+        }
+        let validation = setup_worker(&app, &manifest)
+            .setup_validate(config_context(&app, &id))
+            .await?;
+        if !validation.ok {
+            bail!(
+                "{}",
+                validation
+                    .reason
+                    .unwrap_or_else(|| "integration validation failed".into())
+            );
+        }
+    }
     {
         let mut cfg = app.config.write().await;
         cfg.plugins.integrations_enabled.retain(|x| x != &id);
@@ -84,83 +627,6 @@ pub async fn set_integration_config(
     enable_one(&app, &id).await;
     crate::ipc::broadcast_state(&app).await;
     Ok(())
-}
-
-/// Run the explicit, manifest-declared HTTP pairing exchange and persist only
-/// the response fields mapped to secure config keys. Pairing is never retried
-/// in the background: the user must first open the device's physical window.
-pub async fn pair_integration(
-    id: String,
-    values: HashMap<String, String>,
-    app: Arc<AppState>,
-) -> Result<()> {
-    let manifest = app
-        .registry
-        .pairable_integration_manifest(&id)
-        .context("unknown, disabled, or unconsented integration")?;
-    let http = manifest
-        .transports
-        .http
-        .as_ref()
-        .context("integration has no HTTP transport")?;
-    let pairing = http
-        .pairing
-        .as_ref()
-        .context("integration does not declare HTTP pairing")?;
-    let granted = app.registry.granted_for(&id);
-    if !granted.contains(&halod_shared::types::Permission::Network)
-        || !granted.contains(&halod_shared::types::Permission::SecureStorage)
-    {
-        bail!("integration requires network and secure_storage permissions to pair");
-    }
-    // Unlike Save, do not reconnect yet: the pairing request itself must use
-    // these edits first, and a successful response below performs one scoped
-    // reconnect with the newly stored credentials.
-    super::plugins::persist_config_values(&id, &values, &app).await?;
-    app.request_config_save();
-    let config = app
-        .registry
-        .resolved_config_for(app.secret_store.as_ref(), &id, &granted);
-    let runtime = crate::plugin::runtime::worker::http_runtime_for(&manifest, &granted, &config)
-        .context("HTTP client is unavailable for this integration")?;
-    let origin = runtime
-        .first_origin()
-        .context("pairing has no resolved HTTP origin")?
-        .to_owned();
-    let body = pairing.body.as_ref().map(serde_json::to_vec).transpose()?;
-    let method = pairing.method.clone();
-    let path = pairing.path.clone();
-    let endpoint = format!("{origin}{path}");
-    let response = tokio::task::spawn_blocking(move || {
-        runtime.request(crate::services::http::HttpRequest {
-            method,
-            origin,
-            path,
-            headers: body
-                .as_ref()
-                .map(|_| vec![("Content-Type".into(), "application/json".into())])
-                .unwrap_or_default(),
-            body: body.unwrap_or_default(),
-            timeout: Duration::ZERO,
-        })
-    })
-    .await
-    .context("pairing task panicked")?
-    .with_context(|| format!("pairing request to {endpoint}"))?;
-    if !(200..300).contains(&response.status) {
-        bail!("pairing request returned HTTP {}", response.status);
-    }
-    let json: serde_json::Value =
-        serde_json::from_slice(&response.body).context("pairing response was not JSON")?;
-    let mut values = HashMap::new();
-    for (key, pointer) in &pairing.response_fields {
-        let value = json
-            .pointer(pointer)
-            .and_then(serde_json::Value::as_str)
-            .with_context(|| format!("pairing response is missing string field '{pointer}'"))?;
-        values.insert(key.clone(), value.to_owned());
-    }
-    set_integration_config(id, values, app).await
 }
 
 #[cfg(test)]
@@ -299,6 +765,84 @@ mod tests {
 
             assert_eq!(app.devices.read().await.len(), 1);
             assert!(!unrelated.closed.load(Ordering::SeqCst));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reset_setup_removes_config_and_secrets_then_reopens_the_flow() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let plugin_dir = dir.path().join("resettable");
+            std::fs::create_dir_all(&plugin_dir).unwrap();
+            std::fs::write(
+                plugin_dir.join("plugin.yaml"),
+                "id: resettable\ntype: integration\npermissions: [network, secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [manual]\n  auth: { kind: none }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host, default: controller.local }\n    - { key: token, label: Token, secure: true }\n",
+            )
+            .unwrap();
+            std::fs::write(
+                plugin_dir.join("main.lua"),
+                "return { validate = function(_) return { ok = true } end }",
+            )
+            .unwrap();
+            app.registry.load_all(dir.path());
+
+            let authority = app
+                .registry
+                .list(app.secret_store.as_ref())
+                .into_iter()
+                .find(|plugin| plugin.id == "resettable")
+                .unwrap()
+                .authority;
+            {
+                let mut cfg = app.config.write().await;
+                cfg.plugins
+                    .accepted_authorities
+                    .insert("resettable".into(), authority);
+                cfg.plugins.enabled.push("resettable".into());
+                app.registry.replace_policy(&cfg.plugins);
+            }
+            crate::plugin::usecases::plugins::persist_config_values(
+                "resettable",
+                &HashMap::from([
+                    ("host".into(), "192.0.2.10".into()),
+                    ("token".into(), "secret-token".into()),
+                ]),
+                &app,
+            )
+            .await
+            .unwrap();
+            {
+                let mut cfg = app.config.write().await;
+                cfg.plugins.integrations_configured.push("resettable".into());
+                cfg.plugins.integrations_enabled.push("resettable".into());
+                cfg.plugins
+                    .integration_devices
+                    .insert("resettable".into(), "device-1".into());
+                app.registry.replace_policy(&cfg.plugins);
+            }
+
+            reset_setup("resettable".into(), app.clone()).await.unwrap();
+
+            let cfg = app.config.read().await;
+            assert!(!cfg.plugins.config.contains_key("resettable"));
+            assert!(!cfg
+                .plugins
+                .integrations_configured
+                .contains(&"resettable".to_owned()));
+            assert!(!cfg.plugins.integration_devices.contains_key("resettable"));
+            drop(cfg);
+            assert_eq!(
+                app.secret_store.get("resettable", "token").unwrap(),
+                None
+            );
+            assert_eq!(
+                app.registry
+                    .integration_setup_status("resettable")
+                    .unwrap()
+                    .phase,
+                IntegrationSetupPhase::Init
+            );
         })
         .await;
     }

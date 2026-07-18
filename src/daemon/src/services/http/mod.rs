@@ -16,6 +16,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use base64::Engine as _;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::WebPkiServerVerifier;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{CertificateError, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 
 use crate::plugin::manifest::HttpConfig;
 use crate::plugin::runtime::backends::net_guard;
@@ -70,6 +75,10 @@ pub struct HttpPolicy {
     max_timeout: Duration,
     allow_private: bool,
     tls_profile: String,
+    tls_ca_der_base64: Option<String>,
+    tls_identity: Option<String>,
+    tls_connect_host: Option<String>,
+    tls_certificate_identity: String,
 }
 
 impl HttpPolicy {
@@ -77,7 +86,7 @@ impl HttpPolicy {
     /// the plugin's configured device address. A placeholder origin with no host
     /// configured is dropped, leaving an empty allowlist that rejects every
     /// request — safer than reaching an unintended address.
-    pub fn from_config(config: &HttpConfig, host: Option<&str>) -> Self {
+    pub fn from_config(config: &HttpConfig, host: Option<&str>, identity: Option<&str>) -> Self {
         let host = host.map(str::trim).filter(|h| !h.is_empty());
         let origins = config
             .origins
@@ -102,6 +111,17 @@ impl HttpPolicy {
                 .as_ref()
                 .map(|tls| tls.profile.clone())
                 .unwrap_or_else(|| "default".to_owned()),
+            tls_ca_der_base64: config
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.ca_der_base64.clone()),
+            tls_identity: identity.map(str::to_owned),
+            tls_connect_host: host.map(str::to_owned),
+            tls_certificate_identity: config
+                .tls
+                .as_ref()
+                .map(|tls| tls.certificate_identity.clone())
+                .unwrap_or_else(|| "webpki".to_owned()),
         }
     }
 
@@ -128,6 +148,13 @@ impl HttpPolicy {
         if req.timeout.is_zero() || req.timeout > self.max_timeout {
             req.timeout = self.max_timeout;
         }
+        if self.tls_profile == "custom-ca" {
+            let identity = self
+                .tls_identity
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("custom TLS identity is not configured"))?;
+            req.origin = format!("https://{identity}");
+        }
         Ok(req)
     }
 
@@ -139,10 +166,6 @@ impl HttpPolicy {
     }
     pub fn tls_profile(&self) -> &str {
         &self.tls_profile
-    }
-
-    pub fn origins(&self) -> &[String] {
-        &self.origins
     }
 }
 
@@ -211,6 +234,7 @@ pub trait HttpBackend: Send + Sync {
 /// address so the connection can't be rebound off it between check and connect.
 struct NetGuardResolver {
     allow_private: bool,
+    host_override: Option<(String, String)>,
 }
 
 impl ureq::Resolver for NetGuardResolver {
@@ -221,6 +245,12 @@ impl ureq::Resolver for NetGuardResolver {
         let port: u16 = port
             .parse()
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid port"))?;
+        let host = self
+            .host_override
+            .as_ref()
+            .filter(|(identity, _)| identity.eq_ignore_ascii_case(host))
+            .map(|(_, connect_host)| connect_host.as_str())
+            .unwrap_or(host);
         let addr = net_guard::resolve_vetted_addr(host, port, self.allow_private).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string())
         })?;
@@ -239,18 +269,148 @@ impl UreqBackend {
         // `default` = standard public-CA (webpki) verification, which ureq's tls
         // feature already enforces. Keep a defensive runtime rejection in case a
         // policy is constructed without going through manifest validation.
-        match policy.tls_profile() {
-            "default" => {}
-            other => bail!("http tls profile '{other}' has no live client yet"),
-        }
-        let agent = ureq::AgentBuilder::new()
+        let mut builder = ureq::AgentBuilder::new()
             .redirects(0)
             .timeout(policy.max_timeout)
             .resolver(NetGuardResolver {
                 allow_private: policy.allow_private(),
-            })
-            .build();
+                host_override: policy
+                    .tls_identity
+                    .clone()
+                    .zip(policy.tls_connect_host.clone()),
+            });
+        match policy.tls_profile() {
+            "default" => {}
+            "custom-ca" => {
+                let ca = policy
+                    .tls_ca_der_base64
+                    .as_deref()
+                    .context("custom TLS root CA is not configured")?;
+                builder = builder.tls_config(Arc::new(custom_ca_tls_config(
+                    ca,
+                    &policy.tls_certificate_identity,
+                )?));
+            }
+            other => bail!("http tls profile '{other}' has no live client"),
+        }
+        let agent = builder.build();
         Ok(Self { agent })
+    }
+}
+
+#[derive(Debug)]
+struct SubjectCnCertVerifier {
+    webpki: Arc<WebPkiServerVerifier>,
+}
+
+impl ServerCertVerifier for SubjectCnCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, RustlsError> {
+        match self.webpki.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        ) {
+            Ok(verified) => Ok(verified),
+            Err(error)
+                if is_certificate_name_error(&error)
+                    && subject_cn_matches(end_entity, server_name) =>
+            {
+                // WebPKI has already checked the configured CA chain, validity
+                // period and signatures. This mode replaces only its SAN
+                // identity representation with one exact Subject CN.
+                Ok(ServerCertVerified::assertion())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, RustlsError> {
+        self.webpki.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, RustlsError> {
+        self.webpki.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.webpki.supported_verify_schemes()
+    }
+}
+
+fn is_certificate_name_error(error: &RustlsError) -> bool {
+    matches!(
+        error,
+        RustlsError::InvalidCertificate(
+            CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. }
+        )
+    )
+}
+
+fn subject_cn_matches(cert_der: &CertificateDer<'_>, server_name: &ServerName<'_>) -> bool {
+    let ServerName::DnsName(expected) = server_name else {
+        return false;
+    };
+    let Ok((remaining, cert)) = x509_parser::parse_x509_certificate(cert_der.as_ref()) else {
+        return false;
+    };
+    if !remaining.is_empty() {
+        return false;
+    }
+    let mut common_names = cert.subject().iter_common_name();
+    let Some(common_name) = common_names.next() else {
+        return false;
+    };
+    common_names.next().is_none()
+        && common_name
+            .as_str()
+            .is_ok_and(|name| name.eq_ignore_ascii_case(expected.as_ref()))
+}
+
+fn custom_ca_tls_config(
+    root_der_base64: &str,
+    certificate_identity: &str,
+) -> Result<rustls::ClientConfig> {
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(root_der_base64)
+        .context("decoding custom TLS root CA")?;
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(der))
+        .context("loading custom TLS root CA")?;
+    let provider: Arc<rustls::crypto::CryptoProvider> =
+        rustls::crypto::ring::default_provider().into();
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])?;
+    match certificate_identity {
+        "webpki" => Ok(builder.with_root_certificates(roots).with_no_client_auth()),
+        "subject-cn" => {
+            let webpki =
+                WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider).build()?;
+            Ok(builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(SubjectCnCertVerifier { webpki }))
+                .with_no_client_auth())
+        }
+        other => bail!("custom TLS certificate identity '{other}' is not implemented"),
     }
 }
 
@@ -272,7 +432,7 @@ impl HttpBackend for UreqBackend {
             // HTTP response the plugin should observe, not a transport failure.
             Err(ureq::Error::Status(_, response)) => response,
             Err(ureq::Error::Transport(t)) => {
-                return Err(anyhow::anyhow!(t)).context("http request failed")
+                return Err(anyhow::anyhow!("http request failed: {t}"));
             }
         };
         read_response(response, max_response_bytes)
@@ -330,8 +490,12 @@ impl HttpRuntime {
 
     /// Build the live runtime from a manifest's declared http transport, resolving
     /// a `{host}` origin from the plugin's configured device address (`host_key`).
-    pub fn from_config(config: &HttpConfig, host: Option<&str>) -> Result<Self> {
-        let policy = HttpPolicy::from_config(config, host);
+    pub fn from_config(
+        config: &HttpConfig,
+        host: Option<&str>,
+        identity: Option<&str>,
+    ) -> Result<Self> {
+        let policy = HttpPolicy::from_config(config, host, identity);
         let backend = Arc::new(UreqBackend::new(&policy)?);
         Ok(Self::new(policy, backend, config.max_concurrency))
     }
@@ -346,10 +510,6 @@ impl HttpRuntime {
             bail!("http concurrency limit ({}) reached", self.max_concurrency);
         }
         self.backend.request(&req, self.policy.max_response_bytes())
-    }
-
-    pub fn first_origin(&self) -> Option<&str> {
-        self.policy.origins().first().map(String::as_str)
     }
 }
 
@@ -373,6 +533,10 @@ mod tests {
             max_timeout: Duration::from_secs(5),
             allow_private: false,
             tls_profile: "default".into(),
+            tls_ca_der_base64: None,
+            tls_identity: None,
+            tls_connect_host: None,
+            tls_certificate_identity: "webpki".into(),
         }
     }
 

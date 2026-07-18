@@ -536,7 +536,51 @@ pub struct PluginHandle {
     route: Option<DevMatch>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SetupHookResult {
+    pub ok: bool,
+    #[serde(default)]
+    pub pending: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub values: std::collections::HashMap<String, String>,
+}
+
 impl PluginHandle {
+    async fn setup_hook<R>(&self, name: &'static str, context: serde_json::Value) -> Result<R>
+    where
+        R: serde::de::DeserializeOwned + Send + 'static,
+    {
+        self.run(move |ctx, _dev, _| {
+            let f = required(&ctx.manifest, name)?;
+            let input = ctx
+                .lua
+                .to_value(&context)
+                .map_err(|error| lua_err(name, error))?;
+            let value: Value = f.call(input).map_err(|error| lua_err(name, error))?;
+            ctx.lua
+                .from_value(value)
+                .map_err(|error| lua_err(name, error))
+        })
+        .await
+    }
+
+    pub async fn setup_validate(&self, context: serde_json::Value) -> Result<SetupHookResult> {
+        self.setup_hook("validate", context).await
+    }
+
+    pub async fn setup_discover(
+        &self,
+        context: serde_json::Value,
+    ) -> Result<Vec<halod_shared::types::IntegrationSetupCandidate>> {
+        self.setup_hook("discover", context).await
+    }
+
+    pub async fn setup_pair(&self, context: serde_json::Value) -> Result<SetupHookResult> {
+        self.setup_hook("pair", context).await
+    }
+
     /// Whether this handle addresses a dynamic child inside another device's
     /// worker. Child teardown must not close the shared worker or transport.
     pub fn is_child(&self) -> bool {
@@ -1297,7 +1341,21 @@ pub(in crate::plugin) fn http_runtime_for(
             .get(key)
             .map(crate::plugin::ResolvedConfigValue::to_config_string)
     });
-    match crate::services::http::HttpRuntime::from_config(http, host.as_deref()) {
+    let identity = http
+        .tls
+        .as_ref()
+        .and_then(|tls| tls.verify_identity.as_ref())
+        .and_then(|key| {
+            config
+                .get(key)
+                .map(crate::plugin::ResolvedConfigValue::to_config_string)
+        })
+        .filter(|value| !value.trim().is_empty());
+    match crate::services::http::HttpRuntime::from_config(
+        http,
+        host.as_deref(),
+        identity.as_deref(),
+    ) {
         Ok(runtime) => Some(runtime),
         Err(e) => {
             log::error!(
@@ -1988,6 +2046,37 @@ mod tests {
         );
         let err = h.rgb_apply(static_state()).await.unwrap_err();
         assert!(err.to_string().contains("boom"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn typed_setup_hooks_round_trip_structured_results() {
+        let h = spawn(
+            r#"return {
+                validate = function(context)
+                    return { ok = context.config.host == "controller.local" }
+                end,
+                discover = function(context)
+                    return {{ id = context.mdns[1].id, name = "Controller", values = { host = "controller.local" } }}
+                end,
+                pair = function(_context)
+                    return { ok = true, values = { token = "secret" } }
+                end,
+            }"#,
+            vec![],
+        );
+        let validation = h
+            .setup_validate(serde_json::json!({ "config": { "host": "controller.local" } }))
+            .await
+            .unwrap();
+        assert!(validation.ok);
+        let discovered = h
+            .setup_discover(serde_json::json!({ "mdns": [{ "id": "device-1" }] }))
+            .await
+            .unwrap();
+        assert_eq!(discovered[0].id, "device-1");
+        assert_eq!(discovered[0].values["host"], "controller.local");
+        let paired = h.setup_pair(serde_json::json!({})).await.unwrap();
+        assert_eq!(paired.values["token"], "secret");
     }
 
     #[tokio::test]

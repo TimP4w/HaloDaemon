@@ -55,6 +55,14 @@ macro_rules! callback {
 
 /// Callback names and signatures accepted by plugin API v1.
 pub const CALLBACKS_V1: &[CallbackContract] = &[
+    callback!("validate", Lifecycle, "context", "SetupHookResult"),
+    callback!(
+        "discover",
+        Lifecycle,
+        "context",
+        "IntegrationSetupCandidate[]"
+    ),
+    callback!("pair", Lifecycle, "context", "SetupHookResult"),
     callback!("initialize", Lifecycle, "dev", "bool | InitTable | nil"),
     callback!("close", Lifecycle, "dev", "nil"),
     callback!("close_child", Lifecycle, "dev", "nil"),

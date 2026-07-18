@@ -123,6 +123,59 @@ fn default_http_concurrency() -> usize {
 fn default_tls_profile() -> String {
     "default".to_owned()
 }
+fn default_certificate_identity() -> String {
+    "webpki".to_owned()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrationSetupConfig {
+    pub modes: Vec<halod_shared::types::IntegrationSetupMode>,
+    #[serde(default)]
+    pub discovery: IntegrationDiscoveryConfig,
+    #[serde(default)]
+    pub auth: IntegrationAuthConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrationDiscoveryConfig {
+    #[serde(default)]
+    pub mdns: Vec<String>,
+    #[serde(default)]
+    pub ssdp: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum IntegrationAuthConfig {
+    #[default]
+    None,
+    Button {
+        title: String,
+        instructions: Vec<String>,
+    },
+    Oauth2Pkce {
+        authorization_url: String,
+        token_url: String,
+        client_id: String,
+        #[serde(default)]
+        scopes: Vec<String>,
+        access_token_key: String,
+        #[serde(default)]
+        refresh_token_key: Option<String>,
+    },
+}
+
+impl IntegrationAuthConfig {
+    pub fn kind(&self) -> halod_shared::types::IntegrationAuthKind {
+        match self {
+            Self::None => halod_shared::types::IntegrationAuthKind::None,
+            Self::Button { .. } => halod_shared::types::IntegrationAuthKind::Button,
+            Self::Oauth2Pkce { .. } => halod_shared::types::IntegrationAuthKind::Oauth2Pkce,
+        }
+    }
+}
 
 /// A scoped HTTP client capability (`halod.http`). Unlike `tcp`, this is not a
 /// single root connection but an allowlist the plugin makes bounded requests
@@ -158,42 +211,28 @@ pub struct HttpConfig {
     pub allow_private: bool,
     #[serde(default)]
     pub tls: Option<HttpTls>,
-    /// Optional host-owned pairing exchange. The daemon performs this only on
-    /// an explicit UI request, then stores the selected response values in
-    /// declared secure config fields.
-    #[serde(default)]
-    pub pairing: Option<HttpPairingConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HttpPairingConfig {
-    pub path: String,
-    #[serde(default = "default_http_pairing_method")]
-    pub method: String,
-    #[serde(default)]
-    pub body: Option<serde_json::Value>,
-    /// Secure config key -> JSON Pointer in the pairing response.
-    pub response_fields: HashMap<String, String>,
-}
-
-fn default_http_pairing_method() -> String {
-    "POST".to_owned()
-}
-
-/// Selects a host-owned TLS trust profile. `default` is standard public-CA
-/// (webpki) verification. Named profiles are accepted only after their verifier
-/// is implemented in the host — a plugin can never supply its own CA or weaken
-/// verification.
+/// Selects the TLS trust policy for a scoped HTTP transport. `default` uses the
+/// public web PKI. `custom-ca` trusts exactly the bundled DER root and may bind
+/// the connection to a config-provided identity instead of its LAN address.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpTls {
     #[serde(default = "default_tls_profile")]
     pub profile: String,
-    /// Identity the leaf certificate must bind to for an identity-bound profile
-    /// (e.g. a Hue bridge id). Ignored by the `default` profile.
+    /// Base64-encoded DER trust anchor owned and shipped by the plugin.
+    #[serde(default)]
+    pub ca_der_base64: Option<String>,
+    /// Config field containing the certificate identity. With `custom-ca`, the
+    /// TLS server name is this identity while the socket still connects to the
+    /// configured `host_key` address.
     #[serde(default)]
     pub verify_identity: Option<String>,
+    /// Leaf-certificate identity representation: standard `webpki` SAN
+    /// verification or one exact `subject-cn` value.
+    #[serde(default = "default_certificate_identity")]
+    pub certificate_identity: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -993,6 +1032,7 @@ pub struct PluginManifest {
     /// and authority boundary used before Lua is started.
     pub capabilities: Vec<String>,
     pub config: Option<ConfigManifest>,
+    pub setup: Option<IntegrationSetupConfig>,
 }
 
 /// Package-only fields from `plugin.yaml`. All declarative device, capability,
@@ -1047,6 +1087,8 @@ pub struct PluginMeta {
     pub presets: Vec<PresetManifest>,
     #[serde(default)]
     pub config: Option<ConfigManifest>,
+    #[serde(default)]
+    pub setup: Option<IntegrationSetupConfig>,
     /// Display-only logo, a bare filename under the plugin's `assets/` directory.
     #[serde(default)]
     pub logo: Option<String>,
@@ -1409,6 +1451,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     validate_transports(manifest)?;
     validate_requirements(manifest)?;
     validate_controls(manifest)?;
+    validate_integration_setup(manifest)?;
     validate_data_contract(manifest)?;
     match manifest.plugin_type {
         PluginKind::Device => {
@@ -1544,12 +1587,105 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     Ok(())
 }
 
+fn validate_integration_setup(manifest: &PluginManifest) -> Result<()> {
+    let Some(setup) = &manifest.setup else {
+        return Ok(());
+    };
+    if manifest.plugin_type != PluginKind::Integration {
+        bail!("setup is only valid for integration plugins");
+    }
+    if setup.modes.is_empty() {
+        bail!("integration setup must declare at least one mode");
+    }
+    let unique: HashSet<_> = setup.modes.iter().copied().collect();
+    if unique.len() != setup.modes.len() {
+        bail!("integration setup modes must be unique");
+    }
+    if unique.contains(&halod_shared::types::IntegrationSetupMode::Automatic)
+        && setup.discovery.mdns.is_empty()
+        && setup.discovery.ssdp.is_empty()
+    {
+        bail!("automatic integration setup requires an mdns or ssdp declaration");
+    }
+    if unique.contains(&halod_shared::types::IntegrationSetupMode::Manual)
+        && manifest.config_fields().iter().all(|field| field.secure)
+    {
+        bail!("manual integration setup requires a non-secure config field");
+    }
+    if (!setup.discovery.mdns.is_empty() || !setup.discovery.ssdp.is_empty())
+        && !manifest.permissions.contains(&Permission::Network)
+    {
+        bail!("integration discovery requires the network permission");
+    }
+    for service in &setup.discovery.mdns {
+        let valid = service.starts_with('_')
+            && (service.contains("._tcp.") || service.contains("._udp."))
+            && service.ends_with("local.")
+            && service.len() <= 255
+            && service.is_ascii();
+        if !valid {
+            bail!("invalid mDNS service type '{service}'");
+        }
+    }
+    for target in &setup.discovery.ssdp {
+        if target.trim().is_empty() || target.len() > 255 || !target.is_ascii() {
+            bail!("invalid SSDP search target '{target}'");
+        }
+    }
+    match &setup.auth {
+        IntegrationAuthConfig::None => {}
+        IntegrationAuthConfig::Button {
+            title,
+            instructions,
+        } => {
+            if title.trim().is_empty()
+                || instructions.is_empty()
+                || instructions.iter().any(|line| line.trim().is_empty())
+            {
+                bail!("button pairing requires a title and non-empty instructions");
+            }
+        }
+        IntegrationAuthConfig::Oauth2Pkce {
+            authorization_url,
+            token_url,
+            client_id,
+            access_token_key,
+            refresh_token_key,
+            ..
+        } => {
+            if !manifest.permissions.contains(&Permission::Network)
+                || !manifest.permissions.contains(&Permission::SecureStorage)
+            {
+                bail!("OAuth2 setup requires network and secure_storage permissions");
+            }
+            for endpoint in [authorization_url, token_url] {
+                let parsed = url::Url::parse(endpoint)
+                    .with_context(|| format!("invalid OAuth2 endpoint '{endpoint}'"))?;
+                if parsed.scheme() != "https" || parsed.host_str().is_none() {
+                    bail!("OAuth2 endpoints must be absolute https URLs");
+                }
+            }
+            if client_id.trim().is_empty() {
+                bail!("OAuth2 client_id must not be empty");
+            }
+            for key in std::iter::once(access_token_key).chain(refresh_token_key.iter()) {
+                let secure = manifest
+                    .config_fields()
+                    .iter()
+                    .any(|field| &field.key == key && field.secure);
+                if !secure {
+                    bail!("OAuth2 token key '{key}' must name a secure config field");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Known HTTP methods a scoped `http` transport may allowlist.
 const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
-/// Trust profiles with a live host implementation today. `default` is standard
-/// public-CA (webpki) verification. Additional profiles must not be accepted by
-/// manifest validation until the corresponding live verifier exists.
-const HTTP_TLS_PROFILES: &[&str] = &["default"];
+/// Trust policies with a live host implementation today.
+const HTTP_TLS_PROFILES: &[&str] = &["default", "custom-ca"];
 
 fn validate_http_transport(manifest: &PluginManifest) -> Result<()> {
     let Some(http) = &manifest.transports.http else {
@@ -1607,36 +1743,34 @@ fn validate_http_transport(manifest: &PluginManifest) -> Result<()> {
                 HTTP_TLS_PROFILES.join(", ")
             );
         }
-    }
-    if let Some(pairing) = &http.pairing {
-        if !matches!(pairing.method.as_str(), "POST" | "PUT") {
-            bail!("http pairing method must be POST or PUT");
-        }
-        if !http.methods.iter().any(|method| method == &pairing.method) {
-            bail!(
-                "http pairing method '{}' must also be declared in http methods",
-                pairing.method
-            );
-        }
-        if !pairing.path.starts_with('/') || pairing.path.contains("..") {
-            bail!("http pairing path must be an absolute API path");
-        }
-        if pairing.response_fields.is_empty() {
-            bail!("http pairing must declare at least one response field");
-        }
-        for (key, pointer) in &pairing.response_fields {
-            let field = manifest
+        if tls.profile == "custom-ca" {
+            let ca = tls
+                .ca_der_base64
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .context("custom-ca TLS requires ca_der_base64")?;
+            if ca.len() > 128 * 1024 {
+                bail!("custom-ca TLS ca_der_base64 exceeds 128 KiB");
+            }
+            let key = tls
+                .verify_identity
+                .as_ref()
+                .context("custom-ca TLS requires verify_identity to name a config field")?;
+            if !manifest
                 .config_fields()
                 .iter()
-                .find(|field| field.key == *key);
-            if !field.is_some_and(|field| field.secure) {
-                bail!(
-                    "http pairing response field '{key}' must name a declared secure config field"
-                );
+                .any(|field| &field.key == key && !field.secure)
+            {
+                bail!("custom-ca TLS verify_identity '{key}' must name a non-secure config field");
             }
-            if !pointer.starts_with('/') {
-                bail!("http pairing response pointer for '{key}' must be a JSON Pointer");
+            if !matches!(tls.certificate_identity.as_str(), "webpki" | "subject-cn") {
+                bail!("custom-ca TLS certificate_identity must be 'webpki' or 'subject-cn'");
             }
+        } else if tls.ca_der_base64.is_some()
+            || tls.verify_identity.is_some()
+            || tls.certificate_identity != "webpki"
+        {
+            bail!("custom TLS fields require the custom-ca profile");
         }
     }
     Ok(())
@@ -2835,6 +2969,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         platforms: meta.platforms,
         capabilities: meta.capabilities,
         config: meta.config,
+        setup: meta.setup,
     };
     normalize_device_matches(&mut manifest)?;
 
@@ -2978,49 +3113,26 @@ mod tests {
             .to_string()
             .contains("tls profile"));
 
-        // Profiles without a live verifier are rejected rather than producing
-        // a worker that silently lacks `halod.http`.
-        let unavailable_tls = write_plugin_dir(
+        // A custom CA is identity-bound, so both its root and a declared,
+        // non-secret identity field are required.
+        let custom_without_identity = write_plugin_dir(
             tmp.path(),
-            "unavailable_tls",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: hue-bridge }\n",
+            "custom_without_identity",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: custom-ca, ca_der_base64: Zm9v }\n",
             ENTRY_LUA,
         );
-        assert!(parse_manifest_from_dir(&unavailable_tls)
+        assert!(parse_manifest_from_dir(&custom_without_identity)
             .unwrap_err()
             .to_string()
-            .contains("tls profile"));
-    }
+            .contains("verify_identity"));
 
-    #[test]
-    fn http_pairing_method_must_be_in_declared_methods() {
-        let tmp = tempfile::tempdir().unwrap();
-        let common_config =
-            "config:\n  fields:\n    - { key: token, label: Token, secure: true }\n";
-        let missing = write_plugin_dir(
+        let custom_with_identity = write_plugin_dir(
             tmp.path(),
-            "pair_missing_method",
-            &format!(
-                "type: integration\npermissions: [network, secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    pairing:\n      path: /pair\n      response_fields: {{ token: /token }}\n{common_config}"
-            ),
+            "custom_with_identity",
+            "type: integration\npermissions: [network]\nconfig:\n  fields:\n    - { key: device_id, label: Device ID, type: string }\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: custom-ca, ca_der_base64: Zm9v, verify_identity: device_id, certificate_identity: subject-cn }\n",
             ENTRY_LUA,
         );
-        let error = parse_manifest_from_dir(&missing).unwrap_err().to_string();
-        assert!(error.contains("must also be declared"), "{error}");
-
-        let declared = write_plugin_dir(
-            tmp.path(),
-            "pair_declared_method",
-            &format!(
-                "type: integration\npermissions: [network, secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    methods: [POST]\n    pairing:\n      path: /pair\n      response_fields: {{ token: /token }}\n{common_config}"
-            ),
-            ENTRY_LUA,
-        );
-        assert!(
-            parse_manifest_from_dir(&declared).is_ok(),
-            "{:?}",
-            parse_manifest_from_dir(&declared).err()
-        );
+        assert!(parse_manifest_from_dir(&custom_with_identity).is_ok());
     }
 
     #[test]
@@ -3514,6 +3626,39 @@ mod tests {
             manifest.transports.integration_transport_kind(),
             Some("http")
         );
+    }
+
+    #[test]
+    fn integration_setup_accepts_typed_discovery_and_oauth_pkce() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "oauth_integration",
+            "type: integration\npermissions: [network, secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [automatic, manual]\n  discovery:\n    mdns: [_example._tcp.local.]\n    ssdp: [urn:example:device:1]\n  auth:\n    kind: oauth2_pkce\n    authorization_url: https://accounts.example.com/authorize\n    token_url: https://accounts.example.com/token\n    client_id: halo-desktop\n    scopes: [device.read]\n    access_token_key: access_token\n    refresh_token_key: refresh_token\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: access_token, label: Access token, secure: true }\n    - { key: refresh_token, label: Refresh token, secure: true }\n",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        let setup = manifest.setup.unwrap();
+        assert_eq!(setup.discovery.mdns, ["_example._tcp.local."]);
+        assert_eq!(
+            setup.auth.kind(),
+            halod_shared::types::IntegrationAuthKind::Oauth2Pkce
+        );
+    }
+
+    #[test]
+    fn automatic_setup_requires_declared_discovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "missing_discovery",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [automatic]\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&dir)
+            .unwrap_err()
+            .to_string()
+            .contains("requires an mdns or ssdp"));
     }
 
     #[test]

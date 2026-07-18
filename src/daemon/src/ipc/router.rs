@@ -294,7 +294,13 @@ fn command_target(cmd: &DaemonCommand) -> Option<&str> {
         | ReceiverStartPairing { id, .. }
         | ReceiverStopPairing { id, .. }
         | ReceiverUnpair { id, .. }
-        | SetKeyboardLayout { id, .. } => Some(id),
+        | SetKeyboardLayout { id, .. }
+        | BeginIntegrationSetup { id }
+        | ResetIntegrationSetup { id }
+        | SelectIntegrationSetupMode { id, .. }
+        | SubmitIntegrationSetup { id, .. }
+        | RetryIntegrationPairing { id }
+        | CancelIntegrationSetup { id } => Some(id),
         SetCoolingCurvePoints { device_id, .. }
         | SetCoolingCurvePreset { device_id, .. }
         | RemoveCoolingCurve { device_id, .. } => Some(device_id),
@@ -429,8 +435,25 @@ async fn dispatch(
         DaemonCommand::SetIntegrationConfig { id, values } => {
             plugin::usecases::integrations::set_integration_config(id, values, app).await
         }
-        DaemonCommand::PairIntegration { id, values } => {
-            plugin::usecases::integrations::pair_integration(id, values, app).await
+        DaemonCommand::BeginIntegrationSetup { id } => {
+            plugin::usecases::integrations::begin_setup(id, app).await
+        }
+        DaemonCommand::ResetIntegrationSetup { id } => {
+            plugin::usecases::integrations::reset_setup(id, app).await
+        }
+        DaemonCommand::SelectIntegrationSetupMode { id, mode } => {
+            plugin::usecases::integrations::select_setup_mode(id, mode, app).await
+        }
+        DaemonCommand::SubmitIntegrationSetup {
+            id,
+            candidate_id,
+            values,
+        } => plugin::usecases::integrations::submit_setup(id, candidate_id, values, app).await,
+        DaemonCommand::RetryIntegrationPairing { id } => {
+            plugin::usecases::integrations::retry_pairing(id, app).await
+        }
+        DaemonCommand::CancelIntegrationSetup { id } => {
+            plugin::usecases::integrations::cancel_setup(id, app).await
         }
         DaemonCommand::SetLogLevel { level } => {
             registry::usecases::settings::set_log_level(level, app).await

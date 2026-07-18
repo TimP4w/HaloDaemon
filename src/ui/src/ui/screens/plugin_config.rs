@@ -94,14 +94,39 @@ pub fn config_section(
     widgets::caps_label(ui, &t!("plugins.settings"));
     ui.add_space(theme::SPACE_4);
 
+    config_fields_editor(ui, p, edits);
+
+    ui.add_space(theme::SPACE_6);
+    if widgets::button(
+        ui,
+        &t!("plugins.save_settings"),
+        ButtonKind::Primary,
+        egui::Vec2::new(140.0, 30.0),
+    )
+    .clicked()
+    {
+        let values = config_values_to_send(edits, &p.config_fields);
+        on_save(values);
+        for f in &p.config_fields {
+            if f.secure {
+                edits.insert(f.key.clone(), String::new());
+            }
+        }
+    }
+}
+
+/// Render only the manifest fields. Setup modals reuse this and own their
+/// navigation buttons separately.
+pub fn config_fields_editor(
+    ui: &mut egui::Ui,
+    p: &PluginInfo,
+    edits: &mut HashMap<String, String>,
+) {
     let mut groups: std::collections::BTreeMap<String, Vec<&PluginConfigField>> =
         std::collections::BTreeMap::new();
     for f in &p.config_fields {
         groups.entry(f.category.clone()).or_default().push(f);
     }
-
-    // The Configure panel sits on its own inset surface (darker than the card)
-    // so the editable region reads apart from the status chrome above it.
     egui::Frame::NONE
         .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
@@ -134,24 +159,6 @@ pub fn config_section(
                 }
             }
         });
-
-    ui.add_space(theme::SPACE_6);
-    if widgets::button(
-        ui,
-        &t!("plugins.save_settings"),
-        ButtonKind::Primary,
-        egui::Vec2::new(140.0, 30.0),
-    )
-    .clicked()
-    {
-        let values = config_values_to_send(edits, &p.config_fields);
-        on_save(values);
-        for f in &p.config_fields {
-            if f.secure {
-                edits.insert(f.key.clone(), String::new());
-            }
-        }
-    }
 }
 
 /// One field laid out as a row: label on the left, padded input on the right.

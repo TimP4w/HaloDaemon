@@ -178,6 +178,7 @@ struct PluginState {
     /// (which governs whether the Lua may run at all). Only meaningful for
     /// `PluginKind::Integration` plugins.
     integrations_disabled: HashSet<String>,
+    integrations_configured: HashSet<String>,
     /// Permissions the user granted per plugin (see [`granted_for`]). Every
     /// plugin — built-in or not — must be granted its permissions through
     /// consent; nothing is auto-granted.
@@ -216,6 +217,7 @@ pub struct Registry {
     /// at event points (startup, reconcile) so probes — some of which spawn
     /// processes or open device nodes — never run on every state poll.
     requirement_cache: RwLock<HashMap<String, Vec<halod_shared::types::PluginRequirementStatus>>>,
+    integration_setups: RwLock<HashMap<String, halod_shared::types::IntegrationSetupStatus>>,
     content_revision: std::sync::atomic::AtomicU64,
 }
 
@@ -626,6 +628,7 @@ impl Registry {
                 })
                 .map(|manifest| manifest.plugin_id.clone())
                 .collect();
+            s.integrations_configured = policy.integrations_configured.iter().cloned().collect();
             s.granted = policy
                 .accepted_authorities
                 .iter()
@@ -641,6 +644,27 @@ impl Registry {
 
     fn is_disabled(&self, plugin_id: &str) -> bool {
         self.snapshot().disabled.contains(plugin_id)
+    }
+
+    pub fn integration_setup_status(
+        &self,
+        plugin_id: &str,
+    ) -> Option<halod_shared::types::IntegrationSetupStatus> {
+        read_recover(&self.integration_setups)
+            .get(plugin_id)
+            .cloned()
+    }
+
+    pub fn set_integration_setup_status(
+        &self,
+        plugin_id: String,
+        status: halod_shared::types::IntegrationSetupStatus,
+    ) {
+        write_recover(&self.integration_setups).insert(plugin_id, status);
+    }
+
+    pub fn clear_integration_setup_status(&self, plugin_id: &str) {
+        write_recover(&self.integration_setups).remove(plugin_id);
     }
 
     fn is_integration_disabled(&self, plugin_id: &str) -> bool {
@@ -1126,6 +1150,7 @@ impl Registry {
                     && m.supports_current_platform()
                     && !state.integrations_disabled.contains(&m.plugin_id)
                     && !state.disabled.contains(&m.plugin_id)
+                    && (m.setup.is_none() || state.integrations_configured.contains(&m.plugin_id))
                     && consent_satisfied_in(&state, m)
                     && self.blocking_requirements_met(m)
             })
@@ -1147,7 +1172,7 @@ impl Registry {
     /// on/off switch: pairing credentials must be obtainable before the user
     /// enables the integration. Generic plugin disable, platform, consent, and
     /// requirement gates remain in force.
-    pub(crate) fn pairable_integration_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
+    pub(crate) fn setup_integration_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
         let state = self.snapshot();
         state
             .manifests
@@ -1161,6 +1186,17 @@ impl Registry {
                     && self.blocking_requirements_met(m)
             })
             .cloned()
+    }
+
+    pub(crate) fn integration_is_configured(&self, plugin_id: &str) -> bool {
+        let state = self.snapshot();
+        state
+            .manifests
+            .iter()
+            .find(|manifest| manifest.plugin_id == plugin_id)
+            .is_some_and(|manifest| {
+                manifest.setup.is_none() || state.integrations_configured.contains(plugin_id)
+            })
     }
 }
 
@@ -1333,6 +1369,15 @@ impl Registry {
         let blocking = requirements::blocking_missing(&requirements);
         let intent = m.supports_current_platform() && !self.is_disabled(&m.plugin_id);
         let integration_enabled = !self.is_integration_disabled(&m.plugin_id);
+        let integration_configured =
+            m.setup.is_none() || state.integrations_configured.contains(&m.plugin_id);
+        let integration_state = if !integration_enabled {
+            halod_shared::types::IntegrationLifecycleState::Disabled
+        } else if !integration_configured {
+            halod_shared::types::IntegrationLifecycleState::Unconfigured
+        } else {
+            halod_shared::types::IntegrationLifecycleState::Configured
+        };
         let active = intent
             && consented
             && blocking.is_empty()
@@ -1392,12 +1437,10 @@ impl Registry {
             config_values: config_values_for(state, m),
             secret_set,
             integration_enabled,
-            has_http_pairing: m
-                .transports
-                .http
-                .as_ref()
-                .and_then(|http| http.pairing.as_ref())
-                .is_some(),
+            integration_configured,
+            integration_requires_setup: m.setup.is_some(),
+            integration_state,
+            integration_setup: self.integration_setup_status(&m.plugin_id),
             consented,
             active,
             requirements,
@@ -1720,6 +1763,7 @@ fn record_invalid_plugin_dir(
                 platforms: vec![],
                 capabilities: vec![],
                 config: None,
+                setup: None,
             },
             format!("{reason}; package manifest also failed to parse: {error:#}"),
             context.cloned(),

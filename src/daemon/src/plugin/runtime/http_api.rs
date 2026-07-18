@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, LuaSerdeExt, Table, Value};
 
 use crate::services::http::{HttpRequest, HttpResponse, HttpRuntime};
 
@@ -72,6 +72,9 @@ fn response_to_lua(lua: &Lua, response: HttpResponse) -> mlua::Result<Table> {
         headers.set(name.to_ascii_lowercase(), value)?;
     }
     table.set("headers", headers)?;
+    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response.body) {
+        table.set("json", lua.to_value(&json)?)?;
+    }
     table.set("body", lua.create_string(&response.body)?)?;
     Ok(table)
 }
@@ -105,9 +108,8 @@ mod tests {
             max_concurrency: 2,
             allow_private: false,
             tls: None,
-            pairing: None,
         };
-        HttpRuntime::new(HttpPolicy::from_config(&config, None), backend, 2)
+        HttpRuntime::new(HttpPolicy::from_config(&config, None, None), backend, 2)
     }
 
     #[test]
@@ -130,6 +132,7 @@ mod tests {
                 r#"local r = halod.http:request{ method = "get", origin = "https://api.example.com", path = "/v1/status" }
                    assert(r.status == 200)
                    assert(r.headers["content-type"] == "application/json")
+                   assert(r.json.ok == true)
                    return r.body"#,
             )
             .eval()

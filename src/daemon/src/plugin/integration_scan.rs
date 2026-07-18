@@ -14,7 +14,9 @@ use halod_shared::types::Permission;
 use crate::drivers::Device;
 use crate::ipc::broadcast_state;
 use crate::registry::discovery::{DiscoveryHandle, TransportScanner};
-use crate::registry::usecases::registration::register_device_and_children;
+use crate::registry::usecases::registration::{
+    register_device_and_children, unregister_device_and_children,
+};
 use crate::state::AppState;
 
 use super::manifest::PluginManifest;
@@ -210,6 +212,14 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
     });
     let registered = register_device_and_children(app, device.clone()).await;
     if registered {
+        // Disabling can race the Lua initialize/child-enumeration window. The
+        // pre-registration policy check above is not enough: if the toggle
+        // lands while initialize is running, remove the stale root before it
+        // can remain active behind an "off" GUI toggle.
+        if app.registry.integration_manifest(&plugin_id).is_none() {
+            unregister_device_and_children(app, device.id()).await;
+            return DiscoveryOutcome::TransientFailure;
+        }
         DiscoveryOutcome::Registered
     } else {
         let unrecoverable = device.is_unrecoverable();

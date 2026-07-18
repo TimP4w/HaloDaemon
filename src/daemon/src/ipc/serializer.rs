@@ -71,6 +71,15 @@ pub async fn serialize_state(
 
     let mut plugin_list = app.registry.list(app.secret_store.as_ref());
     for plugin in &mut plugin_list {
+        if plugin.plugin_type == halod_shared::types::PluginKind::Integration
+            && plugin.integration_state
+                == halod_shared::types::IntegrationLifecycleState::Configured
+            && snap.devices.iter().any(|device| {
+                device.integration_id.as_deref() == Some(plugin.id.as_str()) && device.connected
+            })
+        {
+            plugin.integration_state = halod_shared::types::IntegrationLifecycleState::Active;
+        }
         plugin.data_records = app
             .data_bus
             .statuses_for_owner(&plugin.id)

@@ -356,6 +356,14 @@ pub struct PluginPolicy {
     /// Integration ids explicitly enabled independently of package activation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub integrations_enabled: Vec<String>,
+    /// Integrations that completed their host-owned setup flow. This marker is
+    /// separate from retained config values so manifest defaults do not make a
+    /// never-configured integration appear ready.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub integrations_configured: Vec<String>,
+    /// Stable discovery identity selected for each configured integration.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub integration_devices: HashMap<String, String>,
     /// Content hash (hex SHA-256) of the installed plugin package, keyed by
     /// plugin id. This identifies updates and modified checkouts; it is never
     /// used as a consent gate.

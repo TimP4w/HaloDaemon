@@ -1192,6 +1192,83 @@ pub struct PluginRequirementStatus {
     pub feature: Option<String>,
 }
 
+/// User-facing lifecycle of an integration. This is derived from persisted
+/// enable intent, setup completeness, and the live root device.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationLifecycleState {
+    #[default]
+    Disabled,
+    Unconfigured,
+    Configured,
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationSetupMode {
+    Automatic,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationSetupPhase {
+    #[default]
+    Init,
+    Discovering,
+    Pairing,
+    Done,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationAuthKind {
+    #[default]
+    None,
+    Button,
+    Oauth2Pkce,
+}
+
+/// A discovery result normalized by the plugin's typed `discover` hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationSetupCandidate {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub values: HashMap<String, String>,
+}
+
+/// Daemon-owned progress for one integration setup modal. Lua supplies only
+/// candidates and hook results; it never controls screens or transitions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IntegrationSetupStatus {
+    #[serde(default)]
+    pub phase: IntegrationSetupPhase,
+    #[serde(default)]
+    pub modes: Vec<IntegrationSetupMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_mode: Option<IntegrationSetupMode>,
+    #[serde(default)]
+    pub auth: IntegrationAuthKind,
+    #[serde(default)]
+    pub candidates: Vec<IntegrationSetupCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_candidate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub instructions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_url: Option<String>,
+}
+
 /// Why an enabled plugin is currently inactive. Distinct from consent and from
 /// runtime health — the source of truth for the "Enabled, but inactive" state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1357,9 +1434,18 @@ pub struct PluginInfo {
     /// plugin, where the field is meaningless.
     #[serde(default = "default_true")]
     pub integration_enabled: bool,
-    /// Whether this integration declares a host-owned HTTP pairing exchange.
     #[serde(default)]
-    pub has_http_pairing: bool,
+    pub integration_configured: bool,
+    /// Whether this integration declares an interactive setup flow that can
+    /// be reset and run again from the Integrations page.
+    #[serde(default)]
+    pub integration_requires_setup: bool,
+    /// Derived integration lifecycle shown by the Integrations page.
+    #[serde(default)]
+    pub integration_state: IntegrationLifecycleState,
+    /// Active host-owned setup flow, if the user is configuring this integration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_setup: Option<IntegrationSetupStatus>,
     /// Whether the currently declared authority has been accepted and the
     /// package is eligible to run. Content hashes are update/dirty metadata,
     /// never a consent gate.

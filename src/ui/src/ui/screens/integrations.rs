@@ -11,13 +11,16 @@
 use std::collections::{HashMap, HashSet};
 
 use egui::{Sense, Vec2};
-use halod_shared::types::{AppState, PluginInfo, PluginIssue, PluginIssueKind, PluginKind};
+use halod_shared::types::{
+    AppState, IntegrationLifecycleState, IntegrationSetupMode, IntegrationSetupPhase, PluginInfo,
+    PluginIssue, PluginIssueKind, PluginKind,
+};
 
 use crate::domain::models::plugin_issues::plugin_issue_detail;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::screens::plugin_config::{
-    config_section, config_values_to_send, seed_config_edit_if_needed,
+    config_fields_editor, config_section, config_values_to_send, seed_config_edit_if_needed,
 };
 use crate::ui::screens::plugins::{
     decode_new_assets, draw_logo_fit, initials_tile_at, plugin_needs_permission,
@@ -50,6 +53,10 @@ pub struct IntegrationsUi {
     requested_logos: HashSet<String>,
     /// Full integration runtime error opened from a card's error bar.
     issue_modal: Option<(String, String)>,
+    setup_open: Option<String>,
+    setup_candidate: Option<String>,
+    opened_oauth_urls: HashSet<String>,
+    reset_confirm: Option<(String, String)>,
 }
 
 /// How many devices an integration currently exposes, and whether its root
@@ -94,17 +101,20 @@ pub fn integration_status(state: &AppState, plugin_id: &str) -> IntegrationStatu
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegrationState {
     Disabled,
-    Connecting,
-    Connected,
+    Unconfigured,
+    Configured,
+    Active,
 }
 
 pub fn integration_state(p: &PluginInfo, status: &IntegrationStatus) -> IntegrationState {
     if !p.enabled || !p.integration_enabled {
         IntegrationState::Disabled
-    } else if status.connected {
-        IntegrationState::Connected
+    } else if !p.integration_configured {
+        IntegrationState::Unconfigured
+    } else if status.connected || p.integration_state == IntegrationLifecycleState::Active {
+        IntegrationState::Active
     } else {
-        IntegrationState::Connecting
+        IntegrationState::Configured
     }
 }
 
@@ -119,6 +129,8 @@ impl IntegrationsUi {
         self.sync_logos(ui.ctx(), cmd, &state.plugins.plugins, plugin_assets);
         widgets::page_frame(ui, |ui| self.body(ui, state, cmd));
         widgets::issue_modal_slot(ui.ctx(), "integration_issue", &mut self.issue_modal);
+        self.reset_setup_modal(ui.ctx(), cmd);
+        self.setup_modal(ui.ctx(), state, cmd);
     }
 
     /// Request the logo of every visible integration that hasn't been fetched
@@ -262,23 +274,36 @@ impl IntegrationsUi {
                 ui,
                 |ui| status_row(ui, p, &status),
                 |ui| {
-                    if has_config {
-                        let label = if expanded {
-                            t!("integrations.hide_configure")
-                        } else {
-                            t!("integrations.configure")
-                        };
-                        if widgets::button(
-                            ui,
-                            &label,
-                            ButtonKind::Ghost,
-                            egui::Vec2::new(120.0, 28.0),
-                        )
-                        .clicked()
+                    ui.horizontal(|ui| {
+                        if can_reset_setup(p)
+                            && widgets::button(
+                                ui,
+                                &t!("integrations.reset_setup"),
+                                ButtonKind::Ghost,
+                                egui::Vec2::new(110.0, 28.0),
+                            )
+                            .clicked()
                         {
-                            self.expanded = if expanded { None } else { Some(p.id.clone()) };
+                            self.reset_confirm = Some((p.id.clone(), p.name.clone()));
                         }
-                    }
+                        if has_config {
+                            let label = if expanded {
+                                t!("integrations.hide_configure")
+                            } else {
+                                t!("integrations.configure")
+                            };
+                            if widgets::button(
+                                ui,
+                                &label,
+                                ButtonKind::Ghost,
+                                egui::Vec2::new(120.0, 28.0),
+                            )
+                            .clicked()
+                            {
+                                self.expanded = if expanded { None } else { Some(p.id.clone()) };
+                            }
+                        }
+                    });
                 },
             );
 
@@ -305,35 +330,437 @@ impl IntegrationsUi {
                         },
                     );
                 });
-                if p.has_http_pairing {
-                    ui.add_space(theme::SPACE_3);
-                    if widgets::button(ui, "Pair", ButtonKind::Ghost, egui::Vec2::new(100.0, 30.0))
-                        .clicked()
-                    {
-                        let values = config_values_to_send(edits, &p.config_fields);
-                        crate::runtime::ipc::send(
-                            cmd,
-                            halod_shared::commands::DaemonCommand::PairIntegration {
-                                id: p.id.clone(),
-                                values,
-                            },
-                        );
-                    }
-                }
             }
         });
 
         if let Some(target) = toggled {
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::SetIntegrationEnabled {
-                    id: p.id.clone(),
-                    enabled: target,
-                },
-            );
-            self.in_flight.insert(p.id.clone(), target);
+            if target && !p.integration_configured {
+                self.setup_open = Some(p.id.clone());
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::BeginIntegrationSetup {
+                        id: p.id.clone(),
+                    },
+                );
+            } else {
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::SetIntegrationEnabled {
+                        id: p.id.clone(),
+                        enabled: target,
+                    },
+                );
+                self.in_flight.insert(p.id.clone(), target);
+            }
         }
     }
+
+    fn reset_setup_modal(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
+        let Some((_, name)) = self.reset_confirm.as_ref() else {
+            return;
+        };
+        if let Some((id, _)) = widgets::confirm_delete_dialog(
+            ctx,
+            "integration_reset_setup",
+            &t!("integrations.reset_setup_title"),
+            &t!("integrations.reset_setup_confirm", name = name),
+            &t!("integrations.reset_setup_action"),
+            &mut self.reset_confirm,
+        ) {
+            self.setup_open = Some(id.clone());
+            self.setup_candidate = None;
+            self.config_edit = None;
+            self.expanded = None;
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::ResetIntegrationSetup { id },
+            );
+        }
+    }
+
+    fn setup_modal(&mut self, ctx: &egui::Context, state: &AppState, cmd: &CommandTx) {
+        if self.setup_open.is_none() {
+            self.setup_open = state
+                .plugins
+                .plugins
+                .iter()
+                .find(|plugin| plugin.integration_setup.is_some())
+                .map(|plugin| plugin.id.clone());
+        }
+        let Some(id) = self.setup_open.clone() else {
+            return;
+        };
+        let Some(plugin) = state
+            .plugins
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id)
+            .cloned()
+        else {
+            self.setup_open = None;
+            return;
+        };
+        let Some(setup) = plugin.integration_setup.clone() else {
+            return;
+        };
+        let mut close = false;
+        let title = format!("Connect {}", plugin.name);
+        let dismissed =
+            widgets::modal_frame_raw(ctx, "integration_setup", &title, 620.0, 470.0, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(setup_phase_label(&setup))
+                            .font(theme::mono(10.5))
+                            .color(theme::TEXT_FAINT),
+                    );
+                });
+                ui.add_space(theme::SPACE_6);
+                match setup.phase {
+                    IntegrationSetupPhase::Init => {
+                        self.setup_init(ui, &plugin, &setup, cmd);
+                    }
+                    IntegrationSetupPhase::Discovering => {
+                        self.setup_discovery(ui, &plugin, &setup, cmd);
+                    }
+                    IntegrationSetupPhase::Pairing => {
+                        self.setup_pairing(ui, &plugin, &setup, cmd);
+                    }
+                    IntegrationSetupPhase::Done => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(70.0);
+                            let (symbol, color, heading) = if setup.success {
+                                ("✓", theme::ONLINE, format!("{} connected", plugin.name))
+                            } else {
+                                ("!", theme::TRAFFIC_RED, "Setup failed".to_owned())
+                            };
+                            ui.label(egui::RichText::new(symbol).size(42.0).color(color));
+                            ui.label(
+                                egui::RichText::new(heading)
+                                    .font(theme::heading())
+                                    .color(theme::TEXT),
+                            );
+                            if let Some(error) = &setup.error {
+                                ui.label(
+                                    egui::RichText::new(error)
+                                        .font(theme::body_sm())
+                                        .color(theme::TEXT_MUT),
+                                );
+                            }
+                        });
+                        ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
+                            if widgets::button(
+                                ui,
+                                "Finish",
+                                ButtonKind::Primary,
+                                egui::vec2(110.0, 40.0),
+                            )
+                            .clicked()
+                            {
+                                close = true;
+                            }
+                        });
+                    }
+                }
+            });
+        if dismissed || close {
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::CancelIntegrationSetup { id },
+            );
+            self.setup_open = None;
+            self.setup_candidate = None;
+            self.config_edit = None;
+        }
+    }
+
+    fn setup_init(
+        &mut self,
+        ui: &mut egui::Ui,
+        plugin: &PluginInfo,
+        setup: &halod_shared::types::IntegrationSetupStatus,
+        cmd: &CommandTx,
+    ) {
+        if setup.selected_mode.is_none() && setup.modes.len() > 1 {
+            ui.label(
+                egui::RichText::new("How should Halo find the device?")
+                    .font(theme::heading())
+                    .color(theme::TEXT),
+            );
+            ui.add_space(theme::SPACE_6);
+            for (mode, label, detail) in [
+                (
+                    IntegrationSetupMode::Automatic,
+                    "Find devices automatically",
+                    "Search the local network using this integration's declared discovery services.",
+                ),
+                (
+                    IntegrationSetupMode::Manual,
+                    "Enter connection details",
+                    "Configure the address and other required values yourself.",
+                ),
+            ] {
+                if setup.modes.contains(&mode)
+                    && ui
+                        .button(format!("{label}\n{detail}"))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                {
+                    send_setup_mode(cmd, &plugin.id, mode);
+                }
+            }
+            return;
+        }
+        let mode = setup
+            .selected_mode
+            .or_else(|| setup.modes.first().copied())
+            .unwrap_or(IntegrationSetupMode::Manual);
+        if mode == IntegrationSetupMode::Automatic {
+            ui.label(
+                egui::RichText::new("Find devices automatically")
+                    .font(theme::heading())
+                    .color(theme::TEXT),
+            );
+            ui.label(
+                egui::RichText::new("Halo will search the local network for compatible devices.")
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_MUT),
+            );
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
+                if widgets::button(ui, "Search", ButtonKind::Primary, egui::vec2(110.0, 40.0))
+                    .clicked()
+                {
+                    send_setup_mode(cmd, &plugin.id, mode);
+                }
+            });
+            return;
+        }
+        ui.label(
+            egui::RichText::new("Connection details")
+                .font(theme::heading())
+                .color(theme::TEXT),
+        );
+        ui.add_space(theme::SPACE_4);
+        seed_config_edit_if_needed(&mut self.config_edit, &plugin.id, &plugin.config_values);
+        let edits = &mut self.config_edit.as_mut().expect("setup edit seeded").1;
+        config_fields_editor(ui, plugin, edits);
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
+            if widgets::button(ui, "Continue", ButtonKind::Primary, egui::vec2(110.0, 40.0))
+                .clicked()
+            {
+                let values = config_values_to_send(edits, &plugin.config_fields);
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::SubmitIntegrationSetup {
+                        id: plugin.id.clone(),
+                        candidate_id: None,
+                        values,
+                    },
+                );
+            }
+        });
+    }
+
+    fn setup_discovery(
+        &mut self,
+        ui: &mut egui::Ui,
+        plugin: &PluginInfo,
+        setup: &halod_shared::types::IntegrationSetupStatus,
+        cmd: &CommandTx,
+    ) {
+        ui.label(
+            egui::RichText::new("Choose a device")
+                .font(theme::heading())
+                .color(theme::TEXT),
+        );
+        ui.label(
+            egui::RichText::new(
+                setup
+                    .message
+                    .as_deref()
+                    .unwrap_or("Devices found on your local network"),
+            )
+            .font(theme::body_sm())
+            .color(theme::TEXT_MUT),
+        );
+        ui.add_space(theme::SPACE_5);
+        if let Some(error) = &setup.error {
+            widgets::Banner::danger(error).show(ui);
+            ui.add_space(theme::SPACE_4);
+        }
+        if setup.candidates.is_empty() && setup.message.is_none() {
+            widgets::Banner::warn("No devices found. Refresh or enter the address manually.")
+                .show(ui);
+        }
+        for candidate in &setup.candidates {
+            let selected = self.setup_candidate.as_deref() == Some(candidate.id.as_str());
+            if ui
+                .selectable_label(selected, &candidate.name)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                self.setup_candidate = Some(candidate.id.clone());
+            }
+        }
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
+            ui.horizontal(|ui| {
+                if widgets::button(ui, "Continue", ButtonKind::Primary, egui::vec2(110.0, 40.0))
+                    .clicked()
+                {
+                    if let Some(candidate_id) = self.setup_candidate.clone() {
+                        crate::runtime::ipc::send(
+                            cmd,
+                            halod_shared::commands::DaemonCommand::SubmitIntegrationSetup {
+                                id: plugin.id.clone(),
+                                candidate_id: Some(candidate_id),
+                                values: HashMap::new(),
+                            },
+                        );
+                    }
+                }
+                if setup.modes.contains(&IntegrationSetupMode::Manual)
+                    && widgets::button(
+                        ui,
+                        "Enter manually",
+                        ButtonKind::Ghost,
+                        egui::vec2(130.0, 40.0),
+                    )
+                    .clicked()
+                {
+                    send_setup_mode(cmd, &plugin.id, IntegrationSetupMode::Manual);
+                }
+                if widgets::button(ui, "Refresh", ButtonKind::Ghost, egui::vec2(90.0, 40.0))
+                    .clicked()
+                {
+                    send_setup_mode(cmd, &plugin.id, IntegrationSetupMode::Automatic);
+                }
+            });
+        });
+    }
+
+    fn setup_pairing(
+        &mut self,
+        ui: &mut egui::Ui,
+        plugin: &PluginInfo,
+        setup: &halod_shared::types::IntegrationSetupStatus,
+        cmd: &CommandTx,
+    ) {
+        if setup.message.is_some() && setup.external_url.is_none() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(90.0);
+                ui.spinner();
+                ui.add_space(theme::SPACE_5);
+                ui.label(
+                    egui::RichText::new(setup.message.as_deref().unwrap_or("Pairing…"))
+                        .font(theme::heading())
+                        .color(theme::TEXT),
+                );
+                ui.label(
+                    egui::RichText::new("Please wait while Halo completes the secure handshake.")
+                        .font(theme::body_sm())
+                        .color(theme::TEXT_MUT),
+                );
+            });
+            return;
+        }
+        if let Some(url) = &setup.external_url {
+            if self.opened_oauth_urls.insert(url.clone()) {
+                let _ = webbrowser::open(url);
+            }
+            ui.label(
+                egui::RichText::new("Authorize in your browser")
+                    .font(theme::heading())
+                    .color(theme::TEXT),
+            );
+            ui.label("Halo is waiting for the secure OAuth2 callback.");
+            if widgets::button(
+                ui,
+                "Open browser",
+                ButtonKind::Primary,
+                egui::vec2(130.0, 40.0),
+            )
+            .clicked()
+            {
+                let _ = webbrowser::open(url);
+            }
+            return;
+        }
+        ui.label(
+            egui::RichText::new(
+                setup
+                    .title
+                    .as_deref()
+                    .unwrap_or("Put the device in pairing mode"),
+            )
+            .font(theme::heading())
+            .color(theme::TEXT),
+        );
+        ui.add_space(theme::SPACE_5);
+        for (index, instruction) in setup.instructions.iter().enumerate() {
+            ui.label(format!("{}. {instruction}", index + 1));
+        }
+        if let Some(error) = &setup.error {
+            ui.add_space(theme::SPACE_5);
+            widgets::Banner::danger(error).show(ui);
+        }
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
+            ui.horizontal(|ui| {
+                if widgets::button(
+                    ui,
+                    "Start pairing",
+                    ButtonKind::Primary,
+                    egui::vec2(130.0, 40.0),
+                )
+                .clicked()
+                {
+                    crate::runtime::ipc::send(
+                        cmd,
+                        halod_shared::commands::DaemonCommand::RetryIntegrationPairing {
+                            id: plugin.id.clone(),
+                        },
+                    );
+                }
+                if widgets::button(ui, "Back", ButtonKind::Ghost, egui::vec2(90.0, 40.0)).clicked()
+                {
+                    send_setup_mode(
+                        cmd,
+                        &plugin.id,
+                        setup
+                            .selected_mode
+                            .or_else(|| setup.modes.first().copied())
+                            .unwrap_or(IntegrationSetupMode::Manual),
+                    );
+                }
+            });
+        });
+    }
+}
+
+fn setup_phase_label(setup: &halod_shared::types::IntegrationSetupStatus) -> &'static str {
+    match setup.phase {
+        IntegrationSetupPhase::Init | IntegrationSetupPhase::Discovering => "Connect · 1 / 4",
+        IntegrationSetupPhase::Pairing
+            if setup.message.is_some() && setup.external_url.is_none() =>
+        {
+            "Pairing · 3 / 4"
+        }
+        IntegrationSetupPhase::Pairing if setup.external_url.is_some() => "Authorize · 2 / 4",
+        IntegrationSetupPhase::Pairing => "Pairing mode · 2 / 4",
+        IntegrationSetupPhase::Done => "Done · 4 / 4",
+    }
+}
+
+fn can_reset_setup(plugin: &PluginInfo) -> bool {
+    plugin.integration_configured && plugin.integration_requires_setup
+}
+
+fn send_setup_mode(cmd: &CommandTx, id: &str, mode: IntegrationSetupMode) {
+    crate::runtime::ipc::send(
+        cmd,
+        halod_shared::commands::DaemonCommand::SelectIntegrationSetupMode {
+            id: id.to_owned(),
+            mode,
+        },
+    );
 }
 
 /// Runtime/connection failure attached to one integration card. The short bar
@@ -385,8 +812,9 @@ fn logos_to_request(
 fn status_row(ui: &mut egui::Ui, p: &PluginInfo, status: &IntegrationStatus) {
     let (color, label) = match integration_state(p, status) {
         IntegrationState::Disabled => (theme::TEXT_FAINT2, t!("integrations.status_disabled")),
-        IntegrationState::Connecting => (theme::STAT_AMBER, t!("integrations.status_connecting")),
-        IntegrationState::Connected => (theme::ONLINE, t!("integrations.status_connected")),
+        IntegrationState::Unconfigured => (theme::STAT_AMBER, "Unconfigured".into()),
+        IntegrationState::Configured => (theme::STAT_AMBER, "Configured".into()),
+        IntegrationState::Active => (theme::ONLINE, "Active".into()),
     };
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(8.0), egui::Sense::hover());
@@ -465,7 +893,14 @@ mod tests {
             config_values: Default::default(),
             secret_set: Default::default(),
             integration_enabled,
-            has_http_pairing: false,
+            integration_configured: integration_enabled,
+            integration_requires_setup: false,
+            integration_state: if integration_enabled {
+                IntegrationLifecycleState::Configured
+            } else {
+                IntegrationLifecycleState::Disabled
+            },
+            integration_setup: None,
             consented: true,
             active: enabled,
             requirements: vec![],
@@ -619,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn integration_state_connecting_then_connected() {
+    fn integration_state_configured_then_active() {
         let p = plugin("openrgb", true, true);
         assert_eq!(
             integration_state(
@@ -629,7 +1064,7 @@ mod tests {
                     device_count: 0,
                 }
             ),
-            IntegrationState::Connecting
+            IntegrationState::Configured
         );
         assert_eq!(
             integration_state(
@@ -639,7 +1074,30 @@ mod tests {
                     device_count: 3,
                 }
             ),
-            IntegrationState::Connected
+            IntegrationState::Active
         );
+    }
+
+    #[test]
+    fn pairing_progress_uses_the_third_modal_step() {
+        let mut setup = halod_shared::types::IntegrationSetupStatus {
+            phase: IntegrationSetupPhase::Pairing,
+            ..Default::default()
+        };
+        assert_eq!(setup_phase_label(&setup), "Pairing mode · 2 / 4");
+        setup.message = Some("Pairing…".into());
+        assert_eq!(setup_phase_label(&setup), "Pairing · 3 / 4");
+    }
+
+    #[test]
+    fn reset_setup_is_available_only_after_an_interactive_setup() {
+        let mut p = plugin("nanoleaf", true, true);
+        p.integration_requires_setup = true;
+        assert!(can_reset_setup(&p));
+        p.integration_configured = false;
+        assert!(!can_reset_setup(&p));
+        p.integration_configured = true;
+        p.integration_requires_setup = false;
+        assert!(!can_reset_setup(&p));
     }
 }

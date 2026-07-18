@@ -5,6 +5,10 @@ integrations:
   empty_hint: Al momento non hai integrazioni.
   configure: Configura
   hide_configure: Nascondi
+  reset_setup: Reimposta configurazione
+  reset_setup_title: Reimpostare la configurazione dell'integrazione?
+  reset_setup_confirm: "Questa operazione rimuove la configurazione e le credenziali salvate per %{name}. L'integrazione rimarrà disattivata finché la nuova configurazione non sarà completata."
+  reset_setup_action: Reimposta e configura
   status_connected: Connessa
   status_connecting: Non connessa
   status_disabled: Disattivata
