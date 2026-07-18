@@ -65,6 +65,16 @@ impl PlatformTray {
         Self { handle, latest }
     }
 
+    /// A tray with no running ksni service — for headless tests, so no D-Bus
+    /// connection or background thread is started. `sync` becomes a no-op.
+    #[cfg(all(test, feature = "screenshots"))]
+    pub fn headless() -> Self {
+        Self {
+            handle: Arc::new(Mutex::new(None)),
+            latest: Arc::new(Mutex::new(TrayModel::default())),
+        }
+    }
+
     pub fn sync(&mut self, _ctx: &egui::Context, model: &TrayModel, changed: bool) {
         if !changed {
             return;

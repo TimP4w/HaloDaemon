@@ -75,7 +75,7 @@ pub fn app_icon() -> egui::IconData {
 /// On eframe, `Visible(true)` re-shows the window. On the Linux custom loop the
 /// window may have been destroyed, so set `wants_show` too — the loop recreates
 /// it. `request_repaint` wakes the loop (via its proxy) to act on the flag.
-fn present(ctx: &egui::Context, hide_state: &crate::domain::state::HideState) {
+pub(crate) fn present(ctx: &egui::Context, hide_state: &crate::domain::state::HideState) {
     hide_state.wants_show.store(true, Ordering::SeqCst);
     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -165,6 +165,16 @@ impl Tray {
     ) -> Self {
         Self {
             inner: PlatformTray::new(ctx, cmd, force_quit, hide_state),
+            shown: TrayModel::default(),
+        }
+    }
+
+    /// A tray with no platform backend, for headless snapshot rendering — it
+    /// starts no D-Bus/ksni thread and registers no icon.
+    #[cfg(all(test, target_os = "linux", feature = "screenshots"))]
+    pub(crate) fn headless() -> Self {
+        Self {
+            inner: PlatformTray::headless(),
             shown: TrayModel::default(),
         }
     }

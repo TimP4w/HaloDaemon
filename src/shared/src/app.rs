@@ -14,6 +14,14 @@ pub const SOCKET_FILENAME: &str = "halod.sock";
 /// Windows named pipe path.
 pub const PIPE_NAME: &str = r"\\.\pipe\halod";
 
+/// Unix domain socket filename for the GUI's single-instance guard, under the
+/// runtime dir. A second GUI launch pings it so the running instance surfaces
+/// its window instead of opening a duplicate window + tray icon.
+pub const GUI_SOCKET_FILENAME: &str = "halod-gui.sock";
+
+/// Windows named pipe for the GUI single-instance guard.
+pub const GUI_PIPE_NAME: &str = r"\\.\pipe\halod-gui";
+
 /// Process name the GUI registers itself under (window title bar, `eframe`
 /// app id, single-instance checks).
 pub const GUI_PROCESS_NAME: &str = "halod-gui";

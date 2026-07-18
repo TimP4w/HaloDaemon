@@ -99,7 +99,7 @@ pub struct UiRx {
     pub notifications: NotifyQueue,
 }
 
-struct UiTx {
+pub(crate) struct UiTx {
     state: watch::Sender<AppState>,
     connected: watch::Sender<bool>,
     debug: watch::Sender<Option<halod_shared::debug_info::DebugInfo>>,
@@ -158,11 +158,10 @@ pub fn send(tx: &CommandTx, cmd: DaemonCommand) {
     }
 }
 
-/// Spawn the background reader/writer on its own thread + current-thread
-/// runtime, returning the command sender and the receiver bundle. `repaint` is
-/// called whenever new data lands so egui wakes up.
-pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+/// Build the paired sender/receiver bundles for every daemon-driven stream.
+/// Split out from [`spawn`] so headless tests can wire a `UiRx` to senders they
+/// keep and drive directly (see [`fake`]).
+fn channels() -> (UiTx, UiRx) {
     let (state_s, state_r) = watch::channel(AppState::default());
     let (conn_s, conn_r) = watch::channel(false);
     let (debug_s, debug_r) = watch::channel(None);
@@ -216,6 +215,29 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
         lcd_editor_render: editor_render_r,
         notifications,
     };
+    (tx, rx)
+}
+
+/// Seed a `UiRx` with a fixed snapshot for headless rendering, no socket
+/// involved. The returned `UiTx` owns the sender halves and must be held for
+/// the receiver's lifetime, or every channel reports closed.
+#[cfg(all(test, target_os = "linux", feature = "screenshots"))]
+pub(crate) fn fake(state: AppState, connected: bool) -> (CommandTx, UiRx, UiTx) {
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (tx, rx) = channels();
+    tx.state.send_replace(state);
+    tx.connected.send_replace(connected);
+    // Keep the command channel open so the draw path's `send`s stay quiet.
+    std::mem::forget(cmd_rx);
+    (cmd_tx, rx, tx)
+}
+
+/// Spawn the background reader/writer on its own thread + current-thread
+/// runtime, returning the command sender and the receiver bundle. `repaint` is
+/// called whenever new data lands so egui wakes up.
+pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (tx, rx) = channels();
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()

@@ -51,7 +51,7 @@ enum UserEvent {
 /// window close with "close to tray" off) exits the loop. `background` starts
 /// tray-only, with no window ever created until the tray "Open" is used (sign-in
 /// autostart via `--background`).
-pub fn run(background: bool) {
+pub fn run(background: bool, primary: crate::runtime::single_instance::Primary) {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("failed to build winit event loop");
@@ -75,6 +75,11 @@ pub fn run(background: bool) {
             .lock()
             .send_event(UserEvent::Redraw(Duration::ZERO));
     });
+    // A re-launch pings the guard socket; recreate/raise the window in response,
+    // the same path as the tray's "Open".
+    let show_ctx = ctx.clone();
+    let show_hide = hide_state.clone();
+    primary.serve(move || tray::present(&show_ctx, &show_hide));
     let ctx_for_ipc = ctx.clone();
     let (cmd_tx, ui_rx) = ipc::spawn(move || ctx_for_ipc.request_repaint());
     let tray = tray::Tray::new(&ctx, cmd_tx.clone(), force_quit.clone(), hide_state.clone());

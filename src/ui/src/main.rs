@@ -15,7 +15,8 @@ mod app;
 mod domain;
 mod runtime;
 mod ui;
-
+#[cfg(all(test, target_os = "linux", feature = "screenshots"))]
+mod screenshots;
 #[cfg(not(target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -77,13 +78,22 @@ impl eframe::App for App {
 #[cfg(target_os = "linux")]
 fn main() {
     env_logger::init();
+    let primary = match runtime::single_instance::acquire() {
+        runtime::single_instance::Instance::Secondary => return,
+        runtime::single_instance::Instance::Primary(p) => p,
+    };
     let background = domain::lifecycle::start_in_background(std::env::args());
-    runtime::wayland_hide::run(background);
+    runtime::wayland_hide::run(background, primary);
 }
 
 #[cfg(not(target_os = "linux"))]
 fn main() -> eframe::Result<()> {
     env_logger::init();
+
+    let primary = match runtime::single_instance::acquire() {
+        runtime::single_instance::Instance::Secondary => return Ok(()),
+        runtime::single_instance::Instance::Primary(p) => p,
+    };
 
     let background = domain::lifecycle::start_in_background(std::env::args());
 
@@ -109,6 +119,10 @@ fn main() -> eframe::Result<()> {
             let (cmd_tx, ui) = runtime::ipc::spawn(move || ctx.request_repaint());
             let force_quit = Arc::new(AtomicBool::new(false));
             let hide_state = Arc::new(HideState::default());
+            // A re-launch pings the guard socket; raise this window in response.
+            let show_ctx = cc.egui_ctx.clone();
+            let show_hide = hide_state.clone();
+            primary.serve(move || domain::tray::present(&show_ctx, &show_hide));
             let tray = domain::tray::Tray::new(
                 &cc.egui_ctx,
                 cmd_tx.clone(),

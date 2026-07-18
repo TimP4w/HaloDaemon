@@ -9,6 +9,9 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+screenshots = ["dep:egui_kittest"]
+
 [dependencies]
 halod-shared = { path = "../shared" }
 
@@ -50,6 +53,11 @@ glutin-winit = "0.5"
 glow = "0.17"
 egui_glow = { version = "0.35", default-features = false, features = ["winit", "wayland"] }
 zbus = "4"
+# Headless egui harness for the screenshot generators (ui/src/screenshots.rs);
+# `wgpu` renders frames to PNG without a window.
+egui_kittest = { version = "0.35", default-features = false, features = [
+    "wgpu",
+], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.24.1"

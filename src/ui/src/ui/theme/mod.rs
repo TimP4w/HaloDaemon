@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Palette, fonts and small paint helpers for the "Prism Control" design
-//! (imported from claude.ai/design). Dark editorial surface, cyan accent,
+//! (imported from claude.ai/design). Dark midnight surfaces, Halo violet accent,
 //! Inter Tight for text and JetBrains Mono for numerics.
 
 use egui::{
@@ -15,69 +15,70 @@ pub use tokens::*;
 pub use type_scale::*;
 
 // ── Surfaces ─────────────────────────────────────────────────────────────────
-pub const BODY: Color32 = hex(0x090b11);
+pub const BODY: Color32 = hex(0x10121c);
 #[expect(dead_code, reason = "theme token reserved for native window chrome")]
-pub const WIN_TOP: Color32 = hex(0x0e0d15);
-pub const TITLE_BG: Color32 = hex(0x0b0e15);
-pub const SIDEBAR_BG: Color32 = hex(0x0c0f17);
+pub const WIN_TOP: Color32 = hex(0x141622);
+pub const TITLE_BG: Color32 = hex(0x131520);
+pub const SIDEBAR_BG: Color32 = hex(0x12141f);
 /// Raised cards throughout the application.
-pub const CARD_BG: Color32 = hex(0x181521);
+pub const CARD_BG: Color32 = hex(0x171a28);
 /// Dialog, modal, menu, and popup shells.
-pub const MODAL_BG: Color32 = hex(0x110f18);
-pub const INNER_BG: Color32 = hex(0x0d1119);
-pub const ROW_ACTIVE: Color32 = hex(0x211c2c);
+pub const MODAL_BG: Color32 = hex(0x171925);
+pub const INNER_BG: Color32 = hex(0x151722);
+pub const ROW_ACTIVE: Color32 = hex(0x1d2030);
 
 // ── Borders ──────────────────────────────────────────────────────────────────
-pub const BORDER: Color32 = hex(0x262231);
-pub const BORDER_SOFT: Color32 = hex(0x1e1a27);
-pub const BORDER_INNER: Color32 = hex(0x2b2637);
+pub const BORDER: Color32 = hex(0x2d3046);
+pub const BORDER_SOFT: Color32 = hex(0x202337);
+pub const BORDER_INNER: Color32 = hex(0x393d57);
 /// Subtle chrome divider (title bar / sidebar edges) — barely above the bg.
-pub const DIVIDER: Color32 = hex(0x0c0b12);
+pub const DIVIDER: Color32 = hex(0x191b29);
 
 // ── Text ─────────────────────────────────────────────────────────────────────
-pub const TEXT: Color32 = hex(0xe7ebf3);
-pub const TEXT_BRIGHT: Color32 = hex(0xdfe6f2);
-pub const TEXT_DIM: Color32 = hex(0x9aa3b8);
-pub const TEXT_MUT: Color32 = hex(0x7a8398);
-pub const TEXT_FAINT: Color32 = hex(0x5d6679);
-pub const TEXT_FAINT2: Color32 = hex(0x4e576b);
+pub const TEXT: Color32 = hex(0xf1f0fa);
+pub const TEXT_BRIGHT: Color32 = hex(0xffffff);
+pub const TEXT_DIM: Color32 = hex(0xb1b4ca);
+pub const TEXT_MUT: Color32 = hex(0x858aa5);
+pub const TEXT_FAINT: Color32 = hex(0x646983);
+pub const TEXT_FAINT2: Color32 = hex(0x515670);
 
 // ── Accent + status ──────────────────────────────────────────────────────────
-pub const CYAN: Color32 = hex(0x8b6fd8);
-pub const TRAFFIC_RED: Color32 = hex(0xe05a6e);
-pub const TRAFFIC_YELLOW: Color32 = hex(0xe0b34f);
-pub const TRAFFIC_GREEN: Color32 = hex(0x55c98a);
-pub const ONLINE: Color32 = hex(0x55c98a);
-pub const ONLINE_TEXT: Color32 = hex(0x83c9a4);
-pub const OFFLINE: Color32 = hex(0xe05a6e);
-pub const OFFLINE_TEXT: Color32 = hex(0xc98b95);
+/// Halo's product violet. The historical `CYAN` name remains for API compatibility.
+pub const CYAN: Color32 = hex(0x9b7fe0);
+pub const TRAFFIC_RED: Color32 = hex(0xff647c);
+pub const TRAFFIC_YELLOW: Color32 = hex(0xf6bf5f);
+pub const TRAFFIC_GREEN: Color32 = hex(0x42d9a1);
+pub const ONLINE: Color32 = hex(0x42d9a1);
+pub const ONLINE_TEXT: Color32 = hex(0x82e6bd);
+pub const OFFLINE: Color32 = hex(0xff647c);
+pub const OFFLINE_TEXT: Color32 = hex(0xffa0af);
 
 // ── Progress / loading ───────────────────────────────────────────────────────
 /// Loading gradient stops (lavender → magenta) shared by the ring spinner and
 /// the gradient loading bar, so every progress surface reads as one family.
-pub const PROGRESS_A: Color32 = hex(0xa78bfa);
-pub const PROGRESS_B: Color32 = hex(0xe879f9);
+pub const PROGRESS_A: Color32 = hex(0xb49aff);
+pub const PROGRESS_B: Color32 = hex(0xf178d0);
 /// Track behind a progress fill / under a spinner ring.
-pub const TRACK: Color32 = hex(0x221f2a);
+pub const TRACK: Color32 = hex(0x25283a);
 
 /// Success badge (the onboarding "done" check): deep-green disc + ring.
-pub const SUCCESS_FILL: Color32 = hex(0x12211a);
-pub const SUCCESS_RING: Color32 = hex(0x2b6b45);
+pub const SUCCESS_FILL: Color32 = hex(0x10251f);
+pub const SUCCESS_RING: Color32 = hex(0x2e8766);
 
 // ── Stat + battery accents ───────────────────────────────────────────────────
-pub const STAT_CYAN: Color32 = hex(0x5fb8d6);
+pub const STAT_CYAN: Color32 = hex(0x53d5e8);
 pub const STAT_PURPLE: Color32 = hex(0x9b7fe0);
-pub const STAT_GREEN: Color32 = hex(0x47c98f);
-pub const STAT_AMBER: Color32 = hex(0xd9a94f);
+pub const STAT_GREEN: Color32 = hex(0x42d9a1);
+pub const STAT_AMBER: Color32 = hex(0xf6bf5f);
 
-/// Logo mark gradient stops (an RGB spectrum).
+/// Logo mark gradient stops: Halo violet with electric pink and cyan highlights.
 pub const LOGO_STOPS: [Color32; 6] = [
-    hex(0xd96aa8),
-    hex(0xd9a94f),
-    hex(0x47c98f),
-    hex(0x5fb8d6),
     hex(0x9b7fe0),
-    hex(0xd96aa8),
+    hex(0xc58cff),
+    hex(0xf178d0),
+    hex(0x53d5e8),
+    hex(0x9b7fe0),
+    hex(0xc58cff),
 ];
 
 /// Per-sensor accent palette, shared by the Home dashboard and the Cooling
@@ -91,15 +92,15 @@ pub fn sensor_hue(i: usize) -> Color32 {
 
 /// Vibrant per-device accent palette (assigned by device type / id hash).
 pub const DEVICE_HUES: [Color32; 10] = [
-    hex(0x5fb8d6),
+    hex(0x53d5e8),
     hex(0x9b7fe0),
     hex(0x4fc2c2),
     hex(0x6b94e0),
-    hex(0x47c98f),
-    hex(0xd96aa8),
+    hex(0x42d9a1),
+    hex(0xf178d0),
     hex(0x8b7fe0),
-    hex(0xd97088),
-    hex(0xd9a94f),
+    hex(0xff647c),
+    hex(0xf6bf5f),
     hex(0x4fc2c2),
 ];
 
@@ -235,7 +236,7 @@ pub fn install_fonts_with_system<'a>(
 }
 
 /// Main content background (`window` gradient bottom stop).
-pub const MAIN_BG: Color32 = hex(0x090b12);
+pub const MAIN_BG: Color32 = BODY;
 
 /// Install fonts and the base dark visuals.
 pub fn install(ctx: &Context) {
@@ -254,12 +255,12 @@ pub fn install(ctx: &Context) {
     v.window_corner_radius = egui::CornerRadius::same(11);
     v.menu_corner_radius = egui::CornerRadius::same(11);
     v.widgets.inactive.weak_bg_fill = INNER_BG;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, hex(0x2d2b3d));
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
     v.widgets.inactive.corner_radius = egui::CornerRadius::same(7);
-    v.widgets.hovered.weak_bg_fill = hex(0x191826);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, hex(0x2d2b3d));
+    v.widgets.hovered.weak_bg_fill = hex(0x1a1d2c);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, BORDER_INNER);
     v.widgets.hovered.corner_radius = egui::CornerRadius::same(7);
-    v.widgets.active.weak_bg_fill = hex(0x191826);
+    v.widgets.active.weak_bg_fill = ROW_ACTIVE;
     v.widgets.active.bg_stroke = Stroke::new(1.0, CYAN);
     v.widgets.active.corner_radius = egui::CornerRadius::same(7);
 

@@ -52,9 +52,27 @@ pub fn socket_path_in(runtime_dir: &std::path::Path) -> String {
         .to_owned()
 }
 
+#[cfg(unix)]
+pub fn gui_socket_path() -> String {
+    gui_socket_path_in(&runtime_dir().0)
+}
+
+#[cfg(unix)]
+pub fn gui_socket_path_in(runtime_dir: &std::path::Path) -> String {
+    let path = runtime_dir.join(crate::app::GUI_SOCKET_FILENAME);
+    path.to_str()
+        .expect("GUI socket path (XDG_RUNTIME_DIR/halod-gui.sock) contains non-UTF-8 bytes")
+        .to_owned()
+}
+
 #[cfg(windows)]
 pub fn socket_path() -> String {
     crate::app::PIPE_NAME.to_string()
+}
+
+#[cfg(windows)]
+pub fn gui_socket_path() -> String {
+    crate::app::GUI_PIPE_NAME.to_string()
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -79,5 +97,13 @@ mod tests {
         assert!(is_fallback);
         assert_eq!(dir.file_name().unwrap(), format!("halod-{uid}").as_str());
         assert_eq!(socket_path_in(&dir), format!("/tmp/halod-{uid}/halod.sock"));
+    }
+
+    #[test]
+    fn gui_socket_is_a_distinct_path_under_the_same_runtime_dir() {
+        let dir = PathBuf::from("/run/user/1000");
+        let gui = gui_socket_path_in(&dir);
+        assert_eq!(gui, "/run/user/1000/halod-gui.sock");
+        assert_ne!(gui, socket_path_in(&dir));
     }
 }

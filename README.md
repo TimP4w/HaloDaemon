@@ -36,6 +36,14 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
+**Cooling dashboard** — every pump and fan across your devices in one view, each with its bound sensor, live readout, curve preview, and quick presets.
+
+</td>
+<td width="50%"><img src="./docs/images/cooling.png" alt="Cooling dashboard"></td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
 **RGB canvas engine** — unified loop across all placed zones; effects: static color, breathing, rainbow, screen sampler (mirrors monitor content). See [engines](docs/engines.md).
 
 </td>
@@ -96,6 +104,14 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 
 </td>
 <td width="50%"><img src="./docs/images/eq.png" alt="Equalizer control"></td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+**Plugin ecosystem** — install device and effect packages from signed repositories; each plugin declares its capabilities and a narrow set of permissions you approve before it runs.
+
+</td>
+<td width="50%"><img src="./docs/images/plugins.png" alt="Plugin management screen"></td>
 </tr>
 </table>
 

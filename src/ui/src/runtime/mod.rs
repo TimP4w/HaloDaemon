@@ -4,5 +4,6 @@
 //! or presentation.
 
 pub mod ipc;
+pub mod single_instance;
 #[cfg(target_os = "linux")]
 pub mod wayland_hide;
