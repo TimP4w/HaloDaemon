@@ -50,7 +50,7 @@ misc:
   designer_phase_spread: Sfasamento
   designer_ambient_color: Colore ambiente
   # radar.rs
-  radar_daemon_down_sub: Avvia il daemon
+  radar_daemon_down_sub: Il daemon si sta avviando
   radar_one_device_ready: 1 dispositivo pronto
   radar_devices_ready: "%{found} dispositivi pronti"
   radar_all_connected: Tutti i dispositivi connessi
