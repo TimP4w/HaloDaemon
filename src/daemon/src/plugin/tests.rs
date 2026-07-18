@@ -14,6 +14,25 @@ fn declared_write_rate_limit_preserves_manifest_value() {
 }
 
 #[test]
+fn transport_open_attempt_resets_have_the_right_scope() {
+    let registry = super::Registry::default();
+    {
+        let mut failures = registry.transport_open_failures.write().unwrap();
+        failures.insert(("kraken".into(), "kraken-1".into()), 3);
+        failures.insert(("other".into(), "other-1".into()), 2);
+    }
+
+    registry.reset_transport_open_failures_for("kraken");
+    let failures = registry.transport_open_failures.read().unwrap();
+    assert!(!failures.keys().any(|(plugin_id, _)| plugin_id == "kraken"));
+    assert_eq!(failures.get(&("other".into(), "other-1".into())), Some(&2));
+    drop(failures);
+
+    registry.reset_transport_open_failures();
+    assert!(registry.transport_open_failures.read().unwrap().is_empty());
+}
+
+#[test]
 fn init_failure_is_aggregated_and_clears_after_recovery() {
     let registry = super::Registry::default();
     registry.report_init_error("logitech", "g502", "ROOT timeout".into());

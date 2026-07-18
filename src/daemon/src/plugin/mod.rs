@@ -229,7 +229,7 @@ pub struct Registry {
     runtime_recovery_pending: RwLock<HashSet<String>>,
     /// Failed transport opens in the current plugin-load episode, keyed by the
     /// stable plugin device id. A successful open (or plugin reload) resets it.
-    transport_open_failures: RwLock<HashMap<String, u8>>,
+    transport_open_failures: RwLock<HashMap<(String, String), u8>>,
     content_revision: std::sync::atomic::AtomicU64,
 }
 
@@ -641,6 +641,7 @@ impl Registry {
 
     /// Atomically replace every persisted plugin-policy field in one snapshot.
     pub fn replace_policy(&self, policy: &crate::config::PluginPolicy) {
+        let previously_disabled = self.snapshot().disabled.clone();
         self.update(|s| {
             s.disabled = s
                 .manifests
@@ -667,8 +668,24 @@ impl Registry {
             s.installed_hashes = policy.installed_hashes.clone();
             s.config_values = policy.config.clone();
         });
+        let now_disabled = self.snapshot().disabled.clone();
+        for plugin_id in previously_disabled.symmetric_difference(&now_disabled) {
+            self.reset_transport_open_failures_for(plugin_id);
+        }
         self.content_revision
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Start a fresh transport-open episode for one plugin. Used when its
+    /// enable state changes so disabling and re-enabling is an explicit retry.
+    fn reset_transport_open_failures_for(&self, plugin_id: &str) {
+        write_recover(&self.transport_open_failures)
+            .retain(|(failed_plugin_id, _), _| failed_plugin_id != plugin_id);
+    }
+
+    /// A user-requested full discovery is another explicit retry boundary.
+    pub(crate) fn reset_transport_open_failures(&self) {
+        write_recover(&self.transport_open_failures).clear();
     }
 
     fn is_disabled(&self, plugin_id: &str) -> bool {
@@ -2171,8 +2188,9 @@ impl Registry {
         ready: ReadyPlugin,
     ) -> Option<Arc<dyn Device>> {
         let id = device_id(manifest, spec, handle);
+        let failure_key = (manifest.plugin_id.clone(), id.clone());
         if read_recover(&self.transport_open_failures)
-            .get(&id)
+            .get(&failure_key)
             .is_some_and(|attempts| *attempts >= TRANSPORT_OPEN_ATTEMPTS)
         {
             return None;
@@ -2210,7 +2228,7 @@ impl Registry {
                 *runtime_state.lock().unwrap() = device::RuntimeState::Closed;
                 let attempt = {
                     let mut failures = write_recover(&self.transport_open_failures);
-                    let attempts = failures.entry(id.clone()).or_default();
+                    let attempts = failures.entry(failure_key.clone()).or_default();
                     *attempts = attempts.saturating_add(1);
                     *attempts
                 };
@@ -2229,7 +2247,7 @@ impl Registry {
             }
             None => return None,
         };
-        write_recover(&self.transport_open_failures).remove(&id);
+        write_recover(&self.transport_open_failures).remove(&failure_key);
 
         let dev_match = worker::DevMatch {
             transport: spec.transport.clone(),

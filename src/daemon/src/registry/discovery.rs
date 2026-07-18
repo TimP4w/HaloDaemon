@@ -270,6 +270,13 @@ pub async fn discover_devices(app: Arc<AppState>) {
         }
     };
 
+    // Full discovery is an explicit user/startup retry boundary. Scoped
+    // reconciliation must preserve the current attempt episode unless the
+    // plugin's enable state itself changed.
+    if matches!(*app.discovery_scope.read().await, DiscoveryScope::Full) {
+        app.registry.reset_transport_open_failures();
+    }
+
     {
         let mut discovery = app.discovery.lock().await;
         discovery.phase = DiscoveryPhase::Discovering;
