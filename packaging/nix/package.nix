@@ -13,12 +13,12 @@ let
   # deliberately part of the existing package derivation: the NixOS module's
   # default package therefore embeds the same official plugin revision without
   # an extra option or a networked build step.
-  officialPluginsRev = "83c8cbfb695c384ce2c33f83b49f3af8eac16a30";
+  officialPluginsRev = "3e810d44c7736417f0062ec0f38172ce2a9dde54";
   officialPlugins = pkgs.fetchFromGitHub {
     owner = "TimP4w";
     repo = "HaloDaemon-plugins";
     rev = officialPluginsRev;
-    hash = "sha256-1MpBCEdn3Dr7Sj0/2wXR5/Wh5J92M3f0qFyDSC+cqnM=";
+    hash = "sha256-hp2QvVgafKBRpFLp+nPVPJrApM8sF+gq2cwGLq3AhbM=";
   };
 in
 pkgs.rustPlatform.buildRustPackage {
