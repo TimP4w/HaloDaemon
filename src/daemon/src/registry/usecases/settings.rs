@@ -77,6 +77,12 @@ pub async fn set_engine_config(
         }
     }
 
+    let domain = match kind {
+        EngineKind::FanCurve => crate::ipc::Domain::Cooling,
+        EngineKind::Canvas => crate::ipc::Domain::Lighting,
+        EngineKind::Lcd => crate::ipc::Domain::Lcd,
+    };
+    crate::ipc::broadcast_delta(&app, &[domain]).await;
     Ok(())
 }
 
@@ -96,6 +102,7 @@ pub async fn set_log_level(level: String, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     log::info!("Log level changed to {level}");
+    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
     Ok(())
 }
 
@@ -110,6 +117,7 @@ pub async fn set_language(lang: String, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     log::info!("UI language changed to {lang}");
+    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
     Ok(())
 }
 
@@ -128,6 +136,7 @@ pub async fn set_ui_config(
         cfg.gui.low_battery_notifications = low_battery_notifications;
     }
     app.request_config_save();
+    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
     Ok(())
 }
 
@@ -145,6 +154,7 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
         };
     }
     app.request_config_save();
+    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
     if allowed {
         crate::registry::ensure_official_repo(&app).await;
         crate::plugin::usecases::plugins::reload_registry(&app).await;
@@ -173,6 +183,7 @@ pub async fn mark_tour_seen(tour: String, app: Arc<AppState>) -> Result<()> {
         cfg.gui.seen_tours.insert(tour);
     }
     app.request_config_save();
+    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
     Ok(())
 }
 
@@ -182,6 +193,7 @@ pub async fn reset_tours_seen(app: Arc<AppState>) -> Result<()> {
         cfg.gui.seen_tours.clear();
     }
     app.request_config_save();
+    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
     Ok(())
 }
 
@@ -335,8 +347,14 @@ mod tests {
     #[tokio::test]
     async fn set_language_persists_supported_code() {
         with_tmp_config(|app| async move {
+            let generation_before = app.state_gen.load(std::sync::atomic::Ordering::Relaxed);
             set_language("EN".into(), app.clone()).await.unwrap();
             assert_eq!(app.config.read().await.gui.language, "en");
+            assert_eq!(
+                app.state_gen.load(std::sync::atomic::Ordering::Relaxed),
+                generation_before + 1,
+                "changing language must publish a GUI state delta"
+            );
         })
         .await;
     }
