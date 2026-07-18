@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The transport a plugin drives, abstracted over the two I/O shapes the daemon
-//! exposes to scripts:
+//! The transport a plugin drives, abstracted over the I/O shapes the daemon
+//! exposes to scripts. A backend's `open` may yield any [`PluginIo`] shape — a
+//! byte stream, a datagram/register bus, or a request/response capability — not
+//! only a stream. The two canonical shapes:
 //!
-//! - [`PluginIo::Stream`] — a byte-stream `Transport` (HID today). `write`/`read`.
-//! - [`PluginIo::Register`] — an addressed register bus (SMBus today). Ops carry
-//!   an `(addr, cmd)` and run inside an atomic, scope-checked batch.
+//! - [`PluginIo::Stream`] — a byte-stream `Transport` (HID, TCP, …). `write`/`read`.
+//! - [`PluginIo::Register`] — an addressed register bus (SMBus). Ops carry an
+//!   `(addr, cmd)` and run inside an atomic, scope-checked batch.
+//!
+//! See [`PluginIo`] for the full set of shapes.
 //!
 //! Which backend a plugin gets is decided by a [`PluginTransportDescriptor`]
 //! registered next to the transport via `inventory::submit!` — the same
@@ -412,7 +416,8 @@ pub struct PluginTransportDescriptor {
     /// `tcp` integration transport), which is reached via `open` directly and
     /// never through handle matching.
     pub matches: Option<fn(&DeviceSpec, &DiscoveryHandle<'_>) -> bool>,
-    /// Open the live transport for a matched handle. `config` is the plugin's
+    /// Open the live transport for a matched handle, returning any [`PluginIo`]
+    /// shape (stream, datagram, or request/response). `config` is the plugin's
     /// resolved non-secure config values (see `plugins::config_for`) — HID/
     /// SMBus ignore it; the `tcp` backend reads its host/port keys from it,
     /// since a config-instantiated integration has no real discovery handle.

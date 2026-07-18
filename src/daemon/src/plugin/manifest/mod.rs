@@ -389,19 +389,27 @@ impl TransportsConfig {
             && self.http.is_none()
     }
 
+    /// Transport kinds usable as an integration's single persistent root, in
+    /// priority order. Add a new root transport (serial, a datagram bus, …) as
+    /// one entry here; the exactly-one-root rule below stays generic.
+    fn persistent_root_kinds(&self) -> impl Iterator<Item = &'static str> {
+        [
+            self.tcp.is_some().then_some("tcp"),
+            self.hwmon.is_some().then_some("hwmon"),
+            self.command.is_some().then_some("command"),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
     pub fn integration_transport_kind(&self) -> Option<&'static str> {
-        match (
-            self.tcp.is_some(),
-            self.hwmon.is_some(),
-            self.command.is_some(),
-        ) {
-            (true, false, false) => Some("tcp"),
-            (false, true, false) => Some("hwmon"),
-            (false, false, true) => Some("command"),
+        let mut roots = self.persistent_root_kinds();
+        match (roots.next(), roots.next()) {
+            (Some(kind), None) => Some(kind),
             // HTTP is capability-scoped rather than a persistent byte stream,
             // but an HTTP-only integration still needs a headless root worker
             // to run its lifecycle and enumerate controllers.
-            (false, false, false) if self.http.is_some() => Some("http"),
+            (None, None) if self.http.is_some() => Some("http"),
             _ => None,
         }
     }
@@ -3729,6 +3737,22 @@ mod tests {
                 .to_string()
                 .contains("platforms: [windows]"));
         }
+    }
+
+    #[test]
+    fn persistent_root_takes_precedence_over_http_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "hwmon_plus_http",
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon, network]\ntransports:\n  hwmon: {}\n  http:\n    origins: [https://api.example.com]\n",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest.transports.integration_transport_kind(),
+            Some("hwmon")
+        );
     }
 
     #[test]
