@@ -199,7 +199,6 @@ impl WriteRateLimiter {
     }
 
     /// Combine two statuses for a device writing through multiple transports.
-    #[cfg(test)]
     pub fn combine_status(a: WriteRateStatus, b: WriteRateStatus) -> WriteRateStatus {
         WriteRateStatus {
             limit: a.limit.or(b.limit),

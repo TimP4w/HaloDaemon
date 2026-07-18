@@ -457,6 +457,9 @@ pub struct LuaDevice {
     dynamic_model: OnceLock<String>,
     worker: Option<PluginHandle>,
     transport: Option<PluginIo>,
+    /// The shared HTTP capability runtime (integration roots and their children
+    /// hold the same one) so throughput folds HTTP bytes into `write_rate_status`.
+    http: Option<crate::services::http::HttpRuntime>,
     /// Local registry lifetime. Dynamic children share their root's runtime,
     /// so closing a child must be tracked separately from closing the root.
     closed: Arc<AtomicBool>,
@@ -581,6 +584,7 @@ pub(in crate::plugin) struct LuaDeviceChildParts {
     pub dev_match: DevMatch,
     pub worker: PluginHandle,
     pub transport: PluginIo,
+    pub http: Option<crate::services::http::HttpRuntime>,
     pub name: String,
     pub vendor: String,
     pub device_type: DeviceType,
@@ -640,6 +644,7 @@ impl LuaDevice {
                         dev_match,
                         worker,
                         transport,
+                        http,
                         name,
                         vendor,
                         device_type,
@@ -654,6 +659,7 @@ impl LuaDevice {
                         notify,
                     );
                     dev.runtime = runtime;
+                    dev.http = http;
                     dev.name = name;
                     dev.vendor = vendor;
                     dev.device_type = device_type;
@@ -692,6 +698,7 @@ impl LuaDevice {
         let audio_registry: super::audio_api::SinkRegistry =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let http = super::worker::http_runtime_for(manifest, &granted, &config);
+        let http_meter = http.clone();
         let udp = super::worker::udp_runtime_for(manifest, &granted, &config);
         let worker = PluginHandle::spawn_with_data(
             manifest.script_source.clone(),
@@ -718,6 +725,7 @@ impl LuaDevice {
             notify,
         );
         dev.runtime = runtime;
+        dev.http = http_meter;
         dev.transport_kind = transport_kind;
         dev.audio_registry = Some(audio_registry.clone());
         dev.audio_guard = Some(super::audio_api::AudioGuard::new(
@@ -1032,6 +1040,7 @@ impl LuaDevice {
             dynamic_model: OnceLock::new(),
             worker,
             transport,
+            http: None,
             closed: Arc::new(AtomicBool::new(false)),
             call_failed: Arc::new(AtomicBool::new(false)),
             unrecoverable: Arc::new(AtomicBool::new(false)),
@@ -1766,7 +1775,12 @@ impl Device for LuaDevice {
     }
 
     fn write_rate_status(&self) -> Option<WriteRateStatus> {
-        self.transport.as_ref().map(|t| t.rate_status())
+        let transport = self.transport.as_ref().map(|t| t.rate_status());
+        let http = self.http.as_ref().map(|h| h.rate_status());
+        match (transport, http) {
+            (Some(t), Some(h)) => Some(crate::drivers::WriteRateLimiter::combine_status(t, h)),
+            (t, h) => t.or(h),
+        }
     }
 
     fn debug_transport(&self) -> Option<&'static str> {
@@ -2175,6 +2189,7 @@ impl LuaDevice {
                     dev_match,
                     worker: ctx.worker.clone(),
                     transport: ctx.transport.clone(),
+                    http: self.http.clone(),
                     name,
                     vendor: self.vendor.clone(),
                     device_type: controller.device_type,

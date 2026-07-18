@@ -593,6 +593,7 @@ fn attach_http_methods(
                 item.set("method", req.method.clone())?;
                 item.set("origin", req.origin.clone())?;
                 item.set("path", req.path.clone())?;
+                item.set("body", lua.create_string(&req.body)?)?;
                 out.set(i + 1, item)?;
             }
             Ok(out)

@@ -135,17 +135,17 @@ mod tests {
     fn ssrf_guard_blocks_every_special_purpose_range() {
         use std::net::{Ipv4Addr, Ipv6Addr};
         let blocked_v4 = [
-            (0, 1, 2, 3),          // 0.0.0.0/8 "this network"
-            (192, 0, 0, 1),        // 192.0.0.0/24 IETF protocol
-            (192, 0, 2, 5),        // TEST-NET-1
-            (198, 51, 100, 5),     // TEST-NET-2
-            (203, 0, 113, 5),      // TEST-NET-3
-            (198, 18, 0, 1),       // 198.18.0.0/15 benchmarking
-            (198, 19, 255, 254),   // benchmarking upper half
-            (192, 88, 99, 1),      // 6to4 relay anycast
-            (240, 0, 0, 1),        // 240.0.0.0/4 reserved
-            (255, 255, 255, 255),  // limited broadcast
-            (224, 0, 0, 1),        // multicast
+            (0, 1, 2, 3),         // 0.0.0.0/8 "this network"
+            (192, 0, 0, 1),       // 192.0.0.0/24 IETF protocol
+            (192, 0, 2, 5),       // TEST-NET-1
+            (198, 51, 100, 5),    // TEST-NET-2
+            (203, 0, 113, 5),     // TEST-NET-3
+            (198, 18, 0, 1),      // 198.18.0.0/15 benchmarking
+            (198, 19, 255, 254),  // benchmarking upper half
+            (192, 88, 99, 1),     // 6to4 relay anycast
+            (240, 0, 0, 1),       // 240.0.0.0/4 reserved
+            (255, 255, 255, 255), // limited broadcast
+            (224, 0, 0, 1),       // multicast
         ];
         for (a, b, c, d) in blocked_v4 {
             assert!(

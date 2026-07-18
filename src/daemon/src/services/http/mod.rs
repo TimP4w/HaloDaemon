@@ -22,8 +22,10 @@ use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{CertificateError, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 
+use crate::drivers::WriteRateLimiter;
 use crate::plugin::manifest::HttpConfig;
 use crate::plugin::runtime::backends::net_guard;
+use halod_shared::types::WriteRateStatus;
 
 /// Ceiling on distinct response headers surfaced to Lua, so a hostile server
 /// can't exhaust memory through header count.
@@ -499,6 +501,10 @@ pub struct HttpRuntime {
     backend: Arc<dyn HttpBackend>,
     inflight: Arc<AtomicUsize>,
     max_concurrency: usize,
+    /// Rolling byte tally so the device's throughput readout covers HTTP
+    /// traffic the same way transport writes are metered. Measured only —
+    /// never rate-gated.
+    meter: Arc<WriteRateLimiter>,
 }
 
 impl HttpRuntime {
@@ -508,7 +514,14 @@ impl HttpRuntime {
             backend,
             inflight: Arc::new(AtomicUsize::new(0)),
             max_concurrency: max_concurrency.max(1),
+            meter: Arc::new(WriteRateLimiter::new(None)),
         }
+    }
+
+    /// Bytes moved over HTTP in the last second (request + response bodies),
+    /// for the device throughput graph.
+    pub fn rate_status(&self) -> WriteRateStatus {
+        self.meter.status()
     }
 
     /// Build the live runtime from a manifest's declared http transport, resolving
@@ -532,7 +545,11 @@ impl HttpRuntime {
         if prev >= self.max_concurrency {
             bail!("http concurrency limit ({}) reached", self.max_concurrency);
         }
-        self.backend.request(&req, self.policy.max_response_bytes())
+        let response = self
+            .backend
+            .request(&req, self.policy.max_response_bytes())?;
+        self.meter.record(req.body.len() + response.body.len());
+        Ok(response)
     }
 }
 
@@ -572,6 +589,34 @@ mod tests {
             body: Vec::new(),
             timeout: Duration::from_secs(1),
         }
+    }
+
+    /// Returns a fixed-size body so the meter has response bytes to tally.
+    struct SizedBackend {
+        response_len: usize,
+    }
+    impl HttpBackend for SizedBackend {
+        fn request(&self, _req: &HttpRequest, _max: usize) -> Result<HttpResponse> {
+            Ok(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: vec![0u8; self.response_len],
+            })
+        }
+    }
+
+    #[test]
+    fn rate_status_tallies_request_and_response_bytes() {
+        let runtime = HttpRuntime::new(policy(), Arc::new(SizedBackend { response_len: 30 }), 1);
+        assert_eq!(runtime.rate_status().current_bytes_per_sec, 0.0);
+
+        let mut req = request(vec![]);
+        req.body = vec![0u8; 10];
+        runtime.request(req).unwrap();
+
+        // 10 request + 30 response bytes moved in the last second.
+        assert_eq!(runtime.rate_status().current_bytes_per_sec, 40.0);
+        assert_eq!(runtime.rate_status().current_writes_per_sec, 1.0);
     }
 
     #[test]
