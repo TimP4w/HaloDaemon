@@ -267,7 +267,7 @@ pub async fn place_zone(
     .await?;
 
     if let Some(rgb) = device.as_lighting() {
-        let _ = rgb.apply(LightingState::Engine).await;
+        rgb.apply(LightingState::Engine).await?;
     }
 
     crate::registry::usecases::settings::set_engine_config(
@@ -286,10 +286,17 @@ pub async fn place_zone(
 
 /// Remove a zone from the canvas.
 pub async fn remove_zone(device_id: String, channel_id: String, app: Arc<AppState>) -> Result<()> {
-    let _ = modify_canvas_zones(&device_id, &app, |channels| {
+    let mut removed = false;
+    modify_canvas_zones(&device_id, &app, |channels| {
+        let old_len = channels.len();
         channels.retain(|z| !(z.device_id == device_id && z.channel_id == channel_id));
+        removed = channels.len() != old_len;
     })
-    .await;
+    .await?;
+    anyhow::ensure!(
+        removed,
+        "zone '{channel_id}' is not placed on device '{device_id}'"
+    );
 
     ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
     Ok(())
@@ -323,11 +330,13 @@ pub async fn move_zone(
         );
     }
 
-    let _ = modify_canvas_zones(&device_id, &app, |channels| {
+    let mut moved = false;
+    modify_canvas_zones(&device_id, &app, |channels| {
         if let Some(z) = channels
             .iter_mut()
             .find(|z| z.device_id == device_id && z.channel_id == channel_id)
         {
+            moved = true;
             z.x = x;
             z.y = y;
             if let Some(w) = new_w {
@@ -347,7 +356,11 @@ pub async fn move_zone(
             }
         }
     })
-    .await;
+    .await?;
+    anyhow::ensure!(
+        moved,
+        "zone '{channel_id}' is not placed on device '{device_id}'"
+    );
 
     Ok(())
 }
@@ -585,17 +598,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_zone_is_noop_for_offline_device() {
+    async fn remove_zone_errors_for_unknown_device() {
         let app = Arc::new(AppState::new(Config::default()));
-        remove_zone("offline".into(), "ring".into(), app)
+        let err = remove_zone("offline".into(), "ring".into(), app)
             .await
-            .unwrap();
+            .unwrap_err();
+        assert!(err.to_string().contains("offline"));
     }
 
     #[tokio::test]
-    async fn move_zone_is_noop_for_offline_device() {
+    async fn move_zone_errors_for_unknown_device() {
         let app = Arc::new(AppState::new(Config::default()));
-        move_zone(
+        let err = move_zone(
             "offline".into(),
             "ring".into(),
             0.5,
@@ -608,7 +622,35 @@ mod tests {
             app,
         )
         .await
-        .unwrap();
+        .unwrap_err();
+        assert!(err.to_string().contains("offline"));
+    }
+
+    #[tokio::test]
+    async fn move_and_remove_error_for_unplaced_zone() {
+        let dev = Arc::new(MockDevice::new("dev0").with_rgb());
+        let app = make_app(dev);
+
+        let move_err = move_zone(
+            "dev0".into(),
+            "ring".into(),
+            0.5,
+            0.6,
+            None,
+            None,
+            None,
+            None,
+            None,
+            app.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(move_err.to_string().contains("not placed"));
+
+        let remove_err = remove_zone("dev0".into(), "ring".into(), app)
+            .await
+            .unwrap_err();
+        assert!(remove_err.to_string().contains("not placed"));
     }
 
     #[tokio::test]

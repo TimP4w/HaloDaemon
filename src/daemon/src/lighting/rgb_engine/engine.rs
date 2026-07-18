@@ -596,7 +596,7 @@ impl RgbEngine {
                                 dev.id()
                             );
                             ld.runtime = DirectRuntime::Off;
-                            continue;
+                            break;
                         }
                         Err(e) => {
                             log::warn!(
@@ -604,7 +604,7 @@ impl RgbEngine {
                                 dev.id()
                             );
                             ld.runtime = DirectRuntime::Off;
-                            continue;
+                            break;
                         }
                     };
                     if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
@@ -616,7 +616,9 @@ impl RgbEngine {
                             .push((rgb_zone.id.clone(), colors));
                     }
                 }
-                continue;
+                if matches!(ld.runtime, DirectRuntime::Plugin(_)) {
+                    continue;
+                }
             }
 
             let DirectRuntime::BuiltIn(effect) = &mut ld.runtime else {

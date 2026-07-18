@@ -432,8 +432,8 @@ impl PlacedZone {
     pub fn sanitize(&mut self) {
         self.x = finite_or(self.x, 0.0);
         self.y = finite_or(self.y, 0.0);
-        self.w = finite_or(self.w, DEFAULT_ZONE_SIZE);
-        self.h = finite_or(self.h, DEFAULT_ZONE_SIZE);
+        self.w = finite_or(self.w, DEFAULT_ZONE_SIZE).clamp(f32::EPSILON, 4.0);
+        self.h = finite_or(self.h, DEFAULT_ZONE_SIZE).clamp(f32::EPSILON, 4.0);
         self.rotation = finite_or(self.rotation, 0.0);
     }
 }
@@ -447,7 +447,7 @@ impl CanvasState {
             z.sanitize();
         }
         self.placed_zones.truncate(MAX_PLACED_ZONES);
-        self.sample_radius = finite_or(self.sample_radius, DEFAULT_SAMPLE_RADIUS);
+        self.sample_radius = finite_or(self.sample_radius, DEFAULT_SAMPLE_RADIUS).clamp(0.5, 64.0);
     }
 }
 
@@ -3584,10 +3584,16 @@ mod default_tests {
         };
         cs.placed_zones[0].x = f32::NAN;
         cs.placed_zones[0].rotation = f32::INFINITY;
+        cs.placed_zones[0].w = -1.0;
+        cs.placed_zones[0].h = 100.0;
+        cs.sample_radius = -3.0;
         cs.sanitize();
         assert_eq!(cs.placed_zones.len(), MAX_PLACED_ZONES);
         assert!(cs.placed_zones[0].x.is_finite());
         assert!(cs.placed_zones[0].rotation.is_finite());
+        assert!(cs.placed_zones[0].w > 0.0);
+        assert_eq!(cs.placed_zones[0].h, 4.0);
+        assert_eq!(cs.sample_radius, 0.5);
     }
 
     #[test]
