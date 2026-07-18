@@ -89,6 +89,8 @@ fn main() {
 #[cfg(not(target_os = "linux"))]
 fn main() -> eframe::Result<()> {
     env_logger::init();
+    #[cfg(windows)]
+    domain::lifecycle::autostart::repair_enabled_command();
 
     let primary = match runtime::single_instance::acquire() {
         runtime::single_instance::Instance::Secondary => return Ok(()),

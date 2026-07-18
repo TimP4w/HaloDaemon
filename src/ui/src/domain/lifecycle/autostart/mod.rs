@@ -58,3 +58,9 @@ pub fn set_enabled(enable: bool) -> std::io::Result<()> {
         Ok(())
     }
 }
+
+/// Update an existing platform registration to the currently running binary.
+#[cfg(windows)]
+pub fn repair_enabled_command() {
+    windows::repair_enabled_command();
+}

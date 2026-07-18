@@ -218,6 +218,10 @@ pub struct Registry {
     /// processes or open device nodes — never run on every state poll.
     requirement_cache: RwLock<HashMap<String, Vec<halod_shared::types::PluginRequirementStatus>>>,
     integration_setups: RwLock<HashMap<String, halod_shared::types::IntegrationSetupStatus>>,
+    /// Plugin ids with a delayed runtime-error reprobe already queued. A single
+    /// failing RGB frame can fan out across several device calls, so recovery
+    /// must be coalesced per plugin.
+    runtime_recovery_pending: RwLock<HashSet<String>>,
     content_revision: std::sync::atomic::AtomicU64,
 }
 
@@ -898,6 +902,26 @@ impl Registry {
             },
         )
         .await;
+
+        if write_recover(&self.runtime_recovery_pending).insert(plugin_id.to_owned()) {
+            let app = Arc::clone(app);
+            let plugin_id = plugin_id.to_owned();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                // Clear before probing: if initialization/profile application
+                // fails again, that new episode is allowed to queue another try.
+                write_recover(&app.registry.runtime_recovery_pending).remove(&plugin_id);
+                if app.registry.is_disabled(&plugin_id) {
+                    return;
+                }
+                log::info!("retrying plugin '{plugin_id}' after a runtime failure");
+                crate::plugin::usecases::plugins::reconcile_plugins(
+                    &app,
+                    std::slice::from_ref(&plugin_id),
+                )
+                .await;
+            });
+        }
     }
 
     /// Clear a device's outstanding-error flag after a successful call. On the

@@ -89,6 +89,34 @@ impl PlatformTray {
             });
         }
     }
+
+    /// Feed the windowless tray directly from daemon state. At login there may
+    /// be no egui frame at all, and desktop event loops are free to coalesce
+    /// repaint wakeups, so tray data must not depend on window rendering.
+    pub fn watch_state(
+        &self,
+        mut state: tokio::sync::watch::Receiver<halod_shared::types::AppState>,
+    ) {
+        let handle = self.handle.clone();
+        let latest = self.latest.clone();
+        std::thread::spawn(move || loop {
+            match state.has_changed() {
+                Ok(true) => {
+                    let model = TrayModel::from_state(&state.borrow_and_update());
+                    *latest.lock().unwrap() = model.clone();
+                    if let Some(handle) = handle.lock().unwrap().as_ref() {
+                        handle.update(move |tray: &mut HalodTray| {
+                            tray.battery_lines = model.battery_lines;
+                            tray.profiles = model.profiles;
+                            tray.active = model.active;
+                        });
+                    }
+                }
+                Ok(false) => std::thread::sleep(Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        });
+    }
 }
 
 struct HalodTray {

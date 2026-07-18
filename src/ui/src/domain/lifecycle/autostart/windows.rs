@@ -75,6 +75,24 @@ pub fn is_enabled() -> bool {
     read_run_value().is_some_and(|v| v == expected_command(&exe))
 }
 
+/// Preserve an enabled setting across upgrades or install-directory moves.
+/// Windows will keep launching the stale Run command otherwise, while the UI
+/// reports the new executable as disabled because its exact path changed.
+pub fn repair_enabled_command() {
+    let Some(existing) = read_run_value() else {
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let expected = expected_command(&exe);
+    if existing != expected {
+        if let Err(error) = set_enabled(true) {
+            log::warn!("repairing Windows autostart command failed: {error}");
+        }
+    }
+}
+
 pub fn set_enabled(enable: bool) -> io::Result<()> {
     if enable {
         let exe = std::env::current_exe()?;

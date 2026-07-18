@@ -83,6 +83,7 @@ pub fn run(background: bool, primary: crate::runtime::single_instance::Primary) 
     let ctx_for_ipc = ctx.clone();
     let (cmd_tx, ui_rx) = ipc::spawn(move || ctx_for_ipc.request_repaint());
     let tray = tray::Tray::new(&ctx, cmd_tx.clone(), force_quit.clone(), hide_state.clone());
+    tray.watch_state(ui_rx.state.clone());
     let app = App::new(ui_rx, cmd_tx, tray, force_quit.clone());
 
     let mut handler = WaylandApp {

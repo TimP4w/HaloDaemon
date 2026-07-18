@@ -187,6 +187,11 @@ impl Tray {
             self.shown = model;
         }
     }
+
+    #[cfg(unix)]
+    pub fn watch_state(&self, state: tokio::sync::watch::Receiver<AppState>) {
+        self.inner.watch_state(state);
+    }
 }
 
 #[cfg(test)]

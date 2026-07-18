@@ -36,6 +36,9 @@ pub struct OnboardingUi {
     official_retry_started: Option<f64>,
     /// Plugin id → selected for authority review within onboarding.
     selected: HashMap<String, bool>,
+    /// Optimistic value while the daemon persists download consent. This keeps
+    /// a previous installation's config from winning the next wizard click.
+    plugin_downloads: Option<bool>,
 }
 
 /// Whether the wizard was explicitly completed this frame, so the caller can
@@ -46,8 +49,9 @@ pub enum Outcome {
     Finished,
 }
 
-fn plugins_on(state: &AppState) -> bool {
-    state.gui.plugin_downloads == PluginDownloadConsent::Allowed
+fn plugins_on(st: &OnboardingUi, state: &AppState) -> bool {
+    st.plugin_downloads
+        .unwrap_or(state.gui.plugin_downloads == PluginDownloadConsent::Allowed)
 }
 
 fn is_selected(st: &OnboardingUi, id: &str) -> bool {
@@ -183,7 +187,7 @@ pub fn show(
                 match st.step {
                     WELCOME => step_welcome(ui, time as f32),
                     HEALTH => step_health(ui, debug),
-                    PREFS => step_prefs(ui, state, cmd),
+                    PREFS => step_prefs(ui, st, state, cmd),
                     SCANNING => step_scanning(ui, time),
                     PLUGINS => step_plugins(ui, st, state, cmd, time),
                     _ => step_done(ui, st, state, &state.plugins.plugins),
@@ -338,7 +342,7 @@ fn pref_card(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&m
         });
 }
 
-fn step_prefs(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+fn step_prefs(ui: &mut egui::Ui, st: &mut OnboardingUi, state: &AppState, cmd: &CommandTx) {
     step_shell(
         ui,
         &t!("onboarding.prefs_title"),
@@ -370,13 +374,14 @@ fn step_prefs(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
                 },
             );
             ui.add_space(theme::SPACE_6);
-            let on = plugins_on(state);
+            let on = plugins_on(st, state);
             pref_card(
                 ui,
                 &t!("onboarding.plugins_title"),
                 &t!("onboarding.plugins_desc"),
                 |ui| {
                     if widgets::toggle(ui, on) != on {
+                        st.plugin_downloads = Some(!on);
                         ipc::send(
                             cmd,
                             DaemonCommand::SetPluginDownloadConsent { allowed: !on },
@@ -463,7 +468,7 @@ fn step_plugins(
         &t!("onboarding.plugins_page_sub"),
         |ui| {
             ui.add_space(theme::SPACE_8);
-            if candidates.is_empty() && official_unavailable {
+            if candidates.is_empty() && official_unavailable && plugins_on(st, state) {
                 let retrying = st
                     .official_retry_started
                     .is_some_and(|started| time - started < 8.0);
@@ -505,7 +510,7 @@ fn step_plugins(
                         }
                     },
                 );
-            } else if candidates.is_empty() {
+            } else if candidates.is_empty() && plugins_on(st, state) {
                 ui.label(
                     RichText::new(t!("onboarding.plugins_loading"))
                         .font(theme::body_md())
@@ -552,7 +557,7 @@ fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &AppState, plugins: &[
                 .color(theme::TEXT),
         );
         ui.add_space(theme::SPACE_6);
-        let summary = if plugins_on(state) && active_count(st, plugins) > 0 {
+        let summary = if plugins_on(st, state) && active_count(st, plugins) > 0 {
             t!("onboarding.done_summary_plugins")
         } else {
             t!("onboarding.done_summary_basic")
@@ -645,7 +650,10 @@ fn advance_primary(
         WELCOME => st.step = HEALTH,
         HEALTH => st.step = PREFS,
         PREFS => {
-            if state.gui.plugin_downloads == PluginDownloadConsent::Unset {
+            if st.plugin_downloads.is_none()
+                && state.gui.plugin_downloads == PluginDownloadConsent::Unset
+            {
+                st.plugin_downloads = Some(false);
                 ipc::send(
                     cmd,
                     DaemonCommand::SetPluginDownloadConsent { allowed: false },
@@ -737,6 +745,18 @@ mod tests {
         assert_eq!(st.step, SCANNING);
         assert_eq!(outcome, Outcome::Pending);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn onboarding_choice_overrides_stale_persisted_download_consent() {
+        let mut state = AppState::default();
+        state.gui.plugin_downloads = PluginDownloadConsent::Allowed;
+        let st = OnboardingUi {
+            plugin_downloads: Some(false),
+            ..Default::default()
+        };
+
+        assert!(!plugins_on(&st, &state));
     }
 
     #[test]

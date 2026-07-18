@@ -42,6 +42,11 @@ impl App {
     pub(crate) fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
+        // A hidden Windows viewport is still the event pump for the native tray.
+        // Keep it ticking while resident so boot-time IPC snapshots populate
+        // batteries/profiles and tray clicks are handled without opening first.
+        #[cfg(windows)]
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
         // Only re-clone when the watch channel reports a change.
         if let Some(state) = crate::runtime::ipc::take_changed(&mut self.ui.state, "state") {
             self.state_cache = std::sync::Arc::new(state);
