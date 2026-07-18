@@ -1088,7 +1088,10 @@ mod tests {
         )
         .unwrap();
         changes.recv().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Keep Tokio's notification timer deterministic while advancing the
+        // std::time::Instant used by the publication rate limit.
+        tokio::time::pause();
+        std::thread::sleep(Duration::from_millis(20));
         bus.publish(
             "telemetry",
             "telemetry.current",
@@ -1100,7 +1103,8 @@ mod tests {
             changes.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(20));
         let final_revision = bus
             .publish(
                 "telemetry",
