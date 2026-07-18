@@ -100,6 +100,8 @@ pub struct PluginsUi {
     /// The open plugin-issue Details modal (title + detail), when the user
     /// clicked Details on a plugin's issue banner.
     issue_modal: Option<(String, String)>,
+    /// Exact udev lines missing for the selected plugin.
+    udev_rule_details: Option<Vec<String>>,
     #[cfg(target_os = "linux")]
     next_udev_status_check: f64,
     udev_command_copied: bool,
@@ -158,6 +160,14 @@ impl PluginsUi {
         self.repo_repair_modal(ui.ctx(), cmd);
         self.consent_modal(ui.ctx(), state, cmd);
         widgets::issue_modal_slot(ui.ctx(), "plugin_issue_page", &mut self.issue_modal);
+        if self.udev_rule_details.is_some()
+            && udev_rule_details_modal(
+                ui.ctx(),
+                self.udev_rule_details.as_deref().unwrap_or_default(),
+            )
+        {
+            self.udev_rule_details = None;
+        }
         if self.udev_info_open {
             if let Some(status) = udev_status.filter(|status| status.supported) {
                 let rechecking = self
@@ -572,14 +582,11 @@ impl PluginsUi {
                     .and_then(|key| self.asset_textures.get(&key));
                 let update = plugin_updates.iter().find(|s| &s.plugin_id == id);
                 let now = ui.input(|i| i.time);
-                let udev_action_needed = udev_status.is_some_and(|status| {
-                    status.supported
-                        && !status.current
-                        && status
-                            .plugins_requiring_update
-                            .iter()
-                            .any(|item| item == id)
-                });
+                let udev_missing_rules = udev_status
+                    .filter(|status| status.supported && !status.current)
+                    .and_then(|status| status.missing_rules_by_plugin.get(id))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
 
                 egui::ScrollArea::vertical()
                     .id_salt("plugin_detail_scroll")
@@ -596,7 +603,8 @@ impl PluginsUi {
                                 &mut self.in_flight,
                                 &mut self.updating,
                                 &mut self.issue_modal,
-                                udev_action_needed,
+                                &mut self.udev_rule_details,
+                                udev_missing_rules,
                                 now,
                             )
                         });
@@ -975,7 +983,8 @@ impl PluginsUi {
     }
 }
 
-fn udev_plugin_warning_banner(ui: &mut egui::Ui) {
+fn udev_plugin_warning_banner(ui: &mut egui::Ui) -> bool {
+    let mut details = false;
     egui::Frame::NONE
         .fill(theme::a(theme::STAT_AMBER, 0.10))
         .stroke(Stroke::new(1.0, theme::a(theme::STAT_AMBER, 0.35)))
@@ -992,7 +1001,19 @@ fn udev_plugin_warning_banner(ui: &mut egui::Ui) {
                     .font(theme::body_sm())
                     .color(theme::TEXT_DIM),
             );
+            ui.add_space(theme::SPACE_4);
+            if widgets::button(
+                ui,
+                &t!("plugins.issue_details"),
+                ButtonKind::Ghost,
+                Vec2::new(78.0, 28.0),
+            )
+            .clicked()
+            {
+                details = true;
+            }
         });
+    details
 }
 
 /// Map a skipped absolute path back to one of the package layouts accepted by
@@ -1919,40 +1940,62 @@ fn detail_body(
     in_flight: &mut HashMap<String, bool>,
     updating: &mut HashMap<String, f64>,
     issue_modal: &mut Option<(String, String)>,
-    udev_action_needed: bool,
+    udev_rule_details: &mut Option<Vec<String>>,
+    udev_missing_rules: &[String],
     now: f64,
 ) {
-    ui.horizontal(|ui| {
-        match logo_tex {
-            Some(tex) => {
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
-                draw_logo_fit(ui.painter(), rect, tex);
-            }
-            None => initials_tile(ui, &p.name, &p.id, 44.0),
-        }
-        ui.add_space(theme::SPACE_2);
-        ui.vertical(|ui| {
+    let locked_target = if is_load_failed(p) {
+        Some(false)
+    } else {
+        in_flight.get(&p.id).copied()
+    };
+    let mut toggle_clicked = false;
+    egui::Sides::new().show(
+        ui,
+        |ui| {
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(&p.name)
-                        .font(theme::bold(18.0))
-                        .color(theme::TEXT),
-                );
-                let _ = widgets::chip_colored(
-                    ui,
-                    &plugin_type_label(p.plugin_type),
-                    plugin_type_color(p.plugin_type),
-                );
+                match logo_tex {
+                    Some(tex) => {
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+                        draw_logo_fit(ui.painter(), rect, tex);
+                    }
+                    None => initials_tile(ui, &p.name, &p.id, 44.0),
+                }
+                ui.add_space(theme::SPACE_2);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(&p.name)
+                                .font(theme::bold(18.0))
+                                .color(theme::TEXT),
+                        );
+                        let _ = widgets::chip_colored(
+                            ui,
+                            &plugin_type_label(p.plugin_type),
+                            plugin_type_color(p.plugin_type),
+                        );
+                    });
+                    if !p.version.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&p.version)
+                                .font(theme::value_sm())
+                                .color(theme::TEXT_FAINT),
+                        );
+                    }
+                });
             });
-            if !p.version.is_empty() {
-                ui.label(
-                    egui::RichText::new(&p.version)
-                        .font(theme::value_sm())
-                        .color(theme::TEXT_FAINT),
-                );
-            }
-        });
-    });
+        },
+        |ui| {
+            toggle_clicked = detail_toggle(ui, p, locked_target);
+        },
+    );
+    if toggle_clicked {
+        let out = request_toggle(cmd, p, pending_consent.take());
+        *pending_consent = out.pending_consent;
+        if let Some(target) = out.dispatched {
+            apply_and_lock(in_flight, &p.id, target);
+        }
+    }
 
     if is_load_failed(p) {
         if let Some(issue) = &p.health.issue {
@@ -1999,9 +2042,11 @@ fn detail_body(
     ui.add_space(theme::SPACE_7);
     status_banner(ui, p);
 
-    if udev_action_needed {
+    if !udev_missing_rules.is_empty() {
         ui.add_space(theme::SPACE_5);
-        udev_plugin_warning_banner(ui);
+        if udev_plugin_warning_banner(ui) {
+            *udev_rule_details = Some(udev_missing_rules.to_vec());
+        }
     }
 
     if let Some(issue) = &p.health.issue {
@@ -2097,37 +2142,32 @@ fn detail_body(
     }
 
     targets_permissions_row(ui, p, cmd);
+}
 
-    ui.add_space(20.0);
-    ui.separator();
-    ui.add_space(theme::SPACE_7);
-    ui.horizontal(|ui| {
-        let active = plugin_enabled_with_consent(p);
-        let locked = in_flight.contains_key(&p.id);
-        let label = if active {
-            t!("plugins.disable")
+fn detail_toggle(ui: &mut egui::Ui, p: &PluginInfo, locked_target: Option<bool>) -> bool {
+    let locked = locked_target.is_some();
+    let on = locked_target.unwrap_or_else(|| plugin_enabled_with_consent(p));
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(34.0, 18.0),
+        if locked {
+            Sense::hover()
         } else {
-            t!("plugins.enable")
-        };
-        let kind = if active {
-            ButtonKind::Ghost
-        } else {
-            ButtonKind::Primary
-        };
-        let clicked = ui
-            .add_enabled_ui(!locked, |ui| {
-                widgets::button(ui, &label, kind, Vec2::new(120.0, 34.0)).clicked()
-            })
-            .inner;
-        if clicked {
-            let out = request_toggle(cmd, p, pending_consent.take());
-            *pending_consent = out.pending_consent;
-            if let Some(target) = out.dispatched {
-                apply_and_lock(in_flight, &p.id, target);
-            }
+            Sense::click()
+        },
+    );
+    let t = ui.ctx().animate_bool_with_time(response.id, on, 0.15);
+    widgets::paint_toggle(ui.painter(), rect, t);
+    crate::domain::tour::anchor(ui.ctx(), crate::domain::tour::AnchorId::PluginsToggle, rect);
+    if locked {
+        ui.painter()
+            .rect_filled(rect, 9.0, theme::a(theme::CARD_BG, 0.55));
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
         }
-        widgets::caps_label_inline(ui, &t!("plugins.repo_sourced_note"));
-    });
+    } else if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response.clicked() && !locked
 }
 
 fn plugin_type_label(kind: halod_shared::types::PluginKind) -> std::borrow::Cow<'static, str> {
@@ -2752,6 +2792,44 @@ fn udev_info_modal(
         },
     );
     (close || dismissed, recheck)
+}
+
+fn udev_rule_details_modal(ctx: &egui::Context, rules: &[String]) -> bool {
+    let mut close = false;
+    let dismissed = widgets::dialog(
+        ctx,
+        "udev_rule_details",
+        &t!("plugins.udev_rule_details_title"),
+        700.0,
+        |ui| {
+            egui::Frame::NONE
+                .fill(theme::a(egui::Color32::BLACK, 0.22))
+                .stroke(Stroke::new(1.0, theme::BORDER))
+                .corner_radius(9.0)
+                .inner_margin(egui::Margin::same(14))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        egui::RichText::new(rules.join("\n"))
+                            .font(theme::mono(10.5))
+                            .color(theme::TEXT_DIM),
+                    );
+                });
+        },
+        |ui| {
+            if widgets::button(
+                ui,
+                &t!("plugins.issue_close"),
+                ButtonKind::Ghost,
+                Vec2::new(100.0, 32.0),
+            )
+            .clicked()
+            {
+                close = true;
+            }
+        },
+    );
+    close || dismissed
 }
 
 fn udev_modal_status(ui: &mut egui::Ui, status: &halod_shared::types::UdevRulesStatus) {

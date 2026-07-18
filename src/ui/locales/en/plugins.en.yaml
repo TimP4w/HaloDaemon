@@ -90,6 +90,7 @@ plugins:
   udev_recheck_hint: Run the command in a terminal, then recheck. HaloDaemon compares the generated rules against the effective installed file.
   udev_plugin_action: Device-access rules needed
   udev_plugin_action_sub: This plugin declares Linux hardware access that is missing from the installed udev file. Use Generate udev rules above.
+  udev_rule_details_title: Missing device-access rules
   # Plugin issues (connect/runtime failures, load warnings)
   issue_connect_failed: Can't connect
   issue_init_failed: Device initialization failed
@@ -128,7 +129,6 @@ plugins:
   req_hwmon_pwm_permission: "Fan control requires write access to the PWM files in /sys/class/hwmon."
   enable: Enable
   disable: Disable
-  repo_sourced_note: This plugin is provided by a repository. Remove the repository to uninstall it.
   provenance_official: Verified official
   provenance_repository: Unsigned repository
   provenance_development: Development source

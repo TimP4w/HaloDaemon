@@ -90,6 +90,7 @@ plugins:
   udev_recheck_hint: Esegui il comando in un terminale, poi ricontrolla. HaloDaemon confronta le regole generate con il file installato effettivo.
   udev_plugin_action: Regole di accesso necessarie
   udev_plugin_action_sub: Questo plugin dichiara un accesso hardware Linux assente dal file udev installato. Usa Genera regole udev qui sopra.
+  udev_rule_details_title: Regole di accesso mancanti
   # Problemi del plugin (errori di connessione/runtime, avvisi di caricamento)
   issue_connect_failed: Impossibile connettersi
   issue_init_failed: Inizializzazione del dispositivo non riuscita
@@ -128,7 +129,6 @@ plugins:
   req_hwmon_pwm_permission: "Il controllo delle ventole richiede l'accesso in scrittura ai file PWM in /sys/class/hwmon."
   enable: Attiva
   disable: Disattiva
-  repo_sourced_note: Questo plugin proviene da un repository. Rimuovi il repository per disinstallarlo.
   provenance_official: Ufficiale verificato
   provenance_repository: Repository non firmato
   provenance_development: Sorgente di sviluppo

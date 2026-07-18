@@ -1416,6 +1416,9 @@ pub struct UdevRulesStatus {
     /// Empty when the rules are current or when only the daemon baseline drifted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins_requiring_update: Vec<String>,
+    /// Exact generated rule lines absent from the effective file, by plugin id.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub missing_rules_by_plugin: std::collections::BTreeMap<String, Vec<String>>,
     /// Plugins that contribute at least one generated Linux device rule.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contributing_plugin_ids: Vec<String>,

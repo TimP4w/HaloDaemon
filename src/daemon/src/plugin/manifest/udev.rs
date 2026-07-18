@@ -149,22 +149,26 @@ fn status_at_paths<'a>(
         .map(|manifest| manifest.plugin_id.clone())
         .collect::<Vec<_>>();
     contributing_plugin_ids.sort();
-    let mut plugins_requiring_update = manifests
+    let missing_rules_by_plugin = manifests
         .iter()
-        .filter(|manifest| {
+        .filter_map(|manifest| {
             let plugin_rules = assemble(std::slice::from_ref(manifest));
             let required = generated_device_rules(&plugin_rules);
-            !required.is_empty()
-                && installed.as_ref().is_none_or(|(_, contents)| {
+            let missing = installed.as_ref().map_or_else(
+                || required.iter().map(|rule| (*rule).to_owned()).collect(),
+                |(_, contents)| {
                     let installed = String::from_utf8_lossy(contents);
                     required
                         .iter()
-                        .any(|rule| !installed.lines().any(|line| line == *rule))
-                })
+                        .filter(|rule| !installed.lines().any(|line| line == **rule))
+                        .map(|rule| (*rule).to_owned())
+                        .collect::<Vec<_>>()
+                },
+            );
+            (!missing.is_empty()).then(|| (manifest.plugin_id.clone(), missing))
         })
-        .map(|manifest| manifest.plugin_id.clone())
-        .collect::<Vec<_>>();
-    plugins_requiring_update.sort();
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let plugins_requiring_update = missing_rules_by_plugin.keys().cloned().collect();
     match installed {
         Some((path, contents)) => halod_shared::types::UdevRulesStatus {
             supported: true,
@@ -172,6 +176,7 @@ fn status_at_paths<'a>(
             installed_path: Some(path),
             generated_rule_count,
             plugins_requiring_update,
+            missing_rules_by_plugin,
             contributing_plugin_ids,
         },
         None => halod_shared::types::UdevRulesStatus {
@@ -180,6 +185,7 @@ fn status_at_paths<'a>(
             installed_path: None,
             generated_rule_count,
             plugins_requiring_update,
+            missing_rules_by_plugin,
             contributing_plugin_ids,
         },
     }
@@ -338,6 +344,10 @@ mod tests {
 
         assert!(!status.current);
         assert_eq!(status.plugins_requiring_update, ["second"]);
+        assert_eq!(
+            status.missing_rules_by_plugin["second"],
+            generated_device_rules(&assemble(std::slice::from_ref(&manifests[1])))
+        );
         assert_eq!(status.contributing_plugin_ids, ["first", "second"]);
     }
 }
