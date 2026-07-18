@@ -703,6 +703,7 @@ fn send_ui_config(
             close_to_tray: tray.unwrap_or(state.gui.close_to_tray),
             suppress_dependency_warning: state.gui.suppress_dependency_warning,
             hide_window_controls: hide_controls.unwrap_or(state.gui.hide_window_controls),
+            low_battery_notifications: state.gui.low_battery_notifications,
         },
     );
 }

@@ -5,6 +5,9 @@ settings:
 notify:
   error_title: Error
   unknown_error: Unknown error
+  low_battery:
+    title: "%{device} battery is low"
+    message: "%{battery} is at %{level}% (below %{threshold}%)."
   engine_stopped:
     title: Engine stopped
     message: "%{detail}"

@@ -232,6 +232,7 @@ pub enum DaemonCommand {
         close_to_tray: bool,
         suppress_dependency_warning: bool,
         hide_window_controls: bool,
+        low_battery_notifications: bool,
     },
     /// Allow or deny the daemon contacting GitHub for official plugins and
     /// automatic update checks. An allowed request also retries a missing

@@ -117,6 +117,7 @@ pub async fn set_ui_config(
     close_to_tray: bool,
     suppress_dependency_warning: bool,
     hide_window_controls: bool,
+    low_battery_notifications: bool,
     app: Arc<AppState>,
 ) -> Result<()> {
     {
@@ -124,6 +125,7 @@ pub async fn set_ui_config(
         cfg.gui.close_to_tray = close_to_tray;
         cfg.gui.suppress_dependency_warning = suppress_dependency_warning;
         cfg.gui.hide_window_controls = hide_window_controls;
+        cfg.gui.low_battery_notifications = low_battery_notifications;
     }
     app.request_config_save();
     Ok(())
@@ -342,11 +344,14 @@ mod tests {
     #[tokio::test]
     async fn set_ui_config_updates_close_to_tray() {
         with_tmp_config(|app| async move {
-            set_ui_config(false, true, true, app.clone()).await.unwrap();
+            set_ui_config(false, true, true, false, app.clone())
+                .await
+                .unwrap();
             let cfg = app.config.read().await;
             assert!(!cfg.gui.close_to_tray);
             assert!(cfg.gui.suppress_dependency_warning);
             assert!(cfg.gui.hide_window_controls);
+            assert!(!cfg.gui.low_battery_notifications);
         })
         .await;
     }

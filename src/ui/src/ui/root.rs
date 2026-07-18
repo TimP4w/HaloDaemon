@@ -10,12 +10,30 @@ use crate::domain::state::Page;
 const DEPCHECK_GRACE_SECS: f64 = 4.0;
 
 impl App {
+    pub(crate) fn accept_state(&mut self, state: halod_shared::types::AppState) {
+        crate::ui::screens::settings::apply_locale(&state.gui.language);
+        let alerts = self.low_battery_tracker.observe(&state);
+        if state.gui.low_battery_notifications {
+            for alert in alerts {
+                crate::domain::native_notification::show(
+                    &t!("notify.low_battery.title", device = alert.device),
+                    &t!(
+                        "notify.low_battery.message",
+                        battery = alert.battery,
+                        level = alert.level,
+                        threshold = alert.threshold
+                    ),
+                );
+            }
+        }
+        self.state_cache = std::sync::Arc::new(state);
+    }
+
     #[cfg(windows)]
     pub(crate) fn draw_background(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
         if let Some(state) = crate::runtime::ipc::take_changed(&mut self.ui.state, "state") {
-            self.state_cache = std::sync::Arc::new(state);
-            crate::ui::screens::settings::apply_locale(&self.state_cache.gui.language);
+            self.accept_state(state);
         }
         self.tray.sync(ctx, &self.state_cache);
     }
@@ -54,8 +72,7 @@ impl App {
         let ctx = &ctx;
         // Only re-clone when the watch channel reports a change.
         if let Some(state) = crate::runtime::ipc::take_changed(&mut self.ui.state, "state") {
-            self.state_cache = std::sync::Arc::new(state);
-            crate::ui::screens::settings::apply_locale(&self.state_cache.gui.language);
+            self.accept_state(state);
         }
         let state = std::sync::Arc::clone(&self.state_cache);
         let onboarding_active =

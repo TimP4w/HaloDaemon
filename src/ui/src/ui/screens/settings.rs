@@ -103,6 +103,7 @@ fn page_body(
             start_on_boot_row(ui, st);
             language_row(ui, state, cmd);
             close_to_tray_row(ui, state, cmd);
+            low_battery_notifications_row(ui, state, cmd);
             window_controls_row(ui, state, cmd);
             dependency_warning_row(ui, state, cmd);
             plugin_downloads_row(ui, state, cmd);
@@ -318,6 +319,7 @@ fn send_ui_config(
     close_to_tray: Option<bool>,
     suppress_dependency_warning: Option<bool>,
     hide_window_controls: Option<bool>,
+    low_battery_notifications: Option<bool>,
 ) {
     crate::runtime::ipc::send(
         cmd,
@@ -326,6 +328,8 @@ fn send_ui_config(
             suppress_dependency_warning: suppress_dependency_warning
                 .unwrap_or(state.gui.suppress_dependency_warning),
             hide_window_controls: hide_window_controls.unwrap_or(state.gui.hide_window_controls),
+            low_battery_notifications: low_battery_notifications
+                .unwrap_or(state.gui.low_battery_notifications),
         },
     );
 }
@@ -340,7 +344,21 @@ fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     );
     let on = state.gui.close_to_tray;
     if row_toggle(ui, rect, on, "close_to_tray") {
-        send_ui_config(cmd, state, Some(!on), None, None);
+        send_ui_config(cmd, state, Some(!on), None, None, None);
+    }
+}
+
+fn low_battery_notifications_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+    let rect = row_rect(ui);
+    row_label(
+        ui,
+        rect,
+        &t!("settings.low_battery_notifications_title"),
+        &t!("settings.low_battery_notifications_sub"),
+    );
+    let on = state.gui.low_battery_notifications;
+    if row_toggle(ui, rect, on, "low_battery_notifications") {
+        send_ui_config(cmd, state, None, None, None, Some(!on));
     }
 }
 
@@ -371,7 +389,7 @@ fn window_controls_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     );
     let on = !state.gui.hide_window_controls;
     if row_toggle(ui, rect, on, "window_controls") {
-        send_ui_config(cmd, state, None, None, Some(on));
+        send_ui_config(cmd, state, None, None, Some(on), None);
     }
 }
 
@@ -385,7 +403,7 @@ fn dependency_warning_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) 
     );
     let warn_on = !state.gui.suppress_dependency_warning;
     if row_toggle(ui, rect, warn_on, "dependency_warning") {
-        send_ui_config(cmd, state, None, Some(warn_on), None);
+        send_ui_config(cmd, state, None, Some(warn_on), None, None);
     }
 }
 

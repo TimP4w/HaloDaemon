@@ -200,6 +200,8 @@ pub const DEFAULT_CLOSE_TO_TRAY: bool = true;
 pub const DEFAULT_SUPPRESS_DEPENDENCY_WARNING: bool = false;
 /// Default for "hide the custom window controls" (off — controls shown).
 pub const DEFAULT_HIDE_WINDOW_CONTROLS: bool = false;
+/// Default for native low-battery threshold notifications.
+pub const DEFAULT_LOW_BATTERY_NOTIFICATIONS: bool = true;
 /// Milliseconds between fan-curve engine ticks.
 pub const DEFAULT_FAN_CURVE_TICK_MS: u64 = 2000;
 /// Canvas engine frame rate.
@@ -536,6 +538,8 @@ pub struct GuiConfig {
     /// Hide the custom title-bar window controls (minimize/maximize/close),
     /// for tiling window managers that drive those actions themselves.
     pub hide_window_controls: bool,
+    /// Notify once below 20%, then again below 10% and 5% while discharging.
+    pub low_battery_notifications: bool,
     /// Persistence keys (e.g. "page:home", "tab:cooling") of tutorials the
     /// user has completed or skipped.
     pub seen_tours: BTreeSet<String>,
@@ -550,6 +554,7 @@ impl Default for GuiConfig {
             close_to_tray: DEFAULT_CLOSE_TO_TRAY,
             suppress_dependency_warning: DEFAULT_SUPPRESS_DEPENDENCY_WARNING,
             hide_window_controls: DEFAULT_HIDE_WINDOW_CONTROLS,
+            low_battery_notifications: DEFAULT_LOW_BATTERY_NOTIFICATIONS,
             seen_tours: BTreeSet::new(),
             log_level: DEFAULT_LOG_LEVEL.to_string(),
             plugin_downloads: PluginDownloadConsent::Allowed,
@@ -3495,6 +3500,7 @@ mod default_tests {
     fn gui_config_defaults_close_to_tray_when_omitted() {
         let c: GuiConfig = serde_json::from_str(r#"{"language":"en","log_level":"info"}"#).unwrap();
         assert!(c.close_to_tray, "default_close_to_tray");
+        assert!(c.low_battery_notifications);
         assert!(
             !c.suppress_dependency_warning,
             "default_suppress_dependency_warning"

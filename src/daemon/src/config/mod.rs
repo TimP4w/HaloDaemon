@@ -501,6 +501,7 @@ mod tests {
         let yaml = "log_level: info";
         let cfg: GuiConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.close_to_tray);
+        assert!(cfg.low_battery_notifications);
     }
 
     #[test]

@@ -168,6 +168,7 @@ pub fn show(
                     close_to_tray: state.gui.close_to_tray,
                     suppress_dependency_warning: true,
                     hide_window_controls: state.gui.hide_window_controls,
+                    low_battery_notifications: state.gui.low_battery_notifications,
                 },
             );
         }

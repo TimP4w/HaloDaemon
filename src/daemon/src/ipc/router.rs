@@ -465,11 +465,13 @@ async fn dispatch(
             close_to_tray,
             suppress_dependency_warning,
             hide_window_controls,
+            low_battery_notifications,
         } => {
             registry::usecases::settings::set_ui_config(
                 close_to_tray,
                 suppress_dependency_warning,
                 hide_window_controls,
+                low_battery_notifications,
                 app,
             )
             .await
