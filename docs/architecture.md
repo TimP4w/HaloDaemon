@@ -14,7 +14,7 @@ The workspace (`src/Cargo.toml`) has five members:
 
 | Crate | Directory | Role |
 |-------|-----------|------|
-| `halod-shared` | [src/shared/](../src/shared/) | Shared types **and logic** other crates depend on: IPC commands, the `DeviceCapability` enum, and frame/zone definitions, plus real logic — curve evaluation, frame codecs, geometry, zone transforms, and LCD/effect helpers. |
+| `halod-shared` | [src/shared/](../src/shared/) | Shared types **and logic** other crates depend on: IPC commands, the `DeviceCapability` enum, and frame/zone definitions, plus real logic: curve evaluation, frame codecs, geometry, zone transforms, and LCD/effect helpers. |
 | `halod-hwaccess` | [src/hwaccess/](../src/hwaccess/) | Low-level hardware-access primitives shared by the daemon and the broker. |
 | `halod-broker` | [src/broker/](../src/broker/) | **Windows-only** privileged helper: runs as LocalSystem and performs the hardware access the per-user daemon can't. |
 | `halod` | [src/daemon/](../src/daemon/) | The **daemon**: device I/O, discovery, engine loops, config persistence, IPC server. Runs **per-user** (not elevated); on Windows privileged hardware access is delegated to the `halod-broker` process. |
@@ -38,7 +38,7 @@ vendor/   organizational namespace (built-ins live under drivers/vendors/generic
       transport   moves raw bytes (HID, SMBus, USB, …)           ← "how do those bytes reach the wire"
 ```
 
-### Transport — moving bytes
+### Transport: moving bytes
 
 A transport implements the `Transport` trait
 ([transports/mod.rs](../src/daemon/src/drivers/transports/mod.rs)): at its core
@@ -59,22 +59,22 @@ for SMBus) gate every write through a `WriteRateLimiter`
 bytes/sec, delaying (never dropping) writes that exceed the limit. The
 ceiling is opt-in, not a default: `Device::write_rate_limit()` returns `None`
 unless a device explicitly declares one, following the same pattern as
-`debug_transport()` — a device overrides the default only if it needs
+`debug_transport()`: a device overrides the default only if it needs
 something different, and today none do, so nothing is throttled. Live
 throughput is still measured and surfaced to the GUI regardless of whether a
 limit is set. Chain accessories (e.g. an NZXT F-series fan on a Kraken) don't
 hold their own transport at all, so their writes are already covered by
-their parent hub's limiter for free — the GUI resolves this by walking the
+their parent hub's limiter for free; the GUI resolves this by walking the
 hub's chain links (`ui/src/domain/models/device.rs::find_hub_write_rate`) rather than
 requiring the daemon to duplicate the number per accessory. SMBus devices
 sharing one `SmBusScanEntry` (e.g. multiple DRAM sticks) share one bus-level
 limiter, since they already serialize through the same bus mutex; a
 different vendor's `SmBusScanEntry` on the same *physical* bus number still
-opens an independent `SmBusDevice`/limiter today—cross-vendor unification on
+opens an independent `SmBusDevice`/limiter today; cross-vendor unification on
 one physical bus is a known, unaddressed gap. USB-control endpoints are also
 metered and receive the plugin/device write-rate limit.
 
-### Protocol — speaking the vendor's wire format
+### Protocol: speaking the vendor's wire format
 
 A protocol module sits on top of a transport and turns intent ("set zone 2 to
 red", "read fan RPM") into the exact byte sequences the chip expects, and parses
@@ -85,16 +85,16 @@ for an example. When you port a wire format from third-party code, add the
 SPDX attribution header (`CLAUDE.md` → *Licensing & attribution*) and document the
 format beside its package in the [official plugin repository](https://github.com/TimP4w/HaloDaemon-plugins).
 
-### Device — the unit the daemon understands
+### Device: the unit the daemon understands
 
 A device implements the `Device` trait
 ([drivers/mod.rs](../src/daemon/src/drivers/mod.rs)). It owns one or more
 protocol instances and answers two central questions:
 
-- **Identity & lifecycle** — `id()` (stable across runs, unique per physical
+- **Identity & lifecycle** - `id()` (stable across runs, unique per physical
   device), `name()`/`vendor()`/`model()`, `initialize()` (open connections,
   returns whether connected) and `close()`.
-- **`capabilities() -> Vec<CapabilityRef>`** — the list of things this device can
+- **`capabilities() -> Vec<CapabilityRef>`** - the list of things this device can
   do. This is the *only* surface the rest of the daemon talks to.
 
 Capabilities are the daemon's abstraction over heterogeneous hardware. Each
@@ -102,11 +102,11 @@ variant of `CapabilityRef` (`Fan`, `Rgb`, `Sensor`, `Range`, `Choice`, `Boolean`
 `Action`, `Battery`, `Equalizer`, `Dpi`, `OnboardProfiles`, `Lcd`, `KeyRemap`,
 `Chain`, `Controller`, `TransportSwitchable`) has a matching trait and a generated
 accessor (`as_rgb()`, `as_fan()`, …). **Usecases and engines never see concrete
-device types — they call `device.as_rgb()` and talk to the trait object.** Adding
+device types: they call `device.as_rgb()` and talk to the trait object.** Adding
 a capability variant is a deliberate compile-time event: the
 `capability_dispatch!` macro in [drivers/mod.rs](../src/daemon/src/drivers/mod.rs)
 forces every new variant to be classified `persisting` (its state is saved to
-config) or `wire_only` (pushed to the GUI but not persisted) — there is no silent
+config) or `wire_only` (pushed to the GUI but not persisted); there is no silent
 default.
 
 `Device` also covers serialization to the wire (`serialize()` builds a
@@ -114,22 +114,22 @@ default.
 and optional hooks (`after_register`, `debug_info_extra`). **Controllers** host
 child devices (wireless receivers, fan hubs) via `discover_children()`; chainable
 ARGB hubs implement `ChainCapability`/`ChainAdapter` so the canvas engine can
-compose per-zone frames — see [chain.rs](../src/daemon/src/drivers/chain.rs).
+compose per-zone frames; see [chain.rs](../src/daemon/src/drivers/chain.rs).
 
-### Discovery — how a device gets constructed
+### Discovery: how a device gets constructed
 
 There is **no central registry**. Each device module registers itself next to its
 own code via `inventory::submit!`, and discovery walks those submissions
 ([registry/discovery.rs](../src/daemon/src/registry/discovery.rs)):
 
-- **`TransportScanner`** — submitted by each transport. `discover_devices()` loops
+- **`TransportScanner`** - submitted by each transport. `discover_devices()` loops
   over every registered scanner (optionally platform-gated) and runs its bus scan.
-- **`DeviceDescriptor`** `{ matches, make }` — submitted by each device module.
+- **`DeviceDescriptor`** `{ matches, make }` - submitted by each device module.
   Bus scanners build a `DiscoveryHandle` (carrying VID/PID, SMBus addr + bus kind,
   chain accessory id, Logitech slot, …) and `make_device()` returns the first
   descriptor whose `matches(handle)` is true, calling its `make(handle)` to
   construct the `Arc<dyn Device>`.
-- **`SmBusScanEntry`** — SMBus devices also submit one of these so the scanner
+- **`SmBusScanEntry`** - SMBus devices also submit one of these so the scanner
   knows which addresses to probe on which bus (with an optional `pre_scan`).
 
 A device file's tail therefore looks like:
@@ -146,13 +146,13 @@ inventory::submit!(DeviceDescriptor {
 it in `AppState`, restores its saved config, runs `discover_children()`, and calls
 `after_register()`.
 
-### Plugins — devices without recompiling
+### Plugins: devices without recompiling
 
 Built-in host devices register at **compile time** via `inventory`. **Device plugins**
 ([plugin/](../src/daemon/src/plugin/)) add a parallel **runtime**
 registry: `load_all_with_repos()` reads packages (`plugin.yaml` + entry script)
 only from registered remote Git, local Git, or imported archive repositories, and
-`make_device()` consults `plugins::match_handle()` *before* built-in descriptors —
+`make_device()` consults `plugins::match_handle()` *before* built-in descriptors,
 so a plugin **shadows** a built-in host device for the same hardware. A single generic
 `LuaDevice` implements the `Device` + capability traits and forwards each call into a
 per-physical-root Lua worker thread (which owns the VM + transport). Dynamic children
@@ -175,12 +175,12 @@ down and never touches privileged hardware directly.
 
 There are no plugins compiled into the daemon binary. At startup the daemon seeds
 a non-removable **official plugin repo** record and clones it over the network
-(`registry::ensure_official_repo`) — a clone failure (e.g. no network on first
+(`registry::ensure_official_repo`): a clone failure (e.g. no network on first
 launch) is logged and never fails boot, so the daemon simply has no official
 plugins until a later successful clone. Official plugins use the same
 enable-confirmation gate as all other sources. A plugin id
 is owned by whichever source loads it first (official repo, then local
-`plugins/`, then other repos in config order — see `load_all_with_repos`), so a
+`plugins/`, then other repos in config order; see `load_all_with_repos`), so a
 community repo can never shadow an existing plugin id; a collision is rejected
 and surfaced via `take_plugin_load_warnings` rather than silently dropped.
 
@@ -191,7 +191,7 @@ materializes and validates that proposed revision, then atomically selects it.
 Update checks never modify executable files, and a failed update leaves the
 previously selected revision running.
 
-## IPC and usecases — the daemon's public API
+## IPC and usecases: the daemon's public API
 
 The daemon and GUI are separate processes talking over a Unix domain socket
 (`$XDG_RUNTIME_DIR/halod.sock`) or a Windows named pipe (`\\.\pipe\halod`), using
@@ -204,12 +204,12 @@ the serde discriminator), and `dispatch()` matches the variant to a usecase in
 the owning domain module's `usecases/` (e.g. `daemon/src/lighting/usecases/`,
 `daemon/src/cooling/usecases/`, `daemon/src/registry/usecases/`) **with
 already-parsed typed arguments**. Usecases never re-parse raw JSON. The usecase
-layer *is* the daemon's public API surface — one usecase module per concern
+layer *is* the daemon's public API surface: one usecase module per concern
 (`rgb`, `fan_curve`, `dpi`, `lcd`, `profiles`, `app_rules`, `settings`, …), living
 next to the engine/state it drives rather than in one shared directory.
 
-**High-frequency push path:** state that changes constantly — canvas preview, LCD
-frames, sensor readings — is *not* request/response. The router runs
+**High-frequency push path:** state that changes constantly (canvas preview, LCD
+frames, sensor readings) is *not* request/response. The router runs
 `tokio::broadcast` subscription loops (`engine_subscribe_loop`) that stream frames
 to subscribed clients, and broad device-state changes go out via
 `broadcast_state()`.
@@ -221,9 +221,9 @@ So **adding a command is a four-part change**:
 3. Write/extend the usecase in the owning domain's `usecases/` that does the work (talking to devices through capability accessors).
 4. Call it from the GUI.
 
-## Engines — background loops over time
+## Engines: background loops over time
 
-Engines (one per owning domain — `lighting/rgb_engine/`, `cooling/fan_curve.rs`,
+Engines (one per owning domain: `lighting/rgb_engine/`, `cooling/fan_curve.rs`,
 `lcd/engine/`, `input/`, `profiles/focus_watcher/`; shared loop infra in
 [daemon/src/run_loop.rs](../src/daemon/src/run_loop.rs)) are the daemon's
 background drivers of device state. Each owns a tick interval (or is event-driven),
@@ -233,15 +233,15 @@ and are the reason device state evolves without the user touching anything.
 
 The set (full internals in [engines.md](engines.md)):
 
-- **canvas** — unified RGB effect loop; renders a tiny-skia pixmap per tick and
+- **canvas** - unified RGB effect loop; renders a tiny-skia pixmap per tick and
   samples each placed zone to per-LED RGB. Drives every `Rgb` capability. Its
   effect runtime has an intentional two-domain boundary: daemon-owned built-ins
   only for host services/the always-available designer, and runtime plugins for
   portable effects; see [engines.md](engines.md#effects).
-- **fan_curve** — closed-loop temp→PWM with hysteresis, deadband, and a failsafe
+- **fan_curve** - closed-loop temp→PWM with hysteresis, deadband, and a failsafe
   duty when the sensor is missing.
-- **lcd** — renders template images / video frames to Kraken-style LCD panels.
-- **action_executor**, **focus_watcher**, **key_remap** — event-driven engines for
+- **lcd** - renders template images / video frames to Kraken-style LCD panels.
+- **action_executor**, **focus_watcher**, **key_remap** - event-driven engines for
   actions, per-app profile switching, and key remapping.
 
 Engines receive runtime config via `watch` channels (`*_cfg_tx` on `Engines`), so
@@ -256,7 +256,7 @@ directly.
   and shutdown signaling. It is passed (as `Arc<AppState>`) into usecases and
   engines.
 - **Config** is persisted as a directory of YAML files by concern under
-  `~/.config/halod/` (Linux) or `%APPDATA%\halod\` (Windows) — see
+  `~/.config/halod/` (Linux) or `%APPDATA%\halod\` (Windows); see
   [daemon/src/config/mod.rs](../src/daemon/src/config/mod.rs): `config.yaml`
   (global settings + active profile), `devices.yaml` (known devices, chain
   layouts, zone transforms, sensor visibility), `app_rules.yaml`, one
@@ -271,7 +271,7 @@ directly.
 ## The GUI side
 
 The GUI ([ui/src/](../src/ui/src/)) is immediate-mode (eframe/egui on a
-glow/OpenGL renderer) — each frame is drawn from app state held in
+glow/OpenGL renderer): each frame is drawn from app state held in
 [ui/src/app.rs](../src/ui/src/app.rs) as an `Arc<AppState>` (the latest daemon
 state, cloned when its `watch` channel changes), with GUI-side derivations under
 [ui/src/domain/models/](../src/ui/src/domain/models/). Daemon IPC lives in
@@ -279,7 +279,7 @@ state, cloned when its `watch` channel changes), with GUI-side derivations under
 is **capability-driven**: each capability tab is registered in
 [ui/src/ui/screens/device/mod.rs](../src/ui/src/ui/screens/device/mod.rs) and shown only when
 the connected device reports that capability, so a new capability shows up in the
-UI by registering a tab — not by editing the device page. Two-way-bound widgets
+UI by registering a tab, not by editing the device page. Two-way-bound widgets
 gate daemon updates for ~1.5 s after a user edit (a `LiveGuard`) and debounce
 outgoing commands to avoid fighting the user; reuse those rather than
 hand-rolling. High-frequency canvas/LCD frames arrive on dedicated channels, not
@@ -289,7 +289,7 @@ the state broadcast.
 
 New device support is added in the
 [HaloDaemon plugins repository](https://github.com/TimP4w/HaloDaemon-plugins) as
-a Lua package — not as a Rust vendor module in this repo. See
+a Lua package, not as a Rust vendor module in this repo. See
 [development.md](development.md#adding-device-support) for the plugin workflow
 and the manifest/Lua authoring references.
 
@@ -297,19 +297,19 @@ The built-in Rust driver stack (`drivers/`) is now limited to the generic
 `computer`/hwmon-class devices that don't fit a plugin. The vendor → device →
 protocol → transport layering above is how those built-ins are structured, and a
 plugin needs a **new Rust change here only** when it requires a capability or a
-scoped transport operation the daemon does not yet expose — add that core
+scoped transport operation the daemon does not yet expose: add that core
 primitive first, then consume it from Lua. When you do touch a built-in:
 
-1. **Transport** — reuse an existing one if the bus is already supported; write a
+1. **Transport** - reuse an existing one if the bus is already supported; write a
    new transport module only for a genuinely new bus, and document it in
    [transports/](transports/).
-2. **Device** — a file under `drivers/vendors/<vendor>/devices/` implementing
+2. **Device** - a file under `drivers/vendors/<vendor>/devices/` implementing
    `Device`, declaring `capabilities()`, plus the
    `inventory::submit!(DeviceDescriptor …)` (and `SmBusScanEntry` for SMBus parts).
-3. **udev rule** (Linux) — add built-in-driver access to
+3. **udev rule** (Linux) - add built-in-driver access to
    [udev/60-halod.rules](../udev/60-halod.rules). Plugin HID/USB access is
    instead derived from the manifest by `halod udev-rules`.
-4. **Test** — exercise the new frame encode/decode and parsing. `MockDevice` in
+4. **Test** - exercise the new frame encode/decode and parsing. `MockDevice` in
    [test_support.rs](../src/daemon/src/test_support.rs) covers capability-level
    tests; prefer property tests where a real invariant exists
    (`CLAUDE.md` → *Code conventions*).

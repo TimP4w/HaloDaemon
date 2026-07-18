@@ -28,7 +28,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**Fan curves** — temperature-based PWM control with hysteresis and failsafe; preset curves (Balanced, Silent, Performance, Full Speed, 50%).
+**Fan curves** - temperature-based PWM control with hysteresis and failsafe; preset curves (Balanced, Silent, Performance, Full Speed, 50%).
 
 </td>
 <td width="50%"><img src="./docs/images/fan.png" alt="Fan curve editor"></td>
@@ -36,7 +36,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**Cooling dashboard** — every pump and fan across your devices in one view, each with its bound sensor, live readout, curve preview, and quick presets.
+**Cooling dashboard** - every pump and fan across your devices in one view, each with its bound sensor, live readout, curve preview, and quick presets.
 
 </td>
 <td width="50%"><img src="./docs/images/cooling.png" alt="Cooling dashboard"></td>
@@ -44,7 +44,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**RGB canvas engine** — unified loop across all placed zones; effects: static color, breathing, rainbow, screen sampler (mirrors monitor content). See [engines](docs/engines.md).
+**RGB canvas engine** - unified loop across all placed zones; effects: static color, breathing, rainbow, screen sampler (mirrors monitor content). See [engines](docs/engines.md).
 
 </td>
 <td width="50%"><img src="./docs/images/canvas.png" alt="RGB canvas engine"></td>
@@ -52,7 +52,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**Chainable ARGB** — daisy-chain generic ARGB accessories on supported hubs; user-defined zones placed on the canvas.
+**Chainable ARGB** - daisy-chain generic ARGB accessories on supported hubs; user-defined zones placed on the canvas.
 
 </td>
 <td width="50%"><img src="./docs/images/chain.png" alt="Chainable ARGB layout"></td>
@@ -60,7 +60,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**LCD display** — template-based image rendering on LCD panel (frame counter, sensor readouts).
+**LCD display** - template-based image rendering on LCD panel (frame counter, sensor readouts).
 
 </td>
 <td width="50%"><img src="./docs/images/lcd.png" alt="LCD template editor"></td>
@@ -68,7 +68,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**Per-led RGB** — full per-led lighting.
+**Per-led RGB** - full per-led lighting.
 
 </td>
 <td width="50%"><img src="./docs/images/rgb.png" alt="Per-LED RGB editor"></td>
@@ -76,7 +76,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**Audio-reactive effects & now playing** — RGB effects driven by system audio (beat, level, spectrum, waveform) and an LCD widget showing the current track (MPRIS/GSMTC). See [engines](docs/engines.md).
+**Audio-reactive effects & now playing** - RGB effects driven by system audio (beat, level, spectrum, waveform) and an LCD widget showing the current track (MPRIS/GSMTC). See [engines](docs/engines.md).
 
 </td>
 <td width="50%"><img src="./docs/images/lighting.png" alt="Audio-reactive lighting"></td>
@@ -84,7 +84,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**DPI profiles & onboard profiles** — read/write onboard profile storage; DPI step configuration.
+**DPI profiles & onboard profiles** - read/write onboard profile storage; DPI step configuration.
 
 </td>
 <td width="50%"><img src="./docs/images/dpi.png" alt="DPI profile editor"></td>
@@ -92,7 +92,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**Profiles** — profiles and auto-switch based on focused window.
+**Profiles** - profiles and auto-switch based on focused window.
 
 </td>
 <td width="50%"><img src="./docs/images/profiles.png" alt="Profiles list" width="49%"><img src="./docs/images/profile_switch.png" alt="Profile auto-switch" width="49%"></td>
@@ -100,7 +100,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**Battery, Control, Eq, and more** — control device quirks.
+**Battery, Control, Eq, and more** - control device quirks.
 
 </td>
 <td width="50%"><img src="./docs/images/eq.png" alt="Equalizer control"></td>
@@ -108,23 +108,23 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**Plugin ecosystem** — install device and effect packages from signed repositories; each plugin declares its capabilities and a narrow set of permissions you approve before it runs.
+**Plugin ecosystem** - install device and effect packages from signed repositories; each plugin declares its capabilities and a narrow set of permissions you approve before it runs.
 
 </td>
 <td width="50%"><img src="./docs/images/plugins.png" alt="Plugin management screen"></td>
 </tr>
 </table>
 
-- **ChatMix** — for SteelSeries Arctis Nova
-- **Key remap** — divert buttons to custom actions (key chord, mouse button, media key, DPI cycle, macro, command, …)
-- **Lua scripting** — implement device plugin callbacks and custom hardware behavior in Lua
+- **ChatMix** - for SteelSeries Arctis Nova
+- **Key remap** - divert buttons to custom actions (key chord, mouse button, media key, DPI cycle, macro, command, …)
+- **Lua scripting** - implement device plugin callbacks and custom hardware behavior in Lua
 
 ---
 
 ## Install
 
-- **Linux** (NixOS, Ubuntu/Debian, Fedora, Arch/CachyOS, other distros) — see **[Installing on Linux](docs/install/linux.md)**
-- **Windows** — see **[Installing on Windows](docs/install/windows.md)**
+- **Linux** (NixOS, Ubuntu/Debian, Fedora, Arch/CachyOS, other distros) - see **[Installing on Linux](docs/install/linux.md)**
+- **Windows** - see **[Installing on Windows](docs/install/windows.md)**
 
 Both guides cover the runtime dependencies, permissions/PawnIO setup, and the vendor software (NZXT CAM, iCUE, G HUB, …) you should disable to avoid conflicts.
 
@@ -132,11 +132,11 @@ Both guides cover the runtime dependencies, permissions/PawnIO setup, and the ve
 
 ## Further reading
 
-- [Development guide](docs/development.md) — build, add devices, add protocols
-- [Device plugins](docs/plugins.md) — declare packages in YAML and implement hardware callbacks in Lua
-- [Engines](docs/engines.md) — canvas, fan curve, LCD, key remap
-- [Plugin protocols](https://github.com/TimP4w/HaloDaemon-plugins) — each official plugin keeps its protocol documentation in its own `docs/` directory
-- [Transports](docs/transports/) — HID, USB control, SMBus, hwmon, LpcIO, AMD SMN, serial, command, TCP, HTTP, UDP
+- [Development guide](docs/development.md) - build, add devices, add protocols
+- [Device plugins](docs/plugins.md) - declare packages in YAML and implement hardware callbacks in Lua
+- [Engines](docs/engines.md) - canvas, fan curve, LCD, key remap
+- [Plugin protocols](https://github.com/TimP4w/HaloDaemon-plugins) - each official plugin keeps its protocol documentation in its own `docs/` directory
+- [Transports](docs/transports/) - HID, USB control, SMBus, hwmon, LpcIO, AMD SMN, serial, command, TCP, HTTP, UDP
 
 ---
 

@@ -10,7 +10,7 @@ udev rules to `/usr/lib/udev/rules.d/`, the desktop entry and icon to
 |--------|--------|------------|--------------|
 | Ubuntu / Debian | `.deb` | `[package.metadata.deb]` in `src/daemon/Cargo.toml` | yes (release) |
 | Fedora | `.rpm` | `[package.metadata.generate-rpm]` in `src/daemon/Cargo.toml` | yes (release) |
-| Arch / CachyOS | `.pkg.tar.zst` | `packaging/arch/PKGBUILD` (+ `halod.install`) | no — build locally |
+| Arch / CachyOS | `.pkg.tar.zst` | `packaging/arch/PKGBUILD` (+ `halod.install`) | no, build locally |
 
 Both the `.deb` and `.rpm` ship **both** binaries from the one `halod` crate and
 detect their runtime library dependencies automatically (`dpkg-shlibdeps` /

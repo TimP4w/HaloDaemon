@@ -71,9 +71,9 @@ See [`packaging/README.md`](../../packaging/README.md) for details and optional 
 
 ## Other distros
 
-Download `halod-linux-x64.tar.gz` from the [releases page](https://github.com/TimP4w/HaloDaemon/releases), or build from source — see the [development guide](../development.md).
+Download `halod-linux-x64.tar.gz` from the [releases page](https://github.com/TimP4w/HaloDaemon/releases), or build from source; see the [development guide](../development.md).
 
-The tarball install does **not** set up the udev rules, groups, or kernel modules automatically — do that manually below.
+The tarball install does **not** set up the udev rules, groups, or kernel modules automatically; do that manually below.
 
 ### Runtime dependencies
 
@@ -91,7 +91,7 @@ The tarball install does **not** set up the udev rules, groups, or kernel module
 
 ### udev rules
 
-Required — without these the daemon needs root:
+Required: without these the daemon needs root:
 ```bash
 halod udev-rules | sudo tee /etc/udev/rules.d/60-halod.rules >/dev/null
 sudo udevadm control --reload-rules
@@ -146,7 +146,7 @@ systemctl --user enable --now xdg-desktop-portal
 
 ## Avoid conflicting software
 
-HaloDaemon talks directly to hardware over HID, SMBus/I2C, and SuperIO port I/O. If another RGB/peripheral tool is running at the same time, the two will fight over device access — you'll see flicker, dropped writes, effects reverting, or a device failing to be claimed.
+HaloDaemon talks directly to hardware over HID, SMBus/I2C, and SuperIO port I/O. If another RGB/peripheral tool is running at the same time, the two will fight over device access: you'll see flicker, dropped writes, effects reverting, or a device failing to be claimed.
 
 Stop and disable any other daemon that manages the same hardware before running HaloDaemon.
 You can disable single devices on HaloDaemon if you prefer to use another program to control them.

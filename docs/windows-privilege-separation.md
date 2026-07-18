@@ -1,9 +1,9 @@
 # Windows privilege separation
 
 On Windows, HaloDaemon needs elevated access for a small set of low-level
-register-bus operations — chipset SMBus (DRAM/GPU RGB), SuperIO port I/O
+register-bus operations: chipset SMBus (DRAM/GPU RGB), SuperIO port I/O
 (motherboard fan control and temperatures), and the AMD Ryzen on-die SMN
-thermal registers — all reached through the PawnIO kernel driver. Rather than
+thermal registers, all reached through the PawnIO kernel driver. Rather than
 run the whole application elevated, that privileged surface is isolated into a
 single tiny binary, **`halod-broker.exe`**, and everything else runs at the
 user's normal (medium) integrity.
@@ -15,14 +15,14 @@ developer workflow (dev-run UAC prompt and installer testing), see
 ## Process topology
 
 ```
- halod-gui.exe        user, medium integrity   — the UI + tray; launches the worker
+ halod-gui.exe        user, medium integrity   - the UI + tray; launches the worker
       │  (named pipe \\.\pipe\halod, framed JSON)
       ▼
- halod.exe            user, medium integrity   — the daemon/worker: device I/O,
+ halod.exe            user, medium integrity   - the daemon/worker: device I/O,
       │                                           engines, config, the Lua plugin host
-      │  (named pipe \\.\pipe\halod-broker, framed JSON — proto.rs)
+      │  (named pipe \\.\pipe\halod-broker, framed JSON - proto.rs)
       ▼
- halod-broker.exe     LocalSystem (elevated)   — register-bus RPC only
+ halod-broker.exe     LocalSystem (elevated)   - register-bus RPC only
 ```
 
 `halod.exe` is **never** elevated and is **not** a service. The GUI launches it
@@ -36,7 +36,7 @@ brings the broker up:
   `halod-broker.exe`, producing **one** UAC prompt.
 
 The broker links only `halod-hwaccess` + `windows`
-([broker/Cargo.toml](../src/broker/Cargo.toml)) — no Lua runtime, no network
+([broker/Cargo.toml](../src/broker/Cargo.toml)): no Lua runtime, no network
 stack, no `halod` code. That narrowness is the point: the elevated binary can
 reach register buses and nothing else.
 
@@ -46,7 +46,7 @@ The daemon↔broker protocol ([hwaccess/src/proto.rs](../src/hwaccess/src/proto.
 is deliberately just the register-bus primitives:
 
 - SMBus: open an enumerated controller and use the byte/word/block
-  read/write ops — each addressed by a broker-side **handle** returned at open.
+  read/write ops, each addressed by a broker-side **handle** returned at open.
 - AMD SMN: open a typed AMD handle and read a 32-bit SMN offset.
 - LPC I/O: open a typed LPC handle, select one of the two SuperIO slots, find
   BARs, and perform the fixed port/config-register byte operations.
@@ -64,8 +64,8 @@ the wire protocol. Every scope carries request-rate and total-operation ceilings
 
 | Principal | Trusted? | Enforced how |
 |---|---|---|
-| `halod.exe` daemon | **Yes** | — |
-| `halod-broker.exe` | **Yes** | — |
+| `halod.exe` daemon | **Yes** | - |
+| `halod-broker.exe` | **Yes** | - |
 | Lua plugins (run inside the daemon) | **No** | declared address scope plus daemon-layer activation and permission gates |
 | Other interactive users on the box | **No** | **the broker pipe (this document)** |
 
@@ -127,7 +127,7 @@ pipe.
 So the non-elevated daemon can start the on-demand service without a UAC prompt,
 the installer grants only the installing user's concrete SID
 **SERVICE_START + query only** (`(A;;RPLC;;;<SID>)`,
-[broker/src/service.rs](../src/broker/src/service.rs)) — not `SERVICE_STOP`.
+[broker/src/service.rs](../src/broker/src/service.rs)), not `SERVICE_STOP`.
 Installation and upgrades remove every legacy `IU` ACE before adding the exact
 principal. The broker self-stops when idle, so no unprivileged caller needs to
 stop it.

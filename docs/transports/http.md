@@ -10,7 +10,7 @@ API or a web service, such as a Philips Hue bridge or a weather provider.
 Unlike the stream transports, HTTP is not exposed as `dev.transport` userdata.
 A plugin that declares an `http` transport and holds the `network` permission
 gets the `halod.http:request{…}` capability global. Each call is a synchronous,
-bounded request/response validated against the manifest before a socket opens —
+bounded request/response validated against the manifest before a socket opens;
 there is no persistent connection the plugin controls.
 
 ## Operations for plugins
@@ -25,7 +25,7 @@ declared method set, size limits, timeout, or origin scope raise an error.
 
 ## Discovery and scope
 
-The manifest declares an exact `scheme://host[:port]` origin allowlist — no
+The manifest declares an exact `scheme://host[:port]` origin allowlist, no
 wildcards. A device whose address isn't known at authoring time uses the literal
 `{host}` token, resolved from a typed `host_key` config field and combined with
 the typed port named by `port_key`. Redirects are not followed, and
@@ -38,7 +38,7 @@ disable certificate verification.
 
 ## Limitations
 
-- Only request/response is exposed — no streaming, websockets, or server push.
+- Only request/response is exposed: no streaming, websockets, or server push.
 - The plugin cannot reach any origin outside its approved allowlist.
 - Service discovery via mDNS/SSDP is a separate integration-setup mechanism, not
   part of this transport.

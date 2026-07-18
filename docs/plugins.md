@@ -132,13 +132,13 @@ contains the official plugins, working package examples, and the authoritative
 development documentation:
 
 - [Plugin manifest reference](https://github.com/TimP4w/HaloDaemon-plugins/blob/main/docs/manifest-reference.md)
-  — package metadata, plugin types, capabilities, permissions, device matching,
+  covers package metadata, plugin types, capabilities, permissions, device matching,
   transports, configuration, effects, widgets, and presets.
 - [Lua API and test harness](https://github.com/TimP4w/HaloDaemon-plugins/blob/main/docs/lua-api.md)
-  — lifecycle callbacks, capability APIs, transports, sandbox behavior,
+  covers lifecycle callbacks, capability APIs, transports, sandbox behavior,
   effect/widget callbacks, and plugin tests.
 - [Official plugin catalog](https://github.com/TimP4w/HaloDaemon-plugins#plugin-catalog)
-  — package examples and links to the protocol documentation maintained with
+  covers package examples and links to the protocol documentation maintained with
   each plugin.
 
 Use those references when creating or updating a plugin; this page only

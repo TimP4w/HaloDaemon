@@ -34,7 +34,7 @@ transports:
     commands: [nvidia-smi]
 ```
 
-Entries must be bare executable names resolved on `PATH` — a path, a shell
+Entries must be bare executable names resolved on `PATH`; a path, a shell
 fragment, or an argument is runtime data, not authority, and is rejected. A
 `match.command` value must appear in this list. Shells, interpreters, and
 command launchers are refused even when allowlisted, and any executable outside
