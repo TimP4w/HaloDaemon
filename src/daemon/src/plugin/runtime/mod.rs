@@ -16,6 +16,7 @@ mod lua_worker;
 mod sandbox;
 pub(crate) mod transport;
 mod transport_api;
+pub(crate) mod udp_api;
 pub(crate) mod widget_worker;
 pub(crate) mod worker;
 

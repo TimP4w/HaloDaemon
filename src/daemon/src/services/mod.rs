@@ -4,3 +4,4 @@ pub mod data_bus;
 pub mod http;
 pub mod integration_discovery;
 pub mod media;
+pub mod udp;

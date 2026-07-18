@@ -617,6 +617,7 @@ impl PluginHandle {
             audio_registry,
             Default::default(),
             None,
+            None,
         )
     }
 
@@ -633,6 +634,7 @@ impl PluginHandle {
         audio_registry: super::audio_api::SinkRegistry,
         data: super::data_api::DataRuntime,
         http: Option<crate::services::http::HttpRuntime>,
+        udp: Option<crate::services::udp::UdpRuntime>,
     ) -> Self {
         let worker = LuaWorker::spawn(
             "halod-plugin",
@@ -654,6 +656,7 @@ impl PluginHandle {
                     audio_registry,
                     data,
                     http,
+                    udp,
                 )
             },
             |job: Job, ctx: &WorkerCtx| {
@@ -1364,6 +1367,49 @@ pub(in crate::plugin) fn http_runtime_for(
     }
 }
 
+/// Build the live UDP runtime from a manifest's declared udp transport and the
+/// plugin's configured destination, or `None` when the transport is absent,
+/// ungranted, or its socket fails to connect — a plugin simply lacks `halod.udp`
+/// rather than failing to spawn.
+pub(in crate::plugin) fn udp_runtime_for(
+    manifest: &crate::plugin::manifest::PluginManifest,
+    granted: &[Permission],
+    config: &crate::plugin::ResolvedConfig,
+) -> Option<crate::services::udp::UdpRuntime> {
+    let udp = manifest.transports.udp.as_ref()?;
+    if !granted.contains(&Permission::Network) {
+        return None;
+    }
+    let value = |key: &str| {
+        config
+            .get(key)
+            .map(crate::plugin::ResolvedConfigValue::to_config_string)
+            .unwrap_or_default()
+    };
+    let host = value(&udp.host_key);
+    let port: u16 = match value(&udp.port_key).parse() {
+        Ok(port) => port,
+        Err(_) => {
+            log::error!(
+                "plugin '{}': udp port config '{}' is not a valid port",
+                manifest.plugin_id,
+                udp.port_key
+            );
+            return None;
+        }
+    };
+    match crate::services::udp::UdpRuntime::from_config(udp, &host, port) {
+        Ok(runtime) => Some(runtime),
+        Err(e) => {
+            log::error!(
+                "plugin '{}': udp transport unavailable: {e:#}",
+                manifest.plugin_id
+            );
+            None
+        }
+    }
+}
+
 /// Build the worker's VM context on the worker thread. Runs once at spawn; the
 /// [`LuaWorker`] loop then drives jobs against the returned [`WorkerCtx`].
 #[allow(clippy::too_many_arguments)]
@@ -1379,6 +1425,7 @@ fn build_ctx(
     audio_registry: super::audio_api::SinkRegistry,
     data: super::data_api::DataRuntime,
     http: Option<crate::services::http::HttpRuntime>,
+    udp: Option<crate::services::udp::UdpRuntime>,
 ) -> Result<WorkerCtx> {
     debug_assert!(!super::contract::active().tables.is_empty());
     let controller_index = dev_match.index;
@@ -1394,6 +1441,9 @@ fn build_ctx(
     super::data_api::register(&lua, data).map_err(|e| lua_err("data API", e))?;
     if let Some(http) = http {
         super::http_api::register(&lua, http).map_err(|e| lua_err("http API", e))?;
+    }
+    if let Some(udp) = udp {
+        super::udp_api::register(&lua, udp).map_err(|e| lua_err("udp API", e))?;
     }
 
     let manifest: Table = lua

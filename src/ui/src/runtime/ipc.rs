@@ -624,10 +624,9 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> bool {
             return false;
         }
         Some("serial_ports") => {
-            if let Some(ports) = value
-                .get("ports")
-                .and_then(|p| serde_json::from_value::<Vec<halod_shared::types::SerialPortInfo>>(p.clone()).ok())
-            {
+            if let Some(ports) = value.get("ports").and_then(|p| {
+                serde_json::from_value::<Vec<halod_shared::types::SerialPortInfo>>(p.clone()).ok()
+            }) {
                 tx.serial_ports.send_replace(ports);
                 repaint();
             }

@@ -32,6 +32,7 @@ fn setup_worker(
         app.registry
             .resolved_config_for(app.secret_store.as_ref(), &manifest.plugin_id, &granted);
     let http = crate::plugin::runtime::worker::http_runtime_for(manifest, &granted, &config);
+    let udp = crate::plugin::runtime::worker::udp_runtime_for(manifest, &granted, &config);
     crate::plugin::runtime::worker::PluginHandle::spawn_with_data(
         manifest.script_source.clone(),
         manifest.module_sources.clone(),
@@ -47,6 +48,7 @@ fn setup_worker(
         Default::default(),
         Default::default(),
         http,
+        udp,
     )
 }
 

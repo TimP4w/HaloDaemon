@@ -368,8 +368,7 @@ impl Transport for SerialTransport {
     fn event_receiver(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
         // No wake source unless the manifest opted into events, so a request/
         // reply device never spins up the competing event task.
-        self.events_enabled
-            .then(|| self.events.wake.subscribe())
+        self.events_enabled.then(|| self.events.wake.subscribe())
     }
 
     async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
@@ -470,7 +469,9 @@ fn serial_event_loop(
 impl SerialControl for SerialTransport {
     fn set_dtr(&self, level: bool) -> Result<()> {
         let mut guard = self.port.read_access().lock().unwrap();
-        guard.write_data_terminal_ready(level).context("setting DTR")
+        guard
+            .write_data_terminal_ready(level)
+            .context("setting DTR")
     }
 
     fn set_rts(&self, level: bool) -> Result<()> {
@@ -510,7 +511,10 @@ mod tests {
         let drained = events.drain(EVENT_QUEUE_CAPACITY + 1);
         assert_eq!(drained.len(), EVENT_QUEUE_CAPACITY);
         // The very first push was evicted; the queue kept the newest ones.
-        assert_eq!(drained.last().unwrap().data, vec![EVENT_QUEUE_CAPACITY as u8]);
+        assert_eq!(
+            drained.last().unwrap().data,
+            vec![EVENT_QUEUE_CAPACITY as u8]
+        );
     }
 
     #[test]
@@ -520,10 +524,10 @@ mod tests {
         events.push(vec![2]);
         events.push(vec![3]);
         let first = events.drain(2);
-        assert_eq!(first.iter().map(|e| e.data.clone()).collect::<Vec<_>>(), [
-            vec![1],
-            vec![2]
-        ]);
+        assert_eq!(
+            first.iter().map(|e| e.data.clone()).collect::<Vec<_>>(),
+            [vec![1], vec![2]]
+        );
         let rest = events.drain(10);
         assert_eq!(rest.len(), 1);
         assert_eq!(rest[0].data, vec![3]);

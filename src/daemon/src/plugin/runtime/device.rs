@@ -692,6 +692,7 @@ impl LuaDevice {
         let audio_registry: super::audio_api::SinkRegistry =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let http = super::worker::http_runtime_for(manifest, &granted, &config);
+        let udp = super::worker::udp_runtime_for(manifest, &granted, &config);
         let worker = PluginHandle::spawn_with_data(
             manifest.script_source.clone(),
             manifest.module_sources.clone(),
@@ -704,6 +705,7 @@ impl LuaDevice {
             audio_registry.clone(),
             data,
             http,
+            udp,
         );
         let poll_device_id = id.clone();
         let poll_notify = notify.clone();

@@ -406,6 +406,92 @@ impl HttpBackend for RecordingHttp {
     }
 }
 
+/// Records the datagrams a plugin sends and replays queued inbound datagrams, so
+/// `test.lua` can drive a udp integration without touching the network.
+#[derive(Default)]
+struct RecordingUdp {
+    sent: Mutex<Vec<Vec<u8>>>,
+    inbound: Mutex<std::collections::VecDeque<Vec<u8>>>,
+}
+
+impl crate::services::udp::UdpBackend for RecordingUdp {
+    fn send(&self, data: &[u8]) -> Result<usize> {
+        self.sent
+            .lock()
+            .expect("recording udp poisoned")
+            .push(data.to_vec());
+        Ok(data.len())
+    }
+    fn receive(&self, _timeout: std::time::Duration, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .inbound
+            .lock()
+            .expect("recording udp poisoned")
+            .pop_front()
+            .map(|mut d| {
+                d.truncate(max_bytes);
+                d
+            }))
+    }
+}
+
+/// Build a `halod.udp` runtime over the recording backend when the manifest
+/// declares a udp transport, so the harness never opens a real socket.
+fn recording_udp_runtime(
+    manifest: &PluginManifest,
+    recording: &Option<Arc<RecordingUdp>>,
+) -> Option<crate::services::udp::UdpRuntime> {
+    let udp = manifest.transports.udp.as_ref()?;
+    let recording = recording.clone()?;
+    Some(crate::services::udp::UdpRuntime::new(
+        recording,
+        udp.max_datagram_bytes,
+        std::time::Duration::from_millis(udp.recv_timeout_ms),
+    ))
+}
+
+/// Attach `dev:queue_udp_datagram(bytes)` and `dev:udp_sent()` so a udp
+/// package's `test.lua` can inject inbound datagrams and assert what was sent.
+fn attach_udp_methods(lua: &Lua, dev: &Table, recording: Option<Arc<RecordingUdp>>) -> Result<()> {
+    let Some(recording) = recording else {
+        return Ok(());
+    };
+    let inbound = recording.clone();
+    dev.set(
+        "queue_udp_datagram",
+        lua.create_function(move |_, (_self, data): (Table, mlua::String)| {
+            inbound
+                .inbound
+                .lock()
+                .expect("recording udp poisoned")
+                .push_back(data.as_bytes().to_vec());
+            Ok(())
+        })
+        .anyhow()?,
+    )
+    .anyhow()?;
+    let sent = recording;
+    dev.set(
+        "udp_sent",
+        lua.create_function(move |lua, _self: Table| {
+            let out = lua.create_table()?;
+            for (i, datagram) in sent
+                .sent
+                .lock()
+                .expect("recording udp poisoned")
+                .iter()
+                .enumerate()
+            {
+                out.set(i + 1, lua.create_string(datagram)?)?;
+            }
+            Ok(out)
+        })
+        .anyhow()?,
+    )
+    .anyhow()?;
+    Ok(())
+}
+
 /// Build a `halod.http` runtime over the recording backend when the manifest
 /// declares an http transport, so the harness never opens a real socket.
 fn recording_http_runtime(
@@ -507,7 +593,6 @@ fn attach_http_methods(
                 item.set("method", req.method.clone())?;
                 item.set("origin", req.origin.clone())?;
                 item.set("path", req.path.clone())?;
-                item.set("body", lua.create_string(&req.body)?)?;
                 out.set(i + 1, item)?;
             }
             Ok(out)
@@ -830,8 +915,14 @@ fn open_integration(
         .http
         .as_ref()
         .map(|_| Arc::new(RecordingHttp::default()));
+    let udp_recording = manifest
+        .transports
+        .udp
+        .as_ref()
+        .map(|_| Arc::new(RecordingUdp::default()));
     let resolved_config = default_resolved_config(manifest);
     let http = recording_http_runtime(manifest, &resolved_config, &http_recording);
+    let udp = recording_udp_runtime(manifest, &udp_recording);
     let worker = PluginHandle::spawn_with_data(
         manifest.script_source.clone(),
         manifest.module_sources.clone(),
@@ -852,9 +943,11 @@ fn open_integration(
             manifest.consumes.clone(),
         ),
         http,
+        udp,
     );
     let dev = lua.create_table().anyhow()?;
     attach_http_methods(lua, &dev, http_recording)?;
+    attach_udp_methods(lua, &dev, udp_recording)?;
     {
         let worker = worker.clone();
         let handle = handle.clone();
@@ -1018,7 +1111,9 @@ fn integration_child_table(
             "apply",
             lua.create_function(move |_, (_self, state): (Table, Table)| {
                 let rgb_state = table_to_rgb_state(&state).map_err(mlua_err)?;
-                handle.block_on(child.rgb_apply(rgb_state)).map_err(mlua_err)
+                handle
+                    .block_on(child.rgb_apply(rgb_state))
+                    .map_err(mlua_err)
             })?,
         )?;
     }

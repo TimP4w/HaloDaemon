@@ -199,6 +199,51 @@ impl Default for SerialConfig {
     }
 }
 
+/// A scoped connected-UDP capability (`halod.udp`). Like `http`, this is not a
+/// persistent root but a bounded capability: the plugin may exchange datagrams
+/// with the single configured host/port only, vetted through the SSRF guard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UdpConfig {
+    /// `config` field holding the destination host.
+    #[serde(default = "default_host_key")]
+    pub host_key: String,
+    /// `config` field holding the destination port.
+    #[serde(default = "default_port_key")]
+    pub port_key: String,
+    /// Opt-in to reach loopback/private/link-local destinations (LAN devices).
+    #[serde(default)]
+    pub allow_private: bool,
+    #[serde(default = "default_udp_datagram_bytes")]
+    pub max_datagram_bytes: usize,
+    #[serde(default = "default_udp_timeout_ms")]
+    pub send_timeout_ms: u64,
+    #[serde(default = "default_udp_timeout_ms")]
+    pub recv_timeout_ms: u64,
+}
+
+fn default_udp_datagram_bytes() -> usize {
+    // The maximum UDP/IPv4 payload (65535 − 8 UDP − 20 IP), so `udp: {}` with all
+    // defaults stays within the validated ceiling.
+    65_507
+}
+fn default_udp_timeout_ms() -> u64 {
+    5_000
+}
+
+impl Default for UdpConfig {
+    fn default() -> Self {
+        Self {
+            host_key: default_host_key(),
+            port_key: default_port_key(),
+            allow_private: false,
+            max_datagram_bytes: default_udp_datagram_bytes(),
+            send_timeout_ms: default_udp_timeout_ms(),
+            recv_timeout_ms: default_udp_timeout_ms(),
+        }
+    }
+}
+
 fn default_http_methods() -> Vec<String> {
     vec!["GET".to_owned()]
 }
@@ -482,6 +527,8 @@ pub struct TransportsConfig {
     pub lpcio: Option<LpcioConfig>,
     #[serde(default)]
     pub http: Option<HttpConfig>,
+    #[serde(default)]
+    pub udp: Option<UdpConfig>,
 }
 
 impl TransportsConfig {
@@ -495,6 +542,7 @@ impl TransportsConfig {
             && self.amd_smn.is_none()
             && self.lpcio.is_none()
             && self.http.is_none()
+            && self.udp.is_none()
     }
 
     /// Transport kinds usable as an integration's single persistent root, in
@@ -1723,6 +1771,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
         }
     }
     validate_http_transport(manifest)?;
+    validate_udp_transport(manifest)?;
     validate_component("plugin id", &manifest.plugin_id)?;
     Ok(())
 }
@@ -1912,6 +1961,34 @@ fn validate_http_transport(manifest: &PluginManifest) -> Result<()> {
         {
             bail!("custom TLS fields require the custom-ca profile");
         }
+    }
+    Ok(())
+}
+
+fn validate_udp_transport(manifest: &PluginManifest) -> Result<()> {
+    let Some(udp) = &manifest.transports.udp else {
+        return Ok(());
+    };
+    if !manifest.permissions.contains(&Permission::Network) {
+        bail!("a udp transport requires the 'network' permission to be declared");
+    }
+    if udp.host_key.is_empty() || udp.port_key.is_empty() {
+        bail!("a udp transport requires a non-empty host_key and port_key");
+    }
+    let field = |key: &str| manifest.config_fields().iter().find(|f| f.key == key);
+    if !field(&udp.host_key).is_some_and(|f| f.kind == PluginConfigFieldKind::Host)
+        || !field(&udp.port_key).is_some_and(|f| f.kind == PluginConfigFieldKind::Port)
+    {
+        bail!("udp host_key and port_key must name host and port config fields");
+    }
+    if udp.max_datagram_bytes == 0 || udp.max_datagram_bytes > 65_507 {
+        bail!("udp max_datagram_bytes must be between 1 and 65507");
+    }
+    if udp.send_timeout_ms == 0 || udp.send_timeout_ms > 60_000 {
+        bail!("udp send_timeout_ms must be between 1 and 60000");
+    }
+    if udp.recv_timeout_ms == 0 || udp.recv_timeout_ms > 60_000 {
+        bail!("udp recv_timeout_ms must be between 1 and 60000");
     }
     Ok(())
 }
@@ -3951,6 +4028,85 @@ mod tests {
     }
 
     #[test]
+    fn udp_transport_is_valid_and_coexists_with_a_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "udp_ok",
+            "permissions: [hid, network]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\n    max_datagram_bytes: 1024\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest.transports.udp.as_ref().unwrap().max_datagram_bytes,
+            1024
+        );
+    }
+
+    #[test]
+    fn udp_transport_with_default_bounds_is_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Only host_key/port_key set; every bound (incl. max_datagram_bytes)
+        // falls back to its default and must still pass validation.
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "udp_defaults",
+            "permissions: [hid, network]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest.transports.udp.as_ref().unwrap().max_datagram_bytes,
+            65_507
+        );
+    }
+
+    #[test]
+    fn udp_config_keys_must_name_host_and_port_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "udp_wrong_kinds",
+            "permissions: [hid, network]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - { key: host, label: Host, kind: text }\n    - { key: port, label: Port, kind: text }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&dir)
+            .unwrap_err()
+            .to_string()
+            .contains("host and port config fields"));
+    }
+
+    #[test]
+    fn udp_transport_requires_the_network_permission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "udp_no_net",
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&dir)
+            .unwrap_err()
+            .to_string()
+            .contains("network"));
+    }
+
+    #[test]
+    fn udp_transport_rejects_oversized_datagram_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "udp_big",
+            "permissions: [hid, network]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\n    max_datagram_bytes: 70000\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&dir)
+            .unwrap_err()
+            .to_string()
+            .contains("max_datagram_bytes"));
+    }
+
+    #[test]
     fn integration_rejects_multiple_root_transports() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = write_plugin_dir(
@@ -3962,7 +4118,7 @@ mod tests {
         assert!(parse_manifest_from_dir(&dir)
             .unwrap_err()
             .to_string()
-            .contains("tcp, hwmon, or command"));
+            .contains("tcp, hwmon, serial, or command"));
     }
 
     #[test]
