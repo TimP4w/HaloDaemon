@@ -1125,6 +1125,54 @@ mod handle_tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
+    #[tokio::test]
+    async fn wire_flow_full_then_deltas_carry_incrementing_gen() {
+        use crate::config::Config;
+        use crate::state::AppState;
+
+        fn decode(frame: &[u8]) -> Value {
+            let len = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+            serde_json::from_slice(&frame[5..5 + len]).unwrap()
+        }
+
+        let app = Arc::new(AppState::new(Config::default()));
+        let (tx, mut rx) = mpsc::channel::<Arc<Vec<u8>>>(16);
+        let handle = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+
+        send_full_to(&app, &handle).await;
+        let full = decode(&rx.recv().await.unwrap());
+        assert_eq!(full["type"], "state");
+        assert_eq!(full["gen"], 0);
+        assert!(full["data"].get("devices").is_some());
+
+        app.clients.lock().await.push(handle.clone());
+
+        broadcast_delta(&app, &[Domain::Devices]).await;
+        let d1 = decode(&rx.recv().await.unwrap());
+        assert_eq!(d1["type"], "state_delta");
+        assert_eq!(d1["gen"], 1);
+        let data = d1["data"].as_object().unwrap();
+        assert!(data.contains_key("devices"));
+        assert!(!data.contains_key("profiles"));
+
+        broadcast_delta(&app, &[Domain::Profiles]).await;
+        let d2 = decode(&rx.recv().await.unwrap());
+        assert_eq!(d2["type"], "state_delta");
+        assert_eq!(d2["gen"], 2);
+        let data = d2["data"].as_object().unwrap();
+        assert!(data.contains_key("profiles"));
+        assert!(!data.contains_key("devices"));
+
+        broadcast_state(&app).await;
+        let f2 = decode(&rx.recv().await.unwrap());
+        assert_eq!(f2["type"], "state");
+        assert_eq!(f2["gen"], 3);
+    }
+
     #[test]
     fn client_state_starts_connected() {
         let (tx, _rx) = mpsc::channel::<Arc<Vec<u8>>>(4);

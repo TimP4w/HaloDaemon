@@ -7,9 +7,9 @@ use crate::cooling::config::FanCurveRecord;
 use crate::registry::snapshot::DevicesSnapshot;
 use crate::state::AppState;
 use halod_shared::types::{
-    AppState as WireAppState, CoolingState, DiscoveryStatus, HealthCheckState,
-    LightingOverviewState, LcdState, PluginRepoInfo, PluginsState, ProfileState,
-    RepoCompatibilityStatus, RepoSignatureStatus, StateDelta, WireDevice,
+    AppState as WireAppState, CoolingState, DiscoveryStatus, HealthCheckState, LcdState,
+    LightingOverviewState, PluginRepoInfo, PluginsState, ProfileState, RepoCompatibilityStatus,
+    RepoSignatureStatus, StateDelta, WireDevice,
 };
 
 fn active_repo_signature_status(record: &crate::config::PluginRepoRecord) -> RepoSignatureStatus {
@@ -120,7 +120,10 @@ async fn serialize_lighting(
     cfg: &Config,
     placed_zones: Vec<PlacedZone>,
 ) -> LightingOverviewState {
-    let mut lighting = app.lighting.snapshot(&app.registry, cfg, placed_zones).await;
+    let mut lighting = app
+        .lighting
+        .snapshot(&app.registry, cfg, placed_zones)
+        .await;
     lighting.config = cfg.rgb.clone();
     lighting
 }

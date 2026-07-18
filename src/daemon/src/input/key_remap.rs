@@ -292,7 +292,11 @@ impl KeyRemapEngine {
                                         temporary: *dpi,
                                     },
                                 );
-                                crate::ipc::broadcast_delta(&self.app, &[crate::ipc::Domain::Devices]).await;
+                                crate::ipc::broadcast_delta(
+                                    &self.app,
+                                    &[crate::ipc::Domain::Devices],
+                                )
+                                .await;
                             }
                         }
                     }

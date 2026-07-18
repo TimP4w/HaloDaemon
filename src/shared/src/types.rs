@@ -2851,8 +2851,10 @@ mod tests {
     #[test]
     fn all_domain_delta_reproduces_the_snapshot() {
         let snap = sample_state();
-        let mut applied = AppState::default();
-        applied.config_dir = snap.config_dir.clone();
+        let mut applied = AppState {
+            config_dir: snap.config_dir.clone(),
+            ..Default::default()
+        };
         applied.apply_delta(full_delta(&snap));
         assert_eq!(
             serde_json::to_value(&applied).unwrap(),

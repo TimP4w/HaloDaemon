@@ -81,7 +81,11 @@ pub async fn save_custom_effect(
     tokio::task::spawn_blocking(move || crate::config::atomic_write(&path, &yaml)).await??;
     log::info!("[RGB] saved custom effect '{name}'");
     app.lighting.custom_effects.refresh().await;
-    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Lighting, crate::ipc::Domain::Devices]).await;
+    crate::ipc::broadcast_delta(
+        &app,
+        &[crate::ipc::Domain::Lighting, crate::ipc::Domain::Devices],
+    )
+    .await;
     Ok(())
 }
 
@@ -95,7 +99,11 @@ pub async fn delete_custom_effect(name: String, app: Arc<AppState>) -> Result<()
         Err(e) => return Err(e.into()),
     }
     app.lighting.custom_effects.refresh().await;
-    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Lighting, crate::ipc::Domain::Devices]).await;
+    crate::ipc::broadcast_delta(
+        &app,
+        &[crate::ipc::Domain::Lighting, crate::ipc::Domain::Devices],
+    )
+    .await;
     Ok(())
 }
 

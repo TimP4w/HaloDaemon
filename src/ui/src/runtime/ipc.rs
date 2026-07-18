@@ -511,7 +511,10 @@ fn handle_json(
             // Upload finished; drop any stale progress and trigger a library
             // refresh on the next read-loop iteration.
             tx.lcd_upload.send_replace(None);
-            return Reaction { relist_lcd_images: true, ..Reaction::default() };
+            return Reaction {
+                relist_lcd_images: true,
+                ..Reaction::default()
+            };
         }
         Some("lcd_upload_progress") => {
             if let Some(p) = value
@@ -803,7 +806,10 @@ mod tests {
             reconcile_gen(&mut last, FrameKind::Delta, Some(6)),
             GenAction::Ignore
         );
-        assert_eq!(reconcile_gen(&mut last, FrameKind::Delta, Some(4)), GenAction::Ignore);
+        assert_eq!(
+            reconcile_gen(&mut last, FrameKind::Delta, Some(4)),
+            GenAction::Ignore
+        );
         assert_eq!(last, Some(6));
     }
 
@@ -891,16 +897,19 @@ mod tests {
     fn state_delta_merges_into_cached_state_after_a_baseline() {
         let (tx, _u) = test_tx();
         let mut last_gen = None;
-        let full =
-            serde_json::to_vec(&serde_json::json!({"type":"state","gen":1,"data": AppState::default()}))
-                .unwrap();
+        let full = serde_json::to_vec(
+            &serde_json::json!({"type":"state","gen":1,"data": AppState::default()}),
+        )
+        .unwrap();
         handle_json(&full, &tx, &|| {}, &mut last_gen);
         assert_eq!(last_gen, Some(1));
 
-        let mut gui = halod_shared::types::GuiConfig::default();
-        gui.language = "it".into();
+        let device = halod_shared::types::WireDevice {
+            id: "merged-dev".into(),
+            ..Default::default()
+        };
         let delta = halod_shared::types::StateDelta {
-            gui: Some(gui),
+            devices: Some(vec![device]),
             ..Default::default()
         };
         let frame = serde_json::to_vec(&serde_json::json!({
@@ -912,7 +921,8 @@ mod tests {
         let reaction = handle_json(&frame, &tx, &|| {}, &mut last_gen);
         assert!(!reaction.request_resync);
         assert_eq!(last_gen, Some(2));
-        assert_eq!(tx.state.borrow().gui.language, "it");
+        assert_eq!(tx.state.borrow().devices.len(), 1);
+        assert_eq!(tx.state.borrow().devices[0].id, "merged-dev");
     }
 
     #[test]
@@ -1036,18 +1046,24 @@ mod tests {
             stage: halod_shared::types::LcdUploadStage::Applying,
             percent: None,
         }));
-        assert!(handle_json(br#"{"type":"image_uploaded"}"#, &tx, &|| {}, &mut None).relist_lcd_images);
+        assert!(
+            handle_json(br#"{"type":"image_uploaded"}"#, &tx, &|| {}, &mut None).relist_lcd_images
+        );
         assert!(rx.borrow().is_none(), "stale progress cleared");
     }
 
     #[test]
     fn handled_command_error_does_not_create_a_duplicate_generic_toast() {
         let (tx, _rx) = test_tx();
-        assert!(!handle_json(
-            br#"{"type":"error","message":"raw stack trace","handled":true}"#,
-            &tx,
-            &|| {}, &mut None
-        ).relist_lcd_images);
+        assert!(
+            !handle_json(
+                br#"{"type":"error","message":"raw stack trace","handled":true}"#,
+                &tx,
+                &|| {},
+                &mut None
+            )
+            .relist_lcd_images
+        );
         assert!(tx.notifications.lock().unwrap().is_empty());
     }
 

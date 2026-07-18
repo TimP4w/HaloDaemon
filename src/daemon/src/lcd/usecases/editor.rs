@@ -80,13 +80,21 @@ pub async fn render(
         Err(error) => {
             lcd.lcd_state()
                 .set_health(halod_shared::types::LcdHealth::Failed(error.to_string()));
-            crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Lcd, crate::ipc::Domain::Devices]).await;
+            crate::ipc::broadcast_delta(
+                &app,
+                &[crate::ipc::Domain::Lcd, crate::ipc::Domain::Devices],
+            )
+            .await;
             return Err(error.into());
         }
     };
     lcd.lcd_state()
         .set_health(halod_shared::types::LcdHealth::Stable);
-    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Lcd, crate::ipc::Domain::Devices]).await;
+    crate::ipc::broadcast_delta(
+        &app,
+        &[crate::ipc::Domain::Lcd, crate::ipc::Domain::Devices],
+    )
+    .await;
     let (sprites, signatures) = result;
 
     let widgets = def
