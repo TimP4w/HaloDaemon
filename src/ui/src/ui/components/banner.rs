@@ -157,28 +157,29 @@ impl<'a> Banner<'a> {
                 .y;
             let row_h = banner_row_height(action_size, title_line_h);
             let mut clicked = false;
-            egui::Sides::new().height(row_h).show(
-                ui,
-                |ui| {
-                    if let Some(dot) = self.dot {
-                        let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                        ui.painter().circle_filled(r.center(), 3.5, dot);
-                    }
-                    ui.add(
-                        egui::Label::new(
+            egui::Sides::new()
+                .height(row_h)
+                .shrink_left()
+                .truncate()
+                .show(
+                    ui,
+                    |ui| {
+                        if let Some(dot) = self.dot {
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                            ui.painter().circle_filled(r.center(), 3.5, dot);
+                        }
+                        ui.label(
                             egui::RichText::new(self.title)
                                 .font(title_font.clone())
                                 .color(title_color),
-                        )
-                        .truncate(),
-                    );
-                },
-                |ui| {
-                    if let Some(a) = self.action.as_ref().filter(|_| !self.action_below) {
-                        show_action(ui, a, &mut clicked);
-                    }
-                },
-            );
+                        );
+                    },
+                    |ui| {
+                        if let Some(a) = self.action.as_ref().filter(|_| !self.action_below) {
+                            show_action(ui, a, &mut clicked);
+                        }
+                    },
+                );
             if let Some(sub) = self.subtitle {
                 ui.add_space(theme::SPACE_1);
                 ui.label(
