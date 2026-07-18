@@ -1873,7 +1873,7 @@ pub(crate) fn initials_tile_at(ui: &mut egui::Ui, rect: Rect, name: &str, id: &s
         rect.center(),
         Align2::CENTER_CENTER,
         initials_for(name),
-        theme::mono_semibold(rect.height() * 0.34),
+        theme::semibold(rect.height() * 0.34),
         color,
     );
 }
