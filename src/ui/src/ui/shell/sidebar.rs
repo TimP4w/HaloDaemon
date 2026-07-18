@@ -214,9 +214,9 @@ pub fn sidebar(
     footer(ui, rect, connected);
 }
 
-/// Sidebar footer: a daemon health hint. When connected it shows a green dot +
-/// "Daemon running"; when offline it shows a red dot, "Daemon offline" and a
-/// "Start daemon" button that spawns `halod`.
+/// Sidebar footer: a daemon health hint. When connected it shows a green dot,
+/// "Daemon running" and the build version + commit; when offline it shows a red
+/// dot, "Daemon offline" and a "Start daemon" button that spawns `halod`.
 fn footer(ui: &mut egui::Ui, rect: Rect, connected: bool) {
     let y = rect.bottom() - 56.0;
     {
@@ -234,7 +234,12 @@ fn footer(ui: &mut egui::Ui, rect: Rect, connected: bool) {
             (
                 theme::ONLINE,
                 t!("shell.daemon_running"),
-                t!("shell.daemon_running_sub"),
+                std::borrow::Cow::Borrowed(concat!(
+                    "v",
+                    env!("CARGO_PKG_VERSION"),
+                    " · ",
+                    env!("HALOD_BUILD_HASH")
+                )),
                 theme::TEXT_FAINT,
             )
         } else {
