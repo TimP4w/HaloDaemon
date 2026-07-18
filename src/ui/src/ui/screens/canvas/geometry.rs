@@ -172,12 +172,37 @@ pub(super) fn apply_drag(
     }
 }
 
-/// Translate a zone by `delta` (normalized-canvas units), clamping so it stays
-/// on-canvas. `max()` guards oversized channels, where `1.0 - w` goes negative.
+/// Translate a zone by `delta` (normalized-canvas units), clamping its rotated
+/// footprint to the canvas. `x`/`y` describe the unrotated box, so they may be
+/// negative near an edge when a narrow zone is turned by 90 degrees.
 pub(super) fn body_move(orig: &PlacedZone, delta: Vec2) -> PlacedZone {
+    let (sin, cos) = orig.rotation.to_radians().sin_cos();
+    let extent_x = (orig.w * cos.abs() + orig.h * sin.abs()) / 2.0;
+    let extent_y = (orig.w * sin.abs() + orig.h * cos.abs()) / 2.0;
+    let target_cx = orig.x + orig.w / 2.0 + delta.x;
+    let target_cy = orig.y + orig.h / 2.0 + delta.y;
+
+    // An oversized unrotated dimension retains the old stable x/y=0 behavior.
+    // A rotated footprint wider than the canvas has no fully in-bounds
+    // position, so centering is the least surprising fallback.
+    let cx = if orig.w >= 1.0 {
+        orig.w / 2.0
+    } else if extent_x >= 0.5 {
+        0.5
+    } else {
+        target_cx.clamp(extent_x, 1.0 - extent_x)
+    };
+    let cy = if orig.h >= 1.0 {
+        orig.h / 2.0
+    } else if extent_y >= 0.5 {
+        0.5
+    } else {
+        target_cy.clamp(extent_y, 1.0 - extent_y)
+    };
+
     PlacedZone {
-        x: (orig.x + delta.x).clamp(0.0, (1.0 - orig.w).max(0.0)),
-        y: (orig.y + delta.y).clamp(0.0, (1.0 - orig.h).max(0.0)),
+        x: cx - orig.w / 2.0,
+        y: cy - orig.h / 2.0,
         ..orig.clone()
     }
 }
@@ -450,6 +475,46 @@ mod tests {
         );
         assert_eq!(result.x, 0.0);
         assert_eq!(result.y, 0.0);
+    }
+
+    #[test]
+    fn rotated_body_reaches_left_and_right_edges() {
+        let mut zone = z(0.3, 0.3, 0.4, 0.1);
+        zone.rotation = 90.0;
+
+        let left = body_move(&zone, Vec2::new(-1.0, 0.0));
+        let right = body_move(&zone, Vec2::new(1.0, 0.0));
+        let left_cx = left.x + left.w / 2.0;
+        let right_cx = right.x + right.w / 2.0;
+
+        // At 90 degrees the horizontal half-extent is h/2, not w/2.
+        assert!((left_cx - zone.h / 2.0).abs() < 1e-5, "left cx={left_cx}");
+        assert!(
+            (right_cx - (1.0 - zone.h / 2.0)).abs() < 1e-5,
+            "right cx={right_cx}"
+        );
+        assert!(left.x < 0.0, "unrotated x must be allowed past zero");
+        assert!(right.x > 1.0 - right.w, "unrotated x must pass old clamp");
+    }
+
+    #[test]
+    fn angled_body_clamp_keeps_all_corners_on_canvas() {
+        let mut zone = z(0.3, 0.3, 0.4, 0.1);
+        zone.rotation = 45.0;
+        let moved = body_move(&zone, Vec2::new(-1.0, 1.0));
+        let corners = zone_corners(&moved, Rect::from_min_size(Pos2::ZERO, Vec2::splat(1.0)));
+        for corner in corners {
+            assert!(
+                corner.x >= -1e-5 && corner.x <= 1.0 + 1e-5,
+                "x={}",
+                corner.x
+            );
+            assert!(
+                corner.y >= -1e-5 && corner.y <= 1.0 + 1e-5,
+                "y={}",
+                corner.y
+            );
+        }
     }
 
     #[test]
