@@ -149,7 +149,8 @@ impl HttpPolicy {
     /// Reject anything outside the declared scope before a request runs. Returns
     /// the request with its timeout clamped to the declared ceiling.
     pub fn admit(&self, mut req: HttpRequest) -> Result<HttpRequest> {
-        if !self.origins.iter().any(|o| o == &req.origin) {
+        let origin = canonical_origin(&req.origin);
+        if !self.origins.iter().any(|o| canonical_origin(o) == origin) {
             bail!(
                 "http origin '{}' is not in the declared allowlist",
                 req.origin
@@ -174,10 +175,11 @@ impl HttpPolicy {
                 .tls_identity
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("custom TLS identity is not configured"))?;
-            req.origin = match self.tls_connect_port.as_deref() {
+            let rewritten = match self.tls_connect_port.as_deref() {
                 Some(port) => format!("https://{identity}:{port}"),
                 None => format!("https://{identity}"),
             };
+            req.origin = canonical_origin(&rewritten).into_owned();
         }
         Ok(req)
     }
@@ -190,6 +192,25 @@ impl HttpPolicy {
     }
     pub fn tls_profile(&self) -> &str {
         &self.tls_profile
+    }
+}
+
+/// Drop the scheme's default port so `https://h:443` and `https://h` compare
+/// equal (RFC 6454). A `{host}` origin always resolves to `host:port` because
+/// `port_key` is mandatory, but a plugin sends the canonical portless origin
+/// when the port is the scheme default.
+fn canonical_origin(origin: &str) -> std::borrow::Cow<'_, str> {
+    let Some((scheme, rest)) = origin.split_once("://") else {
+        return std::borrow::Cow::Borrowed(origin);
+    };
+    let default_port = match scheme {
+        "https" => ":443",
+        "http" => ":80",
+        _ => return std::borrow::Cow::Borrowed(origin),
+    };
+    match rest.strip_suffix(default_port) {
+        Some(without) => std::borrow::Cow::Owned(format!("{scheme}://{without}")),
+        None => std::borrow::Cow::Borrowed(origin),
     }
 }
 
@@ -750,6 +771,52 @@ mod tests {
             })
             .unwrap();
         assert_eq!(admitted.origin, "https://controller.example:8443");
+    }
+
+    #[test]
+    fn default_port_origin_matches_portless_allowlist_both_directions() {
+        let mut policy = policy();
+        policy.methods = vec!["GET".into()];
+        policy.allow_private = true;
+
+        // Allowlist carries the composed `:443`; plugin sends the canonical
+        // portless origin.
+        policy.origins = vec!["https://192.168.1.60:443".into()];
+        let mut req = request(Vec::new());
+        req.method = "GET".into();
+        req.origin = "https://192.168.1.60".into();
+        assert!(policy.admit(req).is_ok());
+
+        // And the reverse: portless allowlist, `:443` request.
+        policy.origins = vec!["https://192.168.1.60".into()];
+        let mut req = request(Vec::new());
+        req.method = "GET".into();
+        req.origin = "https://192.168.1.60:443".into();
+        assert!(policy.admit(req).is_ok());
+
+        // A non-default port is never elided, so it still gates the allowlist.
+        let mut req = request(Vec::new());
+        req.method = "GET".into();
+        req.origin = "https://192.168.1.60:8443".into();
+        assert!(policy.admit(req).is_err());
+    }
+
+    #[test]
+    fn custom_tls_identity_elides_default_connect_port() {
+        let mut policy = policy();
+        policy.origins = vec!["https://192.168.1.60".into()];
+        policy.methods = vec!["GET".into()];
+        policy.allow_private = true;
+        policy.tls_profile = "custom-ca".into();
+        policy.tls_identity = Some("192.168.1.60".into());
+        policy.tls_connect_host = Some("192.168.1.60".into());
+        policy.tls_connect_port = Some("443".into());
+
+        let mut req = request(Vec::new());
+        req.method = "GET".into();
+        req.origin = "https://192.168.1.60".into();
+        let admitted = policy.admit(req).unwrap();
+        assert_eq!(admitted.origin, "https://192.168.1.60");
     }
 
     #[test]

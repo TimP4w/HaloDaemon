@@ -23,13 +23,16 @@ pub async fn set_cooling_curve_points(
     let cooling = device
         .as_cooling()
         .ok_or_else(|| anyhow!("device does not support cooling: {device_id}"))?;
-    if !cooling
+    let channel = cooling
         .cooling_channels()
         .iter()
-        .any(|channel| channel.id == channel_id)
-    {
-        anyhow::bail!("unknown cooling channel '{channel_id}' on device '{device_id}'");
-    }
+        .find(|channel| channel.id == channel_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("unknown cooling channel '{channel_id}' on device '{device_id}'"))?;
+    anyhow::ensure!(
+        channel.controllable,
+        "cooling channel '{channel_id}' on device '{device_id}' is not controllable"
+    );
     cooling.set_curve(channel_id, record);
     persist_device_state(&app, device.as_ref()).await;
     Ok(())
@@ -70,6 +73,13 @@ pub async fn remove_cooling_curve(
     let cooling = device
         .as_cooling()
         .ok_or_else(|| anyhow!("device does not support cooling: {device_id}"))?;
+    anyhow::ensure!(
+        cooling
+            .cooling_channels()
+            .iter()
+            .any(|channel| channel.id == channel_id),
+        "unknown cooling channel '{channel_id}' on device '{device_id}'"
+    );
     cooling.clear_curve(&channel_id);
     persist_device_state(&app, device.as_ref()).await;
     Ok(())
@@ -300,6 +310,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn set_and_remove_fan_curve_error_on_unknown_channel() {
+        let (app, _device) = make_app_with_fan("fan_0");
+        let set_err = set_cooling_curve_points(
+            "fan_0".into(),
+            "missing".into(),
+            vec![[30.0, 20.0], [80.0, 100.0]],
+            None,
+            app.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(set_err.to_string().contains("unknown cooling channel"));
+
+        let remove_err = remove_cooling_curve("fan_0".into(), "missing".into(), app)
+            .await
+            .unwrap_err();
+        assert!(remove_err.to_string().contains("unknown cooling channel"));
     }
 
     #[tokio::test]

@@ -308,6 +308,11 @@ impl FanCurveEngine {
             self.apply_failsafe(key, curve_target, failsafe_duty).await;
             return FanCurveStatus::NoSensor;
         }
+        if !sensor.value.is_finite() {
+            log::warn!("[FanCurve] Sensor {sensor_id} returned a non-finite temperature");
+            self.apply_failsafe(key, curve_target, failsafe_duty).await;
+            return FanCurveStatus::NoSensor;
+        }
         let temp = self.update_control_temp(key, sensor.value as f32);
         let target = interpolate(&record.points, temp);
         let fan_device = self
@@ -423,6 +428,10 @@ impl FanCurveEngine {
     async fn apply_failsafe(&self, key: &str, target: &CurveTarget, duty: u8) {
         let fan_device = self.app_state.find_device_by_id(&target.device_id).await;
         if let Some(device) = &fan_device {
+            if !device.is_live() {
+                self.record_missing_device(key);
+                return;
+            }
             match apply_duty(device, &target.channel_id, duty).await {
                 Ok(()) => {
                     self.clear_failsafe_error(key);
@@ -875,6 +884,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tick_sets_failsafe_for_non_finite_temperature() {
+        let record = FanCurveRecord {
+            sensor_id: Some("sensor_0".to_string()),
+            points: vec![(0.0, 50.0), (100.0, 100.0)],
+        };
+        let fan = MockFan::new_with_curve("fan_0", record);
+        let sensor = MockSensor::new("sensor_0", f64::NAN);
+        let app = make_app(fan.clone(), Some(sensor));
+        app.refresh_sensor_bus().await;
+
+        let engine = FanCurveEngine::new(app.clone());
+        engine.tick(75).await;
+
+        assert_eq!(fan.last_duty(), 75);
+        assert_eq!(
+            app.cooling.statuses.lock().await[&curve_key("fan_0", "default")],
+            FanCurveStatus::NoSensor
+        );
+    }
+
+    #[tokio::test]
     async fn tick_applies_failsafe_when_no_sensor_assigned() {
         let record = FanCurveRecord {
             sensor_id: None,
@@ -890,6 +920,21 @@ mod tests {
             statuses[&curve_key("fan_0", "default")],
             FanCurveStatus::NoSensor
         );
+    }
+
+    #[tokio::test]
+    async fn failsafe_does_not_write_to_offline_fan() {
+        let record = FanCurveRecord {
+            sensor_id: None,
+            points: vec![(0.0, 50.0), (100.0, 100.0)],
+        };
+        let fan = MockFan::new_offline_with_curve("fan_0", record);
+        let initial_duty = fan.last_duty();
+        let app = make_app(fan.clone(), None);
+
+        FanCurveEngine::new(app).tick(75).await;
+
+        assert_eq!(fan.last_duty(), initial_duty);
     }
 
     #[tokio::test]

@@ -154,11 +154,10 @@ impl LcdEngine {
     /// True when at least one device has an active LCD template to render.
     async fn has_active_content(&self) -> bool {
         self.app_state
-            .devices
-            .read()
+            .get_active_devices()
             .await
-            .iter()
-            .any(|d| d.as_lcd().and_then(|l| l.lcd_template_id()).is_some())
+            .into_iter()
+            .any(|d| d.is_live() && d.as_lcd().and_then(|l| l.lcd_template_id()).is_some())
     }
 
     /// Whether `device_id` currently has a live template slot in the engine.
@@ -282,7 +281,13 @@ impl LcdEngine {
             .swap(receiver_count, std::sync::atomic::Ordering::Relaxed);
         let preview_just_subscribed = receiver_count > 0 && prev_receiver_count == 0;
 
-        let devices = self.app_state.devices.read().await.clone();
+        let devices: Vec<_> = self
+            .app_state
+            .get_active_devices()
+            .await
+            .into_iter()
+            .filter(|device| device.is_live())
+            .collect();
 
         let device_templates: HashMap<String, TemplateSpec> = devices
             .iter()
@@ -399,7 +404,10 @@ impl LcdEngine {
                 template.render(&ctx, frame_buf)
             };
             if let Err(e) = render_result {
-                log::warn!("LCD engine: template render error for {device_id}: {e}");
+                if slot.fail_streak % BACKOFF_TICKS == 0 {
+                    log::warn!("LCD engine: template render error for {device_id}: {e}");
+                }
+                slot.fail_streak = slot.fail_streak.saturating_add(1);
                 continue;
             };
             slot.last_sig = sig;
@@ -507,6 +515,32 @@ mod tests {
 
         dev.lcd.as_ref().unwrap().set_lcd_template_id(None);
         assert!(!engine.has_active_content().await);
+    }
+
+    #[tokio::test]
+    async fn offline_device_does_not_keep_engine_active_or_retain_slot() {
+        use crate::drivers::Device;
+        use crate::test_support::MockDevice;
+
+        let app = Arc::new(AppState::new(Config::default()));
+        let dev = Arc::new(MockDevice::new("lcd0").with_lcd().offline());
+        dev.lcd
+            .as_ref()
+            .unwrap()
+            .set_lcd_template_id(Some("custom".into()));
+        app.devices
+            .write()
+            .await
+            .push(dev.clone() as Arc<dyn Device>);
+
+        let engine = LcdEngine::new(app);
+        engine
+            .set_template_active("lcd0", "custom", &HashMap::new())
+            .await;
+        assert!(!engine.has_active_content().await);
+
+        engine.tick(0.0).await;
+        assert!(!engine.has_slot("lcd0").await);
     }
 
     #[tokio::test]
