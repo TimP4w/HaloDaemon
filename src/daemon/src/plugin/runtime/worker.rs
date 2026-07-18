@@ -1341,6 +1341,11 @@ pub(in crate::plugin) fn http_runtime_for(
             .get(key)
             .map(crate::plugin::ResolvedConfigValue::to_config_string)
     });
+    let port = http.port_key.as_ref().and_then(|key| {
+        config
+            .get(key)
+            .map(crate::plugin::ResolvedConfigValue::to_config_string)
+    });
     let identity = http
         .tls
         .as_ref()
@@ -1354,6 +1359,7 @@ pub(in crate::plugin) fn http_runtime_for(
     match crate::services::http::HttpRuntime::from_config(
         http,
         host.as_deref(),
+        port.as_deref(),
         identity.as_deref(),
     ) {
         Ok(runtime) => Some(runtime),

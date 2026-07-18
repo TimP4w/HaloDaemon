@@ -101,6 +101,7 @@ mod tests {
         let config = crate::plugin::manifest::HttpConfig {
             origins: vec!["https://api.example.com".into()],
             host_key: None,
+            port_key: None,
             methods: vec!["GET".into(), "POST".into()],
             max_request_bytes: 1024,
             max_response_bytes: 1024,
@@ -109,7 +110,11 @@ mod tests {
             allow_private: false,
             tls: None,
         };
-        HttpRuntime::new(HttpPolicy::from_config(&config, None, None), backend, 2)
+        HttpRuntime::new(
+            HttpPolicy::from_config(&config, None, None, None),
+            backend,
+            2,
+        )
     }
 
     #[test]

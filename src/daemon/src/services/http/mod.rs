@@ -80,6 +80,7 @@ pub struct HttpPolicy {
     tls_ca_der_base64: Option<String>,
     tls_identity: Option<String>,
     tls_connect_host: Option<String>,
+    tls_connect_port: Option<String>,
     tls_certificate_identity: String,
 }
 
@@ -88,9 +89,15 @@ impl HttpPolicy {
     /// the plugin's configured device address. A placeholder origin with no host
     /// configured is dropped, leaving an empty allowlist that rejects every
     /// request — safer than reaching an unintended address.
-    pub fn from_config(config: &HttpConfig, host: Option<&str>, identity: Option<&str>) -> Self {
+    pub fn from_config(
+        config: &HttpConfig,
+        host: Option<&str>,
+        port: Option<&str>,
+        identity: Option<&str>,
+    ) -> Self {
         let host = host.map(str::trim).filter(|h| !h.is_empty());
-        let origin_host = host.map(origin_authority);
+        let port = port.map(str::trim).filter(|p| !p.is_empty());
+        let origin_host = host.zip(port).and_then(|(h, p)| compose_authority(h, p));
         let origins = config
             .origins
             .iter()
@@ -130,6 +137,7 @@ impl HttpPolicy {
                 .and_then(|tls| tls.ca_der_base64.clone()),
             tls_identity: identity.map(str::to_owned),
             tls_connect_host: host.map(str::to_owned),
+            tls_connect_port: port.map(str::to_owned),
             tls_certificate_identity: config
                 .tls
                 .as_ref()
@@ -166,7 +174,10 @@ impl HttpPolicy {
                 .tls_identity
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("custom TLS identity is not configured"))?;
-            req.origin = format!("https://{identity}");
+            req.origin = match self.tls_connect_port.as_deref() {
+                Some(port) => format!("https://{identity}:{port}"),
+                None => format!("https://{identity}"),
+            };
         }
         Ok(req)
     }
@@ -188,6 +199,17 @@ fn origin_authority(host: &str) -> String {
     } else {
         host.to_owned()
     }
+}
+
+/// Join a bare host and a separate port into an authority. Fails closed when the
+/// host already carries a port or the port isn't a real u16, so a `port_key`
+/// can't produce a doubled or malformed authority.
+fn compose_authority(host: &str, port: &str) -> Option<String> {
+    let port: u16 = port.parse().ok().filter(|&p| p != 0)?;
+    if host.parse::<IpAddr>().is_err() && host.contains(':') {
+        return None;
+    }
+    Some(format!("{}:{port}", origin_authority(host)))
 }
 
 fn validate_request_headers(headers: &[(String, String)]) -> Result<()> {
@@ -529,9 +551,10 @@ impl HttpRuntime {
     pub fn from_config(
         config: &HttpConfig,
         host: Option<&str>,
+        port: Option<&str>,
         identity: Option<&str>,
     ) -> Result<Self> {
-        let policy = HttpPolicy::from_config(config, host, identity);
+        let policy = HttpPolicy::from_config(config, host, port, identity);
         let backend = Arc::new(UreqBackend::new(&policy)?);
         Ok(Self::new(policy, backend, config.max_concurrency))
     }
@@ -576,6 +599,7 @@ mod tests {
             tls_ca_der_base64: None,
             tls_identity: None,
             tls_connect_host: None,
+            tls_connect_port: None,
             tls_certificate_identity: "webpki".into(),
         }
     }
@@ -642,10 +666,11 @@ mod tests {
     }
 
     #[test]
-    fn resolved_host_must_remain_an_exact_origin_authority() {
+    fn dynamic_origin_without_port_fails_closed() {
         let config = HttpConfig {
             origins: vec!["http://{host}".into()],
             host_key: Some("host".into()),
+            port_key: None,
             methods: vec!["GET".into()],
             max_request_bytes: 1024,
             max_response_bytes: 1024,
@@ -654,27 +679,77 @@ mod tests {
             allow_private: true,
             tls: None,
         };
-        let valid = HttpPolicy::from_config(&config, Some("192.168.1.50:16021"), None);
-        assert_eq!(valid.origins, ["http://192.168.1.50:16021"]);
-
-        let ipv6 =
-            HttpPolicy::from_config(&config, Some("2a04:ee41:4:2168:eeb5:faff:fe2c:f912"), None);
-        assert_eq!(
-            ipv6.origins,
-            ["http://[2a04:ee41:4:2168:eeb5:faff:fe2c:f912]"]
-        );
-
-        for malformed in [
+        for host in [
+            "192.168.1.50",
+            "192.168.1.50:16021",
+            "2a04:ee41:4:2168:eeb5:faff:fe2c:f912",
             "192.168.1.50/api",
             "192.168.1.50?query",
             "user@192.168.1.50",
         ] {
-            let policy = HttpPolicy::from_config(&config, Some(malformed), None);
+            let policy = HttpPolicy::from_config(&config, Some(host), None, None);
             assert!(
                 policy.origins.is_empty(),
-                "accepted malformed host {malformed}"
+                "accepted dynamic host without a separate port: {host}"
             );
         }
+    }
+
+    #[test]
+    fn port_key_composes_authority_from_bare_host() {
+        let config = HttpConfig {
+            origins: vec!["http://{host}".into()],
+            host_key: Some("host".into()),
+            port_key: Some("http_port".into()),
+            methods: vec!["GET".into()],
+            max_request_bytes: 1024,
+            max_response_bytes: 1024,
+            max_timeout_ms: 1000,
+            max_concurrency: 1,
+            allow_private: true,
+            tls: None,
+        };
+        let v4 = HttpPolicy::from_config(&config, Some("192.168.1.50"), Some("16021"), None);
+        assert_eq!(v4.origins, ["http://192.168.1.50:16021"]);
+
+        // IPv6 host is bracketed before the port is appended.
+        let v6 = HttpPolicy::from_config(&config, Some("2a04:ee41:4:2168::1"), Some("16021"), None);
+        assert_eq!(v6.origins, ["http://[2a04:ee41:4:2168::1]:16021"]);
+
+        // Invalid or already-port-qualified inputs fail closed during origin
+        // validation instead of widening or changing the allowlist.
+        for (host, port) in [
+            ("192.168.1.50:80", "16021"),
+            ("192.168.1.50", "0"),
+            ("192.168.1.50", "16021/path"),
+        ] {
+            let policy = HttpPolicy::from_config(&config, Some(host), Some(port), None);
+            assert!(policy.origins.is_empty(), "accepted {host}:{port}");
+        }
+    }
+
+    #[test]
+    fn custom_tls_identity_preserves_separate_port() {
+        let mut policy = policy();
+        policy.origins = vec!["https://192.168.1.50:8443".into()];
+        policy.methods = vec!["GET".into()];
+        policy.allow_private = true;
+        policy.tls_profile = "custom-ca".into();
+        policy.tls_identity = Some("controller.example".into());
+        policy.tls_connect_host = Some("192.168.1.50".into());
+        policy.tls_connect_port = Some("8443".into());
+
+        let admitted = policy
+            .admit(HttpRequest {
+                method: "GET".into(),
+                origin: "https://192.168.1.50:8443".into(),
+                path: "/".into(),
+                headers: Vec::new(),
+                body: Vec::new(),
+                timeout: Duration::from_secs(1),
+            })
+            .unwrap();
+        assert_eq!(admitted.origin, "https://controller.example:8443");
     }
 
     #[test]

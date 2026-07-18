@@ -27,9 +27,10 @@ declared method set, size limits, timeout, or origin scope raise an error.
 
 The manifest declares an exact `scheme://host[:port]` origin allowlist — no
 wildcards. A device whose address isn't known at authoring time uses the literal
-`{host}` token, resolved at runtime from a config field. Redirects are not
-followed, and loopback, private, and link-local origins are rejected unless the
-manifest explicitly opts in.
+`{host}` token, resolved from a typed `host_key` config field and combined with
+the typed port named by `port_key`. Redirects are not followed, and
+loopback, private, and link-local origins are rejected unless the manifest
+explicitly opts in.
 
 TLS trust is either the public web PKI (`default`) or a plugin-shipped DER root
 (`custom-ca`) pinned to a config-provided certificate identity. Plugins cannot

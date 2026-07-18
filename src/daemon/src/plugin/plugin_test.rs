@@ -506,6 +506,11 @@ fn recording_http_runtime(
             .get(key)
             .map(crate::plugin::ResolvedConfigValue::to_config_string)
     });
+    let port = http.port_key.as_ref().and_then(|key| {
+        config
+            .get(key)
+            .map(crate::plugin::ResolvedConfigValue::to_config_string)
+    });
     let identity = http
         .tls
         .as_ref()
@@ -517,7 +522,7 @@ fn recording_http_runtime(
         // host keeps its captured URL stable when an identity has no fixture.
         .or_else(|| host.clone());
     Some(HttpRuntime::new(
-        HttpPolicy::from_config(http, host.as_deref(), identity.as_deref()),
+        HttpPolicy::from_config(http, host.as_deref(), port.as_deref(), identity.as_deref()),
         recording,
         http.max_concurrency,
     ))

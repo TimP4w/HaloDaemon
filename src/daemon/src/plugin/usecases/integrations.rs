@@ -496,6 +496,7 @@ async fn start_oauth(
             let policy = crate::plugin::manifest::HttpConfig {
                 origins: vec![origin.clone()],
                 host_key: None,
+                port_key: None,
                 methods: vec!["POST".into()],
                 max_request_bytes: 64 * 1024,
                 max_response_bytes: 1024 * 1024,
@@ -504,7 +505,7 @@ async fn start_oauth(
                 allow_private: false,
                 tls: None,
             };
-            let runtime = crate::services::http::HttpRuntime::from_config(&policy, None, None)?;
+            let runtime = crate::services::http::HttpRuntime::from_config(&policy, None, None, None)?;
             let response = runtime.request(crate::services::http::HttpRequest {
                 method: "POST".into(),
                 origin,

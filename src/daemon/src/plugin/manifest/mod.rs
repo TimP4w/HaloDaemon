@@ -329,10 +329,15 @@ pub struct HttpConfig {
     /// token `{host}` (e.g. `http://{host}`), resolved at runtime from the config
     /// field named by `host_key`.
     pub origins: Vec<String>,
-    /// Config field whose value substitutes for `{host}` in `origins` (the user-
-    /// or discovery-supplied device address, host or host:port).
+    /// `host` config field whose value substitutes for `{host}` in `origins`.
+    /// Dynamic origins also require `port_key`; the host value is always a bare
+    /// hostname or IP address, never a combined `host:port` authority.
     #[serde(default)]
     pub host_key: Option<String>,
+    /// `port` config field appended to the `{host}` authority. Required whenever
+    /// an origin uses `{host}`; omitted for fully static origins.
+    #[serde(default)]
+    pub port_key: Option<String>,
     #[serde(default = "default_http_methods")]
     pub methods: Vec<String>,
     #[serde(default = "default_http_request_bytes")]
@@ -1898,14 +1903,28 @@ fn validate_http_transport(manifest: &PluginManifest) -> Result<()> {
         validate_http_origin(origin, http.allow_private)?;
     }
     if uses_host_placeholder {
-        let key = http.host_key.as_ref().ok_or_else(|| {
+        let host_key = http.host_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "an http origin using {{host}} requires host_key to name a config field"
             )
         })?;
-        if !manifest.config_fields().iter().any(|f| &f.key == key) {
-            bail!("http host_key '{key}' does not name a declared config field");
+        let port_key = http.port_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "an http origin using {{host}} requires port_key to name a config field"
+            )
+        })?;
+        let field = |key: &str| manifest.config_fields().iter().find(|f| f.key == key);
+        if host_key == port_key {
+            bail!("http host_key and port_key must differ");
         }
+        if !field(host_key).is_some_and(|f| f.kind == PluginConfigFieldKind::Host) {
+            bail!("http host_key '{host_key}' must name a declared host config field when port_key is used");
+        }
+        if !field(port_key).is_some_and(|f| f.kind == PluginConfigFieldKind::Port) {
+            bail!("http port_key '{port_key}' must name a declared port config field");
+        }
+    } else if http.host_key.is_some() || http.port_key.is_some() {
+        bail!("http host_key and port_key require an origin using {{host}}");
     }
     for method in &http.methods {
         if !HTTP_METHODS.contains(&method.as_str()) {
@@ -3317,7 +3336,7 @@ mod tests {
         let ok = write_plugin_dir(
             tmp.path(),
             "lan_light",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: host\n    origins: [\"https://{host}\"]\n    allow_private: true\n    tls: { profile: default }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: text }\n",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: host\n    port_key: port\n    origins: [\"https://{host}\"]\n    allow_private: true\n    tls: { profile: default }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port, default: 443 }\n",
             ENTRY_LUA,
         );
         assert!(
@@ -3338,17 +3357,62 @@ mod tests {
             .to_string()
             .contains("host_key"));
 
+        // Dynamic authorities are always split; a host-only declaration cannot
+        // fall back to accepting a combined host:port text value.
+        let no_port_key = write_plugin_dir(
+            tmp.path(),
+            "lan_no_port_key",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: host\n    origins: [\"https://{host}\"]\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&no_port_key)
+            .unwrap_err()
+            .to_string()
+            .contains("port_key"));
+
         // host_key naming an undeclared field is rejected.
         let bad_key = write_plugin_dir(
             tmp.path(),
             "lan_badkey",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: missing\n    origins: [\"https://{host}\"]\n",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: missing\n    port_key: port\n    origins: [\"https://{host}\"]\nconfig:\n  fields:\n    - { key: port, label: Port, kind: port }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&bad_key)
             .unwrap_err()
             .to_string()
-            .contains("does not name a declared config field"));
+            .contains("must name a declared host config field"));
+
+        // A split authority is deliberately typed: this prevents an embedded
+        // port in the host field and makes the effective origin unambiguous.
+        let split = write_plugin_dir(
+            tmp.path(),
+            "lan_split",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: host\n    port_key: http_port\n    origins: [\"http://{host}\"]\n    allow_private: true\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: http_port, label: HTTP port, kind: port, default: 16021 }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&split).is_ok());
+
+        let untyped_split = write_plugin_dir(
+            tmp.path(),
+            "lan_untyped_split",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: host\n    port_key: http_port\n    origins: [\"http://{host}\"]\n    allow_private: true\nconfig:\n  fields:\n    - { key: host, label: Host, kind: text }\n    - { key: http_port, label: HTTP port, kind: port }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&untyped_split)
+            .unwrap_err()
+            .to_string()
+            .contains("declared host config field"));
+
+        let unused_port = write_plugin_dir(
+            tmp.path(),
+            "lan_unused_port",
+            "type: integration\npermissions: [network]\ntransports:\n  http:\n    port_key: http_port\n    origins: [https://api.example.com]\nconfig:\n  fields:\n    - { key: http_port, label: HTTP port, kind: port }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&unused_port)
+            .unwrap_err()
+            .to_string()
+            .contains("host_key and port_key require an origin using {host}"));
 
         // An unknown tls profile is rejected.
         let bad_tls = write_plugin_dir(
