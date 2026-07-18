@@ -1939,9 +1939,10 @@ impl Registry {
         self.load_all_inner(dir, None, &sources, true);
     }
 
-    /// Load a directly supplied development repository ahead of the normal
-    /// local and configured sources. It is intentionally not required to live
-    /// under Halo's managed repository directory.
+    /// Load an optional directly supplied development repository ahead of the
+    /// normal local and configured sources, so it wins id collisions while those
+    /// sources still load. It is intentionally not required to live under Halo's
+    /// managed repository directory.
     pub fn load_all_with_priority_repo(
         &self,
         dir: &Path,
@@ -1961,18 +1962,20 @@ impl Registry {
         let mut scan = LoadScan::default();
         let is_official =
             |source: &&RepoPluginSource| source.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
+        // The development repo is additive, not a replacement: scanning it first
+        // lets it win id collisions while the official, local, and configured
+        // repos still load behind it.
         if let Some(repo_dir) = priority_repo {
             scan_repo_trusted(repo_dir, &mut scan);
-        } else {
-            for source in repo_sources.iter().filter(is_official) {
-                scan_repo_source(source, &mut scan);
-            }
-            if allow_standalone {
-                scan_plugin_subdirs(dir, &mut scan);
-            }
-            for source in repo_sources.iter().filter(|source| !is_official(source)) {
-                scan_repo_source(source, &mut scan);
-            }
+        }
+        for source in repo_sources.iter().filter(is_official) {
+            scan_repo_source(source, &mut scan);
+        }
+        if allow_standalone {
+            scan_plugin_subdirs(dir, &mut scan);
+        }
+        for source in repo_sources.iter().filter(|source| !is_official(source)) {
+            scan_repo_source(source, &mut scan);
         }
         let effects: Vec<PluginEffectEntry> =
             scan.manifests.iter().flat_map(effect_entries_for).collect();

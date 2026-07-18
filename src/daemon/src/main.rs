@@ -38,7 +38,8 @@ use crate::state::EngineRunConfig;
 /// and the elevated register-bus broker live in `halod-broker.exe`, and the GUI
 /// launches this daemon directly. `--headless` opts out of idle-shutdown (see
 /// [`crate::lifecycle`]); the development-only `--dev-plugin-repo <DIR>` flag
-/// replaces the official plugin checkout with a directly loaded working tree.
+/// loads a directly supplied working tree as an extra plugin source alongside
+/// the official, local, and configured repos, winning any id collisions.
 ///
 /// `plugin-test <package-dir>` (behind the `plugin-test` cargo feature) is a
 /// separate mode entirely: it drives one plugin package's `test.lua` against

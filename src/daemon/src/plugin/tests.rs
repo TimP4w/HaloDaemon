@@ -387,3 +387,50 @@ fn trusted_repo_scan_loads_packages_despite_a_bad_digest() {
     assert_eq!(scan.manifests[0].plugin_id, "demo");
     assert!(scan.invalid.is_empty());
 }
+
+/// Write a standalone (index-less) plugin dir at `root/plugins/<id>`.
+fn write_standalone_plugin(root: &std::path::Path, id: &str) {
+    let package = root.join("plugins").join(id);
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("plugin.yaml"),
+        format!("id: {id}\nversion: 1.0.0\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n"),
+    )
+    .unwrap();
+    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
+}
+
+#[test]
+fn dev_repo_is_additive_and_wins_id_collisions() {
+    // The development repo loads alongside the configured repos: a colliding id
+    // is served from the dev tree while every non-colliding plugin still loads.
+    let dev = tempfile::tempdir().unwrap();
+    write_standalone_plugin(dev.path(), "demo");
+
+    let other_repo = tempfile::tempdir().unwrap();
+    write_standalone_plugin(other_repo.path(), "demo");
+    write_standalone_plugin(other_repo.path(), "other");
+
+    let registry = super::Registry::default();
+    registry.load_all_with_priority_repo(
+        std::path::Path::new("/nonexistent"),
+        Some(dev.path()),
+        &[super::RepoPluginSource {
+            slug: "extra".to_owned(),
+            dir: other_repo.path().to_path_buf(),
+            trust: super::repo::RepositoryTrust::Unsigned,
+        }],
+    );
+
+    let plugins = registry.list(&crate::secrets::FileKeyStore::new());
+    let mut ids: Vec<&str> = plugins.iter().map(|p| p.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["demo", "other"]);
+
+    let demo = plugins.iter().find(|p| p.id == "demo").unwrap();
+    assert_eq!(
+        demo.provenance,
+        halod_shared::types::PluginProvenance::LocalDevelopment,
+        "the dev tree must win the collision over the configured repo"
+    );
+}

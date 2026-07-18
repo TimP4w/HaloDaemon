@@ -144,11 +144,6 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
     }
     app.request_config_save();
     if allowed {
-        #[cfg(feature = "dev-plugin-repo")]
-        if app.development_plugin_repo.read().await.is_some() {
-            log::info!("skipping official plugin download because --dev-plugin-repo is active");
-            return Ok(());
-        }
         crate::registry::ensure_official_repo(&app).await;
         crate::plugin::usecases::plugins::reload_registry(&app).await;
         let official_plugins = app

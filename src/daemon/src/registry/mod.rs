@@ -48,14 +48,10 @@ pub async fn initialize_app_state(
     #[cfg(feature = "dev-plugin-repo")]
     if let Some(dir) = &dev_plugin_repo {
         log::warn!("Using development plugin repository at {}", dir.display());
-    } else {
-        ensure_official_repo(&app).await;
     }
+    ensure_official_repo(&app).await;
     #[cfg(not(feature = "dev-plugin-repo"))]
-    let dev_plugin_repo: Option<std::path::PathBuf> = {
-        ensure_official_repo(&app).await;
-        None
-    };
+    let dev_plugin_repo: Option<std::path::PathBuf> = None;
     #[cfg(feature = "dev-plugin-repo")]
     {
         *app.development_plugin_repo.write().await = dev_plugin_repo.clone();
@@ -64,28 +60,25 @@ pub async fn initialize_app_state(
     {
         let cfg = app.config.read().await;
         let repo_sources = crate::plugin::repo_plugin_sources(&cfg.plugins.repos);
-        if dev_plugin_repo.is_none() {
-            let official_dir = cfg
-                .plugins
-                .repos
-                .iter()
-                .find(|repo| repo.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-                .map(crate::plugin::repo::active_revision_dir)
-                .unwrap_or_else(|| {
-                    crate::config::plugin_repos_dir()
-                        .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-                });
-            if official_dir.is_dir() {
-                match crate::plugin::repo::verify_official_repository(&official_dir) {
-                    Ok(manifest) => discovered_hashes.extend(
-                        manifest
-                            .packages
-                            .into_iter()
-                            .map(|package| (package.id, package.sha256)),
-                    ),
-                    Err(e) => {
-                        log::warn!("official plugin repository failed validation: {e:#}");
-                    }
+        let official_dir = cfg
+            .plugins
+            .repos
+            .iter()
+            .find(|repo| repo.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+            .map(crate::plugin::repo::active_revision_dir)
+            .unwrap_or_else(|| {
+                crate::config::plugin_repos_dir().join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+            });
+        if official_dir.is_dir() {
+            match crate::plugin::repo::verify_official_repository(&official_dir) {
+                Ok(manifest) => discovered_hashes.extend(
+                    manifest
+                        .packages
+                        .into_iter()
+                        .map(|package| (package.id, package.sha256)),
+                ),
+                Err(e) => {
+                    log::warn!("official plugin repository failed validation: {e:#}");
                 }
             }
         }
@@ -106,13 +99,10 @@ pub async fn initialize_app_state(
     }
     // Surface packages whose active revision differs from its installed digest.
     // This is dirty-update metadata, not a consent or activation gate, and it
-    // runs without network access.
-    if dev_plugin_repo.is_none() {
-        crate::plugin::usecases::repos::quarantine_changed_plugins(app.clone()).await;
-    }
-    if dev_plugin_repo.is_none() {
-        start_update_check(app.clone()).await;
-    }
+    // runs without network access. The dev repo is not a config record, so it is
+    // never a subject here.
+    crate::plugin::usecases::repos::quarantine_changed_plugins(app.clone()).await;
+    start_update_check(app.clone()).await;
     discovery::discover_devices(app.clone()).await;
     seed_known_devices(app.clone()).await;
     usecases::chain::restore_saved_chains(app.clone()).await;
