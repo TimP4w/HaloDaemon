@@ -270,6 +270,12 @@ impl CanvasUi {
         &self.led_colors
     }
 
+    pub fn release_textures(&mut self) {
+        self.texture = None;
+        self.texture_frame_id = 0;
+        self.led_colors.clear();
+    }
+
     /// Send any debounced canvas commands whose deadline has passed. `body`
     /// calls this every frame on the Canvas tab; the FPS modal can also be
     /// opened from the Direct tab (where `body` never runs), so that tab drains

@@ -11,6 +11,7 @@
 //! blocks a state read and the UI can cheaply gate work on `has_changed()`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -121,6 +122,24 @@ pub(crate) struct UiTx {
     lcd_template: watch::Sender<Option<(String, CustomTemplateDef)>>,
     lcd_editor_render: watch::Sender<Option<DecodedEditorRender>>,
     notifications: NotifyQueue,
+    hidden: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+pub struct FrameSinks {
+    lcd_frames: watch::Sender<HashMap<String, DecodedFrame>>,
+    canvas_frame: watch::Sender<Option<CanvasFrame>>,
+    plugin_assets: watch::Sender<HashMap<String, Vec<u8>>>,
+    lcd_editor_render: watch::Sender<Option<DecodedEditorRender>>,
+}
+
+impl FrameSinks {
+    pub fn clear(&self) {
+        self.lcd_frames.send_replace(HashMap::new());
+        self.canvas_frame.send_replace(None);
+        self.plugin_assets.send_replace(HashMap::new());
+        self.lcd_editor_render.send_replace(None);
+    }
 }
 
 /// Channel the UI uses to send commands to the daemon (unbounded: low-rate,
@@ -166,7 +185,7 @@ pub fn send(tx: &CommandTx, cmd: DaemonCommand) {
 /// Build the paired sender/receiver bundles for every daemon-driven stream.
 /// Split out from [`spawn`] so headless tests can wire a `UiRx` to senders they
 /// keep and drive directly (see [`fake`]).
-fn channels() -> (UiTx, UiRx) {
+fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
     let (state_s, state_r) = watch::channel(AppState::default());
     let (conn_s, conn_r) = watch::channel(false);
     let (debug_s, debug_r) = watch::channel(None);
@@ -184,6 +203,13 @@ fn channels() -> (UiTx, UiRx) {
     let (template_s, template_r) = watch::channel(None);
     let (editor_render_s, editor_render_r) = watch::channel(None);
     let notifications: NotifyQueue = Arc::new(Mutex::new(Vec::new()));
+
+    let sinks = FrameSinks {
+        lcd_frames: frames_s.clone(),
+        canvas_frame: canvas_s.clone(),
+        plugin_assets: assets_s.clone(),
+        lcd_editor_render: editor_render_s.clone(),
+    };
 
     let tx = UiTx {
         state: state_s,
@@ -203,6 +229,7 @@ fn channels() -> (UiTx, UiRx) {
         lcd_template: template_s,
         lcd_editor_render: editor_render_s,
         notifications: Arc::clone(&notifications),
+        hidden,
     };
     let rx = UiRx {
         state: state_r,
@@ -223,29 +250,32 @@ fn channels() -> (UiTx, UiRx) {
         lcd_editor_render: editor_render_r,
         notifications,
     };
-    (tx, rx)
+    (tx, rx, sinks)
 }
 
 /// Seed a `UiRx` with a fixed snapshot for headless rendering, no socket
 /// involved. The returned `UiTx` owns the sender halves and must be held for
 /// the receiver's lifetime, or every channel reports closed.
 #[cfg(all(test, target_os = "linux", feature = "screenshots"))]
-pub(crate) fn fake(state: AppState, connected: bool) -> (CommandTx, UiRx, UiTx) {
+pub(crate) fn fake(state: AppState, connected: bool) -> (CommandTx, UiRx, UiTx, FrameSinks) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (tx, rx) = channels();
+    let (tx, rx, sinks) = channels(Arc::new(AtomicBool::new(false)));
     tx.state.send_replace(state);
     tx.connected.send_replace(connected);
     // Keep the command channel open so the draw path's `send`s stay quiet.
     std::mem::forget(cmd_rx);
-    (cmd_tx, rx, tx)
+    (cmd_tx, rx, tx, sinks)
 }
 
 /// Spawn the background reader/writer on its own thread + current-thread
 /// runtime, returning the command sender and the receiver bundle. `repaint` is
 /// called whenever new data lands so egui wakes up.
-pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
+pub fn spawn(
+    repaint: impl Fn() + Send + 'static,
+    hidden: Arc<AtomicBool>,
+) -> (CommandTx, UiRx, FrameSinks) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (tx, rx) = channels();
+    let (tx, rx, sinks) = channels(hidden);
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -261,7 +291,7 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> (CommandTx, UiRx) {
         rt.block_on(reconnect_loop(tx, cmd_rx, repaint));
     });
 
-    (cmd_tx, rx)
+    (cmd_tx, rx, sinks)
 }
 
 /// Retry a daemon start every Nth reconnect attempt (~500ms apart) rather than
@@ -527,6 +557,9 @@ fn handle_json(
             return Reaction::default();
         }
         Some("lcd_engine_frame") => {
+            if tx.hidden.load(Ordering::Relaxed) {
+                return Reaction::default();
+            }
             if let Some(data) = value.get("data").cloned() {
                 if let Ok(frame) = serde_json::from_value::<LcdEngineFrame>(data) {
                     use base64::Engine as _;
@@ -541,9 +574,8 @@ fn handle_json(
                                 height: rgba.height() as usize,
                                 rgba: rgba.into_raw(),
                             };
-                            tx.lcd_frames.send_modify(|m| {
-                                m.insert(frame.device_id, decoded);
-                            });
+                            tx.lcd_frames
+                                .send_replace(HashMap::from([(frame.device_id, decoded)]));
                             repaint();
                         }
                     }
@@ -552,6 +584,9 @@ fn handle_json(
             return Reaction::default();
         }
         Some("lcd_editor_render") => {
+            if tx.hidden.load(Ordering::Relaxed) {
+                return Reaction::default();
+            }
             if let Some(data) = value.get("data").cloned() {
                 if let Ok(r) = serde_json::from_value::<LcdEditorRender>(data) {
                     use base64::Engine as _;
@@ -585,6 +620,9 @@ fn handle_json(
             return Reaction::default();
         }
         Some("canvas_frame") => {
+            if tx.hidden.load(Ordering::Relaxed) {
+                return Reaction::default();
+            }
             if let Some(data) = value.get("data").cloned() {
                 if let Ok(frame) = serde_json::from_value::<CanvasFrame>(data) {
                     tx.canvas_frame.send_replace(Some(frame));
@@ -654,6 +692,9 @@ fn handle_json(
             return Reaction::default();
         }
         Some("plugin_asset") => {
+            if tx.hidden.load(Ordering::Relaxed) {
+                return Reaction::default();
+            }
             let plugin_id = value.get("plugin_id").and_then(|v| v.as_str());
             let name = value.get("name").and_then(|v| v.as_str());
             let data_b64 = value.get("data_b64").and_then(|v| v.as_str());
@@ -670,6 +711,9 @@ fn handle_json(
             return Reaction::default();
         }
         Some("lcd_widget_icon") => {
+            if tx.hidden.load(Ordering::Relaxed) {
+                return Reaction::default();
+            }
             let catalog_id = value.get("catalog_id").and_then(|value| value.as_str());
             let data_b64 = value.get("data_b64").and_then(|value| value.as_str());
             if let (Some(catalog_id), Some(data_b64)) = (catalog_id, data_b64) {
@@ -863,6 +907,7 @@ mod tests {
             lcd_template: watch::channel(None).0,
             lcd_editor_render: watch::channel(None).0,
             notifications: Arc::new(Mutex::new(Vec::new())),
+            hidden: Arc::new(AtomicBool::new(false)),
         };
         (tx, upload_r)
     }
@@ -1082,6 +1127,50 @@ mod tests {
                 message: "Repository signature verification failed.".into()
             }
         );
+    }
+
+    fn sample_canvas_frame() -> CanvasFrame {
+        CanvasFrame {
+            frame_id: 1,
+            timestamp_ms: 0,
+            canvas_srgb_b64: String::new(),
+            canvas_w: 1,
+            canvas_h: 1,
+            led_colors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hidden_drops_canvas_frames_before_decode() {
+        let (tx, _u) = test_tx();
+        let mut canvas_r = tx.canvas_frame.subscribe();
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "type": "canvas_frame",
+            "data": sample_canvas_frame(),
+        }))
+        .unwrap();
+
+        handle_json(&payload, &tx, &|| {}, &mut None);
+        assert!(canvas_r.borrow_and_update().is_some());
+
+        tx.canvas_frame.send_replace(None);
+        let _ = canvas_r.borrow_and_update();
+        tx.hidden.store(true, Ordering::Relaxed);
+        handle_json(&payload, &tx, &|| {}, &mut None);
+        assert!(canvas_r.borrow().is_none());
+    }
+
+    #[test]
+    fn frame_sinks_release_retained_buffers() {
+        let (tx, rx, sinks) = channels(Arc::new(AtomicBool::new(false)));
+        tx.plugin_assets
+            .send_replace(HashMap::from([("k".to_string(), vec![0u8; 32])]));
+        tx.canvas_frame.send_replace(Some(sample_canvas_frame()));
+        assert!(!rx.plugin_assets.borrow().is_empty());
+
+        sinks.clear();
+        assert!(rx.plugin_assets.borrow().is_empty());
+        assert!(rx.canvas_frame.borrow().is_none());
     }
 
     #[test]

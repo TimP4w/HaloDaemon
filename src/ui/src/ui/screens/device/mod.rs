@@ -241,6 +241,23 @@ pub struct LcdTab {
 }
 
 impl DeviceUi {
+    pub fn release_render_memory(&mut self) {
+        self.lcd.image_cache.clear();
+        self.lcd.requested.clear();
+        self.lcd.preview_tex = None;
+        self.lcd.preview_key.clear();
+        self.lcd.gif_source.clear();
+        self.lcd.gif_frames.clear();
+        self.lcd.gif_tex.clear();
+        self.lcd.gif_rx = None;
+        self.lcd.gif_started = false;
+        self.lcd.gif_idx = 0;
+        self.lcd.gif_advance_at = None;
+        self.lcd.editor.sprite_tex.clear();
+        self.lcd.editor.widget_icon_tex.clear();
+        self.lcd.editor.requested_widget_icons.clear();
+    }
+
     /// Fresh edit state for the device `id`.
     pub fn new(id: String) -> Self {
         DeviceUi {

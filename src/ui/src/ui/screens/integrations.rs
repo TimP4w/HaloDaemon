@@ -122,6 +122,11 @@ pub fn integration_state(p: &PluginInfo, status: &IntegrationStatus) -> Integrat
 }
 
 impl IntegrationsUi {
+    pub fn release_textures(&mut self) {
+        self.logo_textures.clear();
+        self.requested_logos.clear();
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,

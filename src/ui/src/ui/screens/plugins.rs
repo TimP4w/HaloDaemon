@@ -118,6 +118,11 @@ const UDEV_RECHECK_SPINNER: f64 = 1.0;
 const UPDATE_TIMEOUT: f64 = 90.0;
 
 impl PluginsUi {
+    pub fn release_textures(&mut self) {
+        self.asset_textures.clear();
+        self.requested_assets.clear();
+    }
+
     #[allow(clippy::too_many_arguments)] // screen inputs mirror independent IPC result streams
     pub fn show(
         &mut self,

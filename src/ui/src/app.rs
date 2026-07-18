@@ -15,11 +15,12 @@ use crate::domain::{
     self,
     state::{Page, Rename, Variant},
 };
-use crate::runtime::ipc::{self, CommandTx, UiRx};
+use crate::runtime::ipc::{self, CommandTx, FrameSinks, UiRx};
 use crate::ui;
 
 pub struct App {
     pub(crate) ui: UiRx,
+    pub(crate) frame_sinks: FrameSinks,
     /// Last daemon `AppState`, re-cloned only when its watch channel changes.
     pub(crate) state_cache: Arc<AppState>,
     /// LCD library filenames, re-cloned only when the watch channel changes.
@@ -75,6 +76,8 @@ pub struct App {
     /// Set by the tray "Quit" so a close request bypasses "close to tray" and
     /// actually exits instead of hiding the window.
     pub(crate) force_quit: Arc<AtomicBool>,
+    pub(crate) hidden: Arc<AtomicBool>,
+    pub(crate) hide_state: Arc<domain::state::HideState>,
     /// A just-loaded named LCD template, consumed once by the open editor.
     pub(crate) pending_lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
     /// Latest LCD editor render, cached like `lcd_images_cache`: most frames
@@ -110,16 +113,32 @@ impl App {
         )
     }
 
+    pub(crate) fn release_ui_memory(&mut self) {
+        self.device_ui.release_render_memory();
+        self.canvas_ui.release_textures();
+        self.plugins_ui.release_textures();
+        self.integrations_ui.release_textures();
+        self.profile_ui.release_textures();
+        self.plugin_assets_cache = Arc::new(HashMap::new());
+        self.lcd_editor_render_cache = None;
+        self.frame_sinks.clear();
+        ui::icons::clear();
+    }
+
     /// Assemble the app from the already-created IPC channel, tray, and shared
     /// flags. Used by both the eframe backend and the Linux custom loop.
     pub fn new(
         ui: UiRx,
+        frame_sinks: FrameSinks,
         cmd: CommandTx,
         tray: domain::tray::Tray,
         force_quit: Arc<AtomicBool>,
+        hidden: Arc<AtomicBool>,
+        hide_state: Arc<domain::state::HideState>,
     ) -> Self {
         App {
             ui,
+            frame_sinks,
             state_cache: Arc::new(AppState::default()),
             lcd_images_cache: Arc::new(Vec::new()),
             plugin_assets_cache: Arc::new(HashMap::new()),
@@ -154,6 +173,8 @@ impl App {
             issue_details_modal: None,
             integrity_alert_notified: std::collections::HashSet::new(),
             force_quit,
+            hidden,
+            hide_state,
             pending_lcd_template: None,
             lcd_editor_render_cache: None,
             depcheck_grace: ui::screens::depcheck::GraceState::default(),

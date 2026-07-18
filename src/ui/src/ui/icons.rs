@@ -105,6 +105,11 @@ thread_local! {
 /// so the linear downscale stays crisp on HiDPI.
 const ICON_PX: u32 = 64;
 
+pub fn clear() {
+    TEXTURES.with(|c| c.borrow_mut().clear());
+    DEVICE_TEXTURES.with(|c| c.borrow_mut().clear());
+}
+
 fn texture(ctx: &egui::Context, icon: Icon) -> egui::TextureHandle {
     TEXTURES.with(|cache| {
         cache

@@ -35,6 +35,14 @@ pub struct ProfileUi {
     pub switching_to: Option<String>,
 }
 
+impl ProfileUi {
+    pub fn release_textures(&mut self) {
+        if let Ok(mut cache) = self.icon_cache.lock() {
+            cache.clear();
+        }
+    }
+}
+
 pub fn observe_notifications(st: &mut ProfileUi, notifications: &[Notification]) {
     use halod_shared::types::NotificationCode;
     if notifications

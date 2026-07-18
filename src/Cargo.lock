@@ -2890,6 +2890,7 @@ dependencies = [
  "halod-shared",
  "image",
  "ksni",
+ "libc",
  "log",
  "proptest",
  "resvg",

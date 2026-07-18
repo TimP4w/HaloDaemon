@@ -40,8 +40,17 @@ const SCALE: f32 = 2.0;
 /// on the target page/tab before the captured frame.
 fn capture(name: &str, state: AppState, setup: impl FnOnce(&mut App)) {
     let force_quit = Arc::new(AtomicBool::new(false));
-    let (cmd, ui_rx, _senders) = ipc::fake(state, true);
-    let mut app = App::new(ui_rx, cmd, Tray::headless(), force_quit);
+    let (cmd, ui_rx, _senders, sinks) = ipc::fake(state, true);
+    let hidden = Arc::new(AtomicBool::new(false));
+    let mut app = App::new(
+        ui_rx,
+        sinks,
+        cmd,
+        Tray::headless(),
+        force_quit,
+        hidden,
+        Arc::new(crate::domain::state::HideState::default()),
+    );
     app.entered = true;
     setup(&mut app);
 

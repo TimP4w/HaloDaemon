@@ -29,7 +29,7 @@ use egui_glow::glow;
 use halod_shared::commands::DaemonCommand;
 use winit::application::ApplicationHandler;
 use winit::event::{StartCause, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::raw_window_handle::HasWindowHandle as _;
 use winit::window::WindowId;
 
@@ -58,14 +58,10 @@ pub fn run(background: bool, primary: crate::runtime::single_instance::Primary) 
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
 
-    let ctx = egui::Context::default();
-    theme::install(&ctx);
-    let cb_proxy = egui::mutex::Mutex::new(proxy.clone());
-    ctx.set_request_repaint_callback(move |info| {
-        let _ = cb_proxy.lock().send_event(UserEvent::Redraw(info.delay));
-    });
+    let bootstrap_ctx = egui::Context::default();
 
     let force_quit = Arc::new(AtomicBool::new(false));
+    let hidden_flag = Arc::new(AtomicBool::new(background));
     let hide_state = Arc::new(HideState::default());
     // While the window is destroyed, egui's edge-triggered repaint callback
     // won't fire, so let the tray wake the loop directly for "Open"/"Quit".
@@ -77,17 +73,36 @@ pub fn run(background: bool, primary: crate::runtime::single_instance::Primary) 
     });
     // A re-launch pings the guard socket; recreate/raise the window in response,
     // the same path as the tray's "Open".
-    let show_ctx = ctx.clone();
+    let show_ctx = bootstrap_ctx.clone();
     let show_hide = hide_state.clone();
     primary.serve(move || tray::present(&show_ctx, &show_hide));
-    let ctx_for_ipc = ctx.clone();
-    let (cmd_tx, ui_rx) = ipc::spawn(move || ctx_for_ipc.request_repaint());
-    let tray = tray::Tray::new(&ctx, cmd_tx.clone(), force_quit.clone(), hide_state.clone());
+    let ipc_proxy = proxy.clone();
+    let (cmd_tx, ui_rx, sinks) = ipc::spawn(
+        move || {
+            let _ = ipc_proxy.send_event(UserEvent::Redraw(Duration::ZERO));
+        },
+        hidden_flag.clone(),
+    );
+    let tray = tray::Tray::new(
+        &bootstrap_ctx,
+        cmd_tx.clone(),
+        force_quit.clone(),
+        hide_state.clone(),
+    );
     tray.watch_state(ui_rx.state.clone());
-    let app = App::new(ui_rx, cmd_tx, tray, force_quit.clone());
+    let app = App::new(
+        ui_rx,
+        sinks,
+        cmd_tx,
+        tray,
+        force_quit.clone(),
+        hidden_flag.clone(),
+        hide_state.clone(),
+    );
 
     let mut handler = WaylandApp {
-        ctx,
+        ctx: bootstrap_ctx,
+        proxy,
         egui_winit: None,
         painter: None,
         viewport_info: egui::ViewportInfo::default(),
@@ -96,9 +111,9 @@ pub fn run(background: bool, primary: crate::runtime::single_instance::Primary) 
         gl: None,
         app,
         force_quit,
+        hidden_flag,
         hide_state,
         hidden: background,
-        start_hidden: background,
         wm_close: false,
         repaint_delay: Duration::MAX,
     };
@@ -108,9 +123,8 @@ pub fn run(background: bool, primary: crate::runtime::single_instance::Primary) 
 }
 
 struct WaylandApp {
-    /// The egui context. Fonts, theme, memory, and the repaint callback survive
-    /// every hide/show cycle.
     ctx: egui::Context,
+    proxy: EventLoopProxy<UserEvent>,
     egui_winit: Option<egui_winit::State>,
     painter: Option<egui_glow::Painter>,
     viewport_info: egui::ViewportInfo,
@@ -119,11 +133,9 @@ struct WaylandApp {
     gl: Option<Arc<glow::Context>>,
     app: App,
     force_quit: Arc<AtomicBool>,
+    hidden_flag: Arc<AtomicBool>,
     hide_state: Arc<HideState>,
     hidden: bool,
-    /// `--background`: the first `resumed()` skips window/GL creation
-    /// entirely instead of flashing a window then hiding it. Consumed there.
-    start_hidden: bool,
     /// WM close-requested this cycle.
     wm_close: bool,
     repaint_delay: Duration,
@@ -267,51 +279,23 @@ impl WaylandApp {
         }
     }
 
-    /// "Close to tray": drop only the window + EGL surface so the compositor
-    /// unmaps it. The GL context, glow, painter, egui context, and tray live on.
     fn hide(&mut self) {
-        if self.win.is_none() {
+        if self.painter.is_none() && self.win.is_none() {
             return;
         }
-        // Drop order matters here — see `WindowSurface`.
+        if let Some(mut painter) = self.painter.take() {
+            painter.destroy();
+        }
+        self.egui_winit = None;
         self.win = None;
+        self.gl_keep = None;
+        self.gl = None;
+        self.app.release_ui_memory();
+        self.ctx = egui::Context::default();
         self.hidden = true;
-        log::info!("close to tray: window destroyed, staying resident");
-    }
-
-    /// Tray "Open": build a new window + surface and rebind the surviving GL
-    /// context to it. No painter/texture rebuild — everything is still uploaded.
-    fn show(&mut self, event_loop: &ActiveEventLoop) {
-        if !self.hidden {
-            return;
-        }
-        let Some(keep) = self.gl_keep.as_ref() else {
-            return;
-        };
-        // Recreating the window/surface can transiently fail (compositor restart,
-        // GPU reset, resource pressure). Stay hidden and resident so the next tray
-        // "Open" retries, instead of panicking and taking the tray down with us.
-        let win = match new_window_surface(event_loop, keep) {
-            Ok(win) => win,
-            Err(e) => {
-                log::error!("tray open: window recreation failed, staying hidden: {e}");
-                return;
-            }
-        };
-        // Deliver while HaloDaemon is still hidden. Some desktops suppress a
-        // banner attributed to the application that currently has focus.
-        self.app.replay_integrity_native_on_reopen();
-        win.window.set_visible(true);
-        win.window.request_redraw();
-        // Rebuild egui input state against the fresh window: the compositor may
-        // hand back a different size/scale than the destroyed one, and the old
-        // state cached the previous window's geometry.
-        if let Some(max_side) = self.painter.as_ref().map(|p| p.max_texture_side()) {
-            self.egui_winit = Some(self.new_egui_state(event_loop, &win.window, max_side));
-        }
-        self.win = Some(win);
-        self.hidden = false;
-        log::info!("tray open: window recreated");
+        self.hidden_flag.store(true, Ordering::SeqCst);
+        trim_heap();
+        log::info!("close to tray: render stack released, staying resident");
     }
 
     /// egui's winit input adapter, seeded from a window's current scale factor.
@@ -331,34 +315,48 @@ impl WaylandApp {
         )
     }
 
-    /// First-time setup: window, GL, painter, and egui input state.
     fn create(&mut self, event_loop: &ActiveEventLoop) {
+        self.ctx = build_context(&self.proxy);
         let (keep, win, gl) = create_gl(event_loop);
         let gl = Arc::new(gl);
         win.window.set_visible(true);
         let painter =
             egui_glow::Painter::new(Arc::clone(&gl), "", None, true).expect("create glow painter");
         let egui_winit = self.new_egui_state(event_loop, &win.window, painter.max_texture_side());
+        self.app.replay_integrity_native_on_reopen();
+        win.window.request_redraw();
         self.painter = Some(painter);
         self.egui_winit = Some(egui_winit);
         self.gl_keep = Some(keep);
         self.win = Some(win);
         self.gl = Some(gl);
         self.hidden = false;
+        self.hidden_flag.store(false, Ordering::SeqCst);
+    }
+}
+
+fn build_context(proxy: &EventLoopProxy<UserEvent>) -> egui::Context {
+    let ctx = egui::Context::default();
+    theme::install(&ctx);
+    let cb_proxy = egui::mutex::Mutex::new(proxy.clone());
+    ctx.set_request_repaint_callback(move |info| {
+        let _ = cb_proxy.lock().send_event(UserEvent::Redraw(info.delay));
+    });
+    ctx
+}
+
+fn trim_heap() {
+    #[cfg(target_env = "gnu")]
+    // SAFETY: `malloc_trim` is a thread-safe glibc allocator hint.
+    unsafe {
+        libc::malloc_trim(0);
     }
 }
 
 impl ApplicationHandler<UserEvent> for WaylandApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.egui_winit.is_none() {
-            if self.start_hidden {
-                // Tray "Open" (`user_event`) creates everything lazily instead.
-                self.start_hidden = false;
-                return;
-            }
+        if self.egui_winit.is_none() && !self.hidden {
             self.create(event_loop);
-        } else if self.hidden {
-            self.show(event_loop);
         }
     }
 
@@ -403,14 +401,8 @@ impl ApplicationHandler<UserEvent> for WaylandApp {
             event_loop.exit();
             return;
         }
-        // Tray "Open": recreate the window if it was closed to the tray, or —
-        // for a `--background` launch that never created one — build it now.
         if self.hide_state.wants_show.swap(false, Ordering::SeqCst) && self.hidden {
-            if self.egui_winit.is_none() {
-                self.create(event_loop);
-            } else {
-                self.show(event_loop);
-            }
+            self.create(event_loop);
             return;
         }
         if self.hidden {
@@ -464,11 +456,7 @@ fn window_attrs() -> winit::window::WindowAttributes {
     attrs
 }
 
-/// Persistent GL state that survives every hide/show. Keeping the GL *context*
-/// alive is what preserves egui's uploaded textures across a reopen.
 struct GlKeep {
-    gl_display: glutin::display::Display,
-    gl_config: glutin::config::Config,
     gl_context: glutin::context::PossiblyCurrentContext,
 }
 
@@ -545,11 +533,7 @@ fn create_gl(event_loop: &ActiveEventLoop) -> (GlKeep, WindowSurface, glow::Cont
     };
 
     (
-        GlKeep {
-            gl_display,
-            gl_config,
-            gl_context,
-        },
+        GlKeep { gl_context },
         WindowSurface { gl_surface, window },
         gl,
     )
@@ -571,25 +555,6 @@ fn partition_close(
         }
     }
     (close, passthrough)
-}
-
-/// Build a new window + surface reusing the persistent display/config, and make
-/// the surviving context current on it (used when reopening from the tray).
-fn new_window_surface(
-    event_loop: &ActiveEventLoop,
-    keep: &GlKeep,
-) -> Result<WindowSurface, Box<dyn std::error::Error>> {
-    use glutin::context::PossiblyCurrentGlContext as _;
-    use glutin::surface::GlSurface as _;
-
-    let window = glutin_winit::finalize_window(event_loop, window_attrs(), &keep.gl_config)?;
-    let gl_surface = make_surface(&keep.gl_display, &keep.gl_config, &window)?;
-    keep.gl_context.make_current(&gl_surface)?;
-    let _ = gl_surface.set_swap_interval(
-        &keep.gl_context,
-        glutin::surface::SwapInterval::Wait(NonZeroU32::MIN),
-    );
-    Ok(WindowSurface { gl_surface, window })
 }
 
 fn make_surface(

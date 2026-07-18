@@ -47,6 +47,7 @@ ksni = "0.2"
 # Wayland backend can't hide a surface. Remove this whole block (and the module)
 # once eframe/winit support hiding a Wayland window natively.
 [target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 winit = { version = "0.30", default-features = false, features = ["wayland", "rwh_06"] }
 glutin = "0.32"
 glutin-winit = "0.5"

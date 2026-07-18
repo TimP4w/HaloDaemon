@@ -50,6 +50,9 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.hide_state.wants_show.swap(false, Ordering::SeqCst) {
+            self.hidden.store(false, Ordering::SeqCst);
+        }
         self.draw(ui);
         // Hide via `Visible(false)`; see [`wayland_hide`] for the Linux path.
         let ctx = ui.ctx();
@@ -59,6 +62,9 @@ impl eframe::App for App {
             CloseAction::HideToTray => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                if !self.hidden.swap(true, Ordering::SeqCst) {
+                    self.release_ui_memory();
+                }
             }
             CloseAction::Quit => {
                 if !self.force_quit.load(Ordering::SeqCst) {
@@ -118,7 +124,9 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| {
             ui::theme::install(&cc.egui_ctx);
             let ctx = cc.egui_ctx.clone();
-            let (cmd_tx, ui) = runtime::ipc::spawn(move || ctx.request_repaint());
+            let hidden = Arc::new(AtomicBool::new(background));
+            let (cmd_tx, ui, sinks) =
+                runtime::ipc::spawn(move || ctx.request_repaint(), hidden.clone());
             let force_quit = Arc::new(AtomicBool::new(false));
             let hide_state = Arc::new(HideState::default());
             // A re-launch pings the guard socket; raise this window in response.
@@ -129,9 +137,11 @@ fn main() -> eframe::Result<()> {
                 &cc.egui_ctx,
                 cmd_tx.clone(),
                 force_quit.clone(),
-                hide_state,
+                hide_state.clone(),
             );
-            Ok(Box::new(App::new(ui, cmd_tx, tray, force_quit)))
+            Ok(Box::new(App::new(
+                ui, sinks, cmd_tx, tray, force_quit, hidden, hide_state,
+            )))
         }),
     )
 }
