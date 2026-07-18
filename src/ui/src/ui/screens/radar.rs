@@ -63,7 +63,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                     sw: 12,
                     se: 12,
                 },
-                theme::hex(0x070a0f),
+                theme::BODY,
             );
             let p = ui.painter().clone();
             let complete = matches!(state.discovery.phase, DiscoveryPhase::Complete);
