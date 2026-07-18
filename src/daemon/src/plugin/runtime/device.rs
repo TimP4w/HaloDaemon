@@ -95,7 +95,6 @@ use halod_shared::types::ZoneTopology;
 enum Cap {
     Lighting,
     Cooling,
-    Fan,
     Sensor,
     Lcd,
     Dpi,
@@ -117,7 +116,6 @@ const CONTROL_CAPS: &[Cap] = &[Cap::Choice, Cap::Range, Cap::Boolean, Cap::Actio
 const CAPABILITY_NAMES: &[&str] = &[
     "lighting",
     "cooling",
-    "fan",
     "sensors",
     "lcd",
     "dpi",
@@ -136,7 +134,6 @@ fn cap_for(name: &str) -> &'static [Cap] {
     match name {
         "lighting" => &[Cap::Lighting],
         "cooling" => &[Cap::Cooling],
-        "fan" => &[Cap::Fan],
         "sensors" => &[Cap::Sensor],
         "lcd" => &[Cap::Lcd],
         "dpi" => &[Cap::Dpi],
@@ -206,7 +203,7 @@ impl StatusPollCaps {
     fn from_caps(caps: &[Cap]) -> Self {
         Self {
             sensor: caps.contains(&Cap::Sensor),
-            cooling: caps.contains(&Cap::Cooling) || caps.contains(&Cap::Fan),
+            cooling: caps.contains(&Cap::Cooling),
             boolean: caps.contains(&Cap::Boolean),
             battery: caps.contains(&Cap::Battery),
             connection: caps.contains(&Cap::Connection),
@@ -997,12 +994,12 @@ impl LuaDevice {
         }
         if nuvoton_sensor_root {
             // The matched Super-I/O is the sensor controller. Its dynamic
-            // children own the individual PWM channels; retaining `Fan` here
-            // makes the controller itself appear in the Cooling UI.
+            // children own the individual PWM channels; retaining `Cooling`
+            // here makes the controller itself appear in the Cooling UI.
             dev.caps
                 .get_mut()
                 .unwrap()
-                .retain(|cap| !matches!(cap, Cap::Fan));
+                .retain(|cap| !matches!(cap, Cap::Cooling));
         }
         dev
     }
@@ -1782,7 +1779,6 @@ impl Device for LuaDevice {
             match cap {
                 Cap::Lighting => caps.push(CapabilityRef::Lighting(self)),
                 Cap::Cooling => caps.push(CapabilityRef::Cooling(self)),
-                Cap::Fan => caps.push(CapabilityRef::Cooling(self)),
                 Cap::Sensor => caps.push(CapabilityRef::Sensor(self)),
                 Cap::Lcd => caps.push(CapabilityRef::Lcd(self)),
                 Cap::Dpi => caps.push(CapabilityRef::Dpi(self)),
@@ -2846,14 +2842,14 @@ mod tests {
     fn declared_capabilities_expand_controls_and_preserve_order() {
         let (_tmp, manifest) = test_manifest(
             "declared_caps",
-            &["lighting", "controls", "fan", "lighting_division"],
+            &["lighting", "controls", "cooling", "lighting_division"],
             "return {}",
         );
         assert_eq!(
             declared_caps(&manifest),
             vec![
                 Cap::Lighting,
-                Cap::Fan,
+                Cap::Cooling,
                 Cap::Choice,
                 Cap::Range,
                 Cap::Boolean,
@@ -3006,17 +3002,19 @@ mod tests {
             return {
               initialize = function(dev)
                 return {
-                  capabilities = { "lighting", "fan" },
+                  capabilities = { "lighting", "cooling" },
                   channels = { { id = "ring", name = "Ring", led_count = 2,
                               led_ids = { 7, 9 } } },
-                  fan = { channel = 3 },
+                  cooling = { channels = {
+                    { id = "fan1", name = "Fan", kind = "fan", controllable = true },
+                  } },
                 }
               end,
             }
         "#;
         let (_tmp, manifest) = test_manifest(
             "runtime_descriptors",
-            &["lighting", "fan", "sensors"],
+            &["lighting", "cooling", "sensors"],
             script,
         );
         let dev = hid_device(

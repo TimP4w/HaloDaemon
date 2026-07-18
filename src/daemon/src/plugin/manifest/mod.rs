@@ -2001,7 +2001,6 @@ fn validate_device_identifiers(manifest: &PluginManifest) -> Result<()> {
 pub(in crate::plugin) const SUPPORTED_CAPABILITIES: &[&str] = &[
     "lighting",
     "cooling",
-    "fan",
     "sensors",
     "battery",
     "connection",
@@ -3621,7 +3620,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "hwmon",
-            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ncapabilities: [sensors, fan]\ntransports:\n  hwmon: {}\n",
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ncapabilities: [sensors, cooling]\ntransports:\n  hwmon: {}\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();

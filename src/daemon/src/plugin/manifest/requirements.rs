@@ -119,7 +119,7 @@ pub fn derive_for(manifest: &PluginManifest, os: &str) -> Vec<DerivedRequirement
         if manifest
             .capabilities
             .iter()
-            .any(|capability| capability == "fan" || capability == "cooling")
+            .any(|capability| capability == "cooling")
         {
             out.push(DerivedRequirement {
                 requirement: PluginRequirement::LinuxHwmon {
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn hwmon_read_and_fan_control_are_inferred() {
         let manifest = manifest(
-            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ncapabilities: [sensors, fan]\ntransports:\n  hwmon: {}\n",
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ncapabilities: [sensors, cooling]\ntransports:\n  hwmon: {}\n",
         );
         let requirements = derive_for(&manifest, "linux");
         assert_eq!(requirements.len(), 2);
