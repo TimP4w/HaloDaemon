@@ -273,7 +273,11 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "primary got exactly one ping");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "primary got exactly one ping"
+        );
     }
 
     #[tokio::test]

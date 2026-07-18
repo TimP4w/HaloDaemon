@@ -571,7 +571,8 @@ pub async fn usb_hotplug_monitor(app: Arc<crate::state::AppState>) {
         };
 
         for id in stale_usb_ids(&registered, &present) {
-            crate::registry::usecases::registration::unregister_device_and_children(&app, &id).await;
+            crate::registry::usecases::registration::unregister_device_and_children(&app, &id)
+                .await;
         }
 
         if present != last_present {

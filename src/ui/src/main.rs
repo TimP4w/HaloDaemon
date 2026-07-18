@@ -14,9 +14,9 @@ i18n!("locales", fallback = "en");
 mod app;
 mod domain;
 mod runtime;
-mod ui;
 #[cfg(all(test, target_os = "linux", feature = "screenshots"))]
 mod screenshots;
+mod ui;
 #[cfg(not(target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;

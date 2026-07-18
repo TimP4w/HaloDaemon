@@ -159,7 +159,6 @@ inventory::submit!(TransportScanner {
     scan: |app| Box::pin(scan_usb_non_hid(app)),
 });
 
-
 pub async fn scan_usb_non_hid(app: Arc<crate::state::AppState>) {
     use rusb::{Context, UsbContext};
     let ctx = match Context::new() {
