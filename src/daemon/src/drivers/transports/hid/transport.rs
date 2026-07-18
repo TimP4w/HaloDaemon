@@ -304,7 +304,40 @@ pub struct HidTransport {
     use_feature_report: bool,
 }
 
+/// Which GET_REPORT ioctl a scoped report read issues.
+#[derive(Clone, Copy)]
+enum ReportKind {
+    Feature,
+    Input,
+}
+
 impl HidTransport {
+    /// Read a feature or input report for `report_id`. Shares the write handle
+    /// under the write lock (a GET_REPORT ioctl must not race a concurrent
+    /// write on the same fd) and the same hang timeout as `feature_exchange`.
+    async fn get_report(&self, report_id: u8, size: usize, kind: ReportKind) -> Result<Vec<u8>> {
+        let state = self.io.write_access(0).await?;
+        let dev = Arc::clone(&state.primary.write_dev);
+        timeout(Duration::from_millis(500), async {
+            tokio::task::spawn_blocking(move || {
+                let mut buf = vec![0u8; size + 1];
+                buf[0] = report_id;
+                let guard = dev.blocking_lock();
+                let n = match kind {
+                    ReportKind::Feature => guard.get_feature_report(&mut buf),
+                    ReportKind::Input => guard.get_input_report(&mut buf),
+                }
+                .map_err(|e| anyhow::anyhow!("HID report read error: {}", e))?;
+                buf.truncate(n);
+                Ok(buf)
+            })
+            .await
+            .context("spawn_blocking panicked")?
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("get report timed out"))?
+    }
+
     /// Open a HID device by path.
     ///
     /// `report_size` controls framing:
@@ -567,6 +600,32 @@ impl HidTransportTrait for HidTransport {
         })
         .await
         .map_err(|_| anyhow::anyhow!("feature exchange timed out"))?
+    }
+
+    async fn send_feature_report(&self, data: &[u8]) -> Result<()> {
+        let framed = self.frame(data);
+        let state = self.io.write_access(framed.len()).await?;
+        let dev = Arc::clone(&state.primary.write_dev);
+        timeout(Duration::from_millis(500), async {
+            tokio::task::spawn_blocking(move || {
+                dev.blocking_lock()
+                    .send_feature_report(&framed)
+                    .map(|_| ())
+                    .map_err(|e| anyhow::anyhow!("feature write error: {}", e))
+            })
+            .await
+            .context("spawn_blocking panicked")?
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("send_feature_report timed out"))?
+    }
+
+    async fn get_feature_report(&self, report_id: u8, size: usize) -> Result<Vec<u8>> {
+        self.get_report(report_id, size, ReportKind::Feature).await
+    }
+
+    async fn get_input_report(&self, report_id: u8, size: usize) -> Result<Vec<u8>> {
+        self.get_report(report_id, size, ReportKind::Input).await
     }
 
     async fn read_nonblocking(&self, size: usize) -> Result<Vec<u8>> {

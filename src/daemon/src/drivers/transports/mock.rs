@@ -82,6 +82,28 @@ pub mod test_transport {
                 .ok_or_else(|| anyhow::anyhow!("MockTransport: no more responses queued"))
         }
 
+        async fn send_feature_report(&self, data: &[u8]) -> Result<()> {
+            self.rate.write_access(data.len()).await?;
+            self.written.lock().await.push(data.to_vec());
+            Ok(())
+        }
+
+        async fn get_feature_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
+            self.responses
+                .lock()
+                .await
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("MockTransport: no more responses queued"))
+        }
+
+        async fn get_input_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
+            self.responses
+                .lock()
+                .await
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("MockTransport: no more responses queued"))
+        }
+
         async fn defer_event(&self, _data: &[u8]) -> Result<()> {
             Ok(())
         }

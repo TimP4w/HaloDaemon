@@ -306,9 +306,20 @@ pub struct UsbConfig {
 #[serde(deny_unknown_fields)]
 pub struct UsbMatch {
     pub vid: u16,
+    #[serde(default)]
     pub pid: u16,
+    /// Match any of several product ids (device families). Takes precedence over
+    /// `pid` when non-empty, mirroring [`HidMatch::pids`].
+    #[serde(default)]
+    pub pids: Vec<u16>,
     #[serde(default)]
     pub interface: u8,
+    /// Restrict the match to a device reporting this serial (identical units).
+    #[serde(default)]
+    pub serial: Option<String>,
+    /// Per-device USB write ceiling, mirroring [`HidMatch::max_bytes_per_sec`].
+    #[serde(default)]
+    pub max_bytes_per_sec: Option<u32>,
 }
 
 /// Executables a command plugin may launch. Names are deliberately bare
@@ -805,6 +816,9 @@ pub struct DeviceSpec {
     pub interface: Option<i32>,
     #[serde(skip)]
     pub generic_hid: bool,
+    /// USB serial the match is restricted to, if declared.
+    #[serde(skip)]
+    pub serial: Option<String>,
 
     // ── SMBus (match + scan declaration in one) ──────────────────────────
     /// Bus family to scan/match: "chipset" or "gpu".
@@ -1945,13 +1959,16 @@ fn normalize_device_matches(manifest: &mut PluginManifest) -> Result<()> {
             device.max_bytes_per_sec = hid.max_bytes_per_sec;
             device.generic_hid = hid.any;
         } else if let Some(usb) = &device.r#match.usb {
-            if usb.vid == 0 || usb.pid == 0 {
-                bail!("usb match requires non-zero vid and pid");
+            if usb.vid == 0 || (usb.pid == 0 && usb.pids.is_empty()) {
+                bail!("usb match requires a non-zero vid and pid (or pids)");
             }
             device.transport = "usb".to_owned();
             device.vid = Some(usb.vid);
-            device.pid = Some(usb.pid);
+            device.pid = (usb.pid != 0).then_some(usb.pid);
+            device.pids = usb.pids.clone();
             device.interface = Some(usb.interface.into());
+            device.serial = usb.serial.clone();
+            device.max_bytes_per_sec = usb.max_bytes_per_sec;
         } else if let Some(smbus) = &device.r#match.smbus {
             device.transport = "smbus".to_owned();
             device.bus = Some(smbus.bus.clone());
@@ -3917,6 +3934,67 @@ mod tests {
         let manifest = parse_manifest_from_dir(&dir).unwrap();
         assert_eq!(manifest.devices[0].transport, "usb");
         assert_eq!(manifest.devices[0].vid, Some(0x1234));
+    }
+
+    #[test]
+    fn usb_match_normalizes_pids_serial_and_write_ceiling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "usb_family",
+            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: Panel\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pids: [0x1, 0x2], serial: ABC123, max_bytes_per_sec: 1500, interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            ENTRY_LUA,
+        );
+        let device = &parse_manifest_from_dir(&dir).unwrap().devices[0];
+        assert_eq!(device.transport, "usb");
+        assert_eq!(device.vid, Some(0x1234));
+        assert_eq!(device.pid, None);
+        assert_eq!(device.pids, vec![0x1, 0x2]);
+        assert_eq!(device.serial.as_deref(), Some("ABC123"));
+        assert_eq!(device.max_bytes_per_sec, Some(1500));
+    }
+
+    #[test]
+    fn usb_backend_matches_any_declared_pid_within_serial_scope() {
+        use crate::registry::discovery::DiscoveryHandle;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "usb_scope",
+            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 0x1234, pids: [0x1, 0x2], serial: ABC, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        let spec = &manifest.devices[0];
+        let port = [1u8];
+        let handle = |pid, serial| DiscoveryHandle::UsbNonHid {
+            vid: 0x1234,
+            pid,
+            bus: 1,
+            address: 2,
+            port_path: &port,
+            serial,
+            interface_number: 0,
+        };
+        assert!(spec.matches(&handle(0x2, Some("ABC"))));
+        assert!(!spec.matches(&handle(0x9, Some("ABC")))); // undeclared pid
+        assert!(!spec.matches(&handle(0x1, Some("XYZ")))); // wrong serial
+        assert!(!spec.matches(&handle(0x1, None))); // serial-scoped, none reported
+    }
+
+    #[test]
+    fn usb_match_requires_vid_and_pid_or_pids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "usb_no_ids",
+            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 0x1234, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&dir)
+            .unwrap_err()
+            .to_string()
+            .contains("vid and pid (or pids)"));
     }
 
     #[test]

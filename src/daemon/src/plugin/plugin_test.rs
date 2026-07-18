@@ -136,6 +136,20 @@ impl HidTransport for RecordingStream {
         self.write_then_read(data, size).await
     }
 
+    async fn send_feature_report(&self, data: &[u8]) -> Result<()> {
+        self.rate.write_access(data.len()).await?;
+        self.record("feature", data);
+        Ok(())
+    }
+
+    async fn get_feature_report(&self, _report_id: u8, size: usize) -> Result<Vec<u8>> {
+        self.read(size).await
+    }
+
+    async fn get_input_report(&self, _report_id: u8, size: usize) -> Result<Vec<u8>> {
+        self.read(size).await
+    }
+
     async fn write_companion(&self, data: &[u8]) -> Result<()> {
         if !self.companion {
             anyhow::bail!("companion collection not available on this recording stream");

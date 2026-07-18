@@ -186,9 +186,33 @@ impl UserData for TransportApi {
         stream_method!(bytes_unit hid, "defer_event", defer_event);
         stream_method!(bytes_size_str stream, "write_then_read", write_then_read);
         stream_method!(bytes_size_str hid, "feature_exchange", feature_exchange);
+        stream_method!(bytes_unit hid, "send_feature_report", send_feature_report);
         stream_method!(bytes_unit hid, "write_companion", write_companion);
         stream_method!(size_str hid, "read_companion", read_companion);
         stream_method!(bytes_size_str hid, "write_then_read_companion", write_then_read_companion);
+
+        methods.add_method(
+            "get_feature_report",
+            |lua, this, (report_id, size): (u8, usize)| {
+                check_alloc(size)?;
+                let data = this
+                    .handle
+                    .block_on(this.hid()?.get_feature_report(report_id, size))
+                    .map_err(to_lua_err)?;
+                lua.create_string(&data)
+            },
+        );
+        methods.add_method(
+            "get_input_report",
+            |lua, this, (report_id, size): (u8, usize)| {
+                check_alloc(size)?;
+                let data = this
+                    .handle
+                    .block_on(this.hid()?.get_input_report(report_id, size))
+                    .map_err(to_lua_err)?;
+                lua.create_string(&data)
+            },
+        );
 
         methods.add_method("has_companion", |_, this, ()| {
             Ok(this.hid()?.has_companion())
@@ -461,6 +485,44 @@ mod tests {
             self.writes += 1;
             Ok(())
         }
+    }
+
+    #[test]
+    fn hid_report_methods_round_trip_through_lua() {
+        use crate::drivers::transports::mock::test_transport::MockTransport;
+        use std::sync::Arc;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let transport = Arc::new(MockTransport::new(vec![
+            vec![0x00, 0xAA, 0xBB], // get_feature_report reply
+            vec![0x00, 0xCC],       // get_input_report reply
+        ]));
+        let io = PluginIo::Stream {
+            transport: transport.clone() as Arc<dyn Transport>,
+            usb: None,
+        };
+        let api = TransportApi::new(io, rt.handle().clone());
+        let lua = mlua::Lua::new();
+        lua.globals().set("t", api).unwrap();
+        let out: mlua::Table = lua
+            .load(
+                r#"
+                t:send_feature_report(string.char(0x01, 0x02))
+                return { t:get_feature_report(0x00, 2), t:get_input_report(0x00, 1) }
+            "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(
+            out.get::<mlua::String>(1).unwrap().as_bytes(),
+            &[0x00, 0xAA, 0xBB]
+        );
+        assert_eq!(
+            out.get::<mlua::String>(2).unwrap().as_bytes(),
+            &[0x00, 0xCC]
+        );
+        let written = rt.block_on(async { transport.written.lock().await.clone() });
+        assert_eq!(written, vec![vec![0x01u8, 0x02]]);
     }
 
     #[test]

@@ -15,6 +15,7 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
         vid,
         pid,
         interface_number,
+        serial,
         ..
     } = handle
     else {
@@ -23,6 +24,10 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     spec.vid == Some(*vid)
         && (spec.pid == Some(*pid) || (!spec.pids.is_empty() && spec.pids.contains(pid)))
         && spec.interface == Some((*interface_number).into())
+        && spec
+            .serial
+            .as_deref()
+            .is_none_or(|want| *serial == Some(want))
 }
 
 pub(crate) fn open_usb(

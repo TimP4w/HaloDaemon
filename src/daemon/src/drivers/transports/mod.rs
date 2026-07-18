@@ -134,6 +134,29 @@ pub trait HidTransport: Transport {
     /// `response_size` excludes the leading report-ID byte.
     async fn feature_exchange(&self, data: &[u8], response_size: usize) -> Result<Vec<u8>>;
 
+    /// Send a feature report with no reply — the explicit write half of
+    /// `feature_exchange`. The leading byte of `data` is the report id.
+    async fn send_feature_report(&self, _data: &[u8]) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "send_feature_report is not supported by this transport"
+        ))
+    }
+
+    /// Request a feature report for `report_id`; `size` excludes the leading
+    /// report-id byte, matching `feature_exchange`.
+    async fn get_feature_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
+        Err(anyhow::anyhow!(
+            "get_feature_report is not supported by this transport"
+        ))
+    }
+
+    /// Request an input report for `report_id`; `size` excludes the report-id byte.
+    async fn get_input_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
+        Err(anyhow::anyhow!(
+            "get_input_report is not supported by this transport"
+        ))
+    }
+
     async fn read_nonblocking(&self, size: usize) -> Result<Vec<u8>> {
         self.read(size).await
     }

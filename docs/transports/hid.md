@@ -28,7 +28,10 @@ and output across multiple collections.
 | `read_nonblocking(size)` | Read an available report without waiting. |
 | `write_then_read(data, size)` | Write a report and wait for a reply. |
 | `write_many(packets)` | Write several reports in order. |
-| `feature_exchange(data, size)` | Perform a HID feature-report exchange. |
+| `feature_exchange(data, size)` | Perform a HID feature-report exchange (send then get). |
+| `send_feature_report(data)` | Send a feature report with no reply. |
+| `get_feature_report(report_id, size)` | Read a feature report for `report_id`. |
+| `get_input_report(report_id, size)` | Read an input report for `report_id`. |
 | `read_any(size)` | Read from either the primary or companion collection. |
 | `defer_event(data)` | Return an unrelated report to the plugin event path. |
 | `has_companion()` | Check whether the declared companion collection is open. |
