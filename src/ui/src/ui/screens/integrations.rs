@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use egui::{Sense, Vec2};
+use egui::{Align2, Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use halod_shared::types::{
     AppState, IntegrationLifecycleState, IntegrationSetupMode, IntegrationSetupPhase, PluginInfo,
     PluginIssue, PluginIssueKind, PluginKind,
@@ -128,9 +128,11 @@ impl IntegrationsUi {
     ) {
         self.sync_logos(ui.ctx(), cmd, &state.plugins.plugins, plugin_assets);
         widgets::page_frame(ui, |ui| self.body(ui, state, cmd));
-        widgets::issue_modal_slot(ui.ctx(), "integration_issue", &mut self.issue_modal);
         self.reset_setup_modal(ui.ctx(), cmd);
         self.setup_modal(ui.ctx(), state, cmd);
+        // Rendered last so a "Details" opened from inside the setup modal (or a
+        // card's error bar) stacks on top of it.
+        widgets::issue_modal_slot(ui.ctx(), "integration_issue", &mut self.issue_modal);
     }
 
     /// Request the logo of every visible integration that hasn't been fetched
@@ -405,61 +407,20 @@ impl IntegrationsUi {
         };
         let mut close = false;
         let title = format!("Connect {}", plugin.name);
+        let time = ctx.input(|i| i.time) as f32;
         let dismissed =
-            widgets::modal_frame_raw(ctx, "integration_setup", &title, 620.0, 470.0, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(setup_phase_label(&setup))
-                            .font(theme::mono(10.5))
-                            .color(theme::TEXT_FAINT),
-                    );
-                });
-                ui.add_space(theme::SPACE_6);
+            widgets::modal_frame_raw(ctx, "integration_setup", &title, 620.0, 500.0, |ui| {
+                setup_rail(ui, &setup);
+                ui.add_space(theme::SPACE_8);
                 match setup.phase {
-                    IntegrationSetupPhase::Init => {
-                        self.setup_init(ui, &plugin, &setup, cmd);
-                    }
+                    IntegrationSetupPhase::Init => self.setup_init(ui, &plugin, &setup, cmd),
                     IntegrationSetupPhase::Discovering => {
-                        self.setup_discovery(ui, &plugin, &setup, cmd);
+                        self.setup_discovery(ui, &plugin, &setup, cmd, time)
                     }
                     IntegrationSetupPhase::Pairing => {
-                        self.setup_pairing(ui, &plugin, &setup, cmd);
+                        self.setup_pairing(ui, &plugin, &setup, cmd, time)
                     }
-                    IntegrationSetupPhase::Done => {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(70.0);
-                            let (symbol, color, heading) = if setup.success {
-                                ("✓", theme::ONLINE, format!("{} connected", plugin.name))
-                            } else {
-                                ("!", theme::TRAFFIC_RED, "Setup failed".to_owned())
-                            };
-                            ui.label(egui::RichText::new(symbol).size(42.0).color(color));
-                            ui.label(
-                                egui::RichText::new(heading)
-                                    .font(theme::heading())
-                                    .color(theme::TEXT),
-                            );
-                            if let Some(error) = &setup.error {
-                                ui.label(
-                                    egui::RichText::new(error)
-                                        .font(theme::body_sm())
-                                        .color(theme::TEXT_MUT),
-                                );
-                            }
-                        });
-                        ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
-                            if widgets::button(
-                                ui,
-                                "Finish",
-                                ButtonKind::Primary,
-                                egui::vec2(110.0, 40.0),
-                            )
-                            .clicked()
-                            {
-                                close = true;
-                            }
-                        });
-                    }
+                    IntegrationSetupPhase::Done => close = setup_done(ui, &plugin, &setup),
                 }
             });
         if dismissed || close {
@@ -481,32 +442,29 @@ impl IntegrationsUi {
         cmd: &CommandTx,
     ) {
         if setup.selected_mode.is_none() && setup.modes.len() > 1 {
-            ui.label(
-                egui::RichText::new("How should Halo find the device?")
-                    .font(theme::heading())
-                    .color(theme::TEXT),
-            );
+            step_heading(ui, "How should Halo find it?");
+            step_subtext(ui, "Choose how to locate the device on your network.");
             ui.add_space(theme::SPACE_6);
-            for (mode, label, detail) in [
-                (
-                    IntegrationSetupMode::Automatic,
-                    "Find devices automatically",
-                    "Search the local network using this integration's declared discovery services.",
-                ),
-                (
-                    IntegrationSetupMode::Manual,
-                    "Enter connection details",
-                    "Configure the address and other required values yourself.",
-                ),
-            ] {
-                if setup.modes.contains(&mode)
-                    && ui
-                        .button(format!("{label}\n{detail}"))
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                {
-                    send_setup_mode(cmd, &plugin.id, mode);
-                }
+            if setup.modes.contains(&IntegrationSetupMode::Automatic)
+                && option_card(
+                    ui,
+                    paint_scan_icon,
+                    "Find automatically",
+                    "Scan the local network using this integration's discovery services.",
+                )
+            {
+                send_setup_mode(cmd, &plugin.id, IntegrationSetupMode::Automatic);
+            }
+            ui.add_space(theme::SPACE_5);
+            if setup.modes.contains(&IntegrationSetupMode::Manual)
+                && option_card(
+                    ui,
+                    paint_fields_icon,
+                    "Enter details",
+                    "Type the address and required values yourself.",
+                )
+            {
+                send_setup_mode(cmd, &plugin.id, IntegrationSetupMode::Manual);
             }
             return;
         }
@@ -515,15 +473,10 @@ impl IntegrationsUi {
             .or_else(|| setup.modes.first().copied())
             .unwrap_or(IntegrationSetupMode::Manual);
         if mode == IntegrationSetupMode::Automatic {
-            ui.label(
-                egui::RichText::new("Find devices automatically")
-                    .font(theme::heading())
-                    .color(theme::TEXT),
-            );
-            ui.label(
-                egui::RichText::new("Halo will search the local network for compatible devices.")
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_MUT),
+            step_heading(ui, "Find automatically");
+            step_subtext(
+                ui,
+                "Halo will search the local network for compatible devices.",
             );
             ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
                 if widgets::button(ui, "Search", ButtonKind::Primary, egui::vec2(110.0, 40.0))
@@ -534,12 +487,9 @@ impl IntegrationsUi {
             });
             return;
         }
-        ui.label(
-            egui::RichText::new("Connection details")
-                .font(theme::heading())
-                .color(theme::TEXT),
-        );
-        ui.add_space(theme::SPACE_4);
+        step_heading(ui, "Connection details");
+        step_subtext(ui, "Enter the values Halo needs to reach the device.");
+        ui.add_space(theme::SPACE_5);
         seed_config_edit_if_needed(&mut self.config_edit, &plugin.id, &plugin.config_values);
         let edits = &mut self.config_edit.as_mut().expect("setup edit seeded").1;
         config_fields_editor(ui, plugin, edits);
@@ -566,46 +516,47 @@ impl IntegrationsUi {
         plugin: &PluginInfo,
         setup: &halod_shared::types::IntegrationSetupStatus,
         cmd: &CommandTx,
+        time: f32,
     ) {
-        ui.label(
-            egui::RichText::new("Choose a device")
-                .font(theme::heading())
-                .color(theme::TEXT),
-        );
-        ui.label(
-            egui::RichText::new(
-                setup
-                    .message
-                    .as_deref()
-                    .unwrap_or("Devices found on your local network"),
-            )
-            .font(theme::body_sm())
-            .color(theme::TEXT_MUT),
-        );
+        step_heading(ui, "Choose a device");
+        // While the worker is still probing, the daemon keeps `message` set and
+        // `candidates` empty (see the integration setup usecase).
+        if let Some(message) = &setup.message {
+            ui.add_space(theme::SPACE_6);
+            scanning_card(ui, message, time);
+            return;
+        }
+        step_subtext(ui, "Found on your local network");
         ui.add_space(theme::SPACE_5);
         if let Some(error) = &setup.error {
-            widgets::Banner::danger(error).show(ui);
+            self.setup_error_bar(ui, plugin, error);
             ui.add_space(theme::SPACE_4);
         }
-        if setup.candidates.is_empty() && setup.message.is_none() {
-            widgets::Banner::warn("No devices found. Refresh or enter the address manually.")
-                .show(ui);
-        }
-        for candidate in &setup.candidates {
-            let selected = self.setup_candidate.as_deref() == Some(candidate.id.as_str());
-            if ui
-                .selectable_label(selected, &candidate.name)
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-            {
-                self.setup_candidate = Some(candidate.id.clone());
-            }
+        if setup.candidates.is_empty() {
+            empty_state(
+                ui,
+                "No devices found",
+                "Make sure the device is powered and on the same network, then refresh — or enter the details manually.",
+            );
+        } else {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .max_height(230.0)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = theme::SPACE_5;
+                    for candidate in &setup.candidates {
+                        let selected =
+                            self.setup_candidate.as_deref() == Some(candidate.id.as_str());
+                        if device_row(ui, &candidate.name, &candidate.id, selected) {
+                            self.setup_candidate = Some(candidate.id.clone());
+                        }
+                    }
+                });
         }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
             ui.horizontal(|ui| {
-                if widgets::button(ui, "Continue", ButtonKind::Primary, egui::vec2(110.0, 40.0))
-                    .clicked()
-                {
+                let ready = self.setup_candidate.is_some();
+                if setup_primary(ui, "Continue", ready) {
                     if let Some(candidate_id) = self.setup_candidate.clone() {
                         crate::runtime::ipc::send(
                             cmd,
@@ -643,64 +594,69 @@ impl IntegrationsUi {
         plugin: &PluginInfo,
         setup: &halod_shared::types::IntegrationSetupStatus,
         cmd: &CommandTx,
+        time: f32,
     ) {
         if setup.message.is_some() && setup.external_url.is_none() {
+            ui.add_space(theme::SPACE_12);
             ui.vertical_centered(|ui| {
-                ui.add_space(90.0);
-                ui.spinner();
-                ui.add_space(theme::SPACE_5);
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(96.0), Sense::hover());
+                theme::glow(ui.painter(), rect.center(), 44.0, theme::PROGRESS_A, 0.28);
+                widgets::paint_spinner(ui.painter(), rect.center(), 46.0, time);
+                ui.add_space(theme::SPACE_9);
                 ui.label(
-                    egui::RichText::new(setup.message.as_deref().unwrap_or("Pairing…"))
-                        .font(theme::heading())
+                    RichText::new(setup.message.as_deref().unwrap_or("Pairing…"))
+                        .font(theme::bold(18.0))
                         .color(theme::TEXT),
                 );
+                ui.add_space(theme::SPACE_3);
                 ui.label(
-                    egui::RichText::new("Please wait while Halo completes the secure handshake.")
-                        .font(theme::body_sm())
+                    RichText::new("Waiting for the device to respond.")
+                        .font(theme::body_md())
                         .color(theme::TEXT_MUT),
                 );
+                ui.add_space(theme::SPACE_9);
+                widgets::progress_bar(ui, 320.0, 7.0, None);
             });
+            ui.ctx().request_repaint();
             return;
         }
         if let Some(url) = &setup.external_url {
             if self.opened_oauth_urls.insert(url.clone()) {
                 let _ = webbrowser::open(url);
             }
-            ui.label(
-                egui::RichText::new("Authorize in your browser")
-                    .font(theme::heading())
-                    .color(theme::TEXT),
-            );
-            ui.label("Halo is waiting for the secure OAuth2 callback.");
-            if widgets::button(
-                ui,
-                "Open browser",
-                ButtonKind::Primary,
-                egui::vec2(130.0, 40.0),
-            )
-            .clicked()
-            {
-                let _ = webbrowser::open(url);
-            }
+            step_heading(ui, "Authorize in your browser");
+            step_subtext(ui, "Halo is waiting for the secure OAuth2 callback.");
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
+                if widgets::button(
+                    ui,
+                    "Open browser",
+                    ButtonKind::Primary,
+                    egui::vec2(140.0, 40.0),
+                )
+                .clicked()
+                {
+                    let _ = webbrowser::open(url);
+                }
+            });
             return;
         }
-        ui.label(
-            egui::RichText::new(
-                setup
-                    .title
-                    .as_deref()
-                    .unwrap_or("Put the device in pairing mode"),
-            )
-            .font(theme::heading())
-            .color(theme::TEXT),
+        step_heading(
+            ui,
+            setup
+                .title
+                .as_deref()
+                .unwrap_or("Put the device in pairing mode"),
         );
-        ui.add_space(theme::SPACE_5);
+        ui.add_space(theme::SPACE_6);
+        pairing_hero(ui, &plugin.name, time);
+        ui.add_space(theme::SPACE_8);
         for (index, instruction) in setup.instructions.iter().enumerate() {
-            ui.label(format!("{}. {instruction}", index + 1));
+            instruction_row(ui, index + 1, instruction);
+            ui.add_space(theme::SPACE_5);
         }
         if let Some(error) = &setup.error {
-            ui.add_space(theme::SPACE_5);
-            widgets::Banner::danger(error).show(ui);
+            ui.add_space(theme::SPACE_3);
+            self.setup_error_bar(ui, plugin, error);
         }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
             ui.horizontal(|ui| {
@@ -708,7 +664,7 @@ impl IntegrationsUi {
                     ui,
                     "Start pairing",
                     ButtonKind::Primary,
-                    egui::vec2(130.0, 40.0),
+                    egui::vec2(140.0, 40.0),
                 )
                 .clicked()
                 {
@@ -733,20 +689,423 @@ impl IntegrationsUi {
             });
         });
     }
+
+    /// A compact one-line error with a "Details" action that opens the shared
+    /// issue modal (with copy) on the full text — so a long stack trace never
+    /// inflates the modal. Reuses the same bar/modal as a card's runtime error.
+    fn setup_error_bar(&mut self, ui: &mut egui::Ui, plugin: &PluginInfo, error: &str) {
+        let short = error
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or(error);
+        let details = t!("integrations.issue_details");
+        if widgets::Banner::danger(short)
+            .action(widgets::BannerAction::new(
+                &details,
+                ButtonKind::Ghost,
+                Vec2::new(90.0, 28.0),
+            ))
+            .show(ui)
+        {
+            self.issue_modal = Some((
+                t!("integrations.issue_modal_title", integration = &plugin.name).to_string(),
+                error.to_owned(),
+            ));
+        }
+    }
 }
 
-fn setup_phase_label(setup: &halod_shared::types::IntegrationSetupStatus) -> &'static str {
+/// The rail's four stages, and the zero-based index of the one now active.
+const RAIL_STEPS: [&str; 4] = ["Discover", "Prepare", "Pair", "Done"];
+
+fn rail_step(setup: &halod_shared::types::IntegrationSetupStatus) -> usize {
     match setup.phase {
-        IntegrationSetupPhase::Init | IntegrationSetupPhase::Discovering => "Connect · 1 / 4",
+        IntegrationSetupPhase::Init | IntegrationSetupPhase::Discovering => 0,
         IntegrationSetupPhase::Pairing
             if setup.message.is_some() && setup.external_url.is_none() =>
         {
-            "Pairing · 3 / 4"
+            2
         }
-        IntegrationSetupPhase::Pairing if setup.external_url.is_some() => "Authorize · 2 / 4",
-        IntegrationSetupPhase::Pairing => "Pairing mode · 2 / 4",
-        IntegrationSetupPhase::Done => "Done · 4 / 4",
+        IntegrationSetupPhase::Pairing => 1,
+        IntegrationSetupPhase::Done => 3,
     }
+}
+
+/// The gradient step rail across the modal top: filled bars for reached steps,
+/// a track bar for the rest, with the active step's label picked out in accent.
+fn setup_rail(ui: &mut egui::Ui, setup: &halod_shared::types::IntegrationSetupStatus) {
+    let cur = rail_step(setup);
+    let gap = theme::SPACE_5;
+    let cell = ((ui.available_width() - gap * (RAIL_STEPS.len() as f32 - 1.0))
+        / RAIL_STEPS.len() as f32)
+        .max(1.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for (i, label) in RAIL_STEPS.iter().enumerate() {
+            ui.vertical(|ui| {
+                ui.set_width(cell);
+                widgets::progress_bar(ui, cell, 4.0, Some(if i <= cur { 1.0 } else { 0.0 }));
+                ui.add_space(theme::SPACE_3);
+                let color = if i == cur {
+                    theme::PROGRESS_A
+                } else if i < cur {
+                    theme::TEXT_MUT
+                } else {
+                    theme::TEXT_FAINT2
+                };
+                ui.label(
+                    RichText::new(label.to_uppercase())
+                        .font(theme::micro())
+                        .color(color),
+                );
+            });
+        }
+    });
+}
+
+fn step_heading(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .font(theme::bold(18.0))
+            .color(theme::TEXT),
+    );
+}
+
+fn step_subtext(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(theme::SPACE_2);
+    ui.label(
+        RichText::new(text)
+            .font(theme::body_md())
+            .color(theme::TEXT_MUT),
+    );
+}
+
+/// A primary button that dims to non-interactive when `ready` is false.
+fn setup_primary(ui: &mut egui::Ui, label: &str, ready: bool) -> bool {
+    let size = egui::vec2(110.0, 40.0);
+    if ready {
+        widgets::button(ui, label, ButtonKind::Primary, size).clicked()
+    } else {
+        widgets::button_disabled(ui, label, ButtonKind::Primary, size);
+        false
+    }
+}
+
+/// One selectable method card (icon tile · title · description · chevron).
+/// Returns whether it was clicked this frame.
+fn option_card(
+    ui: &mut egui::Ui,
+    paint_icon: fn(&egui::Painter, Rect),
+    title: &str,
+    desc: &str,
+) -> bool {
+    let resp = egui::Frame::NONE
+        .fill(theme::CARD_BG)
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(theme::RADIUS_LG)
+        .inner_margin(Margin::same(16))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    let (tile, _) = ui.allocate_exact_size(Vec2::splat(46.0), Sense::hover());
+                    theme::paint_well(ui.painter(), tile, theme::RADIUS_MD);
+                    paint_icon(ui.painter(), tile);
+                    ui.add_space(theme::SPACE_7);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(title)
+                                .font(theme::heading())
+                                .color(theme::TEXT),
+                        );
+                        ui.add_space(theme::SPACE_1);
+                        ui.label(
+                            RichText::new(desc)
+                                .font(theme::body_sm())
+                                .color(theme::TEXT_MUT),
+                        );
+                    });
+                },
+                |ui| {
+                    ui.label(
+                        RichText::new("›")
+                            .font(theme::title())
+                            .color(theme::TEXT_FAINT),
+                    );
+                },
+            );
+        })
+        .response
+        .interact(Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    resp.clicked()
+}
+
+/// Concentric-ring "scan the network" glyph, centered in `tile`.
+fn paint_scan_icon(p: &egui::Painter, tile: Rect) {
+    let c = tile.center();
+    p.circle_stroke(c, 10.0, Stroke::new(1.5, theme::TEXT_FAINT2));
+    p.circle_stroke(c, 6.0, Stroke::new(1.5, theme::TEXT_MUT));
+    p.circle_filled(c, 2.6, theme::PROGRESS_A);
+}
+
+/// Stacked-lines "type the details" glyph, centered in `tile`.
+fn paint_fields_icon(p: &egui::Painter, tile: Rect) {
+    let c = tile.center();
+    for (i, (half, color)) in [
+        (10.0, theme::TEXT_FAINT2),
+        (10.0, theme::TEXT_MUT),
+        (6.0, theme::TEXT_FAINT2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let y = c.y - 6.0 + i as f32 * 6.0;
+        p.line_segment(
+            [Pos2::new(c.x - half, y), Pos2::new(c.x + half, y)],
+            Stroke::new(2.0, color),
+        );
+    }
+}
+
+/// A discovered-device row with a live-status dot and a radio selector.
+fn device_row(ui: &mut egui::Ui, name: &str, id: &str, selected: bool) -> bool {
+    let resp = egui::Frame::NONE
+        .fill(if selected {
+            theme::ROW_ACTIVE
+        } else {
+            theme::CARD_BG
+        })
+        .stroke(Stroke::new(
+            1.0,
+            if selected { theme::CYAN } else { theme::BORDER },
+        ))
+        .corner_radius(theme::RADIUS_MD)
+        .inner_margin(Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // `ui.horizontal` cross-centers each item against the tallest (the
+            // name+id block), so the status dot and radio sit on its midline —
+            // `egui::Sides` top-aligns the shorter side instead.
+            ui.horizontal(|ui| {
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(9.0), Sense::hover());
+                theme::glow(ui.painter(), dot.center(), 5.0, theme::ONLINE, 0.7);
+                ui.painter().circle_filled(dot.center(), 4.5, theme::ONLINE);
+                ui.add_space(theme::SPACE_5);
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(name)
+                            .font(theme::heading())
+                            .color(theme::TEXT),
+                    );
+                    if !id.is_empty() {
+                        ui.label(
+                            RichText::new(id)
+                                .font(theme::value_xs())
+                                .color(theme::TEXT_MUT),
+                        );
+                    }
+                });
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), 0.0),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                        let ring = if selected {
+                            theme::CYAN
+                        } else {
+                            theme::TEXT_FAINT2
+                        };
+                        ui.painter()
+                            .circle_stroke(r.center(), 9.0, Stroke::new(2.0, ring));
+                        if selected {
+                            ui.painter().circle_filled(r.center(), 5.0, theme::CYAN);
+                        }
+                    },
+                );
+            });
+        })
+        .response
+        .interact(Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    resp.clicked()
+}
+
+/// The "searching your network" card: spinner beside a live status line.
+fn scanning_card(ui: &mut egui::Ui, message: &str, time: f32) {
+    egui::Frame::NONE
+        .fill(theme::CARD_BG)
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(theme::RADIUS_LG)
+        .inner_margin(Margin::same(16))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+                widgets::paint_spinner(ui.painter(), rect.center(), 22.0, time);
+                ui.add_space(theme::SPACE_6);
+                ui.label(
+                    RichText::new(message)
+                        .font(theme::heading())
+                        .color(theme::TEXT),
+                );
+            });
+        });
+    ui.ctx().request_repaint();
+}
+
+/// Centered "nothing found" placeholder with a dashed marker.
+fn empty_state(ui: &mut egui::Ui, title: &str, hint: &str) {
+    ui.add_space(theme::SPACE_10);
+    ui.vertical_centered(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+        ui.painter()
+            .circle_stroke(rect.center(), 21.0, Stroke::new(1.5, theme::TEXT_FAINT2));
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "?",
+            theme::bold(18.0),
+            theme::TEXT_FAINT,
+        );
+        ui.add_space(theme::SPACE_5);
+        ui.label(
+            RichText::new(title)
+                .font(theme::heading())
+                .color(theme::TEXT),
+        );
+        ui.add_space(theme::SPACE_2);
+        ui.allocate_ui_with_layout(
+            Vec2::new(320.0, 0.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.label(
+                    RichText::new(hint)
+                        .font(theme::body_sm())
+                        .color(theme::TEXT_MUT),
+                );
+            },
+        );
+    });
+}
+
+/// The "press the link button" illustration: a pulsing beacon in a well.
+fn pairing_hero(ui: &mut egui::Ui, label: &str, time: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 132.0), Sense::hover());
+    theme::paint_well(ui.painter(), rect, theme::RADIUS_LG);
+    let c = rect.center();
+    for (phase, color) in [(0.0, theme::PROGRESS_A), (0.95, theme::PROGRESS_B)] {
+        let p = (time + phase).rem_euclid(1.9) / 1.9;
+        let alpha = (1.0 - p).clamp(0.0, 1.0);
+        ui.painter().circle_stroke(
+            c,
+            7.0 + p * 26.0,
+            Stroke::new(1.5, theme::a(color, 0.85 * alpha)),
+        );
+    }
+    theme::glow(ui.painter(), c, 16.0, theme::PROGRESS_A, 0.6);
+    ui.painter().circle_filled(
+        c,
+        7.0,
+        theme::lerp_color(theme::PROGRESS_A, egui::Color32::WHITE, 0.4),
+    );
+    ui.painter().text(
+        rect.left_bottom() + Vec2::new(14.0, -12.0),
+        Align2::LEFT_BOTTOM,
+        label.to_uppercase(),
+        theme::value_xs(),
+        theme::TEXT_FAINT2,
+    );
+    ui.ctx().request_repaint();
+}
+
+/// A numbered instruction line (accent index chip · text).
+fn instruction_row(ui: &mut egui::Ui, n: usize, text: &str) {
+    ui.horizontal(|ui| {
+        let (chip, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+        ui.painter()
+            .circle_filled(chip.center(), 12.0, theme::a(theme::PROGRESS_A, 0.14));
+        ui.painter().circle_stroke(
+            chip.center(),
+            12.0,
+            Stroke::new(1.0, theme::a(theme::PROGRESS_A, 0.5)),
+        );
+        ui.painter().text(
+            chip.center(),
+            Align2::CENTER_CENTER,
+            n.to_string(),
+            theme::value_sm(),
+            theme::PROGRESS_A,
+        );
+        ui.add_space(theme::SPACE_5);
+        ui.label(
+            RichText::new(text)
+                .font(theme::body_md())
+                .color(theme::TEXT_DIM),
+        );
+    });
+}
+
+/// The terminal step: a success (or failure) badge with a Finish action.
+/// Returns whether Finish was clicked.
+fn setup_done(
+    ui: &mut egui::Ui,
+    plugin: &PluginInfo,
+    setup: &halod_shared::types::IntegrationSetupStatus,
+) -> bool {
+    let mut finish = false;
+    ui.add_space(theme::SPACE_12);
+    ui.vertical_centered(|ui| {
+        if setup.success {
+            widgets::success_check(ui, 68.0);
+            ui.add_space(theme::SPACE_9);
+            ui.label(
+                RichText::new(format!("{} connected", plugin.name))
+                    .font(theme::bold(21.0))
+                    .color(theme::TEXT),
+            );
+            ui.add_space(theme::SPACE_3);
+            ui.label(
+                RichText::new("The device is connected and available in your workspace.")
+                    .font(theme::body_md())
+                    .color(theme::TEXT_DIM),
+            );
+        } else {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(68.0), Sense::hover());
+            ui.painter()
+                .circle_filled(rect.center(), 34.0, theme::a(theme::OFFLINE, 0.14));
+            ui.painter()
+                .circle_stroke(rect.center(), 34.0, Stroke::new(1.0, theme::OFFLINE));
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "!",
+                theme::bold(30.0),
+                theme::OFFLINE,
+            );
+            ui.add_space(theme::SPACE_9);
+            ui.label(
+                RichText::new("Setup failed")
+                    .font(theme::bold(21.0))
+                    .color(theme::TEXT),
+            );
+            if let Some(error) = &setup.error {
+                ui.add_space(theme::SPACE_3);
+                ui.label(
+                    RichText::new(error)
+                        .font(theme::body_sm())
+                        .color(theme::TEXT_MUT),
+                );
+            }
+        }
+    });
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
+        if widgets::button(ui, "Finish", ButtonKind::Primary, egui::vec2(110.0, 40.0)).clicked() {
+            finish = true;
+        }
+    });
+    finish
 }
 
 fn can_reset_setup(plugin: &PluginInfo) -> bool {
@@ -1079,14 +1438,32 @@ mod tests {
     }
 
     #[test]
-    fn pairing_progress_uses_the_third_modal_step() {
+    fn rail_advances_from_prepare_to_pair_when_the_handshake_starts() {
+        // "Press the link button" sits on Prepare; once the daemon posts a
+        // pairing message (and it isn't the OAuth browser step), the rail
+        // advances to Pair — but an OAuth handshake stays on Prepare/authorize.
         let mut setup = halod_shared::types::IntegrationSetupStatus {
             phase: IntegrationSetupPhase::Pairing,
             ..Default::default()
         };
-        assert_eq!(setup_phase_label(&setup), "Pairing mode · 2 / 4");
+        assert_eq!(rail_step(&setup), 1);
         setup.message = Some("Pairing…".into());
-        assert_eq!(setup_phase_label(&setup), "Pairing · 3 / 4");
+        assert_eq!(rail_step(&setup), 2);
+        setup.external_url = Some("https://example/oauth".into());
+        assert_eq!(rail_step(&setup), 1);
+    }
+
+    #[test]
+    fn rail_covers_discover_through_done() {
+        let step = |phase| {
+            rail_step(&halod_shared::types::IntegrationSetupStatus {
+                phase,
+                ..Default::default()
+            })
+        };
+        assert_eq!(step(IntegrationSetupPhase::Init), 0);
+        assert_eq!(step(IntegrationSetupPhase::Discovering), 0);
+        assert_eq!(step(IntegrationSetupPhase::Done), 3);
     }
 
     #[test]

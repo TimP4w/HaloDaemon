@@ -180,20 +180,29 @@ fn config_field_row(
             .max_rect(rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    left.vertical(|ui| {
-        ui.label(
-            egui::RichText::new(&f.label)
-                .font(theme::body_md())
-                .color(theme::TEXT),
-        );
-        if let Some(help) = &f.help {
+    // Center the label block against the row height (so a subtitle centers on the
+    // gap between the two lines): a content-height block allocated into a
+    // `Center` layout is what centers it — a full-height `vertical()` child would
+    // top-align instead. Mirrors `widgets::setting_row`.
+    left.allocate_ui_with_layout(
+        egui::vec2((rect.width() - 220.0).max(120.0), 0.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
             ui.label(
-                egui::RichText::new(help)
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_FAINT),
+                egui::RichText::new(&f.label)
+                    .font(theme::body_md())
+                    .color(theme::TEXT),
             );
-        }
-    });
+            if let Some(help) = &f.help {
+                ui.add_space(theme::SPACE_1);
+                ui.label(
+                    egui::RichText::new(help)
+                        .font(theme::body_sm())
+                        .color(theme::TEXT_FAINT),
+                );
+            }
+        },
+    );
 
     let mut right = ui.new_child(
         egui::UiBuilder::new()

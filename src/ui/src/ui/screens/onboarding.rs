@@ -14,7 +14,7 @@ use halod_shared::types::{
 
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
-use crate::ui::{icons, theme};
+use crate::ui::theme;
 
 const WELCOME: u8 = 0;
 const HEALTH: u8 = 1;
@@ -270,7 +270,8 @@ fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
             ui.add_space(theme::SPACE_9);
             match debug {
                 None => {
-                    ui.spinner();
+                    widgets::spinner(ui, 22.0);
+                    ui.add_space(theme::SPACE_4);
                     ui.label(
                         RichText::new(t!("onboarding.health_checking"))
                             .font(theme::body_md())
@@ -487,14 +488,7 @@ fn step_plugins(
                         );
                         ui.add_space(theme::SPACE_7);
                         if retrying {
-                            ui.add(
-                                egui::ProgressBar::new(0.35)
-                                    .desired_width(ui.available_width())
-                                    .desired_height(8.0)
-                                    .fill(theme::CYAN)
-                                    .animate(true),
-                            );
-                            ui.ctx().request_repaint();
+                            widgets::progress_bar(ui, ui.available_width(), 8.0, None);
                         } else if widgets::button(
                             ui,
                             &t!("onboarding.plugins_retry"),
@@ -518,13 +512,7 @@ fn step_plugins(
                         .color(theme::TEXT_FAINT),
                 );
                 ui.add_space(theme::SPACE_7);
-                ui.add(
-                    egui::ProgressBar::new(0.35)
-                        .desired_width(520.0)
-                        .desired_height(8.0)
-                        .fill(theme::CYAN)
-                        .animate(true),
-                );
+                widgets::progress_bar(ui, 520.0, 8.0, None);
             }
             if !candidates.is_empty() {
                 egui::ScrollArea::vertical()
@@ -556,17 +544,7 @@ fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &AppState, plugins: &[
     // with the top-biased form pages.
     ui.add_space((BODY_HEIGHT - 180.0) / 2.0);
     ui.vertical_centered(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(76.0), Sense::hover());
-        ui.painter()
-            .circle_filled(rect.center(), 38.0, theme::hex(0x12211a));
-        ui.painter()
-            .circle_stroke(rect.center(), 38.0, Stroke::new(1.0, theme::hex(0x2b6b45)));
-        icons::draw(
-            ui,
-            egui::Rect::from_center_size(rect.center(), Vec2::splat(38.0)),
-            icons::Icon::Check,
-            theme::ONLINE,
-        );
+        widgets::success_check(ui, 76.0);
         ui.add_space(theme::SPACE_10);
         ui.label(
             RichText::new(t!("onboarding.done_title"))

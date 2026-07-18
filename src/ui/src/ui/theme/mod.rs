@@ -52,6 +52,18 @@ pub const ONLINE_TEXT: Color32 = hex(0x83c9a4);
 pub const OFFLINE: Color32 = hex(0xe05a6e);
 pub const OFFLINE_TEXT: Color32 = hex(0xc98b95);
 
+// ── Progress / loading ───────────────────────────────────────────────────────
+/// Loading gradient stops (lavender → magenta) shared by the ring spinner and
+/// the gradient loading bar, so every progress surface reads as one family.
+pub const PROGRESS_A: Color32 = hex(0xa78bfa);
+pub const PROGRESS_B: Color32 = hex(0xe879f9);
+/// Track behind a progress fill / under a spinner ring.
+pub const TRACK: Color32 = hex(0x221f2a);
+
+/// Success badge (the onboarding "done" check): deep-green disc + ring.
+pub const SUCCESS_FILL: Color32 = hex(0x12211a);
+pub const SUCCESS_RING: Color32 = hex(0x2b6b45);
+
 // ── Stat + battery accents ───────────────────────────────────────────────────
 pub const STAT_CYAN: Color32 = hex(0x5fb8d6);
 pub const STAT_PURPLE: Color32 = hex(0x9b7fe0);
