@@ -1493,6 +1493,10 @@ impl Device for LuaDevice {
         Some(self.plugin_id.clone())
     }
 
+    fn usb_location(&self) -> Option<crate::drivers::transports::usb::UsbLocation> {
+        self.transport.as_ref().and_then(PluginIo::usb_location)
+    }
+
     async fn wire_connection_type(&self) -> Option<halod_shared::types::ConnectionType> {
         ConnectionCapability::connection_status(self)
             .await

@@ -21,7 +21,7 @@ use anyhow::Result;
 use halod_shared::types::{Permission, WriteRateStatus};
 
 use crate::drivers::transports::smbus::{SmBusDevice, SmBusSyncOps};
-use crate::drivers::transports::usb::UsbCollection;
+use crate::drivers::transports::usb::{UsbCollection, UsbLocation};
 use crate::drivers::transports::Transport;
 use crate::registry::discovery::DiscoveryHandle;
 
@@ -64,6 +64,13 @@ impl PluginIo {
             PluginIo::Command(command) => command.unrecoverable_error(),
             #[cfg(target_os = "linux")]
             PluginIo::Hwmon(bus) => bus.unrecoverable_error(),
+            _ => None,
+        }
+    }
+
+    pub fn usb_location(&self) -> Option<UsbLocation> {
+        match self {
+            PluginIo::Usb(c) => c.primary_location(),
             _ => None,
         }
     }

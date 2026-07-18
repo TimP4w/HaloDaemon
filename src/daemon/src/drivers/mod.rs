@@ -213,6 +213,10 @@ pub trait Device: Send + Sync {
         DeviceIdentity::serial(self.hardware_serial())
     }
 
+    fn usb_location(&self) -> Option<transports::usb::UsbLocation> {
+        None
+    }
+
     fn conflict_origin(&self) -> DeviceOrigin {
         self.owning_plugin_id()
             .map(DeviceOrigin::Plugin)

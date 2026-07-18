@@ -313,6 +313,9 @@ impl UsbCollection for RecordingUsb {
     fn rate_status(&self) -> WriteRateStatus {
         self.rate.status()
     }
+    fn primary_location(&self) -> Option<crate::drivers::transports::usb::UsbLocation> {
+        None
+    }
 }
 
 /// Records the `halod.http` requests a plugin makes and replays queued responses,

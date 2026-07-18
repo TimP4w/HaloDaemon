@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Endpoint-oriented, scoped USB transport used by plugins.
 
-use std::{collections::HashMap, sync::Mutex, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
@@ -23,6 +27,15 @@ pub struct UsbSelector {
     pub port_path: Vec<u8>,
     pub serial: Option<String>,
     pub index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UsbLocation {
+    pub vid: u16,
+    pub pid: u16,
+    pub bus: u8,
+    pub address: u8,
+    pub port_path: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -288,6 +301,9 @@ pub trait UsbCollection: Send + Sync {
         timeout_ms: u64,
     ) -> Result<UsbControlResult>;
     fn rate_status(&self) -> WriteRateStatus;
+    /// The primary device's live enumeration coordinates, for liveness tracking.
+    /// `None` for backends (e.g. recordings) with no physical bus location.
+    fn primary_location(&self) -> Option<UsbLocation>;
 }
 
 pub struct UsbDevices {
@@ -376,6 +392,16 @@ impl UsbCollection for UsbDevices {
     }
     fn rate_status(&self) -> WriteRateStatus {
         UsbDevices::rate_status(self)
+    }
+    fn primary_location(&self) -> Option<UsbLocation> {
+        let s = self.devices.get("primary")?.locator();
+        Some(UsbLocation {
+            vid: s.vid,
+            pid: s.pid,
+            bus: s.bus?,
+            address: s.address?,
+            port_path: s.port_path.clone(),
+        })
     }
 }
 
@@ -472,4 +498,145 @@ fn validate_endpoint_descriptor(
         );
     }
     Ok(())
+}
+
+const USB_LIVENESS_POLL: Duration = Duration::from_secs(2);
+
+/// Every USB device's live enumeration coordinates, read without opening a
+/// handle (no serial). Cheap enough to poll: it only lists the bus.
+fn present_usb_locations() -> Vec<UsbLocation> {
+    let ctx = match Context::new() {
+        Ok(c) => c,
+        Err(e) => {
+            log::debug!("USB liveness: context init failed: {e}");
+            return Vec::new();
+        }
+    };
+    let devices = match ctx.devices() {
+        Ok(d) => d,
+        Err(e) => {
+            log::debug!("USB liveness: device list failed: {e}");
+            return Vec::new();
+        }
+    };
+    devices
+        .iter()
+        .filter_map(|d| {
+            let dd = d.device_descriptor().ok()?;
+            Some(UsbLocation {
+                vid: dd.vendor_id(),
+                pid: dd.product_id(),
+                bus: d.bus_number(),
+                address: d.address(),
+                port_path: d.port_numbers().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// Registered device ids whose USB location is no longer on the bus — their
+/// handle is stale and the device must be dropped so a reconnect rebuilds it.
+fn stale_usb_ids(
+    registered: &[(String, UsbLocation)],
+    present: &HashSet<UsbLocation>,
+) -> Vec<String> {
+    registered
+        .iter()
+        .filter(|(_, loc)| !present.contains(loc))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// Liveness monitor for plugin devices whose primary transport is a plain USB
+/// device (the sole transport with no HID hotplug tracking of its own). Each
+/// tick it drops any such device whose port vanished — closing its stale handle
+/// and worker — and, when the bus topology changed since the last tick, re-runs
+/// USB discovery so a reconnected device is rebuilt with a fresh handle and a
+/// fresh `initialize`. Keying the re-add on a topology change (not on
+/// "unregistered device present") keeps the open-every-device scan off the hot
+/// path — unrelated USB devices on the bus would otherwise look like perpetual
+/// arrivals and force a scan every tick.
+pub async fn usb_hotplug_monitor(app: Arc<crate::state::AppState>) {
+    let mut last_present: HashSet<UsbLocation> = present_usb_locations().into_iter().collect();
+    loop {
+        tokio::time::sleep(USB_LIVENESS_POLL).await;
+
+        let present: HashSet<UsbLocation> = present_usb_locations().into_iter().collect();
+        let registered: Vec<(String, UsbLocation)> = {
+            let devices = app.devices.read().await;
+            devices
+                .iter()
+                .filter_map(|d| Some((d.id().to_owned(), d.usb_location()?)))
+                .collect()
+        };
+
+        for id in stale_usb_ids(&registered, &present) {
+            crate::registry::usecases::registration::unregister_device_and_children(&app, &id).await;
+        }
+
+        if present != last_present {
+            crate::registry::discovery::scan_usb_non_hid(Arc::clone(&app)).await;
+        }
+        last_present = present;
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+
+    fn loc(vid: u16, pid: u16, bus: u8, address: u8, port: &[u8]) -> UsbLocation {
+        UsbLocation {
+            vid,
+            pid,
+            bus,
+            address,
+            port_path: port.to_vec(),
+        }
+    }
+
+    #[test]
+    fn present_device_is_not_stale() {
+        let l = loc(0x2109, 0x8884, 1, 5, &[3]);
+        let present = HashSet::from([l.clone()]);
+        assert!(stale_usb_ids(&[("evnia".into(), l)], &present).is_empty());
+    }
+
+    #[test]
+    fn absent_device_is_stale() {
+        let l = loc(0x2109, 0x8884, 1, 5, &[3]);
+        let present = HashSet::new();
+        assert_eq!(
+            stale_usb_ids(&[("evnia".into(), l)], &present),
+            vec!["evnia".to_owned()]
+        );
+    }
+
+    #[test]
+    fn reconnect_changes_address_so_old_location_is_stale_and_topology_changes() {
+        // Same physical port, new enumeration address after a reconnect.
+        let old = loc(0x2109, 0x8884, 1, 5, &[3]);
+        let new = loc(0x2109, 0x8884, 1, 9, &[3]);
+        let present = HashSet::from([new.clone()]);
+        let registered = vec![("evnia".to_owned(), old.clone())];
+        assert_eq!(
+            stale_usb_ids(&registered, &present),
+            vec!["evnia".to_owned()],
+            "the old-address handle is stale"
+        );
+        // The re-add scan is keyed on the bus set changing since the last tick.
+        let last_present = HashSet::from([old]);
+        assert_ne!(present, last_present, "reconnect changes the bus topology");
+    }
+
+    #[test]
+    fn steady_state_leaves_device_registered_and_topology_unchanged() {
+        let l = loc(0x2109, 0x8884, 1, 5, &[3]);
+        // An unrelated device sharing the bus must not perturb either decision.
+        let mouse = loc(0x046d, 0xc08b, 1, 7, &[2]);
+        let present = HashSet::from([l.clone(), mouse.clone()]);
+        assert!(stale_usb_ids(&[("evnia".into(), l)], &present).is_empty());
+        let last_present = HashSet::from([mouse, loc(0x2109, 0x8884, 1, 5, &[3])]);
+        assert_eq!(present, last_present, "no topology change → no rescan");
+    }
 }

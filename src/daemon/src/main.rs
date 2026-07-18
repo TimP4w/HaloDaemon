@@ -306,6 +306,24 @@ async fn run_daemon(
         || {},
     );
 
+    // Liveness watcher for plugin devices whose primary transport is a plain USB
+    // device (e.g. the Philips Evnia). HID hotplug does not cover them, so a
+    // disconnect would otherwise strand a stale handle forever.
+    let usb_hotplug_app = Arc::clone(&app);
+    supervisor.register(
+        "USB hotplug monitor",
+        "USB device hotplug monitoring stopped unexpectedly.",
+        move || {
+            let app = Arc::clone(&usb_hotplug_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(
+                    crate::drivers::transports::usb::usb_hotplug_monitor(app),
+                ))
+            })
+        },
+        || {},
+    );
+
     // Reconnect/liveness watcher for config-instantiated integration plugins
     // (offline-at-startup, mid-run drops, controller add/remove). Runs beside
     // the HID hotplug monitor.

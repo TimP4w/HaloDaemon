@@ -156,73 +156,76 @@ inventory::submit!(TransportScanner {
     name: "USB non-HID",
     detail: halod_shared::types::DiscoveryDetail::Usb,
     platform: None,
-    scan: |app| Box::pin(async move {
-        use rusb::{Context, UsbContext};
-        let ctx = match Context::new() {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("USB non-HID discovery failed: {e}");
-                return;
-            }
-        };
-        let present: Vec<(u16, u16, u8, u8, Vec<u8>, Option<String>, Vec<u8>)> = ctx
-            .devices()
-            .map(|devs| {
-                devs.iter()
-                    .filter_map(|d| {
-                        let dd = d.device_descriptor().ok()?;
-                        let serial = d
-                            .open()
-                            .ok()
-                            .and_then(|h| h.read_serial_number_string_ascii(&dd).ok());
-                        let mut interfaces: Vec<u8> = d
-                            .active_config_descriptor()
-                            .ok()
-                            .map(|c| {
-                                c.interfaces()
-                                    .flat_map(|i| i.descriptors())
-                                    .map(|i| i.interface_number())
-                                    .collect()
-                            })
-                            .unwrap_or_else(|| vec![0]);
-                        interfaces.sort_unstable();
-                        interfaces.dedup();
-                        Some((
-                            dd.vendor_id(),
-                            dd.product_id(),
-                            d.bus_number(),
-                            d.address(),
-                            d.port_numbers().unwrap_or_default(),
-                            serial,
-                            interfaces,
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_else(|e| {
-                log::warn!("USB non-HID: device list failed: {e}");
-                Default::default()
-            });
-
-        for (vid, pid, bus, address, port_path, serial, interfaces) in &present {
-            for interface_number in interfaces {
-                crate::registry::discovery::discover_handle(
-                    &app,
-                    crate::registry::discovery::DiscoveryHandle::UsbNonHid {
-                        vid: *vid,
-                        pid: *pid,
-                        bus: *bus,
-                        address: *address,
-                        port_path,
-                        serial: serial.as_deref(),
-                        interface_number: *interface_number,
-                    },
-                )
-                .await;
-            }
-        }
-    }),
+    scan: |app| Box::pin(scan_usb_non_hid(app)),
 });
+
+
+pub async fn scan_usb_non_hid(app: Arc<crate::state::AppState>) {
+    use rusb::{Context, UsbContext};
+    let ctx = match Context::new() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("USB non-HID discovery failed: {e}");
+            return;
+        }
+    };
+    let present: Vec<(u16, u16, u8, u8, Vec<u8>, Option<String>, Vec<u8>)> = ctx
+        .devices()
+        .map(|devs| {
+            devs.iter()
+                .filter_map(|d| {
+                    let dd = d.device_descriptor().ok()?;
+                    let serial = d
+                        .open()
+                        .ok()
+                        .and_then(|h| h.read_serial_number_string_ascii(&dd).ok());
+                    let mut interfaces: Vec<u8> = d
+                        .active_config_descriptor()
+                        .ok()
+                        .map(|c| {
+                            c.interfaces()
+                                .flat_map(|i| i.descriptors())
+                                .map(|i| i.interface_number())
+                                .collect()
+                        })
+                        .unwrap_or_else(|| vec![0]);
+                    interfaces.sort_unstable();
+                    interfaces.dedup();
+                    Some((
+                        dd.vendor_id(),
+                        dd.product_id(),
+                        d.bus_number(),
+                        d.address(),
+                        d.port_numbers().unwrap_or_default(),
+                        serial,
+                        interfaces,
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_else(|e| {
+            log::warn!("USB non-HID: device list failed: {e}");
+            Default::default()
+        });
+
+    for (vid, pid, bus, address, port_path, serial, interfaces) in &present {
+        for interface_number in interfaces {
+            discover_handle(
+                &app,
+                DiscoveryHandle::UsbNonHid {
+                    vid: *vid,
+                    pid: *pid,
+                    bus: *bus,
+                    address: *address,
+                    port_path,
+                    serial: serial.as_deref(),
+                    interface_number: *interface_number,
+                },
+            )
+            .await;
+        }
+    }
+}
 
 /// Convenience: find the matching descriptor, construct, and register.
 /// Under a [`DiscoveryScope::PluginSet`], silently skips handles outside it.
