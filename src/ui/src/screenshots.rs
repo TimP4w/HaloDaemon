@@ -433,6 +433,7 @@ fn lcd_state() -> AppState {
             {"id": "halo_lcd:gauge", "plugin_id": "halo_lcd", "name": "Gauge", "icon": "gauge.svg", "resize": "uniform"},
             {"id": "halo_lcd:clock", "plugin_id": "halo_lcd", "name": "Clock", "icon": "clock.svg", "resize": "uniform"},
             {"id": "halo_lcd:logo", "plugin_id": "halo_lcd", "name": "Logo", "icon": "logo.svg", "resize": "box"},
+            {"id": "halo_lcd:audio_spectrum", "plugin_id": "halo_lcd", "name": "Audio Spectrum", "icon": "audio_spectrum.svg", "resize": "box"},
         ]}},
         "profiles": {"active": "Gaming", "available": ["Default", "Gaming", "Silent"]},
         "gui": gui_onboarded(),
@@ -444,14 +445,161 @@ fn lcd_state() -> AppState {
 fn lcd_template() -> halod_shared::lcd_custom::CustomTemplateDef {
     serde_json::from_value(json!({
         "widgets": [
-            {"id": "w1", "widget": "halo_lcd:text", "x": 0.5, "y": 0.18, "scale": 1.0,
-             "color": {"r": 255, "g": 255, "b": 255}, "params": {"text": "CPU"}},
-            {"id": "w2", "widget": "halo_lcd:gauge", "x": 0.5, "y": 0.5, "scale": 1.6, "params": {}},
-            {"id": "w3", "widget": "halo_lcd:clock", "x": 0.5, "y": 0.8, "scale": 0.9, "params": {}},
+            {"id": "w1", "widget": "halo_lcd:logo", "x": 0.5, "y": 0.27, "scale": 0.9, "params": {}},
+            {"id": "w2", "widget": "halo_lcd:text", "x": 0.5, "y": 0.5, "scale": 0.7,
+             "color": {"r": 255, "g": 255, "b": 255}, "params": {"text": "Lorem ipsum"}},
+            {"id": "w3", "widget": "halo_lcd:audio_spectrum", "x": 0.5, "y": 0.72, "scale": 1.0, "params": {}},
         ],
         "style": {"accent": {"r": 0, "g": 200, "b": 220}, "background": {"kind": "flow"}, "font": "Noto Sans"},
     }))
     .expect("lcd template")
+}
+
+/// Widget content pixels come from the daemon's LCD render engine, which the
+/// headless harness has no connection to — without a reply the editor stage
+/// paints every widget as an empty box. Stand in a placeholder sprite per
+/// widget (a simple accent-tinted shape by kind) so the captured docs image
+/// shows populated widgets.
+fn placeholder_editor_render(
+    device_id: &str,
+    def: &halod_shared::lcd_custom::CustomTemplateDef,
+) -> ipc::DecodedEditorRender {
+    use halod_shared::lcd_custom::{WidgetRenderState, WidgetRenderStatus};
+
+    let mut sprites = Vec::new();
+    let mut signatures = Vec::new();
+    let mut widgets = Vec::new();
+    for (i, w) in def.widgets.iter().enumerate() {
+        let sig = i as u64 + 1;
+        let (pw, ph, rgba) = placeholder_sprite(w);
+        sprites.push(ipc::DecodedSprite {
+            id: w.id.clone(),
+            signature: sig,
+            w: pw as usize,
+            h: ph as usize,
+            rgba,
+        });
+        signatures.push((w.id.clone(), sig));
+        widgets.push(WidgetRenderState {
+            id: w.id.clone(),
+            status: WidgetRenderStatus::Ready,
+            signature: Some(sig),
+        });
+    }
+    ipc::DecodedEditorRender {
+        device_id: device_id.to_string(),
+        canvas_w: 240,
+        canvas_h: 240,
+        sprites,
+        signatures,
+        widgets,
+    }
+}
+
+/// Rasterize the app logo (`assets/icon.svg`) to a `target`-px-long-edge RGBA
+/// sprite, so the logo widget shows the real mark rather than a placeholder box.
+fn logo_sprite(target: u32) -> (u32, u32, Vec<u8>) {
+    use resvg::{tiny_skia, usvg};
+
+    const ICON: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/icon.svg"
+    ));
+    let tree = usvg::Tree::from_data(ICON, &usvg::Options::default()).expect("icon.svg parses");
+    let size = tree.size().to_int_size();
+    let scale = target as f32 / size.width().max(size.height()) as f32;
+    let w = ((size.width() as f32 * scale).ceil() as u32).max(1);
+    let h = ((size.height() as f32 * scale).ceil() as u32).max(1);
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("logo pixmap");
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    (w, h, pixmap.data().to_vec())
+}
+
+/// A placeholder RGBA sprite for one widget, shaped by kind and sized off its
+/// `scale`: a filled disc for round widgets (gauge/clock), a bar chart for the
+/// audio spectrum, a rounded bar for text/logo — tinted with the widget's colour
+/// or the accent fallback.
+fn placeholder_sprite(w: &halod_shared::lcd_custom::WidgetDef) -> (u32, u32, Vec<u8>) {
+    let s = w.scale.max(0.1);
+    let [r, g, b] = w.color.map(|c| [c.r, c.g, c.b]).unwrap_or([0, 200, 220]);
+    let set = |rgba: &mut Vec<u8>, x: u32, y: u32, pw: u32| {
+        let o = ((y * pw + x) * 4) as usize;
+        rgba[o] = r;
+        rgba[o + 1] = g;
+        rgba[o + 2] = b;
+        rgba[o + 3] = 220;
+    };
+
+    match w.widget.as_str() {
+        "halo_lcd:logo" => {
+            let target = ((56.0 * s) as u32).max(16);
+            logo_sprite(target)
+        }
+        "halo_lcd:gauge" | "halo_lcd:clock" => {
+            // Gauge reads as a ring; clock as a filled disc.
+            let ring = w.widget == "halo_lcd:gauge";
+            let d = ((52.0 * s) as u32).max(8);
+            let mut rgba = vec![0u8; (d * d * 4) as usize];
+            let (c, outer) = (d as f32 / 2.0, d as f32 / 2.0 - 1.0);
+            let inner = if ring { outer * 0.62 } else { 0.0 };
+            for y in 0..d {
+                for x in 0..d {
+                    let (dx, dy) = (x as f32 + 0.5 - c, y as f32 + 0.5 - c);
+                    let r2 = dx * dx + dy * dy;
+                    if r2 <= outer * outer && r2 >= inner * inner {
+                        set(&mut rgba, x, y, d);
+                    }
+                }
+            }
+            (d, d, rgba)
+        }
+        "halo_lcd:audio_spectrum" => {
+            let (pw, ph) = (((120.0 * s) as u32).max(16), ((40.0 * s) as u32).max(12));
+            let mut rgba = vec![0u8; (pw * ph * 4) as usize];
+            // A fixed sawtooth of bar heights — deterministic (no rng in tests).
+            let heights = [
+                0.4, 0.7, 0.5, 0.9, 0.6, 0.8, 0.35, 1.0, 0.55, 0.75, 0.45, 0.65,
+            ];
+            let bars = heights.len() as u32;
+            let bar_w = (pw / bars).max(1);
+            for i in 0..bars {
+                let h = ((ph as f32 * heights[i as usize]) as u32).max(1);
+                let x0 = i * bar_w;
+                for x in x0..(x0 + bar_w - 1).min(pw) {
+                    for y in (ph - h)..ph {
+                        set(&mut rgba, x, y, pw);
+                    }
+                }
+            }
+            (pw, ph, rgba)
+        }
+        _ => {
+            // Text: a rounded bar, widened for longer labels.
+            let chars = halod_shared::lcd_custom::param_str(w, "text")
+                .chars()
+                .count()
+                .max(3) as f32;
+            let base_w = 14.0 * chars + 18.0;
+            let (pw, ph) = (((base_w * s) as u32).max(16), ((30.0 * s) as u32).max(10));
+            let mut rgba = vec![0u8; (pw * ph * 4) as usize];
+            let (cx, cy) = (pw as f32 / 2.0, ph as f32 / 2.0);
+            let corner = 10.0_f32.min(pw.min(ph) as f32 / 2.0);
+            for y in 0..ph {
+                for x in 0..pw {
+                    let dx = (x as f32 + 0.5 - cx).abs() - (pw as f32 / 2.0 - corner);
+                    let dy = (y as f32 + 0.5 - cy).abs() - (ph as f32 / 2.0 - corner);
+                    if dx.max(dy) <= 0.0 || dx.max(0.0).hypot(dy.max(0.0)) <= corner {
+                        set(&mut rgba, x, y, pw);
+                    }
+                }
+            }
+            (pw, ph, rgba)
+        }
+    }
 }
 
 /// A single profile detail page with an app-focus auto-activate rule.
@@ -546,9 +694,11 @@ fn lcd() {
     ui.lcd.editor.def = lcd_template();
     ui.lcd.editor.seeded = true;
     ui.lcd.editor.selected.insert("w2".to_string());
+    let render = placeholder_editor_render("kraken-lcd", &ui.lcd.editor.def);
     capture("lcd", state, move |a| {
         a.page = Page::Device("kraken-lcd".into());
         a.device_ui = ui;
+        a.lcd_editor_render_cache = Some(render);
     });
 }
 
