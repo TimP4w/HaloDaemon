@@ -257,7 +257,7 @@ fn button_selector_card(
             // Key label chip — width grows to fit longer labels
             let label_g = p.layout_no_wrap(
                 btn.label.clone(),
-                theme::mono_semibold(11.0),
+                theme::semibold(11.0),
                 if selected {
                     Color32::WHITE
                 } else {
@@ -440,7 +440,7 @@ fn action_card(
                 // Selected button chip
                 let g = ui.painter().layout_no_wrap(
                     sel_label.to_string(),
-                    theme::mono_semibold(11.0),
+                    theme::semibold(11.0),
                     Color32::WHITE,
                 );
                 let (chip, _) =

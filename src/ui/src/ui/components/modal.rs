@@ -204,7 +204,7 @@ pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> 
         |ui| {
             ui.label(
                 egui::RichText::new(detail)
-                    .font(theme::mono(12.0))
+                    .font(theme::body(12.0))
                     .color(theme::TEXT_DIM),
             );
         },

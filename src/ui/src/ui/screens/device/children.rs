@@ -325,7 +325,7 @@ fn pair_slot_row(
             badge_rect.center(),
             Align2::CENTER_CENTER,
             &code,
-            theme::mono_bold(10.0),
+            theme::bold(10.0),
             theme::hex(0x0a0d13),
         );
         p.text(

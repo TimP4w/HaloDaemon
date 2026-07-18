@@ -243,7 +243,7 @@ fn channel_header(
             badge.center(),
             Align2::CENTER_CENTER,
             badge_label(&channel.name),
-            theme::mono_bold(11.0),
+            theme::bold(11.0),
             theme::CYAN,
         );
     }

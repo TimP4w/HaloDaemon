@@ -424,7 +424,7 @@ fn instance_row(
     );
     // Row 2: effect · channels · devices, truncated to leave room for SYNCED.
     let sub_font = theme::value_xs();
-    let synced_font = theme::mono(8.5);
+    let synced_font = theme::body(8.5);
     let synced_label = format!("⛓ {}", t!("canvas.synced"));
     let synced_w = if synced {
         p.layout_no_wrap(synced_label.clone(), synced_font.clone(), color)

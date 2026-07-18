@@ -197,7 +197,7 @@ fn library_header(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
         box_rect.center(),
         egui::Align2::CENTER_CENTER,
         if collapsed { "▸" } else { "▾" },
-        theme::mono(12.0),
+        theme::body(12.0),
         theme::TEXT_MUT,
     );
     p.text(
@@ -227,7 +227,7 @@ fn library_tile(ui: &mut egui::Ui, badge: &str, label: &str) -> egui::Response {
         badge_rect.center(),
         egui::Align2::CENTER_CENTER,
         badge,
-        theme::mono(17.0),
+        theme::body(17.0),
         theme::CYAN,
     );
     p.text(

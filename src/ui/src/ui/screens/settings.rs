@@ -503,7 +503,7 @@ fn daemon_status_row(ui: &mut egui::Ui, connected: bool) {
         Pos2::new(rect.right() - 10.0, rect.top() + 12.0),
         Align2::RIGHT_TOP,
         status_text,
-        theme::mono_semibold(11.0),
+        theme::semibold(11.0),
         status_color,
     );
 }
@@ -640,7 +640,7 @@ fn dependency_row(ui: &mut egui::Ui, dep: &DependencyStatus) {
         Pos2::new(rect.right() - 10.0, rect.top() + 9.0),
         Align2::RIGHT_TOP,
         status,
-        theme::mono_semibold(11.0),
+        theme::semibold(11.0),
         status_color,
     );
 
@@ -1050,7 +1050,7 @@ fn licenses_modal(ctx: &egui::Context, st: &mut SettingsUi) {
                 .show(ui, |ui| {
                     ui.label(
                         egui::RichText::new(THIRD_PARTY_LICENSES)
-                            .font(theme::mono(10.5))
+                            .font(theme::body(10.5))
                             .color(theme::TEXT_DIM),
                     );
                 });

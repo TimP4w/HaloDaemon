@@ -220,7 +220,7 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingSta
                     Mode::Engine => t!("lighting.mode_canvas_engine"),
                     Mode::None => "\u{2014}".into(),
                 })
-                .font(theme::mono_semibold(11.0))
+                .font(theme::semibold(11.0))
                 .color(theme::CYAN),
             );
         },

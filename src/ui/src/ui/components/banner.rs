@@ -164,10 +164,13 @@ impl<'a> Banner<'a> {
                         let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
                         ui.painter().circle_filled(r.center(), 3.5, dot);
                     }
-                    ui.label(
-                        egui::RichText::new(self.title)
-                            .font(title_font.clone())
-                            .color(title_color),
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(self.title)
+                                .font(title_font.clone())
+                                .color(title_color),
+                        )
+                        .truncate(),
                     );
                 },
                 |ui| {

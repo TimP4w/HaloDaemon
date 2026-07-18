@@ -139,7 +139,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                 Pos2::new(center.x, title_y + 24.0),
                 Align2::CENTER_CENTER,
                 sub,
-                theme::mono(12.5),
+                theme::body(12.5),
                 theme::TEXT_MUT,
             );
             if connected && state.discovery.checking_updates {
@@ -147,7 +147,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                     Pos2::new(center.x, title_y + 44.0),
                     Align2::CENTER_CENTER,
                     t!("misc.radar_checking_updates").to_string(),
-                    theme::mono(11.5),
+                    theme::body(11.5),
                     a(theme::CYAN, 0.7),
                 );
             }
@@ -253,7 +253,7 @@ fn draw_blip(
         Pos2::new(pos.x, pos.y + 16.0),
         Align2::CENTER_CENTER,
         model::code(d),
-        theme::mono(8.5),
+        theme::body(8.5),
         color,
     );
 }

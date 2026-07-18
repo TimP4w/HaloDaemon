@@ -227,7 +227,7 @@ impl IntegrationsUi {
                                 if !p.version.is_empty() {
                                     ui.label(
                                         egui::RichText::new(&p.version)
-                                            .font(theme::mono(10.5))
+                                            .font(theme::body(10.5))
                                             .color(theme::TEXT_FAINT),
                                     );
                                 }
@@ -1254,7 +1254,7 @@ fn status_row(ui: &mut egui::Ui, p: &PluginInfo, status: &IntegrationStatus) {
             ui.add_space(14.0);
             ui.label(
                 egui::RichText::new(&record.key)
-                    .font(theme::mono(10.5))
+                    .font(theme::body(10.5))
                     .color(theme::TEXT_FAINT),
             );
             ui.label(

@@ -258,7 +258,7 @@ fn step_welcome(ui: &mut egui::Ui, time: f32) {
                     halod_shared::app::APP_DISPLAY_NAME,
                     env!("CARGO_PKG_VERSION")
                 ))
-                .font(theme::mono(13.0))
+                .font(theme::body(13.0))
                 .color(theme::TEXT_FAINT),
             );
         },

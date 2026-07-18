@@ -2271,7 +2271,7 @@ fn authority_card(ui: &mut egui::Ui, title: &str, detail: &str) {
                 ui.add_space(theme::SPACE_1);
                 ui.label(
                     egui::RichText::new(title)
-                        .font(theme::mono(12.0))
+                        .font(theme::body(12.0))
                         .color(theme::TEXT),
                 );
             });
@@ -3085,7 +3085,7 @@ fn repo_detail_body(
                     let url = ui.add(
                         egui::Label::new(
                             egui::RichText::new(&r.url)
-                                .font(theme::mono(10.0))
+                                .font(theme::body(10.0))
                                 .color(theme::CYAN)
                                 .underline(),
                         )

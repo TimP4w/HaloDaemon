@@ -79,7 +79,7 @@ pub(super) fn canvas_view(
         Pos2::new(canvas_rect.left() + 14.0, canvas_rect.bottom() - 12.0),
         Align2::LEFT_BOTTOM,
         t!("canvas.drag_hint"),
-        theme::mono(10.0),
+        theme::body(10.0),
         theme::TEXT_FAINT,
     );
 
@@ -458,7 +458,7 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
         );
         let galley = p.layout_no_wrap(
             format!("{dev_name} / {}", zone.channel_id),
-            theme::mono_semibold(8.5),
+            theme::semibold(8.5),
             theme::TEXT_DIM,
         );
         p.add(egui::epaint::TextShape::new(anchor, galley, theme::TEXT_DIM).with_angle(angle));
@@ -477,7 +477,7 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
             let label = super::rack::instance_name(&state.lighting.canvas.effects, inst);
             let bx = corners.iter().map(|c| c.x).fold(f32::MAX, f32::min);
             let by = corners.iter().map(|c| c.y).fold(f32::MAX, f32::min);
-            let g = p.layout_no_wrap(label.to_string(), theme::mono_semibold(8.5), col);
+            let g = p.layout_no_wrap(label.to_string(), theme::semibold(8.5), col);
             let rect =
                 Rect::from_min_size(Pos2::new(bx, by - 17.0), Vec2::new(g.size().x + 22.0, 14.0));
             p.rect_filled(rect, theme::RADIUS_XS, a(theme::hex(0x0b0e14), 0.92));
@@ -492,7 +492,7 @@ fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_
                 Pos2::new(rect.left() + 14.0, rect.center().y),
                 Align2::LEFT_CENTER,
                 label,
-                theme::mono_semibold(8.5),
+                theme::semibold(8.5),
                 col,
             );
         }
