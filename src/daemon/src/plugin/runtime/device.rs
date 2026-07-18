@@ -2558,11 +2558,10 @@ impl EqualizerCapability for LuaDevice {
     }
 
     async fn set_eq_bands(&self, values: &[f32]) -> Result<()> {
-        self.worker()?.equalizer_set_bands(values).await?;
-        if let Some(equalizer) = self.eq_cache.lock_recover().as_mut() {
-            for (band, value) in equalizer.bands.iter_mut().zip(values) {
-                band.value = *value;
-            }
+        let worker = self.worker()?;
+        worker.equalizer_set_bands(values).await?;
+        if let Ok(equalizer) = worker.equalizer_get().await {
+            *self.eq_cache.lock_recover() = Some(equalizer);
         }
         Ok(())
     }
@@ -3230,6 +3229,42 @@ mod tests {
         let eq = dev.eq_cache.lock_recover().clone().unwrap();
         assert_eq!(eq.selected_preset, 1);
         assert_eq!(eq.bands[0].value, 5.0);
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_eq_bands_caches_the_value_the_worker_applied_not_the_request() {
+        // The worker clamps to the device's dB range; the host cache must reflect
+        // what was applied, not the raw request. A request of -20 lands as -10.
+        let script = r#"
+            local applied = 0.0
+            return {
+              initialize = function() return true end,
+              get_equalizer = function()
+                return {
+                  presets = { { id = "custom", label = "Custom", is_custom = true } },
+                  selected_preset = 0, editable = true,
+                  bands = { {
+                    index = 0, label = "60", min = -10, max = 10, step = 1,
+                    value = applied,
+                  } },
+                }
+              end,
+              set_eq_bands = function(dev, values)
+                applied = math.max(-10, math.min(10, values[1]))
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("eq_bands", &["equalizer"], script);
+        let dev = hid_device("eq_bands-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+        dev.refresh_status_cache().await;
+
+        dev.set_eq_bands(&[-20.0]).await.unwrap();
+        assert_eq!(
+            dev.eq_cache.lock_recover().as_ref().unwrap().bands[0].value,
+            -10.0
+        );
         dev.close().await;
     }
 }
