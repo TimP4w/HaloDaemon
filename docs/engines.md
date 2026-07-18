@@ -70,7 +70,7 @@ Only `screen_sampler` and the effect designer's hidden `designer` pixmap are
 built-in Rust (`daemon/src/lighting/rgb_engine/canvas/effects.rs`). Every other
 pixmap effect ships in the official repository's
 [`halo_effects`](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/halo_effects)
-package—see [plugins.md](plugins.md#rgb-effects) for the plugin effect API.
+package—see the [plugin effect API](https://github.com/TimP4w/HaloDaemon-plugins/blob/main/docs/lua-api.md#effect-api).
 
 | Effect | Kind | Description | Parameters |
 |--------|------|-------------|------------|

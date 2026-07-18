@@ -4,8 +4,9 @@ This document is the map of how HaloDaemon is put together: the layers, how they
 connect, and where a new feature or device plugs in. Read it before adding a
 device, a command, or an engine. Companion docs go deeper on specific areas:
 [engines.md](engines.md) (engine internals), [development.md](development.md)
-(toolchain, onboarding walkthrough, udev rules), and the per-protocol/transport
-pages under [protocols/](protocols/) and [transports/](transports/).
+(toolchain, onboarding walkthrough, udev rules), and the per-transport pages
+under [transports/](transports/). Plugin wire protocols are documented per
+package in the [plugins repository](https://github.com/TimP4w/HaloDaemon-plugins).
 
 ## The five crates
 
@@ -31,7 +32,7 @@ Everything that touches hardware lives under
 concerns. A single physical device is the composition of all four.
 
 ```
-vendor/   organizational namespace (nzxt, corsair, logitech, asus, …)
+vendor/   organizational namespace (built-ins live under drivers/vendors/generic/)
   device      implements Device, declares capabilities()        ← what the rest of the daemon sees
     protocol    encodes/decodes the vendor wire format           ← "how do I phrase a 'set color' for this chip"
       transport   moves raw bytes (HID, SMBus, USB, …)           ← "how do those bytes reach the wire"
@@ -286,25 +287,29 @@ the state broadcast.
 
 ## End-to-end: adding a new device
 
-Putting the layers together, a new device is rarely *just* a code change. The full
-checklist (see the `add-device` skill and `CLAUDE.md` → *Adding a device*):
+New device support is added in the
+[HaloDaemon plugins repository](https://github.com/TimP4w/HaloDaemon-plugins) as
+a Lua package — not as a Rust vendor module in this repo. See
+[development.md](development.md#adding-device-support) for the plugin workflow
+and the manifest/Lua authoring references.
+
+The built-in Rust driver stack (`drivers/`) is now limited to the generic
+`computer`/hwmon-class devices that don't fit a plugin. The vendor → device →
+protocol → transport layering above is how those built-ins are structured, and a
+plugin needs a **new Rust change here only** when it requires a capability or a
+scoped transport operation the daemon does not yet expose — add that core
+primitive first, then consume it from Lua. When you do touch a built-in:
 
 1. **Transport** — reuse an existing one if the bus is already supported; write a
-   new transport module only for a genuinely new bus.
-2. **Protocol** — a module under `vendors/<vendor>/protocols/` encoding the wire
-   format (with SPDX attribution if ported). Document it in [protocols/](protocols/).
-3. **Device** — a file under `vendors/<vendor>/devices/` implementing `Device`,
-   declaring `capabilities()`, plus the `inventory::submit!(DeviceDescriptor …)`
-   (and `SmBusScanEntry` for SMBus parts).
-4. **Supported-devices table** — add the row (Vendor, Model, VID:PID, Protocol link,
-   Transport link, Platform) in [docs/supported-devices.md](supported-devices.md); this is the
-   user-facing source of truth (linked from [README.md](../README.md)).
-5. **udev rule** (Linux) — add built-in-driver access to
+   new transport module only for a genuinely new bus, and document it in
+   [transports/](transports/).
+2. **Device** — a file under `drivers/vendors/<vendor>/devices/` implementing
+   `Device`, declaring `capabilities()`, plus the
+   `inventory::submit!(DeviceDescriptor …)` (and `SmBusScanEntry` for SMBus parts).
+3. **udev rule** (Linux) — add built-in-driver access to
    [udev/60-halod.rules](../udev/60-halod.rules). Plugin HID/USB access is
    instead derived from the manifest by `halod udev-rules`.
-6. **Docs** — new protocol/transport pages, and any kernel-module/PawnIO setup
-   notes in [development.md](development.md).
-7. **Test** — exercise the new frame encode/decode and parsing. `MockDevice` in
+4. **Test** — exercise the new frame encode/decode and parsing. `MockDevice` in
    [test_support.rs](../src/daemon/src/test_support.rs) covers capability-level
    tests; prefer property tests where a real invariant exists
    (`CLAUDE.md` → *Code conventions*).

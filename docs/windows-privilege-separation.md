@@ -10,7 +10,7 @@ user's normal (medium) integrity.
 
 This document is the design and threat model for that split. For the day-to-day
 developer workflow (dev-run UAC prompt and installer testing), see
-[development.md](development.md#windows-privilege-separation).
+[development.md](development.md#build-and-run).
 
 ## Process topology
 

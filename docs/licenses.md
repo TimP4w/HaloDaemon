@@ -114,7 +114,7 @@ shared by the daemon (LCD text rendering) and the GUI (egui):
 - NotoSans, JetBrains Mono, Inter Tight — all **OFL-1.1**.
 - Attributed via `override` annotations in [`REUSE.toml`](../REUSE.toml).
 - Loaded with `include_bytes!` from [`daemon/src/lcd/engine/templates.rs`](../src/daemon/src/lcd/engine/templates.rs)
-  and [`ui/src/ui/theme.rs`](../src/ui/src/ui/theme.rs).
+  and [`ui/src/ui/theme/mod.rs`](../src/ui/src/ui/theme/mod.rs).
 - Credited in the About dialog "Bundled assets" section, which ships the full OFL-1.1
   text (see `append_bundled_asset_licenses()` in [`ui/build.rs`](../src/ui/build.rs)).
 

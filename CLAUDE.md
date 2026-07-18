@@ -77,12 +77,11 @@ Devices are organized as **vendor → device → protocol → transport**, all u
 - A **protocol** module encodes/decodes the vendor wire format on top of a transport.
 - **Controllers** host child devices (wireless receivers, fan hubs) via `discover_children()`. Chainable ARGB hubs implement `ChainCapability`/`ChainAdapter` so the canvas engine can compose per-zone LED frames; see [daemon/src/drivers/chain.rs](src/daemon/src/drivers/chain.rs).
 
-**Adding a device — don't stop at the code.** Beyond the device file + descriptor (and a new protocol/transport module if the wire format is new), every device also requires:
+**Adding a device — go through the plugin repository.** New device support is authored as a Lua package in the [HaloDaemon plugins repository](https://github.com/TimP4w/HaloDaemon-plugins), not as a new Rust vendor module here — see [docs/development.md](docs/development.md#adding-device-support). Touch the built-in Rust driver stack only when a plugin needs a capability or scoped transport operation the daemon doesn't yet expose (add that core primitive first, then consume it from Lua). When you do add or change a built-in driver, it also requires:
 
-1. **Supported-devices table** — add a row under the right category in [docs/supported-devices.md](docs/supported-devices.md) (Vendor, Model, VID:PID, Protocol link, Transport link, Platform). This is the user-facing source of truth for supported hardware (linked from [README.md](README.md)).
-2. **udev rule** (Linux) — add built-in-driver access to [udev/60-halod.rules](udev/60-halod.rules). Plugin HID/USB/SMBus rules are instead derived from manifest matches and transports by `halod udev-rules`.
-3. **Docs** — plugin protocols belong in `<plugin>/docs/protocol.md` in the official plugin repository (large protocols may split into local pages); transport docs stay in `docs/transports/<name>.md`. Note vendor-specific setup (kernel module, PawnIO, etc.) in `docs/development.md`.
-4. **Test** — exercise the new frame encode/decode and any parsing with a unit test (`MockDevice` in [daemon/src/test_support.rs](src/daemon/src/test_support.rs) covers capability-level tests).
+1. **udev rule** (Linux) — add built-in-driver access to [udev/60-halod.rules](udev/60-halod.rules). Plugin HID/USB/SMBus rules are instead derived from manifest matches and transports by `halod udev-rules`.
+2. **Docs** — a transport doc under `docs/transports/<name>.md` for any new bus, plus any kernel-module/PawnIO setup notes in `docs/development.md`. Plugin wire protocols live in `<plugin>/docs/protocol.md` in the plugin repository, catalogued in its [README](https://github.com/TimP4w/HaloDaemon-plugins#plugin-catalog).
+3. **Test** — exercise the new frame encode/decode and any parsing with a unit test (`MockDevice` in [daemon/src/test_support.rs](src/daemon/src/test_support.rs) covers capability-level tests).
 
 ### GUI
 
