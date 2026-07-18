@@ -53,6 +53,13 @@ impl eframe::App for App {
         if self.hide_state.wants_show.swap(false, Ordering::SeqCst) {
             self.hidden.store(false, Ordering::SeqCst);
         }
+        #[cfg(windows)]
+        if self.hidden.load(Ordering::SeqCst) {
+            self.draw_background(ui.ctx());
+        } else {
+            self.draw(ui);
+        }
+        #[cfg(not(windows))]
         self.draw(ui);
         // Hide via `Visible(false)`; see [`wayland_hide`] for the Linux path.
         let ctx = ui.ctx();
