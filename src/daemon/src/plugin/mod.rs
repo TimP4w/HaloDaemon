@@ -196,6 +196,11 @@ struct PluginState {
     config_values: HashMap<String, HashMap<String, String>>,
 }
 
+/// Bound repeated opens from polling discovery scanners. A busy interface is
+/// commonly owned by another daemon; retrying it on every scan otherwise logs
+/// forever and needlessly hammers the device.
+const TRANSPORT_OPEN_ATTEMPTS: u8 = 3;
+
 /// The device-plugin registry: every piece of runtime-mutable plugin state the
 /// daemon owns. Held as [`crate::state::AppState::registry`] (one per process in
 /// production, one per `AppState` in tests — so tests are isolated without a
@@ -222,6 +227,9 @@ pub struct Registry {
     /// failing RGB frame can fan out across several device calls, so recovery
     /// must be coalesced per plugin.
     runtime_recovery_pending: RwLock<HashSet<String>>,
+    /// Failed transport opens in the current plugin-load episode, keyed by the
+    /// stable plugin device id. A successful open (or plugin reload) resets it.
+    transport_open_failures: RwLock<HashMap<String, u8>>,
     content_revision: std::sync::atomic::AtomicU64,
 }
 
@@ -2105,6 +2113,7 @@ impl Registry {
             s.presets = presets;
             s.provenance = provenance;
         });
+        write_recover(&self.transport_open_failures).clear();
         self.content_revision
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
@@ -2162,6 +2171,12 @@ impl Registry {
         ready: ReadyPlugin,
     ) -> Option<Arc<dyn Device>> {
         let id = device_id(manifest, spec, handle);
+        if read_recover(&self.transport_open_failures)
+            .get(&id)
+            .is_some_and(|attempts| *attempts >= TRANSPORT_OPEN_ATTEMPTS)
+        {
+            return None;
+        }
         let notify = Arc::downgrade(app);
         if !manifest.needs_worker() {
             return Some(Arc::new(LuaDevice::new(LuaDeviceParts {
@@ -2193,14 +2208,28 @@ impl Registry {
             Some(Ok(t)) => t,
             Some(Err(e)) => {
                 *runtime_state.lock().unwrap() = device::RuntimeState::Closed;
-                log::warn!(
-                    "plugin '{}' transport open failed: {e:#}",
-                    manifest.plugin_id
-                );
+                let attempt = {
+                    let mut failures = write_recover(&self.transport_open_failures);
+                    let attempts = failures.entry(id.clone()).or_default();
+                    *attempts = attempts.saturating_add(1);
+                    *attempts
+                };
+                if attempt == TRANSPORT_OPEN_ATTEMPTS {
+                    log::warn!(
+                        "plugin '{}' transport open failed (attempt {attempt}/{TRANSPORT_OPEN_ATTEMPTS}); giving up until plugins are reloaded: {e:#}",
+                        manifest.plugin_id
+                    );
+                } else {
+                    log::warn!(
+                        "plugin '{}' transport open failed (attempt {attempt}/{TRANSPORT_OPEN_ATTEMPTS}): {e:#}",
+                        manifest.plugin_id
+                    );
+                }
                 return None;
             }
             None => return None,
         };
+        write_recover(&self.transport_open_failures).remove(&id);
 
         let dev_match = worker::DevMatch {
             transport: spec.transport.clone(),
