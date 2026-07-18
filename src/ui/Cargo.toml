@@ -34,6 +34,7 @@ base64 = "0.22"
 resvg = "0.44"
 rust-i18n = "4"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+webbrowser = "1"
 
 [target.'cfg(unix)'.dependencies]
 ksni = "0.2"
