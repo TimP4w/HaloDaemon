@@ -58,6 +58,7 @@ tray:
 onboarding:
   welcome_title: Benvenuto in HaloDaemon
   welcome_body: "Gestisci luci, ventole, pompe e sensori da un unico posto. Sarà tutto pronto in circa un minuto."
+  language: Lingua
   health_title: Stato del sistema
   health_sub: HaloDaemon verifica l'accesso al sistema necessario per gestire l'hardware. Gli elementi opzionali mancanti disabilitano solo le funzioni associate.
   health_checking: Controllo del sistema…

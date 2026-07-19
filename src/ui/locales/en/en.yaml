@@ -58,6 +58,7 @@ tray:
 onboarding:
   welcome_title: Welcome to HaloDaemon
   welcome_body: "Control your lights, fans, pumps, and sensors from one place. We'll get everything ready in about a minute."
+  language: Language
   health_title: System health
   health_sub: HaloDaemon checks the system access needed for your hardware. Missing optional items only disable related features.
   health_checking: Checking your system…

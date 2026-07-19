@@ -210,6 +210,14 @@ pub(crate) fn show(
     }
     if let Some(key) = key {
         tour::maybe_start(st, daemon_seen, key);
+        if !tour::is_active(st) && !tour::is_seen(st, daemon_seen, key) {
+            if let Some((step, _)) = tour::deferred_steps(st, key)
+                .into_iter()
+                .find(|(_, anchor)| tour::peek_anchor(ctx, *anchor).is_some())
+            {
+                tour::resume_deferred(st, key, step);
+            }
+        }
     }
 
     let Some((step_index, step_count, title, body, anchor_id)) = st.current_step() else {

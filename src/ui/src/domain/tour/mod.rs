@@ -8,7 +8,7 @@
 
 pub mod defs;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use egui::Rect;
 
@@ -96,7 +96,7 @@ pub enum AnchorId {
 }
 
 /// Which tour applies to the page/tab the user is currently viewing.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum TourKey {
     PageHome,
     PageLighting,
@@ -166,11 +166,15 @@ struct ActiveTour {
     key: TourKey,
     step: usize,
     missing_since: Option<f64>,
+    deferred_retry: bool,
 }
 
 #[derive(Default)]
 pub struct TourState {
     active: Option<ActiveTour>,
+    /// Steps whose widgets were unavailable on the first pass. They remain
+    /// pending until a later frame on the same page registers their anchor.
+    deferred: HashMap<TourKey, BTreeSet<usize>>,
     /// Optimistic completion set, bridging the daemon roundtrip (see module docs).
     local_seen: BTreeSet<String>,
 }
@@ -193,6 +197,8 @@ impl TourState {
 
     pub(crate) fn clear_local_seen(&mut self) {
         self.local_seen.clear();
+        self.deferred.clear();
+        self.active = None;
     }
 
     pub(crate) fn mark_locally_seen(&mut self, id: &str) {
@@ -212,8 +218,8 @@ pub struct Completed {
     pub id: &'static str,
 }
 
-/// How long a step's anchor may be absent before the tour auto-advances (e.g.
-/// no devices yet, or a capability-gated widget that never renders).
+/// How long a step's anchor may be absent before the tour defers it and checks
+/// the next step (e.g. no devices yet, or capability-gated content).
 pub const MISSING_GRACE_SECS: f64 = 0.5;
 
 /// Whether `key`'s tour has already been completed/skipped — either
@@ -232,6 +238,7 @@ pub fn is_active(st: &TourState) -> bool {
 /// persisted as seen. This also repairs an activation from an earlier,
 /// incomplete bus snapshot in the same GUI session.
 pub fn reconcile_seen(st: &mut TourState, daemon_seen: &BTreeSet<String>) {
+    st.deferred.retain(|key, _| !daemon_seen.contains(key.id()));
     if st
         .active
         .as_ref()
@@ -244,13 +251,45 @@ pub fn reconcile_seen(st: &mut TourState, daemon_seen: &BTreeSet<String>) {
 /// Start `key`'s tour unless one is already active or it's already seen.
 /// Returns whether it started.
 pub fn maybe_start(st: &mut TourState, daemon_seen: &BTreeSet<String>, key: TourKey) -> bool {
-    if st.active.is_some() || is_seen(st, daemon_seen, key) {
+    if st.active.is_some() || st.deferred.contains_key(&key) || is_seen(st, daemon_seen, key) {
         return false;
     }
     st.active = Some(ActiveTour {
         key,
         step: 0,
         missing_since: None,
+        deferred_retry: false,
+    });
+    true
+}
+
+/// Deferred `(step_index, anchor)` pairs for `key`. The UI uses this to retry
+/// only when an anchor is actually present, avoiding a repeated grace-period
+/// loop while optional content remains unavailable.
+pub(crate) fn deferred_steps(st: &TourState, key: TourKey) -> Vec<(usize, AnchorId)> {
+    let tour = tour_for(key);
+    st.deferred
+        .get(&key)
+        .into_iter()
+        .flatten()
+        .filter_map(|index| tour.steps.get(*index).map(|step| (*index, step.anchor)))
+        .collect()
+}
+
+pub(crate) fn resume_deferred(st: &mut TourState, key: TourKey, step: usize) -> bool {
+    if st.active.is_some()
+        || !st
+            .deferred
+            .get(&key)
+            .is_some_and(|pending| pending.contains(&step))
+    {
+        return false;
+    }
+    st.active = Some(ActiveTour {
+        key,
+        step,
+        missing_since: None,
+        deferred_retry: true,
     });
     true
 }
@@ -262,6 +301,7 @@ pub fn apply(st: &mut TourState, ev: Event) -> Option<Completed> {
     match ev {
         Event::Skip => {
             st.active = None;
+            st.deferred.remove(&key);
             Some(Completed { id: key.id() })
         }
         Event::Next => complete_or_advance(st, key, total_steps),
@@ -272,7 +312,8 @@ pub fn apply(st: &mut TourState, ev: Event) -> Option<Completed> {
         Event::AnchorMissing { now } => {
             let since = *st.active.as_mut().unwrap().missing_since.get_or_insert(now);
             if now - since >= MISSING_GRACE_SECS {
-                complete_or_advance(st, key, total_steps)
+                defer_or_advance(st, key, total_steps);
+                None
             } else {
                 None
             }
@@ -281,14 +322,47 @@ pub fn apply(st: &mut TourState, ev: Event) -> Option<Completed> {
 }
 
 fn complete_or_advance(st: &mut TourState, key: TourKey, total_steps: usize) -> Option<Completed> {
-    let active = st.active.as_mut().unwrap();
-    if active.step + 1 >= total_steps {
+    let (step, deferred_retry) = {
+        let active = st.active.as_ref().unwrap();
+        (active.step, active.deferred_retry)
+    };
+    if deferred_retry {
         st.active = None;
-        Some(Completed { id: key.id() })
-    } else {
+        if let Some(pending) = st.deferred.get_mut(&key) {
+            pending.remove(&step);
+            if pending.is_empty() {
+                st.deferred.remove(&key);
+                return Some(Completed { id: key.id() });
+            }
+        }
+        return None;
+    }
+    if step + 1 < total_steps {
+        let active = st.active.as_mut().unwrap();
         active.step += 1;
         active.missing_since = None;
+        return None;
+    }
+    st.active = None;
+    if st.deferred.contains_key(&key) {
         None
+    } else {
+        Some(Completed { id: key.id() })
+    }
+}
+
+fn defer_or_advance(st: &mut TourState, key: TourKey, total_steps: usize) {
+    let (step, deferred_retry) = {
+        let active = st.active.as_ref().unwrap();
+        (active.step, active.deferred_retry)
+    };
+    st.deferred.entry(key).or_default().insert(step);
+    if deferred_retry || step + 1 >= total_steps {
+        st.active = None;
+    } else {
+        let active = st.active.as_mut().unwrap();
+        active.step += 1;
+        active.missing_since = None;
     }
 }
 
@@ -310,6 +384,10 @@ pub(crate) fn take_anchor(ctx: &egui::Context, id: AnchorId) -> Option<Rect> {
         d.remove::<Rect>(anchor_key(id));
         rect
     })
+}
+
+pub(crate) fn peek_anchor(ctx: &egui::Context, id: AnchorId) -> Option<Rect> {
+    ctx.data(|d| d.get_temp::<Rect>(anchor_key(id)))
 }
 
 fn reset_request_key() -> egui::Id {
@@ -455,19 +533,20 @@ mod tests {
     }
 
     #[test]
-    fn anchor_missing_completes_a_single_step_tour_past_the_grace_period() {
+    fn anchor_missing_defers_a_single_step_tour_past_the_grace_period() {
         let mut st = TourState::default();
         maybe_start(&mut st, &seen(&[]), TourKey::PageCooling);
         assert_eq!(tour_for(TourKey::PageCooling).steps.len(), 1);
         apply(&mut st, Event::AnchorMissing { now: 0.0 });
-        let completed = apply(
+        assert!(apply(
             &mut st,
             Event::AnchorMissing {
                 now: MISSING_GRACE_SECS,
             },
         )
-        .expect("single-step tour completes once its only anchor stays missing");
-        assert_eq!(completed.id, "page:cooling");
+        .is_none());
+        assert!(st.active.is_none());
+        assert_eq!(deferred_steps(&st, TourKey::PageCooling).len(), 1);
     }
 
     #[test]
@@ -488,19 +567,49 @@ mod tests {
     }
 
     #[test]
-    fn advance_completes_a_single_step_tour_whose_anchor_never_appears() {
-        // Regression: `show()` used to call `apply(AnchorMissing)` directly and
-        // discard its result, so a tour whose last anchor is permanently
-        // missing (e.g. no hidden devices) would silently loop forever instead
-        // of ever being marked seen. `advance` must surface that completion.
+    fn advance_defers_a_single_step_tour_whose_anchor_never_appears() {
         let mut st = TourState::default();
         maybe_start(&mut st, &seen(&[]), TourKey::PageCooling);
         assert_eq!(tour_for(TourKey::PageCooling).steps.len(), 1);
         assert!(advance(&mut st, false, 0.0, None).is_none());
-        let completed = advance(&mut st, false, MISSING_GRACE_SECS, None)
-            .expect("advance must surface a missing-anchor completion, not swallow it");
-        assert_eq!(completed.id, "page:cooling");
+        assert!(advance(&mut st, false, MISSING_GRACE_SECS, None).is_none());
         assert!(st.active.is_none());
+        assert_eq!(deferred_steps(&st, TourKey::PageCooling).len(), 1);
+    }
+
+    #[test]
+    fn deferred_step_completes_only_after_its_anchor_returns_and_user_advances() {
+        let mut st = TourState::default();
+        maybe_start(&mut st, &seen(&[]), TourKey::PageCooling);
+        advance(&mut st, false, 0.0, None);
+        advance(&mut st, false, MISSING_GRACE_SECS, None);
+
+        assert!(resume_deferred(&mut st, TourKey::PageCooling, 0));
+        let completed = advance(&mut st, true, 1.0, Some(Event::Next))
+            .expect("acknowledging the returned deferred step completes the tour");
+        assert_eq!(completed.id, "page:cooling");
+        assert!(deferred_steps(&st, TourKey::PageCooling).is_empty());
+    }
+
+    #[test]
+    fn missing_integration_toggle_returns_when_an_integration_appears() {
+        let mut st = TourState::default();
+        maybe_start(&mut st, &seen(&[]), TourKey::PageIntegrations);
+        assert!(advance(&mut st, true, 0.0, Some(Event::Next)).is_none());
+        assert_eq!(st.active.as_ref().unwrap().step, 1);
+
+        advance(&mut st, false, 1.0, None);
+        advance(&mut st, false, 1.0 + MISSING_GRACE_SECS, None);
+        assert!(st.active.is_none());
+        assert_eq!(
+            deferred_steps(&st, TourKey::PageIntegrations),
+            vec![(1, AnchorId::IntegrationsToggle)]
+        );
+        assert!(!is_seen(&st, &seen(&[]), TourKey::PageIntegrations));
+
+        assert!(resume_deferred(&mut st, TourKey::PageIntegrations, 1));
+        let completed = advance(&mut st, true, 2.0, Some(Event::Next)).unwrap();
+        assert_eq!(completed.id, "page:integrations");
     }
 
     #[test]

@@ -701,10 +701,10 @@ fn tag_pill(ui: &mut egui::Ui, right: f32, y: f32, text: &str, color: Color32) {
 
 /// Supported UI languages as `(code, native display name)`. Codes must match
 /// `halod_shared::types::SUPPORTED_LANGUAGES`; the parity is asserted in tests.
-const LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("it", "Italiano")];
+pub(crate) const LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("it", "Italiano")];
 
 /// Native display name for a language code, falling back to the code itself.
-fn language_display(code: &str) -> &str {
+pub(crate) fn language_display(code: &str) -> &str {
     LANGUAGES
         .iter()
         .find(|(c, _)| *c == code)

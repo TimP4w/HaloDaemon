@@ -33,6 +33,8 @@ const SCAN_SECS: f64 = 2.2;
 #[derive(Default)]
 pub struct OnboardingUi {
     step: u8,
+    /// Optimistic GUI-owned locale while the daemon persists the selection.
+    language: Option<String>,
     scan_started: Option<f64>,
     official_retry_started: Option<f64>,
     /// Plugin id → selected for authority review within onboarding.
@@ -148,6 +150,9 @@ pub fn show(
     st: &mut OnboardingUi,
     time: f64,
 ) -> Outcome {
+    if let Some(language) = &st.language {
+        crate::ui::screens::settings::apply_locale(language);
+    }
     let recs = &state.plugins.recommendations;
     seed_plugin_selection(st, recs, &state.plugins.plugins);
 
@@ -186,7 +191,7 @@ pub fn show(
                 ui.set_max_height(BODY_HEIGHT);
                 ui.vertical_centered(|ui| ui.set_width(600.0));
                 match st.step {
-                    WELCOME => step_welcome(ui, time as f32),
+                    WELCOME => step_welcome(ui, st, cmd, time as f32),
                     HEALTH => step_health(ui, debug),
                     PREFS => step_prefs(ui, st, state, cmd),
                     SCANNING => step_scanning(ui, time),
@@ -231,8 +236,8 @@ fn step_shell(ui: &mut egui::Ui, title: &str, sub: &str, body: impl FnOnce(&mut 
     });
 }
 
-fn step_welcome(ui: &mut egui::Ui, time: f32) {
-    ui.add_space(52.0);
+fn step_welcome(ui: &mut egui::Ui, st: &mut OnboardingUi, cmd: &CommandTx, time: f32) {
+    ui.add_space(34.0);
     ui.allocate_ui_with_layout(
         Vec2::new(ui.available_width(), 0.0),
         egui::Layout::top_down(egui::Align::Center),
@@ -252,7 +257,52 @@ fn step_welcome(ui: &mut egui::Ui, time: f32) {
                 theme::TEXT_DIM,
                 15.0,
             );
-            ui.add_space(theme::SPACE_10);
+            ui.add_space(26.0);
+            let language_label = t!("onboarding.language");
+            let label_width = ui
+                .painter()
+                .layout_no_wrap(
+                    language_label.to_string(),
+                    theme::body_md(),
+                    theme::TEXT_MUT,
+                )
+                .size()
+                .x;
+            let combo_width = 130.0;
+            let row_width = label_width + ui.spacing().item_spacing.x + combo_width;
+            ui.allocate_ui_with_layout(
+                Vec2::new(row_width, 30.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        RichText::new(language_label)
+                            .font(theme::body_md())
+                            .color(theme::TEXT_MUT),
+                    );
+                    let current = st
+                        .language
+                        .clone()
+                        .unwrap_or_else(|| rust_i18n::locale().to_string());
+                    egui::ComboBox::from_id_salt("onboarding_language")
+                        .selected_text(crate::ui::screens::settings::language_display(&current))
+                        .width(combo_width)
+                        .show_ui(ui, |ui| {
+                            for (code, name) in crate::ui::screens::settings::LANGUAGES {
+                                if ui.selectable_label(current == *code, *name).clicked() {
+                                    st.language = Some((*code).to_owned());
+                                    crate::ui::screens::settings::apply_locale(code);
+                                    ipc::send(
+                                        cmd,
+                                        DaemonCommand::SetLanguage {
+                                            lang: (*code).to_owned(),
+                                        },
+                                    );
+                                }
+                            }
+                        });
+                },
+            );
+            ui.add_space(theme::SPACE_8);
             ui.label(
                 RichText::new(format!(
                     "{} v{}",
