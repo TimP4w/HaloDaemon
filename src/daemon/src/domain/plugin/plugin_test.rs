@@ -1754,7 +1754,7 @@ fn open_device(
             .set(
                 "set_button_mapping",
                 lua.create_function(move |lua, (_self, mapping): (Table, Table)| {
-                    let mapping = lua.from_value(Value::Table(mapping)).map_err(mlua_err)?;
+                    let mapping = lua.from_value(Value::Table(mapping))?;
                     handle
                         .block_on(
                             crate::domain::device::KeyRemapCapability::set_button_mapping(
