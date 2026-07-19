@@ -434,11 +434,19 @@ impl FanCurveEngine {
             let (should_notify, elapsed) = self.record_stall(key);
 
             if should_notify {
+                let fan_name = device
+                    .as_cooling()
+                    .and_then(|cooling| {
+                        cooling
+                            .cooling_channels()
+                            .into_iter()
+                            .find(|channel| channel.id == channel_id)
+                            .map(|channel| channel.name)
+                    })
+                    .unwrap_or_else(|| device.name().to_owned());
                 crate::application::notifications::send(
                     &self.app_state,
-                    halod_shared::types::NotificationCode::FanStalled {
-                        fan: key.to_string(),
-                    },
+                    halod_shared::types::NotificationCode::FanStalled { fan: fan_name },
                 )
                 .await;
             }
