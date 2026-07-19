@@ -538,7 +538,11 @@ fn action_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, 
             let ActionDisplay {
                 type_name, color, ..
             } = action_display(proto);
-            if action_chip(ui, &type_name, active, color) {
+            let (clicked, chip_rect) = action_chip(ui, &type_name, active, color);
+            if layer == Layer::Base && matches!(proto, ButtonAction::Macro { .. }) {
+                anchor_macro_tour(ui.ctx(), chip_rect);
+            }
+            if clicked {
                 let new_action = adapt_to_category(proto.clone(), &current_action);
                 let (base, shifted) = layer.pair(st, new_action.clone());
                 layer.set(st, new_action);
@@ -924,7 +928,7 @@ fn action_text_field(
 
 // ── Action chip widget (colored active state) ────────────────────────────────
 
-fn action_chip(ui: &mut egui::Ui, label: &str, active: bool, color: Color32) -> bool {
+fn action_chip(ui: &mut egui::Ui, label: &str, active: bool, color: Color32) -> (bool, Rect) {
     let galley = ui.painter().layout_no_wrap(
         label.to_string(),
         theme::body_sm(),
@@ -963,7 +967,14 @@ fn action_chip(ui: &mut egui::Ui, label: &str, active: bool, color: Color32) -> 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    resp.clicked()
+    (resp.clicked(), rect)
+}
+
+/// Keep the macro tour step reachable before Macro is selected. Once it is
+/// selected, the later parameters-card anchor replaces this fallback with the
+/// full macro editor rect in the same frame.
+fn anchor_macro_tour(ctx: &egui::Context, rect: Rect) {
+    crate::domain::tour::anchor(ctx, crate::domain::tour::AnchorId::KeysMacro, rect);
 }
 
 // ── Data helpers ─────────────────────────────────────────────────────────────
@@ -1200,6 +1211,19 @@ fn action_display(a: &ButtonAction) -> ActionDisplay {
 mod tests {
     use super::*;
     use halod_shared::keyboard::{KeyCell, KeyId, VisualKey};
+
+    #[test]
+    fn macro_category_registers_the_second_tour_step_before_selection() {
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(80.0, 31.0));
+
+        anchor_macro_tour(&ctx, rect);
+
+        assert_eq!(
+            crate::domain::tour::take_anchor(&ctx, crate::domain::tour::AnchorId::KeysMacro),
+            Some(rect)
+        );
+    }
 
     fn vkey(led_id: u32, remap_cid: Option<u16>) -> VisualKey {
         VisualKey {

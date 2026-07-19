@@ -248,6 +248,9 @@ async fn run_daemon(
     // has to exit *before* it can fight the first over the hardware.
     ipc::ensure_single_instance()?;
 
+    // IPC snapshots must never represent an absent GUI topic as default
+    // English. Seed the config loaded above before a client can subscribe.
+    crate::application::usecases::registry::runtime::publish_gui(&app).await;
     let ipc_handle = ipc::serve(app.clone());
     let mut supervisor = task_supervisor::TaskSupervisor::new(Arc::clone(&app));
 

@@ -18,6 +18,7 @@ use crate::ui::theme;
 /// Shown in the inspector column instead of [`selected_widget_card`] when no
 /// widget is selected on the stage.
 pub(super) fn empty_selection_card(ui: &mut egui::Ui) {
+    anchor_variant_card(ui);
     ui.vertical_centered(|ui| {
         ui.add_space(theme::SPACE_7);
         ui.label(
@@ -27,6 +28,18 @@ pub(super) fn empty_selection_card(ui: &mut egui::Ui) {
         );
         ui.add_space(theme::SPACE_7);
     });
+}
+
+/// The variants tour step targets the persistent inspector, not only its
+/// selected-widget state. A user cannot select a widget through the blocking
+/// tour overlay, so omitting the empty-state anchor makes step three time out.
+fn anchor_variant_card(ui: &egui::Ui) {
+    let rect = Rect::from_min_size(ui.cursor().min, egui::Vec2::new(ui.available_width(), 28.0));
+    crate::domain::tour::anchor(
+        ui.ctx(),
+        crate::domain::tour::AnchorId::LcdEditorVariant,
+        rect,
+    );
 }
 
 /// "SELECTED · {type}" caption matching the design's per-variant labels.
@@ -97,13 +110,7 @@ pub(super) fn selected_widget_card(
     let Some(idx) = st.lcd.editor.def.widgets.iter().position(|w| w.id == sel) else {
         return;
     };
-    let card_rect =
-        Rect::from_min_size(ui.cursor().min, egui::Vec2::new(ui.available_width(), 28.0));
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::LcdEditorVariant,
-        card_rect,
-    );
+    anchor_variant_card(ui);
     ui.label({
         let widget = &st.lcd.editor.def.widgets[idx];
         let plugin_label = Some(widget.widget.clone()).and_then(|catalog_id| {

@@ -730,7 +730,10 @@ pub fn apply_startup_locale() {
     if let Some(code) = startup_locale_from_yaml(&raw) {
         apply_locale(&code);
     } else {
-        log::warn!("could not read a supported GUI language from {}", path.display());
+        log::warn!(
+            "could not read a supported GUI language from {}",
+            path.display()
+        );
     }
 }
 
@@ -1463,10 +1466,7 @@ gui:
 
     #[test]
     fn startup_locale_rejects_codes_without_a_gui_catalog() {
-        assert_eq!(
-            startup_locale_from_yaml("gui:\n  language: xx\n"),
-            None
-        );
+        assert_eq!(startup_locale_from_yaml("gui:\n  language: xx\n"), None);
     }
 
     fn card_divider_count(rows: usize) -> usize {

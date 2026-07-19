@@ -487,11 +487,7 @@ impl PluginsUi {
             |ui| {
                 let add_repo_resp =
                     widgets::button(ui, "+", ButtonKind::Ghost, Vec2::new(28.0, 26.0));
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::PluginsAddRepo,
-                    add_repo_resp.rect,
-                );
+                Self::anchor_add_plugin_source(ui.ctx(), add_repo_resp.rect);
                 if add_repo_resp.clicked() {
                     self.add_repo = Some(AddRepoState::default());
                 }
@@ -514,6 +510,15 @@ impl PluginsUi {
                 self.selection = Selection::Repo(row.slug.to_owned());
             }
         }
+    }
+
+    /// The repository-source button is covered by two consecutive tour steps:
+    /// first as the way to add a plugin source, then specifically as the way to
+    /// add another repository. Register both anchors so neither step is treated
+    /// as missing and silently skipped.
+    fn anchor_add_plugin_source(ctx: &egui::Context, rect: Rect) {
+        crate::domain::tour::anchor(ctx, crate::domain::tour::AnchorId::PluginsAddPlugin, rect);
+        crate::domain::tour::anchor(ctx, crate::domain::tour::AnchorId::PluginsAddRepo, rect);
     }
 
     fn skipped_notice(&mut self, ui: &mut egui::Ui, state: &TopicStore) {
@@ -2256,13 +2261,13 @@ fn provenance_label(provenance: PluginProvenance) -> std::borrow::Cow<'static, s
 fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'static, str> {
     use halod_shared::types::Permission;
     match perm {
-        Permission::Hid => "HID device access".into(),
-        Permission::Usb => "USB device access".into(),
-        Permission::Hwmon => "Hardware monitoring".into(),
-        Permission::Lpcio => "LPC/SuperIO access".into(),
-        Permission::AmdSmn => "AMD SMN access".into(),
-        Permission::Command => "Run approved commands".into(),
-        Permission::Serial => "Serial / COM port access".into(),
+        Permission::Hid => t!("plugins.permission_hid"),
+        Permission::Usb => t!("plugins.permission_usb"),
+        Permission::Hwmon => t!("plugins.permission_hwmon"),
+        Permission::Lpcio => t!("plugins.permission_lpcio"),
+        Permission::AmdSmn => t!("plugins.permission_amd_smn"),
+        Permission::Command => t!("plugins.permission_command"),
+        Permission::Serial => t!("plugins.permission_serial"),
         Permission::Network => t!("plugins.permission_network"),
         Permission::Os => t!("plugins.permission_os"),
         Permission::SecureStorage => t!("plugins.permission_secure_storage"),
@@ -2276,13 +2281,13 @@ fn permission_label(perm: halod_shared::types::Permission) -> std::borrow::Cow<'
 fn permission_description(perm: halod_shared::types::Permission) -> std::borrow::Cow<'static, str> {
     use halod_shared::types::Permission;
     match perm {
-        Permission::Hid => "Lets the plugin communicate with the matching HID device and receive its input reports.".into(),
-        Permission::Usb => "Lets the plugin claim only its declared USB devices and use allowlisted endpoints and bounded control transfers.".into(),
-        Permission::Hwmon => "Lets the plugin access the scoped Linux hardware-monitoring collection, including approved fan controls.".into(),
-        Permission::Lpcio => "Lets the plugin use the typed broker interface for motherboard SuperIO hardware.".into(),
-        Permission::AmdSmn => "Lets the plugin read supported AMD SMN registers through the broker.".into(),
-        Permission::Command => "Lets the plugin run only the executable names declared in its manifest, without a shell.".into(),
-        Permission::Serial => "Lets the plugin open only the serial/COM port scoped by its declared serial transport.".into(),
+        Permission::Hid => t!("plugins.permission_hid_desc"),
+        Permission::Usb => t!("plugins.permission_usb_desc"),
+        Permission::Hwmon => t!("plugins.permission_hwmon_desc"),
+        Permission::Lpcio => t!("plugins.permission_lpcio_desc"),
+        Permission::AmdSmn => t!("plugins.permission_amd_smn_desc"),
+        Permission::Command => t!("plugins.permission_command_desc"),
+        Permission::Serial => t!("plugins.permission_serial_desc"),
         Permission::Network => t!("plugins.permission_network_desc"),
         Permission::Os => t!("plugins.permission_os_desc"),
         Permission::SecureStorage => t!("plugins.permission_secure_storage_desc"),
@@ -3472,6 +3477,23 @@ fn spawn_import_repository_archive(ctx: &egui::Context, cmd: CommandTx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_source_button_registers_both_plugin_tour_steps() {
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(28.0, 26.0));
+
+        PluginsUi::anchor_add_plugin_source(&ctx, rect);
+
+        assert_eq!(
+            crate::domain::tour::take_anchor(&ctx, crate::domain::tour::AnchorId::PluginsAddPlugin),
+            Some(rect)
+        );
+        assert_eq!(
+            crate::domain::tour::take_anchor(&ctx, crate::domain::tour::AnchorId::PluginsAddRepo),
+            Some(rect)
+        );
+    }
 
     #[test]
     fn command_scopes_are_presented_as_executable_names() {
