@@ -945,7 +945,7 @@ mod handle_tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::infrastructure::drivers::Device for SlowSnapshotDevice {
+    impl crate::domain::device::Device for SlowSnapshotDevice {
         fn id(&self) -> &str {
             "slow-snapshot"
         }
@@ -982,7 +982,7 @@ mod handle_tests {
             }
         }
 
-        fn capabilities(&self) -> Vec<crate::infrastructure::drivers::CapabilityRef<'_>> {
+        fn capabilities(&self) -> Vec<crate::domain::device::CapabilityRef<'_>> {
             Vec::new()
         }
     }

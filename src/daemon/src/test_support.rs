@@ -2,7 +2,7 @@
 #![cfg(test)]
 //! Shared mock device + builders for unit tests. Test-only.
 
-use crate::infrastructure::drivers::{
+use crate::domain::device::{
     ActionCapability, BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache,
     CoolingCapability, CoolingStateSlot, Device, DpiCapability, EqualizerCapability,
     KeyRemapCapability, KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
@@ -786,8 +786,8 @@ impl EqualizerCapability for MockDevice {
 #[cfg(test)]
 mod capability_tests {
     use super::*;
-    use crate::infrastructure::drivers::EqualizerCapability as EqCap;
-    use crate::infrastructure::drivers::LcdCapability as LcdCap;
+    use crate::domain::device::EqualizerCapability as EqCap;
+    use crate::domain::device::LcdCapability as LcdCap;
 
     #[tokio::test]
     async fn equalizer_save_restore_round_trip() {

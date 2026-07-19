@@ -11,8 +11,8 @@ use halod_shared::types::{
 };
 
 use crate::{
+    domain::device::{CapabilityRef, Device, KeyboardLayoutSlot, VisibilitySlot},
     domain::registry::observers::discovery::DiscoveryHandle,
-    infrastructure::drivers::{CapabilityRef, Device, KeyboardLayoutSlot, VisibilitySlot},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -17,11 +17,11 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use crate::infrastructure::drivers::vendors::generic::devices::common::TaskHandle;
-use crate::infrastructure::drivers::{
+use crate::domain::device::{
     BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache, Device, SensorCapability,
     VisibilitySlot,
 };
+use crate::infrastructure::drivers::vendors::generic::devices::common::TaskHandle;
 use halod_shared::types::{
     Boolean, Choice, ChoiceDisplay, ChoiceOption, DeviceCapability, DeviceType, Sensor,
 };

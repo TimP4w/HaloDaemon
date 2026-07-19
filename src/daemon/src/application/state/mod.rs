@@ -254,11 +254,11 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev1 as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev1 as std::sync::Arc<dyn crate::domain::device::Device>);
         app.device_registry
             .write()
             .await
-            .push(dev2 as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev2 as std::sync::Arc<dyn crate::domain::device::Device>);
 
         crate::application::usecases::device::telemetry::observe(&app).await;
         let snapshot = app.data_bus.sensors();
@@ -295,7 +295,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev as std::sync::Arc<dyn crate::domain::device::Device>);
 
         crate::application::usecases::device::telemetry::observe(&app).await;
         let snapshot = app.data_bus.sensors();
@@ -341,7 +341,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev as std::sync::Arc<dyn crate::domain::device::Device>);
 
         crate::application::usecases::device::telemetry::observe(&app).await;
         let snapshot = app.data_bus.sensors();
@@ -356,7 +356,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev as std::sync::Arc<dyn crate::domain::device::Device>);
 
         crate::application::usecases::device::telemetry::observe(&app).await;
         let snapshot = app.data_bus.sensors();
@@ -378,15 +378,15 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(visible_dev.clone() as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(visible_dev.clone() as std::sync::Arc<dyn crate::domain::device::Device>);
         app.device_registry
             .write()
             .await
-            .push(hidden_dev.clone() as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(hidden_dev.clone() as std::sync::Arc<dyn crate::domain::device::Device>);
         app.device_registry
             .write()
             .await
-            .push(unknown_dev.clone() as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(unknown_dev.clone() as std::sync::Arc<dyn crate::domain::device::Device>);
 
         // Set up known_devices: visible_dev is Visible, hidden_dev is Hidden,
         // unknown_dev is absent (falls through to unwrap_or(true)).

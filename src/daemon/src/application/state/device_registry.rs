@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::infrastructure::drivers::Device;
+use crate::domain::device::Device;
 
 #[derive(Default)]
 pub struct DeviceRegistry {
