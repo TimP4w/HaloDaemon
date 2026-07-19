@@ -84,6 +84,13 @@ impl SmBusDevice {
         }))
     }
 
+    #[cfg(feature = "plugin-test")]
+    pub(crate) fn recording(ops: Box<dyn SmBusSyncOps + Send>) -> Arc<Self> {
+        Arc::new(Self {
+            io: Metered::new(Mutex::new(ops), None),
+        })
+    }
+
     /// Inline twin of [`run_batch`](Self::run_batch): runs the ops on the
     /// **calling thread** under the bus lock (no `spawn_blocking`, no
     /// `Send`/`'static` bound on `f`), so the closure may call back into

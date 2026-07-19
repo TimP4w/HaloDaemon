@@ -5,8 +5,8 @@
 //! daemon owns the Lua worker + transport machinery here; the test *cases*
 //! live in the plugin repo, one `test.lua` per package.
 //!
-//! Covers HID/TCP streams and scoped USB endpoint/control collections against
-//! the first declared device without opening host hardware.
+//! Covers HID/TCP streams, SMBus registers, and scoped USB endpoint/control
+//! collections against the first declared device without opening host hardware.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -29,6 +29,7 @@ use halod_shared::types::{
 };
 
 use super::engine::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
+use super::engine::transport::{AddrScope, RegisterBus};
 use super::engine::transport::{CommandExecutor, CommandRunResult, PluginIo};
 use super::engine::worker::{DevMatch, PluginHandle};
 use super::manifest::{parse_manifest_from_dir, PluginManifest, UsbConfig};
@@ -54,6 +55,73 @@ fn mlua_err(e: anyhow::Error) -> mlua::Error {
 struct WriteRecord {
     endpoint: &'static str,
     data: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct SmbusWriteRecord {
+    operation: &'static str,
+    addr: u8,
+    cmd: Option<u8>,
+    value: Option<u16>,
+    data: Vec<u8>,
+}
+
+struct RecordingSmbus {
+    reads: std::collections::VecDeque<u8>,
+    written: Arc<Mutex<Vec<SmbusWriteRecord>>>,
+}
+
+impl crate::infrastructure::drivers::transports::smbus::SmBusSyncOps for RecordingSmbus {
+    fn read_byte(&mut self, _addr: u8) -> Result<u8> {
+        self.reads
+            .pop_front()
+            .context("no more scripted SMBus reads")
+    }
+    fn read_byte_data(&mut self, _addr: u8, _cmd: u8) -> Result<u8> {
+        self.reads
+            .pop_front()
+            .context("no more scripted SMBus reads")
+    }
+    fn write_quick(&mut self, addr: u8) -> Result<bool> {
+        self.written.lock().unwrap().push(SmbusWriteRecord {
+            operation: "write_quick",
+            addr,
+            cmd: None,
+            value: None,
+            data: vec![],
+        });
+        Ok(true)
+    }
+    fn write_byte_data(&mut self, addr: u8, cmd: u8, value: u8) -> Result<()> {
+        self.written.lock().unwrap().push(SmbusWriteRecord {
+            operation: "write_byte_data",
+            addr,
+            cmd: Some(cmd),
+            value: Some(value.into()),
+            data: vec![],
+        });
+        Ok(())
+    }
+    fn write_word_data(&mut self, addr: u8, cmd: u8, value: u16) -> Result<()> {
+        self.written.lock().unwrap().push(SmbusWriteRecord {
+            operation: "write_word_data",
+            addr,
+            cmd: Some(cmd),
+            value: Some(value),
+            data: vec![],
+        });
+        Ok(())
+    }
+    fn write_block_data(&mut self, addr: u8, cmd: u8, data: &[u8]) -> Result<()> {
+        self.written.lock().unwrap().push(SmbusWriteRecord {
+            operation: "write_block_data",
+            addr,
+            cmd: Some(cmd),
+            value: None,
+            data: data.to_vec(),
+        });
+        Ok(())
+    }
 }
 
 /// Records every write; replays scripted reads in order. Never touches real
@@ -1240,6 +1308,18 @@ fn reads_from_spec(spec: &Option<Table>) -> Vec<Vec<u8>> {
         .collect()
 }
 
+fn smbus_reads_from_spec(spec: &Option<Table>) -> Vec<u8> {
+    spec.as_ref()
+        .and_then(|table| table.get::<Table>("smbus_reads").ok())
+        .map(|reads| {
+            reads
+                .sequence_values::<u8>()
+                .filter_map(Result::ok)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Read `spec.command_results`, a queue of complete `command.run` outcomes.
 /// Spawn failures are intentionally not scriptable as results: like production,
 /// they surface as Lua errors rather than being confused with timeouts.
@@ -1280,9 +1360,12 @@ fn open_device(
         .devices
         .first()
         .context("plugin declares no devices")?;
-    if !matches!(spec.transport.as_str(), "hid" | "tcp" | "usb" | "command") {
+    if !matches!(
+        spec.transport.as_str(),
+        "hid" | "tcp" | "usb" | "command" | "smbus"
+    ) {
         anyhow::bail!(
-            "plugin-test harness only supports hid/tcp/usb/command transports today (got '{}')",
+            "plugin-test harness only supports hid/tcp/usb/command/smbus transports today (got '{}')",
             spec.transport
         );
     }
@@ -1295,6 +1378,7 @@ fn open_device(
         reads_from_spec(&spec_table),
         companion,
     ));
+    let smbus_written = Arc::new(Mutex::new(Vec::new()));
     let usb_recording = manifest
         .transports
         .usb
@@ -1307,10 +1391,15 @@ fn open_device(
     let key = spec_table
         .as_ref()
         .and_then(|table| table.get::<Option<String>>("key").ok().flatten());
+    let smbus_addr = spec
+        .addresses
+        .as_ref()
+        .and_then(|addresses| addresses.first())
+        .copied();
     let dev_match = DevMatch {
         transport: spec.transport.clone(),
         bus: spec.bus.clone(),
-        addr: None,
+        addr: smbus_addr,
         vid: spec.vid,
         pid,
         index: None,
@@ -1329,6 +1418,19 @@ fn open_device(
             PluginIo::Command(CommandExecutor::scripted(
                 command.commands.clone(),
                 command_results_from_spec(&spec_table)?,
+            ))
+        }
+        "smbus" => {
+            let ops = RecordingSmbus {
+                reads: smbus_reads_from_spec(&spec_table).into(),
+                written: smbus_written.clone(),
+            };
+            let bus = crate::infrastructure::drivers::transports::smbus::SmBusDevice::recording(
+                Box::new(ops),
+            );
+            PluginIo::Register(RegisterBus::new(
+                bus,
+                AddrScope::single(smbus_addr.context("SMBus fixture has no address")?),
             ))
         }
         _ => PluginIo::Stream {
@@ -1464,6 +1566,26 @@ fn open_device(
                     lua.to_value(
                         crate::infrastructure::drivers::LightingCapability::descriptor(&*device),
                     )
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "set_cooling_duty",
+                lua.create_function(move |_, (_self, channel, duty): (Table, String, u8)| {
+                    handle
+                        .block_on(
+                            crate::infrastructure::drivers::CoolingCapability::set_cooling_duty(
+                                &*device, &channel, duty,
+                            ),
+                        )
+                        .map_err(mlua_err)
                 })
                 .anyhow()?,
             )
@@ -1751,6 +1873,33 @@ fn open_device(
     }
 
     {
+        let written = smbus_written.clone();
+        dev_table
+            .set(
+                "smbus_writes",
+                lua.create_function(move |lua, _self: Table| {
+                    let records = written.lock().expect("recording SMBus poisoned");
+                    let out = lua.create_table()?;
+                    for (i, record) in records.iter().enumerate() {
+                        let entry = lua.create_table()?;
+                        entry.set("operation", record.operation)?;
+                        entry.set("addr", record.addr)?;
+                        entry.set("cmd", record.cmd)?;
+                        entry.set("value", record.value)?;
+                        entry.set(
+                            "data",
+                            lua.create_sequence_from(record.data.iter().copied())?,
+                        )?;
+                        out.set(i + 1, entry)?;
+                    }
+                    Ok(out)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
         let device = device.clone();
         let handle = handle.clone();
         dev_table
@@ -1837,6 +1986,7 @@ fn open_device(
     {
         let recording = recording.clone();
         let usb = usb_recording.clone();
+        let smbus_written = smbus_written.clone();
         dev_table
             .set(
                 "clear",
@@ -1849,6 +1999,10 @@ fn open_device(
                     if let Some(usb) = &usb {
                         usb.written.lock().expect("recording USB poisoned").clear();
                     }
+                    smbus_written
+                        .lock()
+                        .expect("recording SMBus poisoned")
+                        .clear();
                     Ok(())
                 })
                 .anyhow()?,
