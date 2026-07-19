@@ -93,11 +93,10 @@ pub struct PluginsUi {
     updating: HashMap<String, f64>,
     /// "Update all" in flight → egui time it began, cleared the same way.
     updating_all: Option<f64>,
-    /// The repo whose whole-repo update is in flight → (slug, egui time it began).
-    /// The Update-repo button shows a spinner until the repo drops its "update
-    /// available" plugins (the daemon re-broadcasts once the pull lands) or it
-    /// times out.
-    updating_repo: Option<(String, f64)>,
+    /// Repositories whose whole-repo update is in flight → egui start time.
+    /// Entries are reconciled centrally so progress ends even when another
+    /// detail pane is selected. "Update all" inserts every affected repo.
+    updating_repos: HashMap<String, f64>,
     /// The open plugin-issue Details modal (title + detail), when the user
     /// clicked Details on a plugin's issue banner.
     issue_modal: Option<(String, String)>,
@@ -229,6 +228,7 @@ impl PluginsUi {
             plugin_updates,
             now,
         );
+        clear_finished_repo_updates(&mut self.updating_repos, plugin_updates, now);
     }
 
     fn body(
@@ -250,7 +250,10 @@ impl PluginsUi {
         );
         let now = ui.input(|i| i.time);
         self.sync_update_progress(plugin_updates, now);
-        if self.updating_all.is_some() || !self.updating.is_empty() {
+        if self.updating_all.is_some()
+            || !self.updating.is_empty()
+            || !self.updating_repos.is_empty()
+        {
             // Keep the timeout advancing and the spinner animating.
             ui.ctx().request_repaint();
         }
@@ -359,6 +362,9 @@ impl PluginsUi {
         if due > 0 {
             if update_all_banner(ui, due, self.updating_all.is_some()) {
                 self.updating_all = Some(now);
+                for status in plugin_updates.iter().filter(|s| s.update_available) {
+                    self.updating_repos.insert(status.slug.clone(), now);
+                }
                 crate::runtime::ipc::send(
                     cmd,
                     halod_shared::commands::DaemonCommand::UpdateAllPlugins,
@@ -636,21 +642,11 @@ impl PluginsUi {
                 let updates_enabled = plugin_updates_enabled(state.gui.plugin_downloads);
 
                 // The whole repo is updatable when any of its plugins report an
-                // upstream update. Drop the spinner once they clear (the daemon
-                // re-broadcasts after the pull) or it times out.
+                // upstream update. Progress is reconciled before rendering.
                 let repo_has_updates = plugin_updates
                     .iter()
                     .any(|s| s.slug == r.slug && s.update_available);
-                if let Some((upd_slug, started)) = &self.updating_repo {
-                    if *upd_slug == r.slug && (!repo_has_updates || now - *started > UPDATE_TIMEOUT)
-                    {
-                        self.updating_repo = None;
-                    }
-                }
-                let updating_repo = self
-                    .updating_repo
-                    .as_ref()
-                    .is_some_and(|(s, _)| s == &r.slug);
+                let updating_repo = self.updating_repos.contains_key(&r.slug);
 
                 let mut select_plugin = None;
                 let mut start_check = false;
@@ -687,7 +683,7 @@ impl PluginsUi {
                     );
                 }
                 if start_update {
-                    self.updating_repo = Some((r.slug.clone(), now));
+                    self.updating_repos.insert(r.slug.clone(), now);
                     crate::runtime::ipc::send(
                         cmd,
                         halod_shared::commands::DaemonCommand::UpdatePluginRepo {
@@ -1364,6 +1360,19 @@ fn clear_finished_updates(
             *updating_all = None;
         }
     }
+}
+
+fn clear_finished_repo_updates(
+    updating_repos: &mut HashMap<String, f64>,
+    plugin_updates: &[PluginUpdateStatus],
+    now: f64,
+) {
+    updating_repos.retain(|slug, started| {
+        plugin_updates
+            .iter()
+            .any(|status| status.slug == *slug && status.update_available)
+            && now - *started < UPDATE_TIMEOUT
+    });
 }
 
 /// Decode any newly-arrived asset bytes into GPU textures, keyed like the
