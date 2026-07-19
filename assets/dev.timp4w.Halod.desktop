@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=HaloDaemon
-Comment=Peripheral control — fan curves, RGB, LCD, audio and more
+Comment=Peripheral control - fan curves, RGB, LCD, audio and more
 Exec=halod-gui
 Icon=halod
 StartupNotify=true
