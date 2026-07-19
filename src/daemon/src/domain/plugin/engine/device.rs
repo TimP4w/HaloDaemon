@@ -2072,6 +2072,18 @@ impl CoolingCapability for LuaDevice {
     }
 
     async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel> {
+        // Dynamically enumerated integration children currently have no
+        // dedicated poll task: sample them when the host telemetry loop asks.
+        // Otherwise their initialization cache remains frozen forever.
+        if self.poll_task.is_none() {
+            let worker = self.worker()?;
+            worker.poll().await?;
+            let channel = worker.cooling_status(channel_id).await?;
+            self.cooling_cache
+                .lock_recover()
+                .insert(channel_id.to_owned(), channel.clone());
+            return Ok(channel);
+        }
         if let Some(channel) = self.cooling_cache.lock_recover().get(channel_id).cloned() {
             return Ok(channel);
         }
@@ -2100,6 +2112,17 @@ impl CoolingCapability for LuaDevice {
 #[async_trait]
 impl SensorCapability for LuaDevice {
     async fn get_sensors(&self) -> Result<Vec<Sensor>> {
+        // See `get_cooling_status`: integration controller children skip the
+        // root's background-task construction path, so telemetry is their poll
+        // driver. Run read_status first because some plugins derive sensors
+        // from the status table it updates.
+        if self.poll_task.is_none() {
+            let worker = self.worker()?;
+            worker.poll().await?;
+            let sensors = worker.get_sensors().await?;
+            replace_if_changed(&self.sensor_cache, sensors.clone());
+            return Ok(sensors);
+        }
         Ok(self.sensor_cache.lock_recover().clone())
     }
 }
