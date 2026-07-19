@@ -25,44 +25,59 @@ use crate::application::state::AppState;
 use crate::application::usecases::registry::registration::unregister_device_and_children;
 use crate::domain::plugin::observers::integration_scan;
 
-fn setup_worker(
+async fn resolved_config(
+    app: &Arc<AppState>,
+    id: &str,
+    granted: &[halod_shared::types::Permission],
+) -> Result<crate::domain::plugin::ResolvedConfig> {
+    let app = Arc::clone(app);
+    let id = id.to_owned();
+    let granted = granted.to_vec();
+    tokio::task::spawn_blocking(move || {
+        app.registry
+            .resolved_config_for(app.secret_store.as_ref(), &id, &granted)
+    })
+    .await
+    .context("secret-store task failed")
+}
+
+async fn setup_worker(
     app: &Arc<AppState>,
     manifest: &crate::domain::plugin::manifest::PluginManifest,
-) -> crate::domain::plugin::engine::worker::PluginHandle {
+) -> Result<crate::domain::plugin::engine::worker::PluginHandle> {
     let granted = app.registry.granted_for(&manifest.plugin_id);
-    let config =
-        app.registry
-            .resolved_config_for(app.secret_store.as_ref(), &manifest.plugin_id, &granted);
+    let config = resolved_config(app, &manifest.plugin_id, &granted).await?;
     let http = crate::domain::plugin::engine::worker::http_runtime_for(manifest, &granted, &config);
     let udp = crate::domain::plugin::engine::worker::udp_runtime_for(manifest, &granted, &config);
-    crate::domain::plugin::engine::worker::PluginHandle::spawn_with_data(
-        manifest.script_source.clone(),
-        manifest.module_sources.clone(),
-        crate::domain::plugin::engine::transport::PluginIo::None,
-        crate::domain::plugin::engine::worker::DevMatch {
-            transport: "setup".into(),
-            ..Default::default()
-        },
-        granted,
-        config,
-        tokio::runtime::Handle::current(),
-        vec![],
-        Default::default(),
-        Default::default(),
-        http,
-        udp,
+    Ok(
+        crate::domain::plugin::engine::worker::PluginHandle::spawn_with_data(
+            manifest.script_source.clone(),
+            manifest.module_sources.clone(),
+            crate::domain::plugin::engine::transport::PluginIo::None,
+            crate::domain::plugin::engine::worker::DevMatch {
+                transport: "setup".into(),
+                ..Default::default()
+            },
+            granted,
+            config,
+            tokio::runtime::Handle::current(),
+            vec![],
+            Default::default(),
+            Default::default(),
+            http,
+            udp,
+        ),
     )
 }
 
-fn config_context(app: &Arc<AppState>, id: &str) -> serde_json::Value {
+async fn config_context(app: &Arc<AppState>, id: &str) -> Result<serde_json::Value> {
     let granted = app.registry.granted_for(id);
-    let values = app
-        .registry
-        .resolved_config_for(app.secret_store.as_ref(), id, &granted)
+    let values = resolved_config(app, id, &granted)
+        .await?
         .into_iter()
         .map(|(key, value)| (key, value.to_config_string()))
         .collect::<HashMap<_, _>>();
-    json!({ "config": values })
+    Ok(json!({ "config": values }))
 }
 
 async fn publish_setup(app: &Arc<AppState>, id: &str, status: IntegrationSetupStatus) {
@@ -118,11 +133,19 @@ pub async fn reset_setup(id: String, app: Arc<AppState>) -> Result<()> {
     app.registry.clear_integration_operational_errors(&id);
     app.registry.clear_integration_setup_status(&id);
 
-    for key in app.registry.secure_config_keys_for(&id) {
-        app.secret_store
-            .delete(&id, &key)
-            .with_context(|| format!("deleting secret '{key}' for integration '{id}'"))?;
-    }
+    let keys = app.registry.secure_config_keys_for(&id);
+    let store = Arc::clone(&app.secret_store);
+    let integration_id = id.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        for key in keys {
+            store.delete(&integration_id, &key).with_context(|| {
+                format!("deleting secret '{key}' for integration '{integration_id}'")
+            })?;
+        }
+        Ok(())
+    })
+    .await
+    .context("secret-store cleanup task failed")??;
     {
         let mut cfg = app.config.write().await;
         cfg.plugins.config.remove(&id);
@@ -170,7 +193,10 @@ pub async fn select_setup_mode(
     let candidates = match async {
         let raw =
             crate::infrastructure::integration_discovery::scan(setup.discovery.clone()).await?;
-        let candidates = setup_worker(&app, &manifest).setup_discover(raw).await?;
+        let candidates = setup_worker(&app, &manifest)
+            .await?
+            .setup_discover(raw)
+            .await?;
         validate_candidates(&manifest, &candidates)?;
         Ok::<_, anyhow::Error>(candidates)
     }
@@ -296,7 +322,8 @@ pub async fn retry_pairing(id: String, app: Arc<AppState>) -> Result<()> {
     status.error = None;
     publish_setup(&app, &id, status.clone()).await;
     let result = match setup_worker(&app, &manifest)
-        .setup_pair(config_context(&app, &id))
+        .await?
+        .setup_pair(config_context(&app, &id).await?)
         .await
     {
         Ok(result) => result,
@@ -340,7 +367,8 @@ async fn finish_setup(
     app: Arc<AppState>,
 ) -> Result<()> {
     let validation = match setup_worker(&app, manifest)
-        .setup_validate(config_context(&app, id))
+        .await?
+        .setup_validate(config_context(&app, id).await?)
         .await
     {
         Ok(validation) => validation,
@@ -611,7 +639,8 @@ pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppStat
             bail!("integration must be configured before it can be enabled");
         }
         let validation = setup_worker(&app, &manifest)
-            .setup_validate(config_context(&app, &id))
+            .await?
+            .setup_validate(config_context(&app, &id).await?)
             .await?;
         if !validation.ok {
             bail!(

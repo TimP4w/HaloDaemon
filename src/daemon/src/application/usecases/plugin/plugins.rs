@@ -176,10 +176,19 @@ pub async fn set_config(
 /// `repos::remove_repo`, so a reinstall of identical content can't inherit an
 /// old grant or acknowledgement.
 pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
-    for key in app.registry.secure_config_keys_for(id) {
-        if let Err(e) = app.secret_store.delete(id, &key) {
-            log::warn!("deleting secret '{key}' for plugin '{id}': {e:#}");
+    let keys = app.registry.secure_config_keys_for(id);
+    let store = Arc::clone(&app.secret_store);
+    let plugin_id = id.to_owned();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        for key in keys {
+            if let Err(error) = store.delete(&plugin_id, &key) {
+                log::warn!("deleting secret '{key}' for plugin '{plugin_id}': {error:#}");
+            }
         }
+    })
+    .await
+    {
+        log::warn!("secret-store cleanup task failed for plugin '{id}': {error}");
     }
 
     let mut cfg = app.config.write().await;
