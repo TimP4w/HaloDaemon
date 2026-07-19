@@ -1734,6 +1734,24 @@ fn open_device(
         let handle = handle.clone();
         dev_table
             .set(
+                "set_boolean",
+                lua.create_function(move |_, (_self, key, value): (Table, String, bool)| {
+                    handle
+                        .block_on(crate::domain::device::BooleanCapability::set_boolean(
+                            &*device, &key, value,
+                        ))
+                        .map_err(mlua_err)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
                 "set_choice",
                 lua.create_function(move |_, (_self, key, selected): (Table, String, usize)| {
                     handle
