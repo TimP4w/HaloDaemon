@@ -185,9 +185,9 @@ impl CommandExecutor {
                 "command '{executable}' is outside the declared transport scope"
             ));
         }
-        if super::manifest::is_disallowed_command(executable) {
+        if !super::manifest::is_allowed_command(executable) {
             return self.reject(format!(
-                "command '{executable}' is a shell, interpreter, or command launcher and cannot be run by a plugin"
+                "command '{executable}' is outside HaloDaemon's executable allowlist"
             ));
         }
         if args.len() > MAX_COMMAND_ARGS

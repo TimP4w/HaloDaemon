@@ -2836,9 +2836,9 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
         let mut names = HashSet::new();
         for name in &command.commands {
             validate_component("command executable", name)?;
-            if is_disallowed_command(name) {
+            if !is_allowed_command(name) {
                 bail!(
-                    "command executable '{name}' is a shell, interpreter, or command launcher and cannot be granted to a plugin"
+                    "command executable '{name}' is not in HaloDaemon's narrow executable allowlist"
                 );
             }
             if !names.insert(name.as_str()) {
@@ -2865,39 +2865,10 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn is_disallowed_command(name: &str) -> bool {
+pub(super) fn is_allowed_command(name: &str) -> bool {
     let normalized = name.to_ascii_lowercase();
     let normalized = normalized.strip_suffix(".exe").unwrap_or(&normalized);
-    matches!(
-        normalized,
-        "sh" | "bash"
-            | "dash"
-            | "zsh"
-            | "fish"
-            | "cmd"
-            | "powershell"
-            | "pwsh"
-            | "env"
-            | "busybox"
-            | "python"
-            | "python2"
-            | "python3"
-            | "perl"
-            | "ruby"
-            | "node"
-            | "nodejs"
-            | "deno"
-            | "bun"
-            | "lua"
-            | "luajit"
-            | "php"
-            | "java"
-            | "wscript"
-            | "cscript"
-            | "mshta"
-            | "rundll32"
-            | "regsvr32"
-    )
+    matches!(normalized, "nvidia-smi" | "liquidctl")
 }
 
 /// Categories are matched against the controls a device reports at runtime, so
@@ -3281,12 +3252,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_launchers_are_disallowed_case_insensitively() {
+    fn command_transport_uses_a_narrow_case_insensitive_allowlist() {
         for name in ["sh", "bash", "python3", "env", "perl", "node", "CMD.EXE"] {
-            assert!(is_disallowed_command(name), "{name} must be rejected");
+            assert!(!is_allowed_command(name), "{name} must be rejected");
         }
-        assert!(!is_disallowed_command("nvidia-smi"));
-        assert!(!is_disallowed_command("liquidctl"));
+        assert!(is_allowed_command("nvidia-smi"));
+        assert!(is_allowed_command("NVIDIA-SMI.EXE"));
+        assert!(is_allowed_command("liquidctl"));
+        assert!(!is_allowed_command("vendor-helper"));
     }
 
     // ── directory plugins (`plugin.yaml` is authoritative) ─────────────
