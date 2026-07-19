@@ -579,7 +579,8 @@ pub const ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED: &str =
 /// A user-visible notification identified by a stable code plus structured,
 /// runtime-supplied parameters (device ids, error text, …). The daemon emits
 /// these; the GUI owns all human-readable copy and translation. `severity()`
-/// is derived from the variant so it is not carried separately on the wire.
+/// is derived from the variant so it is not carried separately on the wire;
+/// `Notification::show_native` explicitly requests desktop delivery.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum NotificationCode {
@@ -594,6 +595,12 @@ pub enum NotificationCode {
     },
     ProfileSwitched {
         profile: String,
+    },
+    LowBattery {
+        device: String,
+        battery: String,
+        level: u8,
+        threshold: u8,
     },
     ChainLinkRestoreFailed {
         name: String,
@@ -675,7 +682,9 @@ impl NotificationCode {
             | PluginContentChanged { .. }
             | PluginRuntimeError { .. }
             | PluginConnectFailed { .. } => NotificationSeverity::Warning,
-            ProfileSwitched { .. } | PluginRecommended { .. } => NotificationSeverity::Info,
+            ProfileSwitched { .. } | LowBattery { .. } | PluginRecommended { .. } => {
+                NotificationSeverity::Info
+            }
         }
     }
 
@@ -696,6 +705,8 @@ impl NotificationCode {
 pub struct Notification {
     #[serde(flatten)]
     pub code: NotificationCode,
+    #[serde(rename = "showNative", default)]
+    pub show_native: bool,
     pub timestamp_ms: u64,
 }
 
@@ -3188,6 +3199,7 @@ mod tests {
                 device: "Kraken".into(),
                 detail: "thing exploded".into(),
             },
+            show_native: true,
             timestamp_ms: 1234,
         };
         // The code tag and its params flatten alongside timestamp_ms.
@@ -3196,8 +3208,10 @@ mod tests {
         assert_eq!(json["device"], "Kraken");
         assert_eq!(json["detail"], "thing exploded");
         assert_eq!(json["timestamp_ms"], 1234);
+        assert_eq!(json["showNative"], true);
         let back: Notification = serde_json::from_value(json).unwrap();
         assert_eq!(back.code, n.code);
+        assert!(back.show_native);
         assert_eq!(back.code.severity(), NotificationSeverity::Error);
         assert_eq!(back.timestamp_ms, 1234);
     }
@@ -3211,6 +3225,12 @@ mod tests {
             DeviceReconnectFailed { device: "d".into() },
             ProfileSwitched {
                 profile: "p".into(),
+            },
+            LowBattery {
+                device: "d".into(),
+                battery: "b".into(),
+                level: 9,
+                threshold: 10,
             },
             ChainLinkRestoreFailed {
                 name: "n".into(),

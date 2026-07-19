@@ -352,6 +352,7 @@ mod tests {
         };
         Notification {
             code,
+            show_native: false,
             timestamp_ms: 0,
         }
     }
@@ -363,6 +364,7 @@ mod tests {
                 plugin: "wled".into(),
                 detail: "boom".into(),
             },
+            show_native: false,
             timestamp_ms: 0,
         }
     }
@@ -373,6 +375,7 @@ mod tests {
                 device: "keyboard".into(),
                 detail: "HID++ rejected write".into(),
             },
+            show_native: false,
             timestamp_ms: 0,
         }
     }
@@ -386,6 +389,7 @@ mod tests {
                 actual: "b".into(),
                 restore_slug: Some("official".into()),
             },
+            show_native: false,
             timestamp_ms: 0,
         }
     }
@@ -474,6 +478,7 @@ mod tests {
                 code: NotificationCode::ProfileSwitched {
                     profile: i.to_string(),
                 },
+                show_native: false,
                 timestamp_ms: i as u64,
             })
             .collect();

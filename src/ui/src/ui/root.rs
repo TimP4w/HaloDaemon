@@ -12,20 +12,6 @@ const DEPCHECK_GRACE_SECS: f64 = 4.0;
 impl App {
     pub(crate) fn accept_state(&mut self, state: halod_shared::types::AppState) {
         crate::ui::screens::settings::apply_locale(&state.gui.language);
-        let alerts = self.low_battery_tracker.observe(&state);
-        if state.gui.low_battery_notifications {
-            for alert in alerts {
-                crate::domain::native_notification::show(
-                    &t!("notify.low_battery.title", device = alert.device),
-                    &t!(
-                        "notify.low_battery.message",
-                        battery = alert.battery,
-                        level = alert.level,
-                        threshold = alert.threshold
-                    ),
-                );
-            }
-        }
         self.state_cache = std::sync::Arc::new(state);
     }
 
@@ -61,6 +47,7 @@ impl App {
                 actual: alert.actual,
                 restore_slug: alert.restore_slug,
             },
+            show_native: true,
             timestamp_ms: 0,
         };
         show_native_notifications(std::slice::from_ref(&notification));
@@ -195,7 +182,6 @@ impl App {
             });
         }
         crate::ui::screens::profile::observe_notifications(&mut self.profile_ui, &incoming);
-        show_native_notifications(&incoming);
         self.toasts.ingest(incoming, time);
 
         // Repository validation failures are part of the state snapshot rather
@@ -216,6 +202,7 @@ impl App {
             };
             let notification = halod_shared::types::Notification {
                 code,
+                show_native: true,
                 timestamp_ms: (time * 1000.0) as u64,
             };
             show_native_notifications(std::slice::from_ref(&notification));
@@ -648,6 +635,9 @@ impl App {
 
 fn show_native_notifications(notifications: &[halod_shared::types::Notification]) {
     for notification in notifications {
+        if !notification.show_native {
+            continue;
+        }
         let (title, message) =
             crate::domain::models::notifications::notification_text(&notification.code);
         crate::domain::native_notification::show(&title, &message);

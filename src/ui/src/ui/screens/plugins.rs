@@ -1454,6 +1454,7 @@ pub(crate) fn quarantine_toasts(
             code: NotificationCode::PluginContentChanged {
                 plugin: p.name.clone(),
             },
+            show_native: true,
             timestamp_ms,
         })
         .collect()
@@ -1519,6 +1520,7 @@ pub(crate) fn recommendation_toasts(
                     code: NotificationCode::PluginRecommended {
                         plugin: rec.plugin_name.clone(),
                     },
+                    show_native: true,
                     timestamp_ms,
                 },
             ))

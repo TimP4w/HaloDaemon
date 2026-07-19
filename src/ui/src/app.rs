@@ -73,8 +73,6 @@ pub struct App {
     pub(crate) issue_details_modal: Option<(String, String)>,
     /// Repository-integrity episodes already notified during this GUI session.
     pub(crate) integrity_alert_notified: std::collections::HashSet<String>,
-    /// Native low-battery alerts already delivered in each discharge episode.
-    pub(crate) low_battery_tracker: domain::battery_notification::LowBatteryTracker,
     /// Set by the tray "Quit" so a close request bypasses "close to tray" and
     /// actually exits instead of hiding the window.
     pub(crate) force_quit: Arc<AtomicBool>,
@@ -174,7 +172,6 @@ impl App {
             toasts: ui::components::toast::Toasts::default(),
             issue_details_modal: None,
             integrity_alert_notified: std::collections::HashSet::new(),
-            low_battery_tracker: domain::battery_notification::LowBatteryTracker::default(),
             force_quit,
             hidden,
             hide_state,

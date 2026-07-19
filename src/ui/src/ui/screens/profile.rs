@@ -1558,6 +1558,7 @@ mod tests {
     fn notification(code: halod_shared::types::NotificationCode) -> Notification {
         Notification {
             code,
+            show_native: false,
             timestamp_ms: 0,
         }
     }

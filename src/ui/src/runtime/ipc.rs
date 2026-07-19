@@ -122,6 +122,7 @@ pub(crate) struct UiTx {
     lcd_template: watch::Sender<Option<(String, CustomTemplateDef)>>,
     lcd_editor_render: watch::Sender<Option<DecodedEditorRender>>,
     notifications: NotifyQueue,
+    low_battery_tracker: Mutex<crate::domain::battery_notification::LowBatteryTracker>,
     hidden: Arc<AtomicBool>,
 }
 
@@ -229,6 +230,7 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
         lcd_template: template_s,
         lcd_editor_render: editor_render_s,
         notifications: Arc::clone(&notifications),
+        low_battery_tracker: Mutex::new(Default::default()),
         hidden,
     };
     let rx = UiRx {
@@ -444,6 +446,46 @@ fn push_notification(tx: &UiTx, n: Notification, repaint: &impl Fn()) {
     repaint();
 }
 
+fn show_native_notification(notification: &Notification) {
+    if !notification.show_native {
+        return;
+    }
+    let (title, message) =
+        crate::domain::models::notifications::notification_text(&notification.code);
+    show_native(&title, &message);
+}
+
+#[cfg(not(test))]
+fn show_native(title: &str, message: &str) {
+    crate::domain::native_notification::show(title, message);
+}
+
+#[cfg(test)]
+fn show_native(_title: &str, _message: &str) {}
+
+fn observe_low_battery(tx: &UiTx) {
+    let state = tx.state.borrow();
+    let Ok(mut tracker) = tx.low_battery_tracker.lock() else {
+        return;
+    };
+    let alerts = tracker.observe(&state);
+    if !state.gui.low_battery_notifications {
+        return;
+    }
+    for alert in alerts {
+        show_native_notification(&Notification {
+            code: NotificationCode::LowBattery {
+                device: alert.device,
+                battery: alert.battery,
+                level: alert.level,
+                threshold: alert.threshold,
+            },
+            show_native: true,
+            timestamp_ms: 0,
+        });
+    }
+}
+
 /// Key an asset is stored/looked up under in `UiRx::plugin_assets`.
 pub fn plugin_asset_cache_key(plugin_id: &str, name: &str) -> String {
     format!("{plugin_id}/{name}")
@@ -510,6 +552,7 @@ fn handle_json(
                             crate::ui::screens::settings::apply_locale(
                                 &tx.state.borrow().gui.language,
                             );
+                            observe_low_battery(tx);
                             tx.connected.send_replace(true);
                             repaint();
                         }
@@ -636,6 +679,9 @@ fn handle_json(
                 .get("data")
                 .and_then(|d| serde_json::from_value::<Notification>(d.clone()).ok())
             {
+                // Native delivery belongs to the resident IPC thread: on
+                // Wayland the window and render loop do not exist in tray mode.
+                show_native_notification(&n);
                 push_notification(tx, n, repaint);
             }
             return Reaction::default();
@@ -661,6 +707,7 @@ fn handle_json(
                 tx,
                 Notification {
                     code: NotificationCode::Generic { message },
+                    show_native: true,
                     timestamp_ms: 0,
                 },
                 repaint,
@@ -811,6 +858,7 @@ fn handle_json(
             // locale while the initial state is still in flight.
             crate::ui::screens::settings::apply_locale(&state.gui.language);
             tx.state.send_replace(state);
+            observe_low_battery(tx);
             tx.connected.send_replace(true);
             repaint();
         }
@@ -907,6 +955,7 @@ mod tests {
             lcd_template: watch::channel(None).0,
             lcd_editor_render: watch::channel(None).0,
             notifications: Arc::new(Mutex::new(Vec::new())),
+            low_battery_tracker: Mutex::new(Default::default()),
             hidden: Arc::new(AtomicBool::new(false)),
         };
         (tx, upload_r)

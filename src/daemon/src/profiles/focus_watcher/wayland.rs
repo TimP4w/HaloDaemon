@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
     protocol::wl_registry,
-    Connection, Dispatch, QueueHandle,
+    Connection, Dispatch, Proxy, QueueHandle,
 };
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
@@ -15,10 +16,17 @@ use super::FocusEvent;
 struct AppData {
     tx: mpsc::Sender<FocusEvent>,
     active_app_id: Option<String>,
-    pending_app_id: Option<String>,
-    pending_activated: bool,
+    toplevels: HashMap<wayland_client::backend::ObjectId, ToplevelState>,
     /// Set when the receiver is gone — signals the dispatch loop to exit.
     disconnected: bool,
+}
+
+#[derive(Default)]
+struct ToplevelState {
+    /// App IDs are persistent protocol state. Compositors generally send this
+    /// once when the handle is announced, not again on every activation.
+    app_id: Option<String>,
+    activated: bool,
 }
 
 impl AppData {
@@ -45,28 +53,32 @@ impl AppData {
 
 impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for AppData {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _proxy: &ZwlrForeignToplevelManagerV1,
-        _event: zwlr_foreign_toplevel_manager_v1::Event,
+        event: zwlr_foreign_toplevel_manager_v1::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        if let zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } = event {
+            state.toplevels.entry(toplevel.id()).or_default();
+        }
     }
 }
 
 impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppData {
     fn event(
         state: &mut Self,
-        _proxy: &ZwlrForeignToplevelHandleV1,
+        proxy: &ZwlrForeignToplevelHandleV1,
         event: zwlr_foreign_toplevel_handle_v1::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        let id = proxy.id();
         match event {
             zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
-                state.pending_app_id = Some(app_id);
+                state.toplevels.entry(id).or_default().app_id = Some(app_id);
             }
             zwlr_foreign_toplevel_handle_v1::Event::State { state: raw_state } => {
                 use zwlr_foreign_toplevel_handle_v1::State as TState;
@@ -74,18 +86,21 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppData {
                     u32::from_ne_bytes(b.try_into().expect("chunks_exact(4) guarantees 4 bytes"))
                         == TState::Activated as u32
                 });
-                state.pending_activated = is_activated;
+                state.toplevels.entry(id).or_default().activated = is_activated;
             }
             zwlr_foreign_toplevel_handle_v1::Event::Done => {
-                if state.pending_activated {
-                    if let Some(app_id) = state.pending_app_id.take() {
-                        state.report_focus(&app_id);
-                    }
+                let focused_app = state
+                    .toplevels
+                    .get(&id)
+                    .filter(|toplevel| toplevel.activated)
+                    .and_then(|toplevel| toplevel.app_id.clone());
+                if let Some(app_id) = focused_app {
+                    state.report_focus(&app_id);
                 }
-                state.pending_app_id = None;
-                state.pending_activated = false;
             }
-            zwlr_foreign_toplevel_handle_v1::Event::Closed => {}
+            zwlr_foreign_toplevel_handle_v1::Event::Closed => {
+                state.toplevels.remove(&id);
+            }
             _ => {}
         }
     }
@@ -140,8 +155,7 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
         let mut data = AppData {
             tx,
             active_app_id: None,
-            pending_app_id: None,
-            pending_activated: false,
+            toplevels: HashMap::new(),
             disconnected: false,
         };
 
@@ -163,8 +177,7 @@ mod tests {
         AppData {
             tx,
             active_app_id: None,
-            pending_app_id: None,
-            pending_activated: false,
+            toplevels: HashMap::new(),
             disconnected: false,
         }
     }

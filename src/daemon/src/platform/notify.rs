@@ -30,6 +30,7 @@ pub async fn send(app: &Arc<AppState>, code: NotificationCode) {
     }
     let n = Notification {
         code,
+        show_native: true,
         timestamp_ms: now_ms(),
     };
     let msg = json!({ "type": "notification", "data": n });

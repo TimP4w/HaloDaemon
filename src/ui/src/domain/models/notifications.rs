@@ -26,6 +26,21 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
             t!("notify.profile_switched.title").to_string(),
             t!("notify.profile_switched.message", profile = profile).to_string(),
         ),
+        LowBattery {
+            device,
+            battery,
+            level,
+            threshold,
+        } => (
+            t!("notify.low_battery.title", device = device).to_string(),
+            t!(
+                "notify.low_battery.message",
+                battery = battery,
+                level = level,
+                threshold = threshold
+            )
+            .to_string(),
+        ),
         ChainLinkRestoreFailed { name, detail } => (
             t!("notify.chain_link_restore_failed.title", name = name).to_string(),
             t!("notify.chain_link_restore_failed.message", detail = detail).to_string(),
