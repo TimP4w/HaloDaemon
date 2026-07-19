@@ -3513,6 +3513,20 @@ mod tests {
     }
 
     #[test]
+    fn repository_update_progress_tracks_multiple_repositories_independently() {
+        let mut updating = HashMap::from([("repo-a".to_owned(), 0.0), ("repo-b".to_owned(), 0.0)]);
+        let mut repo_a = status("a", false);
+        repo_a.slug = "repo-a".into();
+        let mut repo_b = status("b", true);
+        repo_b.slug = "repo-b".into();
+
+        clear_finished_repo_updates(&mut updating, &[repo_a, repo_b], 1.0);
+
+        assert!(!updating.contains_key("repo-a"));
+        assert!(updating.contains_key("repo-b"));
+    }
+
+    #[test]
     fn format_last_sync_trims_fractional_seconds_and_offset() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T23:46:00+00:00")
             .unwrap()

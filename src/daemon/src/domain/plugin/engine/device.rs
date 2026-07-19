@@ -200,6 +200,22 @@ fn should_start_status_poll(
     needs_status_poll(caps) && !integration_root
 }
 
+fn is_redundant_cooling_fan(
+    device_type: DeviceType,
+    has_lighting: bool,
+    cooling_kind: Option<CoolingChannelKind>,
+    combined_fans: &mut usize,
+) -> bool {
+    let redundant = *combined_fans > 0
+        && device_type == DeviceType::Fan
+        && !has_lighting
+        && cooling_kind == Some(CoolingChannelKind::Fan);
+    if redundant {
+        *combined_fans -= 1;
+    }
+    redundant
+}
+
 #[derive(Clone, Copy, Default)]
 struct StatusPollCaps {
     sensor: bool,
@@ -2156,20 +2172,18 @@ impl Controller for LuaDevice {
             })
             .count();
         children.retain(|child| {
-            let cooling_only_fan = child.as_lighting().is_none()
-                && child.as_cooling().is_some_and(|cooling| {
-                    cooling
-                        .cooling_channels()
-                        .first()
-                        .is_some_and(|channel| channel.kind == CoolingChannelKind::Fan)
-                });
-            let redundant = combined_fans > 0
-                && child.wire_device_type() == DeviceType::Fan
-                && cooling_only_fan;
-            if redundant {
-                combined_fans -= 1;
-            }
-            !redundant
+            let cooling_kind = child.as_cooling().and_then(|cooling| {
+                cooling
+                    .cooling_channels()
+                    .first()
+                    .map(|channel| channel.kind.clone())
+            });
+            !is_redundant_cooling_fan(
+                child.wire_device_type(),
+                child.as_lighting().is_some(),
+                cooling_kind,
+                &mut combined_fans,
+            )
         });
         children.extend(accessories);
         children
@@ -3162,6 +3176,34 @@ mod tests {
     }
 
     #[test]
+    fn combined_rgb_fans_consume_only_matching_cooling_only_fan_leaves() {
+        let mut combined_fans = 1;
+
+        assert!(!is_redundant_cooling_fan(
+            DeviceType::AIO,
+            false,
+            Some(CoolingChannelKind::Pump),
+            &mut combined_fans,
+        ));
+        assert!(is_redundant_cooling_fan(
+            DeviceType::Fan,
+            false,
+            Some(CoolingChannelKind::Fan),
+            &mut combined_fans,
+        ));
+        assert_eq!(combined_fans, 0);
+        assert!(
+            !is_redundant_cooling_fan(
+                DeviceType::Fan,
+                false,
+                Some(CoolingChannelKind::Fan),
+                &mut combined_fans,
+            ),
+            "an unmatched cooling-only fan must remain discoverable"
+        );
+    }
+
+    #[test]
     fn every_manifest_capability_maps_to_a_runtime_capability() {
         for name in crate::domain::plugin::manifest::SUPPORTED_CAPABILITIES {
             assert!(
@@ -3320,6 +3362,50 @@ mod tests {
         assert_eq!(
             LightingCapability::descriptor(&dev).channels[0].leds[0].id,
             7
+        );
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn device_without_background_poll_refreshes_cooling_and_sensors_inline() {
+        let script = r#"
+            local sample = 0
+            return {
+              initialize = function()
+                return { cooling = { channels = {
+                  { id = "fan", name = "Fan", kind = "fan", controllable = true },
+                } } }
+              end,
+              read_status = function()
+                sample = sample + 1
+                return { sample = sample }
+              end,
+              get_cooling_status = function(dev, channel)
+                return { id = channel, name = "Fan", kind = "fan", controllable = true,
+                         duty = dev.status.sample }
+              end,
+              get_sensors = function(dev)
+                return {{ id = "temp", name = "Temperature", value = dev.status.sample,
+                          unit = "celsius", sensor_type = "temperature" }}
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("inline_poll", &["cooling", "sensors"], script);
+        let mut dev = hid_device("inline_poll-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+        if let Some(task) = dev.poll_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+
+        let cooling = CoolingCapability::get_cooling_status(&dev, "fan")
+            .await
+            .unwrap();
+        let sensors = SensorCapability::get_sensors(&dev).await.unwrap();
+        assert_eq!(
+            sensors[0].value,
+            f64::from(cooling.duty.unwrap()) + 1.0,
+            "each inline telemetry request must run read_status first"
         );
         dev.close().await;
     }
