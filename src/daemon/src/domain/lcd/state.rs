@@ -28,6 +28,7 @@ pub struct LcdEngineState {
     /// repair the inner value rather than taking down the daemon.
     pub editor_session: Mutex<Option<EditorSession>>,
     pub editor_rendering: std::sync::atomic::AtomicBool,
+    editor_generation: std::sync::atomic::AtomicU64,
     engine: OnceLock<Engine>,
 }
 
@@ -37,6 +38,7 @@ impl LcdEngineState {
             templates: RwLock::new(crate::domain::lcd::usecases::templates::list_templates()),
             editor_session: Mutex::new(None),
             editor_rendering: std::sync::atomic::AtomicBool::new(false),
+            editor_generation: std::sync::atomic::AtomicU64::new(0),
             engine: OnceLock::new(),
         }
     }
@@ -46,6 +48,16 @@ impl LcdEngineState {
             log::warn!("LCD editor-session lock poisoned; recovering state");
             poisoned.into_inner()
         })
+    }
+
+    pub fn editor_generation(&self) -> u64 {
+        self.editor_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn invalidate_editor_session(&self) {
+        self.editor_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     pub fn set_engine(&self, handle: Arc<LcdEngine>, video: Arc<VideoEngine>) {
@@ -118,5 +130,13 @@ mod tests {
         .join();
 
         assert!(state.editor_session().is_none());
+    }
+
+    #[test]
+    fn invalidating_editor_session_changes_generation() {
+        let state = LcdEngineState::new();
+        let before = state.editor_generation();
+        state.invalidate_editor_session();
+        assert_ne!(state.editor_generation(), before);
     }
 }

@@ -51,6 +51,7 @@ pub async fn render(
         .set_health(halod_shared::types::LcdHealth::Starting);
     let images_dir = crate::config::lcd_images_dir();
     let render_device_id = device_id.clone();
+    let editor_generation = app.lcd.editor_generation();
     let mut session = app.lcd.editor_session().take();
     custom::prepare_editor_session(&render_device_id, &def, &images_dir, &mut session)
         .gather_plugin_sprites(cw, ch, 0.0, &app)
@@ -74,7 +75,9 @@ pub async fn render(
         .store(false, std::sync::atomic::Ordering::Release);
     let result = match result {
         Ok((session, result)) => {
-            *app.lcd.editor_session() = session;
+            if app.lcd.editor_generation() == editor_generation {
+                *app.lcd.editor_session() = session;
+            }
             result
         }
         Err(error) => {

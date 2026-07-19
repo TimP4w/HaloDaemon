@@ -6,7 +6,7 @@ use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
 };
-use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
+use windows::Win32::Media::KernelStreaming::{KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE};
 use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
@@ -198,6 +198,44 @@ fn capture_session(handle: &Arc<AudioHandle>) -> windows::core::Result<()> {
 }
 
 #[cfg(test)]
+mod format_regression_tests {
+    use super::*;
+
+    #[test]
+    fn extensible_pcm_is_not_misclassified_as_float() {
+        let mut format = WAVEFORMATEXTENSIBLE::default();
+        format.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE as u16;
+        format.Format.wBitsPerSample = 32;
+        format.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+        let samples = buffer_to_f32(&i32::MAX.to_le_bytes(), &format.Format);
+        assert!(samples[0] > 0.99);
+    }
+
+    #[test]
+    fn extensible_float_uses_its_subformat() {
+        let mut format = WAVEFORMATEXTENSIBLE::default();
+        format.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE as u16;
+        format.Format.wBitsPerSample = 32;
+        format.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+        assert_eq!(
+            buffer_to_f32(&0.5f32.to_le_bytes(), &format.Format),
+            vec![0.5]
+        );
+    }
+
+    #[test]
+    fn packed_24_bit_pcm_is_sign_extended() {
+        let format = WAVEFORMATEX {
+            wFormatTag: 1,
+            wBitsPerSample: 24,
+            ..Default::default()
+        };
+        let samples = buffer_to_f32(&[0, 0, 0x80], &format);
+        assert_eq!(samples, vec![-1.0]);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -221,20 +259,11 @@ mod tests {
     }
 
     #[test]
-    fn buffer_to_f32_extensible_32bit_is_treated_as_float() {
-        let bytes = 0.5f32.to_le_bytes();
-        assert_eq!(
-            buffer_to_f32(&bytes, &fmt(WAVE_FORMAT_EXTENSIBLE, 32)),
-            vec![0.5]
-        );
-    }
-
-    #[test]
     fn buffer_to_f32_decodes_16bit_pcm() {
         // 0x4000 = 16384, 0x8000 = -32768 (little-endian)
         let bytes = [0x00, 0x40, 0x00, 0x80];
         let out = buffer_to_f32(&bytes, &fmt(1, 16));
-        assert!((out[0] - 16384.0 / i16::MAX as f32).abs() < 1e-6);
-        assert!((out[1] - (-32768.0 / i16::MAX as f32)).abs() < 1e-6);
+        assert!((out[0] - 0.5).abs() < 1e-6);
+        assert_eq!(out[1], -1.0);
     }
 }

@@ -241,7 +241,7 @@ async fn run_daemon(
     log::info!("Daemon is running. Press Ctrl+C to shut down.");
 
     #[cfg(unix)]
-    platform::elevation::warn_if_elevated();
+    platform::elevation::refuse_if_elevated()?;
 
     // Must run before device discovery opens any HID handles: a second daemon
     // has to exit *before* it can fight the first over the hardware.

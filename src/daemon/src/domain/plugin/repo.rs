@@ -526,6 +526,19 @@ mod tests {
         oid.to_string()
     }
 
+    #[test]
+    fn rollback_floor_accepts_descendants_but_rejects_ancestors() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = init_repo_with_plugin(dir.path());
+        let repo = git2::Repository::open(dir.path()).unwrap();
+        fs::write(dir.path().join("main.lua"), "return { updated = true }").unwrap();
+        let second = commit_all(&repo, "second");
+
+        assert!(revision_is_at_or_after(dir.path(), &second, &first).unwrap());
+        assert!(revision_is_at_or_after(dir.path(), &second, &second).unwrap());
+        assert!(!revision_is_at_or_after(dir.path(), &first, &second).unwrap());
+    }
+
     /// A `file://` URL for a local path, so tests clone with an explicit,
     /// allow-listed scheme rather than a now-rejected bare path.
     fn file_url(path: &Path) -> String {

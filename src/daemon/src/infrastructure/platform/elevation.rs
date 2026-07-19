@@ -21,29 +21,13 @@ pub(crate) fn is_elevated() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Emit a loud, one-time warning if the daemon is running as root on Unix.
+/// Refuse to run the user daemon as root on Unix.
 #[cfg(unix)]
-pub(crate) fn warn_if_elevated() {
-    // TODO: we should probably just refuse to run elevated.
-    // We have the broker on windows, on linux we really don't have any usecase where running elevated is warranted.
-    // so let's close this hole and decrease the attack surface.
+pub(crate) fn refuse_if_elevated() -> anyhow::Result<()> {
     if is_elevated() {
-        log::warn!(
-            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-        );
-        log::warn!(
-            "!!!!!!! HaloDaemon IS RUNNING AS ROOT - THIS IS DANGEROUS AND UNSUPPORTED !!!!!!!"
-        );
-        log::warn!(
-            "!!!!!!! Run it as your normal user. Command/OpenApp button actions are     !!!!!!!"
-        );
-        log::warn!(
-            "!!!!!!! DISABLED while elevated so a button mapping can't run as root.      !!!!!!!"
-        );
-        log::warn!(
-            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-        );
+        anyhow::bail!("refusing to run HaloDaemon as root; run it as the desktop user");
     }
+    Ok(())
 }
 
 /// Whether the current process token is elevated.

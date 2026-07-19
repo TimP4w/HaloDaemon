@@ -80,6 +80,16 @@ fn bump_fail_streak(streak: &mut u8) {
     };
 }
 
+fn blocking_section<T>(work: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::current().runtime_flavor()
+        == tokio::runtime::RuntimeFlavor::MultiThread
+    {
+        tokio::task::block_in_place(work)
+    } else {
+        work()
+    }
+}
+
 fn build_template(id: &str, params: &HashMap<String, EffectParamValue>) -> Option<CustomTemplate> {
     (id == "custom").then(|| CustomTemplate::from_params(params, &crate::config::lcd_images_dir()))
 }
@@ -408,14 +418,14 @@ impl LcdEngine {
             }
 
             let tr = std::time::Instant::now();
-            let render_result = {
+            let render_result = blocking_section(|| {
                 let DeviceSlot {
                     template,
                     frame_buf,
                     ..
                 } = &mut *slot;
                 template.render(&ctx, frame_buf)
-            };
+            });
             if let Err(e) = render_result {
                 if slot.fail_streak % BACKOFF_TICKS == 0 {
                     log::warn!("LCD engine: template render error for {device_id}: {e}");
@@ -446,12 +456,12 @@ impl LcdEngine {
 
             // Broadcast the preview before the (blocking) device push, at render rate.
             if receiver_count > 0 {
-                let encoded = {
+                let encoded = blocking_section(|| {
                     let DeviceSlot {
                         frame_buf, png_buf, ..
                     } = &mut *slot;
                     templates::encode_png_into(frame_buf, png_buf)
-                };
+                });
                 if encoded.is_ok() {
                     use base64::Engine as _;
                     {

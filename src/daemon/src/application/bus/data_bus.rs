@@ -270,6 +270,8 @@ struct Record {
 
 struct Inner {
     records: HashMap<String, Record>,
+    record_bytes: usize,
+    owner_bytes: HashMap<String, usize>,
     state_records: HashMap<String, StateRecord>,
     events: VecDeque<BusEvent>,
     revision: u64,
@@ -285,6 +287,8 @@ impl Default for Inner {
             .as_nanos() as u64;
         Self {
             records: HashMap::new(),
+            record_bytes: 0,
+            owner_bytes: HashMap::new(),
             state_records: HashMap::new(),
             events: VecDeque::new(),
             revision: 0,
@@ -685,17 +689,12 @@ impl DataBus {
         }
         let bytes = retained_bytes(key, owner, value_bytes, 0);
         let existing_bytes = inner.records.get(key).map_or(0, |record| record.bytes);
-        let plugin_bytes: usize = inner
-            .records
-            .values()
-            .filter(|record| record.owner == owner)
-            .map(|record| record.bytes)
-            .sum();
+        let plugin_bytes = inner.owner_bytes.get(owner).copied().unwrap_or(0);
         ensure!(
             owner == "host" || plugin_bytes - existing_bytes + bytes <= MAX_PLUGIN_BYTES,
             "plugin data exceeds retained-byte limit"
         );
-        let global_bytes: usize = inner.records.values().map(|record| record.bytes).sum();
+        let global_bytes = inner.record_bytes;
         ensure!(
             global_bytes - existing_bytes + bytes <= MAX_GLOBAL_BYTES,
             "host data bus is full"
@@ -724,6 +723,9 @@ impl DataBus {
         {
             task.abort();
         }
+        inner.record_bytes = inner.record_bytes - existing_bytes + bytes;
+        let owner_bytes = inner.owner_bytes.entry(owner.to_owned()).or_default();
+        *owner_bytes = *owner_bytes - existing_bytes + bytes;
         inner.records.insert(
             key.to_owned(),
             Record {
@@ -841,6 +843,13 @@ impl DataBus {
                 return;
             }
             if let Some(record) = inner.records.remove(key) {
+                inner.record_bytes -= record.bytes;
+                if let Some(bytes) = inner.owner_bytes.get_mut(owner) {
+                    *bytes -= record.bytes;
+                    if *bytes == 0 {
+                        inner.owner_bytes.remove(owner);
+                    }
+                }
                 if let Some(task) = record.stale_task {
                     task.abort();
                 }

@@ -62,6 +62,7 @@ async fn deactivate_engine_for_device(
     lcd: &dyn crate::infrastructure::drivers::LcdCapability,
     device_id: &str,
 ) {
+    app.lcd.invalidate_editor_session();
     // Drop the editor session immediately (engine-driven or not) — its
     // CustomTemplate holds decoded image caches (up to 64 MB per image) which
     // would otherwise persist for the 30-second idle timeout, causing apparent
