@@ -91,7 +91,7 @@ pub async fn watcher(app: Arc<AppState>) {
             let notifications = tracker.observe(&device);
             if enabled {
                 for notification in notifications {
-                    crate::infrastructure::platform::notify::send(&app, notification).await;
+                    crate::application::notifications::send(&app, notification).await;
                 }
             }
         }

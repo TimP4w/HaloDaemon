@@ -49,8 +49,8 @@ use halod_shared::types::{
     PluginIssueContext, PluginIssueKind, PluginKind, SkippedPlugin, WriteRateLimit,
 };
 
+use crate::domain::device::Device;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
-use crate::infrastructure::drivers::Device;
 
 mod scan;
 
@@ -919,7 +919,7 @@ impl Registry {
             self.clear_health(&scope);
             return;
         }
-        crate::infrastructure::platform::notify::send(
+        crate::application::notifications::send(
             app,
             halod_shared::types::NotificationCode::PluginRuntimeError {
                 plugin: plugin_id.to_owned(),
@@ -1003,7 +1003,7 @@ impl Registry {
             self.clear_health(plugin_id);
             return;
         }
-        crate::infrastructure::platform::notify::send(
+        crate::application::notifications::send(
             app,
             halod_shared::types::NotificationCode::PluginConnectFailed {
                 plugin: display_name.to_owned(),
@@ -2325,9 +2325,9 @@ impl Registry {
             .iter()
             .any(|capability| capability == "lighting_division")
         {
-            let adapter: Arc<dyn crate::infrastructure::drivers::chain::LightingDivisionAdapter> =
+            let adapter: Arc<dyn crate::domain::device::chain::LightingDivisionAdapter> =
                 device.clone();
-            let host = crate::infrastructure::drivers::chain::LightingDivisionHost::new(adapter);
+            let host = crate::domain::device::chain::LightingDivisionHost::new(adapter);
             device.install_chain_host(host);
         }
         Some(device as Arc<dyn Device>)

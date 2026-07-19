@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use halod_shared::types::Permission;
 
-use crate::infrastructure::drivers::Device;
+use crate::domain::device::Device;
 
 use crate::application::state::AppState;
 use crate::domain::registry::observers::discovery::{DiscoveryHandle, TransportScanner};

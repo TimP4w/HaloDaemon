@@ -111,7 +111,7 @@ impl WriteRateLimiter {
     /// blocking `acquire` variants so both sleep flavors gate identically.
     fn gate_once(&self, len: usize, rate: u32) -> GateOutcome {
         let outcome = {
-            let mut bucket = self.bucket.lock().expect("rate limiter bucket poisoned");
+            let mut bucket = self.bucket.lock().unwrap_or_else(|e| e.into_inner());
             bucket.try_acquire(rate as f64, rate as f64, len as f64, Instant::now())
         };
         match outcome {
@@ -184,10 +184,7 @@ impl WriteRateLimiter {
     /// Record a write for live stats without rate-gating it.
     pub fn record(&self, len: usize) {
         let now = Instant::now();
-        let mut recent = self
-            .recent
-            .lock()
-            .expect("rate limiter recent-writes lock poisoned");
+        let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
         recent.push_back((now, len));
         while let Some(&(t, _)) = recent.front() {
             if is_stale(t, now, STATS_WINDOW) {
@@ -210,10 +207,7 @@ impl WriteRateLimiter {
 
     pub fn status(&self) -> WriteRateStatus {
         let now = Instant::now();
-        let recent = self
-            .recent
-            .lock()
-            .expect("rate limiter recent-writes lock poisoned");
+        let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
         let (writes, bytes) = recent
             .iter()
             .filter(|(t, _)| !is_stale(*t, now, STATS_WINDOW))

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::events::ChangeSink as _;
+
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -53,10 +55,8 @@ pub async fn set_template(
     }
     slot.lcd_state().set_health(LcdHealth::Stable);
 
-    app.record_change(crate::application::bus::coordinator::Change::LcdDevice(
-        device_id,
-    ))
-    .await;
+    app.record_change(crate::domain::events::Change::LcdDevice(device_id))
+        .await;
     Ok(())
 }
 
@@ -75,10 +75,8 @@ pub async fn deactivate(device_id: String, app: Arc<AppState>) -> Result<()> {
     }
     slot.lcd_state().set_health(LcdHealth::Stable);
 
-    app.record_change(crate::application::bus::coordinator::Change::LcdDevice(
-        device_id,
-    ))
-    .await;
+    app.record_change(crate::domain::events::Change::LcdDevice(device_id))
+        .await;
     Ok(())
 }
 
@@ -87,7 +85,7 @@ mod tests {
     use super::*;
     use crate::application::state::AppState;
     use crate::config::Config;
-    use crate::infrastructure::drivers::{CapabilityRef, LcdCapability, LcdStateSlot};
+    use crate::domain::device::{CapabilityRef, LcdCapability, LcdStateSlot};
     use async_trait::async_trait;
     use halod_shared::types::{LcdDescriptor, LcdMode, LcdStatus, ScreenShape};
     use std::sync::Arc;
@@ -107,7 +105,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::infrastructure::drivers::Device for MockLcdDevice {
+    impl crate::domain::device::Device for MockLcdDevice {
         fn id(&self) -> &str {
             &self.id
         }
@@ -180,7 +178,7 @@ mod tests {
         app.device_registry
             .try_write()
             .unwrap()
-            .push(device as Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(device as Arc<dyn crate::domain::device::Device>);
         app
     }
 

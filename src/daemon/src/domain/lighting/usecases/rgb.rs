@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
@@ -83,7 +85,7 @@ pub async fn lighting_apply(id: String, state: LightingState, app: Arc<AppState>
         .await;
         lighting.apply(state).await?;
     }
-    app.record_change(crate::application::bus::coordinator::Change::LightingDevice(id))
+    app.record_change(crate::domain::events::Change::LightingDevice(id))
         .await;
     Ok(())
 }
@@ -130,7 +132,7 @@ pub async fn set_channel_transform(
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::infrastructure::drivers::LightingCapability;
+    use crate::domain::device::LightingCapability;
     use crate::test_support::MockDevice;
     use halod_shared::types::RgbColor;
     #[tokio::test]
@@ -140,7 +142,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev.clone() as Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
 
         set_channel_transform(
             "dev1".into(),
@@ -184,7 +186,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev.clone() as Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
 
         let color = RgbColor {
             r: 10,
@@ -221,7 +223,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev.clone() as Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
 
         set_channel_transform(
             "dev1".into(),
@@ -244,7 +246,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev.clone() as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev.clone() as std::sync::Arc<dyn crate::domain::device::Device>);
 
         let state = LightingState::Static {
             color: RgbColor { r: 255, g: 0, b: 0 },
@@ -266,7 +268,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev.clone() as Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
 
         dev.rgb
             .as_ref()
@@ -306,7 +308,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev.clone() as Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
 
         dev.rgb
             .as_ref()
@@ -340,7 +342,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev.clone() as Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
         dev.apply(LightingState::DirectEffect {
             id: "breathing".into(),
             params: Default::default(),
@@ -376,7 +378,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev.clone() as Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
         dev.apply(LightingState::Static {
             color: RgbColor { r: 1, g: 2, b: 3 },
         })
@@ -410,7 +412,7 @@ mod tests {
         app.device_registry
             .write()
             .await
-            .push(dev as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev as std::sync::Arc<dyn crate::domain::device::Device>);
 
         let err = lighting_apply(
             "dev1".into(),

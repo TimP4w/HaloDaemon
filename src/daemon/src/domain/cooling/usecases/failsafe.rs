@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -13,7 +15,7 @@ pub async fn set_fan_failsafe_duty(duty: u8, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
 
-    app.record_change(crate::application::bus::coordinator::Change::Cooling)
+    app.record_change(crate::domain::events::Change::Cooling)
         .await;
 
     Ok(())

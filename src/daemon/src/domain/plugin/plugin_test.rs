@@ -15,10 +15,11 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 
-use crate::infrastructure::drivers::chain::LightingDivisionAdapter;
+use crate::domain::device::chain::LightingDivisionAdapter;
+use crate::domain::device::LightingCapability;
 use crate::infrastructure::drivers::transports::usb::{UsbCollection, UsbControlResult};
 use crate::infrastructure::drivers::transports::{HidTransport, Transport, TransportEvent};
-use crate::infrastructure::drivers::{LightingCapability, Metered};
+use crate::infrastructure::drivers::Metered;
 use crate::infrastructure::http::{
     HttpBackend, HttpPolicy, HttpRequest, HttpResponse, HttpRuntime,
 };
@@ -1479,7 +1480,7 @@ fn open_device(
                 "initialize",
                 lua.create_function(move |_, _self: Table| {
                     let initialized = handle
-                        .block_on(crate::infrastructure::drivers::Device::initialize(&*device))
+                        .block_on(crate::domain::device::Device::initialize(&*device))
                         .map_err(mlua_err)?;
                     // Package tests drive status reads explicitly through
                     // `poll_sensors`; a live background ticker would race for
@@ -1513,7 +1514,7 @@ fn open_device(
                             .sequence_values::<u8>()
                             .collect::<mlua::Result<Vec<_>>>()?;
                         handle
-                            .block_on(crate::infrastructure::drivers::LcdCapability::stream_frame(
+                            .block_on(crate::domain::device::LcdCapability::stream_frame(
                                 &*device, &rgba, width, height,
                             ))
                             .map_err(mlua_err)
@@ -1532,7 +1533,9 @@ fn open_device(
                 "keyboard_layout_status",
                 lua.create_function(move |lua, _self: Table| {
                     let status = handle.block_on(
-                        crate::infrastructure::drivers::KeyboardLayoutCapability::keyboard_layout_status(&*device),
+                        crate::domain::device::KeyboardLayoutCapability::keyboard_layout_status(
+                            &*device,
+                        ),
                     );
                     lua.to_value(&status)
                 })
@@ -1548,8 +1551,7 @@ fn open_device(
             .set(
                 "serialize",
                 lua.create_function(move |lua, _self: Table| {
-                    let wire = handle
-                        .block_on(crate::infrastructure::drivers::Device::serialize(&*device));
+                    let wire = handle.block_on(crate::domain::device::Device::serialize(&*device));
                     lua.to_value(&wire)
                 })
                 .anyhow()?,
@@ -1563,9 +1565,9 @@ fn open_device(
             .set(
                 "lighting_descriptor",
                 lua.create_function(move |lua, _self: Table| {
-                    lua.to_value(
-                        crate::infrastructure::drivers::LightingCapability::descriptor(&*device),
-                    )
+                    lua.to_value(crate::domain::device::LightingCapability::descriptor(
+                        &*device,
+                    ))
                 })
                 .anyhow()?,
             )
@@ -1580,11 +1582,9 @@ fn open_device(
                 "set_cooling_duty",
                 lua.create_function(move |_, (_self, channel, duty): (Table, String, u8)| {
                     handle
-                        .block_on(
-                            crate::infrastructure::drivers::CoolingCapability::set_cooling_duty(
-                                &*device, &channel, duty,
-                            ),
-                        )
+                        .block_on(crate::domain::device::CoolingCapability::set_cooling_duty(
+                            &*device, &channel, duty,
+                        ))
                         .map_err(mlua_err)
                 })
                 .anyhow()?,
@@ -1604,11 +1604,9 @@ fn open_device(
                         .filter_map(Result::ok)
                         .collect();
                     handle
-                        .block_on(
-                            crate::infrastructure::drivers::LightingCapability::write_frame(
-                                &*device, &channel, &bytes,
-                            ),
-                        )
+                        .block_on(crate::domain::device::LightingCapability::write_frame(
+                            &*device, &channel, &bytes,
+                        ))
                         .map_err(mlua_err)
                 })
                 .anyhow()?,
@@ -1623,9 +1621,8 @@ fn open_device(
             .set(
                 "dpi_status",
                 lua.create_function(move |lua, _self: Table| {
-                    let status = handle.block_on(
-                        crate::infrastructure::drivers::DpiCapability::dpi_status(&*device),
-                    );
+                    let status =
+                        handle.block_on(crate::domain::device::DpiCapability::dpi_status(&*device));
                     lua.to_value(&status)
                 })
                 .anyhow()?,
@@ -1641,9 +1638,7 @@ fn open_device(
                 "key_remap_status",
                 lua.create_function(move |lua, _self: Table| {
                     let status = handle.block_on(
-                        crate::infrastructure::drivers::KeyRemapCapability::get_key_remap_status(
-                            &*device,
-                        ),
+                        crate::domain::device::KeyRemapCapability::get_key_remap_status(&*device),
                     );
                     lua.to_value(&status)
                 })
@@ -1660,9 +1655,7 @@ fn open_device(
                 "connection_status",
                 lua.create_function(move |lua, _self: Table| {
                     let status = handle.block_on(
-                        crate::infrastructure::drivers::ConnectionCapability::connection_status(
-                            &*device,
-                        ),
+                        crate::domain::device::ConnectionCapability::connection_status(&*device),
                     );
                     lua.to_value(&status)
                 })
@@ -1679,11 +1672,9 @@ fn open_device(
                 "get_equalizer",
                 lua.create_function(move |lua, _self: Table| {
                     let equalizer = handle
-                        .block_on(
-                            crate::infrastructure::drivers::EqualizerCapability::get_equalizer(
-                                &*device,
-                            ),
-                        )
+                        .block_on(crate::domain::device::EqualizerCapability::get_equalizer(
+                            &*device,
+                        ))
                         .map_err(mlua_err)?;
                     lua.to_value(&equalizer)
                 })
@@ -1703,11 +1694,9 @@ fn open_device(
                         .sequence_values::<f32>()
                         .collect::<mlua::Result<Vec<_>>>()?;
                     handle
-                        .block_on(
-                            crate::infrastructure::drivers::EqualizerCapability::set_eq_bands(
-                                &*device, &values,
-                            ),
-                        )
+                        .block_on(crate::domain::device::EqualizerCapability::set_eq_bands(
+                            &*device, &values,
+                        ))
                         .map_err(mlua_err)
                 })
                 .anyhow()?,
@@ -1723,11 +1712,9 @@ fn open_device(
                 "set_choice",
                 lua.create_function(move |_, (_self, key, selected): (Table, String, usize)| {
                     handle
-                        .block_on(
-                            crate::infrastructure::drivers::ChoiceCapability::set_choice(
-                                &*device, &key, selected,
-                            ),
-                        )
+                        .block_on(crate::domain::device::ChoiceCapability::set_choice(
+                            &*device, &key, selected,
+                        ))
                         .map_err(mlua_err)
                 })
                 .anyhow()?,
@@ -1743,7 +1730,7 @@ fn open_device(
                 "enumerate_controllers",
                 lua.create_function(move |lua, _self: Table| {
                     let controllers = handle.block_on(
-                        crate::infrastructure::drivers::Controller::discover_children(&*device),
+                        crate::domain::device::Controller::discover_children(&*device),
                     );
                     let out = lua.create_table()?;
                     for (i, controller) in controllers.iter().enumerate() {
@@ -1768,11 +1755,9 @@ fn open_device(
                 "set_dpi",
                 lua.create_function(move |_, (_self, dpi): (Table, u16)| {
                     handle
-                        .block_on(
-                            crate::infrastructure::drivers::DpiCapability::set_dpi_direct(
-                                &*device, dpi,
-                            ),
-                        )
+                        .block_on(crate::domain::device::DpiCapability::set_dpi_direct(
+                            &*device, dpi,
+                        ))
                         .map_err(mlua_err)
                 })
                 .anyhow()?,
@@ -1788,11 +1773,9 @@ fn open_device(
                 "get_batteries",
                 lua.create_function(move |lua, _self: Table| {
                     let batteries = handle
-                        .block_on(
-                            crate::infrastructure::drivers::BatteryCapability::get_batteries(
-                                &*device,
-                            ),
-                        )
+                        .block_on(crate::domain::device::BatteryCapability::get_batteries(
+                            &*device,
+                        ))
                         .map_err(mlua_err)?;
                     lua.to_value(&batteries)
                 })
@@ -1809,7 +1792,7 @@ fn open_device(
                 "set_range",
                 lua.create_function(move |_, (_self, key, value): (Table, String, i32)| {
                     handle
-                        .block_on(crate::infrastructure::drivers::RangeCapability::set_range(
+                        .block_on(crate::domain::device::RangeCapability::set_range(
                             &*device, &key, value,
                         ))
                         .map_err(mlua_err)
@@ -1841,9 +1824,7 @@ fn open_device(
                 "cached_cooling",
                 lua.create_function(move |lua, _self: Table| {
                     lua.to_value(
-                        &crate::infrastructure::drivers::CoolingCapability::cached_cooling_status(
-                            &*device,
-                        ),
+                        &crate::domain::device::CoolingCapability::cached_cooling_status(&*device),
                     )
                 })
                 .anyhow()?,
@@ -1908,9 +1889,9 @@ fn open_device(
                 lua.create_function(move |lua, _self: Table| {
                     handle.block_on(device.poll_once()).map_err(mlua_err)?;
                     let sensors = handle
-                        .block_on(
-                            crate::infrastructure::drivers::SensorCapability::get_sensors(&*device),
-                        )
+                        .block_on(crate::domain::device::SensorCapability::get_sensors(
+                            &*device,
+                        ))
                         .map_err(mlua_err)?;
                     lua.to_value(&sensors)
                 })

@@ -7,7 +7,7 @@ use anyhow::{ensure, Result};
 use async_trait::async_trait;
 use halod_shared::types::{CoolingChannel, DeviceType};
 
-use crate::infrastructure::drivers::{
+use crate::domain::device::{
     CapabilityRef, CoolingCapability, CoolingHub, CoolingStateSlot, Device, VisibilitySlot,
 };
 

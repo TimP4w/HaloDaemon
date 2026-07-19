@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use crate::{
     application::state::{AppState, HidTrackingEntry},
+    domain::device::Device,
     domain::registry::observers::discovery::{DiscoveryHandle, TransportScanner},
-    infrastructure::drivers::Device,
 };
 
 /// Exponential backoff capped at 30 s. After 5+ consecutive failures, promote

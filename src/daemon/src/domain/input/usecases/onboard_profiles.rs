@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
@@ -23,7 +25,7 @@ pub async fn switch_onboard_profile(id: String, slot: u8, app: Arc<AppState>) ->
         device.name()
     );
     cap.switch_profile(slot).await?;
-    app.record_change(crate::application::bus::coordinator::Change::Device(id))
+    app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
 }
@@ -36,7 +38,7 @@ pub async fn restore_onboard_profile(id: String, slot: u8, app: Arc<AppState>) -
         .context("device does not support onboard profiles")?;
     log::info!("[OnboardProfile] Restoring '{}' slot {slot}", device.name());
     cap.restore_profile(slot).await?;
-    app.record_change(crate::application::bus::coordinator::Change::Device(id))
+    app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
 }
@@ -57,7 +59,7 @@ pub async fn set_onboard_profile_enabled(
         device.name()
     );
     cap.set_profile_enabled(slot, enabled).await?;
-    app.record_change(crate::application::bus::coordinator::Change::Device(id))
+    app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
 }
@@ -66,9 +68,7 @@ pub async fn set_onboard_profile_enabled(
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::infrastructure::drivers::{
-        CapabilityRef, Device, OnboardProfilesCapability, VisibilitySlot,
-    };
+    use crate::domain::device::{CapabilityRef, Device, OnboardProfilesCapability, VisibilitySlot};
     use anyhow::Result;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};

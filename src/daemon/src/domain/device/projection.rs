@@ -6,8 +6,8 @@ use std::sync::Arc;
 use crate::application::state::AppState;
 use crate::config::{Config, PlacedZone};
 use crate::domain::cooling::model::FanCurveRecord;
+use crate::domain::device::Device;
 use crate::domain::registry::identity::{detect_conflicts, ConflictEntry};
-use crate::infrastructure::drivers::Device;
 use halod_shared::types::{DeviceCapability, EffectParamValue, VisibilityState, WireDevice};
 
 /// One pass over the device registry: wire-serialize each device, apply the
@@ -501,7 +501,7 @@ mod tests {
             fn model(&self) -> &str {
                 self.inner.model()
             }
-            fn capabilities(&self) -> Vec<crate::infrastructure::drivers::CapabilityRef<'_>> {
+            fn capabilities(&self) -> Vec<crate::domain::device::CapabilityRef<'_>> {
                 vec![]
             }
             fn has_external_name(&self) -> bool {
@@ -561,7 +561,7 @@ mod tests {
             fn model(&self) -> &str {
                 self.inner.model()
             }
-            fn capabilities(&self) -> Vec<crate::infrastructure::drivers::CapabilityRef<'_>> {
+            fn capabilities(&self) -> Vec<crate::domain::device::CapabilityRef<'_>> {
                 vec![]
             }
             async fn initialize(&self) -> anyhow::Result<bool> {

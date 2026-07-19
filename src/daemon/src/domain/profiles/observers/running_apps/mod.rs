@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::infrastructure::ipc::ClientHandle;
+use crate::application::ipc::ClientHandle;
 
 #[cfg(target_os = "linux")]
 mod linux;

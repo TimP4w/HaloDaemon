@@ -34,7 +34,7 @@ fn active_signature_status(record: &PluginRepoRecord) -> RepoSignatureStatus {
         })
 }
 
-pub async fn project(app: &Arc<AppState>, cfg: &Config, devices: &[WireDevice]) -> PluginsState {
+pub async fn project(app: &AppState, cfg: &Config, devices: &[WireDevice]) -> PluginsState {
     let observed_signatures = app.repo_signature_status.lock().await.clone();
     let compatibility = app.repo_compatibility_status.lock().await.clone();
     let mut plugins = app.registry.list(app.secret_store.as_ref());

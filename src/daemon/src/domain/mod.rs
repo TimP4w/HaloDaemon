@@ -3,6 +3,7 @@
 
 pub mod cooling;
 pub mod device;
+pub mod events;
 pub mod input;
 pub mod lcd;
 pub mod lighting;

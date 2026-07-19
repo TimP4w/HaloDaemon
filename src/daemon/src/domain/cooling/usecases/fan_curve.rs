@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
@@ -35,10 +37,8 @@ pub async fn set_cooling_curve_points(
     );
     cooling.set_curve(channel_id, record);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::application::bus::coordinator::Change::CoolingDevice(
-        device_id,
-    ))
-    .await;
+    app.record_change(crate::domain::events::Change::CoolingDevice(device_id))
+        .await;
     Ok(())
 }
 
@@ -86,10 +86,8 @@ pub async fn remove_cooling_curve(
     );
     cooling.clear_curve(&channel_id);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::application::bus::coordinator::Change::CoolingDevice(
-        device_id,
-    ))
-    .await;
+    app.record_change(crate::domain::events::Change::CoolingDevice(device_id))
+        .await;
     Ok(())
 }
 
@@ -137,7 +135,7 @@ mod tests {
         let device = Arc::new(MockDevice::new(id).with_fan());
         {
             let mut devices = app.device_registry.try_write().unwrap();
-            devices.push(device.clone() as Arc<dyn crate::infrastructure::drivers::Device>);
+            devices.push(device.clone() as Arc<dyn crate::domain::device::Device>);
         }
         (app, device)
     }
@@ -167,7 +165,7 @@ mod tests {
         );
         {
             let mut devices = app.device_registry.try_write().unwrap();
-            devices.push(device.clone() as Arc<dyn crate::infrastructure::drivers::Device>);
+            devices.push(device.clone() as Arc<dyn crate::domain::device::Device>);
         }
         app.data_bus
             .replace_host_sensors(vec![(fan_id.to_owned(), reading)]);
@@ -275,7 +273,7 @@ mod tests {
         );
         {
             let mut devices = app.device_registry.try_write().unwrap();
-            devices.push(device.clone() as Arc<dyn crate::infrastructure::drivers::Device>);
+            devices.push(device.clone() as Arc<dyn crate::domain::device::Device>);
         }
         crate::domain::device::usecases::telemetry::observe(&app).await;
         let err = set_cooling_curve_points(

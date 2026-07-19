@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Device and sensor visibility commands.
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
@@ -80,10 +82,8 @@ pub async fn set_device_visibility(
         return Ok(());
     }
 
-    app.record_change(crate::application::bus::coordinator::Change::Device(
-        device_id,
-    ))
-    .await;
+    app.record_change(crate::domain::events::Change::Device(device_id))
+        .await;
     Ok(())
 }
 
@@ -108,7 +108,7 @@ pub async fn set_sensor_visibility(
         app.request_config_save();
     }
 
-    app.record_change(crate::application::bus::coordinator::Change::Device(owner))
+    app.record_change(crate::domain::events::Change::Device(owner))
         .await;
     Ok(())
 }
@@ -125,7 +125,7 @@ mod tests {
         Arc::new(AppState::new(Config::default()))
     }
 
-    fn push_device(app: &Arc<AppState>, device: Arc<dyn crate::infrastructure::drivers::Device>) {
+    fn push_device(app: &Arc<AppState>, device: Arc<dyn crate::domain::device::Device>) {
         app.device_registry.try_write().unwrap().push(device);
     }
 
@@ -148,8 +148,7 @@ mod tests {
     async fn set_device_visibility_to_hidden_clears_engine_slots() {
         let app = make_app();
         let device = Arc::new(MockDevice::new("dev1").with_rgb().with_fan());
-        if let Some(cooling) =
-            (device.as_ref() as &dyn crate::infrastructure::drivers::Device).as_cooling()
+        if let Some(cooling) = (device.as_ref() as &dyn crate::domain::device::Device).as_cooling()
         {
             cooling.set_curve(
                 "default".to_string(),
@@ -185,7 +184,7 @@ mod tests {
         );
         push_device(&app, device.clone());
         crate::domain::registry::usecases::registration::clear_engine_slots(
-            &(device.clone() as Arc<dyn crate::infrastructure::drivers::Device>),
+            &(device.clone() as Arc<dyn crate::domain::device::Device>),
         );
         app.config.write().await.known_devices.insert(
             "dev1".into(),

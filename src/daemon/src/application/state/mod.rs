@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 
+use crate::application::ipc::ClientHandle;
 use crate::config::Config;
 use crate::domain::registry::observers::discovery::{DiscoveryScope, PendingRediscovery};
-use crate::infrastructure::ipc::ClientHandle;
 use halod_shared::types::DiscoveryStatus;
 
 mod config_repository;
@@ -147,16 +147,6 @@ impl AppState {
         self
     }
 
-    /// Commit the retained bus records affected by a completed semantic change.
-    /// The dependency graph lives in `EffectiveStatePublisher`; callers describe
-    /// what happened and do not select wire topics themselves.
-    pub(crate) async fn record_change(
-        self: &Arc<Self>,
-        change: crate::application::bus::coordinator::Change,
-    ) {
-        self.effective_state.record(self, change).await;
-    }
-
     pub async fn set_discovery_scope(&self, scope: DiscoveryScope) {
         *self.discovery_scope.write().await = scope;
     }
@@ -179,6 +169,13 @@ impl AppState {
             DiscoveryScope::PluginSet { filter, .. } => filter.matches(handle),
             DiscoveryScope::Clean | DiscoveryScope::Full => true,
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::domain::events::ChangeSink for AppState {
+    async fn record_change(&self, change: crate::domain::events::Change) {
+        self.effective_state.record(self, change).await;
     }
 }
 

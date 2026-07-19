@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Records observed device telemetry as authoritative retained state.
 
+use crate::domain::events::ChangeSink as _;
+
 use std::{collections::HashMap, sync::Arc};
 
 use crate::application::state::AppState;
-use crate::infrastructure::drivers::Device;
+use crate::domain::device::Device;
 use halod_shared::types::{Sensor, VisibilityState};
 
 const DEVICE_SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -76,7 +78,7 @@ async fn sample_device(
     }
     match tokio::time::timeout(
         DEVICE_SAMPLE_TIMEOUT,
-        crate::infrastructure::drivers::fan_sensors(device.as_ref()),
+        crate::domain::device::fan_sensors(device.as_ref()),
     )
     .await
     {
@@ -97,11 +99,9 @@ async fn sample_device(
 pub async fn refresh(app: &Arc<AppState>) {
     let changed = observe(app).await;
     if !changed.is_empty() {
-        app.record_change(
-            crate::application::bus::coordinator::Change::SensorTelemetry(
-                changed.into_iter().collect(),
-            ),
-        )
+        app.record_change(crate::domain::events::Change::SensorTelemetry(
+            changed.into_iter().collect(),
+        ))
         .await;
     }
 }

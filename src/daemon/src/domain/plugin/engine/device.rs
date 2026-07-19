@@ -20,10 +20,10 @@ use halod_shared::types::{
 };
 use halod_shared::zone_transform::build_permutation;
 
-use crate::infrastructure::drivers::chain::{
+use crate::domain::device::chain::{
     ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost, LightingDivisionHub,
 };
-use crate::infrastructure::drivers::{
+use crate::domain::device::{
     ActionCapability, BatteryCapability, BoolStateCache, BooleanCapability, CapabilityRef,
     ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, CoolingCapability,
     CoolingHub, CoolingStateSlot, Device, DpiCapability, EqualizerCapability, KeyRemapCapability,
@@ -2934,9 +2934,9 @@ impl CoolingHub for LuaDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::device::LightingCapability;
     use crate::infrastructure::drivers::transports::mock::test_transport::MockTransport;
     use crate::infrastructure::drivers::transports::Transport;
-    use crate::infrastructure::drivers::LightingCapability;
 
     fn test_manifest(
         id: &str,

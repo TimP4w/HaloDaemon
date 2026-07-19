@@ -4,12 +4,14 @@
 //! the parent's `LightingDivisionHost`) through that host, and
 //! every other device through its `DeviceRecord.name` in the persisted config.
 
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::device::Device;
 use crate::domain::registry::model::ensure_record;
-use crate::infrastructure::drivers::Device;
 
 const MAX_NAME_LEN: usize = 64;
 
@@ -80,9 +82,9 @@ async fn rename_chain_link(
     chain.rename_link(&channel_id, child_id, &new_name)?;
 
     crate::domain::registry::usecases::chain::persist_layout(app, parent.as_ref()).await?;
-    app.record_change(
-        crate::application::bus::coordinator::Change::LightingDevice(child_id.to_owned()),
-    )
+    app.record_change(crate::domain::events::Change::LightingDevice(
+        child_id.to_owned(),
+    ))
     .await;
     Ok(())
 }
@@ -111,10 +113,8 @@ async fn rename_normal_device(
         app.request_config_save();
     }
 
-    app.record_change(crate::application::bus::coordinator::Change::Device(
-        device_id.to_owned(),
-    ))
-    .await;
+    app.record_change(crate::domain::events::Change::Device(device_id.to_owned()))
+        .await;
     Ok(())
 }
 
@@ -122,10 +122,10 @@ async fn rename_normal_device(
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::infrastructure::drivers::chain::{
+    use crate::domain::device::chain::{
         ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost,
     };
-    use crate::infrastructure::drivers::{CapabilityRef, ChainLinkSpec, Device};
+    use crate::domain::device::{CapabilityRef, ChainLinkSpec, Device};
     use async_trait::async_trait;
     use halod_shared::types::ZoneTopology;
 
@@ -209,7 +209,7 @@ mod tests {
             Ok(true)
         }
         async fn close(&self) {}
-        fn capabilities(&self) -> Vec<crate::infrastructure::drivers::CapabilityRef<'_>> {
+        fn capabilities(&self) -> Vec<crate::domain::device::CapabilityRef<'_>> {
             vec![]
         }
     }

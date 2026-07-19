@@ -1,22 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Shared helpers for the core device implementations.
 
+#[cfg(test)]
 use std::collections::HashMap;
 
-use std::f32::consts::PI;
-
+pub use crate::domain::device::lighting_segment::{ring_led_positions, transformed_zone_frame};
+#[cfg(test)]
 use halod_shared::types::{
-    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, LedPosition, LightingChannel,
-    LightingDivision, RgbColor, WireDevice, ZoneTopology,
+    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, RgbColor, WireDevice,
 };
-use halod_shared::zone_transform::transform_colors;
-
-use crate::infrastructure::drivers::LightingStateSlot;
+use halod_shared::types::{LedPosition, LightingChannel, LightingDivision, ZoneTopology};
 
 /// Assemble a fixed-length per-LED colour frame from one zone's
 /// `index -> colour` map. LED indices are decimal strings; any index missing
 /// from the map (or `>= count`) is left black. This turns the sparse
 /// `LightingState::PerLed` representation into the contiguous frame hardware wants.
+#[cfg(test)]
 pub fn per_led_frame(led_map: &HashMap<String, RgbColor>, count: usize) -> Vec<RgbColor> {
     (0..count)
         .map(|i| {
@@ -26,55 +25,6 @@ pub fn per_led_frame(led_map: &HashMap<String, RgbColor>, count: usize) -> Vec<R
                 .unwrap_or(RgbColor { r: 0, g: 0, b: 0 })
         })
         .collect()
-}
-
-/// Build one zone's transformed per-LED frame: assemble the sparse
-/// `LightingState::PerLed` map into a contiguous frame ([`per_led_frame`]), then apply
-/// the zone's saved content transform. One source of truth for the LED-frame path
-/// shared by every RGB device and child leaf.
-pub fn transformed_zone_frame(
-    zone: &LightingChannel,
-    slot: &LightingStateSlot,
-    led_map: &HashMap<String, RgbColor>,
-) -> Vec<RgbColor> {
-    let colors = per_led_frame(led_map, zone.leds.len());
-    let transform = slot.transform_for(&zone.id);
-    transform_colors(&colors, zone, &transform)
-}
-
-/// Compute LED positions for a ring or multi-ring topology; other topologies return an empty vec.
-pub fn ring_led_positions(topology: &ZoneTopology, count: u32) -> Vec<LedPosition> {
-    match topology {
-        ZoneTopology::Ring => (0..count)
-            .map(|i| {
-                let angle = 2.0 * PI * i as f32 / count as f32 - PI / 2.0;
-                LedPosition {
-                    id: i,
-                    x: 0.5 + 0.42 * angle.cos(),
-                    y: 0.5 + 0.42 * angle.sin(),
-                }
-            })
-            .collect(),
-        ZoneTopology::Rings { count: rings } => {
-            let rings = (*rings).max(1) as u32;
-            let per_ring = (count / rings).max(1);
-            let ring_r_x = 0.42 / rings as f32;
-            (0..count)
-                .map(|i| {
-                    let ring_idx = (i / per_ring).min(rings - 1);
-                    let in_ring = i % per_ring;
-                    let cx = (ring_idx as f32 + 0.5) / rings as f32;
-                    let angle = 2.0 * PI * in_ring as f32 / per_ring as f32 - PI / 2.0;
-                    LedPosition {
-                        id: i,
-                        x: cx + ring_r_x * angle.cos(),
-                        y: 0.5 + 0.42 * angle.sin(),
-                    }
-                })
-                .collect()
-        }
-        _ => vec![],
-    }
 }
 
 /// Build a linear RGB zone with `led_count` evenly-spaced LEDs.
@@ -101,6 +51,7 @@ pub fn linear_lighting_channel(id: &str, name: &str, led_count: usize) -> Lighti
 }
 
 /// Builder for [`WireDevice`], seeded from a [`Device`]'s identity getters; `device_type` defaults to [`DeviceType::Other`] and `connected` to `true`.
+#[cfg(test)]
 pub struct WireDeviceBuilder {
     id: String,
     name: String,
@@ -115,6 +66,7 @@ pub struct WireDeviceBuilder {
     control_layout: Vec<CategoryLayout>,
 }
 
+#[cfg(test)]
 impl WireDeviceBuilder {
     /// Seed a builder from raw string parts — used by the Device trait default
     /// serialize impl where coercing `&Self` to `&dyn Device` is not possible.

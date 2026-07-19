@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! User-visible notifications.
+//! Application-level user-visible notification publishing.
 //!
 //! Two responsibilities, intentionally bundled in one helper:
 //!   1. Log the event at the matching `log::` level.

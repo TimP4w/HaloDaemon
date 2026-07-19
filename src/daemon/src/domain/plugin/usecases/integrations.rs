@@ -5,6 +5,8 @@
 //! scoped to the one integration: only its root device and the children it
 //! exposes are torn down and rebuilt, never the whole device set.
 
+use crate::domain::events::ChangeSink as _;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -66,7 +68,7 @@ fn config_context(app: &Arc<AppState>, id: &str) -> serde_json::Value {
 async fn publish_setup(app: &Arc<AppState>, id: &str, status: IntegrationSetupStatus) {
     app.registry
         .set_integration_setup_status(id.to_owned(), status);
-    app.record_change(crate::application::bus::coordinator::Change::PluginTopology)
+    app.record_change(crate::domain::events::Change::PluginTopology)
         .await;
 }
 
@@ -563,7 +565,7 @@ async fn start_oauth(
 
 pub async fn cancel_setup(id: String, app: Arc<AppState>) -> Result<()> {
     app.registry.clear_integration_setup_status(&id);
-    app.record_change(crate::application::bus::coordinator::Change::PluginTopology)
+    app.record_change(crate::domain::events::Change::PluginTopology)
         .await;
     Ok(())
 }
@@ -636,7 +638,7 @@ pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppStat
         disable_one(&app, &id).await;
         app.registry.clear_integration_operational_errors(&id);
     }
-    app.record_change(crate::application::bus::coordinator::Change::PluginTopology)
+    app.record_change(crate::domain::events::Change::PluginTopology)
         .await;
     Ok(())
 }
@@ -655,7 +657,7 @@ pub async fn set_integration_config(
     disable_one(&app, &id).await;
     app.registry.clear_integration_operational_errors(&id);
     enable_one(&app, &id).await;
-    app.record_change(crate::application::bus::coordinator::Change::PluginTopology)
+    app.record_change(crate::domain::events::Change::PluginTopology)
         .await;
     Ok(())
 }

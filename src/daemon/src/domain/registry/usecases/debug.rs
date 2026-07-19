@@ -8,9 +8,9 @@ use anyhow::Result;
 use serde_json::json;
 use std::sync::Arc;
 
+use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
 use crate::infrastructure::drivers::transports::smbus::{BusInfo, SmBusTransport};
-use crate::infrastructure::ipc::ClientHandle;
 use halod_shared::debug_info::{
     DebugInfo, DependencyRule, DependencyStatus, DeviceDebugInfo, HidEntryDebugInfo, OsKind,
     SmbusBusDebugInfo, SmbusBusKind as DebugSmbusBusKind, SystemDebugInfo,
@@ -358,7 +358,7 @@ fn matches_hid_key(key: &str, entry: &HidEntryDebugInfo) -> bool {
 }
 
 async fn build_device_debug(
-    device: &dyn crate::infrastructure::drivers::Device,
+    device: &dyn crate::domain::device::Device,
     tracking_keys: &[(String, String)],
     hid_entries: &[HidEntryDebugInfo],
 ) -> DeviceDebugInfo {
@@ -423,7 +423,7 @@ async fn build_device_debug(
 /// Ownership metadata is deliberately emitted for every device, not merely
 /// Lua-backed devices. It makes a debug export answer the practical question
 /// behind a duplicate report: which component is talking to this hardware?
-fn source_fields(device: &dyn crate::infrastructure::drivers::Device) -> Vec<(String, String)> {
+fn source_fields(device: &dyn crate::domain::device::Device) -> Vec<(String, String)> {
     use crate::domain::registry::identity::DeviceOrigin;
 
     let origin = device.conflict_origin();

@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::domain::cooling::model::FanCurveRecord;
 
 pub async fn project(
-    app: &Arc<AppState>,
+    app: &AppState,
     cfg: &Config,
     fan_curves: Vec<(String, String, FanCurveRecord)>,
 ) -> halod_shared::types::CoolingState {

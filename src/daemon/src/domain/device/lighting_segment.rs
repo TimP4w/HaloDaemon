@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Vendor-agnostic ARGB chain link.
 
+use std::collections::HashMap;
+use std::f32::consts::PI;
 use std::sync::Arc;
 
-use crate::infrastructure::drivers::{
-    chain::LightingDivisionHub,
-    vendors::generic::devices::common::{ring_led_positions, transformed_zone_frame},
-    CapabilityRef, Device, LightingCapability, LightingStateSlot, VisibilitySlot,
+use super::{
+    chain::LightingDivisionHub, CapabilityRef, Device, LightingCapability, LightingStateSlot,
+    VisibilitySlot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -14,6 +15,57 @@ use halod_shared::types::{
     DeviceType, LedPosition, LightingChannel, LightingDescriptor, LightingState, RgbColor,
     ZoneTopology,
 };
+use halod_shared::zone_transform::transform_colors;
+
+pub fn transformed_zone_frame(
+    zone: &LightingChannel,
+    slot: &LightingStateSlot,
+    led_map: &HashMap<String, RgbColor>,
+) -> Vec<RgbColor> {
+    let colors = (0..zone.leds.len())
+        .map(|i| {
+            led_map
+                .get(&i.to_string())
+                .copied()
+                .unwrap_or(RgbColor { r: 0, g: 0, b: 0 })
+        })
+        .collect::<Vec<_>>();
+    transform_colors(&colors, zone, &slot.transform_for(&zone.id))
+}
+
+pub fn ring_led_positions(topology: &ZoneTopology, count: u32) -> Vec<LedPosition> {
+    match topology {
+        ZoneTopology::Ring => (0..count)
+            .map(|i| {
+                let angle = 2.0 * PI * i as f32 / count as f32 - PI / 2.0;
+                LedPosition {
+                    id: i,
+                    x: 0.5 + 0.42 * angle.cos(),
+                    y: 0.5 + 0.42 * angle.sin(),
+                }
+            })
+            .collect(),
+        ZoneTopology::Rings { count: rings } => {
+            let rings = (*rings).max(1) as u32;
+            let per_ring = (count / rings).max(1);
+            let ring_r_x = 0.42 / rings as f32;
+            (0..count)
+                .map(|i| {
+                    let ring_idx = (i / per_ring).min(rings - 1);
+                    let in_ring = i % per_ring;
+                    let cx = (ring_idx as f32 + 0.5) / rings as f32;
+                    let angle = 2.0 * PI * in_ring as f32 / per_ring as f32 - PI / 2.0;
+                    LedPosition {
+                        id: i,
+                        x: cx + ring_r_x * angle.cos(),
+                        y: 0.5 + 0.42 * angle.sin(),
+                    }
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
+}
 
 fn topology_to_positions(topology: &ZoneTopology, count: u32) -> Vec<LedPosition> {
     if count == 0 {

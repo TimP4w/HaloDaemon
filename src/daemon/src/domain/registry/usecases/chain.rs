@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! IPC use cases for chainable ARGB channels. Each handler forwards to the
-//! device's shared [`crate::infrastructure::drivers::chain::LightingDivisionHost`], then persists and commits the affected topics.
+//! device's shared [`crate::domain::device::chain::LightingDivisionHost`], then persists and commits the affected topics.
+
+use crate::domain::events::ChangeSink as _;
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::device::chain::LightingDivisionHost;
+use crate::domain::device::{ChainLinkSpec, Device};
 use crate::domain::registry::model::{ChainLinkRecord, ChannelLayoutRecord, DeviceLayout};
-use crate::infrastructure::drivers::chain::LightingDivisionHost;
-use crate::infrastructure::drivers::{ChainLinkSpec, Device};
 use halod_shared::types::ZoneTopology;
 
 fn require_chain(device: &Arc<dyn Device>) -> Result<&Arc<LightingDivisionHost>> {
@@ -80,7 +82,7 @@ pub async fn lighting_add_segment(
     }
 
     persist_layout(&app, device.as_ref()).await?;
-    app.record_change(crate::application::bus::coordinator::Change::LightingTopology)
+    app.record_change(crate::domain::events::Change::LightingTopology)
         .await;
     Ok(())
 }
@@ -103,7 +105,7 @@ pub async fn lighting_remove_segment(
     }
 
     persist_layout(&app, device.as_ref()).await?;
-    app.record_change(crate::application::bus::coordinator::Change::LightingTopology)
+    app.record_change(crate::domain::events::Change::LightingTopology)
         .await;
     Ok(())
 }
@@ -123,7 +125,7 @@ pub async fn lighting_reorder_segment(
     }
 
     persist_layout(&app, device.as_ref()).await?;
-    app.record_change(crate::application::bus::coordinator::Change::LightingDevice(id))
+    app.record_change(crate::domain::events::Change::LightingDevice(id))
         .await;
     Ok(())
 }
@@ -202,11 +204,11 @@ pub async fn restore_saved_chains(app: Arc<AppState>) {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::domain::registry::model::{ChainLinkRecord, ChannelLayoutRecord, DeviceLayout};
-    use crate::infrastructure::drivers::chain::{
+    use crate::domain::device::chain::{
         ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost,
     };
-    use crate::infrastructure::drivers::{CapabilityRef, Device};
+    use crate::domain::device::{CapabilityRef, Device};
+    use crate::domain::registry::model::{ChainLinkRecord, ChannelLayoutRecord, DeviceLayout};
     use async_trait::async_trait;
     use halod_shared::types::{ColorOrder, ZoneTopology};
     use std::sync::Arc;

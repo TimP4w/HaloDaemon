@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+//! Local IPC application adapter and bounded client delivery.
 pub mod router;
 
 use anyhow::Result;

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Device keyboard-layout commands.
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
@@ -45,7 +47,7 @@ pub async fn set_keyboard_layout(
         }
     }
 
-    app.record_change(crate::application::bus::coordinator::Change::Device(id))
+    app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
 }

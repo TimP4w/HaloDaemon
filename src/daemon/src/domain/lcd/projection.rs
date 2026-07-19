@@ -9,7 +9,7 @@ use crate::config::Config;
 use halod_shared::types::EffectParamValue;
 
 pub async fn project(
-    app: &Arc<AppState>,
+    app: &AppState,
     cfg: &Config,
     templates: HashMap<String, String>,
     params: HashMap<String, HashMap<String, EffectParamValue>>,

@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! HID transport and its discovery/hotplug service.
-//!
-//! - [`transport`] — byte movement only (`HidTransport`, framing, routing hook).
-//! - [`discovery`] — enumeration, the hotplug loop, and wired/wireless adoption
-//!   policy. Registered as a `TransportScanner`; the hotplug loop is driven from
-//!   `main` via [`hotplug_monitor`].
+//! HID byte transport; discovery orchestration lives in `application::observers::hid`.
 
-mod discovery;
 mod transport;
 
-pub use discovery::hotplug_monitor;
 pub use transport::HidTransport;

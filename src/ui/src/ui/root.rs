@@ -238,13 +238,27 @@ impl App {
 
         if time - self.last_sample >= 1.0 {
             self.last_sample = time;
-            for s in domain::models::sensors::sensors(&state, true) {
+            let sensors = domain::models::sensors::sensors(&state, true);
+            let sensor_ids = sensors
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            self.sensor_history
+                .retain(|id, _| sensor_ids.contains(id.as_str()));
+            for s in sensors {
                 let h = self.sensor_history.entry(s.id).or_default();
                 h.push_back(s.value as f32);
                 if h.len() > domain::state::HISTORY_LEN {
                     h.pop_front();
                 }
             }
+            let device_ids = state
+                .devices
+                .iter()
+                .map(|dev| dev.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            self.write_rate_history
+                .retain(|id, _| device_ids.contains(id.as_str()));
             for dev in &state.devices {
                 let Some(wr) = domain::models::device::effective_write_rate(&state, dev) else {
                     continue;

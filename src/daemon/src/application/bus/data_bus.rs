@@ -6,7 +6,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use mlua::{Lua, Table, Value};
 
 use halod_shared::bus::{
@@ -312,7 +312,7 @@ pub struct DataBus {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Phase 12 consumes the bounded change stream.
+#[allow(dead_code)] // Pending feature: no production change-stream subscriber yet.
 pub struct DataChange {
     pub key: String,
     pub revision: u64,
@@ -699,13 +699,19 @@ impl DataBus {
         let bytes = retained_bytes(key, owner, value_bytes, 0);
         let existing_bytes = inner.records.get(key).map_or(0, |record| record.bytes);
         let plugin_bytes = inner.owner_bytes.get(owner).copied().unwrap_or(0);
+        let plugin_without_existing = plugin_bytes
+            .checked_sub(existing_bytes)
+            .context("plugin retained-byte accounting invariant violated")?;
         ensure!(
-            owner == "host" || plugin_bytes - existing_bytes + bytes <= MAX_PLUGIN_BYTES,
+            owner == "host" || plugin_without_existing.saturating_add(bytes) <= MAX_PLUGIN_BYTES,
             "plugin data exceeds retained-byte limit"
         );
         let global_bytes = inner.record_bytes;
+        let global_without_existing = global_bytes
+            .checked_sub(existing_bytes)
+            .context("global retained-byte accounting invariant violated")?;
         ensure!(
-            global_bytes - existing_bytes + bytes <= MAX_GLOBAL_BYTES,
+            global_without_existing.saturating_add(bytes) <= MAX_GLOBAL_BYTES,
             "host data bus is full"
         );
         inner.revision = inner.revision.wrapping_add(1).max(1);

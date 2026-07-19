@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Managing registered git-repo plugin sources: add, remove, check for updates, and update.
 
+use crate::domain::events::ChangeSink as _;
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::json;
 
+use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
 use crate::config::PluginRepoRecord;
 use crate::domain::plugin::repo;
-use crate::infrastructure::ipc::ClientHandle;
 
 use halod_shared::types::RepoUpdateStatus;
 
@@ -795,7 +797,7 @@ async fn touch_last_sync(app: &Arc<AppState>, slugs: &[String]) {
         }
     }
     app.request_config_save();
-    app.record_change(crate::application::bus::coordinator::Change::PluginTopology)
+    app.record_change(crate::domain::events::Change::PluginTopology)
         .await;
 }
 
@@ -813,13 +815,13 @@ pub(crate) async fn publish_plugin_updates(
     statuses: Vec<halod_shared::types::PluginUpdateStatus>,
 ) {
     *app.plugin_update_status.lock().await = statuses;
-    app.record_change(crate::application::bus::coordinator::Change::PluginData)
+    app.record_change(crate::domain::events::Change::PluginData)
         .await;
 }
 
 async fn publish_repo_updates(app: &Arc<AppState>, statuses: Vec<RepoUpdateStatus>) {
     *app.plugin_repo_update_status.lock().await = statuses;
-    app.record_change(crate::application::bus::coordinator::Change::PluginData)
+    app.record_change(crate::domain::events::Change::PluginData)
         .await;
 }
 

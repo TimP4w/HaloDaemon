@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 
 use super::FrameTx;
 use crate::application::state::AppState;
-use crate::infrastructure::drivers::Device;
+use crate::domain::device::Device;
 use halod_shared::types::LcdHealth;
 
 fn set_device_health(device: &dyn Device, health: LcdHealth) {

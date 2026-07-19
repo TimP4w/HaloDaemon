@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -51,9 +53,9 @@ pub async fn set_engine_config(
     app.request_config_save();
 
     let change = match kind {
-        EngineKind::FanCurve => crate::application::bus::coordinator::Change::Cooling,
-        EngineKind::Canvas => crate::application::bus::coordinator::Change::Lighting,
-        EngineKind::Lcd => crate::application::bus::coordinator::Change::Lcd,
+        EngineKind::FanCurve => crate::domain::events::Change::Cooling,
+        EngineKind::Canvas => crate::domain::events::Change::Lighting,
+        EngineKind::Lcd => crate::domain::events::Change::Lcd,
     };
     app.record_change(change).await;
     Ok(())
@@ -75,8 +77,7 @@ pub async fn set_log_level(level: String, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     log::info!("Log level changed to {level}");
-    app.record_change(crate::application::bus::coordinator::Change::Gui)
-        .await;
+    app.record_change(crate::domain::events::Change::Gui).await;
     Ok(())
 }
 
@@ -91,8 +92,7 @@ pub async fn set_language(lang: String, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     log::info!("UI language changed to {lang}");
-    app.record_change(crate::application::bus::coordinator::Change::Gui)
-        .await;
+    app.record_change(crate::domain::events::Change::Gui).await;
     Ok(())
 }
 
@@ -111,8 +111,7 @@ pub async fn set_ui_config(
         cfg.gui.low_battery_notifications = low_battery_notifications;
     }
     app.request_config_save();
-    app.record_change(crate::application::bus::coordinator::Change::Gui)
-        .await;
+    app.record_change(crate::domain::events::Change::Gui).await;
     Ok(())
 }
 
@@ -130,8 +129,7 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
         };
     }
     app.request_config_save();
-    app.record_change(crate::application::bus::coordinator::Change::Gui)
-        .await;
+    app.record_change(crate::domain::events::Change::Gui).await;
     if allowed {
         crate::domain::registry::ensure_official_repo(&app).await;
         crate::domain::plugin::usecases::plugins::reload_registry(&app).await;
@@ -161,8 +159,7 @@ pub async fn mark_tour_seen(tour: String, app: Arc<AppState>) -> Result<()> {
         cfg.gui.seen_tours.insert(tour);
     }
     app.request_config_save();
-    app.record_change(crate::application::bus::coordinator::Change::Gui)
-        .await;
+    app.record_change(crate::domain::events::Change::Gui).await;
     Ok(())
 }
 
@@ -172,8 +169,7 @@ pub async fn reset_tours_seen(app: Arc<AppState>) -> Result<()> {
         cfg.gui.seen_tours.clear();
     }
     app.request_config_save();
-    app.record_change(crate::application::bus::coordinator::Change::Gui)
-        .await;
+    app.record_change(crate::domain::events::Change::Gui).await;
     Ok(())
 }
 
@@ -185,7 +181,7 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     crate::domain::plugin::usecases::plugins::reload_registry(&app).await;
     crate::domain::plugin::usecases::plugins::reconcile_full(&app).await;
 
-    let controllers: Vec<std::sync::Arc<dyn crate::infrastructure::drivers::Device>> =
+    let controllers: Vec<std::sync::Arc<dyn crate::domain::device::Device>> =
         app.device_registry.read().await.clone();
     for dev in controllers {
         super::receiver::reconcile_owned_children(&dev, &app).await;

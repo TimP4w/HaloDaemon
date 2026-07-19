@@ -517,7 +517,7 @@ mod tests {
 
     #[tokio::test]
     async fn has_active_content_tracks_template_id() {
-        use crate::infrastructure::drivers::Device;
+        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
         let app = Arc::new(AppState::new(Config::default()));
@@ -542,7 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn offline_device_does_not_keep_engine_active_or_retain_slot() {
-        use crate::infrastructure::drivers::Device;
+        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
         let app = Arc::new(AppState::new(Config::default()));
@@ -644,7 +644,7 @@ mod tests {
     async fn app_with_lcd_state(
         state: serde_json::Value,
     ) -> (Arc<AppState>, Arc<crate::test_support::MockDevice>) {
-        use crate::infrastructure::drivers::Device;
+        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
         let mut cfg = Config::default();
         cfg.profiles
@@ -740,7 +740,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_removes_slot_when_device_clears_template() {
-        use crate::infrastructure::drivers::Device;
+        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
         let app = Arc::new(AppState::new(Config::default()));
@@ -775,7 +775,7 @@ mod tests {
 
     #[tokio::test]
     async fn fail_streak_backoff_limits_render_attempts() {
-        use crate::infrastructure::drivers::Device;
+        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
         let app = Arc::new(AppState::new(Config::default()));
@@ -840,7 +840,7 @@ mod tests {
 
     #[tokio::test]
     async fn latching_device_skips_stream_when_signature_unchanged() {
-        use crate::infrastructure::drivers::Device;
+        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
         let app = Arc::new(AppState::new(Config::default()));
@@ -878,7 +878,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_latching_device_renders_every_tick_regardless_of_signature() {
-        use crate::infrastructure::drivers::Device;
+        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
         let app = Arc::new(AppState::new(Config::default()));
@@ -912,7 +912,7 @@ mod tests {
 
     #[tokio::test]
     async fn preview_forced_on_the_tick_a_subscriber_appears() {
-        use crate::infrastructure::drivers::Device;
+        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
         let app = Arc::new(AppState::new(Config::default()));

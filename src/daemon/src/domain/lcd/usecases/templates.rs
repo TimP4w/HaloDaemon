@@ -2,13 +2,15 @@
 //! Save/load/delete named LCD templates under `{config_dir}/lcd/<name>.yaml`.
 //! Mirrors the LCD image library's validation and IPC push patterns (see `usecases::lcd`).
 
+use crate::domain::events::ChangeSink as _;
+
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use serde_json::json;
 
+use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
-use crate::infrastructure::ipc::ClientHandle;
 use halod_shared::lcd_custom::{
     CustomTemplateDef, OPACITY_PARAM, SCALE_Y_PARAM, TEXT_ITALIC_PARAM, TEXT_STRIKETHROUGH_PARAM,
     TEXT_UNDERLINE_PARAM, TEXT_WEIGHT_PARAM,
@@ -229,7 +231,7 @@ pub async fn save_template(name: String, def: CustomTemplateDef, app: Arc<AppSta
     tokio::task::spawn_blocking(move || crate::config::atomic_write(&path, &yaml)).await??;
     log::info!("[LCD] saved template '{name}'");
     app.lcd.refresh_templates().await;
-    app.record_change(crate::application::bus::coordinator::Change::LcdCatalog)
+    app.record_change(crate::domain::events::Change::LcdCatalog)
         .await;
     Ok(())
 }
@@ -259,7 +261,7 @@ pub async fn delete_template(name: String, app: Arc<AppState>) -> Result<()> {
         Err(e) => return Err(e.into()),
     }
     app.lcd.refresh_templates().await;
-    app.record_change(crate::application::bus::coordinator::Change::LcdCatalog)
+    app.record_change(crate::domain::events::Change::LcdCatalog)
         .await;
     Ok(())
 }

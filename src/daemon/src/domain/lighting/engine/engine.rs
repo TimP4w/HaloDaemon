@@ -966,10 +966,10 @@ impl RgbEngine {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::domain::lighting::engine::color::LinearColor;
-    use crate::infrastructure::drivers::{
+    use crate::domain::device::{
         CapabilityRef, LightingCapability, LightingStateSlot, VisibilitySlot,
     };
+    use crate::domain::lighting::engine::color::LinearColor;
     use anyhow::Result;
     use async_trait::async_trait;
     use halod_shared::types::{

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Managing repository-provided plugins: enable/disable and configuration.
 
+use crate::domain::events::ChangeSink as _;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -8,8 +10,8 @@ use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use serde_json::json;
 
+use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
-use crate::infrastructure::ipc::ClientHandle;
 
 /// Disable a plugin immediately. Enabling is only allowed through
 /// [`confirm_enable`], which verifies the authority snapshot shown to the user.
@@ -58,16 +60,29 @@ pub(crate) async fn persist_config_values(
         .secure_config_keys_for(id)
         .into_iter()
         .collect();
+    let secrets = values
+        .iter()
+        .filter(|(key, value)| secure_keys.contains(*key) && !value.is_empty())
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    if !secrets.is_empty() {
+        let store = Arc::clone(&app.secret_store);
+        let plugin_id = id.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            for (key, value) in secrets {
+                store
+                    .set(&plugin_id, &key, &value)
+                    .with_context(|| format!("storing secret '{key}' for plugin '{plugin_id}'"))?;
+            }
+            Ok(())
+        })
+        .await
+        .context("secret-store task failed")??;
+    }
     let mut cfg = app.config.write().await;
     let plaintext = cfg.plugins.config.entry(id.to_owned()).or_default();
     for (key, value) in &values {
-        if secure_keys.contains(key) {
-            if !value.is_empty() {
-                app.secret_store
-                    .set(id, key, value)
-                    .with_context(|| format!("storing secret '{key}' for plugin '{id}'"))?;
-            }
-        } else {
+        if !secure_keys.contains(key) {
             plaintext.insert(key.clone(), value.clone());
         }
     }
@@ -288,7 +303,7 @@ pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<Strin
         );
     }
     if plugin_ids.is_empty() {
-        app.record_change(crate::application::bus::coordinator::Change::PluginTopology)
+        app.record_change(crate::domain::events::Change::PluginTopology)
             .await;
     } else {
         reconcile_plugins(&app, &plugin_ids).await;
@@ -499,7 +514,7 @@ async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[String]) {
     app.set_discovery_scope(DiscoveryScope::Clean).await;
     crate::domain::registry::seed_known_devices(Arc::clone(app)).await;
     crate::domain::registry::usecases::chain::restore_saved_chains(Arc::clone(app)).await;
-    app.record_change(crate::application::bus::coordinator::Change::PluginTopology)
+    app.record_change(crate::domain::events::Change::PluginTopology)
         .await;
 }
 
@@ -616,9 +631,9 @@ mod tests {
         use std::sync::Arc;
 
         crate::test_support::with_tmp_config(|app| async move {
-            let owned: Arc<dyn crate::infrastructure::drivers::Device> =
+            let owned: Arc<dyn crate::domain::device::Device> =
                 Arc::new(MockDevice::new("P-dev").with_owning_plugin_id("P"));
-            let other: Arc<dyn crate::infrastructure::drivers::Device> =
+            let other: Arc<dyn crate::domain::device::Device> =
                 Arc::new(MockDevice::new("Q-dev").with_owning_plugin_id("Q"));
             app.device_registry.write().await.push(owned.clone());
             app.device_registry.write().await.push(other.clone());
@@ -659,10 +674,10 @@ mod tests {
         use std::sync::Arc;
 
         crate::test_support::with_tmp_config(|app| async move {
-            let parent: Arc<dyn crate::infrastructure::drivers::Device> =
+            let parent: Arc<dyn crate::domain::device::Device> =
                 Arc::new(MockDevice::new("nzxt-abc").with_owning_plugin_id("nzxt"));
             // Chain-accessory child: shares the parent key, no owning id of its own.
-            let child: Arc<dyn crate::infrastructure::drivers::Device> =
+            let child: Arc<dyn crate::domain::device::Device> =
                 Arc::new(MockDevice::new("nzxt-abc_acc_0_1"));
             app.device_registry.write().await.push(parent.clone());
             app.device_registry.write().await.push(child.clone());

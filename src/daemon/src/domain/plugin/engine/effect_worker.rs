@@ -357,24 +357,6 @@ fn lerp_helper_color(a: HelperColor, b: HelperColor, amount: f64) -> HelperColor
     }
 }
 
-fn srgb_to_linear_unit(value: f64) -> f64 {
-    let value = value.clamp(0.0, 1.0);
-    if value <= 0.04045 {
-        value / 12.92
-    } else {
-        ((value + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn linear_to_srgb_unit(value: f64) -> f64 {
-    let value = value.clamp(0.0, 1.0);
-    if value <= 0.003_130_8 {
-        value * 12.92
-    } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
-    }
-}
-
 /// The small global helper surface effect scripts get beyond the base sandbox.
 /// Frame-varying data and deterministic helpers live on the effect context.
 fn register_effect_helpers(lua: &Lua) -> mlua::Result<()> {
@@ -503,14 +485,18 @@ fn effect_context_table(
         "srgb_to_linear",
         lua.create_function(|_, (_self, value): (Table, f64)| {
             finite_number(value, "srgb_to_linear")?;
-            Ok(srgb_to_linear_unit(value))
+            Ok(crate::domain::lighting::engine::color::srgb_to_linear_unit(
+                value,
+            ))
         })?,
     )?;
     context.set(
         "linear_to_srgb",
         lua.create_function(|_, (_self, value): (Table, f64)| {
             finite_number(value, "linear_to_srgb")?;
-            Ok(linear_to_srgb_unit(value))
+            Ok(crate::domain::lighting::engine::color::linear_to_srgb_unit(
+                value,
+            ))
         })?,
     )?;
     Ok(context)

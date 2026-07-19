@@ -13,12 +13,12 @@ use halod_shared::types::{
     CoolingChannel, CoolingChannelKind, DeviceType, LightingDescriptor, LightingState, RgbColor,
 };
 
-use crate::infrastructure::drivers::chain::LightingDivisionHub;
-use crate::infrastructure::drivers::vendors::generic::devices::common::transformed_zone_frame;
-use crate::infrastructure::drivers::{
+use crate::domain::device::chain::LightingDivisionHub;
+use crate::domain::device::{
     CapabilityRef, CoolingCapability, CoolingHub, CoolingStateSlot, Device, LightingCapability,
     LightingStateSlot, VisibilitySlot,
 };
+use crate::infrastructure::drivers::vendors::generic::devices::common::transformed_zone_frame;
 
 use super::manifest::AccessoryManifest;
 

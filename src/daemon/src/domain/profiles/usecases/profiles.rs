@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -108,10 +110,10 @@ pub async fn switch_profile_direct(name: String, app: Arc<AppState>) {
         cfg.active_profile = name;
     }
     load_active_profile(app.clone()).await;
-    app.record_change(crate::application::bus::coordinator::Change::ProfileSwitch)
+    app.record_change(crate::domain::events::Change::ProfileSwitch)
         .await;
     let profile = app.config.read().await.active_profile.clone();
-    crate::infrastructure::platform::notify::send(
+    crate::application::notifications::send(
         &app,
         halod_shared::types::NotificationCode::ProfileSwitched { profile },
     )
@@ -130,9 +132,9 @@ pub async fn switch_profile(name: String, app: Arc<AppState>) -> Result<()> {
     };
     app.request_config_save();
     load_active_profile(app.clone()).await;
-    app.record_change(crate::application::bus::coordinator::Change::ProfileSwitch)
+    app.record_change(crate::domain::events::Change::ProfileSwitch)
         .await;
-    crate::infrastructure::platform::notify::send(
+    crate::application::notifications::send(
         &app,
         halod_shared::types::NotificationCode::ProfileSwitched {
             profile: snap.active_profile.clone(),
@@ -166,7 +168,7 @@ pub async fn add_profile(name: String, app: Arc<AppState>) -> Result<()> {
     app.focus
         .notify(ControlMsg::ManualSwitch { profile: name })
         .await;
-    app.record_change(crate::application::bus::coordinator::Change::ProfileSwitch)
+    app.record_change(crate::domain::events::Change::ProfileSwitch)
         .await;
     Ok(())
 }
@@ -197,16 +199,19 @@ pub async fn remove_profile(name: String, app: Arc<AppState>) -> Result<()> {
                 profile: DEFAULT_PROFILE_NAME.to_string(),
             })
             .await;
-        app.record_change(crate::application::bus::coordinator::Change::ProfileSwitch)
+        app.record_change(crate::domain::events::Change::ProfileSwitch)
             .await;
     } else {
-        app.record_change(crate::application::bus::coordinator::Change::Profiles)
+        app.record_change(crate::domain::events::Change::Profiles)
             .await;
     }
     Ok(())
 }
 
 pub async fn rename_profile(old_name: String, new_name: String, app: Arc<AppState>) -> Result<()> {
+    if old_name == new_name {
+        return Ok(());
+    }
     if old_name == DEFAULT_PROFILE_NAME {
         anyhow::bail!("cannot rename the default profile");
     }
@@ -237,7 +242,7 @@ pub async fn rename_profile(old_name: String, new_name: String, app: Arc<AppStat
             .notify(ControlMsg::ManualSwitch { profile: new_name })
             .await;
     }
-    app.record_change(crate::application::bus::coordinator::Change::Profiles)
+    app.record_change(crate::domain::events::Change::Profiles)
         .await;
     Ok(())
 }
@@ -265,7 +270,7 @@ pub async fn set_lighting_targets(
         channels,
     };
     app.request_config_save();
-    app.record_change(crate::application::bus::coordinator::Change::Lighting)
+    app.record_change(crate::domain::events::Change::Lighting)
         .await;
     Ok(())
 }
@@ -440,8 +445,8 @@ mod tests {
 
     #[tokio::test]
     async fn load_active_profile_reactivates_saved_lcd_template() {
+        use crate::domain::device::Device;
         use crate::domain::lcd::engine::LcdEngine;
-        use crate::infrastructure::drivers::Device;
         use crate::test_support::MockDevice;
 
         let app = make_app();
@@ -477,8 +482,8 @@ mod tests {
 
     #[tokio::test]
     async fn load_active_profile_template_survives_remove_and_readd_cycle() {
+        use crate::domain::device::Device;
         use crate::domain::lcd::engine::LcdEngine;
-        use crate::infrastructure::drivers::Device;
         use crate::test_support::MockDevice;
 
         let app = make_app();
@@ -525,8 +530,8 @@ mod tests {
 
     #[tokio::test]
     async fn load_active_profile_clears_missing_lcd_video_path() {
+        use crate::domain::device::Device;
         use crate::domain::lcd::engine::LcdEngine;
-        use crate::infrastructure::drivers::Device;
         use crate::test_support::MockDevice;
 
         let app = make_app();
@@ -568,8 +573,8 @@ mod tests {
 
     #[tokio::test]
     async fn load_active_profile_keeps_existing_lcd_video_path() {
+        use crate::domain::device::Device;
         use crate::domain::lcd::engine::LcdEngine;
-        use crate::infrastructure::drivers::Device;
         use crate::test_support::MockDevice;
 
         let app = make_app();

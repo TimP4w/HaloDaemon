@@ -17,10 +17,9 @@ use std::sync::Arc;
 
 use crate::application::run_loop::{EngineConfigReceiver, EngineConfigTopic};
 use crate::application::state;
-use crate::application::{lifecycle, task_supervisor};
+use crate::application::{ipc, lifecycle, task_supervisor};
 use crate::domain::{cooling, device, input, lcd, lighting, plugin, profiles};
-use crate::infrastructure::drivers::transports::hid;
-use crate::infrastructure::{ipc, platform, secrets};
+use crate::infrastructure::{platform, secrets};
 
 /// How this process was invoked, decided purely from argv.
 ///
@@ -291,9 +290,11 @@ async fn run_daemon(
         "Device hotplug monitoring stopped unexpectedly.",
         move || {
             let app = Arc::clone(&hotplug_app);
-            Box::pin(
-                async move { task_supervisor::TaskHandle(tokio::spawn(hid::hotplug_monitor(app))) },
-            )
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(
+                    application::observers::hid::hotplug_monitor(app),
+                ))
+            })
         },
         || {},
     );
@@ -309,7 +310,7 @@ async fn run_daemon(
             let app = Arc::clone(&usb_hotplug_app);
             Box::pin(async move {
                 task_supervisor::TaskHandle(tokio::spawn(
-                    crate::infrastructure::drivers::transports::usb::usb_hotplug_monitor(app),
+                    crate::application::observers::usb_hotplug::run(app),
                 ))
             })
         },
@@ -466,7 +467,7 @@ async fn run_daemon(
             );
         }
         Err(e) => {
-            platform::notify::send(
+            application::notifications::send(
                 &app,
                 halod_shared::types::NotificationCode::KeyRemapUnavailable {
                     detail: e.to_string(),

@@ -5,7 +5,6 @@ pub mod audio;
 pub mod drivers;
 pub mod http;
 pub mod integration_discovery;
-pub mod ipc;
 pub mod media;
 pub mod platform;
 pub mod secrets;

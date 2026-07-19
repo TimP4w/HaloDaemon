@@ -499,9 +499,7 @@ impl Device for IdentifiedDevice {
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
         self.inner.capabilities()
     }
-    fn chain_host(
-        &self,
-    ) -> Option<&Arc<crate::infrastructure::drivers::chain::LightingDivisionHost>> {
+    fn chain_host(&self) -> Option<&Arc<crate::domain::device::chain::LightingDivisionHost>> {
         self.inner.chain_host()
     }
     fn keyboard_layout_slot(&self) -> Option<&KeyboardLayoutSlot> {
@@ -623,7 +621,7 @@ mod tests {
     }
     #[tokio::test]
     async fn wrapper_forwards_chain_host_to_inner() {
-        use crate::infrastructure::drivers::chain::{
+        use crate::domain::device::chain::{
             ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost,
         };
         use anyhow::Result;

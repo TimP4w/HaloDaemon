@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
 use super::AppState;
-use crate::infrastructure::drivers::Device;
+use crate::domain::device::Device;
 
 /// Value stored in a [`HidTracking`] map.
 pub enum HidTrackingEntry {

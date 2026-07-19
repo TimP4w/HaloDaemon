@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 
+use super::{ClientHandle, LeaseState, SubscriptionTopic};
 use crate::application::state::AppState;
 use crate::domain::cooling;
 use crate::domain::device;
@@ -15,7 +16,6 @@ use crate::domain::lighting;
 use crate::domain::plugin;
 use crate::domain::profiles;
 use crate::domain::registry;
-use crate::infrastructure::ipc::{ClientHandle, LeaseState, SubscriptionTopic};
 
 const LCD_PREVIEW_LEASE: Duration =
     Duration::from_secs(halod_shared::types::LCD_PREVIEW_LEASE_SECS);
@@ -171,7 +171,7 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
                                 .map(|device| device.name().to_string())
                                 .unwrap_or_else(|| id.clone())
                         };
-                        crate::infrastructure::platform::notify::send(
+                        crate::application::notifications::send(
                             &app,
                             halod_shared::types::NotificationCode::DeviceWriteFailed {
                                 device,
@@ -843,9 +843,9 @@ pub(crate) fn request_shutdown(app: &Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
+    use super::ClientHandle;
     use super::*;
     use crate::config::Config;
-    use crate::infrastructure::ipc::ClientHandle;
     use std::time::Duration;
     use tokio::sync::mpsc;
 

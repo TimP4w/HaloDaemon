@@ -323,7 +323,7 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingSta
             // Effect Range params (brightness/speed/…) when an effect is active.
             if let Mode::Effect(eid) = mode {
                 if let Some(eff) = rgb.descriptor.native_effects.iter().find(|e| &e.id == eid) {
-                    if param_sliders(ui, ctx, st, rgb, EffectKind::Native, &eff.id, &eff.params) {
+                    if param_sliders(ui, ctx, st, rgb, EffectSource::Native, &eff.id, &eff.params) {
                         let cmd = effect_cmd(ctx, st, rgb, eff);
                         st.queue("rgb", cmd, ctx.time);
                     }
@@ -338,7 +338,15 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingSta
                     .iter()
                     .find(|a| &a.id == eid)
                 {
-                    if param_sliders(ui, ctx, st, rgb, EffectKind::Direct, &anim.id, &anim.params) {
+                    if param_sliders(
+                        ui,
+                        ctx,
+                        st,
+                        rgb,
+                        EffectSource::Direct,
+                        &anim.id,
+                        &anim.params,
+                    ) {
                         let cmd = direct_cmd(ctx, st, rgb, anim);
                         st.queue("rgb", cmd, ctx.time);
                     }
@@ -638,16 +646,16 @@ fn right_panel(
 }
 
 #[derive(Clone, Copy)]
-enum EffectKind {
+enum EffectSource {
     Native,
     Direct,
 }
 
-impl EffectKind {
+impl EffectSource {
     fn tag(self) -> &'static str {
         match self {
-            EffectKind::Native => "native",
-            EffectKind::Direct => "direct",
+            EffectSource::Native => "native",
+            EffectSource::Direct => "direct",
         }
     }
 }
@@ -1003,7 +1011,7 @@ fn param_sliders(
     ctx: &TabCtx,
     st: &mut DeviceUi,
     rgb: &LightingStatus,
-    kind: EffectKind,
+    kind: EffectSource,
     effect_id: &str,
     params: &[EffectParamDescriptor],
 ) -> bool {
@@ -1115,14 +1123,14 @@ fn param_sliders(
 /// `eid`/`kind` match what the daemon reports (i.e. this is the active effect).
 fn current_effect_params<'a>(
     rgb: &'a LightingStatus,
-    kind: EffectKind,
+    kind: EffectSource,
     eid: &str,
 ) -> Option<&'a HashMap<String, EffectParamValue>> {
     match (kind, &rgb.state) {
-        (EffectKind::Native, Some(LightingState::NativeEffect { id, params })) if id == eid => {
+        (EffectSource::Native, Some(LightingState::NativeEffect { id, params })) if id == eid => {
             Some(params)
         }
-        (EffectKind::Direct, Some(LightingState::DirectEffect { id, params })) if id == eid => {
+        (EffectSource::Direct, Some(LightingState::DirectEffect { id, params })) if id == eid => {
             Some(params)
         }
         _ => None,
@@ -1131,14 +1139,19 @@ fn current_effect_params<'a>(
 
 fn current_param<'a>(
     rgb: &'a LightingStatus,
-    kind: EffectKind,
+    kind: EffectSource,
     eid: &str,
     pid: &str,
 ) -> Option<&'a EffectParamValue> {
     current_effect_params(rgb, kind, eid)?.get(pid)
 }
 
-fn current_param_f32(rgb: &LightingStatus, kind: EffectKind, eid: &str, pid: &str) -> Option<f32> {
+fn current_param_f32(
+    rgb: &LightingStatus,
+    kind: EffectSource,
+    eid: &str,
+    pid: &str,
+) -> Option<f32> {
     match current_param(rgb, kind, eid, pid)? {
         EffectParamValue::Float(f) => Some(*f as f32),
         _ => None,
@@ -1147,7 +1160,7 @@ fn current_param_f32(rgb: &LightingStatus, kind: EffectKind, eid: &str, pid: &st
 
 fn current_param_str(
     rgb: &LightingStatus,
-    kind: EffectKind,
+    kind: EffectSource,
     eid: &str,
     pid: &str,
 ) -> Option<String> {
@@ -1159,7 +1172,7 @@ fn current_param_str(
 
 fn current_param_steps(
     rgb: &LightingStatus,
-    kind: EffectKind,
+    kind: EffectSource,
     eid: &str,
     pid: &str,
 ) -> Option<Vec<ColorStep>> {
@@ -1171,7 +1184,7 @@ fn current_param_steps(
 
 fn current_param_color(
     rgb: &LightingStatus,
-    kind: EffectKind,
+    kind: EffectSource,
     eid: &str,
     pid: &str,
 ) -> Option<RgbColor> {
@@ -1218,7 +1231,7 @@ fn paint_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
 fn collect_effect_params(
     st: &DeviceUi,
     rgb: &LightingStatus,
-    kind: EffectKind,
+    kind: EffectSource,
     effect_id: &str,
     descs: &[EffectParamDescriptor],
 ) -> HashMap<String, EffectParamValue> {
@@ -1304,7 +1317,7 @@ fn effect_cmd(
         id: ctx.dev.id.clone(),
         state: LightingState::NativeEffect {
             id: eff.id.clone(),
-            params: collect_effect_params(st, rgb, EffectKind::Native, &eff.id, &eff.params),
+            params: collect_effect_params(st, rgb, EffectSource::Native, &eff.id, &eff.params),
         },
     }
 }
@@ -1319,7 +1332,7 @@ fn direct_cmd(
         id: ctx.dev.id.clone(),
         state: LightingState::DirectEffect {
             id: anim.id.clone(),
-            params: collect_effect_params(st, rgb, EffectKind::Direct, &anim.id, &anim.params),
+            params: collect_effect_params(st, rgb, EffectSource::Direct, &anim.id, &anim.params),
         },
     }
 }
@@ -1548,7 +1561,7 @@ mod tests {
             },
         ];
         let params =
-            collect_effect_params(&st, &rgb, EffectKind::Direct, "sensor_gradient", &descs);
+            collect_effect_params(&st, &rgb, EffectSource::Direct, "sensor_gradient", &descs);
         assert_eq!(
             params["color_a"],
             EffectParamValue::Color(RgbColor { r: 1, g: 2, b: 3 }),

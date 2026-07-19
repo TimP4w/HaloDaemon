@@ -83,10 +83,6 @@ pub enum Request {
     Renew {
         capability: String,
     },
-    /// Enumerate chipset SMBus controllers.
-    Enumerate,
-    /// Enumerate GPU SMBus/i2c controllers.
-    EnumerateGpu,
     /// Open the register bus described by `info`; replies [`Response::Opened`].
     OpenBus {
         info: BusInfo,
@@ -166,7 +162,6 @@ pub enum Response {
         capability: String,
         expires_in_ms: u64,
     },
-    Buses(Vec<BusInfo>),
     Opened(u32),
     Dword(u32),
     Byte(u8),
@@ -275,8 +270,6 @@ mod tests {
                 },
             }),
             ".*".prop_map(|capability| Request::Renew { capability }),
-            Just(Request::Enumerate),
-            Just(Request::EnumerateGpu),
             arb_bus_info().prop_map(|info| Request::OpenBus { info }),
             (any::<u32>(), any::<u8>()).prop_map(|(bus, addr)| Request::ReadByte { bus, addr }),
             (any::<u32>(), any::<u8>(), any::<u8>())
@@ -345,7 +338,6 @@ mod tests {
                 capability,
                 expires_in_ms: CAPABILITY_TTL_MS,
             }),
-            prop::collection::vec(arb_bus_info(), 0..4).prop_map(Response::Buses),
             any::<u32>().prop_map(Response::Opened),
             any::<u32>().prop_map(Response::Dword),
             any::<u8>().prop_map(Response::Byte),

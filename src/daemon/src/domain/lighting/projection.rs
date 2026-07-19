@@ -7,7 +7,7 @@ use crate::application::state::AppState;
 use crate::config::{Config, PlacedZone};
 
 pub async fn project(
-    app: &Arc<AppState>,
+    app: &AppState,
     cfg: &Config,
     placed_zones: Vec<PlacedZone>,
 ) -> halod_shared::types::LightingOverviewState {

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Device capability commands.
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::device::Device;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
-use crate::infrastructure::drivers::Device;
 
 /// Wire-level parameters for the "look up a device, apply a value to one
 /// capability, maybe persist/broadcast" family of usecases. One variant per
@@ -36,7 +38,7 @@ pub async fn set_capability_param(
     if effects.persist {
         persist_device_state(&app, dev.as_ref()).await;
     }
-    app.record_change(crate::application::bus::coordinator::Change::Device(id))
+    app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
 }

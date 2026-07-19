@@ -6,15 +6,17 @@
 //! preview is pixel-identical to what the panel shows — the daemon is the single
 //! source of truth for widget content.
 
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::Result;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
 use crate::domain::lcd::engine::custom;
 use crate::domain::registry::require_device_owned_id;
-use crate::infrastructure::ipc::ClientHandle;
 use halod_shared::lcd_custom::{CustomTemplateDef, LcdEditorRender};
 
 pub async fn render(
@@ -83,19 +85,15 @@ pub async fn render(
         Err(error) => {
             lcd.lcd_state()
                 .set_health(halod_shared::types::LcdHealth::Failed(error.to_string()));
-            app.record_change(crate::application::bus::coordinator::Change::LcdDevice(
-                device_id.clone(),
-            ))
-            .await;
+            app.record_change(crate::domain::events::Change::LcdDevice(device_id.clone()))
+                .await;
             return Err(error.into());
         }
     };
     lcd.lcd_state()
         .set_health(halod_shared::types::LcdHealth::Stable);
-    app.record_change(crate::application::bus::coordinator::Change::LcdDevice(
-        device_id.clone(),
-    ))
-    .await;
+    app.record_change(crate::domain::events::Change::LcdDevice(device_id.clone()))
+        .await;
     let (sprites, signatures) = result;
 
     let widgets = def

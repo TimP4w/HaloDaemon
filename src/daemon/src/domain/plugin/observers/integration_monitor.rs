@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::infrastructure::drivers::Device;
+use crate::domain::device::Device;
 
 use crate::application::state::AppState;
 use crate::domain::registry::usecases::registration::{
@@ -350,7 +350,7 @@ async fn remove_children(app: &Arc<AppState>, gone: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::drivers::{CapabilityRef, Controller};
+    use crate::domain::device::{CapabilityRef, Controller};
     use crate::test_support::MockDevice;
     use anyhow::Result;
     use async_trait::async_trait;

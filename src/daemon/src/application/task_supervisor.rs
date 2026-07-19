@@ -125,7 +125,7 @@ impl TaskSupervisor {
                 set_state(&manager_state, TaskState::Failed(reason.clone()));
                 log::error!("{name} {reason}");
                 if !failure_detail.is_empty() {
-                    crate::infrastructure::platform::notify::send(
+                    crate::application::notifications::send(
                         &app,
                         halod_shared::types::NotificationCode::EngineStopped {
                             detail: failure_detail.to_owned(),

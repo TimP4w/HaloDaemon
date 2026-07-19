@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Routes semantic topics to domain-owned projections.
 
-use std::sync::Arc;
-
 use crate::application::state::AppState;
 use crate::config::Config;
 use crate::domain::device::projection::DevicesSnapshot;
@@ -38,11 +36,7 @@ pub(super) const ALL_TOPICS: &[Topic] = &[
     Topic::ConfigDir,
 ];
 
-pub async fn produce(
-    app: &Arc<AppState>,
-    cfg: &Config,
-    requested: &[Topic],
-) -> Vec<(String, BusValue)> {
+pub async fn produce(app: &AppState, cfg: &Config, requested: &[Topic]) -> Vec<(String, BusValue)> {
     let needs_all_devices = requested.iter().any(|topic| {
         matches!(
             topic,

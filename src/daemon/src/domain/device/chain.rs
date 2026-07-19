@@ -7,7 +7,7 @@
 //! channels and writes composed frames to the wire.
 //!
 //! Children — instances of
-//! [`crate::infrastructure::drivers::lighting_segment::LightingSegmentDevice`] —
+//! [`super::lighting_segment::LightingSegmentDevice`] —
 //! talk to the host through the [`LightingDivisionHub`] trait.
 //!
 //! See `docs/chainable-argb.md` for the end-to-end walkthrough.
@@ -25,8 +25,8 @@ use halod_shared::types::{
     LightingSegmentInfo, LightingStatus, RgbColor, ZoneTopology,
 };
 
-use crate::infrastructure::drivers::lighting_segment::LightingSegmentDevice;
-use crate::infrastructure::drivers::{ChainLinkSpec, Device};
+use super::lighting_segment::LightingSegmentDevice;
+use super::{ChainLinkSpec, Device};
 
 #[derive(Debug, Clone)]
 pub struct ChainLinkRuntime {
@@ -197,7 +197,7 @@ pub trait LightingDivisionHub: Send + Sync + 'static {
 
 /// Shared chain runtime. Owns state + adapter + the Arc handles to spawned
 /// children; drivers expose their embedded `Arc<LightingDivisionHost>` through
-/// [`crate::infrastructure::drivers::Device::chain_host`].
+/// [`super::Device::chain_host`].
 pub struct LightingDivisionHost {
     adapter: Arc<dyn LightingDivisionAdapter>,
     /// `std::sync::Mutex`: operations never cross `.await` while holding it.
@@ -981,7 +981,7 @@ mod tests {
             .is_empty());
     }
 
-    use crate::infrastructure::drivers::{CapabilityRef, LightingCapability, LightingStateSlot};
+    use super::super::{CapabilityRef, LightingCapability, LightingStateSlot};
     use halod_shared::types::{LedPosition, LightingChannel, LightingDescriptor, LightingState};
 
     /// Minimal RGB device with a single zone — enough to exercise

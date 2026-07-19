@@ -27,6 +27,21 @@ pub struct PlatformTray {
     latest: Arc<Mutex<TrayModel>>,
 }
 
+fn push_to_handle(
+    handle: &Arc<Mutex<Option<ksni::Handle<HalodTray>>>>,
+    latest: &Arc<Mutex<TrayModel>>,
+    model: TrayModel,
+) {
+    *latest.lock().unwrap_or_else(|e| e.into_inner()) = model.clone();
+    if let Some(handle) = handle.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        handle.update(move |tray: &mut HalodTray| {
+            tray.battery_lines = model.battery_lines;
+            tray.profiles = model.profiles;
+            tray.active = model.active;
+        });
+    }
+}
+
 impl PlatformTray {
     pub fn new(
         ctx: &egui::Context,
@@ -79,15 +94,7 @@ impl PlatformTray {
         if !changed {
             return;
         }
-        *self.latest.lock().unwrap() = model.clone();
-        if let Some(handle) = self.handle.lock().unwrap().as_ref() {
-            let model = model.clone();
-            handle.update(move |tray: &mut HalodTray| {
-                tray.battery_lines = model.battery_lines;
-                tray.profiles = model.profiles;
-                tray.active = model.active;
-            });
-        }
+        push_to_handle(&self.handle, &self.latest, model.clone());
     }
 
     /// Feed the windowless tray directly from daemon state. At login there may
@@ -103,14 +110,7 @@ impl PlatformTray {
             match state.has_changed() {
                 Ok(true) => {
                     let model = TrayModel::from_state(&state.borrow_and_update());
-                    *latest.lock().unwrap() = model.clone();
-                    if let Some(handle) = handle.lock().unwrap().as_ref() {
-                        handle.update(move |tray: &mut HalodTray| {
-                            tray.battery_lines = model.battery_lines;
-                            tray.profiles = model.profiles;
-                            tray.active = model.active;
-                        });
-                    }
+                    push_to_handle(&handle, &latest, model);
                 }
                 Ok(false) => std::thread::sleep(Duration::from_millis(100)),
                 Err(_) => break,

@@ -8,21 +8,30 @@ pub struct LinearColor {
     pub b: f32,
 }
 
-pub fn srgb_to_linear(c: u8) -> f32 {
-    let c = c as f32 / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
+pub fn srgb_to_linear_unit(value: f64) -> f64 {
+    let value = value.clamp(0.0, 1.0);
+    if value <= 0.04045 {
+        value / 12.92
     } else {
-        ((c + 0.055) / 1.055).powf(2.4)
+        ((value + 0.055) / 1.055).powf(2.4)
     }
 }
 
-pub fn linear_to_srgb(c: f32) -> u8 {
-    let c = if c <= 0.0031308 {
-        c * 12.92
+pub fn linear_to_srgb_unit(value: f64) -> f64 {
+    let value = value.clamp(0.0, 1.0);
+    if value <= 0.003_130_8 {
+        value * 12.92
     } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+pub fn srgb_to_linear(c: u8) -> f32 {
+    srgb_to_linear_unit(c as f64 / 255.0) as f32
+}
+
+pub fn linear_to_srgb(c: f32) -> u8 {
+    let c = linear_to_srgb_unit(c as f64) as f32;
     (c.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 

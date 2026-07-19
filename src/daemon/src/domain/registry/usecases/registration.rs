@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::application::state::AppState;
-use crate::infrastructure::drivers::Device;
+use crate::domain::device::Device;
 use halod_shared::types::{ConnectionType, VisibilityState, DEFAULT_PROFILE_NAME};
 
 /// Close a device after releasing any global input state it owns. Every
@@ -114,7 +114,7 @@ pub async fn init_device(app: &Arc<AppState>, device: &Arc<dyn Device>) -> Resul
                     format!("{}: {e:#}", device.name()),
                 );
             }
-            crate::infrastructure::platform::notify::send(
+            crate::application::notifications::send(
                 app,
                 halod_shared::types::NotificationCode::DeviceInitFailed {
                     device: device.name().to_string(),
@@ -435,9 +435,9 @@ pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) 
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::domain::device::CapabilityRef;
     use crate::domain::registry::identity::DeviceIdentity;
     use crate::domain::registry::model::DeviceRecord;
-    use crate::infrastructure::drivers::CapabilityRef;
     use crate::test_support::MockDevice;
     use halod_shared::types::VisibilityState;
     use std::sync::{atomic::Ordering, Arc};

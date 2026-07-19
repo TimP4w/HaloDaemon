@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use halod_shared::lifecycle::IDLE_SHUTDOWN_GRACE;
 
+use crate::application::ipc::router::request_shutdown;
 use crate::application::state::AppState;
-use crate::infrastructure::ipc::router::request_shutdown;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 

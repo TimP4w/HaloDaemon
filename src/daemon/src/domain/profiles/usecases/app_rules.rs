@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::events::ChangeSink as _;
+
 use crate::application::state::AppState;
 use anyhow::Result;
 use halod_shared::types::AppRule;
@@ -39,7 +41,7 @@ pub async fn add(
     app.config.write().await.app_rules.push(rule);
     app.request_config_save();
     notify_watcher(&app).await;
-    app.record_change(crate::application::bus::coordinator::Change::AppRules)
+    app.record_change(crate::domain::events::Change::AppRules)
         .await;
     Ok(())
 }
@@ -61,7 +63,7 @@ pub async fn update(
     }
     app.request_config_save();
     notify_watcher(&app).await;
-    app.record_change(crate::application::bus::coordinator::Change::AppRules)
+    app.record_change(crate::domain::events::Change::AppRules)
         .await;
     Ok(())
 }
@@ -76,7 +78,7 @@ pub async fn remove(index: usize, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     notify_watcher(&app).await;
-    app.record_change(crate::application::bus::coordinator::Change::AppRules)
+    app.record_change(crate::domain::events::Change::AppRules)
         .await;
     Ok(())
 }

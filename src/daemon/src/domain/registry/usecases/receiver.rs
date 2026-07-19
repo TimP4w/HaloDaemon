@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
@@ -9,7 +11,7 @@ use crate::domain::registry::require_device_owned_id;
 /// children use stable hardware ids (for example a receiver serial), so a
 /// string-prefix scan cannot safely identify them.
 pub(crate) async fn reconcile_owned_children(
-    device: &Arc<dyn crate::infrastructure::drivers::Device>,
+    device: &Arc<dyn crate::domain::device::Device>,
     app: &Arc<AppState>,
 ) -> bool {
     let Some(controller) = device.as_controller() else {
@@ -35,7 +37,7 @@ pub(crate) async fn reconcile_owned_children(
         }
     }
     if !gone.is_empty() {
-        let removed: Vec<Arc<dyn crate::infrastructure::drivers::Device>> = {
+        let removed: Vec<Arc<dyn crate::domain::device::Device>> = {
             let mut devices = app.device_registry.write().await;
             let mut removed = Vec::new();
             devices.retain(|candidate| {
@@ -74,7 +76,7 @@ pub async fn start_pairing(id: String, timeout_secs: u8, app: Arc<AppState>) -> 
         .as_pairing()
         .context("device does not support pairing")?;
     cap.start_pairing(timeout_secs).await?;
-    app.record_change(crate::application::bus::coordinator::Change::Device(id))
+    app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
 }
@@ -85,7 +87,7 @@ pub async fn stop_pairing(id: String, app: Arc<AppState>) -> Result<()> {
         .as_pairing()
         .context("device does not support pairing")?;
     cap.stop_pairing().await?;
-    app.record_change(crate::application::bus::coordinator::Change::Device(id))
+    app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
 }
@@ -109,7 +111,7 @@ pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
         // instead, which removes the slot that the plugin just cleared.
         reconcile_owned_children(&device, &app).await;
     }
-    app.record_change(crate::application::bus::coordinator::Change::PluginTopology)
+    app.record_change(crate::domain::events::Change::PluginTopology)
         .await;
     Ok(())
 }
@@ -118,7 +120,7 @@ pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::infrastructure::drivers::{CapabilityRef, Device, PairingCapability};
+    use crate::domain::device::{CapabilityRef, Device, PairingCapability};
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 

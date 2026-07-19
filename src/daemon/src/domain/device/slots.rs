@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! `Slot`/`KvStateCache` state cells and the per-capability state-slot types.
-//! Re-exported from `drivers/mod.rs` so call sites keep using `crate::infrastructure::drivers::*`.
+//! Domain-owned state slots shared by device implementations.
 
 use halod_shared::keyboard::KeyboardLayoutSelection;
 use halod_shared::types::{LightingState, VisibilityState};

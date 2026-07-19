@@ -1,23 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
-use crate::infrastructure::ipc::ClientHandle;
 use crate::util::image::compress_for_storage;
 use halod_shared::types::{
     validate_image_filename, LcdHealth, LcdUploadProgress, LcdUploadStage, LightingState,
 };
 
-fn transition_failed(
-    lcd: &dyn crate::infrastructure::drivers::LcdCapability,
-    error: &anyhow::Error,
-) {
+fn transition_failed(lcd: &dyn crate::domain::device::LcdCapability, error: &anyhow::Error) {
     lcd.lcd_state()
         .set_health(LcdHealth::Failed(error.to_string()));
 }
@@ -37,7 +36,7 @@ fn invalidate_editor_image_cache(app: &Arc<AppState>) {
 /// stream drops its ~230 KB+ frame buffer (the allocator retains those pages).
 async fn stop_video_for_device(
     app: &Arc<AppState>,
-    lcd: &dyn crate::infrastructure::drivers::LcdCapability,
+    lcd: &dyn crate::domain::device::LcdCapability,
     device_id: &str,
 ) {
     if let Some(video) = app.lcd.video() {
@@ -59,7 +58,7 @@ async fn stop_video_for_device(
 /// template is persisted by the caller's `persist_device_state`.
 async fn deactivate_engine_for_device(
     app: &Arc<AppState>,
-    lcd: &dyn crate::infrastructure::drivers::LcdCapability,
+    lcd: &dyn crate::domain::device::LcdCapability,
     device_id: &str,
 ) {
     app.lcd.invalidate_editor_session();
@@ -90,8 +89,8 @@ async fn deactivate_engine_for_device(
 /// whose panel upload resets the LEDs (see `needs_rgb_restore_after_upload`).
 /// Skipped when the current state is Engine (controlled externally) or not yet set.
 async fn restore_rgb(
-    device: &dyn crate::infrastructure::drivers::Device,
-    lcd: &dyn crate::infrastructure::drivers::LcdCapability,
+    device: &dyn crate::domain::device::Device,
+    lcd: &dyn crate::domain::device::LcdCapability,
 ) {
     if !lcd.needs_rgb_restore_after_upload() {
         return;
@@ -167,10 +166,8 @@ pub async fn set_screen_image(
     client: ClientHandle,
 ) -> Result<()> {
     let result = set_screen_image_inner(&id, data_b64, request_id, &app, &client).await;
-    app.record_change(crate::application::bus::coordinator::Change::LcdDevice(
-        id.clone(),
-    ))
-    .await;
+    app.record_change(crate::domain::events::Change::LcdDevice(id.clone()))
+        .await;
     finish_upload(&client, &id, result)
 }
 
@@ -254,10 +251,8 @@ pub async fn set_screen_image_from_library(
 ) -> Result<()> {
     let result =
         set_screen_image_from_library_inner(&id, filename, request_id, &app, &client).await;
-    app.record_change(crate::application::bus::coordinator::Change::LcdDevice(
-        id.clone(),
-    ))
-    .await;
+    app.record_change(crate::domain::events::Change::LcdDevice(id.clone()))
+        .await;
     finish_upload(&client, &id, result)
 }
 
@@ -319,8 +314,8 @@ fn rotation_needs_image_reapply(mode: halod_shared::types::LcdMode) -> bool {
 }
 
 async fn reapply_static_image(
-    device: &dyn crate::infrastructure::drivers::Device,
-    lcd: &dyn crate::infrastructure::drivers::LcdCapability,
+    device: &dyn crate::domain::device::Device,
+    lcd: &dyn crate::domain::device::LcdCapability,
 ) -> Result<()> {
     let state = lcd.current_state();
     if !rotation_needs_image_reapply(state.mode) {
@@ -373,7 +368,7 @@ pub async fn set_screen_rotation(
     }
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::application::bus::coordinator::Change::LcdDevice(id))
+    app.record_change(crate::domain::events::Change::LcdDevice(id))
         .await;
     Ok(())
 }
@@ -395,7 +390,7 @@ pub async fn set_screen_brightness(id: String, brightness: u8, app: Arc<AppState
     }
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::application::bus::coordinator::Change::LcdDevice(id))
+    app.record_change(crate::domain::events::Change::LcdDevice(id))
         .await;
     Ok(())
 }
@@ -417,7 +412,7 @@ pub async fn set_screen_default(id: String, app: Arc<AppState>) -> Result<()> {
     lcd.set_active_image_filename(None).await;
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::application::bus::coordinator::Change::LcdDevice(id))
+    app.record_change(crate::domain::events::Change::LcdDevice(id))
         .await;
     Ok(())
 }
@@ -433,7 +428,7 @@ pub async fn set_screen_raw_streaming(id: String, enabled: bool, app: Arc<AppSta
     lcd.set_raw_streaming(enabled);
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::application::bus::coordinator::Change::LcdDevice(id))
+    app.record_change(crate::domain::events::Change::LcdDevice(id))
         .await;
     Ok(())
 }
@@ -492,7 +487,7 @@ pub async fn set_screen_video(id: String, path: String, app: Arc<AppState>) -> R
     lcd.set_video_path(Some(canonical));
 
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::application::bus::coordinator::Change::LcdDevice(id))
+    app.record_change(crate::domain::events::Change::LcdDevice(id))
         .await;
     Ok(())
 }
@@ -642,7 +637,7 @@ mod tests {
         app.device_registry
             .try_write()
             .unwrap()
-            .push(dev.clone() as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev.clone() as std::sync::Arc<dyn crate::domain::device::Device>);
         (app, dev)
     }
 
@@ -695,7 +690,7 @@ mod tests {
     async fn set_screen_default_clears_active_image_and_mode() {
         use halod_shared::types::LcdMode;
         let (app, dev) = make_app_with_lcd_device("lcd_dev");
-        let slot = crate::infrastructure::drivers::LcdCapability::lcd_state(dev.as_ref());
+        let slot = crate::domain::device::LcdCapability::lcd_state(dev.as_ref());
         slot.set_active_image(Some("pic.png".into()));
         slot.set_mode(LcdMode::Image);
 
@@ -703,7 +698,7 @@ mod tests {
             .await
             .unwrap();
 
-        let slot = crate::infrastructure::drivers::LcdCapability::lcd_state(dev.as_ref());
+        let slot = crate::domain::device::LcdCapability::lcd_state(dev.as_ref());
         assert!(slot.active_image().is_none(), "active image cleared");
         assert_eq!(slot.mode(), LcdMode::Default);
     }
@@ -735,7 +730,7 @@ mod tests {
             "expected the video-engine-missing error, got: {err}"
         );
 
-        let lcd = crate::infrastructure::drivers::LcdCapability::lcd_state(dev.as_ref());
+        let lcd = crate::domain::device::LcdCapability::lcd_state(dev.as_ref());
         assert_eq!(lcd.mode(), LcdMode::Default);
         assert!(lcd.video_path().is_none());
     }
@@ -752,7 +747,7 @@ mod tests {
         app.device_registry
             .try_write()
             .unwrap()
-            .push(dev as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
+            .push(dev as std::sync::Arc<dyn crate::domain::device::Device>);
 
         assert!(!dev_ref.lcd.as_ref().unwrap().raw_streaming());
         set_screen_raw_streaming("lcd_dev".into(), true, app.clone())

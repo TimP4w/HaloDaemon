@@ -9,7 +9,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::application::state::AppState;
-use crate::infrastructure::drivers::Device;
+use crate::domain::device::Device;
 use halod_shared::types::VisibilityState;
 
 pub use state::{HidTracking, HidTrackingEntry};
@@ -344,7 +344,7 @@ mod guard_tests {
     use super::require_device_owned_id;
     use crate::application::state::AppState;
     use crate::config::Config;
-    use crate::infrastructure::drivers::Device;
+    use crate::domain::device::Device;
     use crate::test_support::MockDevice;
     use halod_shared::types::VisibilityState;
     use std::sync::Arc;
@@ -402,7 +402,7 @@ mod tests {
             Ok(true)
         }
         async fn close(&self) {}
-        fn capabilities(&self) -> Vec<crate::infrastructure::drivers::CapabilityRef<'_>> {
+        fn capabilities(&self) -> Vec<crate::domain::device::CapabilityRef<'_>> {
             vec![]
         }
     }

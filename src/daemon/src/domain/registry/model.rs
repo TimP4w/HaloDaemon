@@ -19,7 +19,7 @@ pub struct DeviceRecord {
 pub fn ensure_record<'a>(
     known: &'a mut HashMap<String, DeviceRecord>,
     device_id: &str,
-    device: Option<&dyn crate::infrastructure::drivers::Device>,
+    device: Option<&dyn crate::domain::device::Device>,
 ) -> &'a mut DeviceRecord {
     known
         .entry(device_id.to_string())

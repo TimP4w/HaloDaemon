@@ -6,73 +6,45 @@ use tokio::sync::Mutex;
 
 use super::projections::{self, Topic};
 use crate::application::state::AppState;
+use crate::domain::events::Change;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Change {
-    Bootstrap,
-    DiscoveryTopology,
-    Device(String),
-    Devices(Vec<String>),
-    SensorTelemetry(Vec<String>),
-    Lighting,
-    LightingDevice(String),
-    LightingCatalog,
-    LightingTopology,
-    Canvas,
-    CanvasDevice(String),
-    Cooling,
-    CoolingDevice(String),
-    Lcd,
-    LcdDevice(String),
-    LcdCatalog,
-    Gui,
-    Profiles,
-    AppRules,
-    ProfileSwitch,
-    PluginTopology,
-    PluginData,
-    PluginDeviceStatus(String),
-}
-
-impl Change {
-    fn topics(&self) -> Vec<Topic> {
-        match self {
-            Self::Bootstrap => projections::ALL_TOPICS.to_vec(),
-            Self::DiscoveryTopology => vec![
-                Topic::Discovery,
-                Topic::Devices,
-                Topic::Cooling,
-                Topic::Lighting,
-                Topic::Lcd,
-                Topic::Plugins,
-            ],
-            Self::Device(id) => vec![Topic::Device(id.clone())],
-            Self::Devices(ids) => ids.iter().cloned().map(Topic::Device).collect(),
-            Self::SensorTelemetry(ids) => ids.iter().cloned().map(Topic::Device).collect(),
-            Self::Lighting => vec![Topic::Lighting],
-            Self::LightingDevice(id) => vec![Topic::Lighting, Topic::Device(id.clone())],
-            Self::LightingCatalog | Self::Canvas => vec![Topic::Lighting],
-            Self::LightingTopology => vec![Topic::Lighting, Topic::Devices],
-            Self::CanvasDevice(id) => vec![Topic::Lighting, Topic::Device(id.clone())],
-            Self::Cooling => vec![Topic::Cooling],
-            Self::CoolingDevice(id) => vec![Topic::Cooling, Topic::Device(id.clone())],
-            Self::Lcd => vec![Topic::Lcd],
-            Self::LcdDevice(id) => vec![Topic::Lcd, Topic::Device(id.clone())],
-            Self::LcdCatalog => vec![Topic::Lcd],
-            Self::Gui => vec![Topic::Gui],
-            Self::Profiles => vec![Topic::Profiles],
-            Self::AppRules => vec![Topic::Profiles, Topic::ProcessIcons],
-            Self::ProfileSwitch => vec![
-                Topic::Profiles,
-                Topic::Devices,
-                Topic::Cooling,
-                Topic::Lighting,
-                Topic::Lcd,
-            ],
-            Self::PluginTopology => vec![Topic::Plugins, Topic::Devices],
-            Self::PluginData => vec![Topic::Plugins],
-            Self::PluginDeviceStatus(id) => vec![Topic::Plugins, Topic::Device(id.clone())],
-        }
+fn topics(change: &Change) -> Vec<Topic> {
+    match change {
+        Change::Bootstrap => projections::ALL_TOPICS.to_vec(),
+        Change::DiscoveryTopology => vec![
+            Topic::Discovery,
+            Topic::Devices,
+            Topic::Cooling,
+            Topic::Lighting,
+            Topic::Lcd,
+            Topic::Plugins,
+        ],
+        Change::Device(id) => vec![Topic::Device(id.clone())],
+        Change::Devices(ids) => ids.iter().cloned().map(Topic::Device).collect(),
+        Change::SensorTelemetry(ids) => ids.iter().cloned().map(Topic::Device).collect(),
+        Change::Lighting => vec![Topic::Lighting],
+        Change::LightingDevice(id) => vec![Topic::Lighting, Topic::Device(id.clone())],
+        Change::LightingCatalog | Change::Canvas => vec![Topic::Lighting],
+        Change::LightingTopology => vec![Topic::Lighting, Topic::Devices],
+        Change::CanvasDevice(id) => vec![Topic::Lighting, Topic::Device(id.clone())],
+        Change::Cooling => vec![Topic::Cooling],
+        Change::CoolingDevice(id) => vec![Topic::Cooling, Topic::Device(id.clone())],
+        Change::Lcd => vec![Topic::Lcd],
+        Change::LcdDevice(id) => vec![Topic::Lcd, Topic::Device(id.clone())],
+        Change::LcdCatalog => vec![Topic::Lcd],
+        Change::Gui => vec![Topic::Gui],
+        Change::Profiles => vec![Topic::Profiles],
+        Change::AppRules => vec![Topic::Profiles, Topic::ProcessIcons],
+        Change::ProfileSwitch => vec![
+            Topic::Profiles,
+            Topic::Devices,
+            Topic::Cooling,
+            Topic::Lighting,
+            Topic::Lcd,
+        ],
+        Change::PluginTopology => vec![Topic::Plugins, Topic::Devices],
+        Change::PluginData => vec![Topic::Plugins],
+        Change::PluginDeviceStatus(id) => vec![Topic::Plugins, Topic::Device(id.clone())],
     }
 }
 
@@ -82,11 +54,11 @@ pub struct EffectiveStatePublisher {
 }
 
 impl EffectiveStatePublisher {
-    pub async fn record(&self, app: &Arc<AppState>, change: Change) {
-        self.commit(app, &change.topics()).await;
+    pub async fn record(&self, app: &AppState, change: Change) {
+        self.commit(app, &topics(&change)).await;
     }
 
-    async fn commit(&self, app: &Arc<AppState>, topics: &[Topic]) {
+    async fn commit(&self, app: &AppState, topics: &[Topic]) {
         let _commit = self.commit_lock.lock().await;
         let cfg = app.config.read().await.clone();
         let mut upserts = projections::produce(app, &cfg, topics).await;

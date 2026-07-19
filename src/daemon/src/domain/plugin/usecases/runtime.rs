@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Application boundary for plugin runtime and monitor observations.
 
+use crate::domain::events::ChangeSink as _;
+
 use std::sync::Arc;
 
 use crate::application::state::AppState;
 
 pub async fn topology_changed(app: &Arc<AppState>) {
-    app.record_change(crate::application::bus::coordinator::Change::PluginTopology)
+    app.record_change(crate::domain::events::Change::PluginTopology)
         .await;
 }
 
 pub async fn data_changed(app: &Arc<AppState>) {
-    app.record_change(crate::application::bus::coordinator::Change::PluginData)
+    app.record_change(crate::domain::events::Change::PluginData)
         .await;
 }
 
@@ -25,13 +27,13 @@ pub async fn device_changed(app: &Arc<AppState>, device_id: &str) {
             .filter(|device| device.state_source_id() == Some(device_id))
             .map(|device| device.id().to_owned()),
     );
-    app.record_change(crate::application::bus::coordinator::Change::Devices(ids))
+    app.record_change(crate::domain::events::Change::Devices(ids))
         .await;
 }
 
 pub async fn device_status_changed(app: &Arc<AppState>, device_id: &str) {
-    app.record_change(
-        crate::application::bus::coordinator::Change::PluginDeviceStatus(device_id.to_owned()),
-    )
+    app.record_change(crate::domain::events::Change::PluginDeviceStatus(
+        device_id.to_owned(),
+    ))
     .await;
 }

@@ -223,25 +223,19 @@ impl ChoiceCapability for ComputerDevice {
     }
 }
 
-inventory::submit!(
-    crate::domain::registry::observers::discovery::TransportScanner {
-        name: "computer",
-        detail: halod_shared::types::DiscoveryDetail::Computer,
-        platform: None,
-        scan: |app| Box::pin(async move { discover(app).await }),
-    }
-);
-
-async fn discover(app: Arc<crate::application::state::AppState>) {
+pub async fn make_device() -> Option<Arc<dyn Device>> {
     // Metrics are the always-available baseline; without them (unsupported OS)
     // there's nothing to register.
     let Some(metrics) = metrics::make_backend() else {
-        return;
+        return None;
     };
     let keep_awake = keep_awake::make_backend();
     let power_profile = power_profile::make_backend().await;
-    let device: Arc<dyn Device> = Arc::new(ComputerDevice::new(power_profile, metrics, keep_awake));
-    crate::domain::registry::usecases::registration::register_device(&app, device).await;
+    Some(Arc::new(ComputerDevice::new(
+        power_profile,
+        metrics,
+        keep_awake,
+    )))
 }
 
 #[cfg(test)]

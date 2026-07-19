@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use crate::application::state::AppState;
-use crate::infrastructure::drivers::Device;
+use crate::domain::device::Device;
 use halod_shared::types::DEFAULT_PROFILE_NAME;
 
 /// Merge into `entry` only the keys of `new_state` that differ from `effective`.
@@ -180,7 +180,7 @@ mod override_diff_tests {
     #[tokio::test]
     async fn persist_device_state_partial_override_falls_back_on_profile_switch() {
         use crate::application::state::AppState;
-        use crate::infrastructure::drivers::Device;
+        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
         use std::sync::Arc;
 

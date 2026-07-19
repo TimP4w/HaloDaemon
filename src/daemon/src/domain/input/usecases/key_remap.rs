@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::events::ChangeSink as _;
+
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
@@ -21,7 +23,7 @@ pub async fn set_button_mapping(
 
     cap.set_button_mapping(mapping).await?;
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::application::bus::coordinator::Change::Device(id))
+    app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
 }
@@ -34,7 +36,7 @@ pub async fn reset_button_mapping(id: String, cid: u16, app: Arc<AppState>) -> R
 
     cap.reset_button_mapping(cid).await?;
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::application::bus::coordinator::Change::Device(id))
+    app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
 }
@@ -47,7 +49,7 @@ pub async fn reset_all_button_mappings(id: String, app: Arc<AppState>) -> Result
 
     cap.reset_all_button_mappings().await?;
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::application::bus::coordinator::Change::Device(id))
+    app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
 }
@@ -78,7 +80,7 @@ pub async fn set_software_dpi_steps(id: String, steps: Vec<u32>, app: Arc<AppSta
 
     cap.set_dpi_steps(steps).await?;
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::application::bus::coordinator::Change::Device(id))
+    app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
 }
@@ -87,7 +89,7 @@ pub async fn set_software_dpi_steps(id: String, steps: Vec<u32>, app: Arc<AppSta
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::infrastructure::drivers::Device;
+    use crate::domain::device::Device;
     use crate::test_support::MockDevice;
     use halod_shared::types::{ButtonAction, MACRO_MAX_DELAY_MS, MACRO_MAX_STEPS};
     use std::sync::Arc;
