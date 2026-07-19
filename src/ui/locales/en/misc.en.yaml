@@ -50,7 +50,7 @@ misc:
   designer_phase_spread: Phase spread
   designer_ambient_color: Ambient color
   # radar.rs
-  radar_daemon_down_sub: Starting daemon
+  radar_daemon_down_sub: Daemon is starting
   radar_one_device_ready: 1 device ready
   radar_devices_ready: "%{found} devices ready"
   radar_all_connected: All peripherals connected to the engine

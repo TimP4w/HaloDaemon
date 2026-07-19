@@ -134,6 +134,7 @@ struct RecordingStream {
     reads: Mutex<std::collections::VecDeque<Vec<u8>>>,
     deferred: Mutex<std::collections::VecDeque<Vec<u8>>>,
     companion: bool,
+    write_error: Option<String>,
     /// Serial line-control calls (`set_dtr`/`set_rts`/`send_break`/`flush_input`)
     /// recorded in order, so a serial package's `test.lua` can drive them without
     /// erroring and a future assertion helper can inspect them.
@@ -143,15 +144,16 @@ struct RecordingStream {
 
 impl RecordingStream {
     fn new(reads: Vec<Vec<u8>>) -> Self {
-        Self::with_companion(reads, false)
+        Self::with_options(reads, false, None)
     }
 
-    fn with_companion(reads: Vec<Vec<u8>>, companion: bool) -> Self {
+    fn with_options(reads: Vec<Vec<u8>>, companion: bool, write_error: Option<String>) -> Self {
         Self {
             written: Mutex::new(Vec::new()),
             reads: Mutex::new(reads.into()),
             deferred: Mutex::new(std::collections::VecDeque::new()),
             companion,
+            write_error,
             serial_ops: Mutex::new(Vec::new()),
             rate: Metered::new((), None),
         }
@@ -180,6 +182,9 @@ impl RecordingStream {
 #[async_trait]
 impl Transport for RecordingStream {
     async fn write(&self, data: &[u8]) -> Result<()> {
+        if let Some(error) = &self.write_error {
+            anyhow::bail!(error.clone());
+        }
         self.rate.write_access(data.len()).await?;
         self.record("primary", data);
         Ok(())
@@ -231,6 +236,9 @@ impl HidTransport for RecordingStream {
     }
 
     async fn send_feature_report(&self, data: &[u8]) -> Result<()> {
+        if let Some(error) = &self.write_error {
+            anyhow::bail!(error.clone());
+        }
         self.rate.write_access(data.len()).await?;
         self.record("feature", data);
         Ok(())
@@ -247,6 +255,9 @@ impl HidTransport for RecordingStream {
     async fn write_companion(&self, data: &[u8]) -> Result<()> {
         if !self.companion {
             anyhow::bail!("companion collection not available on this recording stream");
+        }
+        if let Some(error) = &self.write_error {
+            anyhow::bail!(error.clone());
         }
         self.rate.write_access(data.len()).await?;
         self.record("companion", data);
@@ -1375,9 +1386,13 @@ fn open_device(
         .as_ref()
         .and_then(|table| table.get::<Option<bool>>("companion").ok().flatten())
         .unwrap_or(false);
-    let recording = Arc::new(RecordingStream::with_companion(
+    let write_error = spec_table
+        .as_ref()
+        .and_then(|table| table.get::<Option<String>>("write_error").ok().flatten());
+    let recording = Arc::new(RecordingStream::with_options(
         reads_from_spec(&spec_table),
         companion,
+        write_error,
     ));
     let smbus_written = Arc::new(Mutex::new(Vec::new()));
     let usb_recording = manifest
