@@ -7,9 +7,9 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use halod_shared::types::{EffectParamValue, LcdEngineFrame, WireLcdEngineState};
 use image::RgbaImage;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::Mutex;
 
-use crate::state::{AppState, EngineRunConfig};
+use crate::state::AppState;
 use custom::CustomTemplate;
 use templates::TemplateCtx;
 
@@ -203,6 +203,8 @@ impl LcdEngine {
                     lcd.lcd_state().end_editor_preview();
                     lcd.lcd_state()
                         .set_health(halod_shared::types::LcdHealth::Stable);
+                    crate::lcd::usecases::runtime::device_changed(&self.app_state, &device_id)
+                        .await;
                 }
             }
         }
@@ -238,7 +240,7 @@ impl LcdEngine {
 
     pub async fn start(
         self: Arc<Self>,
-        cfg_rx: watch::Receiver<EngineRunConfig>,
+        cfg_rx: crate::run_loop::EngineConfigReceiver,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let start = Instant::now();
@@ -499,7 +501,7 @@ mod tests {
 
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -528,7 +530,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_lcd_template_id(Some("custom".into()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -608,19 +610,12 @@ mod tests {
     /// Install every domain engine so usecases that go through them (e.g.
     /// `load_active_profile`) reach `engine`.
     async fn install_engines(app: &Arc<AppState>, engine: &Arc<LcdEngine>) {
-        use crate::state::EngineRunConfig;
-        app.lighting.set_engine(
-            crate::lighting::rgb_engine::RgbEngine::new(Arc::clone(app)).await,
-            watch::channel(EngineRunConfig::canvas(&Default::default())).0,
-        );
-        app.cooling.set_engine(
-            watch::channel(EngineRunConfig::fan_curve(&Default::default())).0,
-            watch::channel(75).0,
-        );
+        app.lighting
+            .set_engine(crate::lighting::rgb_engine::RgbEngine::new(Arc::clone(app)).await);
+        app.cooling.set_engine();
         app.lcd.set_engine(
             Arc::clone(engine),
             video::VideoEngine::new(Arc::clone(app), engine.frame_sender()),
-            watch::channel(EngineRunConfig::lcd(&Default::default())).0,
         );
     }
 
@@ -638,7 +633,7 @@ mod tests {
             .insert("lcd0".into(), serde_json::json!({ "lcd": state }));
         let app = Arc::new(AppState::new(cfg));
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -698,15 +693,16 @@ mod tests {
     /// idle (no active content), a profile load alone must get frames flowing.
     #[tokio::test]
     async fn load_active_profile_wakes_a_parked_engine_loop() {
-        use crate::state::EngineRunConfig;
-
         let (app, _dev) = app_with_lcd_state(serde_json::json!({ "template_id": "custom" })).await;
         let engine = LcdEngine::new(Arc::clone(&app));
         install_engines(&app, &engine).await;
 
         let mut frames = engine.subscribe();
-        let (_cfg_tx, cfg_rx) =
-            watch::channel(EngineRunConfig::lcd(&crate::config::LcdConfig::default()));
+        crate::registry::usecases::runtime::bootstrap(&app).await;
+        let cfg_rx = crate::run_loop::EngineConfigReceiver::new(
+            app.data_bus.clone(),
+            crate::run_loop::EngineConfigTopic::Lcd,
+        );
         let handle = Arc::clone(&engine).start(cfg_rx).await;
         // Let the engine park idle before the profile load.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -732,7 +728,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_lcd_template_id(Some("custom".into()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -768,7 +764,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_lcd_template_id(Some("custom".into()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -833,7 +829,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_lcd_template_params(static_custom_params());
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -866,7 +862,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_lcd_template_params(static_custom_params());
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -900,7 +896,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_lcd_template_params(static_custom_params());
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);

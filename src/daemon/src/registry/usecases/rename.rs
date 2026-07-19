@@ -7,7 +7,6 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
 use crate::drivers::Device;
-use crate::ipc::{broadcast_delta, Domain};
 use crate::registry::config::ensure_record;
 use crate::state::AppState;
 
@@ -26,7 +25,7 @@ pub async fn set_device_name(device_id: String, name: String, app: Arc<AppState>
     };
 
     let device = {
-        let devices = app.devices.read().await;
+        let devices = app.device_registry.read().await;
         devices.iter().find(|d| d.id() == device_id).cloned()
     };
 
@@ -39,7 +38,7 @@ pub async fn set_device_name(device_id: String, name: String, app: Arc<AppState>
     rename_normal_device(&app, device.as_deref(), &device_id, trimmed).await
 }
 
-/// Walk every chain host in `app.devices` until we find the one that owns
+/// Walk every chain host in `app.device_registry` until we find the one that owns
 /// `child_id`, then dispatch to its `rename_chain_link`. Persistence and
 /// broadcast piggy-back on the existing chain-layout machinery.
 async fn rename_chain_link(
@@ -49,7 +48,7 @@ async fn rename_chain_link(
 ) -> Result<()> {
     let new_name = new_name.ok_or_else(|| anyhow!("chain link name cannot be empty"))?;
 
-    let devices = app.devices.read().await.clone();
+    let devices = app.device_registry.read().await.clone();
     let mut found: Option<(Arc<dyn Device>, String)> = None;
     for parent in &devices {
         let Some(chain) = parent.chain_host() else {
@@ -80,7 +79,10 @@ async fn rename_chain_link(
     chain.rename_link(&channel_id, child_id, &new_name)?;
 
     super::chain::persist_layout(app, parent.as_ref()).await?;
-    broadcast_delta(app, &[Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::LightingDevice(
+        child_id.to_owned(),
+    ))
+    .await;
     Ok(())
 }
 
@@ -108,7 +110,10 @@ async fn rename_normal_device(
         app.request_config_save();
     }
 
-    broadcast_delta(app, &[Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Device(
+        device_id.to_owned(),
+    ))
+    .await;
     Ok(())
 }
 
@@ -213,7 +218,7 @@ mod tests {
             id: "dev_a",
             name: "Stock Name",
         });
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
 
         // First override, then clear.
         set_device_name("dev_a".into(), "Custom".into(), app.clone())
@@ -287,7 +292,7 @@ mod tests {
             parent_id: "parent_x".into(),
         }));
         let parent: Arc<dyn Device> = Arc::new(ChainParent { host: host.clone() });
-        app.devices.write().await.push(parent.clone());
+        app.device_registry.write().await.push(parent.clone());
         let (child_id, child_dev) = host
             .add_link(
                 "ch0",
@@ -299,7 +304,7 @@ mod tests {
             )
             .await
             .unwrap();
-        app.devices.write().await.push(child_dev);
+        app.device_registry.write().await.push(child_dev);
         child_id
     }
 
@@ -312,7 +317,7 @@ mod tests {
             .await
             .unwrap();
 
-        let devices = app.devices.read().await;
+        let devices = app.device_registry.read().await;
         let parent = devices.iter().find(|d| d.id() == "parent_x").unwrap();
         let chain = parent.chain_host().unwrap();
         let info = chain.lighting_channels();

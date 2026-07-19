@@ -19,9 +19,10 @@ mod performance;
 
 use std::collections::{HashMap, HashSet};
 
+use crate::domain::topic_store::TopicStore;
 use halod_shared::commands::DaemonCommand;
 use halod_shared::debug_info::DebugInfo;
-use halod_shared::types::{AppState, ButtonAction, EffectParamValue, RgbColor, WireDevice};
+use halod_shared::types::{ButtonAction, EffectParamValue, RgbColor, WireDevice};
 
 use crate::domain::models::device_tabs::{realign_tab, tab_label, tabs_for, TabKind};
 use crate::domain::state::Page;
@@ -332,7 +333,7 @@ pub fn editing(ui_state: &DeviceUi, time: f64) -> bool {
 /// Per-frame daemon-facing bundle handed from the render root to the device
 /// page; [`TabCtx`] narrows it to one resolved device.
 pub struct FrameCtx<'a> {
-    pub state: &'a AppState,
+    pub state: &'a TopicStore,
     pub cmd: &'a CommandTx,
     pub time: f64,
     pub debug: Option<&'a DebugInfo>,
@@ -349,7 +350,7 @@ pub struct FrameCtx<'a> {
 
 /// Shared per-tab context to keep tab signatures small.
 pub struct TabCtx<'a> {
-    pub state: &'a AppState,
+    pub state: &'a TopicStore,
     pub dev: &'a WireDevice,
     pub cmd: &'a CommandTx,
     pub time: f64,
@@ -600,7 +601,7 @@ mod tests {
                 slots: vec![],
             })],
         );
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.devices.push(d);
         let id = state.devices[0].id.clone();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

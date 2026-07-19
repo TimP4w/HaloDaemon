@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio::sync::broadcast;
 
 use crate::input::action_executor::ActionExecutor;
 
@@ -18,8 +17,6 @@ pub struct ButtonEvent {
 
 /// Key-remap input plumbing owned by `KeyRemapEngine`.
 pub struct InputState {
-    /// Sole input feed for `KeyRemapEngine`.
-    pub button_event_tx: broadcast::Sender<ButtonEvent>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// Held Layer Shift tokens, keyed by (device_id, cid); active iff non-empty.
     layer_shift_held: Mutex<HashSet<(String, u16)>>,
@@ -29,9 +26,7 @@ pub struct InputState {
 
 impl InputState {
     pub fn new() -> Self {
-        let (button_event_tx, _) = broadcast::channel(256);
         Self {
-            button_event_tx,
             shutdown_tx: tokio::sync::watch::channel(false).0,
             layer_shift_held: Mutex::new(HashSet::new()),
             executor: OnceLock::new(),

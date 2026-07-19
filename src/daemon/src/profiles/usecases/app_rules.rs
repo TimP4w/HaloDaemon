@@ -40,14 +40,8 @@ pub async fn add(
     app.config.write().await.app_rules.push(rule);
     app.request_config_save();
     notify_watcher(&app).await;
-    crate::ipc::broadcast_delta(
-        &app,
-        &[
-            crate::ipc::Domain::Profiles,
-            crate::ipc::Domain::ProcessIcons,
-        ],
-    )
-    .await;
+    app.record_change(crate::services::effective_state::Change::AppRules)
+        .await;
     Ok(())
 }
 
@@ -68,14 +62,8 @@ pub async fn update(
     }
     app.request_config_save();
     notify_watcher(&app).await;
-    crate::ipc::broadcast_delta(
-        &app,
-        &[
-            crate::ipc::Domain::Profiles,
-            crate::ipc::Domain::ProcessIcons,
-        ],
-    )
-    .await;
+    app.record_change(crate::services::effective_state::Change::AppRules)
+        .await;
     Ok(())
 }
 
@@ -89,14 +77,8 @@ pub async fn remove(index: usize, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     notify_watcher(&app).await;
-    crate::ipc::broadcast_delta(
-        &app,
-        &[
-            crate::ipc::Domain::Profiles,
-            crate::ipc::Domain::ProcessIcons,
-        ],
-    )
-    .await;
+    app.record_change(crate::services::effective_state::Change::AppRules)
+        .await;
     Ok(())
 }
 

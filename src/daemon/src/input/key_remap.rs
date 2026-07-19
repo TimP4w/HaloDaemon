@@ -53,7 +53,7 @@ impl KeyRemapEngine {
 
     pub fn start(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         let engine = self;
-        let mut rx = engine.app.input.button_event_tx.subscribe();
+        let mut rx = engine.app.input_events.subscribe();
         let mut shutdown_rx = engine.app.input.shutdown_rx();
         tokio::spawn(async move {
             // (device_id, cid) → DPI saved before a momentary press
@@ -230,7 +230,7 @@ impl KeyRemapEngine {
             held.insert(key, MomentaryDpiState::RestorePending { original });
         } else {
             held.remove(&key);
-            crate::ipc::broadcast_delta(&self.app, &[crate::ipc::Domain::Devices]).await;
+            crate::input::usecases::runtime::device_changed(&self.app, device_id).await;
         }
     }
 
@@ -292,9 +292,8 @@ impl KeyRemapEngine {
                                         temporary: *dpi,
                                     },
                                 );
-                                crate::ipc::broadcast_delta(
-                                    &self.app,
-                                    &[crate::ipc::Domain::Devices],
+                                crate::input::usecases::runtime::device_changed(
+                                    &self.app, device_id,
                                 )
                                 .await;
                             }
@@ -420,7 +419,7 @@ mod tests {
     async fn momentary_dpi_press_saves_restore_point_and_applies_target() {
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);
@@ -457,7 +456,7 @@ mod tests {
     async fn momentary_dpi_release_restores_saved_dpi() {
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);
@@ -515,7 +514,7 @@ mod tests {
         // Release must restore the app-state-held DPI, not the live hardware value.
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);
@@ -556,7 +555,7 @@ mod tests {
     async fn momentary_dpi_restore_failure_enters_restore_pending_and_retries() {
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);
@@ -573,7 +572,7 @@ mod tests {
             .await;
 
         // Device disappears before release — the restore can't reach it.
-        app.devices.write().await.clear();
+        app.device_registry.write().await.clear();
         engine
             .handle_button(
                 &ButtonAction::MomentaryDpi { dpi: 1600 },
@@ -590,7 +589,7 @@ mod tests {
         );
 
         // Device reappears; the next event for it retries the restore.
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);
@@ -634,7 +633,7 @@ mod tests {
         let app = Arc::new(AppState::new(Config::default()));
         app.input.layer_shift_press("dev1", 0x50);
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);
@@ -734,11 +733,11 @@ mod tests {
         let app = Arc::new(AppState::new(Config::default()));
         let dev_a = Arc::new(MockDevice::new("dev_a").with_key_remap_mappings(dev_a_mappings));
         let dev_b = Arc::new(MockDevice::new("dev_b").with_key_remap_mappings(dev_b_mappings));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev_a) as Arc<dyn Device>);
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev_b) as Arc<dyn Device>);
@@ -798,7 +797,7 @@ mod tests {
         let app = Arc::new(AppState::new(Config::default()));
         app.input.layer_shift_press("shift-btn", 0x50);
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);
@@ -861,7 +860,7 @@ mod tests {
         )];
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);
@@ -895,7 +894,7 @@ mod tests {
         )];
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);

@@ -3,7 +3,7 @@
 //!
 //! These are `#[ignore]`d — they render real screens through a wgpu-backed
 //! [`egui_kittest`] harness (no window, no daemon) and write PNGs, so they only
-//! run when explicitly asked for. Each generator seeds an [`AppState`] fixture,
+//! run when explicitly asked for. Each generator seeds an [`TopicStore`] fixture,
 //! drives [`App::draw`] exactly as production does, and captures the frame.
 //! Regenerate after a visual change with `--features screenshots`.
 //!
@@ -20,8 +20,8 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use crate::domain::topic_store::TopicStore;
 use egui::vec2;
-use halod_shared::types::AppState;
 use serde_json::json;
 
 use crate::app::App;
@@ -38,7 +38,7 @@ const SCALE: f32 = 2.0;
 
 /// Render a seeded state to `docs/images/<name>.png`. `setup` positions the app
 /// on the target page/tab before the captured frame.
-fn capture(name: &str, state: AppState, setup: impl FnOnce(&mut App)) {
+fn capture(name: &str, state: TopicStore, setup: impl FnOnce(&mut App)) {
     let force_quit = Arc::new(AtomicBool::new(false));
     let (cmd, ui_rx, _senders, sinks) = ipc::fake(state, true);
     let hidden = Arc::new(AtomicBool::new(false));
@@ -113,7 +113,7 @@ fn gui_onboarded() -> serde_json::Value {
     json!({ "seen_tours": seen })
 }
 
-fn home_state() -> AppState {
+fn home_state() -> TopicStore {
     let devices = json!([
         {
             "id": "nzxt-kraken", "name": "Kraken Elite 360",
@@ -180,7 +180,7 @@ fn home_state() -> AppState {
     .expect("home fixture")
 }
 
-fn plugins_state() -> AppState {
+fn plugins_state() -> TopicStore {
     fn plugin(v: serde_json::Value) -> serde_json::Value {
         v
     }
@@ -262,7 +262,7 @@ fn plugins_state() -> AppState {
 /// A `DeviceUi` opened on the capability tab of `kind` for device `id`. The tab
 /// index is resolved from the device's capabilities so it survives tab-set
 /// changes (the `tab_kind` field that would do this natively is module-private).
-fn device_ui_on_tab(state: &AppState, id: &str, kind: TabKind) -> DeviceUi {
+fn device_ui_on_tab(state: &TopicStore, id: &str, kind: TabKind) -> DeviceUi {
     let mut ui = DeviceUi::new(id.to_string());
     if let Some(dev) = state.devices.iter().find(|d| d.id == id) {
         ui.tab = tabs_for(dev)
@@ -332,7 +332,7 @@ fn strip_device() -> serde_json::Value {
 }
 
 /// Device-page **Lighting/RGB** tab (per-zone LED editor).
-fn lighting_device_state() -> AppState {
+fn lighting_device_state() -> TopicStore {
     serde_json::from_value(json!({
         "devices": [strip_device()],
         "profiles": {"active": "Gaming", "available": ["Default", "Gaming", "Silent"]},
@@ -342,7 +342,7 @@ fn lighting_device_state() -> AppState {
 }
 
 /// Mouse with editable DPI stages for the Performance tab.
-fn dpi_state() -> AppState {
+fn dpi_state() -> TopicStore {
     serde_json::from_value(json!({
         "devices": [{
             "id": "g502", "name": "G502 X Plus",
@@ -364,7 +364,7 @@ fn dpi_state() -> AppState {
 }
 
 /// AIO with a Cooling capability + temperature sensors, plus the matching fan
-/// curves in `AppState.cooling` — drives both the Cooling page and the
+/// curves in `TopicStore.cooling` — drives both the Cooling page and the
 /// per-device fan-curve editor.
 fn cooling_device() -> serde_json::Value {
     json!({
@@ -402,7 +402,7 @@ fn cooling_appstate_field() -> serde_json::Value {
     })
 }
 
-fn cooling_state() -> AppState {
+fn cooling_state() -> TopicStore {
     serde_json::from_value(json!({
         "devices": [cooling_device()],
         "cooling": cooling_appstate_field(),
@@ -414,7 +414,7 @@ fn cooling_state() -> AppState {
 
 /// A round Kraken LCD panel plus a populated editor template, for the LCD
 /// screen editor.
-fn lcd_state() -> AppState {
+fn lcd_state() -> TopicStore {
     serde_json::from_value(json!({
         "devices": [{
             "id": "kraken-lcd", "name": "NZXT Kraken Elite",
@@ -603,7 +603,7 @@ fn placeholder_sprite(w: &halod_shared::lcd_custom::WidgetDef) -> (u32, u32, Vec
 }
 
 /// A single profile detail page with an app-focus auto-activate rule.
-fn profiles_state() -> AppState {
+fn profiles_state() -> TopicStore {
     serde_json::from_value(json!({
         "profiles": {
             "active": "Gaming",

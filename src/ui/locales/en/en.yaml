@@ -7,7 +7,7 @@ notify:
   unknown_error: Unknown error
   low_battery:
     title: "%{device} battery is low"
-    message: "%{battery} is at %{level}% (below %{threshold}%)."
+    message: "%{battery} is at %{level}%"
   engine_stopped:
     title: Engine stopped
     message: "%{detail}"

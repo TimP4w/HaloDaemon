@@ -3,7 +3,6 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::drivers::Device;
-use crate::ipc::{broadcast_delta, Domain};
 use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::state::AppState;
@@ -24,7 +23,6 @@ pub enum CapabilityParam {
 
 struct Effects {
     persist: bool,
-    broadcast: bool,
 }
 
 pub async fn set_capability_param(
@@ -37,9 +35,8 @@ pub async fn set_capability_param(
     if effects.persist {
         persist_device_state(&app, dev.as_ref()).await;
     }
-    if effects.broadcast {
-        broadcast_delta(&app, &[Domain::Devices]).await;
-    }
+    app.record_change(crate::services::effective_state::Change::Device(id))
+        .await;
     Ok(())
 }
 
@@ -56,40 +53,28 @@ async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
                 }
             }
             cap.set_boolean(key, *value).await?;
-            Ok(Effects {
-                persist: true,
-                broadcast: true,
-            })
+            Ok(Effects { persist: true })
         }
         CapabilityParam::Range { key, value } => {
             dev.as_range()
                 .context("device does not support range control")?
                 .set_range(key, *value)
                 .await?;
-            Ok(Effects {
-                persist: true,
-                broadcast: false,
-            })
+            Ok(Effects { persist: true })
         }
         CapabilityParam::Choice { key, selected } => {
             dev.as_choice()
                 .context("device does not support choice control")?
                 .set_choice(key, *selected)
                 .await?;
-            Ok(Effects {
-                persist: true,
-                broadcast: false,
-            })
+            Ok(Effects { persist: true })
         }
         CapabilityParam::Action { key } => {
             dev.as_action()
                 .context("device does not support actions")?
                 .trigger_action(key)
                 .await?;
-            Ok(Effects {
-                persist: false,
-                broadcast: false,
-            })
+            Ok(Effects { persist: false })
         }
         CapabilityParam::DpiSteps { steps } => {
             let steps16 = steps
@@ -103,20 +88,14 @@ async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
                 .context("device does not support DPI control")?
                 .set_dpi_steps(steps16)
                 .await?;
-            Ok(Effects {
-                persist: false,
-                broadcast: false,
-            })
+            Ok(Effects { persist: false })
         }
         CapabilityParam::EqPreset { preset_index } => {
             dev.as_equalizer()
                 .context("device does not support equalizer control")?
                 .set_eq_preset(*preset_index)
                 .await?;
-            Ok(Effects {
-                persist: true,
-                broadcast: false,
-            })
+            Ok(Effects { persist: true })
         }
         CapabilityParam::EqBands { values } => {
             let cap = dev
@@ -134,10 +113,7 @@ async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
                 "EQ band values must be finite"
             );
             cap.set_eq_bands(values).await?;
-            Ok(Effects {
-                persist: true,
-                broadcast: false,
-            })
+            Ok(Effects { persist: true })
         }
     }
 }
@@ -151,7 +127,7 @@ mod tests {
 
     fn make_app(devices: Vec<Arc<dyn Device>>) -> Arc<AppState> {
         let app = Arc::new(AppState::new(Config::default()));
-        *app.devices.try_write().unwrap() = devices;
+        *app.device_registry.try_write().unwrap() = devices;
         app
     }
 

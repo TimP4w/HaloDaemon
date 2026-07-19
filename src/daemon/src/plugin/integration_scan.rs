@@ -12,7 +12,7 @@ use anyhow::Result;
 use halod_shared::types::Permission;
 
 use crate::drivers::Device;
-use crate::ipc::broadcast_state;
+
 use crate::registry::discovery::{DiscoveryHandle, TransportScanner};
 use crate::registry::usecases::registration::{
     register_device_and_children, unregister_device_and_children,
@@ -125,7 +125,13 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
             .resolved_config_for(app.secret_store.as_ref(), &manifest.plugin_id, &granted);
     let id = root_device_id(&manifest, &config);
 
-    if app.devices.read().await.iter().any(|d| d.id() == id) {
+    if app
+        .device_registry
+        .read()
+        .await
+        .iter()
+        .any(|d| d.id() == id)
+    {
         return DiscoveryOutcome::Registered;
     }
 
@@ -236,7 +242,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
             // Keep a terminal root visible so the monitor can retain the
             // unrecoverable state even when this happened during the initial
             // full scan. Engines skip it through `is_live()`.
-            app.devices.write().await.push(device);
+            app.device_registry.write().await.push(device);
             DiscoveryOutcome::Unrecoverable
         } else {
             device.close().await;
@@ -251,7 +257,7 @@ async fn report_connect_failure(app: &Arc<AppState>, manifest: &PluginManifest, 
     app.registry
         .report_connect_error(app, &manifest.plugin_id, &manifest.display_name(), detail)
         .await;
-    broadcast_state(app).await;
+    crate::plugin::usecases::runtime::topology_changed(app).await;
 }
 
 async fn discover(app: Arc<AppState>) {

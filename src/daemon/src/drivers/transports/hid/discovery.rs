@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use crate::{
     drivers::Device,
-    ipc::broadcast_state,
     registry::discovery::{DiscoveryHandle, TransportScanner},
     state::{AppState, HidTrackingEntry},
 };
@@ -275,7 +274,7 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
     let entry = app.hid.untrack(&key).await;
     if let Some(HidTrackingEntry::Primary(arcs)) = entry {
         let to_close: Vec<Arc<dyn Device>> = {
-            let mut devs = app.devices.write().await;
+            let mut devs = app.device_registry.write().await;
             let closing: Vec<_> = devs
                 .iter()
                 .filter(|d| arcs.iter().any(|a| Arc::ptr_eq(a, d)))
@@ -297,7 +296,7 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
             crate::registry::usecases::registration::close_device(&app, d).await;
         }
         log::info!("Hotplug: removed device(s) for key {key}");
-        broadcast_state(&app).await;
+        crate::registry::usecases::runtime::topology_changed(&app).await;
 
         // The device may now be available through its paired receiver, whose
         // pairing table only shows the slot once the cable is gone — rescan
@@ -308,7 +307,7 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
                 if let Err(e) = async {
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     let controllers: Vec<Arc<dyn Device>> = app2
-                        .devices
+                        .device_registry
                         .read()
                         .await
                         .iter()
@@ -409,7 +408,7 @@ async fn add_hid_device(
     // to avoid a TOCTOU race with the hotplug monitor. Find the parent by Arc
     // pointer equality rather than a stale index.
     let arcs: Vec<Arc<dyn Device>> = {
-        let devs = app.devices.read().await;
+        let devs = app.device_registry.read().await;
         match devs.iter().position(|d| Arc::ptr_eq(d, &impl_)) {
             Some(pos) => devs[pos..].to_vec(),
             None => return,

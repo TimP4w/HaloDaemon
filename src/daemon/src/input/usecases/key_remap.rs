@@ -3,7 +3,6 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::input::validate::{validate_button_mapping, validate_macro};
-use crate::ipc::{broadcast_delta, Domain};
 use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::state::AppState;
@@ -22,7 +21,8 @@ pub async fn set_button_mapping(
 
     cap.set_button_mapping(mapping).await?;
     persist_device_state(&app, device.as_ref()).await;
-    broadcast_delta(&app, &[Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Device(id))
+        .await;
     Ok(())
 }
 
@@ -34,7 +34,8 @@ pub async fn reset_button_mapping(id: String, cid: u16, app: Arc<AppState>) -> R
 
     cap.reset_button_mapping(cid).await?;
     persist_device_state(&app, device.as_ref()).await;
-    broadcast_delta(&app, &[Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Device(id))
+        .await;
     Ok(())
 }
 
@@ -46,7 +47,8 @@ pub async fn reset_all_button_mappings(id: String, app: Arc<AppState>) -> Result
 
     cap.reset_all_button_mappings().await?;
     persist_device_state(&app, device.as_ref()).await;
-    broadcast_delta(&app, &[Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Device(id))
+        .await;
     Ok(())
 }
 
@@ -76,7 +78,8 @@ pub async fn set_software_dpi_steps(id: String, steps: Vec<u32>, app: Arc<AppSta
 
     cap.set_dpi_steps(steps).await?;
     persist_device_state(&app, device.as_ref()).await;
-    broadcast_delta(&app, &[Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Device(id))
+        .await;
     Ok(())
 }
 
@@ -92,7 +95,7 @@ mod tests {
     fn make_app(dev: Arc<MockDevice>) -> Arc<AppState> {
         let app = Arc::new(AppState::new(Config::default()));
         let devices: Vec<Arc<dyn Device>> = vec![dev as Arc<dyn Device>];
-        *app.devices.try_write().unwrap() = devices;
+        *app.device_registry.try_write().unwrap() = devices;
         app
     }
 

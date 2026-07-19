@@ -2,7 +2,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::state::{AppState, EngineRunConfig};
+use crate::state::AppState;
 use halod_shared::commands::EngineKind;
 
 pub async fn set_engine_config(
@@ -50,39 +50,12 @@ pub async fn set_engine_config(
 
     app.request_config_save();
 
-    // Signal the affected engine to re-read config.
-    match kind {
-        EngineKind::FanCurve => {
-            let cooling = app.config.read().await.cooling.clone();
-            if let Some(tx) = app.cooling.cfg_tx() {
-                let _ = tx.send(EngineRunConfig::fan_curve(&cooling));
-            }
-            if failsafe_duty.is_some() {
-                if let Some(tx) = app.cooling.failsafe_duty_tx() {
-                    let _ = tx.send(cooling.fan_failsafe_duty);
-                }
-            }
-        }
-        EngineKind::Canvas => {
-            let rgb = app.config.read().await.rgb.clone();
-            if let Some(tx) = app.lighting.cfg_tx() {
-                let _ = tx.send(EngineRunConfig::canvas(&rgb));
-            }
-        }
-        EngineKind::Lcd => {
-            let lcd = app.config.read().await.lcd.clone();
-            if let Some(tx) = app.lcd.cfg_tx() {
-                let _ = tx.send(EngineRunConfig::lcd(&lcd));
-            }
-        }
-    }
-
-    let domain = match kind {
-        EngineKind::FanCurve => crate::ipc::Domain::Cooling,
-        EngineKind::Canvas => crate::ipc::Domain::Lighting,
-        EngineKind::Lcd => crate::ipc::Domain::Lcd,
+    let change = match kind {
+        EngineKind::FanCurve => crate::services::effective_state::Change::Cooling,
+        EngineKind::Canvas => crate::services::effective_state::Change::Lighting,
+        EngineKind::Lcd => crate::services::effective_state::Change::Lcd,
     };
-    crate::ipc::broadcast_delta(&app, &[domain]).await;
+    app.record_change(change).await;
     Ok(())
 }
 
@@ -102,7 +75,8 @@ pub async fn set_log_level(level: String, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     log::info!("Log level changed to {level}");
-    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
+    app.record_change(crate::services::effective_state::Change::Gui)
+        .await;
     Ok(())
 }
 
@@ -117,7 +91,8 @@ pub async fn set_language(lang: String, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     log::info!("UI language changed to {lang}");
-    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
+    app.record_change(crate::services::effective_state::Change::Gui)
+        .await;
     Ok(())
 }
 
@@ -136,7 +111,8 @@ pub async fn set_ui_config(
         cfg.gui.low_battery_notifications = low_battery_notifications;
     }
     app.request_config_save();
-    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
+    app.record_change(crate::services::effective_state::Change::Gui)
+        .await;
     Ok(())
 }
 
@@ -154,7 +130,8 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
         };
     }
     app.request_config_save();
-    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
+    app.record_change(crate::services::effective_state::Change::Gui)
+        .await;
     if allowed {
         crate::registry::ensure_official_repo(&app).await;
         crate::plugin::usecases::plugins::reload_registry(&app).await;
@@ -183,7 +160,8 @@ pub async fn mark_tour_seen(tour: String, app: Arc<AppState>) -> Result<()> {
         cfg.gui.seen_tours.insert(tour);
     }
     app.request_config_save();
-    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
+    app.record_change(crate::services::effective_state::Change::Gui)
+        .await;
     Ok(())
 }
 
@@ -193,7 +171,8 @@ pub async fn reset_tours_seen(app: Arc<AppState>) -> Result<()> {
         cfg.gui.seen_tours.clear();
     }
     app.request_config_save();
-    crate::ipc::broadcast_delta(&app, &[crate::ipc::Domain::Gui]).await;
+    app.record_change(crate::services::effective_state::Change::Gui)
+        .await;
     Ok(())
 }
 
@@ -206,7 +185,7 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     crate::plugin::usecases::plugins::reconcile_full(&app).await;
 
     let controllers: Vec<std::sync::Arc<dyn crate::drivers::Device>> =
-        app.devices.read().await.clone();
+        app.device_registry.read().await.clone();
     for dev in controllers {
         if let Some(ctrl) = dev.as_controller() {
             // Child ids from plugin packages are stable hardware ids (for
@@ -215,7 +194,8 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
             // established at registration and let the controller perform an
             // exact live diff against it.
             let existing = app
-                .device_children
+                .device_registry
+                .children
                 .lock()
                 .await
                 .get(dev.id())
@@ -235,7 +215,7 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
 
             if !gone.is_empty() {
                 let removed: Vec<std::sync::Arc<dyn crate::drivers::Device>> = {
-                    let mut devices = app.devices.write().await;
+                    let mut devices = app.device_registry.write().await;
                     let mut removed = Vec::new();
                     devices.retain(|device| {
                         if gone.iter().any(|id| id == device.id()) {
@@ -253,7 +233,7 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
             }
 
             if !gone.is_empty() || !registered.is_empty() {
-                let mut owners = app.device_children.lock().await;
+                let mut owners = app.device_registry.children.lock().await;
                 let children = owners.entry(dev.id().to_owned()).or_default();
                 for id in gone {
                     children.remove(&id);
@@ -347,13 +327,13 @@ mod tests {
     #[tokio::test]
     async fn set_language_persists_supported_code() {
         with_tmp_config(|app| async move {
-            let generation_before = app.state_gen.load(std::sync::atomic::Ordering::Relaxed);
+            let revision_before = app.data_bus.state_snapshot(&[]).revision;
             set_language("EN".into(), app.clone()).await.unwrap();
             assert_eq!(app.config.read().await.gui.language, "en");
             assert_eq!(
-                app.state_gen.load(std::sync::atomic::Ordering::Relaxed),
-                generation_before + 1,
-                "changing language must publish a GUI state delta"
+                app.data_bus.state_snapshot(&[]).revision,
+                revision_before + 1,
+                "changing language must commit a bus transaction"
             );
         })
         .await;

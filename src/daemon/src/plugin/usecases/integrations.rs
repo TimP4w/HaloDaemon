@@ -66,7 +66,8 @@ fn config_context(app: &Arc<AppState>, id: &str) -> serde_json::Value {
 async fn publish_setup(app: &Arc<AppState>, id: &str, status: IntegrationSetupStatus) {
     app.registry
         .set_integration_setup_status(id.to_owned(), status);
-    crate::ipc::broadcast_state(app).await;
+    app.record_change(crate::services::effective_state::Change::PluginTopology)
+        .await;
 }
 
 pub async fn begin_setup(id: String, app: Arc<AppState>) -> Result<()> {
@@ -561,19 +562,20 @@ async fn start_oauth(
 
 pub async fn cancel_setup(id: String, app: Arc<AppState>) -> Result<()> {
     app.registry.clear_integration_setup_status(&id);
-    crate::ipc::broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::PluginTopology)
+        .await;
     Ok(())
 }
 
 /// Close and drop `id`'s integration root (and the children it exposes) from
-/// `app.devices`, if currently registered. No-op otherwise.
+/// `app.device_registry`, if currently registered. No-op otherwise.
 async fn disable_one(app: &Arc<AppState>, id: &str) -> Option<String> {
     // Integration enablement is an independent lifecycle gate. Tear down its
     // shared snapshots at the same boundary as its devices so consumers never
     // observe a still-fresh value from a stopped producer.
     app.data_bus.invalidate_owner(id);
     let root_id = {
-        let devices = app.devices.read().await;
+        let devices = app.device_registry.read().await;
         devices
             .iter()
             .find(|d| d.integration_id().as_deref() == Some(id))
@@ -633,7 +635,8 @@ pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppStat
         disable_one(&app, &id).await;
         app.registry.clear_integration_operational_errors(&id);
     }
-    crate::ipc::broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::PluginTopology)
+        .await;
     Ok(())
 }
 
@@ -651,7 +654,8 @@ pub async fn set_integration_config(
     disable_one(&app, &id).await;
     app.registry.clear_integration_operational_errors(&id);
     enable_one(&app, &id).await;
-    crate::ipc::broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::PluginTopology)
+        .await;
     Ok(())
 }
 
@@ -695,7 +699,7 @@ mod tests {
             let child = Arc::new(MockDevice::new("openrgb-root_ctrl_0"));
             let unrelated = Arc::new(MockDevice::new("other-device"));
             {
-                let mut devices = app.devices.write().await;
+                let mut devices = app.device_registry.write().await;
                 devices.push(root.clone());
                 devices.push(child.clone());
                 devices.push(unrelated.clone());
@@ -723,7 +727,7 @@ mod tests {
                 .plugins
                 .integrations_enabled
                 .contains(&"openrgb".to_string()));
-            let remaining = app.devices.read().await;
+            let remaining = app.device_registry.read().await;
             assert_eq!(
                 remaining.len(),
                 1,
@@ -785,11 +789,11 @@ mod tests {
     async fn disable_one_is_a_no_op_when_the_integration_is_not_registered() {
         crate::test_support::with_tmp_config(|app| async move {
             let unrelated = Arc::new(MockDevice::new("other-device"));
-            app.devices.write().await.push(unrelated.clone());
+            app.device_registry.write().await.push(unrelated.clone());
 
             disable_one(&app, "does-not-exist").await;
 
-            assert_eq!(app.devices.read().await.len(), 1);
+            assert_eq!(app.device_registry.read().await.len(), 1);
             assert!(!unrelated.closed.load(Ordering::SeqCst));
         })
         .await;

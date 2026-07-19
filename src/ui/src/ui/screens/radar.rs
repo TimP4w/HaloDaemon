@@ -5,14 +5,15 @@
 
 use std::hash::{Hash, Hasher};
 
+use crate::domain::topic_store::TopicStore;
 use egui::{epaint::Vertex, Align2, Color32, Mesh, Pos2, Sense, Shape, Stroke, Vec2};
-use halod_shared::types::{AppState, DiscoveryDetail, DiscoveryPhase, WireDevice};
+use halod_shared::types::{DiscoveryDetail, DiscoveryPhase, WireDevice};
 
 use crate::domain::models::device as model;
 use crate::ui::theme::{self, a};
 
 /// Returns true when the overlay should be dismissed
-pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> bool {
+pub fn show(ui: &mut egui::Ui, state: &TopicStore, connected: bool, time: f64) -> bool {
     let mut dismissed = false;
     let ctx = ui.ctx().clone();
     // Border on top of the radar screen (same as main app).

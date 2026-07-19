@@ -786,6 +786,10 @@ impl LuaDevice {
                         break;
                     };
                     for outcome in outcomes {
+                        let device_id = outcome
+                            .child_index
+                            .and_then(|index| child_ids.read().unwrap().get(&index).cloned())
+                            .unwrap_or_else(|| root_id.clone());
                         if outcome.children_changed {
                             if let Some(root) = app.find_device_by_id(&root_id).await {
                                 // Receiver firmware may announce lock closure
@@ -802,26 +806,23 @@ impl LuaDevice {
                                     tokio::time::sleep(Duration::from_millis(500)).await;
                                 }
                             }
+                            crate::plugin::usecases::runtime::topology_changed(&app).await;
                         }
                         if outcome.state_changed {
-                            app.broadcast_state().await;
+                            crate::plugin::usecases::runtime::device_changed(&app, &device_id).await;
                         }
                         if outcome.button_events.pressed.is_empty()
                             && outcome.button_events.released.is_empty()
                         {
                             continue;
                         }
-                        let device_id = outcome
-                            .child_index
-                            .and_then(|index| child_ids.read().unwrap().get(&index).cloned())
-                            .unwrap_or_else(|| root_id.clone());
                         log::trace!(
                             "[plugin event] button event device={device_id} child_index={:?} pressed={:?} released={:?}",
                             outcome.child_index,
                             outcome.button_events.pressed,
                             outcome.button_events.released
                         );
-                        let _ = app.input.button_event_tx.send(crate::state::ButtonEvent {
+                        app.input_events.publish(crate::state::ButtonEvent {
                             device_id,
                             pressed: outcome.button_events.pressed,
                             released: outcome.button_events.released,
@@ -884,7 +885,11 @@ impl LuaDevice {
                                     detail,
                                 )
                                 .await;
-                            app.broadcast_state().await;
+                            crate::plugin::usecases::runtime::device_status_changed(
+                                &app,
+                                &poll_device_id,
+                            )
+                            .await;
                         }
                         break;
                     }
@@ -914,20 +919,27 @@ impl LuaDevice {
                                     }
                                 }
                                 if let Some(app) = poll_notify.upgrade() {
-                                    app.broadcast_state().await;
+                                    crate::plugin::usecases::runtime::device_changed(
+                                        &app,
+                                        &poll_device_id,
+                                    )
+                                    .await;
                                 }
                             }
                             if events.state_changed {
                                 if let Some(app) = poll_notify.upgrade() {
-                                    app.broadcast_state().await;
+                                    crate::plugin::usecases::runtime::device_changed(
+                                        &app,
+                                        &poll_device_id,
+                                    )
+                                    .await;
                                 }
                             }
                             if !events.button_events.pressed.is_empty()
                                 || !events.button_events.released.is_empty()
                             {
                                 if let Some(app) = poll_notify.upgrade() {
-                                    let _ =
-                                        app.input.button_event_tx.send(crate::state::ButtonEvent {
+                                    app.input_events.publish(crate::state::ButtonEvent {
                                             device_id: poll_device_id.clone(),
                                             pressed: events.button_events.pressed,
                                             released: events.button_events.released,
@@ -955,7 +967,11 @@ impl LuaDevice {
                                             detail,
                                         )
                                         .await;
-                                    app.broadcast_state().await;
+                                    crate::plugin::usecases::runtime::device_status_changed(
+                                        &app,
+                                        &poll_device_id,
+                                    )
+                                    .await;
                                 }
                                 break;
                             }
@@ -972,7 +988,11 @@ impl LuaDevice {
                                     }
                                 }
                                 if let Some(app) = poll_notify.upgrade() {
-                                    app.broadcast_state().await;
+                                    crate::plugin::usecases::runtime::device_changed(
+                                        &app,
+                                        &poll_device_id,
+                                    )
+                                    .await;
                                 }
                             }
                             continue;

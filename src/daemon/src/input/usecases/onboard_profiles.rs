@@ -2,7 +2,6 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
-use crate::ipc::broadcast_state;
 use crate::registry::require_device_owned_id;
 use crate::state::AppState;
 
@@ -24,7 +23,8 @@ pub async fn switch_onboard_profile(id: String, slot: u8, app: Arc<AppState>) ->
         device.name()
     );
     cap.switch_profile(slot).await?;
-    broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::Device(id))
+        .await;
     Ok(())
 }
 
@@ -36,7 +36,8 @@ pub async fn restore_onboard_profile(id: String, slot: u8, app: Arc<AppState>) -
         .context("device does not support onboard profiles")?;
     log::info!("[OnboardProfile] Restoring '{}' slot {slot}", device.name());
     cap.restore_profile(slot).await?;
-    broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::Device(id))
+        .await;
     Ok(())
 }
 
@@ -56,7 +57,8 @@ pub async fn set_onboard_profile_enabled(
         device.name()
     );
     cap.set_profile_enabled(slot, enabled).await?;
-    broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::Device(id))
+        .await;
     Ok(())
 }
 
@@ -148,7 +150,7 @@ mod tests {
 
     fn make_app_with_device(device: Arc<dyn Device>) -> Arc<AppState> {
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices.try_write().unwrap().push(device);
+        app.device_registry.try_write().unwrap().push(device);
         app
     }
 

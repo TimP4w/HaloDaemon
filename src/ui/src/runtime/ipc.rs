@@ -1,27 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Minimal read-only IPC client for the egui prototype.
 //!
-//! The daemon pushes a full `state` frame on connect and `state_delta` frames
-//! as domains change, so a client only has to connect and decode inbound JSON
-//! frames — no
-//! subscribe handshake is required (except the LCD engine preview, which is
+//! The daemon pushes typed bus snapshots and transactions, so a client only
+//! has to connect and apply inbound records. No subscribe handshake is required
+//! yet (except the LCD engine preview, which is
 //! lease-gated: see `device/lcd.rs`'s keepalive). Each distinct data stream
 //! (state, canvas frames, LCD previews, …) lives on its own
 //! [`tokio::sync::watch`] channel so a high-frequency canvas frame never
 //! blocks a state read and the UI can cheaply gate work on `has_changed()`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::domain::topic_store::TopicStore;
+use halod_shared::bus::{
+    BusEvent, BusEventPayload, BusEventReplay, BusSnapshot, BusSubscribe, BusTransaction,
+};
 use halod_shared::commands::DaemonCommand;
 use halod_shared::frames::{decode_header, encode_json_frame, payload_exceeds_max, FRAME_JSON};
 use halod_shared::lcd_custom::{CustomTemplateDef, LcdEditorRender, WidgetRenderState};
 use halod_shared::socket::socket_path;
 use halod_shared::types::{
-    AppState, CanvasFrame, LcdEngineFrame, LcdUploadProgress, Notification, NotificationCode,
-    PluginUpdateStatus, RepoUpdateStatus, RunningApp,
+    CanvasFrame, LcdEngineFrame, LcdUploadProgress, Notification, NotificationCode, RunningApp,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -73,7 +75,7 @@ pub struct DecodedEditorRender {
 /// `has_changed()` flag so the UI re-clones only what actually moved.
 #[derive(Clone)]
 pub struct UiRx {
-    pub state: watch::Receiver<AppState>,
+    pub state: watch::Receiver<TopicStore>,
     pub connected: watch::Receiver<bool>,
     pub debug: watch::Receiver<Option<halod_shared::debug_info::DebugInfo>>,
     pub lcd_images: watch::Receiver<Vec<String>>,
@@ -82,10 +84,6 @@ pub struct UiRx {
     pub running_apps: watch::Receiver<Vec<RunningApp>>,
     /// Decoded plugin display assets, keyed by `plugin_asset_cache_key`.
     pub plugin_assets: watch::Receiver<HashMap<String, Vec<u8>>>,
-    /// Latest repo update-check result; empty until one is requested.
-    pub repo_updates: watch::Receiver<Vec<RepoUpdateStatus>>,
-    /// Latest per-plugin update-check result; empty until one is requested.
-    pub plugin_updates: watch::Receiver<Vec<PluginUpdateStatus>>,
     pub udev_rules: watch::Receiver<Option<halod_shared::types::UdevRulesStatus>>,
     /// Remote branch lists keyed by the repo URL they were fetched for; empty
     /// until the Add-repository picker requests one via `ListRepoBranches`.
@@ -105,7 +103,7 @@ pub struct UiRx {
 }
 
 pub(crate) struct UiTx {
-    state: watch::Sender<AppState>,
+    state: watch::Sender<TopicStore>,
     connected: watch::Sender<bool>,
     debug: watch::Sender<Option<halod_shared::debug_info::DebugInfo>>,
     lcd_images: watch::Sender<Vec<String>>,
@@ -113,8 +111,6 @@ pub(crate) struct UiTx {
     canvas_frame: watch::Sender<Option<CanvasFrame>>,
     running_apps: watch::Sender<Vec<RunningApp>>,
     plugin_assets: watch::Sender<HashMap<String, Vec<u8>>>,
-    repo_updates: watch::Sender<Vec<RepoUpdateStatus>>,
-    plugin_updates: watch::Sender<Vec<PluginUpdateStatus>>,
     udev_rules: watch::Sender<Option<halod_shared::types::UdevRulesStatus>>,
     repo_branches: watch::Sender<HashMap<String, Vec<String>>>,
     serial_ports: watch::Sender<Vec<halod_shared::types::SerialPortInfo>>,
@@ -122,8 +118,8 @@ pub(crate) struct UiTx {
     lcd_template: watch::Sender<Option<(String, CustomTemplateDef)>>,
     lcd_editor_render: watch::Sender<Option<DecodedEditorRender>>,
     notifications: NotifyQueue,
-    low_battery_tracker: Mutex<crate::domain::battery_notification::LowBatteryTracker>,
     hidden: Arc<AtomicBool>,
+    last_event_id: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -187,7 +183,7 @@ pub fn send(tx: &CommandTx, cmd: DaemonCommand) {
 /// Split out from [`spawn`] so headless tests can wire a `UiRx` to senders they
 /// keep and drive directly (see [`fake`]).
 fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
-    let (state_s, state_r) = watch::channel(AppState::default());
+    let (state_s, state_r) = watch::channel(TopicStore::default());
     let (conn_s, conn_r) = watch::channel(false);
     let (debug_s, debug_r) = watch::channel(None);
     let (imgs_s, imgs_r) = watch::channel(Vec::new());
@@ -195,8 +191,6 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
     let (canvas_s, canvas_r) = watch::channel(None);
     let (apps_s, apps_r) = watch::channel(Vec::new());
     let (assets_s, assets_r) = watch::channel(HashMap::new());
-    let (repo_updates_s, repo_updates_r) = watch::channel(Vec::new());
-    let (plugin_updates_s, plugin_updates_r) = watch::channel(Vec::new());
     let (udev_rules_s, udev_rules_r) = watch::channel(None);
     let (repo_branches_s, repo_branches_r) = watch::channel(HashMap::new());
     let (serial_ports_s, serial_ports_r) = watch::channel(Vec::new());
@@ -221,8 +215,6 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
         canvas_frame: canvas_s,
         running_apps: apps_s,
         plugin_assets: assets_s,
-        repo_updates: repo_updates_s,
-        plugin_updates: plugin_updates_s,
         udev_rules: udev_rules_s,
         repo_branches: repo_branches_s,
         serial_ports: serial_ports_s,
@@ -230,8 +222,8 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
         lcd_template: template_s,
         lcd_editor_render: editor_render_s,
         notifications: Arc::clone(&notifications),
-        low_battery_tracker: Mutex::new(Default::default()),
         hidden,
+        last_event_id: Arc::new(AtomicU64::new(0)),
     };
     let rx = UiRx {
         state: state_r,
@@ -242,8 +234,6 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
         canvas_frame: canvas_r,
         running_apps: apps_r,
         plugin_assets: assets_r,
-        repo_updates: repo_updates_r,
-        plugin_updates: plugin_updates_r,
         udev_rules: udev_rules_r,
         repo_branches: repo_branches_r,
         serial_ports: serial_ports_r,
@@ -259,7 +249,7 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
 /// involved. The returned `UiTx` owns the sender halves and must be held for
 /// the receiver's lifetime, or every channel reports closed.
 #[cfg(all(test, target_os = "linux", feature = "screenshots"))]
-pub(crate) fn fake(state: AppState, connected: bool) -> (CommandTx, UiRx, UiTx, FrameSinks) {
+pub(crate) fn fake(state: TopicStore, connected: bool) -> (CommandTx, UiRx, UiTx, FrameSinks) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (tx, rx, sinks) = channels(Arc::new(AtomicBool::new(false)));
     tx.state.send_replace(state);
@@ -355,6 +345,16 @@ where
 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    let subscription = BusSubscribe {
+        prefixes: Vec::new(),
+        last_event_id: Some(tx.last_event_id.load(Ordering::Acquire)),
+    };
+    let mut subscription = serde_json::to_value(subscription)?;
+    subscription["type"] = serde_json::Value::String("bus_subscribe".into());
+    let frame = encode_json_frame(&subscription)
+        .ok_or_else(|| anyhow::anyhow!("bus subscription exceeds IPC frame limit"))?;
+    stream.write_all(&frame).await?;
+
     // Bootstrap subscriptions. LCD preview lease keepalive is handled by the LCD tab.
     for cmd in [
         DaemonCommand::ListLcdImages,
@@ -375,7 +375,6 @@ where
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut header = [0u8; 5];
-    let mut last_gen: Option<u64> = None;
     // Biased: heartbeat and outbound commands take priority over inbound
     // reads so queued commands and pings go out immediately.
     loop {
@@ -403,14 +402,11 @@ where
                     stream.read_exact(&mut payload).await?;
                 }
                 if frame_type == FRAME_JSON {
-                    let reaction = handle_json(&payload, tx, repaint, &mut last_gen);
+                    let reaction = handle_json(&payload, tx, repaint, &mut None);
                     if reaction.relist_lcd_images {
                         write_cmd(stream, &DaemonCommand::ListLcdImages).await?;
                     }
-                    if reaction.request_resync {
-                        write_cmd(stream, &DaemonCommand::RequestState).await?;
-                    }
-                    if reaction.relist_lcd_images || reaction.request_resync {
+                    if reaction.relist_lcd_images {
                         stream.flush().await?;
                     }
                 }
@@ -463,26 +459,27 @@ fn show_native(title: &str, message: &str) {
 #[cfg(test)]
 fn show_native(_title: &str, _message: &str) {}
 
-fn observe_low_battery(tx: &UiTx) {
-    let state = tx.state.borrow();
-    let Ok(mut tracker) = tx.low_battery_tracker.lock() else {
-        return;
-    };
-    let alerts = tracker.observe(&state);
-    if !state.gui.low_battery_notifications {
-        return;
+fn handle_bus_event(tx: &UiTx, event: BusEvent, repaint: &impl Fn()) {
+    let mut observed = tx.last_event_id.load(Ordering::Acquire);
+    loop {
+        if event.id <= observed {
+            return;
+        }
+        match tx.last_event_id.compare_exchange_weak(
+            observed,
+            event.id,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(current) => observed = current,
+        }
     }
-    for alert in alerts {
-        show_native_notification(&Notification {
-            code: NotificationCode::LowBattery {
-                device: alert.device,
-                battery: alert.battery,
-                level: alert.level,
-                threshold: alert.threshold,
-            },
-            show_native: true,
-            timestamp_ms: 0,
-        });
+    match event.payload {
+        BusEventPayload::Notification(notification) => {
+            show_native_notification(&notification);
+            push_notification(tx, notification, repaint);
+        }
     }
 }
 
@@ -494,44 +491,13 @@ pub fn plugin_asset_cache_key(plugin_id: &str, name: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Reaction {
     pub relist_lcd_images: bool,
-    pub request_resync: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameKind {
-    Full,
-    Delta,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GenAction {
-    Apply,
-    Ignore,
-    Resync,
-}
-
-pub fn reconcile_gen(last_gen: &mut Option<u64>, kind: FrameKind, gen: Option<u64>) -> GenAction {
-    match kind {
-        FrameKind::Full => {
-            *last_gen = gen;
-            GenAction::Apply
-        }
-        FrameKind::Delta => match (*last_gen, gen) {
-            (Some(prev), Some(g)) if g == prev.wrapping_add(1) => {
-                *last_gen = Some(g);
-                GenAction::Apply
-            }
-            (Some(prev), Some(g)) if g <= prev => GenAction::Ignore,
-            _ => GenAction::Resync,
-        },
-    }
 }
 
 fn handle_json(
     payload: &[u8],
     tx: &UiTx,
     repaint: &impl Fn(),
-    last_gen: &mut Option<u64>,
+    _unused_cursor: &mut Option<u64>,
 ) -> Reaction {
     let value = match serde_json::from_slice::<serde_json::Value>(payload) {
         Ok(v) => v,
@@ -540,35 +506,56 @@ fn handle_json(
             return Reaction::default();
         }
     };
-    let gen = value.get("gen").and_then(|g| g.as_u64());
     match value.get("type").and_then(|t| t.as_str()) {
-        Some("state") => {}
-        Some("state_delta") => match reconcile_gen(last_gen, FrameKind::Delta, gen) {
-            GenAction::Apply => {
-                if let Some(data) = value.get("data").cloned() {
-                    match serde_json::from_value::<halod_shared::types::StateDelta>(data) {
-                        Ok(delta) => {
-                            tx.state.send_modify(|s| s.apply_delta(delta));
-                            crate::ui::screens::settings::apply_locale(
-                                &tx.state.borrow().gui.language,
-                            );
-                            observe_low_battery(tx);
-                            tx.connected.send_replace(true);
-                            repaint();
-                        }
-                        Err(e) => log::warn!("state_delta parse failed: {e}"),
-                    }
-                }
-                return Reaction::default();
+        Some("bus_snapshot") => {
+            if let Some(snapshot) = value
+                .get("data")
+                .cloned()
+                .and_then(|data| serde_json::from_value::<BusSnapshot>(data).ok())
+            {
+                tx.state
+                    .send_modify(|store| store.replace_snapshot(snapshot));
+                crate::ui::screens::settings::apply_locale(&tx.state.borrow().gui.language);
+                tx.connected.send_replace(true);
+                repaint();
             }
-            GenAction::Ignore => return Reaction::default(),
-            GenAction::Resync => {
-                return Reaction {
-                    request_resync: true,
-                    ..Reaction::default()
+            return Reaction::default();
+        }
+        Some("bus_transaction") => {
+            if let Some(transaction) = value
+                .get("data")
+                .cloned()
+                .and_then(|data| serde_json::from_value::<BusTransaction>(data).ok())
+            {
+                tx.state
+                    .send_modify(|store| store.apply_transaction(transaction));
+                crate::ui::screens::settings::apply_locale(&tx.state.borrow().gui.language);
+                repaint();
+            }
+            return Reaction::default();
+        }
+        Some("bus_event") => {
+            if let Some(event) = value
+                .get("data")
+                .cloned()
+                .and_then(|data| serde_json::from_value::<BusEvent>(data).ok())
+            {
+                handle_bus_event(tx, event, repaint);
+            }
+            return Reaction::default();
+        }
+        Some("bus_event_replay") => {
+            if let Some(replay) = value
+                .get("data")
+                .cloned()
+                .and_then(|data| serde_json::from_value::<BusEventReplay>(data).ok())
+            {
+                for event in replay.events {
+                    handle_bus_event(tx, event, repaint);
                 }
             }
-        },
+            return Reaction::default();
+        }
         Some("debug_info") => {
             if let Some(data) = value.get("data").cloned() {
                 if let Ok(info) =
@@ -674,18 +661,6 @@ fn handle_json(
             }
             return Reaction::default();
         }
-        Some("notification") => {
-            if let Some(n) = value
-                .get("data")
-                .and_then(|d| serde_json::from_value::<Notification>(d.clone()).ok())
-            {
-                // Native delivery belongs to the resident IPC thread: on
-                // Wayland the window and render loop do not exist in tray mode.
-                show_native_notification(&n);
-                push_notification(tx, n, repaint);
-            }
-            return Reaction::default();
-        }
         Some("error") => {
             // The plugin layer already sent a structured notification whose
             // Details modal contains the full callback error.
@@ -707,7 +682,7 @@ fn handle_json(
                 tx,
                 Notification {
                     code: NotificationCode::Generic { message },
-                    show_native: true,
+                    show_native: false,
                     timestamp_ms: 0,
                 },
                 repaint,
@@ -774,18 +749,6 @@ fn handle_json(
             }
             return Reaction::default();
         }
-        Some("plugin_repo_updates") => {
-            tx.repo_updates
-                .send_replace(field_or_default(&value, "repos"));
-            repaint();
-            return Reaction::default();
-        }
-        Some("plugin_updates") => {
-            tx.plugin_updates
-                .send_replace(field_or_default(&value, "plugins"));
-            repaint();
-            return Reaction::default();
-        }
         Some("udev_rules_status") => {
             tx.udev_rules.send_replace(field_or_default(&value, "data"));
             repaint();
@@ -848,97 +811,16 @@ fn handle_json(
         }
         None => return Reaction::default(),
     }
-    reconcile_gen(last_gen, FrameKind::Full, gen);
-    let data = value.get("data").cloned().unwrap_or(value);
-    match serde_json::from_value::<AppState>(data) {
-        Ok(state) => {
-            // Make the first daemon-backed frame paint in the configured
-            // language. `connected` deliberately flips only after this point,
-            // so the radar never renders discovery phases using the default
-            // locale while the initial state is still in flight.
-            crate::ui::screens::settings::apply_locale(&state.gui.language);
-            tx.state.send_replace(state);
-            observe_low_battery(tx);
-            tx.connected.send_replace(true);
-            repaint();
-        }
-        Err(e) => log::warn!("state parse failed: {e}"),
-    }
-    Reaction::default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn full_frame_always_applies_and_resets_baseline() {
-        let mut last = Some(99);
-        assert_eq!(
-            reconcile_gen(&mut last, FrameKind::Full, Some(5)),
-            GenAction::Apply
-        );
-        assert_eq!(last, Some(5));
-    }
-
-    #[test]
-    fn contiguous_delta_applies_and_advances() {
-        let mut last = Some(5);
-        assert_eq!(
-            reconcile_gen(&mut last, FrameKind::Delta, Some(6)),
-            GenAction::Apply
-        );
-        assert_eq!(last, Some(6));
-    }
-
-    #[test]
-    fn stale_delta_is_ignored_without_moving_baseline() {
-        let mut last = Some(6);
-        assert_eq!(
-            reconcile_gen(&mut last, FrameKind::Delta, Some(6)),
-            GenAction::Ignore
-        );
-        assert_eq!(
-            reconcile_gen(&mut last, FrameKind::Delta, Some(4)),
-            GenAction::Ignore
-        );
-        assert_eq!(last, Some(6));
-    }
-
-    #[test]
-    fn gapped_delta_requests_resync_without_merging() {
-        let mut last = Some(5);
-        assert_eq!(
-            reconcile_gen(&mut last, FrameKind::Delta, Some(8)),
-            GenAction::Resync
-        );
-        assert_eq!(last, Some(5));
-    }
-
-    #[test]
-    fn delta_before_any_baseline_requests_resync() {
-        let mut last = None;
-        assert_eq!(
-            reconcile_gen(&mut last, FrameKind::Delta, Some(1)),
-            GenAction::Resync
-        );
-        assert_eq!(last, None);
-    }
-
-    #[test]
-    fn delta_wraps_from_u64_max_to_zero() {
-        let mut last = Some(u64::MAX);
-        assert_eq!(
-            reconcile_gen(&mut last, FrameKind::Delta, Some(0)),
-            GenAction::Apply
-        );
-        assert_eq!(last, Some(0));
-    }
-
     fn test_tx() -> (UiTx, watch::Receiver<Option<LcdUploadProgress>>) {
         let (upload_s, upload_r) = watch::channel(None);
         let tx = UiTx {
-            state: watch::channel(AppState::default()).0,
+            state: watch::channel(TopicStore::default()).0,
             connected: watch::channel(false).0,
             debug: watch::channel(None).0,
             lcd_images: watch::channel(Vec::new()).0,
@@ -946,8 +828,6 @@ mod tests {
             canvas_frame: watch::channel(None).0,
             running_apps: watch::channel(Vec::new()).0,
             plugin_assets: watch::channel(HashMap::new()).0,
-            repo_updates: watch::channel(Vec::new()).0,
-            plugin_updates: watch::channel(Vec::new()).0,
             udev_rules: watch::channel(None).0,
             repo_branches: watch::channel(HashMap::new()).0,
             serial_ports: watch::channel(Vec::new()).0,
@@ -955,8 +835,8 @@ mod tests {
             lcd_template: watch::channel(None).0,
             lcd_editor_render: watch::channel(None).0,
             notifications: Arc::new(Mutex::new(Vec::new())),
-            low_battery_tracker: Mutex::new(Default::default()),
             hidden: Arc::new(AtomicBool::new(false)),
+            last_event_id: Arc::new(AtomicU64::new(0)),
         };
         (tx, upload_r)
     }
@@ -969,77 +849,6 @@ mod tests {
         let got = rx.borrow().clone().expect("progress routed");
         assert_eq!(got.device_id, "lcd");
         assert_eq!(got.percent, Some(42));
-    }
-
-    #[test]
-    fn connection_becomes_ready_only_after_initial_state() {
-        let (tx, _upload_r) = test_tx();
-        let connected = tx.connected.subscribe();
-        assert!(!*connected.borrow());
-
-        let payload = serde_json::to_vec(&serde_json::json!({
-            "type": "state",
-            "data": AppState::default(),
-        }))
-        .unwrap();
-        assert!(!handle_json(&payload, &tx, &|| {}, &mut None).relist_lcd_images);
-
-        assert!(*connected.borrow());
-    }
-
-    #[test]
-    fn state_delta_merges_into_cached_state_after_a_baseline() {
-        let (tx, _u) = test_tx();
-        let mut last_gen = None;
-        let full = serde_json::to_vec(
-            &serde_json::json!({"type":"state","gen":1,"data": AppState::default()}),
-        )
-        .unwrap();
-        handle_json(&full, &tx, &|| {}, &mut last_gen);
-        assert_eq!(last_gen, Some(1));
-
-        let device = halod_shared::types::WireDevice {
-            id: "merged-dev".into(),
-            ..Default::default()
-        };
-        let delta = halod_shared::types::StateDelta {
-            devices: Some(vec![device]),
-            ..Default::default()
-        };
-        let frame = serde_json::to_vec(&serde_json::json!({
-            "type": "state_delta",
-            "gen": 2,
-            "data": serde_json::to_value(&delta).unwrap(),
-        }))
-        .unwrap();
-        let reaction = handle_json(&frame, &tx, &|| {}, &mut last_gen);
-        assert!(!reaction.request_resync);
-        assert_eq!(last_gen, Some(2));
-        assert_eq!(tx.state.borrow().devices.len(), 1);
-        assert_eq!(tx.state.borrow().devices[0].id, "merged-dev");
-    }
-
-    #[test]
-    fn gapped_state_delta_asks_for_resync_and_leaves_state_untouched() {
-        let (tx, _u) = test_tx();
-        let mut last_gen = Some(1);
-        let delta = halod_shared::types::StateDelta {
-            gui: Some(halod_shared::types::GuiConfig {
-                language: "zz".into(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let frame = serde_json::to_vec(&serde_json::json!({
-            "type": "state_delta",
-            "gen": 9,
-            "data": serde_json::to_value(&delta).unwrap(),
-        }))
-        .unwrap();
-        let reaction = handle_json(&frame, &tx, &|| {}, &mut last_gen);
-        assert!(reaction.request_resync);
-        assert_eq!(last_gen, Some(1));
-        assert_ne!(tx.state.borrow().gui.language, "zz");
     }
 
     #[test]
@@ -1070,20 +879,6 @@ mod tests {
     }
 
     #[test]
-    fn plugin_repo_updates_frame_lands_on_the_watch_channel() {
-        let (tx, _upload_r) = test_tx();
-        let mut repo_updates_r = tx.repo_updates.subscribe();
-        let payload = br#"{"type":"plugin_repo_updates","repos":[
-            {"slug":"foo","locked_sha":"aaa","remote_sha":"bbb","behind":true}
-        ]}"#;
-        assert!(!handle_json(payload, &tx, &|| {}, &mut None).relist_lcd_images);
-        let got = repo_updates_r.borrow_and_update().clone();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].slug, "foo");
-        assert!(got[0].behind);
-    }
-
-    #[test]
     fn udev_status_frame_lands_on_the_watch_channel() {
         let (tx, _) = test_tx();
         let mut rx = tx.udev_rules.subscribe();
@@ -1093,20 +888,6 @@ mod tests {
         assert!(got.supported);
         assert!(!got.current);
         assert_eq!(got.generated_rule_count, 43);
-    }
-
-    #[test]
-    fn plugin_updates_frame_lands_on_the_watch_channel() {
-        let (tx, _upload_r) = test_tx();
-        let mut plugin_updates_r = tx.plugin_updates.subscribe();
-        let payload = br#"{"type":"plugin_updates","plugins":[
-            {"plugin_id":"wled_udp","slug":"foo","update_available":true,"current_version":"1.0.0","available_version":"1.1.0"}
-        ]}"#;
-        assert!(!handle_json(payload, &tx, &|| {}, &mut None).relist_lcd_images);
-        let got = plugin_updates_r.borrow_and_update().clone();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].plugin_id, "wled_udp");
-        assert!(got[0].update_available);
     }
 
     #[test]

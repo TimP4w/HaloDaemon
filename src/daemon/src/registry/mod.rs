@@ -31,7 +31,7 @@ pub async fn require_device_owned_id(id: &str, app: &AppState) -> Result<Arc<dyn
 }
 
 pub async fn seed_known_devices(app: Arc<AppState>) {
-    let devices = app.devices.read().await.clone();
+    let devices = app.device_registry.read().await.clone();
     let mut cfg = app.config.write().await;
     for device in &devices {
         config::ensure_record(&mut cfg.known_devices, device.id(), Some(device.as_ref()));
@@ -332,11 +332,11 @@ pub(crate) async fn start_update_check(app: Arc<AppState>) {
         return;
     }
     app.discovery.lock().await.checking_updates = true;
-    crate::ipc::broadcast_state(&app).await;
+    crate::registry::usecases::runtime::topology_changed(&app).await;
     tokio::spawn(async move {
         crate::plugin::usecases::repos::check_updates_broadcast(app.clone()).await;
         app.discovery.lock().await.checking_updates = false;
-        crate::ipc::broadcast_state(&app).await;
+        crate::registry::usecases::runtime::topology_changed(&app).await;
     });
 }
 
@@ -355,7 +355,7 @@ mod guard_tests {
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
         dev.set_active_state(VisibilityState::Disabled);
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
 
         let result = require_device_owned_id("dev1", &app).await;
         let msg = result.err().map(|e| e.to_string()).unwrap_or_default();
@@ -369,7 +369,7 @@ mod guard_tests {
     async fn require_device_owned_id_allows_visible_device() {
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
 
         assert!(require_device_owned_id("dev1", &app).await.is_ok());
     }
@@ -410,7 +410,7 @@ mod tests {
 
     async fn app_with_devices(ids: &[&'static str]) -> Arc<AppState> {
         let app = Arc::new(AppState::new(Config::default()));
-        let mut devices = app.devices.write().await;
+        let mut devices = app.device_registry.write().await;
         for id in ids {
             devices.push(Arc::new(StubDevice { id }) as Arc<dyn Device>);
         }

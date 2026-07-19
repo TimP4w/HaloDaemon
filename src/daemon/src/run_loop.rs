@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::broadcast;
+
+use crate::services::data_bus::DataBus;
+use halod_shared::bus::{topic, BusTransaction, BusValue};
 
 /// Runtime configuration sent to each engine via a watch channel.
 #[derive(Debug, Clone)]
@@ -8,6 +11,7 @@ pub struct EngineRunConfig {
     pub enabled: bool,
     /// Interval in milliseconds (engines convert fps → ms themselves).
     pub tick_ms: u64,
+    pub failsafe_duty: Option<u8>,
 }
 
 impl EngineRunConfig {
@@ -16,6 +20,7 @@ impl EngineRunConfig {
         Self {
             enabled: c.fan_curve_enabled,
             tick_ms: c.fan_curve_tick_ms,
+            failsafe_duty: Some(c.fan_failsafe_duty),
         }
     }
 
@@ -24,6 +29,7 @@ impl EngineRunConfig {
         Self {
             enabled: c.canvas_enabled,
             tick_ms: 1000 / c.canvas_fps.clamp(1, 240) as u64,
+            failsafe_duty: None,
         }
     }
 
@@ -32,6 +38,98 @@ impl EngineRunConfig {
         Self {
             enabled: c.enabled,
             tick_ms: 1000 / c.fps.clamp(1, 240) as u64,
+            failsafe_duty: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum EngineConfigTopic {
+    Cooling,
+    Lighting,
+    Lcd,
+}
+
+/// A daemon-side typed subscription to an effective configuration record.
+/// Lag recovery reads a fresh retained snapshot, exactly like IPC clients.
+pub struct EngineConfigReceiver {
+    bus: std::sync::Arc<DataBus>,
+    topic: EngineConfigTopic,
+    transactions: broadcast::Receiver<BusTransaction>,
+    current: EngineRunConfig,
+}
+
+impl EngineConfigReceiver {
+    pub fn new(bus: std::sync::Arc<DataBus>, topic: EngineConfigTopic) -> Self {
+        let transactions = bus.subscribe_transactions();
+        let current = Self::read_snapshot(&bus, topic).unwrap_or_else(|| match topic {
+            EngineConfigTopic::Cooling => EngineRunConfig::fan_curve(&Default::default()),
+            EngineConfigTopic::Lighting => EngineRunConfig::canvas(&Default::default()),
+            EngineConfigTopic::Lcd => EngineRunConfig::lcd(&Default::default()),
+        });
+        Self {
+            bus,
+            topic,
+            transactions,
+            current,
+        }
+    }
+
+    pub fn current(&self) -> EngineRunConfig {
+        self.current.clone()
+    }
+
+    pub async fn changed(&mut self) -> bool {
+        loop {
+            match self.transactions.recv().await {
+                Ok(transaction) => {
+                    if let Some(config) = transaction
+                        .upserts
+                        .iter()
+                        .find_map(|record| Self::from_value(self.topic, &record.value))
+                    {
+                        self.current = config;
+                        return true;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if let Some(config) = Self::read_snapshot(&self.bus, self.topic) {
+                        self.current = config;
+                        return true;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+    }
+
+    fn key(topic: EngineConfigTopic) -> &'static str {
+        match topic {
+            EngineConfigTopic::Cooling => topic::COOLING,
+            EngineConfigTopic::Lighting => topic::LIGHTING,
+            EngineConfigTopic::Lcd => topic::LCD,
+        }
+    }
+
+    fn read_snapshot(bus: &DataBus, topic_kind: EngineConfigTopic) -> Option<EngineRunConfig> {
+        bus.state_snapshot(&[Self::key(topic_kind).into()])
+            .records
+            .iter()
+            .find_map(|record| Self::from_value(topic_kind, &record.value))
+    }
+
+    fn from_value(topic: EngineConfigTopic, value: &BusValue) -> Option<EngineRunConfig> {
+        match (topic, value) {
+            (EngineConfigTopic::Cooling, BusValue::Cooling(value)) => {
+                Some(EngineRunConfig::fan_curve(&value.config))
+            }
+            (EngineConfigTopic::Lighting, BusValue::Lighting(value)) => {
+                Some(EngineRunConfig::canvas(&value.config))
+            }
+            (EngineConfigTopic::Lcd, BusValue::Lcd(value)) => {
+                Some(EngineRunConfig::lcd(&value.config))
+            }
+            _ => None,
         }
     }
 }
@@ -41,7 +139,7 @@ use tokio::time::MissedTickBehavior;
 /// `tick_fn` runs once per tick; the loop exits when `cfg_rx` closes.
 pub async fn engine_run_loop<F, Fut>(
     engine_name: &'static str,
-    cfg_rx: watch::Receiver<EngineRunConfig>,
+    cfg_rx: EngineConfigReceiver,
     missed_tick: MissedTickBehavior,
     tick_fn: F,
 ) where
@@ -67,7 +165,7 @@ pub async fn engine_run_loop<F, Fut>(
 /// never resolves.
 pub async fn engine_run_loop_idle<F, Fut, W, Wut, H, Hut>(
     engine_name: &'static str,
-    mut cfg_rx: watch::Receiver<EngineRunConfig>,
+    mut cfg_rx: EngineConfigReceiver,
     missed_tick: MissedTickBehavior,
     mut tick_fn: F,
     mut wait_for_work: W,
@@ -82,10 +180,10 @@ pub async fn engine_run_loop_idle<F, Fut, W, Wut, H, Hut>(
 {
     log::info!("Starting {engine_name} engine");
     loop {
-        let cfg = cfg_rx.borrow_and_update().clone();
+        let cfg = cfg_rx.current();
         if !cfg.enabled {
             log::info!("[{engine_name}] Engine disabled, waiting for re-enable");
-            if cfg_rx.changed().await.is_err() {
+            if !cfg_rx.changed().await {
                 break;
             }
             continue;
@@ -94,7 +192,7 @@ pub async fn engine_run_loop_idle<F, Fut, W, Wut, H, Hut>(
         if !has_work().await {
             tokio::select! {
                 _ = wait_for_work() => {}
-                r = cfg_rx.changed() => if r.is_err() { break; },
+                r = cfg_rx.changed() => if !r { break; },
             }
             continue;
         }
@@ -103,7 +201,7 @@ pub async fn engine_run_loop_idle<F, Fut, W, Wut, H, Hut>(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let cfg = cfg_rx.borrow().clone();
+                    let cfg = cfg_rx.current();
                     tick_fn(cfg).await;
                     if !has_work().await { break; }
                 }
@@ -124,6 +222,7 @@ mod tests {
         EngineRunConfig {
             enabled,
             tick_ms: 5,
+            failsafe_duty: None,
         }
     }
 
@@ -141,7 +240,24 @@ mod tests {
 
     #[tokio::test]
     async fn idle_gate_parks_until_woken_then_stops_when_work_gone() {
-        let (tx, rx) = watch::channel(cfg(true));
+        let bus = std::sync::Arc::new(DataBus::default());
+        bus.commit_state(
+            "host.state",
+            vec![(
+                topic::LCD.into(),
+                BusValue::Lcd(halod_shared::types::LcdState {
+                    config: crate::config::LcdConfig {
+                        enabled: true,
+                        fps: 200,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let rx = EngineConfigReceiver::new(bus, EngineConfigTopic::Lcd);
         let ticks = Arc::new(AtomicUsize::new(0));
         let has_work = Arc::new(AtomicBool::new(false));
         let wake = Arc::new(Notify::new());
@@ -202,7 +318,56 @@ mod tests {
             "must re-park when work is gone"
         );
 
-        drop(tx);
-        let _ = handle.await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn engine_config_receiver_tracks_effective_bus_records() {
+        let bus = std::sync::Arc::new(DataBus::default());
+        let initial = crate::config::CoolingConfig {
+            fan_curve_enabled: false,
+            fan_curve_tick_ms: 900,
+            fan_failsafe_duty: 70,
+            ..Default::default()
+        };
+        bus.commit_state(
+            "host.state",
+            vec![(
+                topic::COOLING.into(),
+                BusValue::Cooling(halod_shared::types::CoolingState {
+                    config: initial,
+                    ..Default::default()
+                }),
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let mut receiver = EngineConfigReceiver::new(bus.clone(), EngineConfigTopic::Cooling);
+        assert!(!receiver.current().enabled);
+        assert_eq!(receiver.current().failsafe_duty, Some(70));
+
+        let updated = crate::config::CoolingConfig {
+            fan_curve_enabled: true,
+            fan_curve_tick_ms: 1200,
+            fan_failsafe_duty: 85,
+            ..Default::default()
+        };
+        bus.commit_state(
+            "host.state",
+            vec![(
+                topic::COOLING.into(),
+                BusValue::Cooling(halod_shared::types::CoolingState {
+                    config: updated,
+                    ..Default::default()
+                }),
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert!(receiver.changed().await);
+        assert!(receiver.current().enabled);
+        assert_eq!(receiver.current().tick_ms, 1200);
+        assert_eq!(receiver.current().failsafe_duty, Some(85));
     }
 }

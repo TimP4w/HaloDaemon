@@ -4,11 +4,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Vec2};
 use halod_shared::{
     commands::DaemonCommand,
     effect_designer::DESIGNER_PIXMAP_EFFECT_ID,
-    types::{AppState, DeviceCapability, EffectDef, PlacedZone, SamplingMode, ZoneTopology},
+    types::{DeviceCapability, EffectDef, PlacedZone, SamplingMode, ZoneTopology},
 };
 
 use crate::runtime::ipc::CommandTx;
@@ -20,7 +21,7 @@ use super::{CanvasUi, DEBOUNCE, MAX_ZONE_CHIPS};
 
 pub(super) fn right_panel(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     canvas_ui: &mut CanvasUi,
     cmd: &CommandTx,
     time: f64,
@@ -40,7 +41,7 @@ pub(super) fn right_panel(
 // ── Sampling card ─────────────────────────────────────────────────────────────
 /// Sampling-radius control: how large an area around each LED is averaged from
 /// the canvas. Mirrors the GTK "Sampling Radius" control (0.5–32 px).
-fn sampling_card(ui: &mut egui::Ui, state: &AppState, canvas_ui: &mut CanvasUi, time: f64) {
+fn sampling_card(ui: &mut egui::Ui, state: &TopicStore, canvas_ui: &mut CanvasUi, time: f64) {
     // Re-seed from daemon state unless the user is mid-edit (mirrors LiveGuard).
     if time - canvas_ui.sample_edit_at >= 1.0 {
         canvas_ui.sample_radius = state.lighting.canvas.sample_radius;
@@ -91,7 +92,7 @@ pub(super) fn instance_color(idx: usize) -> Color32 {
 
 /// The swatch colour for a zone's resolved effect instance (its own, else the
 /// canvas default), matching the rack. Gray when the zone resolves to nothing.
-pub(super) fn instance_color_for(state: &AppState, effect: Option<&str>) -> Color32 {
+pub(super) fn instance_color_for(state: &TopicStore, effect: Option<&str>) -> Color32 {
     let Some(id) = effect.or(state.lighting.canvas.default_effect.as_deref()) else {
         return theme::hex(0x39414f);
     };
@@ -101,7 +102,7 @@ pub(super) fn instance_color_for(state: &AppState, effect: Option<&str>) -> Colo
         .unwrap_or(theme::hex(0x39414f))
 }
 
-pub(super) fn instance_indices(state: &AppState) -> HashMap<&str, usize> {
+pub(super) fn instance_indices(state: &TopicStore) -> HashMap<&str, usize> {
     let mut ids: Vec<&str> = state
         .lighting
         .canvas
@@ -162,7 +163,7 @@ pub(super) fn instance_name<'a>(effects: &'a HashMap<String, EffectDef>, id: &'a
         .unwrap_or(id)
 }
 
-fn device_name<'a>(state: &'a AppState, device_id: &'a str) -> &'a str {
+fn device_name<'a>(state: &'a TopicStore, device_id: &'a str) -> &'a str {
     state
         .devices
         .iter()
@@ -171,7 +172,7 @@ fn device_name<'a>(state: &'a AppState, device_id: &'a str) -> &'a str {
         .unwrap_or(device_id)
 }
 
-fn zone_name<'a>(state: &'a AppState, device_id: &'a str, channel_id: &'a str) -> &'a str {
+fn zone_name<'a>(state: &'a TopicStore, device_id: &'a str, channel_id: &'a str) -> &'a str {
     state
         .devices
         .iter()
@@ -190,7 +191,7 @@ fn zone_name<'a>(state: &'a AppState, device_id: &'a str, channel_id: &'a str) -
 
 /// Lookup an `LightingChannel` descriptor by device and zone id.
 pub(super) fn rgb_zone_descriptor<'a>(
-    state: &'a AppState,
+    state: &'a TopicStore,
     device_id: &str,
     channel_id: &str,
 ) -> Option<&'a halod_shared::types::LightingChannel> {
@@ -233,7 +234,7 @@ pub(super) fn ring_zone_context_menu(ui: &mut egui::Ui, cmd: &CommandTx, z: &Pla
 /// to channels; channels with no layer use the base effect.
 fn instance_rack(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     canvas_ui: &mut CanvasUi,
     cmd: &CommandTx,
     time: f64,
@@ -359,7 +360,7 @@ fn default_effect_card(
 #[allow(clippy::too_many_arguments)]
 fn instance_row(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     canvas_ui: &mut CanvasUi,
     cmd: &CommandTx,
     time: f64,
@@ -829,7 +830,7 @@ mod tests {
 
     #[test]
     fn instance_color_for_matches_rack_index_and_grays_unknown() {
-        let mut s = AppState::default();
+        let mut s = TopicStore::default();
         s.lighting
             .canvas
             .effects

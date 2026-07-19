@@ -27,10 +27,9 @@ mod util;
 
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::watch;
 
 use crate::drivers::transports::hid;
-use crate::state::EngineRunConfig;
+use crate::run_loop::{EngineConfigReceiver, EngineConfigTopic};
 
 /// How this process was invoked, decided purely from argv.
 ///
@@ -256,7 +255,6 @@ async fn run_daemon(
     ipc::ensure_single_instance()?;
 
     let ipc_handle = ipc::serve(app.clone());
-    let broadcast_handle = ipc::broadcast_loop(app.clone());
     let mut supervisor = task_supervisor::TaskSupervisor::new(Arc::clone(&app));
 
     // Reclaim sinks leaked by a previous daemon; safe once single-instance owns.
@@ -278,6 +276,7 @@ async fn run_daemon(
     // Compute passive HID/USB/SMBus recommendations once at startup. The same
     // snapshot is refreshed when repository manifests change.
     crate::plugin::usecases::plugins::refresh_recommendations(&app).await;
+    crate::registry::usecases::runtime::bootstrap(&app).await;
 
     // Started only once startup is done — the grace clock must not elapse
     // before a client has had any chance to connect.
@@ -349,24 +348,37 @@ async fn run_daemon(
         move || {
             let app = Arc::clone(&sensor_app);
             Box::pin(async move {
-                task_supervisor::TaskHandle(tokio::spawn(registry::state::sensor_data_producer(
-                    app,
-                )))
+                task_supervisor::TaskHandle(tokio::spawn(registry::usecases::sensors::run(app)))
             })
         },
         || {},
     );
 
-    let (cooling_cfg, rgb_cfg, lcd_cfg) = {
-        let cfg = app.config.read().await;
-        (cfg.cooling.clone(), cfg.rgb.clone(), cfg.lcd.clone())
-    };
+    let plugin_data_app = Arc::clone(&app);
+    supervisor.register(
+        "Plugin data status producer",
+        "Plugin data status projection stopped unexpectedly.",
+        move || {
+            let app = Arc::clone(&plugin_data_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(services::plugin_data_status::run(app)))
+            })
+        },
+        || {},
+    );
 
-    let (fan_curve_cfg_tx, fan_curve_cfg_rx) =
-        watch::channel(EngineRunConfig::fan_curve(&cooling_cfg));
-    let (failsafe_duty_tx, failsafe_duty_rx) = watch::channel(cooling_cfg.fan_failsafe_duty);
-    let (rgb_cfg_tx, rgb_cfg_rx) = watch::channel(EngineRunConfig::canvas(&rgb_cfg));
-    let (lcd_cfg_tx, lcd_cfg_rx) = watch::channel(EngineRunConfig::lcd(&lcd_cfg));
+    let battery_app = Arc::clone(&app);
+    supervisor.register(
+        "Low battery watcher",
+        "Low battery monitoring stopped unexpectedly.",
+        move || {
+            let app = Arc::clone(&battery_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(services::low_battery::watcher(app)))
+            })
+        },
+        || {},
+    );
 
     let fan_curve = cooling::fan_curve::FanCurveEngine::new(app.clone());
     let rgb = lighting::rgb_engine::RgbEngine::new(app.clone()).await;
@@ -375,49 +387,45 @@ async fn run_daemon(
 
     let focus_watcher = profiles::focus_watcher::FocusWatcherEngine::new(app.clone());
 
-    app.lighting.set_engine(rgb.clone(), rgb_cfg_tx.clone());
-    app.cooling
-        .set_engine(fan_curve_cfg_tx.clone(), failsafe_duty_tx.clone());
-    app.lcd.set_engine(lcd.clone(), video, lcd_cfg_tx.clone());
+    app.lighting.set_engine(rgb.clone());
+    app.cooling.set_engine();
+    app.lcd.set_engine(lcd.clone(), video);
     // Receivers are subscribed lazily; SendError just means no live receivers yet,
     // but watch still stores the value so future subscribers see `true`.
     let _ = app.engines_ready.send(true);
 
-    drop((fan_curve_cfg_rx, failsafe_duty_rx, rgb_cfg_rx, lcd_cfg_rx));
     let fan_engine = Arc::clone(&fan_curve);
-    let fan_cfg = fan_curve_cfg_tx.clone();
-    let fan_failsafe = failsafe_duty_tx.clone();
+    let fan_bus = app.data_bus.clone();
     supervisor.register(
         "FanCurve engine",
         "FanCurve engine exited unexpectedly; fan control will no longer respond to sensors.",
         move || {
             let engine = Arc::clone(&fan_engine);
-            let cfg = fan_cfg.subscribe();
-            let failsafe = fan_failsafe.subscribe();
-            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg, failsafe)) })
+            let cfg = EngineConfigReceiver::new(fan_bus.clone(), EngineConfigTopic::Cooling);
+            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg)) })
         },
         || {},
     );
     let rgb_engine = Arc::clone(&rgb);
-    let rgb_config = rgb_cfg_tx.clone();
+    let rgb_bus = app.data_bus.clone();
     supervisor.register(
         "RGB engine",
         "RGB engine exited unexpectedly; RGB animations will stop.",
         move || {
             let engine = Arc::clone(&rgb_engine);
-            let cfg = rgb_config.subscribe();
+            let cfg = EngineConfigReceiver::new(rgb_bus.clone(), EngineConfigTopic::Lighting);
             Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg).await) })
         },
         || {},
     );
     let lcd_engine = Arc::clone(&lcd);
-    let lcd_config = lcd_cfg_tx.clone();
+    let lcd_bus = app.data_bus.clone();
     supervisor.register(
         "LCD engine",
         "LCD engine exited unexpectedly; device LCDs will stop updating.",
         move || {
             let engine = Arc::clone(&lcd_engine);
-            let cfg = lcd_config.subscribe();
+            let cfg = EngineConfigReceiver::new(lcd_bus.clone(), EngineConfigTopic::Lcd);
             Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg).await) })
         },
         || {},
@@ -497,7 +505,6 @@ async fn run_daemon(
             log::info!("Shutdown requested via IPC");
         }
         r = ipc_handle => { if let Err(e) = r { log::error!("IPC: {e}"); } }
-        r = broadcast_handle => { if let Err(e) = r { log::error!("Broadcast: {e}"); } }
     }
 
     // Stop every supervised task before closing devices so no engine writes mid-close.
@@ -509,7 +516,7 @@ async fn run_daemon(
     // Persistence owns its shutdown transition and performs one final flush of
     // the newest version before it exits. The device-state worker has no disk
     // queue of its own and can be cancelled after engines stop producing work.
-    app.persistence.shutdown_tx.send_replace(true);
+    app.config.persistence().shutdown_tx.send_replace(true);
     if tokio::time::timeout(std::time::Duration::from_secs(5), save_worker)
         .await
         .is_err()

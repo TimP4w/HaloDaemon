@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::drivers::Device;
-use crate::ipc::broadcast_state;
+
 use crate::registry::usecases::registration::{register_device, unregister_device_and_children};
 use crate::state::AppState;
 
@@ -55,7 +55,7 @@ pub(super) enum MonitorState {
 /// exponentially while an integration stays unreachable.
 pub async fn integration_monitor(app: Arc<AppState>) {
     let mut states: HashMap<String, MonitorState> = HashMap::new();
-    let mut shutdown_rx = app.persistence.shutdown_tx.subscribe();
+    let mut shutdown_rx = app.config.persistence().shutdown_tx.subscribe();
     loop {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(BASE_TICK_SECS)) => {}
@@ -160,7 +160,7 @@ pub(super) async fn tick_once(app: &Arc<AppState>, states: &mut HashMap<String, 
                 match integration_scan::discover_one(app, &plugin_id).await {
                     integration_scan::DiscoveryOutcome::Registered => {
                         states.insert(plugin_id, MonitorState::Online);
-                        broadcast_state(app).await;
+                        crate::plugin::usecases::runtime::topology_changed(app).await;
                     }
                     integration_scan::DiscoveryOutcome::Unrecoverable => {
                         states.insert(plugin_id, MonitorState::Unrecoverable);
@@ -202,7 +202,7 @@ async fn reconcile_live_root(
             // device. Surface the new offline state to the GUI. Next tick's
             // liveness check routes this plugin through Case B.
             log::info!("[integration] {} dropped: {e:#}", root.id());
-            broadcast_state(app).await;
+            crate::plugin::usecases::runtime::topology_changed(app).await;
         }
         Ok((added, gone)) => {
             let changed = !added.is_empty() || !gone.is_empty();
@@ -214,7 +214,8 @@ async fn reconcile_live_root(
                 }
             }
             if !registered.is_empty() {
-                app.device_children
+                app.device_registry
+                    .children
                     .lock()
                     .await
                     .entry(root.id().to_owned())
@@ -223,7 +224,7 @@ async fn reconcile_live_root(
             }
             remove_children(app, &gone).await;
             if changed {
-                broadcast_state(app).await;
+                crate::plugin::usecases::runtime::topology_changed(app).await;
             }
             if let Some(id) = root.integration_id() {
                 states.insert(id, MonitorState::Online);
@@ -261,7 +262,7 @@ async fn reconnect_offline_root(
                 integration_scan::DiscoveryOutcome::Registered => {
                     states.insert(plugin_id.clone(), MonitorState::Online);
                     app.registry.clear_connect_error(&plugin_id);
-                    broadcast_state(app).await;
+                    crate::plugin::usecases::runtime::topology_changed(app).await;
                 }
                 integration_scan::DiscoveryOutcome::Unrecoverable => {
                     states.insert(plugin_id, MonitorState::Unrecoverable);
@@ -299,12 +300,12 @@ async fn report_connect_failure(
     app.registry
         .report_connect_error(app, plugin_id, &manifest.display_name(), detail)
         .await;
-    broadcast_state(app).await;
+    crate::plugin::usecases::runtime::topology_changed(app).await;
 }
 
 /// The registered integration root for `plugin_id`, if any.
 async fn find_root(app: &Arc<AppState>, plugin_id: &str) -> Option<Arc<dyn Device>> {
-    app.devices
+    app.device_registry
         .read()
         .await
         .iter()
@@ -315,7 +316,8 @@ async fn find_root(app: &Arc<AppState>, plugin_id: &str) -> Option<Arc<dyn Devic
 /// Ids explicitly registered as children of integration root `root_id`.
 /// Controller-provided stable IDs need not share the root's prefix.
 async fn child_ids_of(app: &Arc<AppState>, root_id: &str) -> HashSet<String> {
-    app.device_children
+    app.device_registry
+        .children
         .lock()
         .await
         .get(root_id)
@@ -323,14 +325,14 @@ async fn child_ids_of(app: &Arc<AppState>, root_id: &str) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-/// Remove exactly the `gone` ids from `app.devices` and close them, leaving
+/// Remove exactly the `gone` ids from `app.device_registry` and close them, leaving
 /// siblings online (a targeted subset, unlike a full teardown).
 async fn remove_children(app: &Arc<AppState>, gone: &[String]) {
     if gone.is_empty() {
         return;
     }
     let removed: Vec<Arc<dyn Device>> = {
-        let mut devices = app.devices.write().await;
+        let mut devices = app.device_registry.write().await;
         let mut removed = Vec::new();
         devices.retain(|d| {
             if gone.iter().any(|g| g == d.id()) {
@@ -346,7 +348,7 @@ async fn remove_children(app: &Arc<AppState>, gone: &[String]) {
         crate::registry::usecases::registration::close_device(app, d).await;
     }
     let gone: HashSet<&str> = gone.iter().map(String::as_str).collect();
-    for children in app.device_children.lock().await.values_mut() {
+    for children in app.device_registry.children.lock().await.values_mut() {
         children.retain(|id| !gone.contains(id.as_str()));
     }
 }
@@ -453,7 +455,7 @@ mod tests {
             let added = child(&root.id, 1);
             root.scripted(Ok((vec![added.clone() as Arc<dyn Device>], vec![])));
             {
-                let mut devices = app.devices.write().await;
+                let mut devices = app.device_registry.write().await;
                 devices.push(root.clone() as Arc<dyn Device>);
                 devices.push(existing.clone() as Arc<dyn Device>);
             }
@@ -461,7 +463,7 @@ mod tests {
             reconcile_live_root(&app, &(root as Arc<dyn Device>), &mut HashMap::new()).await;
 
             let ids: Vec<String> = app
-                .devices
+                .device_registry
                 .read()
                 .await
                 .iter()
@@ -481,7 +483,7 @@ mod tests {
             let drop = child(&root.id, 1);
             root.scripted(Ok((vec![], vec![drop.id.clone()])));
             {
-                let mut devices = app.devices.write().await;
+                let mut devices = app.device_registry.write().await;
                 devices.push(root.clone() as Arc<dyn Device>);
                 devices.push(keep.clone() as Arc<dyn Device>);
                 devices.push(drop.clone() as Arc<dyn Device>);
@@ -490,7 +492,7 @@ mod tests {
             reconcile_live_root(&app, &(root as Arc<dyn Device>), &mut HashMap::new()).await;
 
             let ids: Vec<String> = app
-                .devices
+                .device_registry
                 .read()
                 .await
                 .iter()
@@ -514,11 +516,12 @@ mod tests {
             let existing = Arc::new(MockDevice::new("hwmon_pci_temp"));
             let added = Arc::new(MockDevice::new("hwmon_pci_fan1"));
             root.scripted(Ok((vec![added.clone() as Arc<dyn Device>], vec![])));
-            app.devices.write().await.extend([
+            app.device_registry.write().await.extend([
                 root.clone() as Arc<dyn Device>,
                 existing.clone() as Arc<dyn Device>,
             ]);
-            app.device_children
+            app.device_registry
+                .children
                 .lock()
                 .await
                 .insert(root.id.clone(), [existing.id.clone()].into_iter().collect());
@@ -538,7 +541,7 @@ mod tests {
             assert!(owned.contains(&added.id));
 
             unregister_device_and_children(&app, &root.id).await;
-            assert!(app.devices.read().await.is_empty());
+            assert!(app.device_registry.read().await.is_empty());
             assert!(existing.closed.load(Ordering::SeqCst));
             assert!(added.closed.load(Ordering::SeqCst));
         })
@@ -550,7 +553,7 @@ mod tests {
         crate::test_support::with_tmp_config(|app| async move {
             let root = MockRoot::new("openrgb");
             root.scripted(Err(anyhow::anyhow!("connection reset")));
-            app.devices
+            app.device_registry
                 .write()
                 .await
                 .push(root.clone() as Arc<dyn Device>);
@@ -564,7 +567,7 @@ mod tests {
 
             assert!(!root.is_live(), "a dropped root is greyed");
             assert_eq!(
-                app.devices.read().await.len(),
+                app.device_registry.read().await.len(),
                 1,
                 "greyed root stays registered (not removed)"
             );
@@ -578,7 +581,7 @@ mod tests {
             let root = MockRoot::new("openrgb");
             // Would report a drop if enumerated — but the tick must skip it.
             root.scripted(Err(anyhow::anyhow!("should not be called")));
-            app.devices
+            app.device_registry
                 .write()
                 .await
                 .push(root.clone() as Arc<dyn Device>);
@@ -606,7 +609,7 @@ mod tests {
         use crate::registry::discovery::{DiscoveryFilter, DiscoveryScope};
         crate::test_support::with_tmp_config(|app| async move {
             // tick_once's loop is driven by integration_manifests(), not just
-            // app.devices — register one (consent-satisfied) so the mock root
+            // app.device_registry — register one (consent-satisfied) so the mock root
             // is actually reached.
             register_integration(&app, "openrgb");
 
@@ -617,7 +620,7 @@ mod tests {
             .await;
             let root = MockRoot::new("openrgb");
             root.scripted(Err(anyhow::anyhow!("dropped")));
-            app.devices
+            app.device_registry
                 .write()
                 .await
                 .push(root.clone() as Arc<dyn Device>);
@@ -709,7 +712,7 @@ mod tests {
         crate::test_support::with_tmp_config(|app| async move {
             register_integration(&app, "openrgb");
             let root = MockRoot::new("openrgb");
-            app.devices
+            app.device_registry
                 .write()
                 .await
                 .push(root.clone() as Arc<dyn Device>);
@@ -730,7 +733,7 @@ mod tests {
             let root = MockRoot::new("openrgb");
             root.live.store(false, Ordering::Relaxed);
             root.unrecoverable.store(true, Ordering::Relaxed);
-            app.devices
+            app.device_registry
                 .write()
                 .await
                 .push(root.clone() as Arc<dyn Device>);
@@ -741,10 +744,10 @@ mod tests {
 
             // Even if the root disappears, the monitor keeps the terminal
             // latch instead of constructing the same doomed runtime again.
-            app.devices.write().await.clear();
+            app.device_registry.write().await.clear();
             tick_once(&app, &mut states).await;
             assert_eq!(states.get("openrgb"), Some(&MonitorState::Unrecoverable));
-            assert!(app.devices.read().await.is_empty());
+            assert!(app.device_registry.read().await.is_empty());
         })
         .await;
     }

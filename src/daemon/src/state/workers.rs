@@ -8,8 +8,8 @@ const SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250)
 const SAVE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<()> {
-    let mut rx = app.persistence.save_tx.subscribe();
-    let mut shutdown_rx = app.persistence.shutdown_tx.subscribe();
+    let mut rx = app.config.persistence().save_tx.subscribe();
+    let mut shutdown_rx = app.config.persistence().shutdown_tx.subscribe();
     tokio::spawn(async move {
         let mut saved_version = *rx.borrow();
         loop {
@@ -20,7 +20,8 @@ pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<(
                     continue;
                 }
             }
-            app.persistence
+            app.config
+                .persistence()
                 .save_state
                 .send_replace(ConfigSaveState::Debouncing);
             loop {
@@ -41,7 +42,8 @@ pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<(
 
             loop {
                 let version = *rx.borrow_and_update();
-                app.persistence
+                app.config
+                    .persistence()
                     .save_state
                     .send_replace(ConfigSaveState::Saving(version));
                 let cfg = app.config.read().await.clone();
@@ -50,18 +52,21 @@ pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<(
                     Ok(Ok(())) => {
                         saved_version = version;
                         if *rx.borrow() == saved_version {
-                            app.persistence
+                            app.config
+                                .persistence()
                                 .save_state
                                 .send_replace(ConfigSaveState::Clean);
                             break;
                         }
-                        app.persistence
+                        app.config
+                            .persistence()
                             .save_state
                             .send_replace(ConfigSaveState::DirtyWhileSaving);
                     }
                     Ok(Err(error)) => {
                         log::warn!("[Config] Save failed, retrying: {error}");
-                        app.persistence
+                        app.config
+                            .persistence()
                             .save_state
                             .send_replace(ConfigSaveState::Failed(error.to_string()));
                         tokio::select! {
@@ -72,7 +77,8 @@ pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<(
                     }
                     Err(error) => {
                         log::warn!("[Config] Save worker panicked, retrying: {error}");
-                        app.persistence
+                        app.config
+                            .persistence()
                             .save_state
                             .send_replace(ConfigSaveState::Failed(error.to_string()));
                         tokio::time::sleep(SAVE_RETRY).await;
@@ -84,7 +90,8 @@ pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<(
             }
         }
 
-        app.persistence
+        app.config
+            .persistence()
             .save_state
             .send_replace(ConfigSaveState::Stopping);
         let latest = *rx.borrow();
@@ -92,23 +99,27 @@ pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<(
             let cfg = app.config.read().await.clone();
             match tokio::task::spawn_blocking(move || crate::config::save(&cfg)).await {
                 Ok(Ok(())) => {
-                    app.persistence
+                    app.config
+                        .persistence()
                         .save_state
                         .send_replace(ConfigSaveState::Clean);
                 }
                 Ok(Err(error)) => {
-                    app.persistence
+                    app.config
+                        .persistence()
                         .save_state
                         .send_replace(ConfigSaveState::Failed(error.to_string()));
                 }
                 Err(error) => {
-                    app.persistence
+                    app.config
+                        .persistence()
                         .save_state
                         .send_replace(ConfigSaveState::Failed(error.to_string()));
                 }
             }
         } else {
-            app.persistence
+            app.config
+                .persistence()
                 .save_state
                 .send_replace(ConfigSaveState::Clean);
         }
@@ -123,8 +134,8 @@ pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<(
 pub fn start_persist_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            app.persistence.notify.notified().await;
-            let devices = app.devices.read().await.clone();
+            app.config.persistence().notify.notified().await;
+            let devices = app.device_registry.read().await.clone();
             for device in &devices {
                 crate::profiles::device_state::persist_device_state(&app, device.as_ref()).await;
             }
@@ -134,7 +145,7 @@ pub fn start_persist_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<()> {
 
 pub async fn shutdown(app: Arc<AppState>) {
     log::info!("Gracefully shutting down...");
-    let devices = app.devices.read().await.clone();
+    let devices = app.device_registry.read().await.clone();
     for device in devices {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), device.close()).await;
     }

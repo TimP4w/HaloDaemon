@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio::sync::{watch, RwLock};
+use tokio::sync::RwLock;
 
 use halod_shared::types::EffectParamValue;
 
 use crate::lcd::engine::custom::EditorSession;
 use crate::lcd::engine::{video::VideoEngine, LcdEngine};
-use crate::run_loop::EngineRunConfig;
 
 struct Engine {
     handle: Arc<LcdEngine>,
     video: Arc<VideoEngine>,
-    cfg_tx: watch::Sender<EngineRunConfig>,
 }
 
 /// The LCD template engine and its companion video engine (video frames feed
@@ -50,17 +48,8 @@ impl LcdEngineState {
         })
     }
 
-    pub fn set_engine(
-        &self,
-        handle: Arc<LcdEngine>,
-        video: Arc<VideoEngine>,
-        cfg_tx: watch::Sender<EngineRunConfig>,
-    ) {
-        let _ = self.engine.set(Engine {
-            handle,
-            video,
-            cfg_tx,
-        });
+    pub fn set_engine(&self, handle: Arc<LcdEngine>, video: Arc<VideoEngine>) {
+        let _ = self.engine.set(Engine { handle, video });
     }
 
     pub fn engine(&self) -> Option<&Arc<LcdEngine>> {
@@ -69,10 +58,6 @@ impl LcdEngineState {
 
     pub fn video(&self) -> Option<&Arc<VideoEngine>> {
         self.engine.get().map(|e| &e.video)
-    }
-
-    pub fn cfg_tx(&self) -> Option<&watch::Sender<EngineRunConfig>> {
-        self.engine.get().map(|e| &e.cfg_tx)
     }
 
     /// Re-read the saved LCD template names from disk into the cache. Call

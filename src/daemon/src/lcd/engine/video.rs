@@ -289,10 +289,18 @@ impl VideoEngine {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
             }
             // Only overwrite state we own — a concurrent stop()/start() may have already replaced this entry.
-            let mut streams = engine.streams.lock().await;
-            if matches!(streams.get(&device_id), Some(VideoStream::Playing { .. })) {
-                set_device_health(device.as_ref(), LcdHealth::Failed(failure.clone()));
-                streams.insert(device_id, VideoStream::Failed);
+            let changed = {
+                let mut streams = engine.streams.lock().await;
+                if matches!(streams.get(&device_id), Some(VideoStream::Playing { .. })) {
+                    set_device_health(device.as_ref(), LcdHealth::Failed(failure.clone()));
+                    streams.insert(device_id.clone(), VideoStream::Failed);
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                crate::lcd::usecases::runtime::device_changed(&engine.app, &device_id).await;
             }
         });
         Ok((task, child))
@@ -398,7 +406,7 @@ mod tests {
     async fn start_returns_err_when_path_does_not_exist() {
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("lcd1").with_lcd());
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);
@@ -467,7 +475,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let video = tiny_test_video(dir.path());
         let (app, dev) = lcd_app_with_device("lcd1");
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);
@@ -493,7 +501,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let video = tiny_test_video(dir.path());
         let (app, dev) = lcd_app_with_device("lcd1");
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);
@@ -515,7 +523,7 @@ mod tests {
         let garbage = dir.path().join("not_a_video.mp4");
         std::fs::write(&garbage, b"this is not a video file").unwrap();
         let (app, dev) = lcd_app_with_device("lcd1");
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
-use crate::{ipc, lcd::engine::LcdEngine, state::AppState};
+use crate::{lcd::engine::LcdEngine, state::AppState};
 use halod_shared::lcd_custom::{CustomTemplateDef, WIDGETS_JSON_PARAM};
 use halod_shared::types::{EffectParamValue, LcdHealth};
 
@@ -53,7 +53,10 @@ pub async fn set_template(
     }
     slot.lcd_state().set_health(LcdHealth::Stable);
 
-    ipc::broadcast_delta(&app, &[ipc::Domain::Lcd, ipc::Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::LcdDevice(
+        device_id,
+    ))
+    .await;
     Ok(())
 }
 
@@ -72,7 +75,10 @@ pub async fn deactivate(device_id: String, app: Arc<AppState>) -> Result<()> {
     }
     slot.lcd_state().set_health(LcdHealth::Stable);
 
-    ipc::broadcast_delta(&app, &[ipc::Domain::Lcd, ipc::Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::LcdDevice(
+        device_id,
+    ))
+    .await;
     Ok(())
 }
 
@@ -171,7 +177,7 @@ mod tests {
 
     fn make_app(device: Arc<MockLcdDevice>) -> Arc<AppState> {
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices
+        app.device_registry
             .try_write()
             .unwrap()
             .push(device as Arc<dyn crate::drivers::Device>);
@@ -220,7 +226,6 @@ mod tests {
         app.lcd.set_engine(
             Arc::clone(&engine),
             crate::lcd::engine::video::VideoEngine::new(Arc::clone(&app), engine.frame_sender()),
-            tokio::sync::watch::channel(crate::state::EngineRunConfig::lcd(&Default::default())).0,
         );
 
         set_template("dev0".into(), "custom".into(), HashMap::new(), app)

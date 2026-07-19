@@ -6,5 +6,7 @@ pub mod keyboard_layout;
 pub mod receiver;
 pub mod registration;
 pub mod rename;
+pub mod runtime;
+pub mod sensors;
 pub mod settings;
 pub mod visibility;

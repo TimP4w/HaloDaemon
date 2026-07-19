@@ -563,7 +563,7 @@ pub async fn usb_hotplug_monitor(app: Arc<crate::state::AppState>) {
 
         let present: HashSet<UsbLocation> = present_usb_locations().into_iter().collect();
         let registered: Vec<(String, UsbLocation)> = {
-            let devices = app.devices.read().await;
+            let devices = app.device_registry.read().await;
             devices
                 .iter()
                 .filter_map(|d| Some((d.id().to_owned(), d.usb_location()?)))

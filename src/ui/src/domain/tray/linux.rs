@@ -95,7 +95,7 @@ impl PlatformTray {
     /// repaint wakeups, so tray data must not depend on window rendering.
     pub fn watch_state(
         &self,
-        mut state: tokio::sync::watch::Receiver<halod_shared::types::AppState>,
+        mut state: tokio::sync::watch::Receiver<crate::domain::topic_store::TopicStore>,
     ) {
         let handle = self.handle.clone();
         let latest = self.latest.clone();

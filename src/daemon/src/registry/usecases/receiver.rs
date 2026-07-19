@@ -2,7 +2,6 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
-use crate::ipc::broadcast_state;
 use crate::registry::require_device_owned_id;
 use crate::state::AppState;
 
@@ -17,7 +16,8 @@ pub(crate) async fn reconcile_owned_children(
         return false;
     };
     let existing = app
-        .device_children
+        .device_registry
+        .children
         .lock()
         .await
         .get(device.id())
@@ -36,7 +36,7 @@ pub(crate) async fn reconcile_owned_children(
     }
     if !gone.is_empty() {
         let removed: Vec<Arc<dyn crate::drivers::Device>> = {
-            let mut devices = app.devices.write().await;
+            let mut devices = app.device_registry.write().await;
             let mut removed = Vec::new();
             devices.retain(|candidate| {
                 if gone.iter().any(|child_id| child_id == candidate.id()) {
@@ -58,7 +58,7 @@ pub(crate) async fn reconcile_owned_children(
     }
     let changed = !gone.is_empty() || !registered.is_empty();
     if changed {
-        let mut owners = app.device_children.lock().await;
+        let mut owners = app.device_registry.children.lock().await;
         let children = owners.entry(device.id().to_owned()).or_default();
         for child_id in gone {
             children.remove(&child_id);
@@ -74,7 +74,8 @@ pub async fn start_pairing(id: String, timeout_secs: u8, app: Arc<AppState>) -> 
         .as_pairing()
         .context("device does not support pairing")?;
     cap.start_pairing(timeout_secs).await?;
-    broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::Device(id))
+        .await;
     Ok(())
 }
 
@@ -84,7 +85,8 @@ pub async fn stop_pairing(id: String, app: Arc<AppState>) -> Result<()> {
         .as_pairing()
         .context("device does not support pairing")?;
     cap.stop_pairing().await?;
-    broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::Device(id))
+        .await;
     Ok(())
 }
 
@@ -95,7 +97,10 @@ pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
         .context("device does not support pairing")?;
     if let Some(removed) = cap.unpair(slot).await? {
         let removed_id = removed.id();
-        app.devices.write().await.retain(|d| d.id() != removed_id);
+        app.device_registry
+            .write()
+            .await
+            .retain(|d| d.id() != removed_id);
         super::registration::close_device(&app, &removed).await;
         log::info!("[receiver] Removed {removed_id} after unpair");
     } else {
@@ -104,7 +109,8 @@ pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
         // instead, which removes the slot that the plugin just cleared.
         reconcile_owned_children(&device, &app).await;
     }
-    broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::PluginTopology)
+        .await;
     Ok(())
 }
 
@@ -164,7 +170,7 @@ mod tests {
 
     async fn app_with(dev: Arc<dyn Device>) -> Arc<AppState> {
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
         app
     }
 

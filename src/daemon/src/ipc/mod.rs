@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pub mod router;
-pub mod serializer;
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::{interval, Duration};
+use tokio::time::Duration;
 
+use halod_shared::bus::{BusEvent, BusEventReplay, BusSubscribe, BusTransaction};
 use halod_shared::frames::{
     decode_binary_payload, decode_header, encode_json_frame, payload_exceeds_max, FRAME_BINARY,
     FRAME_JSON,
@@ -17,9 +16,8 @@ use halod_shared::frames::{
 
 use crate::state::AppState;
 
-/// Bound on a client's outgoing frame queue. A client that stalls (socket
-/// buffer full) drops frames past this point rather than growing unbounded;
-/// state is idempotent, so the next broadcast supersedes any dropped frame.
+/// Bound on a client's outgoing frame queue. When incremental state cannot fit,
+/// the bus relay waits for capacity and replaces it with a fresh snapshot.
 const CLIENT_QUEUE_CAPACITY: usize = 256;
 
 static NEXT_CLIENT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -111,24 +109,38 @@ pub struct ClientHandle {
 
 impl ClientHandle {
     pub fn send_json(&self, msg: &Value) {
-        let Some(frame) = encode_json_frame(msg) else {
-            return;
-        };
-        self.send_frame(Arc::new(frame));
+        let _ = self.try_send_json(msg);
     }
 
-    /// Queue an already-encoded wire frame, shared so broadcast fan-out costs
-    /// one `Arc` clone per client instead of a re-serialization.
-    pub fn send_frame(&self, frame: Arc<Vec<u8>>) {
+    fn try_send_json(&self, msg: &Value) -> bool {
+        let Some(frame) = encode_json_frame(msg) else {
+            return false;
+        };
+        self.try_send_frame(Arc::new(frame))
+    }
+
+    fn try_send_frame(&self, frame: Arc<Vec<u8>>) -> bool {
         match self.tx.try_send(frame) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
                 log::debug!("IPC: client {} queue full, dropping frame", self.id);
+                false
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 log::debug!("IPC: client {} channel closed, dropping frame", self.id);
+                false
             }
         }
+    }
+
+    async fn send_json_when_ready(&self, msg: &Value) -> bool {
+        let Some(frame) = encode_json_frame(msg) else {
+            return false;
+        };
+        matches!(
+            tokio::time::timeout(Duration::from_secs(10), self.tx.send(Arc::new(frame))).await,
+            Ok(Ok(()))
+        )
     }
 
     /// Publish an LCD preview frame into the latest-wins slot, replacing any
@@ -216,6 +228,10 @@ impl ClientHandle {
             SubscriptionTopic::Lcd => topics.lcd = true,
         }
         lifecycle.client = ClientState::Subscribed(topics);
+        self.subs.tasks.lock().unwrap().push(task);
+    }
+
+    fn track_task(&self, task: tokio::task::JoinHandle<()>) {
         self.subs.tasks.lock().unwrap().push(task);
     }
 
@@ -533,10 +549,11 @@ where
     });
 }
 
-async fn handle_client<S>(stream: S, app: Arc<AppState>) -> Result<()>
+async fn handle_client<S>(mut stream: S, app: Arc<AppState>) -> Result<()>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
 {
+    let subscription = read_bus_subscription(&mut stream).await?;
     let (write_tx, mut write_rx) = mpsc::channel::<Arc<Vec<u8>>>(CLIENT_QUEUE_CAPACITY);
     let handle = ClientHandle {
         id: next_client_id(),
@@ -544,15 +561,21 @@ where
         subs: Arc::default(),
     };
 
-    send_full_to(&app, &handle).await;
-
-    let plugin_updates = app.plugin_update_status.lock().await.clone();
-    if !plugin_updates.is_empty() {
-        handle.send_json(&serde_json::json!({
-            "type": "plugin_updates",
-            "plugins": plugin_updates,
-        }));
-    }
+    // Subscribe before taking the initial snapshots. Transactions committed in
+    // between are either represented by the snapshot or queued on the receiver;
+    // the GUI's revision/event cursors make the overlap idempotent.
+    let transactions = app.data_bus.subscribe_transactions();
+    let events = app.data_bus.subscribe_events();
+    send_bus_snapshot(&app, &handle, &subscription.prefixes);
+    send_event_replay(&app, &handle, subscription.last_event_id);
+    let bus_task = tokio::spawn(bus_forward_loop(
+        app.clone(),
+        handle.clone(),
+        subscription.prefixes,
+        transactions,
+        events,
+    ));
+    handle.track_task(bus_task);
 
     {
         let mut clients = app.clients.lock().await;
@@ -597,6 +620,32 @@ where
     writer.abort();
 
     result
+}
+
+async fn read_bus_subscription<S>(stream: &mut S) -> Result<BusSubscribe>
+where
+    S: AsyncReadExt + Unpin,
+{
+    let mut header = [0u8; 5];
+    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut header))
+        .await
+        .map_err(|_| anyhow::anyhow!("client did not subscribe to the state bus"))??;
+    let (frame_type, payload_len) = decode_header(&header);
+    anyhow::ensure!(frame_type == FRAME_JSON, "bus subscription must be JSON");
+    anyhow::ensure!(
+        !payload_exceeds_max(payload_len),
+        "oversized bus subscription"
+    );
+    let mut payload = vec![0u8; payload_len as usize];
+    if payload_len > 0 {
+        stream.read_exact(&mut payload).await?;
+    }
+    let value: Value = serde_json::from_slice(&payload)?;
+    anyhow::ensure!(
+        value.get("type").and_then(Value::as_str) == Some("bus_subscribe"),
+        "first client frame must be a bus subscription"
+    );
+    Ok(serde_json::from_value(value)?)
 }
 
 /// Pairs JSON command frames with their accompanying binary payload frames for
@@ -736,99 +785,93 @@ where
     }
 }
 
-pub use serializer::Domain;
+fn send_bus_snapshot(app: &Arc<AppState>, handle: &ClientHandle, prefixes: &[String]) {
+    let snapshot = app.data_bus.state_snapshot(prefixes);
+    handle.send_json(&json!({ "type": "bus_snapshot", "data": snapshot }));
+}
 
-const LIVE_DOMAINS: &[Domain] = &[Domain::Devices, Domain::Cooling];
+fn send_event_replay(app: &Arc<AppState>, handle: &ClientHandle, cursor: Option<u64>) {
+    let replay: BusEventReplay = app.data_bus.replay_events(cursor);
+    handle.send_json(&json!({ "type": "bus_event_replay", "data": replay }));
+}
 
-pub fn broadcast_loop(app: Arc<AppState>) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move {
-        let mut changes = app.data_bus.subscribe();
-        let mut tick = interval(Duration::from_secs(2));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {}
-                recv = changes.recv() => {
-                    if matches!(recv, Err(broadcast::error::RecvError::Closed)) {
-                        break;
+async fn bus_forward_loop(
+    app: Arc<AppState>,
+    client: ClientHandle,
+    prefixes: Vec<String>,
+    mut transactions: broadcast::Receiver<BusTransaction>,
+    mut events: broadcast::Receiver<BusEvent>,
+) {
+    loop {
+        tokio::select! {
+            transaction = transactions.recv() => match transaction {
+                Ok(transaction) => {
+                    let filtered = filter_transaction(transaction, &prefixes);
+                    if !filtered.upserts.is_empty() || !filtered.tombstones.is_empty() {
+                        let frame = json!({ "type": "bus_transaction", "data": filtered });
+                        if !client.try_send_json(&frame)
+                            && !send_bus_snapshot_when_ready(&app, &client, &prefixes).await
+                        {
+                            return;
+                        }
                     }
-                    while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) =
-                        changes.try_recv()
-                    {}
                 }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if !send_bus_snapshot_when_ready(&app, &client, &prefixes).await {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            event = events.recv() => match event {
+                Ok(event) => {
+                    let frame = json!({ "type": "bus_event", "data": event });
+                    if !client.try_send_json(&frame)
+                        && !send_event_replay_when_ready(&app, &client).await
+                    {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if !send_event_replay_when_ready(&app, &client).await {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
             }
-            broadcast_delta(&app, LIVE_DOMAINS).await;
         }
-        Ok(())
-    })
-}
-
-fn state_value<T: serde::Serialize>(wire: &T) -> Option<Value> {
-    match serde_json::to_value(wire) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            log::error!("state serialize failed (non-finite float in config?): {e}");
-            None
+        if client.tx.is_closed() {
+            return;
         }
     }
 }
 
-async fn fan_out(app: &Arc<AppState>, kind: &str, data: Value) {
-    let clients = app.clients.lock().await;
-    let gen = app.state_gen.fetch_add(1, Ordering::Relaxed) + 1;
-    let Some(frame) = encode_json_frame(&json!({ "type": kind, "gen": gen, "data": data })) else {
-        return;
-    };
-    let frame = Arc::new(frame);
-    for client in clients.iter() {
-        client.send_frame(frame.clone());
-    }
+async fn send_bus_snapshot_when_ready(
+    app: &Arc<AppState>,
+    client: &ClientHandle,
+    prefixes: &[String],
+) -> bool {
+    let snapshot = app.data_bus.state_snapshot(prefixes);
+    client
+        .send_json_when_ready(&json!({ "type": "bus_snapshot", "data": snapshot }))
+        .await
 }
 
-pub async fn broadcast_state(app: &Arc<AppState>) {
-    let _broadcast = app.ipc_broadcast_lock.lock().await;
-    let cfg = app.config.read().await.clone();
-    let wire = serializer::build_full(app, &cfg).await;
-    let Some(data) = state_value(&wire) else {
-        return;
-    };
-    fan_out(app, "state", data).await;
+async fn send_event_replay_when_ready(app: &Arc<AppState>, client: &ClientHandle) -> bool {
+    let replay = app.data_bus.replay_events(None);
+    client
+        .send_json_when_ready(&json!({ "type": "bus_event_replay", "data": replay }))
+        .await
 }
 
-pub async fn broadcast_delta(app: &Arc<AppState>, domains: &[Domain]) {
-    let _guard = if domains.iter().any(|d| d.uses_device_pass()) {
-        Some(app.ipc_broadcast_lock.lock().await)
-    } else {
-        None
-    };
-    let cfg = app.config.read().await.clone();
-    let delta = serializer::build_delta(app, &cfg, domains).await;
-    let Some(data) = state_value(&delta) else {
-        return;
-    };
-    fan_out(app, "state_delta", data).await;
-}
-
-pub async fn send_full_to(app: &Arc<AppState>, handle: &ClientHandle) {
-    let gen = app.state_gen.load(Ordering::Relaxed);
-    let cfg = app.config.read().await.clone();
-    let wire = serializer::build_full(app, &cfg).await;
-    let Some(data) = state_value(&wire) else {
-        return;
-    };
-    handle.send_json(&json!({ "type": "state", "gen": gen, "data": data }));
-}
-
-/// Fan an arbitrary JSON frame out to every connected client (encoded once).
-pub async fn broadcast_json(app: &Arc<AppState>, msg: &Value) {
-    let Some(frame) = encode_json_frame(msg) else {
-        return;
-    };
-    let frame = Arc::new(frame);
-    let clients = app.clients.lock().await;
-    for client in clients.iter() {
-        client.send_frame(frame.clone());
-    }
+fn filter_transaction(mut transaction: BusTransaction, prefixes: &[String]) -> BusTransaction {
+    transaction
+        .upserts
+        .retain(|record| halod_shared::bus::matches_prefixes(&record.key, prefixes));
+    transaction
+        .tombstones
+        .retain(|key| halod_shared::bus::matches_prefixes(key, prefixes));
+    transaction
 }
 
 /// Path to the IPC command channel. Shared with the UI via `halod-shared`
@@ -1041,6 +1084,34 @@ mod handle_tests {
     }
 
     #[tokio::test]
+    async fn bus_subscription_is_the_first_typed_client_frame() {
+        let (mut read_half, mut feed) = tokio::io::duplex(1024);
+        let frame = encode_json_frame(&json!({
+            "type": "bus_subscribe",
+            "prefixes": ["runtime.devices."],
+            "last_event_id": 41
+        }))
+        .unwrap();
+        feed.write_all(&frame).await.unwrap();
+
+        let subscription = read_bus_subscription(&mut read_half).await.unwrap();
+        assert_eq!(subscription.prefixes, vec!["runtime.devices."]);
+        assert_eq!(subscription.last_event_id, Some(41));
+    }
+
+    #[tokio::test]
+    async fn ordinary_command_cannot_bypass_bus_subscription() {
+        let (mut read_half, mut feed) = tokio::io::duplex(1024);
+        let frame = encode_json_frame(&json!({"type": "ping"})).unwrap();
+        feed.write_all(&frame).await.unwrap();
+
+        let error = read_bus_subscription(&mut read_half).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("first client frame must be a bus subscription"));
+    }
+
+    #[tokio::test]
     async fn lcd_preview_slot_keeps_only_the_newest_frame() {
         let (tx, _rx) = mpsc::channel::<Arc<Vec<u8>>>(4);
         let handle = ClientHandle {
@@ -1078,7 +1149,51 @@ mod handle_tests {
     }
 
     #[tokio::test]
-    async fn concurrent_state_broadcasts_do_not_overlap_device_passes() {
+    async fn full_client_queue_replaces_incremental_state_with_snapshot() {
+        use crate::config::Config;
+        use crate::state::AppState;
+
+        let app = Arc::new(AppState::new(Config::default()));
+        let transactions = app.data_bus.subscribe_transactions();
+        let events = app.data_bus.subscribe_events();
+        let (tx, mut rx) = mpsc::channel::<Arc<Vec<u8>>>(1);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        client.send_json(&json!({"type": "already_queued"}));
+
+        let relay = tokio::spawn(bus_forward_loop(
+            app.clone(),
+            client,
+            Vec::new(),
+            transactions,
+            events,
+        ));
+        crate::registry::usecases::runtime::gui_changed(&app).await;
+        tokio::task::yield_now().await;
+
+        let queued = rx.recv().await.unwrap();
+        let queued: Value = serde_json::from_slice(&queued[5..]).unwrap();
+        assert_eq!(queued["type"], "already_queued");
+
+        let recovered = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let recovered: Value = serde_json::from_slice(&recovered[5..]).unwrap();
+        assert_eq!(recovered["type"], "bus_snapshot");
+        assert!(recovered["data"]["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["key"] == halod_shared::bus::topic::GUI));
+        relay.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_topic_commits_do_not_overlap_device_passes() {
         use crate::config::Config;
         use crate::state::AppState;
 
@@ -1086,15 +1201,18 @@ mod handle_tests {
         let release = Arc::new(tokio::sync::Notify::new());
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices.write().await.push(Arc::new(SlowSnapshotDevice {
-            entered: entered.clone(),
-            release: release.clone(),
-            calls: calls.clone(),
-        }));
+        app.device_registry
+            .write()
+            .await
+            .push(Arc::new(SlowSnapshotDevice {
+                entered: entered.clone(),
+                release: release.clone(),
+                calls: calls.clone(),
+            }));
 
         let first = tokio::spawn({
             let app = app.clone();
-            async move { broadcast_state(&app).await }
+            async move { crate::registry::usecases::runtime::topology_changed(&app).await }
         });
         tokio::time::timeout(Duration::from_secs(1), entered.notified())
             .await
@@ -1102,7 +1220,7 @@ mod handle_tests {
 
         let second = tokio::spawn({
             let app = app.clone();
-            async move { broadcast_state(&app).await }
+            async move { crate::registry::usecases::runtime::topology_changed(&app).await }
         });
         tokio::task::yield_now().await;
         assert_eq!(
@@ -1123,54 +1241,6 @@ mod handle_tests {
                 .expect("snapshot task panicked");
         }
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn wire_flow_full_then_deltas_carry_incrementing_gen() {
-        use crate::config::Config;
-        use crate::state::AppState;
-
-        fn decode(frame: &[u8]) -> Value {
-            let len = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
-            serde_json::from_slice(&frame[5..5 + len]).unwrap()
-        }
-
-        let app = Arc::new(AppState::new(Config::default()));
-        let (tx, mut rx) = mpsc::channel::<Arc<Vec<u8>>>(16);
-        let handle = ClientHandle {
-            id: 0,
-            tx,
-            subs: Arc::default(),
-        };
-
-        send_full_to(&app, &handle).await;
-        let full = decode(&rx.recv().await.unwrap());
-        assert_eq!(full["type"], "state");
-        assert_eq!(full["gen"], 0);
-        assert!(full["data"].get("devices").is_some());
-
-        app.clients.lock().await.push(handle.clone());
-
-        broadcast_delta(&app, &[Domain::Devices]).await;
-        let d1 = decode(&rx.recv().await.unwrap());
-        assert_eq!(d1["type"], "state_delta");
-        assert_eq!(d1["gen"], 1);
-        let data = d1["data"].as_object().unwrap();
-        assert!(data.contains_key("devices"));
-        assert!(!data.contains_key("profiles"));
-
-        broadcast_delta(&app, &[Domain::Profiles]).await;
-        let d2 = decode(&rx.recv().await.unwrap());
-        assert_eq!(d2["type"], "state_delta");
-        assert_eq!(d2["gen"], 2);
-        let data = d2["data"].as_object().unwrap();
-        assert!(data.contains_key("profiles"));
-        assert!(!data.contains_key("devices"));
-
-        broadcast_state(&app).await;
-        let f2 = decode(&rx.recv().await.unwrap());
-        assert_eq!(f2["type"], "state");
-        assert_eq!(f2["gen"], 3);
     }
 
     #[test]

@@ -12,12 +12,13 @@
 use crate::ui::components as widgets;
 use std::collections::HashMap;
 
+use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::commands::DaemonCommand;
 use halod_shared::effect_designer::DESIGNER_EFFECT_ID;
 use halod_shared::types::{
-    Animation, AppState, CanvasFrame, ColorStep, DeviceCapability, EffectDef,
-    EffectParamDescriptor, EffectParamValue, LightingState, ParamKind, RgbColor, WireDevice,
+    Animation, CanvasFrame, ColorStep, DeviceCapability, EffectDef, EffectParamDescriptor,
+    EffectParamValue, LightingState, ParamKind, RgbColor, WireDevice,
 };
 
 use crate::domain::models::device as model;
@@ -106,7 +107,7 @@ impl Default for LightingUi {
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     st: &mut LightingUi,
     canvas_ui: &mut CanvasUi,
@@ -186,7 +187,7 @@ pub fn show(
 /// then render the scrollable body.
 fn direct_effects(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     st: &mut LightingUi,
     designer_ui: &mut DesignerUi,
@@ -218,7 +219,7 @@ fn direct_effects(
 /// Seed the selection from the active profile's saved targets; reseed on
 /// profile switch. Offline devices stay in the saved selection so reconnecting
 /// restores them.
-fn seed_if_profile_changed(st: &mut LightingUi, state: &AppState) {
+fn seed_if_profile_changed(st: &mut LightingUi, state: &TopicStore) {
     if st.seeded_for.as_deref() != Some(state.profiles.active.as_str()) {
         st.sel_ids = state.lighting.targets.device_ids.clone();
         st.zone_sel = state.lighting.targets.channels.clone();
@@ -230,7 +231,7 @@ fn seed_if_profile_changed(st: &mut LightingUi, state: &AppState) {
 
 fn page_body(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     st: &mut LightingUi,
     designer_ui: &mut DesignerUi,
@@ -301,7 +302,7 @@ fn debounce_apply(deadline: &mut Option<f64>, apply: bool, now: f64) -> bool {
 /// Static, or the selected effect's own params. Returns `true` on change.
 fn effect_extras(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     st: &mut LightingUi,
     anim: Option<&Animation>,
 ) -> bool {
@@ -321,7 +322,7 @@ fn effect_extras(
 /// Every sensor across all devices as `(id, display name)` pairs, for the
 /// `ParamKind::Sensor` picker. Hidden sensors stay selectable — visibility
 /// only governs the home dashboard.
-pub(crate) fn sensor_options(state: &AppState) -> Vec<(String, String)> {
+pub(crate) fn sensor_options(state: &TopicStore) -> Vec<(String, String)> {
     crate::domain::models::sensors::sensors(state, true)
         .into_iter()
         .map(|s| {
@@ -549,7 +550,7 @@ fn wants_own_row(d: &EffectParamDescriptor) -> bool {
 /// Renders an effect's non-master-color params from its descriptors.
 fn effect_params_card(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     st: &mut LightingUi,
     anim: &Animation,
 ) -> bool {
@@ -720,7 +721,12 @@ fn sliders_card(ui: &mut egui::Ui, st: &mut LightingUi) -> bool {
 
 // ── Target devices & channels card ───────────────────────────────────────────────
 
-fn targets_card(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx, st: &mut LightingUi) -> bool {
+fn targets_card(
+    ui: &mut egui::Ui,
+    state: &TopicStore,
+    cmd: &CommandTx,
+    st: &mut LightingUi,
+) -> bool {
     let mut apply = false;
     let mut persist = false;
     widgets::card(ui, |ui| {
@@ -1126,7 +1132,7 @@ fn device_card(
 /// `custom_direct_effects` state lookup — the daemon hasn't broadcast the
 /// new entry back yet, but we already have its params in hand.
 fn apply_direct_params(
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     st: &LightingUi,
     params: HashMap<String, EffectParamValue>,
@@ -1161,7 +1167,7 @@ fn release_device(cmd: &CommandTx, id: &str) {
     );
 }
 
-fn send_to_selected(state: &AppState, cmd: &CommandTx, st: &LightingUi) {
+fn send_to_selected(state: &TopicStore, cmd: &CommandTx, st: &LightingUi) {
     for dev in rgb_devices(state) {
         if !st.sel_ids.contains(&dev.id) {
             continue;
@@ -1337,7 +1343,7 @@ fn delete_confirm_modal(ui: &mut egui::Ui, st: &mut LightingUi, cmd: &CommandTx)
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn rgb_devices(state: &AppState) -> impl Iterator<Item = &WireDevice> {
+fn rgb_devices(state: &TopicStore) -> impl Iterator<Item = &WireDevice> {
     state
         .devices
         .iter()
@@ -1614,7 +1620,7 @@ mod tests {
 
     #[test]
     fn sensor_options_labels_include_live_reading() {
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![WireDevice {
                 capabilities: vec![DeviceCapability::Sensors(vec![
                     halod_shared::types::Sensor {
@@ -1880,8 +1886,8 @@ mod tests {
         assert!(has_rgb_zones(&d));
     }
 
-    fn state_with_targets(profile: &str, ids: &[&str]) -> AppState {
-        AppState {
+    fn state_with_targets(profile: &str, ids: &[&str]) -> TopicStore {
+        TopicStore {
             profiles: halod_shared::types::ProfileState {
                 active: profile.into(),
                 ..Default::default()

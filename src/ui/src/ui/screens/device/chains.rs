@@ -13,6 +13,8 @@ use halod_shared::types::{
 };
 
 use super::TabCtx;
+#[cfg(test)]
+use crate::domain::topic_store::TopicStore;
 use crate::ui::theme;
 
 /// Maximum LED dots shown inline before the "+N" overflow label.
@@ -967,7 +969,7 @@ mod tests {
         use std::sync::mpsc;
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            let state = halod_shared::types::AppState::default();
+            let state = TopicStore::default();
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             let ctx = egui::Context::default();
             theme::install_fonts(&ctx);

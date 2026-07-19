@@ -9,11 +9,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use halod_shared::types::AppState;
-
 use crate::domain::{
     self,
     state::{Page, Rename, Variant},
+    topic_store::TopicStore,
 };
 use crate::runtime::ipc::{self, CommandTx, FrameSinks, UiRx};
 use crate::ui;
@@ -21,8 +20,8 @@ use crate::ui;
 pub struct App {
     pub(crate) ui: UiRx,
     pub(crate) frame_sinks: FrameSinks,
-    /// Last daemon `AppState`, re-cloned only when its watch channel changes.
-    pub(crate) state_cache: Arc<AppState>,
+    /// Last atomic bus state, re-cloned only when its watch channel changes.
+    pub(crate) state_cache: Arc<TopicStore>,
     /// LCD library filenames, re-cloned only when the watch channel changes.
     pub(crate) lcd_images_cache: Arc<Vec<String>>,
     /// Decoded plugin display assets, keyed by `ipc::plugin_asset_cache_key`.
@@ -86,10 +85,6 @@ pub struct App {
     /// rather than going back to `None`.
     pub(crate) lcd_editor_render_cache: Option<ipc::DecodedEditorRender>,
     pub(crate) depcheck_grace: ui::screens::depcheck::GraceState,
-    /// Latest repo update-check result; persists like `lcd_editor_render_cache`.
-    pub(crate) repo_updates_cache: Vec<halod_shared::types::RepoUpdateStatus>,
-    /// Latest per-plugin update-check result; persists like `repo_updates_cache`.
-    pub(crate) plugin_updates_cache: Vec<halod_shared::types::PluginUpdateStatus>,
     /// Remote branch lists keyed by repo URL, for the Add-repository picker.
     pub(crate) repo_branches_cache: std::collections::HashMap<String, Vec<String>>,
     /// Host serial ports, for the `serial_port` config-field dropdown.
@@ -139,7 +134,7 @@ impl App {
         App {
             ui,
             frame_sinks,
-            state_cache: Arc::new(AppState::default()),
+            state_cache: Arc::new(TopicStore::default()),
             lcd_images_cache: Arc::new(Vec::new()),
             plugin_assets_cache: Arc::new(HashMap::new()),
             cmd,
@@ -178,9 +173,7 @@ impl App {
             pending_lcd_template: None,
             lcd_editor_render_cache: None,
             depcheck_grace: ui::screens::depcheck::GraceState::default(),
-            repo_updates_cache: Vec::new(),
             repo_branches_cache: std::collections::HashMap::new(),
-            plugin_updates_cache: Vec::new(),
             serial_ports_cache: Vec::new(),
             serial_ports_requested: false,
         }

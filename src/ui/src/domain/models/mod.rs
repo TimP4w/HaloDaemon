@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Pure derivations from the daemon's `AppState`/`WireDevice` — no egui, no
+//! Pure derivations from the GUI topic store and `WireDevice` — no egui, no
 //! channels, no mutation. Screens call these to turn wire types into display
 //! values.
 

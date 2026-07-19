@@ -267,12 +267,13 @@ fn drive_preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, lcd: &LcdSt
 #[cfg(test)]
 mod tests {
     use super::{preview_keepalive_due, preview_key, rot_label, show, wants_engine_preview};
+    use crate::domain::topic_store::TopicStore;
     use crate::runtime::ipc::DecodedFrame;
     use crate::ui::screens::device::{DeviceUi, LcdMediaTab, PickerTarget, TabCtx};
     use halod_shared::commands::DaemonCommand;
     use halod_shared::types::LcdUploadProgress;
     use halod_shared::types::{
-        AppState, DeviceCapability, LcdDescriptor, LcdEngineTemplateDescriptor, LcdMode, LcdStatus,
+        DeviceCapability, LcdDescriptor, LcdEngineTemplateDescriptor, LcdMode, LcdStatus,
         ScreenRotation, ScreenShape, WireDevice,
     };
     use std::time::{Duration, Instant};
@@ -348,7 +349,7 @@ mod tests {
     /// same way the GUI reads them from the daemon's library.
     struct Fixture {
         ctx: egui::Context,
-        state: AppState,
+        state: TopicStore,
         dev: WireDevice,
         images: Vec<String>,
         preview: Option<DecodedFrame>,
@@ -371,7 +372,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(tmp.path().join(halod_shared::types::LCD_IMAGES_SUBDIR))
                 .unwrap();
-            let state = AppState {
+            let state = TopicStore {
                 health: halod_shared::types::HealthCheckState {
                     ffmpeg_available: true,
                     ..Default::default()

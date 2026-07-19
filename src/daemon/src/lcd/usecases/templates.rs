@@ -229,11 +229,8 @@ pub async fn save_template(name: String, def: CustomTemplateDef, app: Arc<AppSta
     tokio::task::spawn_blocking(move || crate::config::atomic_write(&path, &yaml)).await??;
     log::info!("[LCD] saved template '{name}'");
     app.lcd.refresh_templates().await;
-    crate::ipc::broadcast_delta(
-        &app,
-        &[crate::ipc::Domain::Lcd, crate::ipc::Domain::Devices],
-    )
-    .await;
+    app.record_change(crate::services::effective_state::Change::LcdCatalog)
+        .await;
     Ok(())
 }
 
@@ -262,11 +259,8 @@ pub async fn delete_template(name: String, app: Arc<AppState>) -> Result<()> {
         Err(e) => return Err(e.into()),
     }
     app.lcd.refresh_templates().await;
-    crate::ipc::broadcast_delta(
-        &app,
-        &[crate::ipc::Domain::Lcd, crate::ipc::Domain::Devices],
-    )
-    .await;
+    app.record_change(crate::services::effective_state::Change::LcdCatalog)
+        .await;
     Ok(())
 }
 

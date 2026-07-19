@@ -313,7 +313,7 @@ impl LightingDivisionHost {
     }
 
     /// Append a new user-added chain link, spawn its child device, register it
-    /// in `app.devices` and return the new child's id. Validation:
+    /// in `app.device_registry` and return the new child's id. Validation:
     /// - the channel must exist
     /// - `led_count` must fit within remaining budget
     /// - `led_count` must satisfy the topology's divisibility constraint

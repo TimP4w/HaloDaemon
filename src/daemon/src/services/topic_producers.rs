@@ -6,11 +6,42 @@ use crate::config::{Config, PlacedZone};
 use crate::cooling::config::FanCurveRecord;
 use crate::registry::snapshot::DevicesSnapshot;
 use crate::state::AppState;
+use halod_shared::bus::{topic, BusValue};
 use halod_shared::types::{
-    AppState as WireAppState, CoolingState, DiscoveryStatus, HealthCheckState, LcdState,
-    LightingOverviewState, PluginRepoInfo, PluginsState, ProfileState, RepoCompatibilityStatus,
-    RepoSignatureStatus, StateDelta, WireDevice,
+    CoolingState, DiscoveryStatus, HealthCheckState, LcdState, LightingOverviewState,
+    PluginRepoInfo, PluginsState, ProfileState, RepoCompatibilityStatus, RepoSignatureStatus,
+    WireDevice,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Topic {
+    Discovery,
+    Device(String),
+    Devices,
+    Profiles,
+    Cooling,
+    Lighting,
+    Lcd,
+    Gui,
+    Health,
+    ProcessIcons,
+    Plugins,
+    ConfigDir,
+}
+
+pub(super) const ALL_TOPICS: &[Topic] = &[
+    Topic::Discovery,
+    Topic::Devices,
+    Topic::Profiles,
+    Topic::Cooling,
+    Topic::Lighting,
+    Topic::Lcd,
+    Topic::Gui,
+    Topic::Health,
+    Topic::ProcessIcons,
+    Topic::Plugins,
+    Topic::ConfigDir,
+];
 
 fn active_repo_signature_status(record: &crate::config::PluginRepoRecord) -> RepoSignatureStatus {
     let trust = if record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
@@ -47,34 +78,11 @@ fn active_repo_signature_status(record: &crate::config::PluginRepoRecord) -> Rep
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Domain {
-    Discovery,
-    Devices,
-    Profiles,
-    Cooling,
-    Lighting,
-    Lcd,
-    Gui,
-    Health,
-    ProcessIcons,
-    Plugins,
-}
-
-impl Domain {
-    pub fn uses_device_pass(self) -> bool {
-        matches!(
-            self,
-            Domain::Devices | Domain::Cooling | Domain::Lighting | Domain::Lcd | Domain::Plugins
-        )
-    }
-}
-
-async fn serialize_discovery(app: &Arc<AppState>) -> DiscoveryStatus {
+async fn produce_discovery(app: &Arc<AppState>) -> DiscoveryStatus {
     app.discovery.lock().await.clone()
 }
 
-fn serialize_profiles(cfg: &Config) -> ProfileState {
+fn produce_profiles(cfg: &Config) -> ProfileState {
     ProfileState {
         active: cfg.active_profile.clone(),
         available: cfg.profile_names(),
@@ -83,18 +91,18 @@ fn serialize_profiles(cfg: &Config) -> ProfileState {
     }
 }
 
-fn serialize_gui(cfg: &Config) -> halod_shared::types::GuiConfig {
+fn produce_gui(cfg: &Config) -> halod_shared::types::GuiConfig {
     cfg.gui.clone()
 }
 
-fn serialize_health(app: &Arc<AppState>) -> HealthCheckState {
+fn produce_health(app: &Arc<AppState>) -> HealthCheckState {
     HealthCheckState {
         focus_watcher_supported: app.focus.supported(),
         ffmpeg_available: crate::lcd::engine::video::ffmpeg_available(),
     }
 }
 
-fn serialize_process_icons(cfg: &Config) -> HashMap<String, String> {
+fn produce_process_icons(cfg: &Config) -> HashMap<String, String> {
     let mut names: Vec<String> = cfg
         .app_rules
         .iter()
@@ -105,7 +113,7 @@ fn serialize_process_icons(cfg: &Config) -> HashMap<String, String> {
     crate::profiles::running_apps::resolve_process_icons(&names)
 }
 
-async fn serialize_cooling(
+async fn produce_cooling(
     app: &Arc<AppState>,
     cfg: &Config,
     fan_curves: Vec<(String, String, FanCurveRecord)>,
@@ -115,7 +123,7 @@ async fn serialize_cooling(
     cooling
 }
 
-async fn serialize_lighting(
+async fn produce_lighting(
     app: &Arc<AppState>,
     cfg: &Config,
     placed_zones: Vec<PlacedZone>,
@@ -128,7 +136,7 @@ async fn serialize_lighting(
     lighting
 }
 
-async fn serialize_lcd(
+async fn produce_lcd(
     app: &Arc<AppState>,
     cfg: &Config,
     lcd_templates: HashMap<String, String>,
@@ -142,7 +150,7 @@ async fn serialize_lcd(
     lcd
 }
 
-async fn serialize_plugins(
+async fn produce_plugins(
     app: &Arc<AppState>,
     cfg: &Config,
     devices: &[WireDevice],
@@ -223,79 +231,95 @@ async fn serialize_plugins(
             .collect(),
         skipped: app.registry.skipped(),
         recommendations: app.registry.recommendations(),
+        updates: app.plugin_update_status.lock().await.clone(),
+        repo_updates: app.plugin_repo_update_status.lock().await.clone(),
     }
 }
 
-pub async fn build_full(app: &Arc<AppState>, cfg: &Config) -> WireAppState {
+pub async fn produce(
+    app: &Arc<AppState>,
+    cfg: &Config,
+    requested: &[Topic],
+) -> Vec<(String, BusValue)> {
+    let needs_devices = requested.iter().any(|topic| {
+        matches!(
+            topic,
+            Topic::Device(_)
+                | Topic::Devices
+                | Topic::Cooling
+                | Topic::Lighting
+                | Topic::Lcd
+                | Topic::Plugins
+        )
+    });
     let DevicesSnapshot {
         devices,
         fan_curves,
         placed_zones,
         lcd_templates,
         lcd_template_params,
-    } = app.snapshot_devices(cfg).await;
-    let plugins = serialize_plugins(app, cfg, &devices).await;
-    WireAppState {
-        discovery: serialize_discovery(app).await,
-        devices,
-        profiles: serialize_profiles(cfg),
-        cooling: serialize_cooling(app, cfg, fan_curves).await,
-        lighting: serialize_lighting(app, cfg, placed_zones).await,
-        lcd: serialize_lcd(app, cfg, lcd_templates, lcd_template_params).await,
-        gui: serialize_gui(cfg),
-        config_dir: crate::config::config_dir().display().to_string(),
-        health: serialize_health(app),
-        process_icons: serialize_process_icons(cfg),
-        plugins,
-    }
-}
-
-pub async fn build_delta(app: &Arc<AppState>, cfg: &Config, domains: &[Domain]) -> StateDelta {
-    let want = |d: Domain| domains.contains(&d);
-    let mut delta = StateDelta::default();
-
-    if want(Domain::Discovery) {
-        delta.discovery = Some(serialize_discovery(app).await);
-    }
-    if want(Domain::Profiles) {
-        delta.profiles = Some(serialize_profiles(cfg));
-    }
-    if want(Domain::Gui) {
-        delta.gui = Some(serialize_gui(cfg));
-    }
-    if want(Domain::Health) {
-        delta.health = Some(serialize_health(app));
-    }
-    if want(Domain::ProcessIcons) {
-        delta.process_icons = Some(serialize_process_icons(cfg));
-    }
-
-    if domains.iter().any(|d| d.uses_device_pass()) {
-        let DevicesSnapshot {
-            devices,
-            fan_curves,
-            placed_zones,
-            lcd_templates,
-            lcd_template_params,
-        } = app.snapshot_devices(cfg).await;
-        if want(Domain::Cooling) {
-            delta.cooling = Some(serialize_cooling(app, cfg, fan_curves).await);
+    } = if needs_devices {
+        app.snapshot_devices(cfg).await
+    } else {
+        DevicesSnapshot::default()
+    };
+    let mut records = Vec::new();
+    for requested_topic in requested {
+        match requested_topic {
+            Topic::Discovery => records.push((
+                topic::DISCOVERY.into(),
+                BusValue::Discovery(produce_discovery(app).await),
+            )),
+            Topic::Device(id) => records.extend(
+                devices
+                    .iter()
+                    .filter(|device| &device.id == id)
+                    .cloned()
+                    .map(|device| (topic::device(&device.id), BusValue::Device(device))),
+            ),
+            Topic::Devices => records.extend(
+                devices
+                    .iter()
+                    .cloned()
+                    .map(|device| (topic::device(&device.id), BusValue::Device(device))),
+            ),
+            Topic::Profiles => records.push((
+                topic::PROFILES.into(),
+                BusValue::Profiles(produce_profiles(cfg)),
+            )),
+            Topic::Cooling => records.push((
+                topic::COOLING.into(),
+                BusValue::Cooling(produce_cooling(app, cfg, fan_curves.clone()).await),
+            )),
+            Topic::Lighting => records.push((
+                topic::LIGHTING.into(),
+                BusValue::Lighting(produce_lighting(app, cfg, placed_zones.clone()).await),
+            )),
+            Topic::Lcd => records.push((
+                topic::LCD.into(),
+                BusValue::Lcd(
+                    produce_lcd(app, cfg, lcd_templates.clone(), lcd_template_params.clone()).await,
+                ),
+            )),
+            Topic::Gui => records.push((topic::GUI.into(), BusValue::Gui(produce_gui(cfg)))),
+            Topic::Health => {
+                records.push((topic::HEALTH.into(), BusValue::Health(produce_health(app))))
+            }
+            Topic::ProcessIcons => records.push((
+                topic::PROCESS_ICONS.into(),
+                BusValue::ProcessIcons(produce_process_icons(cfg)),
+            )),
+            Topic::Plugins => records.push((
+                topic::PLUGINS.into(),
+                BusValue::Plugins(produce_plugins(app, cfg, &devices).await),
+            )),
+            Topic::ConfigDir => records.push((
+                topic::CONFIG_DIR.into(),
+                BusValue::ConfigDir(crate::config::config_dir().display().to_string()),
+            )),
         }
-        if want(Domain::Lighting) {
-            delta.lighting = Some(serialize_lighting(app, cfg, placed_zones).await);
-        }
-        if want(Domain::Lcd) {
-            delta.lcd = Some(serialize_lcd(app, cfg, lcd_templates, lcd_template_params).await);
-        }
-        if want(Domain::Plugins) {
-            delta.plugins = Some(serialize_plugins(app, cfg, &devices).await);
-        }
-        if want(Domain::Devices) {
-            delta.devices = Some(devices);
-        }
     }
-
-    delta
+    records
 }
 
 #[cfg(test)]
@@ -339,7 +363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serialize_surfaces_a_rejected_remote_signature() {
+    async fn producer_surfaces_a_rejected_remote_signature() {
         let app = Arc::new(AppState::new(Config::default()));
         let mut record = repo_record(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
         record.locked_sha = "active".to_owned();
@@ -361,15 +385,22 @@ mod tests {
             },
         );
 
-        let wire = build_full(&app, &cfg).await;
+        let records = produce(&app, &cfg, ALL_TOPICS).await;
+        let plugins = records
+            .into_iter()
+            .find_map(|(_, value)| match value {
+                BusValue::Plugins(value) => Some(value),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(
-            wire.plugins.repos[0].signature,
+            plugins.repos[0].signature,
             RepoSignatureStatus::Invalid {
                 reason: "repository.sig is missing".to_owned(),
             }
         );
         assert_eq!(
-            wire.plugins.repos[0].compatibility,
+            plugins.repos[0].compatibility,
             RepoCompatibilityStatus::Incompatible {
                 reason: "requires Halo >=0.4.0".to_owned(),
             }
@@ -377,24 +408,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serialize_empty_state() {
+    async fn produce_empty_state() {
         let app = Arc::new(AppState::new(Config::default()));
         let mut cfg = app.config.read().await.clone();
         cfg.cooling.fan_failsafe_duty = 42;
         cfg.rgb.canvas_fps = 33;
         cfg.lcd.fps = 12;
         cfg.gui.language = "it".into();
-        let wire = build_full(&app, &cfg).await;
-        assert_eq!(wire.devices.len(), 0);
-        assert_eq!(wire.cooling.config.fan_failsafe_duty, 42);
-        assert_eq!(wire.lighting.config.canvas_fps, 33);
-        assert_eq!(wire.lcd.config.fps, 12);
-        assert_eq!(wire.gui.language, "it");
-        assert_eq!(wire.profiles.active, "default");
+        let records = produce(&app, &cfg, ALL_TOPICS).await;
+        assert!(!records
+            .iter()
+            .any(|(_, value)| matches!(value, BusValue::Device(_))));
+        assert!(records.iter().any(
+            |(_, value)| matches!(value, BusValue::Cooling(v) if v.config.fan_failsafe_duty == 42)
+        ));
+        assert!(records
+            .iter()
+            .any(|(_, value)| matches!(value, BusValue::Lighting(v) if v.config.canvas_fps == 33)));
+        assert!(records
+            .iter()
+            .any(|(_, value)| matches!(value, BusValue::Lcd(v) if v.config.fps == 12)));
+        assert!(records
+            .iter()
+            .any(|(_, value)| matches!(value, BusValue::Gui(v) if v.language == "it")));
+        assert!(records
+            .iter()
+            .any(|(_, value)| matches!(value, BusValue::Profiles(v) if v.active == "default")));
     }
 
     #[tokio::test]
-    async fn serialize_with_one_device() {
+    async fn produce_with_one_device() {
         let app = Arc::new(AppState::new(Config::default()));
         let dev: Arc<dyn Device> = Arc::new(
             MockDevice::new("test_device")
@@ -404,80 +447,18 @@ mod tests {
                 .with_fan()
                 .with_rgb(),
         );
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
         let cfg = app.config.read().await.clone();
-        let wire = build_full(&app, &cfg).await;
-        assert_eq!(wire.devices.len(), 1);
-        assert_eq!(wire.devices[0].id, "test_device");
-        assert_eq!(wire.devices[0].name, "Test Fan");
-        assert_eq!(wire.devices[0].vendor, "Acme");
-    }
-
-    struct CountingDevice {
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl Device for CountingDevice {
-        fn id(&self) -> &str {
-            "counting"
-        }
-        fn name(&self) -> &str {
-            "Counting"
-        }
-        fn vendor(&self) -> &str {
-            "test"
-        }
-        fn model(&self) -> &str {
-            "test"
-        }
-        async fn initialize(&self) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        async fn serialize(&self) -> halod_shared::types::WireDevice {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            crate::drivers::vendors::generic::devices::common::WireDeviceBuilder::from_parts(
-                self.id().to_string(),
-                self.name().to_string(),
-                self.vendor().to_string(),
-                self.model().to_string(),
-            )
-            .build()
-        }
-        fn capabilities(&self) -> Vec<crate::drivers::CapabilityRef<'_>> {
-            Vec::new()
-        }
-    }
-
-    #[tokio::test]
-    async fn non_device_domains_skip_the_device_pass() {
-        let app = Arc::new(AppState::new(Config::default()));
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        app.devices.write().await.push(Arc::new(CountingDevice {
-            calls: calls.clone(),
-        }));
-        let cfg = app.config.read().await.clone();
-        let delta = build_delta(&app, &cfg, &[Domain::Profiles, Domain::Gui]).await;
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert!(delta.profiles.is_some());
-        assert!(delta.gui.is_some());
-        assert!(delta.devices.is_none());
-        assert!(delta.cooling.is_none());
-    }
-
-    #[tokio::test]
-    async fn multi_device_domains_run_a_single_device_pass() {
-        let app = Arc::new(AppState::new(Config::default()));
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        app.devices.write().await.push(Arc::new(CountingDevice {
-            calls: calls.clone(),
-        }));
-        let cfg = app.config.read().await.clone();
-        let delta = build_delta(&app, &cfg, &[Domain::Devices, Domain::Cooling]).await;
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(delta.devices.is_some());
-        assert!(delta.cooling.is_some());
-        assert!(delta.profiles.is_none());
+        let records = produce(&app, &cfg, ALL_TOPICS).await;
+        let device = records
+            .into_iter()
+            .find_map(|(_, value)| match value {
+                BusValue::Device(value) => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(device.id, "test_device");
+        assert_eq!(device.name, "Test Fan");
+        assert_eq!(device.vendor, "Acme");
     }
 }

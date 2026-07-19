@@ -795,27 +795,32 @@ async fn touch_last_sync(app: &Arc<AppState>, slugs: &[String]) {
         }
     }
     app.request_config_save();
-    crate::ipc::broadcast_state(app).await;
+    app.record_change(crate::services::effective_state::Change::PluginTopology)
+        .await;
 }
 
 /// Recompute per-plugin update status (optionally scoped to one repo) and
-/// broadcast it to every client, so their update banners reflect reality after
-/// an update lands.
+/// commit it to the retained plugins topic.
 pub(crate) async fn broadcast_plugin_updates(app: &Arc<AppState>, slug_filter: Option<&str>) {
     let (statuses, reached) = compute_plugin_updates(app, slug_filter).await;
     touch_last_sync(app, &reached).await;
     publish_plugin_updates(app, statuses).await;
 }
 
-/// Cache the latest plugin-update status (so a client that connects later gets
-/// it, via `ipc::plugin_updates_frame`) and broadcast it now.
+/// Cache and commit the latest plugin-update status.
 pub(crate) async fn publish_plugin_updates(
     app: &Arc<AppState>,
     statuses: Vec<halod_shared::types::PluginUpdateStatus>,
 ) {
-    let frame = json!({ "type": "plugin_updates", "plugins": statuses });
     *app.plugin_update_status.lock().await = statuses;
-    crate::ipc::broadcast_json(app, &frame).await;
+    app.record_change(crate::services::effective_state::Change::PluginData)
+        .await;
+}
+
+async fn publish_repo_updates(app: &Arc<AppState>, statuses: Vec<RepoUpdateStatus>) {
+    *app.plugin_repo_update_status.lock().await = statuses;
+    app.record_change(crate::services::effective_state::Change::PluginData)
+        .await;
 }
 
 /// Update every plugin currently flagged as having an update available, across every repo.
@@ -835,19 +840,12 @@ pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
 }
 
 /// Background/startup update check: compute repo- and plugin-level update
-/// status and broadcast both to every connected client (no requesting client).
+/// status and commit both to the retained plugins record.
 /// Errors are logged per-repo inside the compute helpers, so this never fails.
 pub async fn check_updates_broadcast(app: Arc<AppState>) {
     let repo_statuses = compute_repo_updates(&app).await;
     let reached: Vec<String> = repo_statuses.iter().map(|s| s.slug.clone()).collect();
-    crate::ipc::broadcast_json(
-        &app,
-        &json!({
-            "type": "plugin_repo_updates",
-            "repos": repo_statuses,
-        }),
-    )
-    .await;
+    publish_repo_updates(&app, repo_statuses).await;
     touch_last_sync(&app, &reached).await;
 
     let (mut statuses, plugin_reached) = compute_plugin_updates(&app, None).await;
@@ -941,16 +939,13 @@ pub async fn quarantine_changed_plugins(app: Arc<AppState>) {
     publish_plugin_updates(&app, statuses).await;
 }
 
-/// Check every registered repo for updates and reply to the requesting client with a `plugin_repo_updates` frame.
-pub async fn check_repo_updates(app: Arc<AppState>, client: ClientHandle) -> Result<()> {
+/// Check every registered repo for updates and commit the result.
+pub async fn check_repo_updates(app: Arc<AppState>, _client: ClientHandle) -> Result<()> {
     let statuses = compute_repo_updates(&app).await;
     // Each returned status is a repo we successfully reached — stamp their sync.
     let reached: Vec<String> = statuses.iter().map(|s| s.slug.clone()).collect();
     touch_last_sync(&app, &reached).await;
-    client.send_json(&json!({
-        "type": "plugin_repo_updates",
-        "repos": statuses,
-    }));
+    publish_repo_updates(&app, statuses).await;
     // A repo check must also refresh the per-plugin update flags, or the plugin
     // update banners never appear until the daemon restarts.
     broadcast_plugin_updates(&app, None).await;
@@ -1724,7 +1719,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_all_plugins_broadcasts_a_cleared_update_flag() {
+    async fn update_all_plugins_commits_a_cleared_update_flag() {
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
             let slug = super::sanitize_slug(&file_url(src.path()));
@@ -1745,31 +1740,25 @@ mod tests {
                 "the plugin should report an available update before updating"
             );
 
-            // Register a client so the post-update broadcast is captured.
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<Arc<Vec<u8>>>(8);
-            app.clients.lock().await.push(crate::ipc::ClientHandle {
-                id: 0,
-                tx,
-                subs: Arc::default(),
-            });
-
             update_all_plugins(app.clone()).await.unwrap();
 
-            // Drain frames until the plugin_updates one, and assert the flag cleared.
-            let mut cleared = None;
-            while let Ok(frame) = rx.try_recv() {
-                let msg: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
-                if msg["type"] == "plugin_updates" {
-                    cleared = msg["plugins"]
-                        .as_array()
-                        .and_then(|a| a.iter().find(|s| s["plugin_id"] == slug))
-                        .map(|s| s["update_available"].as_bool().unwrap());
-                }
-            }
+            let cleared = app
+                .data_bus
+                .state_snapshot(&[halod_shared::bus::topic::PLUGINS.into()])
+                .records
+                .into_iter()
+                .find_map(|record| match record.value {
+                    halod_shared::bus::BusValue::Plugins(plugins) => plugins
+                        .updates
+                        .into_iter()
+                        .find(|status| status.plugin_id == slug)
+                        .map(|status| status.update_available),
+                    _ => None,
+                });
             assert_eq!(
                 cleared,
                 Some(false),
-                "update_all_plugins must broadcast a plugin_updates frame clearing the flag"
+                "update_all_plugins must commit a plugins record clearing the flag"
             );
         })
         .await;

@@ -9,6 +9,8 @@ use crate::ipc::ClientHandle;
 use crate::registry::discovery::{DiscoveryScope, PendingRediscovery};
 use halod_shared::types::DiscoveryStatus;
 
+mod config_repository;
+mod device_registry;
 mod persistence;
 mod workers;
 
@@ -18,25 +20,19 @@ pub use crate::lcd::LcdEngineState;
 pub use crate::lighting::LightingState;
 pub use crate::profiles::FocusState;
 pub use crate::registry::{HidTracking, HidTrackingEntry};
-pub use crate::run_loop::EngineRunConfig;
+#[cfg(test)]
+use crate::run_loop::EngineRunConfig;
+pub use config_repository::ConfigRepository;
+pub use device_registry::DeviceRegistry;
 pub use persistence::Persistence;
 pub use workers::{shutdown, start_config_save_worker, start_persist_worker};
 
 pub struct AppState {
     // --- Cross-cutting spine (used by nearly every domain) ---
-    pub config: RwLock<Config>,
-    /// Device registry. `RwLock` because every engine tick, serializer pass, and
+    pub config: ConfigRepository,
+    /// Device registry. `RwLock` because every engine tick, topic-production pass, and
     /// `find_device_by_id` is a reader; only discovery/removal takes the write lock.
-    pub devices: RwLock<Vec<Arc<dyn crate::drivers::Device>>>,
-    /// Device ids currently going through asynchronous initialization. Several
-    /// transport scanners run concurrently, so checking only `devices` leaves
-    /// a window where the same physical device can be initialized twice.
-    pub device_registrations: Mutex<std::collections::HashSet<String>>,
-    /// Dynamically discovered child ids owned by each controller. Stable child
-    /// ids need not share their root's prefix, so prefix matching alone cannot
-    /// remove them during a plugin reload.
-    pub device_children:
-        Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+    pub device_registry: DeviceRegistry,
 
     // --- Domains ---
     pub discovery: Mutex<DiscoveryStatus>,
@@ -46,20 +42,18 @@ pub struct AppState {
     pub lcd: LcdEngineState,
     pub focus: FocusState,
     pub input: InputState,
-    pub persistence: Persistence,
+    pub input_events: crate::input::InputEventBus,
 
     // --- Runtime / lifecycle infra ---
     /// Per-device command serialization. Commands targeting the same device
     /// acquire the same lock (run in order, never overlap); commands to
     /// different devices run concurrently, so one slow/timing-out device can't
     /// stall the whole IPC command stream.
-    pub device_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
-    /// Coalesces full IPC snapshots. Periodic ticks and command-triggered
-    /// broadcasts can otherwise serialize the same plugin devices concurrently,
-    /// filling their single-threaded worker queues ahead of interactive writes.
-    pub ipc_broadcast_lock: Mutex<()>,
+    /// Serializes atomic topic production. Concurrent changes can otherwise
+    /// snapshot the same plugin devices at once and fill their single-threaded
+    /// worker queues ahead of interactive writes.
+    pub effective_state: crate::services::effective_state::EffectiveStatePublisher,
     pub clients: Mutex<Vec<ClientHandle>>,
-    pub state_gen: std::sync::atomic::AtomicU64,
     /// Flipped to `true` once every domain's engine has been set
     pub engines_ready: watch::Sender<bool>,
     /// Notified to request a graceful daemon shutdown (e.g. an IPC `shutdown`
@@ -72,8 +66,10 @@ pub struct AppState {
     /// Elects one drain loop. Callers may merge work while another drain runs,
     /// then wait on this gate until their request has been consumed.
     pub rediscovery_runner: Mutex<()>,
-    /// Latest plugin update/on-disk status, replayed to each client on connect.
+    /// Latest plugin update/on-disk status, retained in the plugins bus record.
     pub plugin_update_status: Mutex<Vec<halod_shared::types::PluginUpdateStatus>>,
+    /// Latest repository update status, retained in the plugins bus record.
+    pub plugin_repo_update_status: Mutex<Vec<halod_shared::types::RepoUpdateStatus>>,
     /// Latest signature result observed for a fetched repository commit, keyed
     /// by slug. The SHA distinguishes a rejected remote tip from the active revision.
     pub repo_signature_status: Mutex<
@@ -98,10 +94,8 @@ pub struct AppState {
 impl AppState {
     pub fn new(cfg: Config) -> Self {
         Self {
-            config: RwLock::new(cfg),
-            devices: RwLock::new(Vec::new()),
-            device_registrations: Mutex::new(std::collections::HashSet::new()),
-            device_children: Mutex::new(std::collections::HashMap::new()),
+            config: ConfigRepository::new(cfg),
+            device_registry: DeviceRegistry::default(),
             discovery: Mutex::new(DiscoveryStatus::default()),
             hid: HidTracking::new(),
             lighting: LightingState::default(),
@@ -109,17 +103,16 @@ impl AppState {
             lcd: LcdEngineState::new(),
             focus: FocusState::new(),
             input: InputState::new(),
-            persistence: Persistence::new(),
-            device_locks: Mutex::new(std::collections::HashMap::new()),
-            ipc_broadcast_lock: Mutex::new(()),
+            input_events: crate::input::InputEventBus::new(),
+            effective_state: crate::services::effective_state::EffectiveStatePublisher::default(),
             clients: Mutex::new(Vec::new()),
-            state_gen: std::sync::atomic::AtomicU64::new(0),
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
             discovery_scope: RwLock::new(DiscoveryScope::Clean),
             pending_rediscovery: Mutex::new(PendingRediscovery::Clean),
             rediscovery_runner: Mutex::new(()),
             plugin_update_status: Mutex::new(Vec::new()),
+            plugin_repo_update_status: Mutex::new(Vec::new()),
             repo_signature_status: Mutex::new(std::collections::HashMap::new()),
             repo_compatibility_status: Mutex::new(std::collections::HashMap::new()),
             registry: crate::plugin::Registry::default(),
@@ -134,21 +127,13 @@ impl AppState {
     /// the duration of a device-scoped command so concurrent commands to the
     /// same device don't interleave; different devices get different locks.
     pub async fn device_lock(&self, id: &str) -> Arc<Mutex<()>> {
-        Arc::clone(
-            self.device_locks
-                .lock()
-                .await
-                .entry(id.to_string())
-                .or_default(),
-        )
+        self.device_registry.command_lock(id).await
     }
 
     /// Signal that the config is dirty. The save worker debounces and snapshots
     /// `self.config` once when the window fires, so callers need not clone.
     pub fn request_config_save(&self) {
-        self.persistence.save_tx.send_modify(|version| {
-            *version = version.wrapping_add(1);
-        });
+        self.config.request_save();
     }
 
     /// Override the secret store (e.g. with `crate::secrets::open_secret_store()`
@@ -158,13 +143,14 @@ impl AppState {
         self
     }
 
-    /// Push a full state snapshot to all connected GUI clients.
-    ///
-    /// Background tasks inside driver modules (e.g. notification watchers, DPI
-    /// pollers) call this instead of importing `crate::ipc` directly, keeping the
-    /// IPC layer out of the driver layer.
-    pub async fn broadcast_state(self: &Arc<Self>) {
-        crate::ipc::broadcast_state(self).await;
+    /// Commit the retained bus records affected by a completed semantic change.
+    /// The dependency graph lives in `EffectiveStatePublisher`; callers describe
+    /// what happened and do not select wire topics themselves.
+    pub(crate) async fn record_change(
+        self: &Arc<Self>,
+        change: crate::services::effective_state::Change,
+    ) {
+        self.effective_state.record(self, change).await;
     }
 
     pub async fn set_discovery_scope(&self, scope: DiscoveryScope) {
@@ -201,6 +187,42 @@ mod tests {
         AppState::new(Config::default())
     }
 
+    #[test]
+    fn retained_record_commits_are_scoped_to_usecases() {
+        fn visit(path: &std::path::Path, violations: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(path).expect("read source directory") {
+                let path = entry.expect("read source entry").path();
+                if path.is_dir() {
+                    visit(&path, violations);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs")
+                    || path.ends_with("state/mod.rs")
+                {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read Rust source");
+                if source.contains("record_change(")
+                    && !path
+                        .components()
+                        .any(|component| component.as_os_str() == "usecases")
+                {
+                    violations.push(path);
+                }
+            }
+        }
+
+        let mut violations = Vec::new();
+        visit(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut violations,
+        );
+        assert!(
+            violations.is_empty(),
+            "retained records may only be committed by use cases: {violations:?}"
+        );
+    }
+
     #[tokio::test]
     async fn sensor_bus_collects_sensors_from_all_devices() {
         let app = make_test_app();
@@ -228,16 +250,16 @@ mod tests {
                 },
             ]),
         );
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev1 as std::sync::Arc<dyn crate::drivers::Device>);
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev2 as std::sync::Arc<dyn crate::drivers::Device>);
 
-        app.refresh_sensor_bus().await;
+        crate::registry::usecases::sensors::observe(&app).await;
         let snapshot = app.data_bus.sensors();
         assert_eq!(snapshot.len(), 2);
         assert_eq!(snapshot.get("temp1").unwrap().value, 45.5);
@@ -269,12 +291,12 @@ mod tests {
                     visibility: halod_shared::types::VisibilityState::Visible,
                 }]),
         );
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev as std::sync::Arc<dyn crate::drivers::Device>);
 
-        app.refresh_sensor_bus().await;
+        crate::registry::usecases::sensors::observe(&app).await;
         let snapshot = app.data_bus.sensors();
         assert!(snapshot.is_empty());
     }
@@ -296,12 +318,12 @@ mod tests {
                 },
             ]),
         );
-        app.devices.write().await.push(device.clone());
-        app.refresh_sensor_bus().await;
+        app.device_registry.write().await.push(device.clone());
+        crate::registry::usecases::sensors::observe(&app).await;
         assert!(app.data_bus.sensors().contains_key("temp1"));
 
         device.live.store(false, Ordering::SeqCst);
-        app.refresh_sensor_bus().await;
+        crate::registry::usecases::sensors::observe(&app).await;
         assert!(app.data_bus.sensors().is_empty());
         assert_eq!(
             app.data_bus
@@ -315,12 +337,12 @@ mod tests {
     async fn sensor_bus_skips_devices_without_sensor_capability() {
         let app = make_test_app();
         let dev = std::sync::Arc::new(crate::test_support::MockDevice::new("no_sensor").with_rgb());
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev as std::sync::Arc<dyn crate::drivers::Device>);
 
-        app.refresh_sensor_bus().await;
+        crate::registry::usecases::sensors::observe(&app).await;
         let snapshot = app.data_bus.sensors();
         assert!(snapshot.is_empty());
     }
@@ -330,12 +352,12 @@ mod tests {
         let app = make_test_app();
         let dev =
             std::sync::Arc::new(crate::test_support::MockDevice::new("fan0").with_fan_rpm(900));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev as std::sync::Arc<dyn crate::drivers::Device>);
 
-        app.refresh_sensor_bus().await;
+        crate::registry::usecases::sensors::observe(&app).await;
         let snapshot = app.data_bus.sensors();
         assert_eq!(
             snapshot.get("cooling_fan0_default_rpm").map(|s| s.value),
@@ -352,15 +374,15 @@ mod tests {
         let hidden_dev = std::sync::Arc::new(crate::test_support::MockDevice::new("hidden_dev"));
         let unknown_dev = std::sync::Arc::new(crate::test_support::MockDevice::new("unknown_dev"));
 
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(visible_dev.clone() as std::sync::Arc<dyn crate::drivers::Device>);
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(hidden_dev.clone() as std::sync::Arc<dyn crate::drivers::Device>);
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(unknown_dev.clone() as std::sync::Arc<dyn crate::drivers::Device>);

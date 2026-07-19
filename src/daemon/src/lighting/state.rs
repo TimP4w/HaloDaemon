@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::sync::{Arc, OnceLock};
-use tokio::sync::{watch, RwLock};
+use tokio::sync::RwLock;
 
 use halod_shared::types::{
     finite_or, CanvasState, EffectDef, LightingOverviewState as WireLightingState,
@@ -9,7 +9,6 @@ use halod_shared::types::{
 
 use crate::config::{Config, PlacedZone};
 use crate::lighting::rgb_engine::RgbEngine;
-use crate::run_loop::EngineRunConfig;
 
 fn sanitize_zone(mut p: PlacedZone) -> PlacedZone {
     p.sanitize();
@@ -18,7 +17,6 @@ fn sanitize_zone(mut p: PlacedZone) -> PlacedZone {
 
 struct Engine {
     handle: Arc<RgbEngine>,
-    cfg_tx: watch::Sender<EngineRunConfig>,
 }
 
 /// Cached custom Designer effects, refreshed from disk after save/delete.
@@ -63,12 +61,8 @@ impl LightingState {
         self.engine.get().map(|e| &e.handle)
     }
 
-    pub fn cfg_tx(&self) -> Option<&watch::Sender<EngineRunConfig>> {
-        self.engine.get().map(|e| &e.cfg_tx)
-    }
-
-    pub fn set_engine(&self, handle: Arc<RgbEngine>, cfg_tx: watch::Sender<EngineRunConfig>) {
-        let _ = self.engine.set(Engine { handle, cfg_tx });
+    pub fn set_engine(&self, handle: Arc<RgbEngine>) {
+        let _ = self.engine.set(Engine { handle });
     }
 
     pub async fn snapshot(

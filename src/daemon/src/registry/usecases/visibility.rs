@@ -2,7 +2,6 @@
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
-use crate::ipc::{broadcast_delta, Domain};
 use crate::profiles::device_state::persist_device_state;
 use crate::registry::config::ensure_record;
 use crate::state::AppState;
@@ -14,7 +13,7 @@ pub async fn set_device_visibility(
     app: Arc<AppState>,
 ) -> Result<()> {
     let device = {
-        let devices = app.devices.read().await;
+        let devices = app.device_registry.read().await;
         devices.iter().find(|d| d.id() == device_id).cloned()
     };
 
@@ -60,12 +59,16 @@ pub async fn set_device_visibility(
     let enabling_from_disabled =
         new_state == VisibilityState::Visible && prev_state == Some(VisibilityState::Disabled);
     if enabling_from_disabled {
-        app.devices.write().await.retain(|d| d.id() != device_id);
+        app.device_registry
+            .write()
+            .await
+            .retain(|d| d.id() != device_id);
         crate::plugin::usecases::plugins::reconcile_full(&app).await;
         return Ok(());
     }
 
-    broadcast_delta(&app, &[Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Device(device_id))
+        .await;
     Ok(())
 }
 
@@ -74,7 +77,8 @@ pub async fn set_sensor_visibility(
     state: VisibilityState,
     app: Arc<AppState>,
 ) -> Result<()> {
-    app.data_bus
+    let owner = app
+        .data_bus
         .sensor_owner(&sensor_id)
         .ok_or_else(|| anyhow!("sensor not found: {sensor_id}"))?;
 
@@ -89,7 +93,8 @@ pub async fn set_sensor_visibility(
         app.request_config_save();
     }
 
-    broadcast_delta(&app, &[Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Device(owner))
+        .await;
     Ok(())
 }
 
@@ -106,7 +111,7 @@ mod tests {
     }
 
     fn push_device(app: &Arc<AppState>, device: Arc<dyn crate::drivers::Device>) {
-        app.devices.try_write().unwrap().push(device);
+        app.device_registry.try_write().unwrap().push(device);
     }
 
     #[tokio::test]
@@ -205,7 +210,7 @@ mod tests {
         let app = make_app();
         let device = Arc::new(MockDevice::new("fan0").with_fan());
         push_device(&app, device.clone());
-        app.refresh_sensor_bus().await;
+        crate::registry::usecases::sensors::observe(&app).await;
 
         set_sensor_visibility(
             "cooling_fan0_default_duty".into(),
@@ -245,7 +250,7 @@ mod tests {
             },
         ]));
         push_device(&app, device);
-        app.refresh_sensor_bus().await;
+        crate::registry::usecases::sensors::observe(&app).await;
 
         set_sensor_visibility("temp1".into(), VisibilityState::Hidden, app.clone())
             .await
@@ -272,7 +277,7 @@ mod tests {
             },
         ]));
         push_device(&app, device);
-        app.refresh_sensor_bus().await;
+        crate::registry::usecases::sensors::observe(&app).await;
 
         set_sensor_visibility("temp1".into(), VisibilityState::Hidden, app.clone())
             .await

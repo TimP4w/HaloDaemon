@@ -13,7 +13,7 @@ use halod_shared::types::{
 use halod_shared::zone_transform::ring_slice;
 use std::time::Duration;
 use tiny_skia::Pixmap;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::Mutex;
 
 use super::canvas::{self, FrameSource, Sampler};
 use super::color::linear_to_led;
@@ -21,7 +21,7 @@ use super::direct::{self, DirectLedEffect};
 use crate::{
     config::{CanvasState, PlacedZone},
     drivers::Device,
-    state::{AppState, EngineRunConfig},
+    state::AppState,
 };
 
 const CANVAS_W: u32 = 400;
@@ -272,7 +272,7 @@ impl RgbEngine {
 
     pub async fn start(
         self: Arc<Self>,
-        cfg_rx: watch::Receiver<EngineRunConfig>,
+        cfg_rx: crate::run_loop::EngineConfigReceiver,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let engine_start = Instant::now();
@@ -283,10 +283,10 @@ impl RgbEngine {
 
             log::info!("Starting RGB engine");
             loop {
-                let cfg = cfg_rx.borrow_and_update().clone();
+                let cfg = cfg_rx.current();
                 if !cfg.enabled {
                     log::info!("[RGB] Engine disabled, waiting for re-enable");
-                    if cfg_rx.changed().await.is_err() {
+                    if !cfg_rx.changed().await {
                         break;
                     }
                     continue;
@@ -655,17 +655,27 @@ impl RgbEngine {
     }
 
     async fn sync_tick_state(&self) -> (CanvasState, RgbDeviceMap, Vec<DirectDevice>) {
-        let (sample_radius, effects, default_effect) = {
-            let config = self.app_state.config.read().await;
-            let cs = config.effective_canvas_state_ref();
-            (
-                cs.sample_radius,
-                cs.effects.clone(),
-                cs.default_effect.clone(),
-            )
-        };
+        let (sample_radius, effects, default_effect) = self
+            .app_state
+            .data_bus
+            .state_snapshot(&[halod_shared::bus::topic::LIGHTING.into()])
+            .records
+            .into_iter()
+            .find_map(|record| match record.value {
+                halod_shared::bus::BusValue::Lighting(state) => Some((
+                    state.canvas.sample_radius,
+                    state.canvas.effects,
+                    state.canvas.default_effect,
+                )),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                log::warn!("effective lighting topic unavailable; using an empty canvas state");
+                let state = CanvasState::default();
+                (state.sample_radius, state.effects, state.default_effect)
+            });
 
-        let devices_guard = self.app_state.devices.read().await;
+        let devices_guard = self.app_state.device_registry.read().await;
         // Skip offline devices so the engine never queues a frame for a dead socket.
         let placed_zones: Vec<PlacedZone> = devices_guard
             .iter()
@@ -716,7 +726,7 @@ impl RgbEngine {
             .map(|z| z.device_id.clone())
             .collect();
 
-        let devices = self.app_state.devices.read().await.clone();
+        let devices = self.app_state.device_registry.read().await.clone();
         let mut intent = self.engine_mode_intent.lock().await;
         for device in &devices {
             if device.active_state() == VisibilityState::Disabled {
@@ -751,7 +761,7 @@ impl RgbEngine {
                             if should_engine { "Engine" } else { "Static" }
                         );
                     }
-                    self.app_state.persistence.notify.notify_one();
+                    self.app_state.config.persistence().notify.notify_one();
                 }
             }
 
@@ -1255,7 +1265,7 @@ mod tests {
         let zone = make_zone("dev0", "ring");
         let dev: Arc<dyn Device> =
             MockRgbDevice::new_with_zones("dev0", "ring", 3, false, vec![zone.clone()]);
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
 
         let engine = RgbEngine::new(app).await;
         let (canvas_state, rgb_devices, direct) = engine.sync_tick_state().await;
@@ -1286,7 +1296,7 @@ mod tests {
         });
         direct_dev.live.store(false, Ordering::SeqCst);
         {
-            let mut devices = app.devices.write().await;
+            let mut devices = app.device_registry.write().await;
             devices.push(canvas as Arc<dyn Device>);
             devices.push(direct_dev as Arc<dyn Device>);
         }
@@ -1338,7 +1348,10 @@ mod tests {
             id: "breathing".into(),
             params: HashMap::new(),
         });
-        app.devices.write().await.push(dev as Arc<dyn Device>);
+        app.device_registry
+            .write()
+            .await
+            .push(dev as Arc<dyn Device>);
 
         let engine = RgbEngine::new(app).await;
         let (_, _, direct) = engine.sync_tick_state().await;
@@ -1355,7 +1368,7 @@ mod tests {
             params: HashMap::new(),
         });
         dev.set_active_state(VisibilityState::Disabled);
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -1384,7 +1397,7 @@ mod tests {
             id: "breathing".into(),
             params: HashMap::new(),
         });
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -1467,7 +1480,7 @@ mod tests {
                 visibility: halod_shared::types::VisibilityState::Visible,
             },
         ]);
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::new(sensor_dev) as Arc<dyn Device>);
@@ -1479,12 +1492,12 @@ mod tests {
             id: "engine_sensor_fx:probe".to_string(),
             params,
         });
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
 
-        app.refresh_sensor_bus().await;
+        crate::registry::usecases::sensors::observe(&app).await;
         let engine = RgbEngine::new(app).await;
         engine.tick(0.1, 1.0, 0).await;
         engine.drain_writes().await;
@@ -1506,7 +1519,7 @@ mod tests {
             id: "sensor_gradient".into(),
             params: HashMap::new(),
         });
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -1534,7 +1547,7 @@ mod tests {
             id: "breathing".into(),
             params: HashMap::new(),
         });
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -1562,7 +1575,7 @@ mod tests {
     async fn reconcile_engine_mode_reverts_zoneless_engine_device() {
         let app = make_app();
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -1581,7 +1594,7 @@ mod tests {
     async fn reconcile_does_not_blank_device_that_left_canvas_for_a_direct_effect() {
         let app = make_app();
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -1607,7 +1620,7 @@ mod tests {
     async fn reconcile_engine_mode_does_not_loop_when_revert_write_fails() {
         let app = make_app();
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", true);
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -1627,7 +1640,7 @@ mod tests {
         let app = make_app();
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", true);
         dev.skip_record_on_fail.store(true, Ordering::SeqCst);
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -1759,7 +1772,7 @@ mod tests {
         let zone = make_zone("dev0", "ring");
         let dev: Arc<dyn Device> =
             MockRgbDevice::new_with_zones("dev0", "ring", 3, false, vec![zone.clone()]);
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
 
         let engine = RgbEngine::new(app).await;
         assert!(engine.tick(0.0, 0.0, 0).await);
@@ -1773,7 +1786,10 @@ mod tests {
             id: "breathing".into(),
             params: HashMap::new(),
         });
-        app.devices.write().await.push(dev as Arc<dyn Device>);
+        app.device_registry
+            .write()
+            .await
+            .push(dev as Arc<dyn Device>);
 
         let engine = RgbEngine::new(app).await;
         assert!(engine.tick(0.0, 0.0, 0).await);
@@ -1831,16 +1847,15 @@ mod tests {
     }
 
     async fn set_default_effect(app: &Arc<AppState>, def: EffectDef) {
-        let mut cfg = app.config.write().await;
-        let profile = cfg
-            .profiles
-            .get_mut(halod_shared::types::DEFAULT_PROFILE_NAME)
+        crate::lighting::usecases::canvas::upsert_effect("inst".to_string(), def, Arc::clone(app))
+            .await
             .unwrap();
-        profile.lighting.canvas = Some(CanvasState {
-            default_effect: Some("inst".to_string()),
-            effects: [("inst".to_string(), def)].into_iter().collect(),
-            ..Default::default()
-        });
+        crate::lighting::usecases::canvas::set_default_effect(
+            Some("inst".to_string()),
+            Arc::clone(app),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1849,7 +1864,7 @@ mod tests {
         let _tmp = load_test_effect_plugin(&app);
         let zone = make_zone("dev0", "ring");
         let dev = MockRgbDevice::new_with_zones("dev0", "ring", 2, false, vec![zone]);
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -1890,7 +1905,7 @@ mod tests {
             id: "engine_test_fx:ramp".to_string(),
             params: HashMap::new(),
         });
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);

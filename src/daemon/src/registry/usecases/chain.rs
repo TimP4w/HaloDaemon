@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! IPC use cases for chainable ARGB channels. Each handler forwards to the
-//! device's shared [`crate::drivers::chain::LightingDivisionHost`], then persists and broadcasts.
+//! device's shared [`crate::drivers::chain::LightingDivisionHost`], then persists and commits the affected topics.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::drivers::chain::LightingDivisionHost;
 use crate::drivers::{ChainLinkSpec, Device};
-use crate::ipc;
 use crate::state::AppState;
 use halod_shared::types::ZoneTopology;
 
@@ -51,11 +50,12 @@ pub async fn lighting_add_segment(
     {
         let chain = require_chain(&device)?;
         let (_child_id, child_device) = chain.add_link(&channel_id, spec).await?;
-        app.devices.write().await.push(child_device);
+        app.device_registry.write().await.push(child_device);
     }
 
     persist_layout(&app, device.as_ref()).await?;
-    ipc::broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::LightingTopology)
+        .await;
     Ok(())
 }
 
@@ -70,11 +70,15 @@ pub async fn lighting_remove_segment(
     {
         let chain = require_chain(&device)?;
         let removed_id = chain.remove_link(&channel_id, &child_device_id).await?;
-        app.devices.write().await.retain(|d| d.id() != removed_id);
+        app.device_registry
+            .write()
+            .await
+            .retain(|d| d.id() != removed_id);
     }
 
     persist_layout(&app, device.as_ref()).await?;
-    ipc::broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::LightingTopology)
+        .await;
     Ok(())
 }
 
@@ -93,7 +97,8 @@ pub async fn lighting_reorder_segment(
     }
 
     persist_layout(&app, device.as_ref()).await?;
-    ipc::broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::LightingDevice(id))
+        .await;
     Ok(())
 }
 
@@ -128,7 +133,7 @@ mod tests {
 
     fn make_app_with(dev: Arc<dyn Device>) -> Arc<AppState> {
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices.try_write().unwrap().push(dev);
+        app.device_registry.try_write().unwrap().push(dev);
         app
     }
 

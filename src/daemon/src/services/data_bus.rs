@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Bounded, namespaced latest-value snapshots shared by plugin runtimes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -9,6 +9,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, ensure, Result};
 use mlua::{Lua, Table, Value};
 
+use halod_shared::bus::{
+    matches_prefixes, BusEvent, BusEventPayload, BusEventReplay, BusRecord, BusRecordStatus,
+    BusSnapshot, BusTransaction, BusValue, EVENT_RING_CAPACITY,
+};
 use halod_shared::types::{Sensor, SensorType, SensorUnit, VisibilityState};
 
 pub const MAX_PLUGIN_RECORD_BYTES: usize = 32 * 1024;
@@ -267,12 +271,23 @@ struct Record {
 #[derive(Default)]
 struct Inner {
     records: HashMap<String, Record>,
+    state_records: HashMap<String, StateRecord>,
+    events: VecDeque<BusEvent>,
+    revision: u64,
+    next_event_id: u64,
+}
+
+struct StateRecord {
+    owner: String,
+    value: BusValue,
     revision: u64,
 }
 
 pub struct DataBus {
     inner: Arc<Mutex<Inner>>,
     changes: tokio::sync::broadcast::Sender<DataChange>,
+    transactions: tokio::sync::broadcast::Sender<BusTransaction>,
+    events: tokio::sync::broadcast::Sender<BusEvent>,
 }
 
 #[derive(Clone, Debug)]
@@ -285,15 +300,136 @@ pub struct DataChange {
 impl Default for DataBus {
     fn default() -> Self {
         let (changes, _) = tokio::sync::broadcast::channel(256);
+        let (transactions, _) = tokio::sync::broadcast::channel(256);
+        let (events, _) = tokio::sync::broadcast::channel(EVENT_RING_CAPACITY);
         Self {
             inner: Arc::new(Mutex::new(Inner::default())),
             changes,
+            transactions,
+            events,
         }
     }
 }
 
 impl DataBus {
-    pub fn replace_host_sensors(&self, mut sensors: Vec<(String, Sensor)>) {
+    pub fn commit_state(
+        &self,
+        owner: &str,
+        upserts: Vec<(String, BusValue)>,
+        tombstones: Vec<String>,
+    ) -> Result<BusTransaction> {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        for (key, _) in &upserts {
+            ensure!(!key.is_empty(), "state topic is empty");
+            if let Some(record) = inner.state_records.get(key) {
+                ensure!(
+                    record.owner == owner,
+                    "state topic '{key}' is owned by another producer"
+                );
+            }
+        }
+        for key in &tombstones {
+            if let Some(record) = inner.state_records.get(key) {
+                ensure!(
+                    record.owner == owner,
+                    "state topic '{key}' is owned by another producer"
+                );
+            }
+        }
+        inner.revision = inner.revision.wrapping_add(1).max(1);
+        let revision = inner.revision;
+        let mut wire_upserts = Vec::with_capacity(upserts.len());
+        for (key, value) in upserts {
+            inner.state_records.insert(
+                key.clone(),
+                StateRecord {
+                    owner: owner.to_owned(),
+                    value: value.clone(),
+                    revision,
+                },
+            );
+            wire_upserts.push(BusRecord {
+                key,
+                value,
+                status: BusRecordStatus::Fresh,
+                revision,
+            });
+        }
+        for key in &tombstones {
+            inner.state_records.remove(key);
+        }
+        let transaction = BusTransaction {
+            revision,
+            upserts: wire_upserts,
+            tombstones,
+        };
+        drop(inner);
+        let _ = self.transactions.send(transaction.clone());
+        Ok(transaction)
+    }
+
+    pub fn state_snapshot(&self, prefixes: &[String]) -> BusSnapshot {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut records: Vec<_> = inner
+            .state_records
+            .iter()
+            .filter(|(key, _)| matches_prefixes(key, prefixes))
+            .map(|(key, record)| BusRecord {
+                key: key.clone(),
+                value: record.value.clone(),
+                status: BusRecordStatus::Fresh,
+                revision: record.revision,
+            })
+            .collect();
+        records.sort_by(|left, right| left.key.cmp(&right.key));
+        BusSnapshot {
+            revision: inner.revision,
+            records,
+        }
+    }
+
+    pub fn publish_event(&self, payload: BusEventPayload) -> BusEvent {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        inner.next_event_id = inner.next_event_id.wrapping_add(1).max(1);
+        let event = BusEvent {
+            id: inner.next_event_id,
+            payload,
+        };
+        inner.events.push_back(event.clone());
+        if inner.events.len() > EVENT_RING_CAPACITY {
+            inner.events.pop_front();
+        }
+        drop(inner);
+        let _ = self.events.send(event.clone());
+        event
+    }
+
+    pub fn replay_events(&self, last_event_id: Option<u64>) -> BusEventReplay {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        BusEventReplay {
+            oldest_available_id: inner.events.front().map(|event| event.id),
+            events: inner
+                .events
+                .iter()
+                .filter(|event| last_event_id.is_none_or(|id| event.id > id))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    pub fn subscribe_transactions(&self) -> tokio::sync::broadcast::Receiver<BusTransaction> {
+        self.transactions.subscribe()
+    }
+
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<BusEvent> {
+        self.events.subscribe()
+    }
+
+    pub fn replace_host_sensors(
+        &self,
+        mut sensors: Vec<(String, Sensor)>,
+    ) -> std::collections::HashSet<String> {
+        let mut changed_devices = std::collections::HashSet::new();
         sensors.sort_by(|(left_owner, left), (right_owner, right)| {
             left.id
                 .cmp(&right.id)
@@ -309,6 +445,11 @@ impl DataBus {
                 && key != "host.sensors.catalog"
                 && !expected.contains(&key)
             {
+                if let Some(DataValue::Map(old)) = self.read(&key).value {
+                    if let Some(device_id) = data_string(&old, "device_id") {
+                        changed_devices.insert(device_id.to_owned());
+                    }
+                }
                 self.remove("host", &key);
             }
         }
@@ -333,7 +474,11 @@ impl DataBus {
                 "visibility".into(),
                 DataValue::String(visibility_name(&sensor.visibility).into()),
             );
-            let _ = self.publish("host", &key, DataValue::Map(value), policy);
+            let next = DataValue::Map(value);
+            if self.read(&key).value.as_ref() != Some(&next) {
+                changed_devices.insert(device_id.clone());
+            }
+            let _ = self.publish("host", &key, next, policy);
 
             let mut item = BTreeMap::new();
             item.insert("device_id".into(), DataValue::String(device_id));
@@ -347,6 +492,7 @@ impl DataBus {
             DataValue::Array(catalog),
             policy,
         );
+        changed_devices
     }
 
     pub fn sensors(&self) -> HashMap<String, Sensor> {
@@ -1146,5 +1292,76 @@ mod tests {
             .unwrap();
         assert!(change.revision > initial_revision);
         assert_eq!(bus.read("telemetry.current").status, SnapshotStatus::Stale);
+    }
+
+    #[test]
+    fn state_transaction_is_atomic_and_filters_snapshots() {
+        let bus = DataBus::default();
+        let transaction = bus
+            .commit_state(
+                "config",
+                vec![
+                    (
+                        halod_shared::bus::topic::GUI.into(),
+                        BusValue::Gui(Default::default()),
+                    ),
+                    (
+                        halod_shared::bus::topic::CONFIG_DIR.into(),
+                        BusValue::ConfigDir("/tmp/halod".into()),
+                    ),
+                ],
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(transaction.upserts.len(), 2);
+        assert!(transaction
+            .upserts
+            .iter()
+            .all(|record| record.revision == transaction.revision));
+        let snapshot = bus.state_snapshot(&["config.".into()]);
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].key, halod_shared::bus::topic::GUI);
+    }
+
+    #[test]
+    fn state_transaction_enforces_ownership_and_tombstones() {
+        let bus = DataBus::default();
+        let key = halod_shared::bus::topic::CONFIG_DIR.to_owned();
+        bus.commit_state(
+            "host",
+            vec![(key.clone(), BusValue::ConfigDir("one".into()))],
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(bus
+            .commit_state(
+                "other",
+                vec![(key.clone(), BusValue::ConfigDir("two".into()))],
+                Vec::new(),
+            )
+            .is_err());
+        bus.commit_state("host", Vec::new(), vec![key]).unwrap();
+        assert!(bus.state_snapshot(&[]).records.is_empty());
+    }
+
+    #[test]
+    fn event_ring_is_bounded_and_replays_after_cursor() {
+        let bus = DataBus::default();
+        for index in 0..EVENT_RING_CAPACITY + 3 {
+            bus.publish_event(BusEventPayload::Notification(
+                halod_shared::types::Notification {
+                    code: halod_shared::types::NotificationCode::Generic {
+                        message: index.to_string(),
+                    },
+                    show_native: false,
+                    timestamp_ms: index as u64,
+                },
+            ));
+        }
+        let replay = bus.replay_events(None);
+        assert_eq!(replay.events.len(), EVENT_RING_CAPACITY);
+        let cursor = replay.events[EVENT_RING_CAPACITY - 2].id;
+        let tail = bus.replay_events(Some(cursor));
+        assert_eq!(tail.events.len(), 1);
     }
 }

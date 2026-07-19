@@ -2,18 +2,13 @@
 //! User-visible notifications.
 //!
 //! Two responsibilities, intentionally bundled in one helper:
-//!   1. Log the event at the matching `log::` level (so it still lands in the
-//!      log buffer the UI streams via state broadcasts).
-//!   2. Push a `{"type":"notification", ...}` JSON frame to every connected
-//!      client so the UI can render a toast.
+//!   1. Log the event at the matching `log::` level.
+//!   2. Publish a retained session event for native delivery and GUI toasts.
 //!
-//! Notifications are not buffered daemon-side. A client that connects after a
-//! notification fires will not see it — historical context lives in
-//! the daemon log file.
+//! The bounded bus event ring lets a reconnecting GUI replay notifications
+//! emitted while it was closed or resident only in the tray.
 
 use std::sync::Arc;
-
-use serde_json::json;
 
 use crate::state::AppState;
 use crate::util::time::now_ms;
@@ -33,39 +28,17 @@ pub async fn send(app: &Arc<AppState>, code: NotificationCode) {
         show_native: true,
         timestamp_ms: now_ms(),
     };
-    let msg = json!({ "type": "notification", "data": n });
-    let clients = app.clients.lock().await;
-    for client in clients.iter() {
-        client.send_json(&msg);
-    }
+    app.data_bus
+        .publish_event(halod_shared::bus::BusEventPayload::Notification(n));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
-    use tokio::sync::mpsc;
-
-    async fn register_test_client(app: &Arc<AppState>) -> mpsc::Receiver<std::sync::Arc<Vec<u8>>> {
-        let (tx, rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(16);
-        app.clients.lock().await.push(crate::ipc::ClientHandle {
-            id: 0,
-            tx,
-            subs: std::sync::Arc::default(),
-        });
-        rx
-    }
-
-    fn decode_json_frame(frame: &[u8]) -> serde_json::Value {
-        // Frame layout: 1 byte type + 4 byte BE length + payload.
-        assert!(frame.len() >= 5);
-        serde_json::from_slice(&frame[5..]).expect("valid json payload")
-    }
-
     #[tokio::test]
-    async fn send_broadcasts_flattened_code_frame() {
+    async fn send_publishes_typed_replayable_event() {
         let app = Arc::new(AppState::new(Config::default()));
-        let mut rx = register_test_client(&app).await;
 
         send(
             &app,
@@ -76,16 +49,16 @@ mod tests {
         )
         .await;
 
-        let frame = rx.try_recv().expect("frame was pushed");
-        let msg = decode_json_frame(&frame);
-        assert_eq!(msg["type"], "notification");
-        // Code tag + params flatten into `data`; no human-readable prose crosses.
-        assert_eq!(msg["data"]["code"], "device_init_failed");
-        assert_eq!(msg["data"]["device"], "Kraken");
-        assert_eq!(msg["data"]["detail"], "thing exploded");
-        assert!(msg["data"]["timestamp_ms"].as_u64().is_some());
-        assert!(msg["data"]["title"].is_null());
-        assert!(msg["data"]["message"].is_null());
+        let replay = app.data_bus.replay_events(None);
+        let event = replay.events.last().expect("event was retained");
+        let halod_shared::bus::BusEventPayload::Notification(notification) = &event.payload;
+        assert!(notification.show_native);
+        assert!(notification.timestamp_ms > 0);
+        assert!(matches!(
+            &notification.code,
+            NotificationCode::DeviceInitFailed { device, detail }
+                if device == "Kraken" && detail == "thing exploded"
+        ));
     }
 
     #[tokio::test]

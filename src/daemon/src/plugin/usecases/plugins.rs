@@ -23,7 +23,7 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
     }
     app.request_config_save();
     let device_ids = {
-        let devices = app.devices.read().await;
+        let devices = app.device_registry.read().await;
         devices
             .iter()
             .filter(|device| {
@@ -287,7 +287,8 @@ pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<Strin
         );
     }
     if plugin_ids.is_empty() {
-        crate::ipc::broadcast_state(&app).await;
+        app.record_change(crate::services::effective_state::Change::PluginTopology)
+            .await;
     } else {
         reconcile_plugins(&app, &plugin_ids).await;
     }
@@ -386,7 +387,7 @@ pub async fn confirm_enable_batch(
 /// `plugins` (plus its `_ctrl_` children); leaves every other device untouched.
 async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
     let owned_ids: Vec<String> = {
-        let devices = app.devices.read().await;
+        let devices = app.device_registry.read().await;
         devices
             .iter()
             .filter(|d| {
@@ -493,7 +494,8 @@ async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[String]) {
     app.set_discovery_scope(DiscoveryScope::Clean).await;
     crate::registry::seed_known_devices(Arc::clone(app)).await;
     crate::registry::usecases::chain::restore_saved_chains(Arc::clone(app)).await;
-    crate::ipc::broadcast_state(app).await;
+    app.record_change(crate::services::effective_state::Change::PluginTopology)
+        .await;
 }
 
 /// Sanitize a file name or repo URL into a safe plugin id / directory name (lower-cased `[a-z0-9-]`, path-traversal-proof).
@@ -574,7 +576,7 @@ mod tests {
     #[tokio::test]
     async fn set_enabled_reconciles_without_touching_unrelated_devices() {
         crate::test_support::with_tmp_config(|app| async move {
-            app.devices.write().await.push(std::sync::Arc::new(
+            app.device_registry.write().await.push(std::sync::Arc::new(
                 crate::test_support::MockDevice::new("stays-open"),
             ));
 
@@ -583,7 +585,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(
-                app.devices.read().await.len(),
+                app.device_registry.read().await.len(),
                 1,
                 "scoped reconciliation must leave unrelated devices alone"
             );
@@ -613,8 +615,8 @@ mod tests {
                 Arc::new(MockDevice::new("P-dev").with_owning_plugin_id("P"));
             let other: Arc<dyn crate::drivers::Device> =
                 Arc::new(MockDevice::new("Q-dev").with_owning_plugin_id("Q"));
-            app.devices.write().await.push(owned.clone());
-            app.devices.write().await.push(other.clone());
+            app.device_registry.write().await.push(owned.clone());
+            app.device_registry.write().await.push(other.clone());
             app.hid
                 .track("1234:5678:P".into(), HidTrackingEntry::Primary(vec![owned]))
                 .await;
@@ -657,8 +659,8 @@ mod tests {
             // Chain-accessory child: shares the parent key, no owning id of its own.
             let child: Arc<dyn crate::drivers::Device> =
                 Arc::new(MockDevice::new("nzxt-abc_acc_0_1"));
-            app.devices.write().await.push(parent.clone());
-            app.devices.write().await.push(child.clone());
+            app.device_registry.write().await.push(parent.clone());
+            app.device_registry.write().await.push(child.clone());
             app.hid
                 .track(
                     "1e71:2022:S".into(),
@@ -689,7 +691,7 @@ mod tests {
             let other_plugin = Arc::new(MockDevice::new("p2-xyz").with_owning_plugin_id("p2"));
             let native = Arc::new(MockDevice::new("native-dev"));
             {
-                let mut devices = app.devices.write().await;
+                let mut devices = app.device_registry.write().await;
                 devices.push(root.clone());
                 devices.push(child.clone());
                 devices.push(other_plugin.clone());
@@ -699,7 +701,7 @@ mod tests {
             teardown_owned_devices(&app, &["p1".to_string()]).await;
 
             let remaining: Vec<String> = app
-                .devices
+                .device_registry
                 .read()
                 .await
                 .iter()
@@ -720,11 +722,11 @@ mod tests {
         use crate::test_support::MockDevice;
         crate::test_support::with_tmp_config(|app| async move {
             let native = Arc::new(MockDevice::new("native-dev"));
-            app.devices.write().await.push(native.clone());
+            app.device_registry.write().await.push(native.clone());
 
             teardown_owned_devices(&app, &["p1".to_string()]).await;
 
-            assert_eq!(app.devices.read().await.len(), 1);
+            assert_eq!(app.device_registry.read().await.len(), 1);
             assert!(!native.closed.load(Ordering::SeqCst));
         })
         .await;

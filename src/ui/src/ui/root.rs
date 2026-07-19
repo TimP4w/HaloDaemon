@@ -10,7 +10,7 @@ use crate::domain::state::Page;
 const DEPCHECK_GRACE_SECS: f64 = 4.0;
 
 impl App {
-    pub(crate) fn accept_state(&mut self, state: halod_shared::types::AppState) {
+    pub(crate) fn accept_state(&mut self, state: crate::domain::topic_store::TopicStore) {
         crate::ui::screens::settings::apply_locale(&state.gui.language);
         self.state_cache = std::sync::Arc::new(state);
     }
@@ -82,16 +82,6 @@ impl App {
             self.plugin_assets_cache = std::sync::Arc::new(assets);
         }
         let plugin_assets = std::sync::Arc::clone(&self.plugin_assets_cache);
-        if let Some(updates) =
-            crate::runtime::ipc::take_changed(&mut self.ui.repo_updates, "repo_updates")
-        {
-            self.repo_updates_cache = updates;
-        }
-        if let Some(updates) =
-            crate::runtime::ipc::take_changed(&mut self.ui.plugin_updates, "plugin_updates")
-        {
-            self.plugin_updates_cache = updates;
-        }
         if let Some(branches) =
             crate::runtime::ipc::take_changed(&mut self.ui.repo_branches, "repo_branches")
         {
@@ -250,7 +240,7 @@ impl App {
         if !onboarding_active {
             let quarantine = crate::ui::screens::plugins::quarantine_toasts(
                 &state.plugins.plugins,
-                &self.plugin_updates_cache,
+                &state.plugins.updates,
                 &mut self.quarantine_toasted,
                 (time * 1000.0) as u64,
             );
@@ -366,7 +356,7 @@ impl App {
                     &state,
                     connected,
                     &mut self.page,
-                    &self.plugin_updates_cache,
+                    &state.plugins.updates,
                     udev_rules.as_ref(),
                 );
             });
@@ -470,8 +460,8 @@ impl App {
                             &state,
                             &self.cmd,
                             &plugin_assets,
-                            &self.repo_updates_cache,
-                            &self.plugin_updates_cache,
+                            &state.plugins.repo_updates,
+                            &state.plugins.updates,
                             &self.repo_branches_cache,
                             udev_rules.as_ref(),
                         );

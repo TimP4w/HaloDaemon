@@ -3,11 +3,12 @@
 
 use std::collections::HashMap;
 
+use crate::domain::topic_store::TopicStore;
 use egui::Vec2;
 use halod_shared::{
     commands::{DaemonCommand, EngineKind},
     effect_designer::DESIGNER_PIXMAP_EFFECT_ID,
-    types::{AppState, DeviceCapability, EffectParamValue, PlacedZone},
+    types::{DeviceCapability, EffectParamValue, PlacedZone},
 };
 
 use crate::runtime::ipc::CommandTx;
@@ -23,7 +24,7 @@ use super::{CanvasUi, DEBOUNCE};
 /// different instance — clicking one reassigns it here.
 pub(super) fn zones_assign_modal(
     ctx: &egui::Context,
-    state: &AppState,
+    state: &TopicStore,
     canvas_ui: &mut CanvasUi,
     cmd: &CommandTx,
 ) {
@@ -218,7 +219,7 @@ pub(super) fn zones_assign_modal(
 /// Grid picker for creating a new effect instance — blank effects or from saved presets.
 pub(super) fn new_instance_modal(
     ctx: &egui::Context,
-    state: &AppState,
+    state: &TopicStore,
     canvas_ui: &mut CanvasUi,
     cmd: &CommandTx,
 ) {
@@ -330,7 +331,7 @@ pub(super) fn new_instance_modal(
 /// Modal to adjust the canvas engine frame rate. Mirrors the GTK FPS control.
 pub(crate) fn fps_modal(
     ctx: &egui::Context,
-    state: &AppState,
+    state: &TopicStore,
     canvas_ui: &mut CanvasUi,
     time: f64,
 ) {

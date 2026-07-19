@@ -160,6 +160,10 @@ pub async fn set_screen_image(
     client: ClientHandle,
 ) -> Result<()> {
     let result = set_screen_image_inner(&id, data_b64, request_id, &app, &client).await;
+    app.record_change(crate::services::effective_state::Change::LcdDevice(
+        id.clone(),
+    ))
+    .await;
     finish_upload(&client, &id, result)
 }
 
@@ -243,6 +247,10 @@ pub async fn set_screen_image_from_library(
 ) -> Result<()> {
     let result =
         set_screen_image_from_library_inner(&id, filename, request_id, &app, &client).await;
+    app.record_change(crate::services::effective_state::Change::LcdDevice(
+        id.clone(),
+    ))
+    .await;
     finish_upload(&client, &id, result)
 }
 
@@ -358,6 +366,8 @@ pub async fn set_screen_rotation(
     }
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
+    app.record_change(crate::services::effective_state::Change::LcdDevice(id))
+        .await;
     Ok(())
 }
 
@@ -378,6 +388,8 @@ pub async fn set_screen_brightness(id: String, brightness: u8, app: Arc<AppState
     }
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
+    app.record_change(crate::services::effective_state::Change::LcdDevice(id))
+        .await;
     Ok(())
 }
 
@@ -398,6 +410,8 @@ pub async fn set_screen_default(id: String, app: Arc<AppState>) -> Result<()> {
     lcd.set_active_image_filename(None).await;
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
+    app.record_change(crate::services::effective_state::Change::LcdDevice(id))
+        .await;
     Ok(())
 }
 
@@ -412,6 +426,8 @@ pub async fn set_screen_raw_streaming(id: String, enabled: bool, app: Arc<AppSta
     lcd.set_raw_streaming(enabled);
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
+    app.record_change(crate::services::effective_state::Change::LcdDevice(id))
+        .await;
     Ok(())
 }
 
@@ -469,6 +485,8 @@ pub async fn set_screen_video(id: String, path: String, app: Arc<AppState>) -> R
     lcd.set_video_path(Some(canonical));
 
     persist_device_state(&app, device.as_ref()).await;
+    app.record_change(crate::services::effective_state::Change::LcdDevice(id))
+        .await;
     Ok(())
 }
 
@@ -613,7 +631,7 @@ mod tests {
         let app =
             std::sync::Arc::new(crate::state::AppState::new(crate::config::Config::default()));
         let dev = std::sync::Arc::new(crate::test_support::MockDevice::new(dev_id).with_lcd());
-        app.devices
+        app.device_registry
             .try_write()
             .unwrap()
             .push(dev.clone() as std::sync::Arc<dyn crate::drivers::Device>);
@@ -722,7 +740,7 @@ mod tests {
             std::sync::Arc::new(crate::state::AppState::new(crate::config::Config::default()));
         let dev = std::sync::Arc::new(crate::test_support::MockDevice::new("lcd_dev").with_lcd());
         let dev_ref = dev.clone();
-        app.devices
+        app.device_registry
             .try_write()
             .unwrap()
             .push(dev as std::sync::Arc<dyn crate::drivers::Device>);

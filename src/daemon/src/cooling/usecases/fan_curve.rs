@@ -35,6 +35,10 @@ pub async fn set_cooling_curve_points(
     );
     cooling.set_curve(channel_id, record);
     persist_device_state(&app, device.as_ref()).await;
+    app.record_change(crate::services::effective_state::Change::CoolingDevice(
+        device_id,
+    ))
+    .await;
     Ok(())
 }
 
@@ -82,6 +86,10 @@ pub async fn remove_cooling_curve(
     );
     cooling.clear_curve(&channel_id);
     persist_device_state(&app, device.as_ref()).await;
+    app.record_change(crate::services::effective_state::Change::CoolingDevice(
+        device_id,
+    ))
+    .await;
     Ok(())
 }
 
@@ -128,7 +136,7 @@ mod tests {
         let app = Arc::new(AppState::new(cfg));
         let device = Arc::new(MockDevice::new(id).with_fan());
         {
-            let mut devices = app.devices.try_write().unwrap();
+            let mut devices = app.device_registry.try_write().unwrap();
             devices.push(device.clone() as Arc<dyn crate::drivers::Device>);
         }
         (app, device)
@@ -158,7 +166,7 @@ mod tests {
                 .with_sensor(vec![reading.clone()]),
         );
         {
-            let mut devices = app.devices.try_write().unwrap();
+            let mut devices = app.device_registry.try_write().unwrap();
             devices.push(device.clone() as Arc<dyn crate::drivers::Device>);
         }
         app.data_bus
@@ -266,10 +274,10 @@ mod tests {
                 .with_sensor(vec![sensor("load0", halod_shared::types::SensorType::Load)]),
         );
         {
-            let mut devices = app.devices.try_write().unwrap();
+            let mut devices = app.device_registry.try_write().unwrap();
             devices.push(device.clone() as Arc<dyn crate::drivers::Device>);
         }
-        app.refresh_sensor_bus().await;
+        crate::registry::usecases::sensors::observe(&app).await;
         let err = set_cooling_curve_points(
             "fan_0".into(),
             "default".into(),

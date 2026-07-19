@@ -120,7 +120,7 @@ impl HidTracking {
 
     /// Cached set of device ids reachable over HID, derived from the
     /// tracking map. The cache may lag the map by one tick, the same
-    /// trade-off `ipc/serializer.rs` accepts elsewhere.
+    /// trade-off the effective-state projector accepts elsewhere.
     pub async fn tracked_ids(&self) -> HashSet<String> {
         self.ids.read().await.clone()
     }
@@ -128,51 +128,12 @@ impl HidTracking {
 
 impl AppState {
     pub async fn find_device_by_id(&self, id: &str) -> Option<Arc<dyn Device>> {
-        self.devices
-            .read()
-            .await
-            .iter()
-            .find(|d| d.id() == id)
-            .cloned()
-    }
-
-    /// Poll hardware producers and atomically refresh the host-owned sensor
-    /// records. Consumers read the resulting typed view from `data_bus`.
-    pub async fn refresh_sensor_bus(&self) {
-        let known = self.config.read().await.known_devices.clone();
-        let visibility = self.config.read().await.sensor_visibility.clone();
-        let devices = self.devices.read().await.clone();
-        let mut sensors = Vec::new();
-        for device in &devices {
-            let disabled = known
-                .get(device.id())
-                .is_some_and(|r| r.active_state == halod_shared::types::VisibilityState::Disabled);
-            if disabled || !device.is_live() {
-                continue;
-            }
-            if let Some(cap) = device.as_sensor_capability() {
-                if let Ok(readings) = cap.get_sensors().await {
-                    for mut sensor in readings {
-                        if let Some(state) = visibility.get(&sensor.id) {
-                            sensor.visibility = state.clone();
-                        }
-                        sensors.push((device.id().to_owned(), sensor));
-                    }
-                }
-            }
-            for mut sensor in crate::drivers::fan_sensors(device.as_ref()).await {
-                if let Some(state) = visibility.get(&sensor.id) {
-                    sensor.visibility = state.clone();
-                }
-                sensors.push((device.id().to_owned(), sensor));
-            }
-        }
-        self.data_bus.replace_host_sensors(sensors);
+        self.device_registry.find(id).await
     }
 
     pub async fn get_active_devices(&self) -> Vec<Arc<dyn Device>> {
         let known = self.config.read().await.known_devices.clone();
-        self.devices
+        self.device_registry
             .read()
             .await
             .iter()
@@ -184,17 +145,5 @@ impl AppState {
             })
             .cloned()
             .collect()
-    }
-}
-
-/// The sole continuous producer for `host.sensors.*`. Device implementations
-/// already cache hardware samples; this task snapshots those caches at a
-/// bounded cadence independently of RGB, LCD, fan-curve, and IPC rendering.
-pub async fn sensor_data_producer(app: Arc<AppState>) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        interval.tick().await;
-        app.refresh_sensor_bus().await;
     }
 }

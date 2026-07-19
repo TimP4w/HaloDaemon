@@ -194,7 +194,7 @@ mod override_diff_tests {
                 points: vec![(20.0, 25.0), (80.0, 100.0)],
             },
         );
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);

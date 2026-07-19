@@ -20,7 +20,7 @@ pub async fn load_active_profile(app: Arc<AppState>) {
     // tick can't stream a frame after load_state resets the device. Clear
     // lcd_template_id first, else the next tick re-derives it and re-adds the
     // slot before remove_device takes effect.
-    let devices = app.devices.read().await.clone();
+    let devices = app.device_registry.read().await.clone();
     if let Some(lcd_engine) = app.lcd.engine() {
         for device in &devices {
             if let Some(lcd) = device.as_lcd() {
@@ -108,7 +108,8 @@ pub async fn switch_profile_direct(name: String, app: Arc<AppState>) {
         cfg.active_profile = name;
     }
     load_active_profile(app.clone()).await;
-    crate::ipc::broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::ProfileSwitch)
+        .await;
 }
 
 pub async fn switch_profile(name: String, app: Arc<AppState>) -> Result<()> {
@@ -123,7 +124,8 @@ pub async fn switch_profile(name: String, app: Arc<AppState>) -> Result<()> {
     };
     app.request_config_save();
     load_active_profile(app.clone()).await;
-    crate::ipc::broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::ProfileSwitch)
+        .await;
     crate::platform::notify::send(
         &app,
         halod_shared::types::NotificationCode::ProfileSwitched {
@@ -155,7 +157,8 @@ pub async fn add_profile(name: String, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     load_active_profile(app.clone()).await;
-    crate::ipc::broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::ProfileSwitch)
+        .await;
     Ok(())
 }
 
@@ -164,20 +167,28 @@ pub async fn remove_profile(name: String, app: Arc<AppState>) -> Result<()> {
         anyhow::bail!("cannot remove the default profile");
     }
 
-    {
+    let active_removed = {
         let mut cfg = app.config.write().await;
         if !cfg.profiles.contains_key(&name) {
             anyhow::bail!("profile not found: {name}");
         }
         log::info!("[Profile] Removing '{name}'");
         cfg.profiles.remove(&name);
-        if cfg.active_profile == name {
+        let active_removed = cfg.active_profile == name;
+        if active_removed {
             cfg.active_profile = DEFAULT_PROFILE_NAME.to_string();
         }
-    }
+        active_removed
+    };
     app.request_config_save();
-    load_active_profile(app.clone()).await;
-    crate::ipc::broadcast_state(&app).await;
+    if active_removed {
+        load_active_profile(app.clone()).await;
+        app.record_change(crate::services::effective_state::Change::ProfileSwitch)
+            .await;
+    } else {
+        app.record_change(crate::services::effective_state::Change::Profiles)
+            .await;
+    }
     Ok(())
 }
 
@@ -205,7 +216,8 @@ pub async fn rename_profile(old_name: String, new_name: String, app: Arc<AppStat
         }
     }
     app.request_config_save();
-    crate::ipc::broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::Profiles)
+        .await;
     Ok(())
 }
 
@@ -232,7 +244,8 @@ pub async fn set_lighting_targets(
         channels,
     };
     app.request_config_save();
-    crate::ipc::broadcast_state(&app).await;
+    app.record_change(crate::services::effective_state::Change::Lighting)
+        .await;
     Ok(())
 }
 
@@ -399,7 +412,7 @@ mod tests {
 
         let app = make_app();
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -407,11 +420,7 @@ mod tests {
         let engine = LcdEngine::new(app.clone());
         let (frame_tx, _) = tokio::sync::broadcast::channel(2);
         let video = crate::lcd::engine::video::VideoEngine::new(app.clone(), frame_tx);
-        let (cfg_tx, _) = tokio::sync::watch::channel(crate::state::EngineRunConfig {
-            enabled: true,
-            tick_ms: 100,
-        });
-        app.lcd.set_engine(engine, video, cfg_tx);
+        app.lcd.set_engine(engine, video);
 
         // Saved state carries a template id, as `load_state` would restore it.
         app.config
@@ -440,7 +449,7 @@ mod tests {
 
         let app = make_app();
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -448,11 +457,7 @@ mod tests {
         let engine = LcdEngine::new(app.clone());
         let (frame_tx, _) = tokio::sync::broadcast::channel(2);
         let video = crate::lcd::engine::video::VideoEngine::new(app.clone(), frame_tx);
-        let (cfg_tx, _) = tokio::sync::watch::channel(crate::state::EngineRunConfig {
-            enabled: true,
-            tick_ms: 100,
-        });
-        app.lcd.set_engine(engine, video, cfg_tx);
+        app.lcd.set_engine(engine, video);
 
         app.config
             .write()
@@ -492,7 +497,7 @@ mod tests {
 
         let app = make_app();
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -500,11 +505,7 @@ mod tests {
         let engine = LcdEngine::new(app.clone());
         let (frame_tx, _) = tokio::sync::broadcast::channel(2);
         let video = crate::lcd::engine::video::VideoEngine::new(app.clone(), frame_tx);
-        let (cfg_tx, _) = tokio::sync::watch::channel(crate::state::EngineRunConfig {
-            enabled: true,
-            tick_ms: 100,
-        });
-        app.lcd.set_engine(engine, video, cfg_tx);
+        app.lcd.set_engine(engine, video);
 
         app.config
             .write()
@@ -539,7 +540,7 @@ mod tests {
 
         let app = make_app();
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn Device>);
@@ -547,11 +548,7 @@ mod tests {
         let engine = LcdEngine::new(app.clone());
         let (frame_tx, _) = tokio::sync::broadcast::channel(2);
         let video = crate::lcd::engine::video::VideoEngine::new(app.clone(), frame_tx);
-        let (cfg_tx, _) = tokio::sync::watch::channel(crate::state::EngineRunConfig {
-            enabled: true,
-            tick_ms: 100,
-        });
-        app.lcd.set_engine(engine, video, cfg_tx);
+        app.lcd.set_engine(engine, video);
 
         // A real, existing file: playback may fail (ffmpeg absent in CI) but the
         // path must not be treated as stale and cleared.

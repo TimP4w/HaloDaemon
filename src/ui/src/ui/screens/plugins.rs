@@ -6,9 +6,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
-    AppState, PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
+    PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
     PluginRecommendation, PluginRepoInfo, PluginRepoLocation, PluginRequirement,
     PluginRequirementStatus, PluginSource, PluginUpdateStatus, RepoCompatibilityStatus,
     RepoSignatureStatus, RepoUpdateStatus, RequirementImpact,
@@ -129,7 +130,7 @@ impl PluginsUi {
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         cmd: &CommandTx,
         plugin_assets: &HashMap<String, Vec<u8>>,
         repo_updates: &[RepoUpdateStatus],
@@ -233,7 +234,7 @@ impl PluginsUi {
     fn body(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         cmd: &CommandTx,
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
@@ -298,7 +299,7 @@ impl PluginsUi {
     fn sidebar(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         cmd: &CommandTx,
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
@@ -381,7 +382,7 @@ impl PluginsUi {
     fn plugin_list(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         cmd: &CommandTx,
         plugin_updates: &[PluginUpdateStatus],
         udev_status: Option<&halod_shared::types::UdevRulesStatus>,
@@ -443,7 +444,7 @@ impl PluginsUi {
     fn repositories(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         repo_updates: &[RepoUpdateStatus],
     ) {
         ui.add_space(theme::SPACE_9);
@@ -484,7 +485,7 @@ impl PluginsUi {
         }
     }
 
-    fn skipped_notice(&mut self, ui: &mut egui::Ui, state: &AppState) {
+    fn skipped_notice(&mut self, ui: &mut egui::Ui, state: &TopicStore) {
         if state.plugins.skipped.is_empty() {
             return;
         }
@@ -560,7 +561,7 @@ impl PluginsUi {
     fn detail_column(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         cmd: &CommandTx,
         plugin_updates: &[PluginUpdateStatus],
         udev_status: Option<&halod_shared::types::UdevRulesStatus>,
@@ -900,7 +901,7 @@ impl PluginsUi {
     /// declares permissions (or right after importing one). Lists each
     /// permission with what it lets the plugin do; "Grant & Enable" accepts and
     /// activates, "Cancel" leaves the plugin installed but off.
-    fn consent_modal(&mut self, ctx: &egui::Context, state: &AppState, cmd: &CommandTx) {
+    fn consent_modal(&mut self, ctx: &egui::Context, state: &TopicStore, cmd: &CommandTx) {
         let Some(id) = self.pending_consent.clone() else {
             return;
         };
@@ -1077,7 +1078,7 @@ fn repo_integrity_failed(slug: &str, plugins: &[PluginInfo]) -> bool {
     })
 }
 
-fn repository_integrity_problem(state: &AppState) -> Option<RepoIntegrityProblem> {
+fn repository_integrity_problem(state: &TopicStore) -> Option<RepoIntegrityProblem> {
     state.plugins.repos.iter().find_map(|repo| {
         repo_integrity_failed(&repo.slug, &state.plugins.plugins).then(|| RepoIntegrityProblem {
             slug: repo.slug.clone(),
@@ -3975,7 +3976,7 @@ mod tests {
 
     #[test]
     fn repository_integrity_problem_repairs_only_verified_sources() {
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.repos = vec![repo("publisher", "aaaaaaaa")];
         state.plugins.plugins = vec![integrity_failed_plugin("publisher")];
 

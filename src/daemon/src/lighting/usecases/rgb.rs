@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
 use crate::registry::usecases::settings;
-use crate::{ipc, state::AppState};
+use crate::state::AppState;
 use halod_shared::types::{LightingChannel, LightingState, ZoneTopology};
 use halod_shared::zone_transform::ZoneContentTransform;
 
@@ -66,10 +66,6 @@ pub async fn lighting_apply(id: String, state: LightingState, app: Arc<AppState>
     lighting.apply(state.clone()).await?;
     persist_device_state(&app, device.as_ref()).await;
 
-    if left_canvas {
-        ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
-    }
-
     if needs_engine {
         settings::set_engine_config(
             halod_shared::commands::EngineKind::Canvas,
@@ -87,6 +83,8 @@ pub async fn lighting_apply(id: String, state: LightingState, app: Arc<AppState>
         .await;
         lighting.apply(state).await?;
     }
+    app.record_change(crate::services::effective_state::Change::LightingDevice(id))
+        .await;
     Ok(())
 }
 
@@ -139,7 +137,7 @@ mod tests {
     async fn set_channel_transform_stores_transform_in_config() {
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn crate::drivers::Device>);
@@ -183,7 +181,7 @@ mod tests {
     async fn set_channel_transform_reapplies_current_state() {
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn crate::drivers::Device>);
@@ -220,7 +218,7 @@ mod tests {
         // stores the transform.
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn crate::drivers::Device>);
@@ -243,7 +241,7 @@ mod tests {
     async fn rgb_apply_applies_state_and_persists() {
         let dev = std::sync::Arc::new(MockDevice::new("dev1").with_rgb());
         let app = std::sync::Arc::new(AppState::new(Config::default()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as std::sync::Arc<dyn crate::drivers::Device>);
@@ -265,7 +263,7 @@ mod tests {
     async fn rgb_apply_clears_canvas_placement() {
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn crate::drivers::Device>);
@@ -305,7 +303,7 @@ mod tests {
     async fn rgb_apply_engine_state_keeps_canvas_placement() {
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn crate::drivers::Device>);
@@ -339,7 +337,7 @@ mod tests {
         // the final write ours (see `super::canvas::STOP_DRAIN_MS`).
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn crate::drivers::Device>);
@@ -375,7 +373,7 @@ mod tests {
     async fn rgb_apply_static_to_static_does_not_drain_again() {
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev.clone() as Arc<dyn crate::drivers::Device>);
@@ -409,7 +407,7 @@ mod tests {
     async fn rgb_apply_errors_when_device_lacks_rgb_capability() {
         let dev = std::sync::Arc::new(MockDevice::new("dev1"));
         let app = std::sync::Arc::new(AppState::new(Config::default()));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(dev as std::sync::Arc<dyn crate::drivers::Device>);

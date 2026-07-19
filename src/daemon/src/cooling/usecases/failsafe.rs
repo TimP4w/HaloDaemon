@@ -2,25 +2,19 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::run_loop::EngineRunConfig;
 use crate::state::AppState;
 
 pub async fn set_fan_failsafe_duty(duty: u8, app: Arc<AppState>) -> Result<()> {
     let duty = duty.min(100);
 
-    let cooling = {
+    {
         let mut cfg = app.config.write().await;
         cfg.cooling.fan_failsafe_duty = duty;
-        cfg.cooling.clone()
-    };
+    }
     app.request_config_save();
 
-    if let Some(tx) = app.cooling.cfg_tx() {
-        let _ = tx.send(EngineRunConfig::fan_curve(&cooling));
-    }
-    if let Some(tx) = app.cooling.failsafe_duty_tx() {
-        let _ = tx.send(duty);
-    }
+    app.record_change(crate::services::effective_state::Change::Cooling)
+        .await;
 
     Ok(())
 }

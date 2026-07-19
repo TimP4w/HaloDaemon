@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use halod_shared::types::FanCurveStatus;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::Mutex;
 
-use crate::run_loop::EngineRunConfig;
-use halod_shared::types::FanCurveStatus;
-
-struct Engine {
-    cfg_tx: watch::Sender<EngineRunConfig>,
-    /// Failsafe duty sent to the engine independently of the run config.
-    failsafe_duty_tx: watch::Sender<u8>,
-}
+struct Engine;
 
 /// The fan-curve engine handle plus its runtime config/failsafe channels and
 /// the per-fan status cache the serializer reads. The engine is set once at
@@ -30,23 +24,8 @@ impl CoolingEngineState {
         }
     }
 
-    pub fn set_engine(
-        &self,
-        cfg_tx: watch::Sender<EngineRunConfig>,
-        failsafe_duty_tx: watch::Sender<u8>,
-    ) {
-        let _ = self.engine.set(Engine {
-            cfg_tx,
-            failsafe_duty_tx,
-        });
-    }
-
-    pub fn cfg_tx(&self) -> Option<&watch::Sender<EngineRunConfig>> {
-        self.engine.get().map(|e| &e.cfg_tx)
-    }
-
-    pub fn failsafe_duty_tx(&self) -> Option<&watch::Sender<u8>> {
-        self.engine.get().map(|e| &e.failsafe_duty_tx)
+    pub fn set_engine(&self) {
+        let _ = self.engine.set(Engine);
     }
 
     /// Join device-collected fan curve records with the engine's live statuses.

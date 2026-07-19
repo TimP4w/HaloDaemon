@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::profiles::device_state::persist_device_state;
 use crate::registry::require_device_owned_id;
-use crate::{config, ipc, state::AppState};
+use crate::{config, state::AppState};
 use halod_shared::commands::EngineKind;
 use halod_shared::types::{
     EffectDef, EffectParamValue, LightingState, PlacedZone, RgbColor, SamplingMode, ZoneTopology,
@@ -141,7 +141,8 @@ pub async fn upsert_effect(
         effects.insert(instance_id, def);
     }
     app.request_config_save();
-    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Canvas)
+        .await;
     Ok(())
 }
 
@@ -161,7 +162,8 @@ pub async fn remove_effect(instance_id: String, app: Arc<AppState>) -> Result<()
         }
     }
     app.request_config_save();
-    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Canvas)
+        .await;
     Ok(())
 }
 
@@ -179,7 +181,8 @@ pub async fn set_default_effect(instance_id: Option<String>, app: Arc<AppState>)
         cs.default_effect = instance_id;
     }
     app.request_config_save();
-    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Canvas)
+        .await;
     Ok(())
 }
 
@@ -280,7 +283,10 @@ pub async fn place_zone(
     )
     .await?;
 
-    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::CanvasDevice(
+        device_id,
+    ))
+    .await;
     Ok(())
 }
 
@@ -298,7 +304,10 @@ pub async fn remove_zone(device_id: String, channel_id: String, app: Arc<AppStat
         "zone '{channel_id}' is not placed on device '{device_id}'"
     );
 
-    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::CanvasDevice(
+        device_id,
+    ))
+    .await;
     Ok(())
 }
 
@@ -362,10 +371,12 @@ pub async fn move_zone(
     );
 
     // The UI keeps an optimistic transform until the daemon confirms the new
-    // placement. Before state deltas, the periodic full-state broadcast did
-    // that implicitly; the periodic delta only contains live device/cooling
-    // data, so canvas geometry must now be published explicitly.
-    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting]).await;
+    // placement. Report the semantic topology change so the retained lighting
+    // and device records are committed together.
+    app.record_change(crate::services::effective_state::Change::CanvasDevice(
+        device_id,
+    ))
+    .await;
     Ok(())
 }
 
@@ -382,7 +393,7 @@ mod tests {
 
     fn make_app(device: Arc<MockDevice>) -> Arc<AppState> {
         let app = Arc::new(AppState::new(Config::default()));
-        app.devices
+        app.device_registry
             .try_write()
             .unwrap()
             .push(device as Arc<dyn crate::drivers::Device>);
@@ -897,7 +908,7 @@ pub async fn stop(app: Arc<AppState>) -> Result<()> {
     let black = LightingState::Static {
         color: RgbColor { r: 0, g: 0, b: 0 },
     };
-    let devices = app.devices.read().await.clone();
+    let devices = app.device_registry.read().await.clone();
     for device in devices {
         if let Some(rgb) = device.as_lighting() {
             // `DirectEffect` is engine-driven too, so blank it alongside `Engine`.
@@ -911,7 +922,8 @@ pub async fn stop(app: Arc<AppState>) -> Result<()> {
         }
     }
 
-    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::LightingTopology)
+        .await;
     Ok(())
 }
 
@@ -923,6 +935,7 @@ pub async fn set_sample_radius(radius: f64, app: Arc<AppState>) -> Result<()> {
         cfg.canvas_state_for_edit().sample_radius = radius.clamp(0.5, 64.0);
     }
     app.request_config_save();
-    ipc::broadcast_delta(&app, &[ipc::Domain::Lighting, ipc::Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Canvas)
+        .await;
     Ok(())
 }

@@ -39,7 +39,7 @@ async fn dpi_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>) {
     if let Err(e) = sw.set_dpi_index(next).await {
         log::warn!("ActionExecutor: dpi_cycle: {e}");
     } else {
-        crate::ipc::broadcast_state(&app).await;
+        crate::input::usecases::runtime::device_changed(&app, device_id).await;
     }
 }
 
@@ -75,7 +75,7 @@ async fn profile_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>
     if let Err(e) = op.switch_profile(enabled[next]).await {
         log::warn!("ActionExecutor: profile_cycle: {e}");
     } else {
-        crate::ipc::broadcast_state(&app).await;
+        crate::input::usecases::runtime::device_changed(&app, device_id).await;
     }
 }
 
@@ -771,7 +771,7 @@ mod tests {
         // calling set_dpi_index.
         let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::clone(&dev) as Arc<dyn Device>);

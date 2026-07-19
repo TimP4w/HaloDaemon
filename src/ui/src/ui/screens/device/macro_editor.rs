@@ -864,8 +864,9 @@ fn palette_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::topic_store::TopicStore;
     use egui::pos2;
-    use halod_shared::types::{AppState, WireDevice};
+    use halod_shared::types::WireDevice;
     use proptest::prelude::*;
 
     /// egui keys that intentionally have no entry in the shared key table:
@@ -1154,7 +1155,7 @@ mod tests {
     }
 
     fn test_ctx<'a>(
-        state: &'a AppState,
+        state: &'a TopicStore,
         dev: &'a WireDevice,
         tx: &'a tokio::sync::mpsc::UnboundedSender<DaemonCommand>,
     ) -> TabCtx<'a> {
@@ -1178,7 +1179,7 @@ mod tests {
 
     #[test]
     fn commit_immediate_sends_mapping_with_other_layer_preserved() {
-        let state = AppState::default();
+        let state = TopicStore::default();
         let dev = WireDevice::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = test_ctx(&state, &dev, &tx);
@@ -1209,7 +1210,7 @@ mod tests {
 
     #[test]
     fn commit_debounced_lands_in_pending_not_channel() {
-        let state = AppState::default();
+        let state = TopicStore::default();
         let dev = WireDevice::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = test_ctx(&state, &dev, &tx);
@@ -1230,7 +1231,7 @@ mod tests {
 
     #[test]
     fn sync_selection_commits_recording_to_its_owning_button() {
-        let state = AppState::default();
+        let state = TopicStore::default();
         let dev = WireDevice::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = test_ctx(&state, &dev, &tx);
@@ -1262,7 +1263,7 @@ mod tests {
 
     #[test]
     fn sync_selection_drops_stale_drag_and_capture() {
-        let state = AppState::default();
+        let state = TopicStore::default();
         let dev = WireDevice::default();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = test_ctx(&state, &dev, &tx);

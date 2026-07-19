@@ -123,7 +123,7 @@ impl DiscoveryFilter {
 }
 
 /// `AppState::discovery_scope`. `PluginSet`/`Full` both mean "a rediscovery
-/// is touching `app.devices`" (the coarse gate, `integration_monitor`'s
+/// is touching `app.device_registry`" (the coarse gate, `integration_monitor`'s
 /// tick); only `PluginSet` restricts which handles register (the fine gate,
 /// `handle_in_scope`). `Clean -> PluginSet|Full -> Clean`.
 #[derive(Clone)]
@@ -241,7 +241,7 @@ pub async fn discover_handle(app: &Arc<crate::state::AppState>, handle: Discover
     }
 }
 
-use crate::{ipc::broadcast_state, state::AppState};
+use crate::state::AppState;
 
 /// Push a free-form status line describing the current discovery step to any
 /// connected UI. Transport scanners call this to report finer-grained progress
@@ -254,7 +254,7 @@ pub async fn set_discovery_detail(
         let mut discovery = app.discovery.lock().await;
         discovery.detail = detail;
     }
-    broadcast_state(app).await;
+    crate::registry::usecases::runtime::topology_changed(app).await;
 }
 
 pub async fn discover_devices(app: Arc<AppState>) {
@@ -281,7 +281,7 @@ pub async fn discover_devices(app: Arc<AppState>) {
         let mut discovery = app.discovery.lock().await;
         discovery.phase = DiscoveryPhase::Discovering;
     }
-    broadcast_state(&app).await;
+    crate::registry::usecases::runtime::topology_changed(&app).await;
 
     // Unit tests drive the usecase/reconcile layer with synthetic handles and a
     // `MockDevice` registry; enumerating the host's real USB/HID/SMBus hardware
@@ -309,14 +309,17 @@ pub async fn discover_devices(app: Arc<AppState>) {
         }
     }
 
-    log::info!("Discovered {} devices", app.devices.read().await.len());
+    log::info!(
+        "Discovered {} devices",
+        app.device_registry.read().await.len()
+    );
 
     {
         let mut discovery = app.discovery.lock().await;
         discovery.phase = DiscoveryPhase::Complete;
         discovery.detail = Default::default();
     }
-    broadcast_state(&app).await;
+    crate::registry::usecases::runtime::topology_changed(&app).await;
 
     if owns_scope {
         app.set_discovery_scope(DiscoveryScope::Clean).await;

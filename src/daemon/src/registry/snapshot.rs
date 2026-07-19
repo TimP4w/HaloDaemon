@@ -12,6 +12,7 @@ use halod_shared::types::{DeviceCapability, EffectParamValue, VisibilityState, W
 /// One pass over the device registry: wire-serialize each device, apply the
 /// config/HID overlay, and collect the per-domain engine inputs the cooling,
 /// lighting, and LCD snapshots need.
+#[derive(Default)]
 pub struct DevicesSnapshot {
     pub devices: Vec<WireDevice>,
     pub fan_curves: Vec<(String, String, FanCurveRecord)>,
@@ -22,7 +23,7 @@ pub struct DevicesSnapshot {
 
 impl AppState {
     pub async fn snapshot_devices(&self, cfg: &Config) -> DevicesSnapshot {
-        let device_list: Vec<Arc<dyn Device>> = self.devices.read().await.clone();
+        let device_list: Vec<Arc<dyn Device>> = self.device_registry.read().await.clone();
         let mut devices = Vec::with_capacity(device_list.len());
         for d in &device_list {
             devices.push(d.serialize().await);
@@ -178,7 +179,7 @@ mod tests {
                 identity,
                 origin,
             ));
-            app.devices.write().await.push(dev);
+            app.device_registry.write().await.push(dev);
         }
         let cfg = app.config.read().await.clone();
         let snapshot = app.snapshot_devices(&cfg).await;
@@ -202,8 +203,8 @@ mod tests {
                 .with_model("Fan 3000")
                 .with_fan_rpm(1500),
         );
-        app.devices.write().await.push(dev);
-        app.refresh_sensor_bus().await;
+        app.device_registry.write().await.push(dev);
+        crate::registry::usecases::sensors::observe(&app).await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("fan sensors present");
@@ -224,8 +225,8 @@ mod tests {
         );
         let app = Arc::new(AppState::new(cfg));
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("test_device").with_fan());
-        app.devices.write().await.push(dev);
-        app.refresh_sensor_bus().await;
+        app.device_registry.write().await.push(dev);
+        crate::registry::usecases::sensors::observe(&app).await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("fan sensors present");
@@ -256,8 +257,8 @@ mod tests {
             sensor_type: SensorType::Temperature,
             visibility: VisibilityState::Visible,
         }]));
-        app.devices.write().await.push(dev);
-        app.refresh_sensor_bus().await;
+        app.device_registry.write().await.push(dev);
+        crate::registry::usecases::sensors::observe(&app).await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("sensors present");
@@ -291,7 +292,7 @@ mod tests {
                     visibility: halod_shared::types::VisibilityState::Visible,
                 }]),
         );
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         assert!(snap.devices[0].sensors().is_none());
@@ -319,7 +320,7 @@ mod tests {
                 .with_fan()
                 .with_rgb(),
         );
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         assert_eq!(snap.devices[0].name, "My Fan");
@@ -336,7 +337,7 @@ mod tests {
                 .with_fan()
                 .with_rgb(),
         );
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         assert_eq!(snap.devices[0].name, "Test Fan");
@@ -395,7 +396,7 @@ mod tests {
                 .with_vendor("Generic")
                 .with_model("Chain Link"),
         });
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         assert_eq!(snap.devices[0].name, "Chain Link 1");
@@ -448,7 +449,7 @@ mod tests {
                 .with_vendor("Acme")
                 .with_model("Widget"),
         });
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
 
@@ -469,7 +470,7 @@ mod tests {
     async fn write_rate_is_none_when_device_does_not_report_it() {
         let app = Arc::new(AppState::new(Config::default()));
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("plain_dev"));
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         assert!(snap.devices[0].write_rate.is_none());
@@ -511,7 +512,7 @@ mod tests {
             .unwrap()
             .set_lcd_template_id(Some("tmpl".into()));
         let dev: Arc<dyn Device> = Arc::new(dev);
-        app.devices.write().await.push(dev);
+        app.device_registry.write().await.push(dev);
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
 

@@ -163,7 +163,7 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
                         .is_some();
                     if writes_device && !plugin_handled {
                         let device = {
-                            let devices = app.devices.read().await;
+                            let devices = app.device_registry.read().await;
                             devices
                                 .iter()
                                 .find(|device| device.id() == id)
@@ -795,10 +795,6 @@ async fn dispatch(
 
         DaemonCommand::ListRunningApps => profiles::running_apps::list(client).await,
         DaemonCommand::GetDebugInfo => registry::usecases::debug::get_debug_info(client, app).await,
-        DaemonCommand::RequestState => {
-            crate::ipc::send_full_to(&app, &client).await;
-            Ok(())
-        }
         DaemonCommand::SetEngineConfig {
             engine,
             enabled,
@@ -886,7 +882,7 @@ mod tests {
         handle_message(
             json!({"type": "definitely_not_a_command", "request_id": "req-42"}),
             client,
-            app,
+            app.clone(),
         )
         .await;
 
@@ -942,35 +938,26 @@ mod tests {
                 "request_id": "write-1"
             }),
             client,
-            app,
+            app.clone(),
         )
         .await;
 
-        let mut notification = None;
-        let mut error = None;
-        for _ in 0..2 {
-            let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-                .await
-                .expect("response timed out")
-                .expect("response channel closed");
-            let value: Value = serde_json::from_slice(&frame[5..]).unwrap();
-            match value["type"].as_str() {
-                Some("notification") => notification = Some(value),
-                Some("error") => error = Some(value),
-                other => panic!("unexpected frame type: {other:?}"),
-            }
-        }
-
-        let notification = notification.expect("device-write notification");
-        assert_eq!(notification["data"]["code"], "device_write_failed");
-        assert_eq!(notification["data"]["device"], "missing-device");
-        assert!(notification["data"]["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("missing-device")));
-
-        let error = error.expect("correlated error reply");
+        let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("response timed out")
+            .expect("response channel closed");
+        let error: Value = serde_json::from_slice(&frame[5..]).unwrap();
         assert_eq!(error["request_id"], "write-1");
         assert_eq!(error["handled"], true);
+
+        let replay = app.data_bus.replay_events(None);
+        let notification = replay.events.last().expect("device-write event");
+        let halod_shared::bus::BusEventPayload::Notification(notification) = &notification.payload;
+        assert!(matches!(
+            &notification.code,
+            halod_shared::types::NotificationCode::DeviceWriteFailed { device, detail }
+                if device == "missing-device" && detail.contains("missing-device")
+        ));
     }
 
     #[test]
@@ -1053,15 +1040,12 @@ mod tests {
     /// Test helper: `AppState` with a live `LcdEngine`.
     fn app_with_lcd_engine() -> (Arc<AppState>, Arc<crate::lcd::engine::LcdEngine>) {
         use crate::lcd::engine::{video::VideoEngine, LcdEngine};
-        use crate::state::EngineRunConfig;
 
         let app = Arc::new(AppState::new(Config::default()));
         let engine = LcdEngine::new(Arc::clone(&app));
         app.lcd.set_engine(
             Arc::clone(&engine),
             VideoEngine::new(Arc::clone(&app), engine.frame_sender()),
-            tokio::sync::watch::channel(EngineRunConfig::lcd(&crate::config::LcdConfig::default()))
-                .0,
         );
         let _ = app.engines_ready.send(true);
         (app, engine)

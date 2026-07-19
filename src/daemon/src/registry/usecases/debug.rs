@@ -30,7 +30,7 @@ async fn collect(app: Arc<AppState>) -> DebugInfo {
     let system = system_task.await.unwrap_or_else(|_| collect_system());
     let hid_raw = hid_task.await.unwrap_or_default();
 
-    let device_list = app.devices.read().await.clone();
+    let device_list = app.device_registry.read().await.clone();
     let mut devices = Vec::with_capacity(device_list.len());
     for d in &device_list {
         devices.push(build_device_debug(d.as_ref(), &tracking_keys, &hid_raw).await);

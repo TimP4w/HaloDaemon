@@ -10,9 +10,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use halod_shared::types::{
-    AppState, IntegrationLifecycleState, IntegrationSetupMode, IntegrationSetupPhase, PluginInfo,
+    IntegrationLifecycleState, IntegrationSetupMode, IntegrationSetupPhase, PluginInfo,
     PluginIssue, PluginIssueKind, PluginKind,
 };
 
@@ -74,7 +75,7 @@ pub struct IntegrationStatus {
 /// the one `WireDevice` whose `integration_id` matches, and the devices it
 /// exposes are the `IntegrationLeaf` children registered alongside it (ids
 /// prefixed `{root_id}_ctrl_`, mirroring the daemon's own scheme).
-pub fn integration_status(state: &AppState, plugin_id: &str) -> IntegrationStatus {
+pub fn integration_status(state: &TopicStore, plugin_id: &str) -> IntegrationStatus {
     let Some(root) = state
         .devices
         .iter()
@@ -130,7 +131,7 @@ impl IntegrationsUi {
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         cmd: &CommandTx,
         plugin_assets: &HashMap<String, Vec<u8>>,
         serial_ports: &[halod_shared::types::SerialPortInfo],
@@ -172,7 +173,7 @@ impl IntegrationsUi {
             .and_then(|key| self.logo_textures.get(&key))
     }
 
-    fn body(&mut self, ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+    fn body(&mut self, ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
         ui.set_max_width(ui.available_width().min(840.0));
         reconcile_in_flight(&mut self.in_flight, &state.plugins.plugins);
         widgets::page_header(
@@ -208,7 +209,7 @@ impl IntegrationsUi {
             });
     }
 
-    fn card(&mut self, ui: &mut egui::Ui, state: &AppState, p: &PluginInfo, cmd: &CommandTx) {
+    fn card(&mut self, ui: &mut egui::Ui, state: &TopicStore, p: &PluginInfo, cmd: &CommandTx) {
         let locked = self.in_flight.get(&p.id).copied();
         let mut toggled: Option<bool> = None;
         widgets::card(ui, |ui| {
@@ -390,7 +391,7 @@ impl IntegrationsUi {
         }
     }
 
-    fn setup_modal(&mut self, ctx: &egui::Context, state: &AppState, cmd: &CommandTx) {
+    fn setup_modal(&mut self, ctx: &egui::Context, state: &TopicStore, cmd: &CommandTx) {
         if self.setup_open.is_none() {
             self.setup_open = state
                 .plugins
@@ -1352,7 +1353,7 @@ mod tests {
 
     #[test]
     fn integration_status_is_absent_when_root_not_registered() {
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![device("other", None, true)],
             ..Default::default()
         };
@@ -1363,7 +1364,7 @@ mod tests {
 
     #[test]
     fn integration_status_counts_only_this_roots_children() {
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![
                 device("openrgb-root", Some("openrgb"), true),
                 device("openrgb-root_ctrl_0", None, true),

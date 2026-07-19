@@ -7,7 +7,7 @@ notify:
   unknown_error: Errore sconosciuto
   low_battery:
     title: "Batteria di %{device} quasi scarica"
-    message: "%{battery} è al %{level}% (sotto il %{threshold}%)."
+    message: "%{battery} è al %{level}%."
   engine_stopped:
     title: Motore arrestato
     message: "%{detail}"

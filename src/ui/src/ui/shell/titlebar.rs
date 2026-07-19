@@ -4,8 +4,8 @@
 //! button. Also hosts the daemon-down overlay and the native-drag
 //! pointer-release workaround shared by both window backends.
 
+use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::AppState;
 
 use crate::domain::state::Page;
 use crate::runtime::ipc::CommandTx;
@@ -396,7 +396,7 @@ fn paint_windows(p: &egui::Painter, rect: Rect, ctl: WinCtl, hovered: bool, maxi
     }
 }
 
-fn title_bar_chrome(ui: &mut egui::Ui, state: &AppState) -> (ChromeConfig, Option<(f32, f32)>) {
+fn title_bar_chrome(ui: &mut egui::Ui, state: &TopicStore) -> (ChromeConfig, Option<(f32, f32)>) {
     let rect = ui.max_rect();
 
     // Drag the whole bar to move the window; double-click toggles maximize.
@@ -464,13 +464,13 @@ fn title_bar_chrome(ui: &mut egui::Ui, state: &AppState) -> (ChromeConfig, Optio
 
 /// The title bar without the profile button — window controls and logo only.
 /// Used by the discovery radar overlay, which has no active profile to show.
-pub fn title_bar_plain(ui: &mut egui::Ui, state: &AppState) {
+pub fn title_bar_plain(ui: &mut egui::Ui, state: &TopicStore) {
     title_bar_chrome(ui, state);
 }
 
 pub fn title_bar(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     profile_ui: &mut profile::ProfileUi,
     page: &mut Page,

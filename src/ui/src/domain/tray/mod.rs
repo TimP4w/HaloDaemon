@@ -10,7 +10,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use halod_shared::types::{AppState, BatteryStatus, DeviceCapability, DEFAULT_PROFILE_NAME};
+use crate::domain::topic_store::TopicStore;
+use halod_shared::types::{BatteryStatus, DeviceCapability, DEFAULT_PROFILE_NAME};
 
 use crate::runtime::ipc::CommandTx;
 
@@ -25,7 +26,7 @@ const CHARGING_SUFFIX: &str = " ↑";
 
 /// One human-readable line per battery across all devices, e.g.
 /// `"G560 - Battery: 75%"`. Charging batteries get [`CHARGING_SUFFIX`] appended.
-pub fn battery_lines(state: &AppState) -> Vec<String> {
+pub fn battery_lines(state: &TopicStore) -> Vec<String> {
     let mut lines = Vec::new();
     for device in &state.devices {
         for cap in &device.capabilities {
@@ -134,7 +135,7 @@ pub struct TrayModel {
 }
 
 impl TrayModel {
-    fn from_state(state: &AppState) -> Self {
+    fn from_state(state: &TopicStore) -> Self {
         let active = if state.profiles.active.is_empty() {
             DEFAULT_PROFILE_NAME.to_string()
         } else {
@@ -179,7 +180,7 @@ impl Tray {
         }
     }
 
-    pub fn sync(&mut self, ctx: &egui::Context, state: &AppState) {
+    pub fn sync(&mut self, ctx: &egui::Context, state: &TopicStore) {
         let model = TrayModel::from_state(state);
         let changed = model != self.shown;
         self.inner.sync(ctx, &model, changed);
@@ -189,7 +190,7 @@ impl Tray {
     }
 
     #[cfg(unix)]
-    pub fn watch_state(&self, state: tokio::sync::watch::Receiver<AppState>) {
+    pub fn watch_state(&self, state: tokio::sync::watch::Receiver<TopicStore>) {
         self.inner.watch_state(state);
     }
 }
@@ -222,7 +223,7 @@ mod tests {
 
     #[test]
     fn battery_lines_formats_discharging() {
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![device_with_batteries(
                 "G560",
                 vec![battery(75, BatteryStatus::Discharging)],
@@ -237,7 +238,7 @@ mod tests {
 
     #[test]
     fn battery_lines_appends_suffix_when_charging() {
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![device_with_batteries(
                 "G560",
                 vec![battery(40, BatteryStatus::Charging)],
@@ -252,7 +253,7 @@ mod tests {
 
     #[test]
     fn battery_lines_empty_when_no_battery_capability() {
-        assert!(battery_lines(&AppState::default()).is_empty());
+        assert!(battery_lines(&TopicStore::default()).is_empty());
     }
 
     #[test]

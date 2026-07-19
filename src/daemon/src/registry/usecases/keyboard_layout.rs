@@ -2,7 +2,6 @@
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
-use crate::ipc::{broadcast_delta, Domain};
 use crate::state::AppState;
 use halod_shared::keyboard::KeyboardLayoutSelection;
 
@@ -17,7 +16,7 @@ pub async fn set_keyboard_layout(
     app: Arc<AppState>,
 ) -> Result<()> {
     let device = {
-        let devices = app.devices.read().await;
+        let devices = app.device_registry.read().await;
         devices.iter().find(|d| d.id() == id).cloned()
     };
     let device = device.ok_or_else(|| anyhow!("device not found: {id}"))?;
@@ -45,7 +44,8 @@ pub async fn set_keyboard_layout(
         }
     }
 
-    broadcast_delta(&app, &[Domain::Devices]).await;
+    app.record_change(crate::services::effective_state::Change::Device(id))
+        .await;
     Ok(())
 }
 
@@ -65,7 +65,7 @@ mod tests {
     async fn persists_and_applies_selection_without_dropping_device() {
         let app = make_app();
         let device = Arc::new(MockDevice::new("kbd").with_keyboard_layout());
-        app.devices.write().await.push(device.clone());
+        app.device_registry.write().await.push(device.clone());
 
         let sel = KeyboardLayoutSelection {
             variant: Some(KeyVariant::Iso),
@@ -97,14 +97,14 @@ mod tests {
             Some(KeyboardLayout::CH)
         );
         // …and the device is still registered (no re-discovery drop).
-        assert_eq!(app.devices.read().await.len(), 1);
+        assert_eq!(app.device_registry.read().await.len(), 1);
     }
 
     #[tokio::test]
     async fn auto_selection_removes_entry() {
         let app = make_app();
         let device = Arc::new(MockDevice::new("kbd").with_keyboard_layout());
-        app.devices.write().await.push(device);
+        app.device_registry.write().await.push(device);
         app.config.write().await.keyboard_layouts.insert(
             "kbd".into(),
             KeyboardLayoutSelection {
@@ -127,7 +127,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_device_without_slot() {
         let app = make_app();
-        app.devices
+        app.device_registry
             .write()
             .await
             .push(Arc::new(MockDevice::new("plain")));

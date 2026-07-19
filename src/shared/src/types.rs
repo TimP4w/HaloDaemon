@@ -526,7 +526,7 @@ pub enum PluginDownloadConsent {
 /// Persisted first-run onboarding completion key shared by daemon and GUI.
 pub const ONBOARDING_TOUR_KEY: &str = "onboarding";
 
-/// GUI-facing preferences and daemon log level, sent as `AppState.gui` and
+/// GUI-facing preferences and daemon log level, published on the GUI bus topic and
 /// persisted on the daemon under `config.yaml`'s `gui` key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -798,6 +798,13 @@ pub struct PluginsState {
     /// plugin you may activate").
     #[serde(default)]
     pub recommendations: Vec<PluginRecommendation>,
+    /// Latest retained update status for each plugin. This belongs to the
+    /// plugins topic so reconnecting clients do not need an ad-hoc broadcast.
+    #[serde(default)]
+    pub updates: Vec<PluginUpdateStatus>,
+    /// Latest retained repository update-check results.
+    #[serde(default)]
+    pub repo_updates: Vec<RepoUpdateStatus>,
 }
 
 /// A plugin directory that couldn't be parsed into a manifest.
@@ -899,109 +906,6 @@ pub struct PluginUpdateStatus {
     pub on_disk_changed: bool,
     pub current_version: String,
     pub available_version: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AppState {
-    #[serde(default)]
-    pub discovery: DiscoveryStatus,
-    #[serde(default)]
-    pub devices: Vec<WireDevice>,
-    #[serde(default)]
-    pub profiles: ProfileState,
-    #[serde(default)]
-    pub cooling: CoolingState,
-    #[serde(default)]
-    pub lighting: LightingOverviewState,
-    #[serde(default)]
-    pub lcd: LcdState,
-    #[serde(default)]
-    pub gui: GuiConfig,
-    /// Filesystem path to the daemon's config directory; the UI displays and
-    /// opens it without recomputing client-side.
-    #[serde(default)]
-    pub config_dir: String,
-    #[serde(default)]
-    pub health: HealthCheckState,
-    /// Resolved `process_name -> icon` for every process referenced by an app
-    /// rule, so the UI can show app icons on rule badges without re-resolving.
-    /// On Linux the icon is a theme name or absolute path from the matching
-    /// `.desktop` file; on Windows an absolute path to a cached PNG.
-    #[serde(default)]
-    pub process_icons: HashMap<String, String>,
-    #[serde(default)]
-    pub plugins: PluginsState,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct StateDelta {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discovery: Option<DiscoveryStatus>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub devices: Option<Vec<WireDevice>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profiles: Option<ProfileState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooling: Option<CoolingState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lighting: Option<LightingOverviewState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lcd: Option<LcdState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gui: Option<GuiConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub health: Option<HealthCheckState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_icons: Option<HashMap<String, String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugins: Option<PluginsState>,
-}
-
-impl AppState {
-    pub fn apply_delta(&mut self, delta: StateDelta) {
-        let StateDelta {
-            discovery,
-            devices,
-            profiles,
-            cooling,
-            lighting,
-            lcd,
-            gui,
-            health,
-            process_icons,
-            plugins,
-        } = delta;
-        if let Some(v) = discovery {
-            self.discovery = v;
-        }
-        if let Some(v) = devices {
-            self.devices = v;
-        }
-        if let Some(v) = profiles {
-            self.profiles = v;
-        }
-        if let Some(v) = cooling {
-            self.cooling = v;
-        }
-        if let Some(v) = lighting {
-            self.lighting = v;
-        }
-        if let Some(v) = lcd {
-            self.lcd = v;
-        }
-        if let Some(v) = gui {
-            self.gui = v;
-        }
-        if let Some(v) = health {
-            self.health = v;
-        }
-        if let Some(v) = process_icons {
-            self.process_icons = v;
-        }
-        if let Some(v) = plugins {
-            self.plugins = v;
-        }
-    }
 }
 
 /// A privileged capability a plugin must declare before the daemon grants it —
@@ -2722,12 +2626,6 @@ mod app_rule_tests {
     }
 
     #[test]
-    fn app_state_defaults_empty_app_rules() {
-        let state: AppState = serde_json::from_str("{}").unwrap();
-        assert!(state.profiles.app_rules.is_empty());
-    }
-
-    #[test]
     fn app_rule_enabled_defaults_to_true() {
         let back: AppRule =
             serde_json::from_str(r#"{"process_names":["foo"],"profile":"P"}"#).unwrap();
@@ -2794,110 +2692,11 @@ mod app_rule_tests {
         assert!(field.help.is_none());
         assert!(field.placeholder.is_none());
     }
-
-    /// An empty AppState JSON must materialize the manual config defaults through
-    /// the nested `config` fields — the easiest silent regression to introduce.
-    #[test]
-    fn app_state_empty_json_config_defaults() {
-        let state: AppState = serde_json::from_str("{}").unwrap();
-        assert!(state.gui.close_to_tray);
-        assert_eq!(
-            state.cooling.config.fan_failsafe_duty,
-            DEFAULT_FAN_FAILSAFE_DUTY
-        );
-        assert_eq!(state.lighting.config.canvas_fps, DEFAULT_CANVAS_FPS);
-        assert_eq!(state.lcd.config.fps, DEFAULT_LCD_FPS);
-    }
-
-    #[test]
-    fn app_state_regrouped_json_round_trips() {
-        let mut state = AppState::default();
-        state.profiles.active = "gaming".into();
-        state.profiles.available = vec!["default".into(), "gaming".into()];
-        state.gui.language = "it".into();
-        state.gui.seen_tours.insert("page:home".into());
-        state.cooling.config.fan_failsafe_duty = 42;
-        state.lighting.config.canvas_fps = 33;
-        state.lcd.config.enabled = false;
-        state.health.ffmpeg_available = true;
-        let value = serde_json::to_value(&state).unwrap();
-        let back: AppState = serde_json::from_value(value).unwrap();
-        assert_eq!(back.profiles.active, "gaming");
-        assert_eq!(back.profiles.available, state.profiles.available);
-        assert_eq!(back.gui.language, "it");
-        assert_eq!(back.gui.seen_tours, state.gui.seen_tours);
-        assert_eq!(back.cooling.config.fan_failsafe_duty, 42);
-        assert_eq!(back.lighting.config.canvas_fps, 33);
-        assert!(!back.lcd.config.enabled);
-        assert!(back.health.ffmpeg_available);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sample_state() -> AppState {
-        let mut s = AppState {
-            config_dir: "/keep".into(),
-            ..Default::default()
-        };
-        s.gui.language = "de".into();
-        s.profiles.active = "gaming".into();
-        s.process_icons.insert("proc".into(), "icon".into());
-        s.devices.push(WireDevice {
-            id: "dev-1".into(),
-            ..Default::default()
-        });
-        s.discovery.phase = DiscoveryPhase::Complete;
-        s
-    }
-
-    fn full_delta(s: &AppState) -> StateDelta {
-        StateDelta {
-            discovery: Some(s.discovery.clone()),
-            devices: Some(s.devices.clone()),
-            profiles: Some(s.profiles.clone()),
-            cooling: Some(s.cooling.clone()),
-            lighting: Some(s.lighting.clone()),
-            lcd: Some(s.lcd.clone()),
-            gui: Some(s.gui.clone()),
-            health: Some(s.health.clone()),
-            process_icons: Some(s.process_icons.clone()),
-            plugins: Some(s.plugins.clone()),
-        }
-    }
-
-    #[test]
-    fn all_domain_delta_reproduces_the_snapshot() {
-        let snap = sample_state();
-        let mut applied = AppState {
-            config_dir: snap.config_dir.clone(),
-            ..Default::default()
-        };
-        applied.apply_delta(full_delta(&snap));
-        assert_eq!(
-            serde_json::to_value(&applied).unwrap(),
-            serde_json::to_value(&snap).unwrap()
-        );
-    }
-
-    #[test]
-    fn apply_delta_replaces_only_present_domains() {
-        let mut base = sample_state();
-        let delta = StateDelta {
-            gui: Some(GuiConfig {
-                language: "it".into(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        base.apply_delta(delta);
-        assert_eq!(base.gui.language, "it");
-        assert_eq!(base.profiles.active, "gaming");
-        assert_eq!(base.devices.len(), 1);
-        assert_eq!(base.config_dir, "/keep");
-    }
 
     #[test]
     fn notification_detail_and_severity_for_detail_codes() {

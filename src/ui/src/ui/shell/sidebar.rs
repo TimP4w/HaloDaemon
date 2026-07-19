@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Left sidebar: workspace nav, live device list, and the daemon-health footer.
 
+use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{
-    AppState, FanCurveStatus, PluginIssueKind, PluginUpdateStatus, UdevRulesStatus,
-};
+use halod_shared::types::{FanCurveStatus, PluginIssueKind, PluginUpdateStatus, UdevRulesStatus};
 
 use crate::domain::models::device as model;
 use crate::domain::models::udev::udev_rules_need_action;
@@ -25,7 +24,7 @@ const NAV: [(Icon, &str, Page); 6] = [
 /// a plugin disabled by the security gate after its content changed or it
 /// requested a new permission. Ordinary first-time consent is intentionally
 /// not surfaced here because enabling the plugin presents that flow in context.
-pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateStatus]) -> usize {
+pub fn plugins_needing_action(state: &TopicStore, plugin_updates: &[PluginUpdateStatus]) -> usize {
     state
         .plugins
         .plugins
@@ -48,7 +47,7 @@ pub fn plugins_needing_action(state: &AppState, plugin_updates: &[PluginUpdateSt
 
 /// Integrations with an active connection/runtime failure. These belong to
 /// the Integrations navigation hint, not the Plugins package-management hint.
-pub fn integrations_needing_action(state: &AppState) -> usize {
+pub fn integrations_needing_action(state: &TopicStore) -> usize {
     state
         .plugins
         .plugins
@@ -63,7 +62,7 @@ pub fn integrations_needing_action(state: &AppState) -> usize {
 /// Whether the Plugins attention badge includes a real failure. Load warnings,
 /// updates, and consent prompts remain amber; connect/runtime/load failures use
 /// the same red severity color as their plugin issue banner.
-fn plugins_have_errors(state: &AppState) -> bool {
+fn plugins_have_errors(state: &TopicStore) -> bool {
     state.plugins.plugins.iter().any(|plugin| {
         plugin.plugin_type != halod_shared::types::PluginKind::Integration
             && plugin
@@ -77,7 +76,7 @@ fn plugins_have_errors(state: &AppState) -> bool {
 /// Count fan curves with an actionable status, such as no temperature sensor,
 /// a sensor malfunction, a stalled fan, or a failed write. Healthy curves do
 /// not add noise to the Cooling navigation item.
-pub fn cooling_needing_action(state: &AppState) -> usize {
+pub fn cooling_needing_action(state: &TopicStore) -> usize {
     state
         .cooling
         .fan_curves
@@ -101,7 +100,7 @@ pub fn cooling_needing_action(state: &AppState) -> usize {
 
 pub fn sidebar(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     connected: bool,
     page: &mut Page,
     plugin_updates: &[PluginUpdateStatus],
@@ -552,7 +551,7 @@ mod tests {
 
     #[test]
     fn plugins_needing_action_counts_updates_and_security_blocks_only() {
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.plugins = vec![
             plugin("ok", true),           // fine — not counted
             plugin("unconsented", false), // first-time consent is contextual
@@ -573,7 +572,7 @@ mod tests {
 
     #[test]
     fn plugins_needing_action_is_zero_when_all_clear() {
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.plugins = vec![plugin("a", true), plugin("b", true)];
         assert_eq!(plugins_needing_action(&state, &[]), 0);
     }
@@ -592,7 +591,7 @@ mod tests {
             halod_shared::types::Permission::Network,
         ];
         p.authority.permissions = p.declared_permissions.clone();
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.plugins = vec![p];
         assert_eq!(plugins_needing_action(&state, &[]), 1);
 
@@ -613,7 +612,7 @@ mod tests {
             context: None,
             timestamp_ms: 0,
         });
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.plugins = vec![with_issue, plugin("ok", true)];
         assert_eq!(plugins_needing_action(&state, &[]), 0);
         assert_eq!(integrations_needing_action(&state), 1);
@@ -635,7 +634,7 @@ mod tests {
         let mut loaded = plugin("loaded", true);
         loaded.plugin_type = halod_shared::types::PluginKind::Integration;
         loaded.health.issue = Some(issue);
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.plugins = vec![unloaded, loaded];
 
         assert_eq!(integrations_needing_action(&state), 1);
@@ -650,7 +649,7 @@ mod tests {
             context: None,
             timestamp_ms: 0,
         });
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.plugins = vec![affected.clone()];
         assert!(!plugins_have_errors(&state));
 
@@ -661,7 +660,7 @@ mod tests {
 
     #[test]
     fn plugins_needing_action_ignores_skipped_plugins() {
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.plugins = vec![plugin("ok", true)];
         state.plugins.skipped = vec![halod_shared::types::SkippedPlugin {
             path: "/a/broken".into(),
@@ -672,7 +671,7 @@ mod tests {
 
     #[test]
     fn cooling_needing_action_counts_only_unhealthy_curves() {
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.cooling.fan_curves = vec![
             halod_shared::types::WireFanCurve {
                 device_id: "ok".into(),
@@ -710,7 +709,7 @@ mod tests {
         // Quarantined (disabled) → needs action.
         let mut disabled = plugin("edited", true);
         disabled.enabled = false;
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.plugins = vec![disabled];
         assert_eq!(
             plugins_needing_action(&state, &[on_disk_change("edited")]),
@@ -721,7 +720,7 @@ mod tests {
         // on-disk-change status lingers until the next check.
         let mut enabled = plugin("edited", true);
         enabled.enabled = true;
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.plugins = vec![enabled];
         assert_eq!(
             plugins_needing_action(&state, &[on_disk_change("edited")]),

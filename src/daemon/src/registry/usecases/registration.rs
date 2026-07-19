@@ -54,7 +54,7 @@ pub(super) fn clear_engine_slots(device: &Arc<dyn Device>) {
     }
 }
 
-/// If the device is marked `Disabled` in config, push it to `app.devices`
+/// If the device is marked `Disabled` in config, push it to `app.device_registry`
 /// without calling `initialize()` and return `true`.
 /// Returns `false` when not disabled so the caller can proceed with init.
 pub async fn register_if_disabled(app: &Arc<AppState>, device: &Arc<dyn Device>) -> bool {
@@ -76,7 +76,7 @@ pub async fn register_if_disabled(app: &Arc<AppState>, device: &Arc<dyn Device>)
         "[{}] registered as disabled, skipping initialize()",
         device.name()
     );
-    app.devices.write().await.push(device.clone());
+    app.device_registry.write().await.push(device.clone());
     true
 }
 
@@ -158,13 +158,13 @@ async fn ensure_default_baseline(app: &Arc<AppState>, device: &dyn Device) {
 }
 
 /// Register a device through the full discovery lifecycle:
-///   1. Dedup    — skip silently if same id already in app.devices
+///   1. Dedup    — skip silently if same id already in app.device_registry
 ///   2. Disabled — register without init if user-disabled
 ///   3. Init     — initialize; skip if Err or Ok(false)
 ///   4. State    — load saved state (sensor visibility, fan curves, …)
-///   5. Push     — add to app.devices
+///   5. Push     — add to app.device_registry
 ///
-/// Returns `true` when the device is now active in app.devices.
+/// Returns `true` when the device is now active in app.device_registry.
 pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bool {
     let device_id = device.id().to_owned();
     if !claim_registration(app, &device_id).await {
@@ -189,7 +189,7 @@ pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bo
     // baseline before overrides
     ensure_default_baseline(app, device.as_ref()).await;
     restore_saved_state(app, &device).await;
-    app.devices.write().await.push(device.clone());
+    app.device_registry.write().await.push(device.clone());
     log_registration_conflicts(app, &device).await;
     finish_registration(app, &device_id).await;
     log::info!("[{}] registered", device.name());
@@ -214,7 +214,7 @@ async fn prefer_wired_transport(app: &Arc<AppState>, device: &Arc<dyn Device>) -
     };
 
     let candidates: Vec<Arc<dyn Device>> = app
-        .devices
+        .device_registry
         .read()
         .await
         .iter()
@@ -256,12 +256,12 @@ async fn prefer_wired_transport(app: &Arc<AppState>, device: &Arc<dyn Device>) -
 
     let displaced_ids: std::collections::HashSet<String> =
         wireless.iter().map(|d| d.id().to_owned()).collect();
-    app.devices
+    app.device_registry
         .write()
         .await
         .retain(|d| !displaced_ids.contains(d.id()));
     {
-        let mut owners = app.device_children.lock().await;
+        let mut owners = app.device_registry.children.lock().await;
         for children in owners.values_mut() {
             children.retain(|id| !displaced_ids.contains(id));
         }
@@ -287,7 +287,7 @@ async fn log_registration_conflicts(app: &Arc<AppState>, device: &Arc<dyn Device
         return;
     }
     let origin = device.conflict_origin();
-    for other in app.devices.read().await.iter() {
+    for other in app.device_registry.read().await.iter() {
         if other.id() == device.id()
             || other.active_state() == VisibilityState::Disabled
             || !other.is_live()
@@ -321,8 +321,15 @@ async fn log_registration_conflicts(app: &Arc<AppState>, device: &Arc<dyn Device
 /// window. The reservation lock is held while consulting `devices`, closing
 /// the check/insert race between concurrent transport scanners.
 async fn claim_registration(app: &Arc<AppState>, id: &str) -> bool {
-    let mut active = app.device_registrations.lock().await;
-    if active.contains(id) || app.devices.read().await.iter().any(|d| d.id() == id) {
+    let mut active = app.device_registry.registrations.lock().await;
+    if active.contains(id)
+        || app
+            .device_registry
+            .read()
+            .await
+            .iter()
+            .any(|d| d.id() == id)
+    {
         return false;
     }
     active.insert(id.to_owned());
@@ -330,7 +337,7 @@ async fn claim_registration(app: &Arc<AppState>, id: &str) -> bool {
 }
 
 async fn finish_registration(app: &Arc<AppState>, id: &str) {
-    app.device_registrations.lock().await.remove(id);
+    app.device_registry.registrations.lock().await.remove(id);
 }
 
 /// Register `device`, then — if it's a `Controller` — discover and register
@@ -354,7 +361,8 @@ pub async fn register_device_and_children(app: &Arc<AppState>, device: Arc<dyn D
             }
         }
         if !child_ids.is_empty() {
-            app.device_children
+            app.device_registry
+                .children
                 .lock()
                 .await
                 .entry(device.id().to_owned())
@@ -385,7 +393,7 @@ fn is_registered_child(id: &str, root_id: &str) -> bool {
 /// caller can prune their (shared) HID-tracking entry.
 pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) -> Vec<String> {
     let explicit_children = {
-        let mut owners = app.device_children.lock().await;
+        let mut owners = app.device_registry.children.lock().await;
         let owned = owners.remove(root_id).unwrap_or_default();
         for children in owners.values_mut() {
             children.remove(root_id);
@@ -396,7 +404,7 @@ pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) 
         owned
     };
     let removed: Vec<Arc<dyn Device>> = {
-        let mut devices = app.devices.write().await;
+        let mut devices = app.device_registry.write().await;
         let mut removed = Vec::new();
         devices.retain(|d| {
             if d.id() == root_id
@@ -495,7 +503,8 @@ mod tests {
             ConnectionType::Wireless,
         ));
         assert!(register_device(&app, wireless.clone()).await);
-        app.device_children
+        app.device_registry
+            .children
             .lock()
             .await
             .entry("logitech-receiver".into())
@@ -508,13 +517,14 @@ mod tests {
         ));
         assert!(register_device(&app, wired.clone()).await);
 
-        let devices = app.devices.read().await;
+        let devices = app.device_registry.read().await;
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id(), wired.id());
         drop(devices);
         assert!(wireless.closed.load(Ordering::SeqCst));
         assert!(!app
-            .device_children
+            .device_registry
+            .children
             .lock()
             .await
             .get("logitech-receiver")
@@ -537,7 +547,7 @@ mod tests {
         ));
         assert!(!register_device(&app, wireless.clone()).await);
 
-        let devices = app.devices.read().await;
+        let devices = app.device_registry.read().await;
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id(), wired.id());
         assert!(wireless.closed.load(Ordering::SeqCst));
@@ -584,7 +594,7 @@ mod tests {
     async fn register_device_skips_already_registered_id() {
         let app = make_app();
         let first = Arc::new(MockDevice::new("dev-1")) as Arc<dyn Device>;
-        app.devices.write().await.push(first);
+        app.device_registry.write().await.push(first);
 
         let second = Arc::new(MockDevice::new("dev-1"));
         let load = Arc::clone(&second.load_called);
@@ -592,7 +602,7 @@ mod tests {
 
         assert!(!result, "should return false for duplicate id");
         assert_eq!(
-            app.devices.read().await.len(),
+            app.device_registry.read().await.len(),
             1,
             "must not push a second copy"
         );
@@ -611,7 +621,7 @@ mod tests {
         );
 
         assert_ne!(a, b, "exactly one concurrent scanner must own the id");
-        assert_eq!(app.device_registrations.lock().await.len(), 1);
+        assert_eq!(app.device_registry.registrations.lock().await.len(), 1);
         finish_registration(&app, "steelseries-1").await;
     }
 
@@ -646,7 +656,7 @@ mod tests {
 
         assert!(result, "disabled device should return true");
         assert_eq!(
-            app.devices.read().await.len(),
+            app.device_registry.read().await.len(),
             1,
             "disabled device must be pushed"
         );
@@ -671,7 +681,7 @@ mod tests {
 
         assert!(!result);
         assert!(
-            app.devices.read().await.is_empty(),
+            app.device_registry.read().await.is_empty(),
             "Ok(false) must not push"
         );
     }
@@ -683,7 +693,10 @@ mod tests {
         let result = register_device(&app, device as Arc<dyn Device>).await;
 
         assert!(!result);
-        assert!(app.devices.read().await.is_empty(), "Err must not push");
+        assert!(
+            app.device_registry.read().await.is_empty(),
+            "Err must not push"
+        );
     }
 
     #[tokio::test]
@@ -700,7 +713,7 @@ mod tests {
         let result = register_device(&app, mock as Arc<dyn Device>).await;
 
         assert!(result);
-        assert_eq!(app.devices.read().await.len(), 1);
+        assert_eq!(app.device_registry.read().await.len(), 1);
         assert!(
             load.load(Ordering::SeqCst),
             "load_state must be called when saved state exists"
@@ -935,7 +948,7 @@ mod tests {
         let child2 = Arc::new(MockDevice::new("openrgb-127_0_0_1_6742_ctrl_1"));
         let unrelated = Arc::new(MockDevice::new("other-device"));
         {
-            let mut devices = app.devices.write().await;
+            let mut devices = app.device_registry.write().await;
             devices.push(root.clone());
             devices.push(child1.clone());
             devices.push(child2.clone());
@@ -944,7 +957,7 @@ mod tests {
 
         unregister_device_and_children(&app, "openrgb-127_0_0_1_6742").await;
 
-        let remaining = app.devices.read().await;
+        let remaining = app.device_registry.read().await;
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id(), "other-device");
         drop(remaining);
@@ -968,7 +981,7 @@ mod tests {
         // A sibling whose id merely shares a leading substring must survive.
         let sibling = Arc::new(MockDevice::new("kraken-0b"));
         {
-            let mut devices = app.devices.write().await;
+            let mut devices = app.device_registry.write().await;
             devices.push(root.clone());
             devices.push(accessory.clone());
             devices.push(link.clone());
@@ -977,7 +990,7 @@ mod tests {
 
         unregister_device_and_children(&app, "kraken-0").await;
 
-        let remaining = app.devices.read().await;
+        let remaining = app.device_registry.read().await;
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id(), "kraken-0b");
         drop(remaining);

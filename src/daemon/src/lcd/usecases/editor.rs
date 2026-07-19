@@ -80,20 +80,18 @@ pub async fn render(
         Err(error) => {
             lcd.lcd_state()
                 .set_health(halod_shared::types::LcdHealth::Failed(error.to_string()));
-            crate::ipc::broadcast_delta(
-                &app,
-                &[crate::ipc::Domain::Lcd, crate::ipc::Domain::Devices],
-            )
+            app.record_change(crate::services::effective_state::Change::LcdDevice(
+                device_id.clone(),
+            ))
             .await;
             return Err(error.into());
         }
     };
     lcd.lcd_state()
         .set_health(halod_shared::types::LcdHealth::Stable);
-    crate::ipc::broadcast_delta(
-        &app,
-        &[crate::ipc::Domain::Lcd, crate::ipc::Domain::Devices],
-    )
+    app.record_change(crate::services::effective_state::Change::LcdDevice(
+        device_id.clone(),
+    ))
     .await;
     let (sprites, signatures) = result;
 
