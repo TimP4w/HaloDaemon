@@ -2276,14 +2276,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: command_fixture\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [fixture-tool]\n",
+            "id: command_fixture\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
         )
         .unwrap();
         std::fs::write(
             dir.join("main.lua"),
             r#"return {
                 enumerate_controllers = function(_dev)
-                    local result = command.run("fixture-tool", { "arg" })
+                    local result = command.run("nvidia-smi", { "arg" })
                     return {{
                         index = result.exit_code,
                         id = tostring(result.success),
