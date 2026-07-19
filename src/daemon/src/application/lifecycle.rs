@@ -21,7 +21,7 @@ fn idle_shutdown_due(empty_since: Option<Instant>, now: Instant, grace: Duration
 pub fn spawn_idle_watcher(app: Arc<AppState>, headless: bool) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if headless {
-            return;
+            std::future::pending::<()>().await;
         }
         let mut empty_since: Option<Instant> = Some(Instant::now());
         loop {
@@ -38,7 +38,9 @@ pub fn spawn_idle_watcher(app: Arc<AppState>, headless: bool) -> tokio::task::Jo
                     IDLE_SHUTDOWN_GRACE
                 );
                 request_shutdown(&app);
-                return;
+                // Stay alive until TaskSupervisor cancels us. Returning here
+                // would be misclassified as a crash during normal shutdown.
+                std::future::pending::<()>().await;
             }
         }
     })
@@ -73,5 +75,18 @@ mod tests {
         let since = Instant::now();
         let now = since + Duration::from_secs(10);
         assert!(idle_shutdown_due(Some(since), now, Duration::from_secs(10)));
+    }
+
+    #[tokio::test]
+    async fn headless_watcher_stays_alive_until_cancelled() {
+        let app = Arc::new(AppState::new(crate::config::Config::default()));
+        let mut watcher = spawn_idle_watcher(app, true);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut watcher)
+                .await
+                .is_err()
+        );
+        watcher.abort();
+        let _ = watcher.await;
     }
 }

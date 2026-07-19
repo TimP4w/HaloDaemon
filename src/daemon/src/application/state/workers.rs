@@ -161,12 +161,31 @@ pub fn start_persist_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     })
 }
 
+fn order_devices_for_shutdown(
+    devices: &mut [Arc<dyn crate::domain::device::Device>],
+    child_ids: &std::collections::HashSet<String>,
+) {
+    devices.sort_by_key(|device| !child_ids.contains(device.id()));
+}
+
 pub async fn shutdown(app: Arc<AppState>) {
     log::info!("Gracefully shutting down...");
     if let Some(video) = app.lcd.video() {
         video.stop_all().await;
     }
-    let devices = app.device_registry.read().await.clone();
+    let mut devices = app.device_registry.read().await.clone();
+    let child_ids: std::collections::HashSet<String> = app
+        .device_registry
+        .children
+        .lock()
+        .await
+        .values()
+        .flatten()
+        .cloned()
+        .collect();
+    // Dynamic children share their root's Lua worker. Match scoped-unload
+    // ordering so root close cannot terminate the worker first.
+    order_devices_for_shutdown(&mut devices, &child_ids);
     for device in devices {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), device.close()).await;
     }
@@ -229,5 +248,19 @@ mod tests {
 
         app.config.persistence().shutdown_tx.send_replace(true);
         worker.await.unwrap();
+    }
+
+    #[test]
+    fn shutdown_orders_shared_worker_children_before_roots() {
+        let root = Arc::new(MockDevice::new("root")) as Arc<dyn Device>;
+        let child = Arc::new(MockDevice::new("child")) as Arc<dyn Device>;
+        let independent = Arc::new(MockDevice::new("independent")) as Arc<dyn Device>;
+        let mut devices = vec![root, independent, child];
+        let children = std::collections::HashSet::from(["child".to_owned()]);
+
+        order_devices_for_shutdown(&mut devices, &children);
+
+        assert_eq!(devices[0].id(), "child");
+        assert!(devices[1..].iter().any(|device| device.id() == "root"));
     }
 }
