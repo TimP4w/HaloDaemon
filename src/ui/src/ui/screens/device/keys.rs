@@ -31,17 +31,6 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     };
     let id = ctx.dev.id.clone();
 
-    if remap.requires_host_mode && !remap.host_mode_active {
-        widgets::card(ui, |ui| {
-            ui.label(
-                egui::RichText::new(t!("device.keys_host_mode_required"))
-                    .font(theme::body_md())
-                    .color(theme::STAT_AMBER),
-            );
-        });
-        ui.add_space(theme::SPACE_7);
-    }
-
     // Default to first button
     if st.keys.keys_sel_cid.is_none() && !remap.buttons.is_empty() {
         st.keys.keys_sel_cid = Some(remap.buttons[0].cid);

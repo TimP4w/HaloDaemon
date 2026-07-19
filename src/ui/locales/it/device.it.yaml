@@ -1,6 +1,5 @@
 device:
   # keys.rs - Scheda Tasti/Pulsanti
-  keys_host_mode_required: "È richiesta la modalità host. La rimappatura viene applicata mentre il daemon controlla il dispositivo."
   keys_tab_buttons: Pulsanti
   keys_tab_keys: Tasti
   keys_select_button_hint: Seleziona un pulsante per rimapparlo

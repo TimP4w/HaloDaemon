@@ -189,6 +189,17 @@ fn needs_status_poll(caps: &[Cap]) -> bool {
     StatusPollCaps::from_caps(caps).any()
 }
 
+fn should_start_status_poll(
+    caps: &[Cap],
+    plugin_kind: PluginKind,
+    has_manifest_spec: bool,
+    has_controller_identity: bool,
+) -> bool {
+    let integration_root =
+        plugin_kind == PluginKind::Integration && !has_manifest_spec && !has_controller_identity;
+    needs_status_poll(caps) && !integration_root
+}
+
 #[derive(Clone, Copy, Default)]
 struct StatusPollCaps {
     sensor: bool,
@@ -296,11 +307,28 @@ fn replace_if_changed<T: serde::Serialize>(cache: &Mutex<T>, next: T) -> bool {
 
 #[cfg(test)]
 mod status_poll_tests {
-    use super::{needs_status_poll, Cap};
+    use super::{needs_status_poll, should_start_status_poll, Cap};
+    use halod_shared::types::PluginKind;
 
     #[test]
     fn chain_root_polls_for_child_fan_telemetry() {
         assert!(needs_status_poll(&[Cap::LightingDivision]));
+    }
+
+    #[test]
+    fn dynamic_integration_child_is_not_mistaken_for_the_root() {
+        assert!(should_start_status_poll(
+            &[Cap::Sensor],
+            PluginKind::Integration,
+            false,
+            true,
+        ));
+        assert!(!should_start_status_poll(
+            &[Cap::Sensor],
+            PluginKind::Integration,
+            false,
+            false,
+        ));
     }
 }
 
@@ -717,6 +745,7 @@ impl LuaDevice {
         }
         let receiver_root = manifest.plugin_id == "logitech" && dev_match.pid == Some(0xc547);
         let nuvoton_sensor_root = manifest.plugin_id == "nuvoton_lpcio" && dev_match.key.is_none();
+        let has_controller_identity = dev_match.index.is_some() || dev_match.key.is_some();
         // Keep a handle to the (metered) transport so the device can report
         // write-rate/throughput; the worker owns the one it does I/O through.
         let rate_transport = transport.clone();
@@ -871,9 +900,12 @@ impl LuaDevice {
         // Start paused and let initialize() release it. This matters because a
         // plugin device is constructed before central registration checks the
         // persisted Disabled state.
-        if needs_status_poll(&dev.caps.read().unwrap())
-            && !(manifest.plugin_type == PluginKind::Integration && spec.is_none())
-        {
+        if should_start_status_poll(
+            &dev.caps.read().unwrap(),
+            manifest.plugin_type,
+            spec.is_some(),
+            has_controller_identity,
+        ) {
             dev.poll_paused.store(true, Ordering::Relaxed);
             let interval = Duration::from_millis(manifest.poll_interval_ms);
             let paused = dev.poll_paused.clone();

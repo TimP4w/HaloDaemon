@@ -2568,7 +2568,7 @@ pub struct KeyRemapStatus {
     pub buttons: Vec<ButtonDescriptor>,
     /// Only entries that differ from Native in at least one action.
     pub mappings: Vec<ButtonMapping>,
-    /// True for Logitech — the UI shows a "requires host mode" notice when false.
+    /// Whether the device reports that remapping depends on host mode.
     pub requires_host_mode: bool,
     pub host_mode_active: bool,
 }
