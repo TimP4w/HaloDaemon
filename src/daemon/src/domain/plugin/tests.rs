@@ -93,7 +93,7 @@ fn fresh_integration_runtime_clears_stale_device_errors() {
 
 #[test]
 fn missing_command_requirement_is_daemon_authoritative() {
-    let manifest = command_manifest(&["definitely-not-a-real-binary-xyz-42"]);
+    let manifest = command_manifest(&["liquidctl"]);
     let registry = super::Registry::default();
     registry.update(|s| s.manifests = vec![manifest.clone()]);
 
@@ -109,7 +109,7 @@ fn missing_command_requirement_is_daemon_authoritative() {
 
 #[test]
 fn refresh_requirements_caches_evaluated_statuses() {
-    let manifest = command_manifest(&["definitely-not-a-real-binary-xyz-42"]);
+    let manifest = command_manifest(&["liquidctl"]);
     let registry = super::Registry::default();
     registry.update(|s| s.manifests = vec![manifest.clone()]);
 
@@ -121,7 +121,7 @@ fn refresh_requirements_caches_evaluated_statuses() {
 
 #[test]
 fn consented_integration_with_missing_command_is_gated_out() {
-    let manifest = command_manifest(&["definitely-not-a-real-binary-xyz-42"]);
+    let manifest = command_manifest(&["liquidctl"]);
     let registry = super::Registry::default();
     let authority = super::authority_for_manifest(&manifest);
     registry.update(|s| {
@@ -155,10 +155,10 @@ fn disabled_integration_is_not_reported_active() {
         }
     }
 
-    let mut manifest = command_manifest(&["definitely-not-a-real-binary-xyz-42"]);
+    let mut manifest = command_manifest(&["liquidctl"]);
     manifest.requirements.push(super::manifest::RequirementDef {
         kind: super::manifest::RequirementDefKind::Command,
-        name: "definitely-not-a-real-binary-xyz-42".into(),
+        name: "liquidctl".into(),
         platforms: vec![],
     });
     let registry = super::Registry::default();
@@ -193,7 +193,7 @@ fn command_manifest(commands: &[&str]) -> super::PluginManifest {
 
 #[test]
 fn consent_rejects_transport_scope_widening_under_old_acceptance() {
-    let manifest = command_manifest(&["nvidia-smi", "rocm-smi"]);
+    let manifest = command_manifest(&["nvidia-smi", "liquidctl"]);
     let mut state = super::PluginState::default();
     state.granted.insert(
         manifest.plugin_id.clone(),
@@ -232,7 +232,7 @@ fn consent_accepts_authority_within_the_accepted_snapshot() {
             permissions: vec![halod_shared::types::Permission::Command],
             transport_scopes: vec![
                 "command:nvidia-smi".to_owned(),
-                "command:rocm-smi".to_owned(),
+                "command:liquidctl".to_owned(),
             ],
             data_reads: vec![],
         },

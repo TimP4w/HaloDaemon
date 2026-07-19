@@ -3701,7 +3701,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("shell, interpreter, or command launcher"),
+                .contains("not in HaloDaemon's narrow executable allowlist"),
             "{error:#}"
         );
     }
@@ -3749,7 +3749,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "dup_req",
-            "type: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [pactl]\nrequirements:\n  - { kind: command, name: pactl }\n  - { kind: command, name: PACTL }\n",
+            "type: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [liquidctl]\nrequirements:\n  - { kind: command, name: liquidctl }\n  - { kind: command, name: LIQUIDCTL }\n",
             ENTRY_LUA,
         );
         let err = parse_manifest_from_dir(&dir).unwrap_err();

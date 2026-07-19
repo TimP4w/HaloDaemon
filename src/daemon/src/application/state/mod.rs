@@ -203,7 +203,7 @@ mod tests {
                     continue;
                 }
                 let source = std::fs::read_to_string(&path).expect("read Rust source");
-                if source.contains("record_change(")
+                if source.contains(".record_change(")
                     && !path
                         .components()
                         .any(|component| component.as_os_str() == "usecases")

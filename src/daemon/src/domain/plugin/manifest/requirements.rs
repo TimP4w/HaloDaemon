@@ -240,9 +240,9 @@ mod tests {
     #[test]
     fn missing_transport_command_blocks_activation() {
         let manifest = manifest(
-            "type: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [present, missing]\n",
+            "type: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi, liquidctl]\n",
         );
-        let statuses = evaluate_with(&manifest, "linux", &|name| name == "present");
+        let statuses = evaluate_with(&manifest, "linux", &|name| name == "nvidia-smi");
         let missing = blocking_missing(&statuses);
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].reason, Some(RequirementFailureReason::NotFound));
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn unsupported_platform_has_no_requirements() {
         let manifest = manifest(
-            "type: integration\nplatforms: [windows]\npermissions: [command]\ntransports:\n  command:\n    commands: [tool]\n",
+            "type: integration\nplatforms: [windows]\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
         );
         assert!(derive_for(&manifest, "linux").is_empty());
     }

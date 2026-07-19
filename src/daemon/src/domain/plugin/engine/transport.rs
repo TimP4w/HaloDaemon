@@ -467,7 +467,7 @@ mod tests {
             .unwrap_err();
         assert!(error
             .to_string()
-            .contains("shell, interpreter, or command launcher"));
+            .contains("outside HaloDaemon's executable allowlist"));
         assert!(commands.unrecoverable_error().is_some());
     }
 
@@ -475,7 +475,11 @@ mod tests {
     fn command_executor_returns_nonzero_exit_and_stderr() {
         let commands = CommandExecutor::new(["rustc".to_owned()]);
         let result = commands
-            .run("rustc", &["--definitely-not-a-rustc-option".to_owned()])
+            .run_system(
+                "rustc",
+                &["--definitely-not-a-rustc-option".to_owned()],
+                super::COMMAND_TIMEOUT,
+            )
             .unwrap();
         assert!(!result.success);
         assert_ne!(result.exit_code, 0);
