@@ -28,6 +28,11 @@ pub const PIPE_NAME: &str = r"\\.\pipe\halod-broker";
 /// (register) and the daemon (start) agree on one string.
 pub const BROKER_SERVICE_NAME: &str = "HalodBroker";
 
+/// How long an unowned broker remains alive after its last client disconnects.
+/// Shared with the client so a replacement daemon can wait out a broker that
+/// still carries the previous daemon's process-local bootstrap token.
+pub const BROKER_IDLE_GRACE_MS: u64 = 30_000;
+
 /// Lifetime of one connection-bound authorization. Clients renew before it
 /// expires; the bootstrap secret itself exists only for one broker process.
 pub const CAPABILITY_TTL_MS: u64 = 60_000;

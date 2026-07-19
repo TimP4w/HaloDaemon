@@ -230,6 +230,48 @@ mod tests {
         assert_eq!(last, ("nc_level".to_string(), 50));
     }
 
+    #[tokio::test]
+    async fn set_range_publishes_new_profile_override() {
+        let dev = Arc::new(MockDevice::new("dev1").with_range());
+        dev.range.as_ref().unwrap().record("nc_level", 0);
+        let app = make_app(vec![dev as Arc<dyn Device>]);
+        {
+            let mut cfg = app.config.write().await;
+            cfg.active_profile_data_mut().device_states.insert(
+                "dev1".into(),
+                serde_json::json!({ "range": { "nc_level": 0 } }),
+            );
+            cfg.profiles.insert("Gaming".into(), Default::default());
+            cfg.active_profile = "Gaming".into();
+        }
+        let mut transactions = app.data_bus.subscribe_transactions();
+
+        set_capability_param(
+            "dev1".into(),
+            CapabilityParam::Range {
+                key: "nc_level".into(),
+                value: 50,
+            },
+            app,
+        )
+        .await
+        .unwrap();
+
+        let transaction = transactions.recv().await.unwrap();
+        let profiles = transaction
+            .upserts
+            .into_iter()
+            .find_map(|record| match record.value {
+                halod_shared::bus::BusValue::Profiles(profiles) => Some(profiles),
+                _ => None,
+            })
+            .expect("persisted capability mutation must publish profile overrides");
+        assert_eq!(
+            profiles.overrides.device_capabilities["dev1"],
+            vec!["range".to_string()]
+        );
+    }
+
     // ── Choice ───────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -257,6 +299,48 @@ mod tests {
             .clone()
             .unwrap();
         assert_eq!(last, ("nc_mode".to_string(), 2));
+    }
+
+    #[tokio::test]
+    async fn set_choice_publishes_new_profile_override() {
+        let dev = Arc::new(MockDevice::new("dev1").with_choice());
+        dev.choice.as_ref().unwrap().record("nc_mode", 0);
+        let app = make_app(vec![dev as Arc<dyn Device>]);
+        {
+            let mut cfg = app.config.write().await;
+            cfg.active_profile_data_mut().device_states.insert(
+                "dev1".into(),
+                serde_json::json!({ "choice": { "nc_mode": 0 } }),
+            );
+            cfg.profiles.insert("Gaming".into(), Default::default());
+            cfg.active_profile = "Gaming".into();
+        }
+        let mut transactions = app.data_bus.subscribe_transactions();
+
+        set_capability_param(
+            "dev1".into(),
+            CapabilityParam::Choice {
+                key: "nc_mode".into(),
+                selected: 2,
+            },
+            app,
+        )
+        .await
+        .unwrap();
+
+        let transaction = transactions.recv().await.unwrap();
+        let profiles = transaction
+            .upserts
+            .into_iter()
+            .find_map(|record| match record.value {
+                halod_shared::bus::BusValue::Profiles(profiles) => Some(profiles),
+                _ => None,
+            })
+            .expect("persisted capability mutation must publish profile overrides");
+        assert_eq!(
+            profiles.overrides.device_capabilities["dev1"],
+            vec!["choice".to_string()]
+        );
     }
 
     // ── Action ───────────────────────────────────────────────────────────

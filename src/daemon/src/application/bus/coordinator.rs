@@ -20,18 +20,34 @@ fn topics(change: &Change) -> Vec<Topic> {
             Topic::Lcd,
             Topic::Plugins,
         ],
-        Change::Device(id) => vec![Topic::Device(id.clone())],
-        Change::Devices(ids) => ids.iter().cloned().map(Topic::Device).collect(),
+        // Persisted capability state is stored in the active profile. Some
+        // device changes are observational only, but the unchanged-record
+        // filter makes projecting Profiles cheap in that case and, crucially,
+        // keeps the override badges in sync after a persisted mutation.
+        Change::Device(id) => vec![Topic::Device(id.clone()), Topic::Profiles],
+        Change::Devices(ids) => ids
+            .iter()
+            .cloned()
+            .map(Topic::Device)
+            .chain(std::iter::once(Topic::Profiles))
+            .collect(),
         Change::SensorTelemetry(ids) => ids.iter().cloned().map(Topic::Device).collect(),
-        Change::Lighting => vec![Topic::Lighting],
-        Change::LightingDevice(id) => vec![Topic::Lighting, Topic::Device(id.clone())],
-        Change::LightingCatalog | Change::Canvas => vec![Topic::Lighting],
+        Change::Lighting => vec![Topic::Lighting, Topic::Profiles],
+        Change::LightingDevice(id) => {
+            vec![Topic::Lighting, Topic::Device(id.clone()), Topic::Profiles]
+        }
+        Change::LightingCatalog => vec![Topic::Lighting],
+        Change::Canvas => vec![Topic::Lighting, Topic::Profiles],
         Change::LightingTopology => vec![Topic::Lighting, Topic::Devices],
-        Change::CanvasDevice(id) => vec![Topic::Lighting, Topic::Device(id.clone())],
+        Change::CanvasDevice(id) => {
+            vec![Topic::Lighting, Topic::Device(id.clone()), Topic::Profiles]
+        }
         Change::Cooling => vec![Topic::Cooling],
-        Change::CoolingDevice(id) => vec![Topic::Cooling, Topic::Device(id.clone())],
+        Change::CoolingDevice(id) => {
+            vec![Topic::Cooling, Topic::Device(id.clone()), Topic::Profiles]
+        }
         Change::Lcd => vec![Topic::Lcd],
-        Change::LcdDevice(id) => vec![Topic::Lcd, Topic::Device(id.clone())],
+        Change::LcdDevice(id) => vec![Topic::Lcd, Topic::Device(id.clone()), Topic::Profiles],
         Change::LcdCatalog => vec![Topic::Lcd],
         Change::Gui => vec![Topic::Gui],
         Change::Profiles => vec![Topic::Profiles],
@@ -116,7 +132,11 @@ mod tests {
     fn semantic_changes_own_their_topic_dependency_graph() {
         assert_eq!(
             topics(&Change::LightingDevice("kbd".into())),
-            vec![Topic::Lighting, Topic::Device("kbd".into())]
+            vec![
+                Topic::Lighting,
+                Topic::Device("kbd".into()),
+                Topic::Profiles
+            ]
         );
         assert_eq!(
             topics(&Change::AppRules),
@@ -127,8 +147,41 @@ mod tests {
         assert_eq!(topics(&Change::LcdCatalog), vec![Topic::Lcd]);
         assert_eq!(
             topics(&Change::CanvasDevice("kbd".into())),
-            vec![Topic::Lighting, Topic::Device("kbd".into())]
+            vec![
+                Topic::Lighting,
+                Topic::Device("kbd".into()),
+                Topic::Profiles
+            ]
         );
+        assert_eq!(
+            topics(&Change::Device("mouse".into())),
+            vec![Topic::Device("mouse".into()), Topic::Profiles]
+        );
+        assert_eq!(
+            topics(&Change::Canvas),
+            vec![Topic::Lighting, Topic::Profiles]
+        );
+    }
+
+    #[test]
+    fn persisted_device_state_changes_refresh_profile_overrides() {
+        let changes = [
+            Change::Device("mouse".into()),
+            Change::Devices(vec!["mouse".into(), "keyboard".into()]),
+            Change::Lighting,
+            Change::LightingDevice("keyboard".into()),
+            Change::Canvas,
+            Change::CanvasDevice("keyboard".into()),
+            Change::CoolingDevice("fan".into()),
+            Change::LcdDevice("screen".into()),
+        ];
+
+        for change in changes {
+            assert!(
+                topics(&change).contains(&Topic::Profiles),
+                "{change:?} must refresh the profile projection"
+            );
+        }
     }
 
     #[tokio::test]
@@ -138,6 +191,10 @@ mod tests {
             .write()
             .await
             .push(Arc::new(MockDevice::new("mouse")) as Arc<dyn Device>);
+        // Bootstrap normally seeds this retained projection. A later
+        // observational device change may request it for override tracking,
+        // but must not publish it when it is unchanged.
+        app.effective_state.record(&app, Change::Profiles).await;
         let mut transactions = app.data_bus.subscribe_transactions();
 
         app.effective_state

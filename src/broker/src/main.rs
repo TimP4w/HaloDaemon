@@ -60,7 +60,9 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     });
-    server::wait_until_idle(std::time::Duration::from_secs(30));
+    server::wait_until_idle(std::time::Duration::from_millis(
+        halod_hwaccess::proto::BROKER_IDLE_GRACE_MS,
+    ));
     log::info!("[broker] idle; exiting");
     Ok(())
 }

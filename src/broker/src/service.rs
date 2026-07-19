@@ -30,7 +30,7 @@ const ERROR_SERVICE_EXISTS: i32 = 1073;
 const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 
 /// Stop serving once idle (no live client) continuously for this long.
-const IDLE_GRACE: Duration = Duration::from_secs(30);
+const IDLE_GRACE: Duration = Duration::from_millis(halod_hwaccess::proto::BROKER_IDLE_GRACE_MS);
 
 /// Register (or reconfigure) `HalodBroker` as a **demand-start** LocalSystem
 /// service running `halod-broker.exe --service`. Not started here: the worker

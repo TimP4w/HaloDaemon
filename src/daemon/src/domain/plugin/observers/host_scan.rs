@@ -37,7 +37,7 @@ async fn scan(app: Arc<AppState>) {
     #[cfg(target_os = "windows")]
     if specs.iter().any(|spec| spec.r#match.amd_smn.is_some()) {
         if let Some((family, model)) = amd_signature() {
-            discover_amd_smn(&app, family, model).await;
+            discovery::discover_handle(&app, DiscoveryHandle::AmdSmn { family, model }).await;
         }
     }
 
@@ -66,27 +66,6 @@ async fn scan(app: Arc<AppState>) {
             Err(error) => log::debug!("LPCIO scan task failed: {error}"),
         },
     }
-}
-
-/// PawnIO can briefly reject the first module open while its kernel service is
-/// still settling after the on-demand broker starts. Unlike hotplug transports,
-/// AMD SMN has no later scan to recover it, so retry this one startup root here.
-/// A successful registration stops immediately; permanent failures remain
-/// bounded by the registry's three-attempt transport-open episode.
-#[cfg(target_os = "windows")]
-async fn discover_amd_smn(app: &Arc<AppState>, family: u8, model: u8) {
-    const RETRY_DELAYS: [std::time::Duration; 2] = [
-        std::time::Duration::from_secs(1),
-        std::time::Duration::from_secs(2),
-    ];
-
-    for delay in RETRY_DELAYS {
-        if discovery::discover_handle(app, DiscoveryHandle::AmdSmn { family, model }).await {
-            return;
-        }
-        tokio::time::sleep(delay).await;
-    }
-    discovery::discover_handle(app, DiscoveryHandle::AmdSmn { family, model }).await;
 }
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]

@@ -150,6 +150,13 @@ pub fn start_persist_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<()> {
                 crate::domain::profiles::device_state::persist_device_state(&app, device.as_ref())
                     .await;
             }
+            // Engine-originated persistence does not pass through a command
+            // use case, so explicitly refresh the profile projection here.
+            // The publisher suppresses the transaction when no profile state
+            // actually changed.
+            app.effective_state
+                .record(&app, crate::domain::events::Change::Profiles)
+                .await;
         }
     })
 }
@@ -162,5 +169,65 @@ pub async fn shutdown(app: Arc<AppState>) {
     let devices = app.device_registry.read().await.clone();
     for device in devices {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), device.close()).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::Config,
+        domain::{device::Device, events::Change},
+        test_support::MockDevice,
+    };
+
+    #[tokio::test]
+    async fn persist_worker_publishes_engine_originated_profile_override() {
+        let device = Arc::new(MockDevice::new("dev1").with_choice());
+        device.choice.as_ref().unwrap().record("nc_mode", 0);
+        let app = Arc::new(AppState::new(Config::default()));
+        app.device_registry
+            .write()
+            .await
+            .push(device.clone() as Arc<dyn Device>);
+        {
+            let mut config = app.config.write().await;
+            config.active_profile_data_mut().device_states.insert(
+                "dev1".into(),
+                serde_json::json!({ "choice": { "nc_mode": 0 } }),
+            );
+            config.profiles.insert("Gaming".into(), Default::default());
+            config.active_profile = "Gaming".into();
+        }
+
+        // Seed the bus with the pre-mutation projection so the transaction
+        // below can only be caused by the newly persisted override.
+        app.effective_state.record(&app, Change::Profiles).await;
+        let mut transactions = app.data_bus.subscribe_transactions();
+        let worker = start_persist_worker(app.clone());
+
+        device.choice.as_ref().unwrap().record("nc_mode", 2);
+        app.config.persistence().notify.notify_one();
+
+        let transaction =
+            tokio::time::timeout(std::time::Duration::from_secs(1), transactions.recv())
+                .await
+                .expect("persist worker must publish the changed profile projection")
+                .unwrap();
+        let profiles = transaction
+            .upserts
+            .into_iter()
+            .find_map(|record| match record.value {
+                halod_shared::bus::BusValue::Profiles(profiles) => Some(profiles),
+                _ => None,
+            })
+            .expect("engine-originated persistence must publish profile overrides");
+        assert_eq!(
+            profiles.overrides.device_capabilities["dev1"],
+            vec!["choice".to_string()]
+        );
+
+        app.config.persistence().shutdown_tx.send_replace(true);
+        worker.await.unwrap();
     }
 }

@@ -584,6 +584,7 @@ impl ChoiceCapability for MockDevice {
             .expect("MockDevice: ChoiceStateCache not present — call .with_choice()")
     }
     async fn set_choice(&self, key: &str, selected: usize) -> Result<()> {
+        self.choice_cache().record(key, selected);
         *self
             .choice_last_set
             .as_ref()
@@ -602,6 +603,7 @@ impl RangeCapability for MockDevice {
             .expect("MockDevice: RangeStateCache not present — call .with_range()")
     }
     async fn set_range(&self, key: &str, value: i32) -> Result<()> {
+        self.range_cache().record(key, value);
         *self
             .range_last_set
             .as_ref()

@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 
 use halod_hwaccess::proto::{
-    self, CapabilityScope, Request, Response, BROKER_SERVICE_NAME, MAX_OPERATIONS_PER_CAPABILITY,
-    MAX_OPERATIONS_PER_SECOND, PIPE_NAME,
+    self, CapabilityScope, Request, Response, BROKER_IDLE_GRACE_MS, BROKER_SERVICE_NAME,
+    MAX_OPERATIONS_PER_CAPABILITY, MAX_OPERATIONS_PER_SECOND, PIPE_NAME,
 };
 use halod_hwaccess::smbus::{BusInfo, SmBusSyncOps};
 
@@ -131,6 +131,56 @@ fn ensure_broker_running(auth: &BrokerAuth) {
     }
 }
 
+fn is_stale_broker_token_error(error: &str) -> bool {
+    error.contains("invalid broker bootstrap token")
+}
+
+/// A demand-start service that is already running ignores new start arguments,
+/// including this daemon's bootstrap token. After a fast daemon restart, wait
+/// without touching the old pipe so the broker can complete its idle shutdown,
+/// then start a fresh instance with the current token.
+fn wait_for_stale_broker_exit() -> Result<()> {
+    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let fallback = Duration::from_millis(BROKER_IDLE_GRACE_MS + 1_000);
+    let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+    {
+        Ok(manager) => manager,
+        Err(error) => {
+            log::debug!(
+                "[register_ops] cannot query stale broker service ({error}); waiting for dev broker idle exit"
+            );
+            std::thread::sleep(fallback);
+            return Ok(());
+        }
+    };
+    let service = match manager.open_service(BROKER_SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
+        Ok(service) => service,
+        Err(error) => {
+            log::debug!(
+                "[register_ops] cannot query stale broker service ({error}); waiting for dev broker idle exit"
+            );
+            std::thread::sleep(fallback);
+            return Ok(());
+        }
+    };
+
+    let deadline = Instant::now() + fallback;
+    loop {
+        if matches!(
+            service.query_status().map(|status| status.current_state),
+            Ok(ServiceState::Stopped)
+        ) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("stale {BROKER_SERVICE_NAME} service did not stop after its idle grace period");
+        }
+        std::thread::sleep(CONNECT_BACKOFF);
+    }
+}
+
 /// Connect to the broker, bringing it up on first attempt if it isn't there yet.
 fn connect_or_spawn(scope: &CapabilityScope) -> Result<AuthorizedPipe> {
     let auth = broker_auth()?;
@@ -161,12 +211,16 @@ fn connect_or_spawn(scope: &CapabilityScope) -> Result<AuthorizedPipe> {
                                     + Duration::from_millis(expires_in_ms / 2),
                             });
                         }
-                        // A live broker with a different bootstrap token is
-                        // not still starting up. Retrying this same token 160
-                        // times only floods the log and cannot succeed; the
-                        // coordinator must be restarted (or the stale broker
-                        // stopped) to establish a matching session.
                         Ok(Response::Error(error)) => {
+                            if is_stale_broker_token_error(&error) {
+                                drop(pipe);
+                                log::info!(
+                                    "[register_ops] found a broker from the previous daemon; waiting for it to exit"
+                                );
+                                wait_for_stale_broker_exit()?;
+                                ensure_broker_running(auth);
+                                continue;
+                            }
                             bail!("halod-broker rejected this daemon's bootstrap token: {error}");
                         }
                         Ok(other) => log::debug!(
@@ -558,4 +612,18 @@ pub fn open_lpc_io() -> Result<LpcIoBrokerClient> {
         pipe: Mutex::new(pipe),
         handle,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_stale_broker_token_error;
+
+    #[test]
+    fn recognizes_only_the_stale_bootstrap_session_error() {
+        assert!(is_stale_broker_token_error(
+            "invalid broker bootstrap token"
+        ));
+        assert!(!is_stale_broker_token_error("invalid capability"));
+        assert!(!is_stale_broker_token_error("capability expired"));
+    }
 }
