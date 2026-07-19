@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::HashMap;
-use std::net::UdpSocket;
+use std::net::{IpAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -32,11 +32,7 @@ fn scan_mdns(services: &[String]) -> Result<Vec<Value>> {
             if let Ok(ServiceEvent::ServiceResolved(info)) =
                 receiver.recv_timeout(Duration::from_millis(150))
             {
-                let addresses: Vec<String> = info
-                    .get_addresses()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect();
+                let addresses = ordered_mdns_addresses(info.get_addresses().iter().copied());
                 let txt: HashMap<String, String> = info
                     .get_properties()
                     .iter()
@@ -61,6 +57,23 @@ fn scan_mdns(services: &[String]) -> Result<Vec<Value>> {
     }
     let _ = daemon.shutdown();
     Ok(found.into_values().collect())
+}
+
+/// mDNS libraries expose addresses as a set, so iteration order otherwise
+/// changes between scans. Prefer IPv4 for local appliances: link-local IPv6
+/// addresses returned by mDNS carry no interface scope and cannot be connected
+/// reliably. Keep global IPv6 as a deterministic fallback.
+fn ordered_mdns_addresses(addresses: impl IntoIterator<Item = IpAddr>) -> Vec<String> {
+    let mut addresses: Vec<IpAddr> = addresses.into_iter().collect();
+    addresses.sort_by_key(|address| match address {
+        IpAddr::V4(address) => (0, address.octets().to_vec()),
+        IpAddr::V6(address) if !address.is_unicast_link_local() => (1, address.octets().to_vec()),
+        IpAddr::V6(address) => (2, address.octets().to_vec()),
+    });
+    addresses
+        .into_iter()
+        .map(|address| address.to_string())
+        .collect()
 }
 
 fn scan_ssdp(targets: &[String]) -> Result<Vec<Value>> {
@@ -135,5 +148,19 @@ mod tests {
         );
         assert_eq!(headers["location"], "http://192.0.2.1/device.xml");
         assert_eq!(headers["usn"], "uuid:one");
+    }
+
+    #[test]
+    fn mdns_addresses_prefer_ipv4_and_are_stable() {
+        let addresses = ordered_mdns_addresses([
+            "fe80::2".parse().unwrap(),
+            "192.168.1.50".parse().unwrap(),
+            "2001:db8::2".parse().unwrap(),
+            "10.0.0.4".parse().unwrap(),
+        ]);
+        assert_eq!(
+            addresses,
+            ["10.0.0.4", "192.168.1.50", "2001:db8::2", "fe80::2"]
+        );
     }
 }
