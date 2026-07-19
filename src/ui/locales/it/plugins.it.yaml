@@ -144,12 +144,26 @@ plugins:
   permissions_granted: Concesso
   grant: Concedi permessi
   revoke: Revoca e disattiva
+  permission_hid: Accesso ai dispositivi HID
+  permission_usb: Accesso ai dispositivi USB
+  permission_hwmon: Monitoraggio hardware
+  permission_lpcio: Accesso LPC/SuperIO
+  permission_amd_smn: Accesso AMD SMN
+  permission_command: Esecuzione di comandi approvati
+  permission_serial: Accesso alla porta seriale / COM
   permission_network: Rete
   permission_os: Sistema operativo
   permission_secure_storage: Archiviazione sicura
   permission_smbus: SMBus
   permission_audio_routing: Instradamento audio
   permission_data_reads: Dati condivisi
+  permission_hid_desc: Consente al plugin di comunicare con il dispositivo HID corrispondente e di riceverne i report di input.
+  permission_usb_desc: Consente al plugin di acquisire solo i dispositivi USB dichiarati e di usare endpoint autorizzati e trasferimenti di controllo limitati.
+  permission_hwmon_desc: Consente al plugin di accedere alla raccolta di monitoraggio hardware Linux assegnata, inclusi i controlli delle ventole approvati.
+  permission_lpcio_desc: Consente al plugin di usare l'interfaccia tipizzata del broker per l'hardware SuperIO della scheda madre.
+  permission_amd_smn_desc: Consente al plugin di leggere i registri AMD SMN supportati tramite il broker.
+  permission_command_desc: Consente al plugin di eseguire, senza una shell, solo i nomi degli eseguibili dichiarati nel manifest.
+  permission_serial_desc: Consente al plugin di aprire solo la porta seriale/COM definita dal trasporto seriale dichiarato.
   permission_network_desc: Apre connessioni di rete, ad esempio verso un SDK o un server locale. Uno script dannoso potrebbe inviare dati all'esterno del computer.
   permission_os_desc: Legge l'orologio di sistema (os.time / os.clock). Il rischio è basso e non viene mai concesso l'accesso a file o processi.
   permission_secure_storage_desc: Legge i valori segreti salvati di questo plugin (es. un token API) in chiaro durante l'esecuzione.

@@ -91,6 +91,7 @@ impl eframe::App for App {
 #[cfg(target_os = "linux")]
 fn main() {
     env_logger::init();
+    ui::screens::settings::apply_startup_locale();
     let primary = match runtime::single_instance::acquire() {
         runtime::single_instance::Instance::Secondary => return,
         runtime::single_instance::Instance::Primary(p) => p,
@@ -102,6 +103,7 @@ fn main() {
 #[cfg(not(target_os = "linux"))]
 fn main() -> eframe::Result<()> {
     env_logger::init();
+    ui::screens::settings::apply_startup_locale();
     #[cfg(windows)]
     domain::lifecycle::autostart::repair_enabled_command();
 

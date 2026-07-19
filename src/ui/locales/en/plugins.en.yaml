@@ -144,12 +144,26 @@ plugins:
   permissions_granted: Granted
   grant: Grant permissions
   revoke: Revoke & disable
+  permission_hid: HID device access
+  permission_usb: USB device access
+  permission_hwmon: Hardware monitoring
+  permission_lpcio: LPC/SuperIO access
+  permission_amd_smn: AMD SMN access
+  permission_command: Run approved commands
+  permission_serial: Serial / COM port access
   permission_network: Network
   permission_os: OS
   permission_secure_storage: Secure storage
   permission_smbus: SMBus
   permission_audio_routing: Audio routing
   permission_data_reads: Shared data
+  permission_hid_desc: Lets the plugin communicate with the matching HID device and receive its input reports.
+  permission_usb_desc: Lets the plugin claim only its declared USB devices and use allowlisted endpoints and bounded control transfers.
+  permission_hwmon_desc: Lets the plugin access the scoped Linux hardware-monitoring collection, including approved fan controls.
+  permission_lpcio_desc: Lets the plugin use the typed broker interface for motherboard SuperIO hardware.
+  permission_amd_smn_desc: Lets the plugin read supported AMD SMN registers through the broker.
+  permission_command_desc: Lets the plugin run only the executable names declared in its manifest, without a shell.
+  permission_serial_desc: Lets the plugin open only the serial/COM port scoped by its declared serial transport.
   permission_network_desc: Opens network connections, such as to a local SDK or server. A malicious script could send data from this computer.
   permission_os_desc: Reads the system clock (os.time / os.clock). This is low risk and does not grant access to files or processes.
   permission_secure_storage_desc: Reads this plugin's own saved secret values (e.g. an API token) in clear text while it runs.

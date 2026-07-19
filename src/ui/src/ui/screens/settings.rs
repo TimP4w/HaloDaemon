@@ -719,6 +719,53 @@ pub fn apply_locale(code: &str) {
     }
 }
 
+/// Apply the persisted GUI locale before the first frame is constructed.
+/// Waiting for the daemon's initial bus snapshot leaves startup/onboarding
+/// screens in English for a visible moment.
+pub fn apply_startup_locale() {
+    let path = gui_config_dir().join("config.yaml");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if let Some(code) = startup_locale_from_yaml(&raw) {
+        apply_locale(&code);
+    } else {
+        log::warn!("could not read a supported GUI language from {}", path.display());
+    }
+}
+
+fn gui_config_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("HALOD_CONFIG_DIR") {
+        return dir.into();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return std::path::PathBuf::from(
+            std::env::var("APPDATA").unwrap_or_else(|_| ".".to_owned()),
+        )
+        .join(halod_shared::app::APP_NAME);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_owned()))
+            .join(".config")
+            .join(halod_shared::app::APP_NAME)
+    }
+}
+
+fn startup_locale_from_yaml(raw: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct MainConfig {
+        #[serde(default)]
+        gui: halod_shared::types::GuiConfig,
+    }
+
+    let code = serde_yaml::from_str::<MainConfig>(raw).ok()?.gui.language;
+    halod_shared::types::SUPPORTED_LANGUAGES
+        .contains(&code.as_str())
+        .then_some(code)
+}
+
 fn language_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(ui, rect, &t!("settings.language"), "");
@@ -747,6 +794,9 @@ fn language_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
         });
     if let Some(code) = picked {
         if code != current {
+            // The GUI owns translation state; do not wait for the daemon's
+            // persistence round-trip before updating visible copy.
+            apply_locale(code);
             crate::runtime::ipc::send(
                 cmd,
                 halod_shared::commands::DaemonCommand::SetLanguage {
@@ -1399,6 +1449,25 @@ fn export_diagnostics(json: String) {
 mod tests {
     use super::*;
     use halod_shared::types::DiscoveryStatus;
+
+    #[test]
+    fn startup_locale_is_read_directly_from_main_config() {
+        let raw = r#"
+active_profile: default
+gui:
+  language: it
+  close_to_tray: true
+"#;
+        assert_eq!(startup_locale_from_yaml(raw).as_deref(), Some("it"));
+    }
+
+    #[test]
+    fn startup_locale_rejects_codes_without_a_gui_catalog() {
+        assert_eq!(
+            startup_locale_from_yaml("gui:\n  language: xx\n"),
+            None
+        );
+    }
 
     fn card_divider_count(rows: usize) -> usize {
         let ctx = egui::Context::default();
