@@ -102,8 +102,7 @@ fn parse_wm_class(bytes: &[u8]) -> Option<String> {
     // is generally stable across windows, while instance may contain a title.
     bytes
         .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .next_back()
+        .rfind(|part| !part.is_empty())
         .and_then(|part| std::str::from_utf8(part).ok())
         .map(str::trim)
         .filter(|name| !name.is_empty())
